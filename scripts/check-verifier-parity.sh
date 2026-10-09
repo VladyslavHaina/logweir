@@ -262,6 +262,7 @@ receipt_tb_cases=0
 receipt_model_cases=0
 receipt_unchecked_cases=0
 receipt_admin_cases=0
+receipt_cp_cases=0
 receipt_sd_dependent_cases=0
 receipt_sd_key_cases=0
 receipt_sd_absent_cases=0
@@ -421,6 +422,39 @@ $rust_tc"
         fi
         case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
         case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
+        # PROD-04.1: both readers print the consumer position evidence — a
+        # header and one line per selected group, or nothing when the backup
+        # selected none — and the SAME lines. The groups, their outcomes and
+        # how many positions relate to archived data are read from the
+        # DOCUMENT, so a reader that dropped a group, or counted a position the
+        # receipt does not relate, fails here; and at least one accepted case
+        # must carry the block (below).
+        rust_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/rust.all" || true)"
+        py_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/py.all" || true)"
+        if [ "$rust_cp" != "$py_cp" ]; then
+            fail "$name: the two readers print DIFFERENT consumer position lines.
+  rust:
+$rust_cp
+  python:
+$py_cp"
+        fi
+        want_cp="$("$PY" -c 'import json, sys
+cp = json.load(open(sys.argv[1])).get("consumer_positions")
+for g in sorted((cp or {}).get("groups") or {}):
+    entry = cp["groups"][g]
+    n = (entry.get("counts") or {}).get("related", 0)
+    print("consumer_positions[" + json.dumps(g) + "]: " + entry["outcome"] + " " + str(n))' "$doc")"
+        got_cp="$(printf '%s\n' "$rust_cp" | sed -n \
+            -e 's/^\(consumer_positions\[".*"\]: captured\) .*positions: \([0-9]*\) related to archived data.*/\1 \2/p' \
+            -e 's/^\(consumer_positions\[".*"\]: [a-z]*\) (.*/\1 0/p')"
+        if [ "$got_cp" != "$want_cp" ]; then
+            fail "$name: the consumer position lines do not name exactly the receipt's groups, outcomes and related positions.
+  want:
+$want_cp
+  got:
+$rust_cp"
+        fi
+        [ -z "$want_cp" ] || receipt_cp_cases=$((receipt_cp_cases + 1))
         # PROD-03.0: both readers print the schema dependency, one line per
         # topic or the one line saying it was not assessed (never "not
         # schema-dependent"), and the SAME lines. The lines are ALSO derived
@@ -530,6 +564,9 @@ fi
 if [ "$receipt_model_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
 fi
+if [ "$receipt_cp_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case carries consumer_positions, so the consumer position lines (PROD-04.1) were never compared"
+fi
 if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
 fi
@@ -541,6 +578,99 @@ if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ]
     fail "the accepted backup-receipt cases do not include a topic with one generation ($receipt_gen_same_cases), one recreated during the capture ($receipt_gen_changed_cases) and one whose ID is unknown ($receipt_gen_unknown_cases), so the generations lines (PROD-01.4a) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
+
+# ---------------------------------------------------------------------------
+# PROD-04.1: the POSITIONS DOCUMENT a 1.7.0 receipt binds, on FULL refusal text
+# (`consumer-positions-index.json`, both readers with `--consumer-positions`).
+# On the accepted case both readers print the SAME consumer_positions lines,
+# and those lines name every position the DOCUMENT lists — read from the
+# document here, so a reader that dropped or invented a position fails even
+# when the other agrees with it.
+# ---------------------------------------------------------------------------
+RUST_POSITIONS_PREFIX="SIGNATURE VALID but the consumer positions document is refused: "
+mkdir -p "$tmp/positions"
+"$PY" - "$CORPUS" "$tmp/positions" > "$tmp/positions-cases.tsv" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+PT = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+key = serialization.load_pem_private_key(
+    (corpus.parent / "signed" / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+for e in json.loads((corpus / "consumer-positions-index.json").read_text()):
+    payload = (corpus / e["receipt"]).read_bytes()
+    t = PT.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{e['id']}.json").write_bytes(payload)
+    (out / f"{e['id']}.sig").write_text(json.dumps(
+        {"payloadType": PT,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+    (out / f"{e['id']}.positions.json").write_bytes((corpus / e["document"]).read_bytes())
+    print(f"{e['id']}\t{e['rust_exit']}\t{e['python_exit']}\t{e['reason']}")
+PYEOF
+
+positions_count=0
+positions_accepted=0
+while IFS=$'\t' read -r name want_rust want_py reason; do
+    [ -n "$name" ] || continue
+    positions_count=$((positions_count + 1))
+    doc="$tmp/positions/$name.json"
+    set +e
+    "$BIN" drill verify --payload-type backup-receipt --scorecard "$doc" \
+        --signature "$tmp/positions/$name.sig" --public-key "$FIX/public.pem" \
+        --consumer-positions "$tmp/positions/$name.positions.json" >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    "$PY" "$VERIFIER" --payload-type backup-receipt \
+        --consumer-positions "$tmp/positions/$name.positions.json" \
+        "$doc" "$tmp/positions/$name.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq "$want_rust" ] || { cat "$tmp/rust.err" >&2; fail "$name: drill verify exited $rust_rc, expected $want_rust"; }
+    [ "$py_rc" -eq "$want_py" ] || { cat "$tmp/py.err" >&2; fail "$name: verify_scorecard.py exited $py_rc, expected $want_py"; }
+    rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_POSITIONS_PREFIX")"
+    [ -n "$rust_msg" ] || rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_PREFIX")"
+    py_msg="$(refusal_text "$tmp/py.err" "$PY_PREFIX")"
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$reason" ]; then
+        fail "$name: the positions document refusals differ.
+  rust:   $rust_msg
+  python: $py_msg
+  index:  $reason"
+    fi
+    if [ -z "$reason" ]; then
+        positions_accepted=$((positions_accepted + 1))
+        rust_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/rust.out" || true)"
+        py_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/py.out" || true)"
+        [ "$rust_cp" = "$py_cp" ] || fail "$name: the two readers print DIFFERENT consumer position lines.
+  rust:
+$rust_cp
+  python:
+$py_cp"
+        want_pos="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+for g in sorted(doc["groups"]):
+    for e in doc["groups"][g]["positions"]:
+        print("consumer_positions[" + json.dumps(g) + "][" + json.dumps(e["topic"]) + ":" + str(e["partition"]) + "]")
+    print("consumer_positions[" + json.dumps(g) + "][*]: " + str(doc["groups"][g]["no_committed_position"]))' "$tmp/positions/$name.positions.json")"
+        got_pos="$(printf '%s\n' "$rust_cp" | sed -n \
+            -e 's/^\(consumer_positions\[".*"\]\[".*":[0-9]*\]\):.*/\1/p' \
+            -e 's/^\(consumer_positions\[".*"\]\[\*\]: [0-9]*\) other.*/\1/p')"
+        [ "$got_pos" = "$want_pos" ] || fail "$name: the position lines do not name exactly the document's positions.
+  want:
+$want_pos
+  got:
+$rust_cp"
+    fi
+    echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (positions document)"
+done <<< "$(cat "$tmp/positions-cases.tsv")"
+[ "$positions_count" -gt 0 ] || fail "walked zero positions document cases"
+[ "$positions_accepted" -eq 1 ] || fail "consumer-positions-index.json must carry exactly one accepted case, found $positions_accepted"
+echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $positions_count positions documents"
 
 # ---------------------------------------------------------------------------
 # FX-7: the pinned manifest version (backup receipt format 1.2.0).

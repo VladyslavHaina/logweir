@@ -170,6 +170,7 @@ fn main() -> std::process::ExitCode {
             backup_id_override,
             kafka_topic_resources,
             strimzi_cluster,
+            consumer_groups,
         }) => logweir::backup::run(&logweir::backup::BackupRunArgs {
             store_contract_version,
             spec,
@@ -181,6 +182,7 @@ fn main() -> std::process::ExitCode {
             backup_id_override,
             kafka_topic_resources,
             strimzi_cluster,
+            consumer_groups,
         }),
         // Task 15c, interface I14. Dispatched here for the structural reason
         // the comment at the end of this match records: the arm list is
@@ -278,7 +280,14 @@ fn main() -> std::process::ExitCode {
             signature,
             public_key,
             payload_type,
-        }) => verify::run(&scorecard, &signature, &public_key, &payload_type),
+            consumer_positions,
+        }) => verify::run_with(
+            &scorecard,
+            &signature,
+            &public_key,
+            &payload_type,
+            consumer_positions.as_deref(),
+        ),
         // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
         // same `RunArgs` through the same `From` impl and call
         // `drill::run_named`; the only difference between them is the

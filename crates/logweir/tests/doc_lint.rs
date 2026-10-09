@@ -2086,6 +2086,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // topic's ID before and after the engine, and a recreated topic is a
         // new generation.
         ("each topic's ID before and after the engine", "generations"),
+        // PROD-04.1 (2026-10-09, item 49): a backup records the committed positions of
+        // the groups it names, one outcome each, never offset 0 for absence.
+        (
+            "consumer position evidence for selected groups",
+            "consumer_positions",
+        ),
     ];
     assert_eq!(
         items.len(),

@@ -49,8 +49,9 @@ pub fn scorecard_schema() -> String {
 /// stop describing the type.
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_GENERATIONS>.json`
-/// (`1.6.0`, PROD-01.4a's `generations`; PROD-03.0's 1.5.0
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_CONSUMER_POSITIONS>.json`
+/// (`1.7.0`, PROD-04.1's `consumer_positions`; PROD-01.4a's 1.6.0
+/// `generations` file, PROD-03.0's 1.5.0
 /// `schema_dependency` file, PROD-01.3's 1.4.0 file with its three new
 /// `source.auth.mode` values, PROD-05.1's 1.3.0 `topic_configuration` file and
 /// FX-7's 1.2.0 `archive.manifest_version_id` file are frozen beside it),
@@ -74,7 +75,29 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
+        crate::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    ));
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}
+
+/// **PROD-04.1.** The JSON Schema of the consumer positions DOCUMENT
+/// (`<run_id>.consumer-positions.json`, format
+/// [`crate::consumer_positions::DOCUMENT_FORMAT_VERSION`]) a 1.7.0 receipt
+/// binds by digest: `schemas/logweir-consumer-positions-1.0.0.json`, its `$id`
+/// built from that one constant.
+pub fn consumer_positions_document_schema() -> String {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut root = settings
+        .into_generator()
+        .into_root_schema_for::<crate::consumer_positions::PositionsDocument>();
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-consumer-positions-{}.json",
+        crate::consumer_positions::DOCUMENT_FORMAT_VERSION
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

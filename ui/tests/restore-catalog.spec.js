@@ -56,6 +56,7 @@ import {
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
   pointRow,
+  consumerPositionsNote,
   renderPoints,
 } from "../pages/catalog.js";
 import { latestRestorablePoint, readSchedulePoints, restoreCell } from "../pages/schedules.js";
@@ -954,4 +955,67 @@ test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
   assert.equal(ownVerdictOf({ status: { evidence: { verification: { result: "Untrusted" } } } }),
     "Untrusted", "a legacy-mode custom resource is read as it is written");
   assert.equal(ownVerdictOf({ status: {} }), null);
+});
+
+test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () => {
+  const cp = {
+    observedFromMs: 1, observedToMs: 2, observedBeforeRecoveryPointMs: 1500, listing: "complete",
+    groups: [
+      { groupId: "billing", outcome: "captured", groupType: "consumer", active: true,
+        positions: { related: 5, notRelated: 1, neverCommitted: 2, beyondEnd: 0, failed: 0,
+          notObserved: 0 } },
+      { groupId: "word-count", outcome: "excluded", reason: "GroupTypeNotCaptured",
+        groupType: "other" },
+    ],
+  };
+  const note = consumerPositionsNote(row({ consumerPositions: cp }));
+  assert.match(note, /data-consumer-positions="2"/);
+  assert.match(note, /read 1\.5 s before this point/);
+  assert.match(note, /billing: captured \(active\), 5 of 8 position\(s\) relate to archived data, 2 never committed/);
+  assert.match(note, /word-count: excluded \(GroupTypeNotCaptured\)/);
+  assert.match(note, /not atomic with the records/);
+  // It rides in the RECOVERY POINT cell, so the table keeps its columns.
+  const cells = pointRow(row({ consumerPositions: cp }), NS, "archive", "primary", page([]));
+  assert.equal(cells.length, pointRow(row(), NS, "archive", "primary", page([])).length);
+  assert.match(cells[2], /data-consumer-positions/);
+  // Groups the view left out are counted, never read as the whole selection.
+  assert.match(consumerPositionsNote(row({ consumerPositions: { listing: "complete",
+    observedBeforeRecoveryPointMs: 0, groupsOmitted: 40 } })), /40 group\(s\) not listed here/);
+  // CONTROL: a point that publishes none says nothing -- never "no positions".
+  assert.equal(consumerPositionsNote(row()), "");
+  assert.doesNotMatch(pointRow(row(), NS, "archive", "primary", page([]))[2],
+    /data-consumer-positions/);
+});
+
+test("prod041_a_captured_group_whose_reads_failed_says_so_never_only_none_relate", () => {
+  // Review L5: "0 of 3 relate" alone read like three positions that do not
+  // relate; the failed, beyond-the-end and not-observed counts are said too.
+  const cp = {
+    observedBeforeRecoveryPointMs: 0, listing: "complete",
+    groups: [{ groupId: "g", outcome: "captured", active: false,
+      positions: { related: 0, notRelated: 0, neverCommitted: 0, beyondEnd: 1, failed: 3,
+        notObserved: 2 } }],
+  };
+  const note = consumerPositionsNote(row({ consumerPositions: cp }));
+  assert.match(note,
+    /g: captured, 0 of 6 position\(s\) relate to archived data, 1 beyond the end, 3 failed, 2 not observed/);
+  assert.doesNotMatch(note, /never committed/, "a zero count is not said");
+});
+
+test("prod041_h1_a_point_selecting_the_most_groups_is_offered_and_counts_what_it_does_not_list", () => {
+  // Review H1's chain, at the console: the catalog now reads a point whose
+  // backup selected 100 groups (the most) as Available -- its receipt carries
+  // counts, never partitions -- and the view lists none of the groups past
+  // its cap of 32, only how many. Such a row is offered for restore like any
+  // other, and its note says the groups were left out of the list.
+  const big = row({ consumerPositions: { observedFromMs: 1, observedToMs: 2,
+    observedBeforeRecoveryPointMs: 2000, listing: "complete", groupsOmitted: 100 } });
+  assert.deepEqual(catalogPointOffer(big, page([])), { offer: true, reason: null });
+  assert.match(consumerPositionsNote(big),
+    /100 group\(s\) not listed here; the signed receipt names each/);
+  // NEGATIVE CONTROL: the same point read Unreadable -- what an over-cap
+  // receipt was before the fix -- is not offered.
+  const unreadable = row({ availability: "Unreadable", selectable: false,
+    consumerPositions: undefined });
+  assert.equal(catalogPointOffer(unreadable, page([])).offer, false);
 });

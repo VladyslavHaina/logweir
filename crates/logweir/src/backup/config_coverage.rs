@@ -686,6 +686,7 @@ mod tests {
             config_coverage: Some(block),
             topic_configuration: None,
             owner_detection: None,
+            consumer_positions: None,
             schema_dependency: None,
             generations: None,
         };
@@ -891,6 +892,7 @@ mod tests {
             config_coverage: Some(coverage),
             topic_configuration: Some(m),
             owner_detection: Some(vec!["declared".into()]),
+            consumer_positions: None,
             schema_dependency: None,
             generations: None,
         };

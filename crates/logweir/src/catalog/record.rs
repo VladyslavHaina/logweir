@@ -60,6 +60,7 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// (reading rule 2: an older reader ignores the field). A record backfilled
 /// from an older receipt keeps the format it would have had.
 pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
+
 /// **PROD-01.4a.** The format of a record whose topics carry the receipt's
 /// `generations` entry (`topics[].identity`: the topic ID before and after the
 /// engine) — copied from a receipt that is itself 1.6.0
@@ -70,6 +71,14 @@ pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 /// which every receipt this build signs does; a record backfilled from an older
 /// receipt keeps the format it would have had.
 pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
+
+/// **PROD-04.1.** The format of a record that carries `consumer_positions` —
+/// copied from a receipt that is itself 1.7.0
+/// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`).
+/// A MINOR bump over [`FORMAT_VERSION_WITH_GENERATIONS`]: one optional field,
+/// which an older reader ignores, and 1.7.0 includes every earlier minor.
+/// Written only for a backup that selected consumer groups.
+pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -187,7 +196,9 @@ pub struct CatalogPoint {
     /// [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] (`1.5.0`) for one whose topics
     /// carry the receipt's schema dependency (PROD-03.0), or
     /// [`FORMAT_VERSION_WITH_GENERATIONS`] (`1.6.0`) for one whose topics carry
-    /// the receipt's topic IDs (PROD-01.4a). Major `1`; a higher major is
+    /// the receipt's topic IDs (PROD-01.4a), or
+    /// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] (`1.7.0`) for one that carries
+    /// `consumer_positions` (PROD-04.1). Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -240,6 +251,89 @@ pub struct CatalogPoint {
     /// backfill the two differ. ABSENT means unknown (rule 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation: Option<RecordInstallation>,
+    /// **Format 1.7.0 (PROD-04.1).** The receipt's consumer position evidence,
+    /// summarised ([`RecordConsumerPositions::of`]) and BOUND by the digest of
+    /// the receipt's block: when the positions were observed, and per selected
+    /// group its outcome and how many positions relate to archived data. The
+    /// positions themselves are in the positions document the receipt's block
+    /// binds by its own digest, so this digest binds them too.
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose summary or digest the verified receipt does not back. ABSENT
+    /// means the backup selected no group, or the record predates 1.7.0 —
+    /// never "no positions".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<RecordConsumerPositions>,
+}
+
+/// **PROD-04.1.** A receipt's `consumer_positions`, as the catalog carries it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordConsumerPositions {
+    /// `sha256:<hex>` over the deterministic JSON of the receipt's
+    /// `consumer_positions` block (`ConsumerPositions::digest`): the binding a
+    /// reader recomputes from the verified receipt. The block carries the
+    /// positions document's digest, so one position moved is a different
+    /// block and a different digest here.
+    pub sha256: String,
+    /// When the group capture started (the receipt's `observed_from`).
+    pub observed_from: DateTime<Utc>,
+    /// When it ended, before the engine: the snapshot's freshness is measured
+    /// from here to the recovery point (`capture.started_at`).
+    pub observed_to: DateTime<Utc>,
+    /// `complete` or `notComplete`: whether the group listings were complete.
+    pub listing: String,
+    /// One per selected group, in id order.
+    pub groups: Vec<RecordGroup>,
+}
+
+/// One selected group in the catalog.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordGroup {
+    pub group_id: String,
+    /// `captured`, `excluded` or `failed`.
+    pub outcome: String,
+    /// The receipt's reason, when not captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `classic`, `consumer` or `other`, when the receipt records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_type: Option<String>,
+    /// Whether the group had members at capture (captured only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Its positions, counted by what they say about archived data (captured
+    /// only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<logweir_core::consumer_positions::PositionCounts>,
+}
+
+impl RecordConsumerPositions {
+    /// The summary of a receipt's block: the ONE projection, which the writer
+    /// writes and `reader::cross_check` recomputes.
+    ///
+    /// # Errors
+    ///
+    /// The block does not serialise (it always does).
+    pub fn of(block: &logweir_core::consumer_positions::ConsumerPositions) -> Result<Self, String> {
+        Ok(Self {
+            sha256: block.digest()?,
+            observed_from: block.observed_from,
+            observed_to: block.observed_to,
+            listing: block.listing.clone(),
+            groups: block
+                .groups
+                .iter()
+                .map(|(id, g)| RecordGroup {
+                    group_id: id.clone(),
+                    outcome: g.outcome.clone(),
+                    reason: g.reason.clone(),
+                    group_type: g.group_type.clone(),
+                    active: g.active,
+                    positions: g.counts,
+                })
+                .collect(),
+        })
+    }
 }
 
 /// Where the signed receipt this point is derived from lives, and what it

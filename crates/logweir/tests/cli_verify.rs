@@ -531,10 +531,10 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all thirty-four backup-receipt invariants"),
+        stdout.contains("the signature AND all forty backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout (twenty-nine since \
-         PROD-03.0's eight schema_dependency arms, thirty-four since PROD-01.4a's five \
-         generations arms), got: {stdout}"
+         PROD-03.0's eight schema_dependency arms, forty since PROD-04.1's six \
+         consumer_positions arms and PROD-01.4a's five generations arms), got: {stdout}"
     );
     // PROD-01.4a: the checked-in receipt is a 1.0.0 document, so no topic ID
     // is known from it — said, never left to read as "the same generation".

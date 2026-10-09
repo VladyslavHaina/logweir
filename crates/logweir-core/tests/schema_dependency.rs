@@ -107,6 +107,7 @@ fn receipt_with(entry: &TopicSchemaDependency, records: u64) -> BackupReceipt {
         owner_detection: None,
         schema_dependency: Some(BTreeMap::from([("t".to_string(), entry.clone())])),
         generations: None,
+        consumer_positions: None,
     }
 }
 

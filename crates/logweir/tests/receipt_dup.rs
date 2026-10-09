@@ -107,6 +107,7 @@ impl Fixture {
                 backup_id_override: Some(EXECUTION_ID.into()),
                 kafka_topic_resources: None,
                 strimzi_cluster: None,
+                consumer_groups: Vec::new(),
             },
             key,
             dir,

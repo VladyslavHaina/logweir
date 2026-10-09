@@ -113,6 +113,8 @@ from", before trusting a VALID result.
 """
 import base64
 import binascii
+# `calendar` is stdlib: PROD-04.1's arm 31 compares two RFC 3339 instants.
+import calendar
 import hashlib
 import json
 # `re` is stdlib, like every other import here: this script's ONLY third-party
@@ -512,7 +514,27 @@ FORMAT_VERSION = "1.4.0"
 # refuses a block whose fields are not strings or null, and the `generations`
 # lines say, per topic, whether the capture saw one generation, saw the topic
 # recreated while it ran, or could not establish it by ID.
-SCRIPT_VERSION = "1.25.0"
+# 1.26.0 (PROD-04.1) knows receipt format 1.7.0 and its `consumer_positions`:
+# the consumer position evidence of the groups a backup selected, as a
+# summary — per group its outcome, type, states, members, active flag and
+# position counts, the capture window, and the positions document beside the
+# receipt by key, SHA-256 and length — whose size depends on the selection,
+# never on partitions. Six arms, 30 to 35, mirrored byte for byte and in
+# position from `BackupReceipt::validate_invariants`: the block only under a
+# version of at least 1.7.0; a forward capture window, a closed listing and at
+# least one group; this run's document by a well-formed digest; each group's
+# outcome and reason from the closed sets; what a captured (never `Dead` with
+# no member), a GroupTypeNotCaptured and any other group records; and an
+# `active` the two states derive. With `--consumer-positions <file>` it also
+# checks that document against the receipt — fourteen arms, CP-1 to CP-14,
+# mirrored from `BackupReceipt::validate_consumer_positions_document`: bound
+# by digest and length, the receipt's backup and run, the named topics with
+# their partitions in order and well-formed marks, a derived changed flag,
+# exactly the captured groups, no position on a changed topic, no capture
+# over an unread topic, every partition accounted for so absence is never
+# offset 0, each position's status, value, reason and derived coverage, and
+# the receipt's counts — and prints each position.
+SCRIPT_VERSION = "1.26.0"
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -631,6 +653,205 @@ RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
 # `crates/logweir-core/src/backup_receipt.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_topic_configuration_minor_is_the_rust_readers`).
 RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR = 3
+
+# PROD-04.1: the first minor of the BACKUP RECEIPT's format 1 that defines
+# `consumer_positions` (arm 30) — `CONSUMER_POSITIONS_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_consumer_positions_minor_is_the_rust_readers`).
+RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR = 7
+
+# PROD-04.1: the closed vocabularies of `consumer_positions`, in the order
+# `crates/logweir-core/src/consumer_positions.rs` declares them, which they must
+# equal (`docs/test_verify_scorecard.py::test_the_consumer_positions_vocabulary_is_the_rust_readers`).
+CP_EXCLUDED_REASONS = ("GroupTypeNotCaptured", "GroupNotFound")
+CP_FAILED_REASONS = (
+    "NotVisibleToPrincipal",
+    "NotVisibleOrUnreachable",
+    "NotAuthorized",
+    "PositionsUnstable",
+    "ListingInconsistent",
+    "AbsenceUnproven",
+    "TypeUnproven",
+    "Unreachable",
+    "DescribeFailed",
+    "PositionsFailed",
+    "GenerationChangedDuringCapture",
+    "CaptureUnavailable",
+    "GroupVanishedDuringCapture",
+    "PartitionsNotRead",
+)
+CP_CAPTURED_TYPES = ("classic", "consumer")
+CP_GROUP_STATES = (
+    "PreparingRebalance",
+    "CompletingRebalance",
+    "Stable",
+    "Dead",
+    "Empty",
+    "stateUnknownToClient",
+)
+CP_INACTIVE_STATES = ("Empty", "Dead")
+CP_POSITION_STATUSES = ("captured", "excluded", "failed", "notObserved")
+CP_POSITION_FAILED_REASONS = (
+    "TopicNotAuthorized",
+    "Unstable",
+    "NotAPosition",
+    "PartitionFailed",
+    "MarksNotRead",
+)
+CP_NOT_OBSERVED_REASONS = ("PartitionAddedDuringCapture", "TopicNotObserved")
+CP_COVERAGE_RELATIONS = (
+    "beforeLogStart",
+    "noArchivedData",
+    "beforeArchive",
+    "withinArchive",
+    "atArchiveEnd",
+    "beyondArchive",
+)
+CP_RELATED = ("withinArchive", "atArchiveEnd")
+CP_LISTING_VALUES = ("complete", "notComplete")
+
+
+def _cp_relation(position, facts):
+    """`logweir_core::consumer_positions::relation`, word for word: the
+    verdict a committed position's partition facts derive."""
+    log_start = facts.get("log_start")
+    high = facts.get("high_watermark")
+    if log_start is None or high is None:
+        return "MarksNotRead"
+    if position > high:
+        return "PositionBeyondEnd"
+    if position < log_start:
+        return "beforeLogStart"
+    first = facts.get("archived_first")
+    last = facts.get("archived_last")
+    if first is None or last is None:
+        return "noArchivedData"
+    if position < first:
+        return "beforeArchive"
+    if position <= last:
+        return "withinArchive"
+    # `i64::saturating_add(1)`.
+    if position == min(last + 1, 2**63 - 1):
+        return "atArchiveEnd"
+    return "beyondArchive"
+
+
+def _cp_changed(partitions):
+    """`logweir_core::consumer_positions::changed_during_capture`."""
+    for p in partitions:
+        for before, after in (
+            ("log_start", "log_start_after"),
+            ("high_watermark", "high_watermark_after"),
+        ):
+            b, a = p.get(before), p.get(after)
+            if b is not None and a is not None and a < b:
+                return True
+    return False
+
+
+def _cp_active(state, listed):
+    """`logweir_core::consumer_positions::active`."""
+    return state not in CP_INACTIVE_STATES or listed not in CP_INACTIVE_STATES
+
+
+def _cp_vanished(state, members) -> bool:
+    """`logweir_core::consumer_positions::vanished`: `Dead` with no member."""
+    return state == "Dead" and members == 0
+
+
+def _cp_document_key(backup_id, run_id) -> str:
+    """`logweir_core::consumer_positions::document_key`."""
+    return f"logweir/backups/{backup_id}/{run_id}.consumer-positions.json"
+
+
+CP_COUNT_NAMES = ("related", "not_related", "never_committed", "beyond_end", "failed",
+                  "not_observed")
+
+
+def _cp_counts_of(group):
+    """`PositionCounts::of` over one captured group's document entry."""
+    c = dict.fromkeys(CP_COUNT_NAMES, 0)
+    c["never_committed"] = group["no_committed_position"]
+    for p in group["positions"]:
+        status = p["status"]
+        if status == "captured":
+            slot = "related" if p.get("coverage") in CP_RELATED else "not_related"
+        elif status == "excluded":
+            slot = "beyond_end"
+        elif status == "failed":
+            slot = "failed"
+        else:
+            slot = "not_observed"
+        c[slot] = min(c[slot] + 1, 2**32 - 1)
+    return c
+
+
+def _cp_counts_total(c) -> int:
+    """`PositionCounts::total`."""
+    return sum(c[n] for n in CP_COUNT_NAMES)
+
+
+def _cp_counts_render(c) -> str:
+    """`PositionCounts::render`, word for word."""
+    return (
+        f"{c['related']} related, {c['not_related']} not related, {c['never_committed']} "
+        f"never committed, {c['beyond_end']} beyond the end, {c['failed']} failed, "
+        f"{c['not_observed']} not observed"
+    )
+
+
+_RFC3339 = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?"
+    r"([Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
+def _rfc3339_ns(value):
+    """Nanoseconds since the epoch of an RFC 3339 instant, or None — what
+    chrono's `DateTime<Utc>` deserialises, compared as the Rust reader does
+    (a later instant is greater, whatever its offset)."""
+    if not isinstance(value, str):
+        return None
+    m = _RFC3339.fullmatch(value)
+    if not m:
+        return None
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    if not (1 <= month <= 12 and 1 <= day <= 31 and hour <= 23 and minute <= 59
+            and second <= 60):
+        return None
+    frac = m.group(7) or "."
+    nanos = int((frac[1:] + "000000000")[:9])
+    tz = m.group(8)
+    offset = 0
+    if tz not in ("Z", "z"):
+        offset = (1 if tz[0] == "+" else -1) * (int(tz[1:3]) * 3600 + int(tz[4:6]) * 60)
+    seconds = calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)) - offset
+    return seconds * 10**9 + nanos
+
+
+def _rust_bool(b) -> str:
+    """A `bool` as Rust's `{}` renders it."""
+    return "true" if b else "false"
+
+
+def _cp_pair(a, b) -> bool:
+    """Arm CP-6's pair rule: recorded whole, never negative, never inverted."""
+    if a is None and b is None:
+        return True
+    if a is not None and b is not None:
+        return 0 <= a <= b
+    return False
+
+
+def _cp_shown(value) -> str:
+    """An `Option<String>` as the Rust arms render it: `{:?}` or `absent`."""
+    return "absent" if value is None else _rust_debug_str(value)
+
+
+def _cp_place(topic, partition) -> str:
+    """A position's place, `"topic":partition`, as arm CP-11 and the lines render it."""
+    return f"{_rust_debug_str(topic)}:{partition}"
+
 
 # PROD-03.0: the first minor of the BACKUP RECEIPT's format 1 that defines
 # `schema_dependency` (arm 22) — `SCHEMA_DEPENDENCY_SINCE_MINOR` in
@@ -2449,6 +2670,140 @@ def _receipt_shape(doc) -> str:
                 value = entry.get(name)
                 if value is not None and not isinstance(value, str):
                     return f"{where}.{name} is not a string"
+    # PROD-04.1, format 1.7.0: `consumer_positions` is
+    # `Option<ConsumerPositions>` over there; every one of these is refused at
+    # DESERIALISATION by the Rust reader before arm 30 runs (an instant is
+    # RFC 3339, a count and `members` a `u32`, `document.bytes` a `u64`,
+    # `active` a `bool`), so they belong in the shape layer here for the
+    # reason `source.auth` does. `null` is absent on both sides.
+    shape = _consumer_positions_shape(doc.get("consumer_positions"))
+    if shape:
+        return shape
+    return ""
+
+
+def _is_int_in(value, low, high) -> bool:
+    """A JSON integer (never a bool) in `[low, high]`."""
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _consumer_positions_shape(cp) -> str:
+    """"" when `cp` is absent or has the shape `ConsumerPositions` reads (the
+    receipt's 1.7.0 block: the summary, never the positions)."""
+    if cp is None:
+        return ""
+    if not isinstance(cp, dict):
+        return "consumer_positions is not an object"
+    for name in ("observed_from", "observed_to"):
+        if _rfc3339_ns(cp.get(name)) is None:
+            return f"consumer_positions.{name} is not an RFC 3339 instant"
+    if not isinstance(cp.get("listing"), str):
+        return "consumer_positions.listing is not a string"
+    document = cp.get("document")
+    if not isinstance(document, dict):
+        return "consumer_positions.document is not an object"
+    for name in ("key", "sha256"):
+        if not isinstance(document.get(name), str):
+            return f"consumer_positions.document.{name} is not a string"
+    if not _is_int_in(document.get("bytes"), 0, 2**64 - 1):
+        return "consumer_positions.document.bytes is not a u64"
+    if not isinstance(cp.get("groups"), dict):
+        return "consumer_positions.groups is not an object"
+    u32 = (0, 2**32 - 1)
+    for group_id in sorted(cp["groups"]):
+        group = cp["groups"][group_id]
+        where = f"consumer_positions.groups[{_rust_debug_str(group_id)}]"
+        if not isinstance(group, dict):
+            return f"{where} is not an object"
+        if not isinstance(group.get("outcome"), str):
+            return f"{where}.outcome is not a string"
+        for name in ("reason", "group_type", "state", "listed_state"):
+            value = group.get(name)
+            if value is not None and not isinstance(value, str):
+                return f"{where}.{name} is not a string"
+        members = group.get("members")
+        if members is not None and not _is_int_in(members, *u32):
+            return f"{where}.members is not a u32"
+        active = group.get("active")
+        if active is not None and not isinstance(active, bool):
+            return f"{where}.active is not a boolean"
+        counts = group.get("counts")
+        if counts is None:
+            continue
+        if not isinstance(counts, dict):
+            return f"{where}.counts is not an object"
+        for name in CP_COUNT_NAMES:
+            if not _is_int_in(counts.get(name), *u32):
+                return f"{where}.counts.{name} is not a u32"
+    return ""
+
+
+def _positions_document_shape(pd) -> str:
+    """"" when `pd` has the shape `PositionsDocument` reads; otherwise why not,
+    as the Rust reader refuses it at deserialisation before arm CP-1."""
+    if not isinstance(pd, dict):
+        return "the positions document is not an object"
+    for name in ("format_version", "backup_id", "run_id"):
+        if not isinstance(pd.get(name), str):
+            return f"the positions document's {name} is not a string"
+    for name in ("topics", "groups"):
+        if not isinstance(pd.get(name), dict):
+            return f"the positions document's {name} is not an object"
+    i64 = (-(2**63), 2**63 - 1)
+    u32 = (0, 2**32 - 1)
+    for topic in sorted(pd["topics"]):
+        entry = pd["topics"][topic]
+        where = f"the positions document's topics[{_rust_debug_str(topic)}]"
+        if not isinstance(entry, dict):
+            return f"{where} is not an object"
+        if not isinstance(entry.get("partitions"), list):
+            return f"{where}.partitions is not an array"
+        if not isinstance(entry.get("changed_during_capture"), bool):
+            return f"{where}.changed_during_capture is not a boolean"
+        for i, facts in enumerate(entry["partitions"]):
+            at = f"{where}.partitions[{i}]"
+            if not isinstance(facts, dict):
+                return f"{at} is not an object"
+            if not _is_int_in(facts.get("partition"), *u32):
+                return f"{at}.partition is not a u32"
+            if not isinstance(facts.get("observed"), bool):
+                return f"{at}.observed is not a boolean"
+            for name in (
+                "log_start",
+                "high_watermark",
+                "log_start_after",
+                "high_watermark_after",
+                "archived_first",
+                "archived_last",
+            ):
+                value = facts.get(name)
+                if value is not None and not _is_int_in(value, *i64):
+                    return f"{at}.{name} is not an i64"
+    for group_id in sorted(pd["groups"]):
+        group = pd["groups"][group_id]
+        where = f"the positions document's groups[{_rust_debug_str(group_id)}]"
+        if not isinstance(group, dict):
+            return f"{where} is not an object"
+        if not _is_int_in(group.get("no_committed_position"), *u32):
+            return f"{where}.no_committed_position is not a u32"
+        if not isinstance(group.get("positions"), list):
+            return f"{where}.positions is not an array"
+        for i, entry in enumerate(group["positions"]):
+            at = f"{where}.positions[{i}]"
+            if not isinstance(entry, dict):
+                return f"{at} is not an object"
+            for name in ("topic", "status"):
+                if not isinstance(entry.get(name), str):
+                    return f"{at}.{name} is not a string"
+            if not _is_int_in(entry.get("partition"), *u32):
+                return f"{at}.partition is not a u32"
+            position = entry.get("position")
+            if position is not None and not _is_int_in(position, *i64):
+                return f"{at}.position is not an i64"
+            for name in ("reason", "coverage"):
+                value = entry.get(name)
+                if value is not None and not isinstance(value, str):
+                    return f"{at}.{name} is not a string"
     return ""
 
 
@@ -2512,7 +2867,8 @@ def check_backup_receipt_invariants(doc) -> str:
        1.4.0 (PROD-01.3) also `scramSha256`, `plain` or `mtls`.
 
     Arms 6-21 read the 1.1.0 and 1.3.0 blocks (FX-4, PROD-05.1), arms 22-29
-    the 1.5.0 `schema_dependency` (PROD-03.0), and arms 36-40 the 1.6.0
+    the 1.5.0 `schema_dependency` (PROD-03.0), arms 30-35 the 1.7.0
+    `consumer_positions` summary (PROD-04.1), and arms 36-40 the 1.6.0
     `generations` (PROD-01.4a): present only from 1.6.0,
     covering exactly the named topic set, every recorded topic ID canonical, a
     reason exactly when an ID is null, and a source exactly when one is
@@ -2964,6 +3320,128 @@ def check_backup_receipt_invariants(doc) -> str:
                         "dependent"
                     )
 
+    # ARMS 30-35 (format 1.7.0, PROD-04.1): the `consumer_positions` block, and
+    # ONLY when it is present. Groups in id order. The positions themselves
+    # are in the document the block binds, checked by
+    # `check_consumer_positions_document` (arms CP-1 to CP-14).
+    cp = doc.get("consumer_positions")
+    if cp is not None:
+        # ARM 30. A document declaring a minor before 7 cannot carry a 1.7 field.
+        if parsed[1] < RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR:
+            return (
+                f"consumer_positions is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR}.0"
+            )
+        # ARM 31. The capture ends at or after it starts, the listing word is
+        # closed, and at least one group is recorded.
+        window_fits = _rfc3339_ns(cp["observed_to"]) >= _rfc3339_ns(cp["observed_from"])
+        if not window_fits or cp["listing"] not in CP_LISTING_VALUES or not cp["groups"]:
+            return (
+                f"consumer_positions records listing {_rust_debug_str(cp['listing'])}, "
+                f"{len(cp['groups'])} group(s) and a capture that "
+                f"{'ends at or after it starts' if window_fits else 'ends before it starts'}: "
+                "the capture ends at or after it starts, the listing is \"complete\" or "
+                "\"notComplete\", and at least one group is recorded"
+            )
+        # ARM 32. The positions document is the one beside this receipt, named
+        # by a well-formed digest over at least one byte.
+        document = cp["document"]
+        key = _cp_document_key(doc["backup_id"], doc["run_id"])
+        digest = document["sha256"]
+        digest_fits = (
+            digest.startswith("sha256:")
+            and len(digest) == 71
+            and all(ch in "0123456789abcdef" for ch in digest[7:])
+        )
+        if document["key"] != key or not digest_fits or document["bytes"] == 0:
+            return (
+                f"consumer_positions.document is {_rust_debug_str(document['key'])} with sha256 "
+                f"{_rust_debug_str(digest)} over {document['bytes']} bytes: the positions "
+                f"document is {_rust_debug_str(key)}, its digest \"sha256:\" and 64 lowercase "
+                "hex digits, over at least one byte"
+            )
+        shown = _cp_shown
+        for group_id in sorted(cp["groups"]):
+            group = cp["groups"][group_id]
+            gid = _rust_debug_str(group_id)
+            outcome = group["outcome"]
+            reason = group.get("reason")
+            # ARM 33. The outcome, and a reason exactly when it is not captured.
+            if outcome == "captured":
+                reason_fits = reason is None
+            elif outcome == "excluded":
+                reason_fits = reason in CP_EXCLUDED_REASONS
+            elif outcome == "failed":
+                reason_fits = reason in CP_FAILED_REASONS
+            else:
+                reason_fits = False
+            if not reason_fits:
+                return (
+                    f"consumer_positions.groups[{gid}] has outcome {_rust_debug_str(outcome)} "
+                    f"and reason {shown(reason)}: the outcome is \"captured\", \"excluded\" "
+                    "or \"failed\", a reason is present exactly when it is not \"captured\", "
+                    "and it is one this format defines for that outcome"
+                )
+            # ARM 34. What a group records follows from its outcome; a captured
+            # group's counts cover at least one partition, and a group
+            # described `Dead` with no member is never captured.
+            captured = outcome == "captured"
+            other = reason == "GroupTypeNotCaptured"
+            group_type = group.get("group_type")
+            state = group.get("state")
+            listed = group.get("listed_state")
+            members = group.get("members")
+            active = group.get("active")
+            counts = group.get("counts")
+            if captured:
+                fields_fit = (
+                    group_type in CP_CAPTURED_TYPES
+                    and state in CP_GROUP_STATES
+                    and listed in CP_GROUP_STATES
+                    and members is not None
+                    and active is not None
+                    and counts is not None
+                    and _cp_counts_total(counts) >= 1
+                    and not (state is not None and members is not None
+                             and _cp_vanished(state, members))
+                )
+            else:
+                only_type = (
+                    state is None
+                    and listed is None
+                    and members is None
+                    and active is None
+                    and counts is None
+                )
+                ty = group_type == "other" if other else group_type is None
+                fields_fit = only_type and ty
+            counts_shown = (
+                "absent" if counts is None else f"over {_cp_counts_total(counts)} partition(s)"
+            )
+            if not fields_fit:
+                return (
+                    f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with "
+                    f"group_type {shown(group_type)}, state {shown(state)}, listed_state "
+                    f"{shown(listed)}, members {'absent' if members is None else members}, "
+                    f"active {'absent' if active is None else _rust_bool(active)} and counts "
+                    f"{counts_shown}: "
+                    "a captured group records a type of \"classic\" or \"consumer\", both "
+                    "states from the closed set, its members, active and counts over at least "
+                    "one partition, and is never \"Dead\" with no member; a "
+                    "GroupTypeNotCaptured group records group_type \"other\" and nothing else; "
+                    "any other group records none of them"
+                )
+            if state is not None and listed is not None and active is not None:
+                # ARM 35. `active` is what the two states say.
+                derived = _cp_active(state, listed)
+                if active != derived:
+                    return (
+                        f"consumer_positions.groups[{gid}].active is {_rust_bool(active)} but "
+                        f"its states {_rust_debug_str(state)} and {_rust_debug_str(listed)} say "
+                        f"{_rust_bool(derived)}: a group is active unless both its states are "
+                        "\"Empty\" or \"Dead\""
+                    )
     # ARMS 36-40 (format 1.6.0, PROD-01.4a): the `generations` block, and ONLY
     # when it is present, so every earlier receipt is decided exactly as
     # before. Topics in NAME order; per topic, arms 38, 39 and 40, each over
@@ -3066,6 +3544,245 @@ def _catalog_point_problem(doc) -> str:
                     "padding over the ID's 16 bytes, and never one of Kafka's reserved IDs "
                     "(AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
                 )
+    return ""
+
+
+def check_consumer_positions_document(doc, raw, pd) -> str:
+    """The positions document `pd` (its exact bytes `raw`) checked against the
+    receipt `doc` that binds it, or "" when it holds — arms CP-1 to CP-14.
+
+    ARM FOR ARM, IN ORDER, WITH `BackupReceipt::
+    validate_consumer_positions_document`
+    (crates/logweir-core/src/backup_receipt.rs), and with BYTE-IDENTICAL
+    refusal text. Called only after the receipt's own arms accepted it and
+    `_positions_document_shape(pd)` returned "".
+    """
+    # ARM CP-1. Only a receipt that selected groups binds a document.
+    cp = doc.get("consumer_positions")
+    if cp is None:
+        return (
+            f"the receipt of run {_rust_debug_str(doc['run_id'])} records no consumer_positions "
+            "block, so it binds no positions document: only a backup that selected consumer "
+            "groups writes one"
+        )
+    # ARM CP-2. The exact bytes the receipt's signature covers.
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if digest != cp["document"]["sha256"] or len(raw) != cp["document"]["bytes"]:
+        return (
+            f"the positions document is {digest} over {len(raw)} bytes but the receipt binds "
+            f"{cp['document']['sha256']} over {cp['document']['bytes']} bytes: it is not the "
+            "document this receipt signed"
+        )
+    # ARM CP-3. Format 1, for this receipt's own backup and run.
+    parsed = _receipt_parse_semver(pd["format_version"])
+    if (
+        parsed is None
+        or parsed[0] != 1
+        or pd["backup_id"] != doc["backup_id"]
+        or pd["run_id"] != doc["run_id"]
+    ):
+        return (
+            f"the positions document is format {_rust_debug_str(pd['format_version'])} for "
+            f"backup {_rust_debug_str(pd['backup_id'])} run {_rust_debug_str(pd['run_id'])} but "
+            f"the receipt is backup {_rust_debug_str(doc['backup_id'])} run "
+            f"{_rust_debug_str(doc['run_id'])}: a format-1 positions document names its "
+            "receipt's own backup and run"
+        )
+    # ARM CP-4. The observed topics are the named topics.
+    named_topics = [str(x) for x in doc["source"]["topics"]]
+    observed = list(pd["topics"].keys())
+    if sorted(set(observed)) != sorted(set(named_topics)):
+        return (
+            f"the positions document's topics cover {_render_topic_set(observed)} but the "
+            f"named topic set is {_render_topic_set(named_topics)}"
+        )
+    changed = []
+    unread = []
+    facts_at = {}
+    for topic in sorted(pd["topics"]):
+        entry = pd["topics"][topic]
+        for i, facts in enumerate(entry["partitions"]):
+            # ARM CP-5. Every partition once, from 0, in order.
+            if facts["partition"] != i:
+                return (
+                    f"the positions document's topics[{_rust_debug_str(topic)}].partitions[{i}] "
+                    f"is partition {facts['partition']}: each topic lists its partitions from 0, "
+                    "one entry each, in order"
+                )
+            # ARM CP-6. Marks and ranges are well formed.
+            fits = (
+                _cp_pair(facts.get("log_start"), facts.get("high_watermark"))
+                and _cp_pair(facts.get("log_start_after"), facts.get("high_watermark_after"))
+                and _cp_pair(facts.get("archived_first"), facts.get("archived_last"))
+                and (
+                    facts["observed"]
+                    or (facts.get("log_start") is None and facts.get("high_watermark") is None)
+                )
+            )
+            if not fits:
+                return (
+                    f"the positions document's topics[{_rust_debug_str(topic)}].partitions[{i}] "
+                    "records marks that are not well formed: a log start and its high watermark "
+                    "are recorded together with 0 <= log start <= high watermark, the archived "
+                    "range is recorded whole with 0 <= first <= last, and a partition the "
+                    "capture did not observe has no group-capture marks"
+                )
+            facts_at[(topic, facts["partition"])] = facts
+        # ARM CP-7. `changed_during_capture` is what the marks say.
+        derived = _cp_changed(entry["partitions"])
+        if entry["changed_during_capture"] != derived:
+            return (
+                f"the positions document's topics[{_rust_debug_str(topic)}].changed_during_capture "
+                f"is {_rust_bool(entry['changed_during_capture'])} but its marks say "
+                f"{_rust_bool(derived)}: a topic changed during the capture exactly when a mark "
+                "read after the engine is below the one read at group capture"
+            )
+        if derived:
+            changed.append(topic)
+        if not entry["partitions"]:
+            unread.append(topic)
+    # ARM CP-8. Positions for exactly the captured groups.
+    captured = [g for g in cp["groups"] if cp["groups"][g]["outcome"] == "captured"]
+    positioned = list(pd["groups"].keys())
+    if sorted(set(positioned)) != sorted(set(captured)):
+        return (
+            f"the positions document records positions for the groups "
+            f"{_render_topic_set(positioned)} but the receipt's captured groups are "
+            f"{_render_topic_set(captured)}: it records exactly the captured groups"
+        )
+    shown = _cp_shown
+    for group_id in sorted(cp["groups"]):
+        group = cp["groups"][group_id]
+        gid = _rust_debug_str(group_id)
+        outcome = group["outcome"]
+        reason = group.get("reason")
+        positions = pd["groups"].get(group_id)
+        # ARM CP-9. No kept position on a topic that changed, and no group
+        # failed GenerationChangedDuringCapture when none changed.
+        on_changed = any(
+            e.get("position") is not None and e["topic"] in changed
+            for e in (positions["positions"] if positions is not None else [])
+        )
+        blamed = reason == "GenerationChangedDuringCapture"
+        if on_changed or (blamed and not changed):
+            return (
+                f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with reason "
+                f"{shown(reason)} while the topics that changed during the capture are "
+                f"{_render_topic_set(changed)}: a group holding a position on such a topic "
+                "fails GenerationChangedDuringCapture, and no group fails so when none changed"
+            )
+        # ARM CP-10. A group is captured only over topics whose partitions
+        # were read.
+        not_read = reason == "PartitionsNotRead"
+        if (outcome == "captured" and unread) or (not_read and not unread):
+            return (
+                f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with reason "
+                f"{shown(reason)} while the topics whose partitions were never read are "
+                f"{_render_topic_set(unread)}: a group is captured only when every named "
+                "topic's partitions were read, and fails PartitionsNotRead only when one was not"
+            )
+        if positions is None:
+            continue
+        # ARM CP-11. The entries name partitions of the named topics, in order,
+        # once each, every unobserved one among them; every other partition is
+        # counted as having no committed position.
+        entries = positions["positions"]
+        out_of_place = None
+        for i, e in enumerate(entries):
+            here = (e["topic"], e["partition"])
+            if here not in facts_at or (
+                i > 0 and (entries[i - 1]["topic"], entries[i - 1]["partition"]) >= here
+            ):
+                out_of_place = i
+                break
+        listed = {(e["topic"], e["partition"]) for e in entries}
+        unobserved_missing = sum(
+            1 for at, f in facts_at.items() if not f["observed"] and at not in listed
+        )
+        total = len(facts_at)
+        if (
+            out_of_place is not None
+            or unobserved_missing > 0
+            or len(entries) + positions["no_committed_position"] != total
+        ):
+            first = (
+                "none"
+                if out_of_place is None
+                else f"{out_of_place}, "
+                + _cp_place(entries[out_of_place]["topic"], entries[out_of_place]["partition"])
+            )
+            return (
+                f"the positions document's groups[{gid}] lists {len(entries)} position(s) "
+                f"(first out of place: {first}), leaves {unobserved_missing} unobserved "
+                f"partition(s) out and counts {positions['no_committed_position']} without a "
+                f"committed position over {total} partition(s): a captured group lists, topics "
+                "in name order and partitions in order, each partition of a named topic at most "
+                "once and every one the capture did not observe, and counts every other "
+                "partition as without a committed position"
+            )
+        for i, entry in enumerate(entries):
+            facts = facts_at[(entry["topic"], entry["partition"])]
+            status = entry["status"]
+            position = entry.get("position")
+            why = entry.get("reason")
+            # ARM CP-12. The status, the position and the reason fit.
+            if status == "excluded":
+                reason_ok = why == "PositionBeyondEnd"
+            elif status == "failed":
+                reason_ok = why in CP_POSITION_FAILED_REASONS
+            elif status == "notObserved":
+                reason_ok = why in CP_NOT_OBSERVED_REASONS
+            else:
+                reason_ok = why is None
+            fits = (
+                status in CP_POSITION_STATUSES
+                and (position is not None) == (status in ("captured", "excluded"))
+                and (position is None or position >= 0)
+                and reason_ok
+                and (status == "notObserved") == (not facts["observed"])
+            )
+            if not fits:
+                return (
+                    f"the positions document's groups[{gid}].positions[{i}] has status "
+                    f"{_rust_debug_str(status)}, position "
+                    f"{'absent' if position is None else position} and reason {shown(why)}: the "
+                    "status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a "
+                    "position is present exactly when it is \"captured\" or \"excluded\" and is "
+                    "never negative, a reason exactly when it is not \"captured\" and from that "
+                    "status's set, and \"notObserved\" is exactly a partition the capture did "
+                    "not observe"
+                )
+            # ARM CP-13. A coverage word exactly on a captured position, and a
+            # kept position's verdict follows from its partition's facts.
+            coverage = entry.get("coverage")
+            derived = None if position is None else _cp_relation(position, facts)
+            if status == "excluded":
+                recorded = "PositionBeyondEnd"
+            elif status == "captured":
+                recorded = coverage
+            else:
+                recorded = None
+            coverage_fits = (coverage is not None) == (status == "captured")
+            if not coverage_fits or recorded != derived:
+                return (
+                    f"the positions document's groups[{gid}].positions[{i}] is "
+                    f"{_rust_debug_str(status)} with coverage {shown(coverage)} at position "
+                    f"{'absent' if position is None else position}, but its partition's facts "
+                    f"make it {'unjudged' if derived is None else derived}: a coverage word is "
+                    "recorded exactly on a captured position, and a kept position's coverage, "
+                    "or its PositionBeyondEnd, follows from the marks and the archived range"
+                )
+        # ARM CP-14. The receipt's counts are the document's.
+        derived = _cp_counts_of(positions)
+        recorded = group.get("counts")
+        if recorded is None or any(recorded[n] != derived[n] for n in CP_COUNT_NAMES):
+            return (
+                f"consumer_positions.groups[{gid}].counts are "
+                f"{'absent' if recorded is None else _cp_counts_render(recorded)} but its "
+                f"positions count {_cp_counts_render(derived)}: the receipt counts what the "
+                "positions document records"
+            )
+
     return ""
 
 
@@ -3195,6 +3912,72 @@ def _topic_configuration_lines(block, detection=None):
             f"topic_configuration[{_rust_debug_str(topic)}]: partitions "
             f"{count(model.get('partitions'))}, replication factor "
             f"{count(model.get('replication_factor'))}, {said}, {route}"
+        )
+    return lines
+
+
+def _consumer_positions_lines(block, verified=None):
+    """The receipt's `consumer_positions`: a header, the positions document and
+    whether it was verified, one line per group in id order and — only for a
+    VERIFIED document — one line per listed position of each captured group
+    and one with how many partitions have no committed position. The twin of
+    `crates/logweir/src/verify.rs::consumer_positions_lines`, in the same
+    words (PROD-04.1). Nothing when the receipt carries no block: the backup
+    selected no group."""
+    if block is None:
+        return []
+    document = block["document"]
+    lines = [
+        f"consumer_positions: {len(block['groups'])} group(s), listing {block['listing']}",
+        f"consumer_positions: positions document {document['key']} ({document['sha256']}, "
+        f"{document['bytes']} bytes) "
+        + (
+            "verified against this receipt"
+            if verified is not None
+            else "not checked: pass --consumer-positions <file> to verify it and print each "
+            "position"
+        ),
+    ]
+    for group_id in sorted(block["groups"]):
+        g = block["groups"][group_id]
+        c = g.get("counts")
+        if g["outcome"] == "captured" and c is not None:
+            members = g.get("members") if g.get("members") is not None else 0
+            active = "inactive" if g.get("active") is False else "active"
+            lines.append(
+                f"consumer_positions[{_rust_debug_str(group_id)}]: captured "
+                f"{g.get('group_type') or ''}, state {g.get('state') or ''} (listed "
+                f"{g.get('listed_state') or ''}), {members} member(s), {active}; positions: "
+                f"{c['related']} related to archived data, {c['not_related']} not related, "
+                f"{c['never_committed']} never committed, {c['beyond_end']} beyond the end, "
+                f"{c['failed']} failed, {c['not_observed']} not observed"
+            )
+        else:
+            other = ", group type other" if g.get("group_type") == "other" else ""
+            lines.append(
+                f"consumer_positions[{_rust_debug_str(group_id)}]: {g['outcome']} "
+                f"({g.get('reason') or ''}){other}, no position recorded"
+            )
+    if verified is None:
+        return lines
+    for group_id in sorted(verified["groups"]):
+        g = verified["groups"][group_id]
+        for e in g["positions"]:
+            at = (
+                f"consumer_positions[{_rust_debug_str(group_id)}]"
+                f"[{_cp_place(e['topic'], e['partition'])}]"
+            )
+            position = e.get("position")
+            if e["status"] == "captured" and position is not None:
+                lines.append(f"{at}: position {position}, {e.get('coverage') or ''}")
+            elif position is not None:
+                lines.append(f"{at}: {e['status']} ({e.get('reason') or ''}), position {position}")
+            else:
+                lines.append(f"{at}: {e['status']} ({e.get('reason') or ''}), no position")
+        lines.append(
+            f"consumer_positions[{_rust_debug_str(group_id)}][*]: "
+            f"{g['no_committed_position']} other partition(s) with no committed position, "
+            "never offset 0"
         )
     return lines
 
@@ -3470,7 +4253,17 @@ def main(
     sig_path: str,
     pubkey_path: str,
     payload_type_wanted: str = PAYLOAD_TYPE,
+    positions_path=None,
 ) -> int:
+    # PROD-04.1: the positions document is checked against the backup receipt
+    # that binds it, and against nothing else.
+    if positions_path is not None and payload_type_wanted != PAYLOAD_TYPES["backup-receipt"]:
+        print(
+            "INVALID: --consumer-positions applies to --payload-type backup-receipt only: the "
+            "positions document is checked against the backup receipt that binds it",
+            file=sys.stderr,
+        )
+        return 1
     # The payload is the bytes as stored on disk, byte for byte, including
     # any trailing newline. Re-serialising the parsed JSON before verifying
     # would check a signature over a document nobody actually signed or
@@ -3777,6 +4570,30 @@ def main(
         if problem:
             print(f"INVALID: {problem}", file=sys.stderr)
             return 1
+        # PROD-04.1: the positions document, only when given, against the
+        # receipt just verified — its exact bytes, never a re-serialisation.
+        verified_positions = None
+        if positions_path is not None:
+            try:
+                raw = open(positions_path, "rb").read()
+            except OSError as e:
+                print(
+                    f"INVALID: cannot read positions document {positions_path!r}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                pd = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"INVALID: the positions document is not valid JSON: {e}", file=sys.stderr)
+                return 1
+            problem = _positions_document_shape(pd) or check_consumer_positions_document(
+                doc, raw, pd
+            )
+            if problem:
+                print(f"INVALID: {problem}", file=sys.stderr)
+                return 1
+            verified_positions = pd
         archive = doc["archive"]
         covered = doc["covered"]
         records = doc["records"]
@@ -3840,6 +4657,13 @@ def main(
         # generation_lines`); the parity script compares them.
         for line in _generation_lines(doc.get("generations")):
             print(f"       {line}")
+        # PROD-04.1: the consumer position evidence, one line per group, in the
+        # same words `logweir drill verify` prints (`verify.rs::
+        # consumer_positions_lines`); the parity script compares them.
+        for line in _consumer_positions_lines(
+            doc.get("consumer_positions"), verified_positions
+        ):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -3863,10 +4687,24 @@ def main(
             "named topic set, closed verdict, reason and basis sets, both sides exactly when "
             "judged, a judged count that fits records, distinct plausible schema ids within "
             "the cap, the one-in-ten threshold, and a verdict its sides give, "
+            "consumer_positions' six: present only from 1.7.0, a forward capture window with "
+            "a closed listing and at least one group, this run's positions document by a "
+            "well-formed digest, closed outcomes and reasons, fields and counts that fit the "
+            "outcome with no captured group Dead and memberless, and an active flag the "
+            "states derive, "
             "and the topic IDs' five: generations present only from 1.6.0, covering exactly "
             "the named topic set, every recorded ID in Kafka's text and never the zero ID, a "
             "reason exactly for a null ID, and a source exactly for a recorded one)"
         )
+        if verified_positions is not None:
+            print(
+                "       positions document: the fourteen CP arms held (bound to this receipt "
+                "by digest and length, its backup and run, its topic set, partitions in "
+                "order, well-formed marks, a derived changed flag, exactly the captured "
+                "groups, no position on a changed topic, no capture over an unread topic, "
+                "every partition accounted for so absence is never offset 0, status, value "
+                "and reason, a derived coverage, and the receipt's counts)"
+            )
         return 0
 
     if payload_type_wanted == PAYLOAD_TYPES["receipt"]:
@@ -3958,10 +4796,23 @@ if __name__ == "__main__":
     # given.
     argv = sys.argv[1:]
     wanted = PAYLOAD_TYPE
+    positions = None
     rest = []
     i = 0
     while i < len(argv):
         a = argv[i]
+        # PROD-04.1: the positions document a backup receipt binds.
+        if a == "--consumer-positions":
+            if i + 1 >= len(argv):
+                print("INVALID: --consumer-positions needs a value", file=sys.stderr)
+                sys.exit(1)
+            positions = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--consumer-positions="):
+            positions = a.split("=", 1)[1]
+            i += 1
+            continue
         if a == "--payload-type":
             if i + 1 >= len(argv):
                 print("INVALID: --payload-type needs a value", file=sys.stderr)
@@ -3987,8 +4838,9 @@ if __name__ == "__main__":
         print(
             f"usage: {sys.argv[0]} "
             "[--payload-type " + "|".join(sorted(PAYLOAD_TYPES)) + "] "
+            "[--consumer-positions <positions.json>] "
             "<document.json> <document.sig> <public.pem>",
             file=sys.stderr,
         )
         sys.exit(1)
-    sys.exit(main(rest[0], rest[1], rest[2], wanted))
+    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions))

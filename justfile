@@ -59,7 +59,7 @@ golden:
 # as revised): the drill scorecard and the backup receipt; PLAT-17.1 adds a
 # THIRD, `schemas/logweir-api-v1.openapi.json`, the product API's OpenAPI
 # document generated from `crates/logweir-api`'s DTOs; PLAT-15.1 adds a
-# FOURTH, `schemas/logweir-catalog-point-1.6.0.json` (1.0.0 to 1.5.0 frozen beside it), the recovery catalog's
+# FOURTH, `schemas/logweir-catalog-point-1.7.0.json` (1.0.0 to 1.6.0 frozen beside it), the recovery catalog's
 # point record, generated from `crates/logweir`'s own type (the type is runner
 # vocabulary, so its emitter lives beside it rather than in `logweir-core`).
 # `logweir schema` still accepts exactly the two names Global Constraint 13
@@ -131,24 +131,32 @@ golden:
 # `-1.5.0.json` files are frozen beside the new ones the same way
 # (`the_frozen_1_5_0_receipt_schema_is_still_prod_03_0s`,
 # `the_frozen_1_5_0_catalog_point_schema_is_still_prod_03_0s`); every receipt
-# this build signs is 1.6.0.
+# this build signs is 1.6.0 or later.
+#
+# PROD-04.1 moved them to 1.7.0 (`consumer_positions`, the summary of a
+# selected backup's consumer positions), and PROD-01.4a's `-1.6.0.json` files
+# are frozen beside the new ones (`the_frozen_1_6_0_receipt_schema_is_still_prod_01_4as`,
+# `the_frozen_1_6_0_catalog_point_schema_is_still_prod_01_4as`); a receipt is
+# 1.7.0 exactly when its backup selected consumer groups. Its positions
+# document has its own schema, `logweir-consumer-positions-1.0.0.json`.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
 # (`scorecard::FORMAT_VERSION_WITH_SELECTION`,
-# `backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`,
-# `catalog::record::FORMAT_VERSION_WITH_GENERATIONS`), which also builds the
+# `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
+# `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
 scorecard_schema_version := "1.7.0"
-receipt_schema_version := "1.6.0"
-catalog_schema_version := "1.6.0"
+receipt_schema_version := "1.7.0"
+catalog_schema_version := "1.7.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-{{receipt_schema_version}}.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
     cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
+    cargo run -p logweir-core --example emit_consumer_positions_schema > schemas/logweir-consumer-positions-1.0.0.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -161,10 +169,12 @@ schema-check:
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
+    cargo run --locked -p logweir-core --example emit_consumer_positions_schema > "$tmp/consumer-positions.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
     diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
     diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
+    diff -u schemas/logweir-consumer-positions-1.0.0.json "$tmp/consumer-positions.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

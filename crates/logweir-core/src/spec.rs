@@ -1105,6 +1105,18 @@ pub struct BackupSourceSpec {
     /// declared owner, and it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
+    /// **PROD-04.1.** The consumer groups whose positions this backup records
+    /// as evidence, by exact id: never a pattern, never "all groups". Each
+    /// gets one outcome in the receipt's `consumer_positions` block (captured,
+    /// excluded with a reason, or failed); phase −1 refuses a blank, repeated
+    /// or control-character id and more than
+    /// [`crate::consumer_positions::MAX_SELECTED_GROUPS`] ids (exit 3).
+    ///
+    /// Optional: ABSENT (or empty) selects no group, so the receipt carries no
+    /// block and a plan without the key is the plan it was, byte for byte. An
+    /// older runner ignores the key and records no positions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins

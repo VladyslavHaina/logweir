@@ -784,7 +784,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.25.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.26.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
@@ -821,6 +821,7 @@ history is:
 | `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
 | `1.24.0` | Knows backup receipt format `1.5.0` (PROD-03.0). Adds `schema_dependency`'s eight arms (22 to 29: only from 1.5.0; covering exactly the named topics; a closed verdict, reason and basis; both sides exactly when judged; a judged count that fits `records`; distinct plausible schema ids within the cap of 16 and a count; the one-in-ten threshold; a verdict its sides give) and its shape check, and prints one `schema_dependency["<topic>"]:` line per topic — `schema-dependent, registry not captured`, `no schema framing detected` or `not assessed (<reason>)`, with the framed share and the schema ids — or `schema_dependency: not assessed, …` for a receipt without the block. Every receipt without the block is decided exactly as before. |
 | `1.25.0` | Knows backup-receipt and catalog-point format `1.6.0` (PROD-01.4a). Adds the backup receipt's five `generations` arms (36–40: only from 1.6.0; covering exactly the named topic set; every recorded topic ID in Kafka's text — 22 URL-safe base64 characters over 16 bytes, never one of Kafka's reserved IDs, `AAAAAAAAAAAAAAAAAAAAAA` or `AAAAAAAAAAAAAAAAAAAAAQ`; a reason exactly for a null ID, from the closed six; a source exactly for a recorded one), its shape check (each field a string or null), and the `generations` lines: per topic, one generation, the ID CHANGED during the capture, or not established by ID (with the reason). For a catalog point it makes ONE check beyond the signature: every topic ID the record copies (`topics[].identity`) is a real one, else the record is refused in the Rust reader's words. Every document without the block is decided exactly as before. |
+| `1.26.0` | Knows backup-receipt and catalog-point format `1.7.0` (PROD-04.1). Adds the receipt's six `consumer_positions` arms (30–35, after PROD-03.0's 22–29): the block only from 1.7.0; a capture window that ends at or after it starts (compared as instants), a closed listing word and at least one group; this run's positions document named by a well-formed digest over at least one byte; each group's outcome and reason from the closed sets; what a captured (never `Dead` with no member, counts over at least one partition), a `GroupTypeNotCaptured` and any other group records; and an `active` the two states derive. With `--consumer-positions <file>` (backup receipts only) it checks the positions document the receipt binds — fourteen arms, CP-1 to CP-14: the receipt's digest and length, its backup and run, the named topics with their partitions in order and well-formed marks, a derived changed flag, exactly the captured groups, no kept position on a changed topic, no capture over an unread topic, every partition accounted for so absence is never offset 0, each position's status, value, reason and derived coverage, and the receipt's counts — and prints each position. Adds their shape checks and prints the `consumer_positions` lines: the document and whether it was verified, per group its outcome and counts, and with the document one line per position. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -831,6 +832,14 @@ a 1.6.0 backup receipt or catalog point: they ignore `generations` (and the
 record's `topics[].identity`), check none of arms 36 to 40 and print no topic
 ID — so they cannot say whether a topic was recreated between two points or
 during one ([backup-receipt.md](formats/backup-receipt.md#upgrade-rollback-and-old-receipts-format-160)).
+A verifier older than `1.26.0`, and a `logweir` built before PROD-04.1, accept
+a 1.7.0 receipt — the major is unchanged — ignore `consumer_positions` and
+print no `consumer_positions` line, so they say nothing about the selected
+groups' positions (measured with 1.22.0: it accepts a signed receipt carrying the block
+whose captured group lists no position); every other check applies as before.
+To read positions — for instance to recover them with the source offline — use
+`1.26.0` or later with `--consumer-positions`, and look for the `positions
+document … verified against this receipt` line.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print

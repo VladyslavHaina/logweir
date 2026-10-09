@@ -42,7 +42,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
 }
 
@@ -410,7 +410,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -419,7 +419,41 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    );
+}
+
+/// **PROD-04.1.** The checked-in consumer positions DOCUMENT schema is exactly
+/// what the generator emits, and names its own format: the document a 1.7.0
+/// receipt binds by digest (`schemas/logweir-consumer-positions-1.0.0.json`).
+#[test]
+fn consumer_positions_document_schema_has_no_drift() {
+    let generated = logweir_core::schema::consumer_positions_document_schema();
+    let checked_in = current_schema(
+        "consumer-positions",
+        logweir_core::consumer_positions::DOCUMENT_FORMAT_VERSION,
+    );
+    assert_eq!(
+        generated.trim_end(),
+        checked_in.trim_end(),
+        "schemas/logweir-consumer-positions-{}.json is stale. Run `just schema` and review \
+         the diff.",
+        logweir_core::consumer_positions::DOCUMENT_FORMAT_VERSION
+    );
+    let v: serde_json::Value = serde_json::from_str(&generated).unwrap();
+    assert_eq!(
+        v["$id"],
+        "https://logweir.dev/schemas/logweir-consumer-positions-1.0.0.json"
+    );
+    let required: Vec<&str> = v["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        required,
+        ["backup_id", "format_version", "groups", "run_id", "topics"]
     );
 }
 
@@ -441,7 +475,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
         )
     );
     assert!(
@@ -730,6 +764,49 @@ fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
     assert!(current["properties"]["topic_configuration"].is_object());
 }
 
+/// **PROD-04.1: PROD-01.3's 1.4.0 receipt schema is FROZEN** beside the current
+/// one and has no `consumer_positions`; the current file carries it, optional.
+#[test]
+fn the_frozen_1_4_0_receipt_schema_has_no_consumer_positions() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.4.0.json"
+    ))
+    .expect("the frozen 1.4.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.4.0.json"
+    );
+    assert!(frozen["properties"]["consumer_positions"].is_null());
+    assert!(frozen["properties"]["topic_configuration"].is_object());
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert!(
+        current["properties"]["consumer_positions"].is_object(),
+        "the current file describes PROD-04.1's block"
+    );
+    assert!(
+        !current["required"]
+            .as_array()
+            .expect("a required array")
+            .iter()
+            .any(|r| r == "consumer_positions"),
+        "consumer_positions is OPTIONAL: a backup that selects no group writes none"
+    );
+    // AT LEAST 1.5.0, and the minor arm 30 gates on: a renumber at
+    // integration moves both together, never below PROD-01.3's 1.4.0.
+    let minor: u64 = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(minor >= 5);
+    assert_eq!(
+        minor,
+        logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR
+    );
+}
+
 /// **PROD-01.3: PROD-05.1's 1.3.0 receipt schema is FROZEN** beside the 1.4.0
 /// one, and still describes every receipt of a `plaintext` or `scramSha512`
 /// backup, which this build writes as 1.3.0: it names itself 1.3.0, carries
@@ -847,4 +924,32 @@ fn the_frozen_1_5_0_receipt_schema_is_still_prod_03_0s() {
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
         "1.6.0"
     );
+}
+
+/// **PROD-04.1: PROD-01.4a's 1.6.0 receipt schema is FROZEN** beside the 1.7.0
+/// one. It still describes every receipt signed before PROD-04.1, and every
+/// later one whose backup selects no group: it names itself 1.6.0, carries
+/// `generations` and `schema_dependency`, and does NOT describe
+/// `consumer_positions`. `just schema` no longer regenerates it.
+#[test]
+fn the_frozen_1_6_0_receipt_schema_is_still_prod_01_4as() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.6.0.json"
+    ))
+    .expect("the frozen 1.6.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.6.0.json"
+    );
+    assert!(frozen["properties"]["generations"].is_object());
+    assert!(frozen["properties"]["schema_dependency"].is_object());
+    assert!(
+        frozen["properties"].get("consumer_positions").is_none(),
+        "the frozen 1.6.0 schema must not describe the 1.7.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert_ne!(current["$id"], frozen["$id"]);
+    assert!(current["properties"]["consumer_positions"].is_object());
+    assert!(current["properties"]["generations"].is_object());
 }

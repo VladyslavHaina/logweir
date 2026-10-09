@@ -550,6 +550,111 @@ pub fn topic_configuration_lines(
         .collect()
 }
 
+/// The consumer position lines both readers print for a backup receipt
+/// (PROD-04.1): a header with the number of groups and the listing word; the
+/// positions document's key, digest and length, and whether it was verified;
+/// one line per selected group, in id order — its outcome, and for a
+/// captured one its type, both states, members, whether it was active and its
+/// position counts; and, only for a VERIFIED document, one line per listed
+/// position of each captured group and one with how many partitions have no
+/// committed position. NOTHING when the receipt carries no block: the backup
+/// selected no group. `docs/verify_scorecard.py` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `consumer_positions` between the two readers.
+#[must_use]
+pub fn consumer_positions_lines(
+    block: Option<&logweir_core::consumer_positions::ConsumerPositions>,
+    verified: Option<&logweir_core::consumer_positions::PositionsDocument>,
+) -> Vec<String> {
+    use logweir_core::consumer_positions as model;
+    let Some(block) = block else {
+        return Vec::new();
+    };
+    let mut lines = vec![
+        format!(
+            "consumer_positions: {} group(s), listing {}",
+            block.groups.len(),
+            block.listing
+        ),
+        format!(
+            "consumer_positions: positions document {} ({}, {} bytes) {}",
+            block.document.key,
+            block.document.sha256,
+            block.document.bytes,
+            if verified.is_some() {
+                "verified against this receipt"
+            } else {
+                "not checked: pass --consumer-positions <file> to verify it and print each \
+                 position"
+            }
+        ),
+    ];
+    for (id, g) in &block.groups {
+        let line = match (g.outcome.as_str(), &g.counts) {
+            ("captured", Some(c)) => format!(
+                "consumer_positions[{id:?}]: captured {}, state {} (listed {}), {} member(s), {}; \
+                 positions: {} related to archived data, {} not related, {} never committed, {} \
+                 beyond the end, {} failed, {} not observed",
+                g.group_type.as_deref().unwrap_or(""),
+                g.state.as_deref().unwrap_or(""),
+                g.listed_state.as_deref().unwrap_or(""),
+                g.members.unwrap_or(0),
+                if g.active == Some(false) {
+                    "inactive"
+                } else {
+                    "active"
+                },
+                c.related,
+                c.not_related,
+                c.never_committed,
+                c.beyond_end,
+                c.failed,
+                c.not_observed,
+            ),
+            (outcome, _) => format!(
+                "consumer_positions[{id:?}]: {outcome} ({}){}, no position recorded",
+                g.reason.as_deref().unwrap_or(""),
+                if g.group_type.as_deref() == Some(model::OTHER_TYPE) {
+                    ", group type other"
+                } else {
+                    ""
+                }
+            ),
+        };
+        lines.push(line);
+    }
+    let Some(doc) = verified else {
+        return lines;
+    };
+    for (id, g) in &doc.groups {
+        for e in &g.positions {
+            let at = format!("consumer_positions[{id:?}][{:?}:{}]", e.topic, e.partition);
+            lines.push(match (e.status.as_str(), e.position) {
+                ("captured", Some(p)) => {
+                    format!(
+                        "{at}: position {p}, {}",
+                        e.coverage.as_deref().unwrap_or("")
+                    )
+                }
+                (status, Some(p)) => format!(
+                    "{at}: {status} ({}), position {p}",
+                    e.reason.as_deref().unwrap_or("")
+                ),
+                (status, None) => format!(
+                    "{at}: {status} ({}), no position",
+                    e.reason.as_deref().unwrap_or("")
+                ),
+            });
+        }
+        lines.push(format!(
+            "consumer_positions[{id:?}][*]: {} other partition(s) with no committed position, \
+             never offset 0",
+            g.no_committed_position
+        ));
+    }
+    lines
+}
+
 /// One line per topic of a backup receipt's `schema_dependency` (PROD-03.0),
 /// or the one line that says it is absent — NOT ASSESSED, never "not
 /// schema-dependent". `docs/verify_scorecard.py` prints the same lines, and
@@ -724,6 +829,13 @@ pub enum Verdict {
         /// The 1.6.0 block (PROD-01.4a), as read; `None` is UNKNOWN for every
         /// topic.
         generations: Option<BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
+        /// The 1.7.0 block (PROD-04.1), as read; `None` is "no group
+        /// selected".
+        consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
+        /// The positions document the block binds, when the reader was given
+        /// it and it held against the receipt (arms CP-1 to CP-14); `None`
+        /// when it was not given.
+        positions: Option<logweir_core::consumer_positions::PositionsDocument>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -765,6 +877,34 @@ pub fn verify_scorecard(
     public_key: &Path,
     payload_type: &str,
 ) -> Result<Verdict, ExitCode> {
+    verify_scorecard_with(scorecard, signature, public_key, payload_type, None)
+}
+
+/// The refusal prefix of a positions document that does not hold against its
+/// receipt. `two_reader_parity_positions.rs` strips it, as `INVALID: ` is
+/// stripped from the second reader.
+pub const POSITIONS_REFUSED: &str = "SIGNATURE VALID but the consumer positions document is \
+                                     refused: ";
+
+/// [`verify_scorecard`], and — for a backup receipt — the positions document
+/// at `positions`, checked against the verified receipt (PROD-04.1, arms
+/// CP-1 to CP-14). A document given for any other payload type is a bad
+/// command line (exit 1); one that does not hold is exit 4, like a receipt
+/// that contradicts itself.
+pub fn verify_scorecard_with(
+    scorecard: &Path,
+    signature: &Path,
+    public_key: &Path,
+    payload_type: &str,
+    positions: Option<&Path>,
+) -> Result<Verdict, ExitCode> {
+    if positions.is_some() && payload_type != PAYLOAD_TYPE_BACKUP_RECEIPT {
+        eprintln!(
+            "--consumer-positions applies to --payload-type backup-receipt only: the positions \
+             document is checked against the backup receipt that binds it"
+        );
+        return Err(ExitCode::Operational);
+    }
     // verify-as-read: the exact bytes on disk, never a re-serialisation.
     let bytes = match std::fs::read(scorecard) {
         Ok(b) => b,
@@ -888,6 +1028,37 @@ pub fn verify_scorecard(
             eprintln!("SIGNATURE VALID but the document is self-contradicting: {e}");
             return Err(ExitCode::SigningOrLock);
         }
+        // PROD-04.1: the positions document, only when given, against the
+        // receipt that was just verified — its exact bytes, never a
+        // re-serialisation.
+        let positions = match positions {
+            None => None,
+            Some(path) => {
+                let doc_bytes = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("cannot read {}: {e}", path.display());
+                        return Err(ExitCode::Operational);
+                    }
+                };
+                let doc: logweir_core::consumer_positions::PositionsDocument =
+                    match serde_json::from_slice(&doc_bytes) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "{POSITIONS_REFUSED}it does not parse as a positions document: \
+                                 {e}"
+                            );
+                            return Err(ExitCode::SigningOrLock);
+                        }
+                    };
+                if let Err(e) = receipt.validate_consumer_positions_document(&doc_bytes, &doc) {
+                    eprintln!("{POSITIONS_REFUSED}{e}");
+                    return Err(ExitCode::SigningOrLock);
+                }
+                Some(doc)
+            }
+        };
         return Ok(Verdict::BackupReceipt {
             payload_type: payload_type.to_string(),
             key_id: matched_key_id,
@@ -900,6 +1071,8 @@ pub fn verify_scorecard(
             owner_detection: receipt.owner_detection,
             schema_dependency: receipt.schema_dependency,
             generations: receipt.generations,
+            consumer_positions: receipt.consumer_positions,
+            positions,
         });
     }
     if payload_type == PAYLOAD_TYPE_CATALOG_POINT {
@@ -1087,6 +1260,11 @@ struct ReceiptBlocks<'a> {
         Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
     /// PROD-01.4a's 1.6.0 block; `None` is UNKNOWN.
     generations: Option<&'a BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>>,
+    /// PROD-04.1's 1.7.0 block; `None` when no group was selected.
+    consumer_positions: Option<&'a logweir_core::consumer_positions::ConsumerPositions>,
+    /// The positions document the block binds, verified; `None` when it was
+    /// not given.
+    positions: Option<&'a logweir_core::consumer_positions::PositionsDocument>,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -1153,8 +1331,12 @@ fn print_backup_receipt(
     for line in generation_lines(blocks.generations) {
         println!("identity:  {line}");
     }
+    // PROD-04.1: the consumer position evidence, one line per selected group.
+    for line in consumer_positions_lines(blocks.consumer_positions, blocks.positions) {
+        println!("groups:    {line}");
+    }
     println!(
-        "checked:   the signature AND all thirty-four backup-receipt invariants \
+        "checked:   the signature AND all forty backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
@@ -1165,10 +1347,24 @@ fn print_backup_receipt(
          a source it lists, schema_dependency's eight: its version, its topic set, \
          closed verdict, reason and basis, both sides exactly when judged, the judged \
          count against records, the schema ids, the one-in-ten threshold, and the \
-         verdict from its sides, and the topic IDs' five: their version, their topic \
-         set, Kafka's text and never the zero ID, a reason exactly for a null ID, a \
-         source exactly for a recorded one)"
+         verdict from its sides, consumer_positions' six: its version, a forward \
+         capture window with a closed listing and at least one group, this run's \
+         positions document by a well-formed digest, outcome and reason, fields and \
+         counts that fit the outcome with no captured group Dead and memberless, and a \
+         derived active, and the topic IDs' five: their version, their topic set, \
+         Kafka's text and never the zero ID, a reason exactly for a null ID, a source \
+         exactly for a recorded one)"
     );
+    if blocks.positions.is_some() {
+        println!(
+            "checked:   AND the positions document's fourteen (CP-1 to CP-14): bound to \
+             this receipt by digest and length, its backup and run, its topic set, \
+             partitions in order, well-formed marks, a derived changed flag, exactly the \
+             captured groups, no position on a changed topic, no capture over an unread \
+             topic, every partition accounted for (absence never offset 0), status, value \
+             and reason, a derived coverage, and the receipt's counts)"
+        );
+    }
 }
 
 /// What a `SignatureOnly` verdict prints. Separate from `print_report` so the
@@ -1201,6 +1397,18 @@ fn print_catalog_point(payload_type: &str, key_id: &str) {
 }
 
 pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: &str) -> ExitCode {
+    run_with(scorecard, signature, public_key, payload_type, None)
+}
+
+/// [`run`], with the positions document a backup receipt binds
+/// (`--consumer-positions`, PROD-04.1).
+pub fn run_with(
+    scorecard: &Path,
+    signature: &Path,
+    public_key: &Path,
+    payload_type: &str,
+    positions: Option<&Path>,
+) -> ExitCode {
     // Resolved BEFORE anything is read: a bad `--payload-type` is a bad
     // command line, and reporting it after a file-read failure would blame
     // the artifact for the operator's typo.
@@ -1211,7 +1419,7 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             return ExitCode::Operational;
         }
     };
-    match verify_scorecard(scorecard, signature, public_key, wanted) {
+    match verify_scorecard_with(scorecard, signature, public_key, wanted, positions) {
         Ok(Verdict::Scorecard(r)) => {
             print_report(&r);
             ExitCode::Ok
@@ -1228,6 +1436,8 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             owner_detection,
             schema_dependency,
             generations,
+            consumer_positions,
+            positions,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -1242,6 +1452,8 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
                     owner_detection: owner_detection.as_deref(),
                     schema_dependency: schema_dependency.as_ref(),
                     generations: generations.as_ref(),
+                    consumer_positions: consumer_positions.as_ref(),
+                    positions: positions.as_ref(),
                 },
             );
             ExitCode::Ok

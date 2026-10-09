@@ -2314,6 +2314,7 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
             },
             topics: vec!["orders".to_string()],
             topic_owners: None,
+            consumer_groups: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "kafka-backups".to_string(),
@@ -7212,6 +7213,7 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
             },
             topics: vec!["orders".to_string()],
             topic_owners: None,
+            consumer_groups: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),
@@ -7453,6 +7455,7 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
             },
             topics: vec!["orders".to_string()],
             topic_owners: None,
+            consumer_groups: None,
         },
         storage: logweir_core::engine::StorageUrl::S3 {
             bucket: "lw-a".to_string(),
@@ -8160,5 +8163,33 @@ async fn a_schedules_run_deadline_is_the_deadline_its_backup_carries() {
         posted_spec(&bodies)["deadlineSeconds"],
         serde_json::json!(7200),
         "the run carries the schedule's own deadline, not the default"
+    );
+}
+
+/// **PROD-04.1.** A schedule's `consumerGroups` is part of the run policy it
+/// copies into every run: the runs carry it, their recorded digest is their
+/// own, and a schedule that selects none (absent or empty) digests as it did
+/// before the field existed.
+#[test]
+fn a_schedules_consumer_groups_reach_every_run_and_an_absent_selection_digests_as_before() {
+    use weirkeeper::controllers::backup_schedule::{run_policy_digest, run_policy_spec};
+    let mut s = schedule("nightly", UID, "17 3 * * 1", false);
+    let before = run_policy_digest(&s.spec);
+    s.spec.consumer_groups = Some(Vec::new());
+    assert_eq!(run_policy_digest(&s.spec), before, "empty is no selection");
+    s.spec.consumer_groups = Some(vec!["billing".into()]);
+    assert_ne!(run_policy_digest(&s.spec), before);
+    let policy = run_policy_spec(&s.spec);
+    assert_eq!(policy.consumer_groups, Some(vec!["billing".to_string()]));
+    assert_eq!(
+        weirkeeper::policy::run_policy_sha256(&policy),
+        run_policy_digest(&s.spec)
+    );
+    // A selection every run would refuse is refused at the schedule.
+    s.spec.consumer_groups = Some(vec!["billing".into(), "billing".into()]);
+    let errs = weirkeeper::policy::validate_run_policy(&run_policy_spec(&s.spec)).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.field == "spec.consumerGroups"),
+        "{errs:?}"
     );
 }

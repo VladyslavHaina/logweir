@@ -91,6 +91,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         owner_detection: None,
         schema_dependency: None,
         generations: None,
+        consumer_positions: None,
     }
 }
 
@@ -1566,9 +1567,10 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The CURRENT file is the newest MINOR's, named by the writer's constant
     // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
     // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency, 1.6.0
-    // since PROD-01.4a's topic IDs), so a renumber moves the constant and the
-    // justfile, not this test; the 1.0.0 to 1.5.0 files are frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS;
+    // since PROD-01.4a's topic IDs, 1.7.0 since PROD-04.1's consumer
+    // positions), so a renumber moves the constant and the justfile, not this
+    // test; the 1.0.0 to 1.6.0 files are frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -2651,6 +2653,33 @@ fn the_frozen_1_5_0_catalog_point_schema_is_still_prod_03_0s() {
     );
 }
 
+/// **PROD-01.4a's 1.6.0 catalog-point schema is FROZEN** beside PROD-04.1's
+/// 1.7.0 one: it names itself 1.6.0, carries `topics[].identity`, and does NOT
+/// describe the record's `consumer_positions` summary.
+#[test]
+fn the_frozen_1_6_0_catalog_point_schema_is_still_prod_01_4as() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.6.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.6.0.json"
+    );
+    assert!(frozen["definitions"]["RecordTopic"]["properties"]["identity"].is_object());
+    assert!(
+        frozen["properties"].get("consumer_positions").is_none(),
+        "the frozen 1.6.0 schema must not describe the 1.7.0 field"
+    );
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    assert!(current["properties"]["consumer_positions"].is_object());
+    assert_ne!(current["$id"], frozen["$id"]);
+}
+
 /// A document's `format_version` is at least `min` (the minor that defines the
 /// field under test), surviving the integration renumber of receipt and
 /// catalog-point versions where an exact pin would break a sibling's CI.
@@ -2788,5 +2817,222 @@ fn two_records_conflict_on_topic_ids_only_where_both_carry_them() {
             )]
         ),
         other => panic!("two copies disagreeing on a topic's IDs are a conflict: {other:?}"),
+    }
+}
+
+// ===================================================================== PROD-04.1
+
+/// A 1.7.0 receipt: `receipt_1_3` plus a consumer position block over its one
+/// topic — `billing` captured (one related position, at `position`, and one
+/// partition never committed), `share-1` excluded GroupTypeNotCaptured,
+/// `hidden` failed — bound to the positions document that holds them.
+fn receipt_cp_at(position: i64) -> BackupReceipt {
+    let mut r = receipt_1_3();
+    r.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into();
+    let doc: logweir_core::consumer_positions::PositionsDocument =
+        serde_json::from_value(serde_json::json!({
+            "format_version": "1.0.0",
+            "backup_id": r.backup_id,
+            "run_id": r.run_id,
+            "topics": {"orders": {"partitions": [
+                {"partition": 0, "observed": true, "log_start": 0, "high_watermark": 40,
+                 "log_start_after": 0, "high_watermark_after": 41,
+                 "archived_first": 0, "archived_last": 40},
+                {"partition": 1, "observed": true, "log_start": 0, "high_watermark": 3,
+                 "archived_first": 0, "archived_last": 2}
+            ], "changed_during_capture": false}},
+            "groups": {"billing": {"positions": [
+                {"topic": "orders", "partition": 0, "status": "captured",
+                 "position": position, "coverage": "withinArchive"}
+            ], "no_committed_position": 1}}
+        }))
+        .expect("a document");
+    let bytes = doc.to_bytes().unwrap();
+    r.consumer_positions = Some(
+        serde_json::from_value(serde_json::json!({
+            "observed_from": "2026-09-15T02:59:58Z",
+            "observed_to": "2026-09-15T02:59:59.250Z",
+            "listing": "complete",
+            "document": {
+                "key": logweir_core::consumer_positions::document_key(&r.backup_id, &r.run_id),
+                "sha256": logweir_core::ids::sha256_prefixed(&bytes),
+                "bytes": bytes.len()
+            },
+            "groups": {
+                "billing": {"outcome": "captured", "group_type": "classic", "state": "Empty",
+                            "listed_state": "Empty", "members": 0, "active": false,
+                            "counts": {"related": 1, "not_related": 0, "never_committed": 1,
+                                       "beyond_end": 0, "failed": 0, "not_observed": 0}},
+                "share-1": {"outcome": "excluded", "reason": "GroupTypeNotCaptured",
+                            "group_type": "other"},
+                "hidden": {"outcome": "failed", "reason": "NotVisibleToPrincipal"}
+            }
+        }))
+        .expect("a block"),
+    );
+    r.validate_invariants().expect("the 1.7.0 fixture is valid");
+    assert_eq!(
+        r.validate_consumer_positions_document(&bytes, &doc),
+        Ok(()),
+        "and its document holds"
+    );
+    r
+}
+
+fn receipt_cp() -> BackupReceipt {
+    receipt_cp_at(17)
+}
+
+/// The record summarises the receipt's block, bound by its digest, and is
+/// 1.7.0; a receipt without the block writes the record it wrote before.
+#[test]
+fn a_1_7_0_record_summarises_and_binds_the_receipts_consumer_positions() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_cp();
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        p.format_version,
+        logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    );
+    let cp = p.consumer_positions.as_ref().expect("the summary travels");
+    assert_eq!(
+        cp.sha256,
+        r.consumer_positions.as_ref().unwrap().digest().unwrap()
+    );
+    assert_eq!(cp.observed_to, ts("2026-09-15T02:59:59.250Z"));
+    assert_eq!(cp.listing, "complete");
+    let ids: Vec<&str> = cp.groups.iter().map(|g| g.group_id.as_str()).collect();
+    assert_eq!(ids, ["billing", "hidden", "share-1"], "id order");
+    let billing = &cp.groups[0];
+    assert_eq!(billing.outcome, "captured");
+    assert_eq!(billing.active, Some(false));
+    let counts = billing.positions.expect("captured groups carry counts");
+    assert_eq!((counts.related, counts.never_committed), (1, 1));
+    assert_eq!(
+        cp.groups[1].reason.as_deref(),
+        Some("NotVisibleToPrincipal")
+    );
+    assert_eq!(cp.groups[1].positions, None);
+    assert_eq!(cp.groups[2].group_type.as_deref(), Some("other"));
+    assert_eq!(
+        reader::cross_check(&p, &r, &receipt_bytes(&r)),
+        CrossCheck::Agrees
+    );
+    // Without the block: 1.3.0, no field.
+    let mut none = r.clone();
+    none.consumer_positions = None;
+    none.format_version = "1.3.0".into();
+    let q = point_for(&none, "s3://kafka-backups/prod", &key);
+    assert_eq!(q.format_version, "1.3.0");
+    assert!(q.consumer_positions.is_none());
+    let bytes = q.canonical_bytes().unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("consumer_positions"));
+}
+
+/// **Rule 3 for the summary.** A record may carry none; never one its receipt
+/// does not back — a group made captured, a position made to relate, a digest
+/// changed, or a summary beside a receipt without the block.
+#[test]
+fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_cp();
+    let bytes = receipt_bytes(&r);
+    let honest = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mismatch = |p: &CatalogPoint, receipt: &BackupReceipt, want: &str| match reader::cross_check(
+        p,
+        receipt,
+        &receipt_bytes(receipt),
+    ) {
+        CrossCheck::RecordMismatch(d) => {
+            assert!(d.iter().any(|m| m.starts_with(want)), "{want}: {d:?}")
+        }
+        other => panic!("{want}: must not agree: {other:?}"),
+    };
+    let mut promoted = honest.clone();
+    let hidden = &mut promoted.consumer_positions.as_mut().unwrap().groups[1];
+    hidden.outcome = "captured".into();
+    hidden.reason = None;
+    mismatch(&promoted, &r, "consumer_positions: the summary of");
+    let mut related = honest.clone();
+    let counts = related.consumer_positions.as_mut().unwrap().groups[0]
+        .positions
+        .as_mut()
+        .unwrap();
+    counts.related = 2;
+    counts.never_committed = 0;
+    mismatch(&related, &r, "consumer_positions: the summary of");
+    let mut redigested = honest.clone();
+    redigested.consumer_positions.as_mut().unwrap().sha256 = format!("sha256:{}", "e".repeat(64));
+    mismatch(&redigested, &r, "consumer_positions.sha256");
+    let old = receipt_1_3();
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.consumer_positions = honest.consumer_positions.clone();
+    mismatch(&invented, &old, "consumer_positions: sha256:");
+    // Knowing less is not a contradiction.
+    let mut quieter = honest.clone();
+    quieter.consumer_positions = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &r, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **The review's A8: the digest binds the positions themselves.** Two
+/// receipts whose documents differ in ONE position — the same coverage, so the
+/// same counts — carry different blocks and different digests, and a record
+/// carrying the other's digest is refused by the cross-check; nothing but the
+/// digest tells them apart.
+#[test]
+fn one_position_moved_is_another_digest_and_a_record_carrying_it_is_refused() {
+    let key = SigningKey::generate_ed25519();
+    let (a, b) = (receipt_cp_at(17), receipt_cp_at(18));
+    let (ca, cb) = (
+        a.consumer_positions.as_ref().unwrap(),
+        b.consumer_positions.as_ref().unwrap(),
+    );
+    assert_eq!(ca.groups, cb.groups, "the same outcomes and counts");
+    assert_ne!(ca.document.sha256, cb.document.sha256);
+    assert_ne!(ca.digest().unwrap(), cb.digest().unwrap());
+    let mut swapped = point_for(&a, "s3://kafka-backups/prod", &key);
+    swapped.consumer_positions.as_mut().unwrap().sha256 = cb.digest().unwrap();
+    match reader::cross_check(&swapped, &a, &receipt_bytes(&a)) {
+        CrossCheck::RecordMismatch(d) => assert!(
+            d.iter().any(|m| m.starts_with("consumer_positions.sha256")),
+            "{d:?}"
+        ),
+        other => panic!("another receipt's digest must not agree: {other:?}"),
+    }
+    // The control: its own digest agrees.
+    let own = point_for(&a, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        reader::cross_check(&own, &a, &receipt_bytes(&a)),
+        CrossCheck::Agrees
+    );
+}
+
+/// **Rule 4 for the summary.** Two records of one point conflict only where
+/// both carry one and they differ.
+#[test]
+fn two_records_conflict_on_consumer_positions_only_where_both_carry_them() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_cp();
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.consumer_positions = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    c.consumer_positions.as_mut().unwrap().listing = "notComplete".into();
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => {
+            assert!(
+                d.iter().any(|m| m.starts_with("consumer_positions:")),
+                "{d:?}"
+            )
+        }
+        other => panic!("two copies disagreeing on the summary are a conflict: {other:?}"),
     }
 }

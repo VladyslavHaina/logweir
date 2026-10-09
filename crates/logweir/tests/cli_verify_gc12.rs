@@ -93,15 +93,16 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
     // The CURRENT file, named by the writer's constant: the newest MINOR's
     // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
     // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency, 1.6.0
-    // since PROD-01.4a's topic IDs). The 1.0.0, FX-4's 1.1.0, FX-7's 1.2.0,
-    // PROD-05.1's 1.3.0, PROD-01.3's 1.4.0 and PROD-03.0's 1.5.0 files are
+    // since PROD-01.4a's topic IDs, 1.7.0 since PROD-04.1's consumer
+    // positions). The 1.0.0, FX-4's 1.1.0, FX-7's 1.2.0, PROD-05.1's 1.3.0,
+    // PROD-01.3's 1.4.0, PROD-03.0's 1.5.0 and PROD-01.4a's 1.6.0 files are
     // frozen beside it
     // (`crates/logweir-core/tests/schema_drift.rs::the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
     // `…::the_frozen_1_1_0_receipt_schema_is_still_fx4s`,
     // `…::the_frozen_1_2_0_receipt_schema_is_still_fx7s`).
     let checked_in = std::fs::read(format!(
         "../../schemas/logweir-backup-receipt-{}.json",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     ))
     .expect("read the schema");
     assert_eq!(

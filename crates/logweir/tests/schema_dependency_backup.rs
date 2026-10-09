@@ -533,6 +533,7 @@ fn sign_backup(
         backup_id_override: None,
         kafka_topic_resources: None,
         strimzi_cluster: None,
+        consumer_groups: Vec::new(),
     };
     let outcome = execute_with(&args, "01JRUN", &Reader, engine, archive, evidence)
         .unwrap_or_else(|e| panic!("the run failed: {e}"));

@@ -168,6 +168,10 @@ pub const MAX_BODY_PAGES: usize = 8;
 /// lists none and says how many it left out (`topicsOmitted`): a partial list
 /// would read as the point's whole topic set.
 pub const MAX_ENTRY_TOPICS: usize = 64;
+/// **PROD-04.1.** The most consumer groups one entry may list. A point naming
+/// more lists none and counts them (`groupsOmitted`): a partial list would
+/// read as the point's whole selection.
+pub const MAX_ENTRY_GROUPS: usize = 32;
 /// The most `byDay` rows a body carries — `status.histogram`'s `maxItems`.
 pub const MAX_HISTOGRAM_DAYS: usize = 400;
 
@@ -381,6 +385,63 @@ impl EntrySchemaDependency {
     }
 }
 
+/// **PROD-04.1.** A point's consumer position evidence, as the view lists it:
+/// the snapshot's freshness, the listing word, and per selected group its
+/// outcome and how many of its positions relate to archived data — copied
+/// from the point RECORD's `consumer_positions`, which the sync has just
+/// cross-checked against the verified receipt (rule 3). Never a position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryConsumerPositions {
+    /// When the group capture started, epoch milliseconds.
+    pub observed_from_ms: i64,
+    /// When it ended, before the engine: the snapshot's age against the
+    /// recovery point is `recoveryPointAtMs - observedToMs`.
+    pub observed_to_ms: i64,
+    /// `complete` or `notComplete`.
+    pub listing: String,
+    /// The groups, at most [`MAX_ENTRY_GROUPS`]; empty when they were left out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<EntryGroup>,
+    /// How many groups the entry left out: all of them, when the point names
+    /// more than [`MAX_ENTRY_GROUPS`] or the body's byte budget could not hold
+    /// them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups_omitted: Option<u32>,
+}
+
+/// **PROD-04.1.** One selected group of a point, as the view lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryGroup {
+    pub group_id: String,
+    /// `captured`, `excluded` or `failed`.
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// A captured group's positions, counted by what they say about archived
+    /// data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positions: Option<EntryPositionCounts>,
+}
+
+/// **PROD-04.1.** `logweir_core::consumer_positions::PositionCounts`, in the
+/// view's camelCase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPositionCounts {
+    pub related: u32,
+    pub not_related: u32,
+    pub never_committed: u32,
+    pub beyond_end: u32,
+    pub failed: u32,
+    pub not_observed: u32,
+}
+
 /// One point, as this Job reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -432,6 +493,12 @@ pub struct CatalogEntry {
     /// topics, and absent for a record that predates 1.3.0 (NOT RECORDED).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
+    /// **PROD-04.1.** The point's consumer position evidence — present only
+    /// for an `Available` point whose record carries the 1.7.0 summary.
+    /// ABSENT is NOT PUBLISHED: no group selected, an older record, or a point
+    /// the sync could not stand behind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<EntryConsumerPositions>,
 }
 
 /// The signature half of [`CatalogCounts`].
@@ -1616,6 +1683,7 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
         topics: Vec::new(),
         topics_omitted: None,
         owner_detection: None,
+        consumer_positions: None,
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
@@ -1631,7 +1699,54 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
             .as_ref()
             .map(|d| d.iter().map(|s| redact(s)).collect());
     }
+    // PROD-04.1: the consumer position summary, from a record the cross-check
+    // let stand.
+    entry.consumer_positions = entry_consumer_positions(point, availability);
     Some(entry)
+}
+
+/// **PROD-04.1.** An entry's `consumerPositions`, from the record: only for an
+/// `Available` point whose record carries the summary. A point selecting more
+/// than [`MAX_ENTRY_GROUPS`] groups lists none and counts them.
+fn entry_consumer_positions(
+    point: &CatalogPoint,
+    availability: Availability,
+) -> Option<EntryConsumerPositions> {
+    if availability != Availability::Available {
+        return None;
+    }
+    let cp = point.consumer_positions.as_ref()?;
+    let (groups, groups_omitted) = if cp.groups.len() > MAX_ENTRY_GROUPS {
+        (Vec::new(), u32::try_from(cp.groups.len()).ok())
+    } else {
+        let groups = cp
+            .groups
+            .iter()
+            .map(|g| EntryGroup {
+                group_id: redact(&g.group_id),
+                outcome: redact(&g.outcome),
+                reason: g.reason.as_deref().map(redact),
+                group_type: g.group_type.as_deref().map(redact),
+                active: g.active,
+                positions: g.positions.map(|c| EntryPositionCounts {
+                    related: c.related,
+                    not_related: c.not_related,
+                    never_committed: c.never_committed,
+                    beyond_end: c.beyond_end,
+                    failed: c.failed,
+                    not_observed: c.not_observed,
+                }),
+            })
+            .collect();
+        (groups, None)
+    };
+    Some(EntryConsumerPositions {
+        observed_from_ms: cp.observed_from.timestamp_millis(),
+        observed_to_ms: cp.observed_to.timestamp_millis(),
+        listing: redact(&cp.listing),
+        groups,
+        groups_omitted,
+    })
 }
 
 /// **PROD-05.1.** An entry's `topics` and `topicsOmitted`, from the record.
@@ -1715,15 +1830,31 @@ struct RenderedBody {
 /// `topicsOmitted` counting them, and without the `ownerDetection` that only
 /// qualifies a listed topic (PROD-05.1). An entry with no topics renders the
 /// same line twice.
+///
+/// PROD-04.1: the slim rendering also drops the consumer groups' list, keeping
+/// the snapshot's freshness and listing word, with `groupsOmitted` counting
+/// the groups left out.
 fn entry_renderings(entry: &CatalogEntry) -> (String, String) {
     let full = serde_json::to_string(entry).unwrap_or_default();
-    if entry.topics.is_empty() {
+    let groups_listed = entry
+        .consumer_positions
+        .as_ref()
+        .is_some_and(|c| !c.groups.is_empty());
+    if entry.topics.is_empty() && !groups_listed {
         return (full.clone(), full);
     }
     let mut slim = entry.clone();
-    slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
-    slim.topics.clear();
-    slim.owner_detection = None;
+    if !slim.topics.is_empty() {
+        slim.topics_omitted = u32::try_from(slim.topics.len()).ok();
+        slim.topics.clear();
+        slim.owner_detection = None;
+    }
+    if let Some(cp) = slim.consumer_positions.as_mut() {
+        if !cp.groups.is_empty() {
+            cp.groups_omitted = u32::try_from(cp.groups.len()).ok();
+            cp.groups.clear();
+        }
+    }
     (full, serde_json::to_string(&slim).unwrap_or_default())
 }
 
@@ -2023,6 +2154,7 @@ mod tests {
             }],
             topics_omitted: None,
             owner_detection: Some(Vec::new()),
+            consumer_positions: None,
         };
         let (full, slim) = entry_renderings(&entry);
         let full: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -2041,6 +2173,62 @@ mod tests {
         bare.topics.clear();
         bare.owner_detection = None;
         let (a, b) = entry_renderings(&bare);
+        assert_eq!(a, b);
+    }
+
+    /// PROD-04.1: the SLIM rendering drops the consumer groups' list and
+    /// counts it, keeping the snapshot's freshness and listing word, so the
+    /// view can still say how old the positions are.
+    #[test]
+    fn a_slim_entry_keeps_the_snapshots_freshness_and_counts_its_groups() {
+        let mut entry = CatalogEntry {
+            point_id: "lwp1-00000000000000000000000000000000".into(),
+            backup_id: "set-a".into(),
+            run_id: "run-a".into(),
+            recovery_point_at_ms: 10,
+            covered_from_ms: 0,
+            covered_to_ms: 2,
+            locations: Vec::new(),
+            receipt_key: "k".into(),
+            receipt_sha256: "sha256:00".into(),
+            manifest_key: None,
+            manifest_sha256: None,
+            recorded_at: None,
+            format_version: Some(
+                crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS.into(),
+            ),
+            availability: Availability::Available,
+            signature: SignatureVerdict::Verified,
+            signer_key_id: None,
+            remedy: None,
+            topics: Vec::new(),
+            topics_omitted: None,
+            owner_detection: None,
+            consumer_positions: Some(EntryConsumerPositions {
+                observed_from_ms: 7,
+                observed_to_ms: 9,
+                listing: "complete".into(),
+                groups: vec![EntryGroup {
+                    group_id: "billing".into(),
+                    outcome: "excluded".into(),
+                    reason: Some("GroupNotFound".into()),
+                    group_type: None,
+                    active: None,
+                    positions: None,
+                }],
+                groups_omitted: None,
+            }),
+        };
+        let (full, slim) = entry_renderings(&entry);
+        let full: serde_json::Value = serde_json::from_str(&full).unwrap();
+        let slim: serde_json::Value = serde_json::from_str(&slim).unwrap();
+        assert_eq!(full["consumerPositions"]["groups"][0]["groupId"], "billing");
+        assert!(slim["consumerPositions"].get("groups").is_none(), "{slim}");
+        assert_eq!(slim["consumerPositions"]["groupsOmitted"], 1, "{slim}");
+        assert_eq!(slim["consumerPositions"]["observedToMs"], 9, "{slim}");
+        // No groups listed: one line, rendered twice.
+        entry.consumer_positions.as_mut().unwrap().groups.clear();
+        let (a, b) = entry_renderings(&entry);
         assert_eq!(a, b);
     }
 }

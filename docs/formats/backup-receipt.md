@@ -441,8 +441,6 @@ constants.
    block it judged (a manifest this build did not foresee) is signed with every
    topic `notAssessed (segmentUnreadable)` instead.
 
----
-
 ## `generations` — the topic's ID before and after the engine (format 1.6.0)
 
 **Why it exists (PROD-01.4a).** A topic deleted and created again under the
@@ -496,7 +494,259 @@ first consumers are PROD-02.1's lineage and the catalog and console views.
 
 ---
 
-## The thirty-four arms
+## `consumer_positions` — consumer position evidence (format 1.7.0)
+
+**Why it exists (PROD-04.1).** A restore that brings a topic back still leaves
+its applications to guess where to resume. A backup records, at backup time,
+the committed positions of the consumer groups it was asked about — natively,
+through Logweir's own client, never through the engine — so a later cutover
+(PROD-04.2) and an auditor read them from signed evidence, with the source gone
+if need be.
+
+**Selected, never discovered.** The block is present exactly when the backup
+selected consumer groups: the plan's `source.consumer_groups`, `logweir backup
+run --consumer-group <id>` (repeatable), or a `Backup`/`BackupSchedule`
+`spec.consumerGroups`. **At most 100 exact ids**, each at most 255 bytes;
+anything else is refused before anything runs (phase −1, exit 3; the
+controller's `ExecutionSpecInvalid`) BY NAME: `ConsumerGroupSelectionTooLarge`
+past 100 ids or past the summary's encoded cap (below), `ConsumerGroupIdInvalid`
+for a blank, control-character or over-long id, `ConsumerGroupSelectedTwice`
+for a repeat. A backup that selects none writes no block and no positions
+document.
+
+### Two documents: the receipt's summary and the positions document
+
+**The receipt stays small however many partitions the groups hold** (PROD-04.1
+review H1). The catalog reads a receipt whole and refuses one over 256 KiB
+(`Unreadable`, so the console stops offering the point), and the evidence fetch
+relays at most 1 MiB; positions grow with groups × partitions. So the receipt
+carries only a per-group SUMMARY — outcome, type, states, members, `active` and
+the position COUNTS — the capture window, and the positions document's key,
+SHA-256 and length. Its size depends on the selection alone, and its cap,
+`MAX_BLOCK_BYTES` (80 KiB), is ENFORCED on the block's encoded bytes (review
+N1): `refuse_selection` builds the largest block the selection could produce —
+every group captured, every field at its longest — encodes it as the receipt
+does, and refuses the selection by name (`ConsumerGroupSelectionTooLarge`)
+when it is over, before anything runs. Never a truncated block. Escapes count
+as JSON writes them: 100 ids of 255 bytes that need no escape fit (71,236
+bytes at worst, four-byte characters included), while ids of 255 `"` or `\`
+— two bytes each when encoded — fit 84 to a selection (81,220 bytes at worst)
+and the 85th is refused (82,171; the review's 100 such ids would be 96,436)
+(`consumer_positions::tests::the_cap_is_enforced_on_the_encoded_bytes_with_escape_heavy_ids_at_and_over_it`,
+`consumer_positions_seam::a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name`).
+Ordinary ids cost a few hundred bytes a group. Measured through the runner's
+own builder with every group committed on every partition
+(`check_cli::the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available`):
+
+| Selection | Receipt | Block | Positions document |
+|---|---|---|---|
+| 10 groups over 20 topics × 12 partitions | 9,264 bytes | 4,046 bytes | 481,703 bytes |
+| 100 groups over 10 topics × 11 partitions | 43,715 bytes | 37,527 bytes | 1,943,683 bytes |
+
+Live on Kafka 4.3.1 through `logweir backup run`
+(`e2e/tests/position_evidence.rs::a_large_selection_keeps_the_receipt_small_and_its_positions_verified`,
+one record in every partition), the same two selections signed 52,049 and
+65,530-byte receipts — most of it the topics' configuration model, which grows
+with topics, not groups — beside 512,787 and 2,087,137-byte positions
+documents. Before this split those positions were inline, and both receipts
+were over the catalog's cap (the review measured 487,437 and 1,947,657
+bytes).
+
+**The positions document** is `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`,
+beside the receipt, put create-only BEFORE the receipt (a receipt never names a
+document that is not there), and written beside `--receipt-out` as
+`<stem>.consumer-positions.json`. It is not signed itself: the receipt's
+signature covers its digest and length, so a reader that fetches it verifies it
+against the signed receipt (arms CP-1 to CP-14 below). Its own format is
+`1.0.0`; its schema is `schemas/logweir-consumer-positions-1.0.0.json`.
+
+```json
+"consumer_positions": {
+  "observed_from": "2026-10-09T03:00:01.120Z",
+  "observed_to": "2026-10-09T03:00:01.480Z",
+  "listing": "complete",
+  "document": {
+    "key": "logweir/backups/nightly-7/01J9X2QK7C4V0R8YB3ZP6MTS5A.consumer-positions.json",
+    "sha256": "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8",
+    "bytes": 2581
+  },
+  "groups": {
+    "billing":    { "outcome": "captured", "group_type": "classic", "state": "Stable",
+                    "listed_state": "Stable", "members": 2, "active": true,
+                    "counts": { "related": 1, "not_related": 0, "never_committed": 0,
+                                "beyond_end": 0, "failed": 0, "not_observed": 1 } },
+    "word-count": { "outcome": "excluded", "reason": "GroupTypeNotCaptured", "group_type": "other" },
+    "audit":      { "outcome": "failed", "reason": "NotVisibleToPrincipal" }
+  }
+}
+```
+
+and the document it binds:
+
+```json
+{
+  "format_version": "1.0.0",
+  "backup_id": "nightly-7",
+  "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+  "topics": {
+    "orders": {
+      "partitions": [
+        { "partition": 0, "observed": true, "log_start": 0, "high_watermark": 40,
+          "log_start_after": 0, "high_watermark_after": 41, "archived_first": 0, "archived_last": 40 },
+        { "partition": 1, "observed": false, "log_start_after": 0, "high_watermark_after": 2,
+          "archived_first": 0, "archived_last": 1 }
+      ],
+      "changed_during_capture": false
+    }
+  },
+  "groups": {
+    "billing": {
+      "positions": [
+        { "topic": "orders", "partition": 0, "status": "captured", "position": 17, "coverage": "withinArchive" },
+        { "topic": "orders", "partition": 1, "status": "notObserved", "reason": "PartitionAddedDuringCapture" }
+      ],
+      "no_committed_position": 0
+    }
+  }
+}
+```
+
+**When it is read, and what that means.** Just before the engine starts, the
+runner classifies every selected id (PROD-04.0's listings, §5), describes the
+capturable ones, reads each one's committed positions on every partition of
+every named topic (one RequireStable fetch per group, so a pending
+transactional offset commit never yields the pre-transaction position), and
+then reads each partition's log start and high watermark (`READ_UNCOMMITTED`).
+After the engine it reads the marks again, and takes the archived range of each
+partition from the manifest it digested. The marks are read only when at least
+one group was described — a capture that asked no position (every group
+excluded, as on Kafka 3.7.x) reads no partition and no mark — and one pass over
+them takes at most 60 seconds, a partition it did not reach recorded with its
+marks NOT read. **Positions observed while applications run are not atomic with
+the records the engine reads**: an `active` group may commit again a moment
+later, and nothing makes the groups and the records one consistent cut.
+`observed_from`/`observed_to` say when the positions were read; the recovery
+point (`started_at`) follows them.
+
+**The receipt's block:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `observed_from`, `observed_to` | RFC 3339 | When the group capture started and ended — before the engine; the end at or after the start (arm 31). |
+| `listing` | `complete` or `notComplete` | Whether the group listings were complete (Describe on the cluster, no lost broker). `notComplete`: an unlisted id was classified by a targeted describe (PROD-04.0 §5, T14). |
+| `document.key` | string | `logweir/backups/<backup_id>/<run_id>.consumer-positions.json` of this receipt's own ids (arm 32). |
+| `document.sha256`, `document.bytes` | `sha256:<64 lowercase hex>`, integer ≥ 1 | The positions document's exact bytes (arm 32; CP-2). |
+| `groups.<id>.outcome` | `captured`, `excluded`, `failed` | Exactly one per selected id. |
+| `groups.<id>.reason` | string | Present exactly when not `captured`. `excluded`: `GroupTypeNotCaptured` (a share or streams group, another protocol, or a type the client cannot name — **every group on a broker below ListGroups v5, Kafka 3.7.x**), `GroupNotFound`. `failed`: `NotVisibleToPrincipal`, `NotVisibleOrUnreachable`, `NotAuthorized`, `PositionsUnstable`, `ListingInconsistent`, `AbsenceUnproven`, `TypeUnproven`, `Unreachable`, `DescribeFailed`, `PositionsFailed`, `GenerationChangedDuringCapture`, `CaptureUnavailable`, `GroupVanishedDuringCapture` (described `Dead` with no member: deleted, or its offsets expired, while it was read), `PartitionsNotRead` (a named topic's partitions were never read). |
+| `groups.<id>.group_type` | string, optional | `classic` or `consumer` for a captured group, `other` for `GroupTypeNotCaptured`, absent otherwise. |
+| `groups.<id>.state`, `listed_state` | string | Captured only: the description's state and the listing's, from `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`, `Empty`, `stateUnknownToClient`. They differ when the group changed between the two reads. A captured group is never `Dead` with no member (arm 34). |
+| `groups.<id>.members` | integer | Captured only: the members the description listed. |
+| `groups.<id>.active` | boolean | Captured only: either state is not `Empty`/`Dead`, so its positions may have moved after they were read (arm 35). |
+| `groups.<id>.counts` | object of six integers | Captured only, over **every partition of every named topic**: `related`, `not_related`, `never_committed`, `beyond_end`, `failed`, `not_observed` — what the document's positions say (CP-14). |
+
+**The positions document:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `format_version`, `backup_id`, `run_id` | string | `1.0.0`, and the receipt's own ids (CP-3). |
+| `topics.<t>.partitions[]` | array | One entry per partition, `partition` equal to its index (CP-5): the partitions the capture read, then any the read after the engine or the archive shows beyond them. EMPTY only when no read gave one — and then no group is captured (`PartitionsNotRead`, CP-10). |
+| `…observed` | boolean | Whether the capture read this partition. `false`: added after the capture read the topic (or that read failed), so no position was asked for it. |
+| `…log_start`, `…high_watermark` | integer ≥ 0, optional | The group-capture marks. Absent: not read (never 0). |
+| `…log_start_after`, `…high_watermark_after` | integer ≥ 0, optional | The marks read again after the engine. |
+| `…archived_first`, `…archived_last` | integer ≥ 0, optional | The lowest and highest offsets the manifest records for the partition (inclusive). Absent: nothing archived. |
+| `topics.<t>.changed_during_capture` | boolean | A mark read after the engine is below the one read at group capture (PROD-01.4 §4.4). Re-derived by CP-7. |
+| `groups.<id>` | object | **Captured groups only** (CP-8). |
+| `groups.<id>.positions[]` | array | SPARSE, topics in name order, partitions in order (CP-11): every committed position, every failed read and every partition the capture did not observe. |
+| `…status` | string | `captured` (a committed position the facts can judge), `excluded` (`PositionBeyondEnd`), `failed` (`TopicNotAuthorized`, `Unstable`, `NotAPosition`, `PartitionFailed`, `MarksNotRead` — a refused or impossible read is never "never committed"), `notObserved` (`PartitionAddedDuringCapture`, `TopicNotObserved`). |
+| `…position` | integer ≥ 0 | The next offset the group would consume. Present exactly for `captured` and `excluded`. |
+| `…coverage` | string | Captured only — whether the position relates to archived data (below). |
+| `groups.<id>.no_committed_position` | integer | How many partitions have NO committed offset: exactly every partition `positions` does not list (CP-11). **Absence is never offset 0**: it is counted, never written as a position. |
+
+**Which positions relate to archived data.** One rule, re-derived by both
+readers from the recorded facts (CP-13), first that holds:
+
+| Condition | Status / coverage | Relates? |
+|---|---|---|
+| the marks were not read | `failed: MarksNotRead` | — |
+| position > high watermark | `excluded: PositionBeyondEnd` (a commit made through an older generation's offsets, PROD-01.4 TI-04.1-2) | — |
+| position < log start | `beforeLogStart`: the records it would read next had expired from the source | no |
+| nothing archived for the partition | `noArchivedData` | no |
+| position < first archived offset | `beforeArchive` | no |
+| position ≤ last archived offset | `withinArchive` | **yes** |
+| position = last archived offset + 1 | `atArchiveEnd`: the group had read everything archived | **yes** |
+| otherwise | `beyondArchive` | no |
+
+`archived_last` is inclusive: high watermark 4 and `archived_last` 3 make a
+position of 4 `atArchiveEnd`. A `read_committed` group fully caught up past a
+trailing transaction marker sits at `archived_last + 2` and reads
+`beyondArchive` — an under-claim, on the safe side.
+
+**A topic that changed during the capture** fails every group holding a kept
+position on it — captured or `excluded: PositionBeyondEnd` —
+`GenerationChangedDuringCapture` (CP-9): those offsets may name records of
+another generation. Detection is a REGRESSION of the marks only: a topic
+recreated and refilled past its old marks before the read after the engine is
+not seen, and a read after the engine that failed decides nothing. Topic
+identity (PROD-01.4a) is what closes that gap. **Generation:** the receipt
+records no topic generation token and no topic id yet (PROD-02.1, PROD-01.4a),
+so a snapshot relates to this point's data only, through its marks, and to
+"generation unknown" for every other point (PROD-01.4 TI-04.1-4).
+
+**Engine snapshots.** Logweir's own backups never ask the engine for its
+`consumer-groups-snapshot.json`. One found beside a foreign archive is read only
+as an import source (FX-1's reader, `ConsumerGroupSnapshotRead::imported`),
+every group typed `unknown`, never shown as a consumer group's and never
+applied: the engine records no type and keeps a streams group's positions
+untyped (PROD-04.0 §3.7).
+
+**What the readers print.** Both readers print, from the receipt alone, a
+`consumer_positions` header, the positions document's key, digest and length
+and whether it was checked, and one line per group — its outcome, and for a
+captured group its type, both states, members, whether it was active and its
+counts. Given the document (`--consumer-positions <file>`), they check it
+against the receipt and print one line per listed position and one with the
+count of partitions with no committed position. The catalog point carries the
+summary, bound by the block's digest — which carries the document's digest, so
+one position moved is a different point
+([catalog-point.md](catalog-point.md)).
+
+### Recovering positions with the source offline
+
+The positions are in the evidence store beside the signed receipt, so they
+survive the source cluster. With the source gone:
+
+1. Find the point: `logweir catalog list` over the destination, or the
+   `logweir/backups/<backup_id>/` prefix in the evidence bucket.
+2. Fetch the receipt, its sidecar and its positions document
+   (`logweir/backups/<backup_id>/<run_id>.receipt.json`, `.receipt.sig` and
+   `.consumer-positions.json`), and verify all three with no network, with a
+   reader that knows format 1.7.0 — **`logweir` from PROD-04.1 on, or
+   `verify_scorecard.py` 1.26.0 or later**:
+   `logweir drill verify --payload-type backup-receipt --scorecard receipt.json
+   --signature receipt.sig --public-key <key> --consumer-positions
+   <run_id>.consumer-positions.json` (or `docs/verify_scorecard.py
+   --payload-type backup-receipt --consumer-positions … receipt.json
+   receipt.sig <key>`). The output MUST carry the `consumer_positions:
+   positions document … verified against this receipt` line and one
+   `consumer_positions["<group>"]["<topic>":<partition>]` line per position. An
+   older reader says `VALID` over a 1.7.0 receipt and checks nothing in the
+   block — measured with `verify_scorecard.py` 1.22.0, which accepts a signed
+   receipt whose captured group lists no position — so its `VALID` is not this
+   step.
+3. Use only `captured` positions whose `coverage` relates (`withinArchive`,
+   `atArchiveEnd`); every other status is a reason NOT to set a position, and a
+   partition counted without a committed position is never 0.
+4. A position is a SOURCE offset. Restored records carry their source offset in
+   the `x-original-offset` header: resume a group on the target at the first
+   restored record whose `x-original-offset` is at or above the position (and
+   at the partition's end for `atArchiveEnd`), with the group stopped
+   (`kafka-consumer-groups.sh --reset-offsets --to-offset … --execute`).
+   PROD-04.2 makes this a reviewed, audited step; until it lands it is an
+   operator's.
+
+---
+
+## The forty arms, and the positions document's fourteen
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -505,16 +755,16 @@ BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
-arm 6–29 and 36–40, and
-`validate_invariants_has_exactly_thirty_six_return_err_statements` over the
-total — thirty-four arms, thirty-six statements, because arm 5 is three since
+arm 6–40, and
+`validate_invariants_has_exactly_forty_two_return_err_statements` over the
+total — forty arms, forty-two statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-thirty-four arms in the same order.
+forty arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -528,7 +778,7 @@ without it, which is every receipt written before 1.3.0, is decided exactly as
 before. Topics in name order; per topic arm 15, then arms 16 and 17 per entry in
 key order, then 18 and 19. Arms 20 and 21 run over `owner_detection`.
 
-Arms 36–40 run only when `generations` is present, after arms 1–29, and judge it
+Arms 36–40 run only when `generations` is present, after arms 1–35, and judge it
 against `source.topics` — so every receipt without it, which is every receipt
 written before 1.6.0, is decided exactly as before. Topics in name order; per
 topic arm 38, then 39, then 40, each over `topic_id` before `topic_id_after`.
@@ -706,6 +956,91 @@ and then the value side, then 29.
 29. **The verdict is what the sides say.**
 
     > `schema_dependency["orders"] verdict "notDetected" does not fit its sides: a judged topic is "schemaDependent" exactly when its key side or its value side is dependent`
+Arms 30 to 35 (format 1.7.0, PROD-04.1, after PROD-03.0's 22 to 29) read `consumer_positions` and run only
+when it is present; every document without it is decided exactly as before.
+Each has a corpus case in `e2e/fixtures/invariants/backup-receipt-index.json`
+(`consumer_positions_*`), and arm 34 one per clause of its captured branch.
+
+30. **`consumer_positions` is present only under a minor of at least 7.**
+
+    > `consumer_positions is present but format_version "1.6.0" predates it: the field is defined from 1.7.0`
+
+31. **The capture ends at or after it starts, the listing word is closed, and
+    at least one group is recorded.** The window is compared as instants,
+    whatever the offset.
+
+    > `consumer_positions records listing "complete", 5 group(s) and a capture that ends before it starts: the capture ends at or after it starts, the listing is "complete" or "notComplete", and at least one group is recorded`
+
+32. **The positions document is this run's**, named by a well-formed digest over
+    at least one byte.
+
+    > `consumer_positions.document is "logweir/backups/logweir-backup-01J8Z9QK7V/another-run.consumer-positions.json" with sha256 "sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8" over 2581 bytes: the positions document is "logweir/backups/logweir-backup-01J8Z9QK7V/01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json", its digest "sha256:" and 64 lowercase hex digits, over at least one byte`
+
+33. **Each group's outcome is closed, with a reason exactly when it is not
+    `captured`, from that outcome's set.**
+
+    > `consumer_positions.groups["gone"] has outcome "excluded" and reason "NotVisibleToPrincipal": the outcome is "captured", "excluded" or "failed", a reason is present exactly when it is not "captured", and it is one this format defines for that outcome`
+
+34. **What a group records follows from its outcome** — a group that was not
+    captured never carries counts, a captured one carries its type, both
+    states, members, `active` and counts over at least one partition, and a
+    captured group is never `Dead` with no member (the stand-in for "no such
+    group"; review M2).
+
+    > `consumer_positions.groups["audit"] is "captured" with group_type "consumer", state "Dead", listed_state "Stable", members 0, active true and counts over 4 partition(s): a captured group records a type of "classic" or "consumer", both states from the closed set, its members, active and counts over at least one partition, and is never "Dead" with no member; a GroupTypeNotCaptured group records group_type "other" and nothing else; any other group records none of them`
+
+35. **`active` is what the two states say.**
+
+    > `consumer_positions.groups["audit"].active is false but its states "Empty" and "PreparingRebalance" say true: a group is active unless both its states are "Empty" or "Dead"`
+
+**The positions document's arms, CP-1 to CP-14**
+(`BackupReceipt::validate_consumer_positions_document`, mirrored by
+`docs/verify_scorecard.py::check_consumer_positions_document`), run by a reader
+given the document after the receipt's own arms accepted it. Each has a case in
+`e2e/fixtures/invariants/consumer-positions-index.json` (regenerated by
+`scripts/fixtures/consumer_positions_corpus.py`, so each case's receipt binds
+its document); both readers refuse with the same text, `drill verify` exiting 4
+behind `SIGNATURE VALID but the consumer positions document is refused: `.
+
+- **CP-1. The receipt carries a block.**
+  > `the receipt of run "01J8Z9QK7V6M3F2R5T8W1XB0CD" records no consumer_positions block, so it binds no positions document: only a backup that selected consumer groups writes one`
+- **CP-2. The bytes' SHA-256 and length are the ones the receipt signed** — a
+  document changed after signing, even one with the same counts, is refused
+  here.
+  > `the positions document is sha256:8ecdd6ea6adfa3d1e0023f5d664d2ebeda175a882c7448ed87a0643640d2b9b9 over 2581 bytes but the receipt binds sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8 over 2581 bytes: it is not the document this receipt signed`
+- **CP-3. Format 1, for the receipt's own backup and run.**
+  > `the positions document is format "1.0.0" for backup "logweir-backup-01J8Z9QK7V" run "another-run" but the receipt is backup "logweir-backup-01J8Z9QK7V" run "01J8Z9QK7V6M3F2R5T8W1XB0CD": a format-1 positions document names its receipt's own backup and run`
+- **CP-4. Its topics are exactly `source.topics`.**
+  > `the positions document's topics cover {"orders"} but the named topic set is {"orders", "payments"}`
+- **CP-5. Each topic lists its partitions from 0, once each, in order.**
+  > `the positions document's topics["orders"].partitions[1] is partition 2: each topic lists its partitions from 0, one entry each, in order`
+- **CP-6. Marks and ranges are whole, non-negative and ordered**, and an
+  unobserved partition has no group-capture marks.
+  > `the positions document's topics["orders"].partitions[0] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks`
+- **CP-7. `changed_during_capture` is what the marks say.**
+  > `the positions document's topics["orders"].changed_during_capture is false but its marks say true: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture`
+- **CP-8. Positions for exactly the receipt's captured groups.**
+  > `the positions document records positions for the groups {"audit", "billing", "hidden"} but the receipt's captured groups are {"audit", "billing"}: it records exactly the captured groups`
+- **CP-9. No kept position on a topic that changed during the capture**, and no
+  group fails `GenerationChangedDuringCapture` when none changed.
+  > `consumer_positions.groups["billing"] is "captured" with reason absent while the topics that changed during the capture are {"payments"}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed`
+- **CP-10. A group is captured only when every named topic's partitions were
+  read**, and none fails `PartitionsNotRead` when all were (review L4).
+  > `consumer_positions.groups["audit"] is "captured" with reason absent while the topics whose partitions were never read are {"payments"}: a group is captured only when every named topic's partitions were read, and fails PartitionsNotRead only when one was not`
+- **CP-11. Every partition accounted for** — entries in order, once each, every
+  unobserved partition among them, and `no_committed_position` counting every
+  other: absence is never silently missing and never offset 0.
+  > `the positions document's groups["billing"] lists 3 position(s) (first out of place: none), leaves 0 unobserved partition(s) out and counts 0 without a committed position over 4 partition(s): a captured group lists, topics in name order and partitions in order, each partition of a named topic at most once and every one the capture did not observe, and counts every other partition as without a committed position`
+- **CP-12. Each position's status, value and reason fit one another**, and
+  `notObserved` is exactly an unobserved partition; the old dense
+  `noCommittedPosition` status — absence written as an entry — is refused.
+  > `the positions document's groups["billing"].positions[0] has status "noCommittedPosition", position 0 and reason absent: the status is "captured", "excluded", "failed" or "notObserved", a position is present exactly when it is "captured" or "excluded" and is never negative, a reason exactly when it is not "captured" and from that status's set, and "notObserved" is exactly a partition the capture did not observe`
+- **CP-13. A coverage word exactly on a captured position, and every kept
+  position's verdict is what its partition's facts derive.**
+  > `the positions document's groups["audit"].positions[0] is "captured" with coverage "beyondArchive" at position 21, but its partition's facts make it PositionBeyondEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range`
+- **CP-14. The receipt's counts are what the document's positions say.**
+  > `consumer_positions.groups["billing"].counts are 1 related, 1 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed but its positions count 2 related, 0 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed: the receipt counts what the positions document records`
+
 Arms 36–40 (format 1.6.0, PROD-01.4a) read `generations` — with
 `source.topics` as its context — and run only when it is present, so every
 receipt without it is decided exactly as before (OD-7 (a): MINOR).
@@ -766,6 +1101,12 @@ python3 docs/verify_scorecard.py --payload-type backup-receipt \
   e2e/fixtures/signed/public.pem
 ```
 
+A 1.7.0 receipt's positions document is checked by both readers when it is
+given — `--consumer-positions <run_id>.consumer-positions.json` to either, with
+`--payload-type backup-receipt` only — against the receipt they just verified
+(arms CP-1 to CP-14 above); without it they print the receipt's counts and say
+the document was not checked.
+
 `--payload-type` defaults to `scorecard` in both readers, so every invocation
 that predates the receipt is unchanged. The accepted names are `scorecard`,
 `backup-receipt`, `receipt` (the post-put storage readback of a scorecard) and
@@ -778,12 +1119,12 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all thirty-four arms above** over a `--payload-type
+> readers run **all forty arms above** over a `--payload-type
 > backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
 > together in FX-4, arms 12–21 together in PROD-05.1, arms 22–29 together in
-> PROD-03.0 and arms 36–40 together in PROD-01.4a, so the two readers never
-> disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all thirty-four
+> PROD-03.0, arms 36–40 together in PROD-01.4a and arms 30–35 together in
+> PROD-04.1, so the two readers never disagreed in between.
+> `logweir drill verify` prints `checked:   the signature AND all forty
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
@@ -1256,7 +1597,8 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
 
 ## Upgrade, rollback and old receipts (format 1.6.0)
 
-- **Every receipt this build signs is 1.6.0 and carries `generations`**, one
+- **Every receipt this build signs is at least 1.6.0 and carries
+  `generations`** (1.7.0 when its backup selected consumer groups, below), one
   entry per named topic, whatever else it carries — 1.6.0 includes every
   earlier minor (PROD-03.0's `schema_dependency`, PROD-01.3's auth modes,
   PROD-05.1's `topic_configuration`, FX-7's optional pin).
@@ -1282,6 +1624,34 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `Describe`, as the engine does). A cluster below inter-broker protocol 2.8
   has no topic IDs: its receipts record `null` with `noTopicId` and every
   generation stays unknown.
+
+## Upgrade, rollback and old receipts (format 1.7.0)
+
+- **A receipt carries the block exactly when its backup selected consumer
+  groups** (PROD-04.1), and such a receipt is 1.7.0, whatever else it
+  carries — 1.7.0 includes every earlier minor's fields. A backup that selects
+  none writes the document it wrote before PROD-04.1, byte for byte, and a plan without `source.consumer_groups` is
+  the plan it was. `schemas/logweir-backup-receipt-1.7.0.json` adds the one
+  optional property to the frozen 1.6.0 file; the payload type keeps
+  `version=1.0.0`.
+- **MINOR under OD-7 (a).** Arms 30 to 35 read only the new block, and the
+  positions document is a new object beside the receipt that only a reader
+  asked for it reads. Readers built before PROD-04.1 (`verify_scorecard.py`
+  1.25.0 and earlier, an older `logweir`) accept a 1.7.0 receipt, ignore the
+  block and print no `consumer_positions` line — they say nothing about the
+  positions, and decide everything else as before; for positions, use a
+  reader from 1.26.0 on (the recovery path above). ABSENT means positions not
+  recorded: no group was selected.
+- **The evidence prefix holds one more object per selecting run**
+  (`<run_id>.consumer-positions.json`). `logweir catalog sync` reads only
+  `.receipt.json` keys and skips it; a `--max` page of the listing counts it
+  like the sidecar.
+- **Rollback.** An older runner ignores `source.consumer_groups` and
+  `--consumer-group` is an unknown flag to it, so it records no positions; the
+  1.7.0 receipts already written stay valid for every major-1 reader. An older
+  controller refuses a frozen plan whose execution inputs carry
+  `consumerGroups` (`PlanConfigMapConflict`): let such runs finish, or remove
+  `spec.consumerGroups` from the schedule, before rolling it back.
 
 ---
 

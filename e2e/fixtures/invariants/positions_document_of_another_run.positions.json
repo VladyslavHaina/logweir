@@ -1,0 +1,111 @@
+{
+  "format_version": "1.0.0",
+  "backup_id": "logweir-backup-01J8Z9QK7V",
+  "run_id": "another-run",
+  "topics": {
+    "orders": {
+      "partitions": [
+        {
+          "partition": 0,
+          "observed": true,
+          "log_start": 0,
+          "high_watermark": 20,
+          "log_start_after": 0,
+          "high_watermark_after": 24,
+          "archived_first": 0,
+          "archived_last": 23
+        },
+        {
+          "partition": 1,
+          "observed": true,
+          "log_start": 5,
+          "high_watermark": 9,
+          "log_start_after": 5,
+          "high_watermark_after": 9,
+          "archived_first": 5,
+          "archived_last": 8
+        },
+        {
+          "partition": 2,
+          "observed": false,
+          "log_start_after": 0,
+          "high_watermark_after": 3,
+          "archived_first": 0,
+          "archived_last": 2
+        }
+      ],
+      "changed_during_capture": false
+    },
+    "payments": {
+      "partitions": [
+        {
+          "partition": 0,
+          "observed": true,
+          "log_start": 0,
+          "high_watermark": 7,
+          "archived_first": 0,
+          "archived_last": 6
+        }
+      ],
+      "changed_during_capture": false
+    }
+  },
+  "groups": {
+    "audit": {
+      "positions": [
+        {
+          "topic": "orders",
+          "partition": 0,
+          "status": "excluded",
+          "position": 21,
+          "reason": "PositionBeyondEnd"
+        },
+        {
+          "topic": "orders",
+          "partition": 1,
+          "status": "captured",
+          "position": 2,
+          "coverage": "beforeLogStart"
+        },
+        {
+          "topic": "orders",
+          "partition": 2,
+          "status": "notObserved",
+          "reason": "PartitionAddedDuringCapture"
+        },
+        {
+          "topic": "payments",
+          "partition": 0,
+          "status": "failed",
+          "reason": "Unstable"
+        }
+      ],
+      "no_committed_position": 0
+    },
+    "billing": {
+      "positions": [
+        {
+          "topic": "orders",
+          "partition": 0,
+          "status": "captured",
+          "position": 12,
+          "coverage": "withinArchive"
+        },
+        {
+          "topic": "orders",
+          "partition": 2,
+          "status": "notObserved",
+          "reason": "PartitionAddedDuringCapture"
+        },
+        {
+          "topic": "payments",
+          "partition": 0,
+          "status": "captured",
+          "position": 7,
+          "coverage": "atArchiveEnd"
+        }
+      ],
+      "no_committed_position": 1
+    }
+  }
+}
