@@ -3452,7 +3452,9 @@ async fn a_policy_with_no_resource_version_sends_no_patch() {
 /// the API server prunes, so the no-op skip saw a change on every pass even
 /// with the clock frozen. Every pass wrote, and the write woke the next pass: a
 /// hot loop on every `Report` or `Enforce` policy whose catalog resolved.
-/// CONTROL: at `a8a30428` every pass below sends a patch.
+/// CONTROL: at `a8a30428` this row fails — the evaluation instant moves on the
+/// settling pass — and the pass after it sends a patch whose only change, once
+/// the API server has pruned its `null` members, is `lastEvaluation.at`.
 #[tokio::test]
 async fn a_steady_policy_writes_nothing_once_settled() {
     let first = fixture(happy_routes(&six_points()));
