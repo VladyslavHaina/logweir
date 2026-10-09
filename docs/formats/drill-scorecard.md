@@ -434,6 +434,18 @@ subset from <the archive's floor | epoch-ms S> to epoch-ms E: every selected
 partition was held to its own count bound over that window, every other
 partition of a narrowed topic was held empty, …`.
 
+**Every other surface says partial.** The signed block is copied, never
+recomputed, to the surfaces that do not print the document: the `Restore`
+status' `integrity.selection` (with `scope: partial` and the `SELECTION`
+printer column, [kubernetes.md](../kubernetes.md)), the product API's
+`selection` on both restore reads and the operation view's
+`verificationScope` ([api.md](../api.md)), the console's History list, detail
+and operation view (`partial: partitions 0, 2 of topic orders`, and a
+complete-coverage sentence over every SELECTED partition), and the runner's
+notification body (`selection` with `scope: "partial"`, `format_version`; the
+PagerDuty incident title appends `(partial: …)`). An unnarrowed restore shows
+none of these, exactly as before.
+
 **The number.** 2.0.0. A renumber moves
 `scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and
 `scorecard::PARTITION_SUBSETS_MAJOR` together, the justfile's
