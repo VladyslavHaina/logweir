@@ -343,8 +343,29 @@ pub fn mint_standing(
             "the scope names no `topics`, so it authorises the restore of nothing".to_string(),
         );
     }
+    // PROD-08.1a review M1: a scope that authorises complete coverage signs
+    // `maxPartitions: 0` and nothing else — a complete plan samples no
+    // partitions, and 0 is what makes every reader older than format 1.1.0
+    // refuse every plan under the document (`COMPLETE_SCOPE_MAX_PARTITIONS`).
+    // Refused here, with the value to write, rather than by the admission
+    // below with a reader's wording.
+    let complete = scope.signed_coverage() == logweir_core::spec::Coverage::Complete;
+    if complete
+        && scope.max_partitions != logweir_core::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS
+    {
+        return Err(format!(
+            "the scope says `\"coverage\": \"complete\"` and `\"maxPartitions\": {}`; a scope \
+             that authorises complete coverage states `\"maxPartitions\": 0`. A complete plan \
+             samples no partitions, and 0 is what makes a runner or controller older than \
+             formatVersion {} refuse every plan under it, instead of reading it as a sampled \
+             scope. The schedule's own spec.bounds.maxPartitions still bounds which point a slot \
+             selects, inside the signed templateDigest",
+            scope.max_partitions,
+            wire::STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE
+        ));
+    }
     for (zero, what) in [
-        (scope.max_partitions == 0, "maxPartitions"),
+        (scope.max_partitions == 0 && !complete, "maxPartitions"),
         (scope.records_per_partition == 0, "recordsPerPartition"),
         (scope.deadline_seconds == 0, "deadlineSeconds"),
     ] {

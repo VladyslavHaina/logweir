@@ -5197,7 +5197,9 @@ async fn a_complete_schedule_fires_only_under_a_scope_that_signed_complete_cover
 
     // 2. The same schedule under a scope that signed complete coverage.
     let (verdict, child, _) = with_coverage(coverage, || async {
-        let envelope = envelope_1_1(json!({"coverage": "complete", "completeMaxRecords": 5000}));
+        let envelope = envelope_1_1(
+            json!({"coverage": "complete", "maxPartitions": 0, "completeMaxRecords": 5000}),
+        );
         fire_with(approval_value(&envelope)).await
     })
     .await;
@@ -5220,16 +5222,50 @@ async fn a_complete_schedule_fires_only_under_a_scope_that_signed_complete_cover
         .expect("the Restore controller admits the declaration it was given");
 }
 
+/// **PROD-08.1a review M1: a scope that authorises complete coverage signs
+/// `maxPartitions: 0`.** The complete schedule above, under a 1.1.0 scope
+/// that signed complete coverage but a positive partition bound, fires no
+/// slot: the controller's own admission refuses the document, because a
+/// reader older than format 1.1.0 would read it as a sampled scope it could
+/// run sampled plans under. The control is the row above, where the same
+/// scope with `maxPartitions: 0` fires.
+///
+/// KILLS: the zero-bound rule removed from `admit_standing_authorization`.
+#[tokio::test]
+async fn a_complete_scope_with_a_positive_partition_bound_authorises_no_slot() {
+    let (verdict, child, _) = with_coverage(Some(("complete", Some(5000_i64))), || async {
+        let envelope = envelope_1_1(
+            json!({"coverage": "complete", "maxPartitions": 200, "completeMaxRecords": 5000}),
+        );
+        fire_with(approval_value(&envelope)).await
+    })
+    .await;
+    let rs::Verdict::Skipped(skip) = &verdict else {
+        panic!("a complete scope with a partition bound authorised a slot: {verdict:?}")
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(
+        skip.detail.contains("states `maxPartitions: 200`")
+            && skip.detail.contains("signs `maxPartitions: 0`"),
+        "{skip}"
+    );
+    assert!(child.is_none());
+}
+
 /// **A scope that signed complete refuses a sampled schedule's plan** — a
 /// weaker check than the signer chose — and a 1.0.0 document carrying
 /// `coverage` is refused as malformed. Both before any `Restore`.
 ///
-/// KILLS: the equality reduced to "complete needs a complete scope"; the
-/// minor check removed from `admit_standing_authorization`.
+/// The complete scope signs `maxPartitions: 0` (review M1), so the sampled
+/// plan, whose bound a schedule's CRD keeps at 1 or more, is also past the
+/// signed bound; the coverage equality alone is pinned by `logweir-core`'s
+/// `a_sampled_plan_under_a_complete_scope_is_refused` (its zero-bound plan).
+///
+/// KILLS: the minor check removed from `admit_standing_authorization`.
 #[tokio::test]
 async fn a_scope_that_signed_complete_does_not_cover_a_sampled_rehearsal() {
     let (verdict, child, _) = fire_with(approval_value(&envelope_1_1(
-        json!({"coverage": "complete"}),
+        json!({"coverage": "complete", "maxPartitions": 0}),
     )))
     .await;
     let rs::Verdict::Skipped(skip) = &verdict else {
@@ -5242,6 +5278,7 @@ async fn a_scope_that_signed_complete_does_not_cover_a_sampled_rehearsal() {
     // The coverage field in a document that declares 1.0.0.
     let mut scope = scope_value();
     scope["coverage"] = json!("complete");
+    scope["maxPartitions"] = json!(0);
     let old = envelope_with(SCHEDULE_UID, scope, "2026-11-01T00:00:00Z");
     let (verdict, child, _) = with_coverage(Some(("complete", None)), || async {
         fire_with(approval_value(&old)).await

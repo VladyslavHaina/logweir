@@ -705,6 +705,26 @@ pub fn admit_standing_authorization(
         }
         _ => {}
     }
+    // PROD-08.1a review M1: A SCOPE THAT AUTHORISES COMPLETE COVERAGE SIGNS
+    // `maxPartitions: 0`, and only that. A complete plan samples no
+    // partitions, so this build never reads the bound for one; a reader built
+    // before format 1.1.0 ignores `coverage`, reads a sampled scope, and under
+    // a bound of 0 refuses every plan. Any other value would let that older
+    // reader admit a sampled plan the signer did not authorise, so it is
+    // refused here — by every reader and by the minter, which all call this.
+    if doc.scope.signed_coverage() == crate::spec::Coverage::Complete
+        && doc.scope.max_partitions != crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS
+    {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed scope authorises `coverage: complete` and states `maxPartitions: {}`; a \
+             scope that authorises complete coverage signs `maxPartitions: {}` (a complete plan \
+             samples no partitions, and {} is what makes every reader older than formatVersion \
+             {STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE} refuse every plan under it)",
+            doc.scope.max_partitions,
+            crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS,
+            crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS
+        )));
+    }
     if doc.kind != STANDING_AUTHORIZATION_KIND {
         return Err(AuthorizationRefusal::invalid(format!(
             "the signed document declares kind {:?}, not {STANDING_AUTHORIZATION_KIND:?}",
@@ -1325,9 +1345,12 @@ mod tests {
     }
 
     /// A 1.1.0 scope that authorises complete coverage, with no record bound.
+    /// A scope that authorises complete coverage, as it is signed: with
+    /// `maxPartitions: 0` (review M1, [`crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS`]).
     fn complete_scope() -> RehearsalScope {
         RehearsalScope {
             coverage: Some(crate::spec::Coverage::Complete),
+            max_partitions: crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS,
             ..scope()
         }
     }
@@ -1430,18 +1453,28 @@ mod tests {
     /// A scope that signed complete coverage refuses a SAMPLED plan: a weaker
     /// check than the signer chose is not the one they authorised.
     ///
-    /// KILLS: the equality reduced to "complete needs a complete scope" (this
-    /// sampled plan, inside every other bound, would be admitted).
+    /// The complete scope signs `maxPartitions: 0` (review M1), so an ordinary
+    /// sampled plan is ALSO past its partition bound (two mismatches). The
+    /// plan whose `max_partitions` is 0 — the one sampled plan a reader older
+    /// than format 1.1.0 admits under this scope (it samples nothing, and
+    /// every build's phase 7 refuses an empty selection) — is inside the bound,
+    /// so the coverage equality is what refuses it here, alone.
+    ///
+    /// KILLS: the equality reduced to "complete needs a complete scope" (the
+    /// zero-bound sampled plan, inside every other bound, would be admitted).
     #[test]
     fn a_sampled_plan_under_a_complete_scope_is_refused() {
+        let words = "`sample.coverage: sampled` and the signed scope authorises `complete`";
         let refusal = plan_within_scope(&facts(), &complete_scope()).expect_err("downgraded");
-        assert!(
-            refusal
-                .to_string()
-                .contains("`sample.coverage: sampled` and the signed scope authorises `complete`"),
-            "{refusal}"
-        );
-        assert_eq!(refusal.mismatches.len(), 1, "{refusal}");
+        assert!(refusal.to_string().contains(words), "{refusal}");
+        assert_eq!(refusal.mismatches.len(), 2, "coverage and bound: {refusal}");
+        let zero_bound = PlanScopeFacts {
+            max_partitions: Some(0),
+            ..facts()
+        };
+        let refusal = plan_within_scope(&zero_bound, &complete_scope()).expect_err("downgraded");
+        assert!(refusal.to_string().contains(words), "{refusal}");
+        assert_eq!(refusal.mismatches.len(), 1, "the coverage alone: {refusal}");
     }
 
     /// The signer's record bound: a complete plan under a scope stating
@@ -1554,6 +1587,29 @@ mod tests {
         let refused = admit_standing_authorization(&doc("1.1.0", zero), Some("u-1"), now)
             .expect_err("a bound of 0");
         assert!(refused.detail.contains("is 0"), "{refused}");
+        // A COMPLETE SCOPE SIGNS `maxPartitions: 0` (review M1): any other
+        // value is a document an older reader would read as a sampled scope
+        // with a usable partition bound, so it is refused. The control is
+        // `complete_scope()` itself, admitted above, and a sampled scope with
+        // a positive bound, admitted as before.
+        for wide in [1, 200] {
+            let complete_wide = RehearsalScope {
+                max_partitions: wide,
+                ..complete_scope()
+            };
+            let refused =
+                admit_standing_authorization(&doc("1.1.0", complete_wide), Some("u-1"), now)
+                    .expect_err("a complete scope with a partition bound");
+            assert!(
+                refused
+                    .detail
+                    .contains(&format!("states `maxPartitions: {wide}`"))
+                    && refused.detail.contains("signs `maxPartitions: 0`"),
+                "{refused}"
+            );
+        }
+        admit_standing_authorization(&doc("1.0.0", scope()), Some("u-1"), now)
+            .expect("a sampled scope keeps its positive bound");
 
         assert_eq!(standing_format_version_for(&scope()), "1.0.0");
         assert_eq!(standing_format_version_for(&complete_scope()), "1.1.0");

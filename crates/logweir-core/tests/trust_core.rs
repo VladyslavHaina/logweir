@@ -812,10 +812,15 @@ fn the_rehearsal_scope_serialises_in_camel_case() {
     let complete = RehearsalScope {
         coverage: Some(logweir_core::spec::Coverage::Complete),
         complete_max_records: Some(1_000_000),
+        max_partitions: logweir_core::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS,
         ..scope
     };
     let wire = serde_json::to_value(&complete).expect("a serialisable scope");
     assert_eq!(wire["coverage"], "complete");
+    assert_eq!(
+        wire["maxPartitions"], 0,
+        "a complete scope signs a partition bound of 0"
+    );
     assert_eq!(wire["completeMaxRecords"], 1_000_000);
     let back: RehearsalScope = serde_json::from_value(wire).expect("a round trip");
     assert_eq!(back, complete);

@@ -238,6 +238,7 @@ fn a_minted_standing_authorization_is_accepted_by_the_runner() {
 fn a_scope_that_signs_complete_coverage_mints_1_1_and_the_runner_admits_its_plan() {
     let mut scope: serde_json::Value = serde_json::from_str(&scope_json()).expect("parses");
     scope["coverage"] = serde_json::json!("complete");
+    scope["maxPartitions"] = serde_json::json!(0);
     scope["completeMaxRecords"] = serde_json::json!(5000);
     let minted = mint_scope(30, &scope.to_string());
     let mut complete = plan();
@@ -309,6 +310,56 @@ fn a_scope_that_signs_complete_coverage_mints_1_1_and_the_runner_admits_its_plan
         !dir.path().join("standing-authorization.json").exists(),
         "nothing was written"
     );
+}
+
+/// **PROD-08.1a review M1: the minter signs a complete scope only with
+/// `"maxPartitions": 0`.** A complete scope with a positive bound is refused
+/// before anything is written, naming the value to write — an older runner or
+/// controller would read it as a sampled scope it could run sampled plans
+/// under. With 0 it mints at 1.1.0 and the document carries 0. A SAMPLED scope
+/// with 0 is still refused as a bound that admits nothing (the control: the
+/// zero is allowed only beside complete).
+///
+/// KILLS: the minter's complete check removed (the wide scope is minted — the
+/// shared admission would still refuse it, but with a reader's wording and
+/// after the scope file was accepted); the zero allowed on a sampled scope.
+#[test]
+fn a_complete_scope_is_minted_only_with_a_partition_bound_of_zero() {
+    let refused_with = |scope: serde_json::Value| -> String {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("scope.json");
+        std::fs::write(&path, scope.to_string()).expect("written");
+        let signer = SigningKey::generate_ed25519();
+        let key = dir.path().join("approver.pem");
+        std::fs::write(&key, signer.to_pkcs8_pem().expect("a private PEM")).expect("written");
+        let refused = mint_standing(&args_for(dir.path(), &path, &key, 30), now())
+            .expect_err("refused before signing");
+        assert!(
+            !dir.path().join("standing-authorization.json").exists(),
+            "nothing was written: {refused}"
+        );
+        refused
+    };
+    let mut wide: serde_json::Value = serde_json::from_str(&scope_json()).expect("parses");
+    wide["coverage"] = serde_json::json!("complete");
+    let refused = refused_with(wide.clone());
+    assert!(
+        refused.contains("`\"maxPartitions\": 200`")
+            && refused.contains("states `\"maxPartitions\": 0`"),
+        "{refused}"
+    );
+
+    let mut sampled_zero: serde_json::Value = serde_json::from_str(&scope_json()).expect("parses");
+    sampled_zero["maxPartitions"] = serde_json::json!(0);
+    let refused = refused_with(sampled_zero);
+    assert!(refused.contains("`maxPartitions` is 0"), "{refused}");
+
+    wide["maxPartitions"] = serde_json::json!(0);
+    let minted = mint_scope(30, &wide.to_string());
+    let doc: serde_json::Value = serde_json::from_slice(&minted.envelope).expect("JSON");
+    assert_eq!(doc["formatVersion"], "1.1.0", "{doc}");
+    assert_eq!(doc["scope"]["maxPartitions"], 0, "{doc}");
+    assert_eq!(doc["scope"]["coverage"], "complete", "{doc}");
 }
 
 /// The payload type is the whole point of the second signer path: a standing

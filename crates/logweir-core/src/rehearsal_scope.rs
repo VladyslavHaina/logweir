@@ -58,6 +58,21 @@ use serde::{Deserialize, Serialize};
 /// safe — only applies to scratch names.
 pub const MODE_SCRATCH: &str = "scratch";
 
+/// The `maxPartitions` a scope that authorises complete coverage signs — and
+/// the only one it may sign (PROD-08.1a review M1).
+///
+/// A complete plan states no `sample.max_partitions`, so this build never reads
+/// the scope's partition bound for one. A reader built before format 1.1.0
+/// ignores `coverage` and reads the document as a SAMPLED scope; under a bound
+/// of 0 its `plan_within_scope` refuses every plan — a complete plan (no bound)
+/// as an unbounded sample, a sampled plan whose bound is above 0 as past the
+/// signed one — and its Approval controller and its minter refuse the scope
+/// itself (a bound of 0 is not a positive bound). So an older reader never
+/// reads a complete-only authorization as permission to run a sampled
+/// rehearsal: it runs nothing under it. That is the fail-closed direction, and
+/// it keeps format 1.1.0 a MINOR (`docs/stability.md`).
+pub const COMPLETE_SCOPE_MAX_PARTITIONS: u32 = 0;
+
 /// What a standing rehearsal authorization permits (D3 §4.3).
 ///
 /// EXACT VALUES, NOT PATTERNS, except for the one prefix the mode requires.
@@ -85,7 +100,14 @@ pub struct RehearsalScope {
     pub topic_prefix: String,
     /// The source topics this authorization covers, by exact name.
     pub topics: Vec<String>,
-    /// The most partitions any one restored topic may have.
+    /// The most partitions a slot's plan may sample (`sample.max_partitions`).
+    ///
+    /// **[`COMPLETE_SCOPE_MAX_PARTITIONS`] (0) exactly when the scope
+    /// authorises `coverage: complete`** (PROD-08.1a review M1): a complete
+    /// plan samples no partitions, and 0 is what makes every reader built
+    /// before format 1.1.0 — which ignores `coverage` and reads a sampled
+    /// scope — refuse every plan under the document. Every reader of this
+    /// build refuses a complete scope with any other value.
     pub max_partitions: u32,
     /// The most records per partition the rehearsal may write.
     pub records_per_partition: u32,
