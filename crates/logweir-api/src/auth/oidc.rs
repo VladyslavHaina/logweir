@@ -1597,11 +1597,9 @@ mod tests {
             PROVIDER_KEEPALIVE_RETRIES
         );
 
-        let refused = provider_connector(false, bare_tls())
-            .oneshot(uri)
-            .await
-            .err()
-            .expect("the production arm refuses a plain-HTTP URL");
+        let Err(refused) = provider_connector(false, bare_tls()).oneshot(uri).await else {
+            panic!("the production arm refuses a plain-HTTP URL");
+        };
         assert_eq!(refused.to_string(), "unsupported scheme http");
     }
 
@@ -1636,11 +1634,12 @@ mod tests {
             deadline: Duration::from_millis(300),
         };
         let started = std::time::Instant::now();
-        let refused = tokio::time::timeout(Duration::from_secs(5), bounded.oneshot(uri))
+        let Err(refused) = tokio::time::timeout(Duration::from_secs(5), bounded.oneshot(uri))
             .await
             .expect("the wrapper ends the dial")
-            .err()
-            .expect("a silent handshake is not a connection");
+        else {
+            panic!("a silent handshake is not a connection");
+        };
         let elapsed = started.elapsed();
         assert!(
             elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(3),
