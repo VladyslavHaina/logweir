@@ -2075,7 +2075,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "schema-dependent topics are flagged",
             "Registry not captured: applications may not read these",
         ),
-        // FX-31 (2026-10-09, item 47): every object-store read has a size cap;
+        // FX-28 (2026-10-09, item 47): a sign-in whose identity provider
+        // stalls its body is answered at the provider deadline, under the
+        // audit code an operator alerts on.
+        (
+            "a stalled identity provider meets the provider deadline",
+            "provider_timeout",
+        ),
+        // FX-31 (2026-10-09, item 48): every object-store read has a size cap;
         // the controller reads evidence under the relay's cap, which sets the
         // receipt's topic limit an operator must know.
         (

@@ -190,6 +190,7 @@ async fn fetch(trust: &TlsTrust, url: &str) -> Result<Vec<u8>, String> {
     tokio::time::timeout(Duration::from_secs(20), client.get(url))
         .await
         .map_err(|_| "the test's own deadline expired".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 // ----------------------------------------------------------------- rows

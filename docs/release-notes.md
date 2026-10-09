@@ -36,8 +36,9 @@ can select a window start) and 43 (PROD-08.1a, complete coverage requested
 and shown through the CRDs, the API and the console), 44 (FX-24b, a
 client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
-(PROD-03.0, schema-dependent topics flagged from the archived bytes) and 47
-(FX-31, every object-store read has a size cap) so far. Items continue the next entry's
+(PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
+(FX-28, a sign-in whose identity provider stalls is answered at the provider
+deadline) and 48 (FX-31, every object-store read has a size cap) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -109,7 +110,11 @@ the backup); it changes the runner's receipts and records, the catalog's view
 (runner and controller), the product API and the console, so the PoC upgrade
 that carries it runs a backup, reads its receipt's `schema_dependency` and the
 catalog's `topics[].schemaDependency`, and opens the restore review.
-Item 47 is fix-now row FX-31, proven by store, controller and check rows, by a
+Item 47 is fix-now row FX-28, proven by rows over a loopback identity
+provider that stalls and on the built console binary; it changes the console
+only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
+be simulated on the live Dex).
+Item 48 is fix-now row FX-31, proven by store, controller and check rows, by a
 child-process peak-RSS measurement, and on the compose stack against MinIO; it
 changes the controller, the runner and the check Jobs, and the PoC upgrade that
 carries it plants an oversized object at a receipt key in a scratch namespace's
@@ -1349,7 +1354,65 @@ and earlier) accept a 1.5.0 receipt and print no schema line.
 block (their topics read not assessed); the 1.5.0 documents already written
 stay valid for every reader. An older controller or console ignores the field.
 
-#### 47. Every object-store read has a size cap; the controller reads evidence under the relay's 1 MiB (FX-31)
+#### 47. A sign-in whose identity provider stalls is answered at the provider deadline (FX-28)
+
+**Changed.** The shared-mode console's OIDC client put its ten-second provider
+deadline (`PROVIDER_DEADLINE`) around the request up to the response head only,
+and read the body after it with no timer. A provider, or a path to it, that
+answered a head and then stopped sending held the sign-in open for as long as
+the socket stayed open: `/auth/login`, which is unauthenticated, whenever its
+hour-long discovery cache is stale, and `/auth/callback` at the token endpoint
+or the key set. Each such request held one of the console's 256 connection
+slots. Now one deadline covers the connection, the request, the head and the
+whole body of every provider request (discovery, the key set and the token
+exchange), and a document over 512 KiB is still refused, now by name. A
+stalled request fails at ten seconds and the console drops its connection to
+the provider: `/auth/login` answers `503 kubernetes_unavailable` ("The identity
+provider could not be reached. Try again shortly."), the callback
+`401 unauthenticated` ("The sign-in could not be completed."). The audit
+failure is a new code, `provider_timeout`, and the console's warning says "did
+not complete a request within the 10-second provider deadline"; the login
+warning now carries that detail too, as the callback's and readiness's already
+did. The deadline is per request: `/auth/login` makes at most one, and a
+callback at most four, so a provider that answers each just inside the bound
+can take a callback to forty seconds, while one that stalls ends it at once.
+A dial (TCP connect and TLS handshake) also has a twelve-second bound of its
+own, for a dial that outlives its sign-in. Provider connections now carry TCP
+keepalive (30 s idle, then three probes ten seconds apart), so a pooled
+connection to a provider that has gone silently is dropped after about a
+minute of idleness; a sign-in inside that minute can still meet the deadline
+once. What the deadline leaves: a failed discovery is not cached and
+concurrent sign-ins do not share a fetch, so while a provider stalls, about 77
+client addresses at the sign-in limit can keep every console connection busy
+([api.md](api.md#sign-in)).
+**Do:** nothing is required. Alert on `provider_timeout` beside
+`provider_unreachable` and `code_exchange_failed`.
+**Scope:** rows over a loopback HTTP provider that this repository's tests
+bind, reached through the console's production client
+(`crates/logweir-api/tests/oidc_provider_deadline.rs`): a discovery document,
+a key set and a token response that each send a head and stall, a provider
+that never sends a head, and a TLS handshake that is never answered are each
+answered after 10.0 s with `provider_timeout` (or the client's deadline
+error), and the provider sees the console hang up at 10.0 s; under the pre-fix
+code each body-stall row is still pending at fifteen seconds. A provider that
+trickles its head over seven seconds and then stalls the body is answered at
+10.0 s, not seventeen, so the request and the body share one deadline. A
+provider that takes six seconds per document still signs in (login 6.1 s,
+callback 12.1 s). An oversized document is refused by name. On the built
+binary in shared mode, a raw-socket `GET /auth/login` against a stalled
+provider gets its `503` status line at 10.1 s and the server closes the
+connection. Unit rows read keepalive back off a socket the client's own
+connector dialled, and end a stalled dial at the connector's bound. Mutants,
+all killed: the pre-fix timer, a timer around the body alone, one timer per
+phase, the body uncapped, keepalive off in the connector or in the client's
+wiring, the deadline doubled, halved or moved, the dial unbounded, and the
+timeout reported under another name.
+Live: the PoC upgrade that carries this item signs in through Dex; a stall
+cannot be simulated on the live Dex.
+**Rollback:** an older console reads a stalled provider's body with no
+deadline again; nothing is stored, so nothing needs converting.
+
+#### 48. Every object-store read has a size cap; the controller reads evidence under the relay's 1 MiB (FX-31)
 
 **Changed.** A read from an object store took the whole object, so the memory
 it used was whatever the bucket held. In shared mode a namespace whose bucket
@@ -1474,7 +1537,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46 and 47, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1503,8 +1566,9 @@ rehearsal is to verify every record (a new schedule and a new
 authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
-and controller), the product API and the console, and needs nothing; item 47 changes the
-controller, the runner and the check Jobs and needs nothing. To roll back to
+and controller), the product API and the console, and needs nothing; item 47
+changes the console only and needs nothing; item 48 changes the controller,
+the runner and the check Jobs and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
