@@ -3,10 +3,15 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.3.0.json`](../../schemas/logweir-backup-receipt-1.3.0.json)
+[`schemas/logweir-backup-receipt-1.5.0.json`](../../schemas/logweir-backup-receipt-1.5.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
 silently. A MINOR bump is a new schema file beside the old one: the
+[`1.4.0` schema](../../schemas/logweir-backup-receipt-1.4.0.json), which
+describes every receipt signed before PROD-01.4a that names one of PROD-01.3's
+auth modes, the
+[`1.3.0` schema](../../schemas/logweir-backup-receipt-1.3.0.json), which
+describes every other receipt signed between PROD-05.1 and PROD-01.4a, the
 [`1.2.0` schema](../../schemas/logweir-backup-receipt-1.2.0.json), which
 describes every pinned receipt written before PROD-05.1 (FX-7's format), the
 [`1.1.0` schema](../../schemas/logweir-backup-receipt-1.1.0.json), which
@@ -318,9 +323,60 @@ declaration naming an unplanned topic, another kind or an unusable reference,
 or a topic declared twice, and a declaration wins over a resource for the same
 topic.
 
+## `generations` — the topic's ID before and after the engine (format 1.5.0)
+
+**Why it exists (PROD-01.4a).** A topic deleted and created again under the
+same name is a NEW topic: the broker gives it a new topic ID (KIP-516) and
+restarts its offsets at zero, so an offset that meant one record before the
+recreation means a different record after it. Before this block no signed
+document could tell the two apart — the engine reads no topic IDs, and the
+offsets of a refilled or byte-identical recreation can look continuous
+([decision record](../to-do/decisions/PROD-01.4-topic-identity.md) §4.7).
+
+An object keyed by topic name, **one entry per `source.topics` entry and no
+others** (arm 23), written on every receipt this build signs:
+
+```json
+"generations": {
+  "orders":   { "topic_id": "gtOq2VXiTCK1QM2UtERijA", "topic_id_after": "gtOq2VXiTCK1QM2UtERijA",
+                "topic_id_source": "describeTopics" },
+  "payments": { "topic_id": null, "topic_id_after": null,
+                "topic_id_reason": "noTopicId", "topic_id_after_reason": "noTopicId" }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `topic_id` | string or `null`, always written | The topic's ID as `logweir backup run`'s own DescribeTopics read returned it **immediately before the engine** (the last read of phase −1), through the engine's principal. Kafka's text form: 22 characters of URL-safe base64, no padding, over the ID's 16 bytes — exactly what `kafka-topics.sh --describe` prints (arm 24). Derived from the ID's two 64-bit halves, never from librdkafka's `rd_kafka_Uuid_base64str`, whose standard alphabet would print `Cf6zT/mcTNCoxuPmv1Ztxw` for Kafka's `Cf6zT_mcTNCoxuPmv1Ztxw`. The all-zero ID is never written. |
+| `topic_id_after` | string or `null`, always written | The same read **immediately after the engine exited**. A different non-null value means the topic was deleted and recreated WHILE the engine ran: the point mixes two generations. Recorded, never refused. |
+| `topic_id_source` | string, present exactly when an ID is recorded (arm 26) | `describeTopics` (Logweir's read through `logweir-rdkafka-ffi`, OD-6 (a2)); `engineManifest` is defined for the engine route (decision §6.3) and written by no build yet. |
+| `topic_id_reason` | string, present exactly when `topic_id` is `null` (arm 25) | Why there is no ID: `noTopicId` (the broker answered with the all-zero ID — a cluster below inter-broker protocol 2.8), `notAuthorized` (the principal may not Describe the topic — refused by name, never read as "absent"), `topicNotFound` (the broker does not hold the topic), `readFailed` (no answer in time, or another error) or `notRead` (the reader that took the backup reads no IDs). |
+| `topic_id_after_reason` | string, present exactly when `topic_id_after` is `null` (arm 25) | The same, for the read after the engine. |
+
+**`null` means UNKNOWN, never "the same".** A null ID always says why, and a
+reader never treats two unknown IDs as one generation.
+
+**What a reader does with two points' IDs** (`logweir_core::topic_identity`):
+
+| The two points' IDs (same source cluster, same topic) | Generation |
+|---|---|
+| both recorded before their captures, and different | **a NEW generation**: the topic was deleted and recreated between them (`TopicIdChanged`), never a continuation |
+| this point's own `topic_id` and `topic_id_after` differ | **changed during the capture** (`ChangedDuringCapture`), a break whatever came before |
+| both recorded and equal, and this capture saw no change | **the same generation** (basis `topicId`) |
+| any ID unknown, no previous point, or another source cluster | **not established by ID** — unknown, never the same generation. This is today's fallback, stated rather than guessed: the offset checks of decision §4 (PROD-02.1) are what will decide such links. |
+
+Equal IDs say "the same topic incarnation", not "continuous offsets": a
+same-ID truncation (an unclean leader election) keeps the ID and reuses offsets
+(decision §2, FP1), so offset-dependent consumers still need decision §4's
+offset checks over equal IDs. No product surface compares two points yet; the
+first consumers are PROD-02.1's lineage and the catalog and console views.
+
+**Permissions.** Nothing new: DescribeTopics is a Metadata request, which needs
+`Describe` on the topic — what the engine's own Metadata read already needs.
+
 ---
 
-## The twenty-one arms
+## The twenty-six arms
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -329,16 +385,16 @@ BOTH readers — compared byte-for-byte by
 `crates/logweir-core/tests/backup_receipt.rs` (`backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
-arm 6–21, and
-`validate_invariants_has_exactly_twenty_three_return_err_statements` over the
-total — twenty-one arms, twenty-three statements, because arm 5 is three since
+arm 6–26, and
+`validate_invariants_has_exactly_twenty_eight_return_err_statements` over the
+total — twenty-six arms, twenty-eight statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-twenty-one arms in the same order.
+twenty-six arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -350,7 +406,12 @@ Arms 12–19 run only when `topic_configuration` is present, after arms 1–11,
 and judge it against `config_coverage` and `source.topics` — so every receipt
 without it, which is every receipt written before 1.3.0, is decided exactly as
 before. Topics in name order; per topic arm 15, then arms 16 and 17 per entry in
-key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
+key order, then 18 and 19. Arms 20 and 21 run over `owner_detection`.
+
+Arms 22–26 run only when `generations` is present, after arms 1–21, and judge it
+against `source.topics` — so every receipt without it, which is every receipt
+written before 1.5.0, is decided exactly as before. Topics in name order; per
+topic arm 24, then 25, then 26, each over `topic_id` before `topic_id_after`.
 
 1. **`format_version` parses as semver and its major is `1`.** Checked first, so
    a document from a future major is refused before any other arm is evaluated
@@ -484,6 +545,33 @@ key order, then 18 and 19. Arms 20 and 21 run last, over `owner_detection`.
 
     > `topic_configuration["orders"].owner by "kafkaTopicResource" names no source owner_detection ["declared"] lists: a "declared" owner needs "declared", a "kafkaTopicResource" owner "kafkaTopicResources"`
 
+22. **`generations` is present only under a minor of at least 5.**
+
+    > `generations is present but format_version "1.4.0" predates it: the field is defined from 1.5.0`
+
+23. **`generations` covers exactly `source.topics`** — the twin of arms 3, 7
+    and 14.
+
+    > `generations covers {"orders"} but the named topic set is {"orders", "payments"}`
+
+24. **Every recorded ID is Kafka's text form of a real ID**: 22 URL-safe base64
+    characters, no padding, over 16 bytes that re-encode to the same text, and
+    never the all-zero ID. librdkafka's standard-alphabet text is refused here.
+
+    > `generations["orders"].topic_id_after "Cf6zT/mcTNCoxuPmv1Ztxw" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID`
+
+25. **A reason is present exactly when its ID is `null`**, from the closed set.
+
+    > `generations["payments"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is "noTopicId", "notAuthorized", "topicNotFound", "readFailed" or "notRead"`
+
+26. **`topic_id_source` is present exactly when an ID is recorded**, from the
+    closed set.
+
+    > `generations["orders"].topic_id_source absent does not fit its IDs: a source is present exactly when an ID is recorded, and is "describeTopics" or "engineManifest"`
+
+Two different recorded IDs are NOT refused: they are what the run observed
+(the topic was recreated while the engine ran), and both readers report it.
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -522,11 +610,11 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all twenty-one arms above** over a `--payload-type
+> readers run **all twenty-six arms above** over a `--payload-type
 > backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
-> together in FX-4 and arms 12–21 together in PROD-05.1, so the two readers
-> never disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all twenty-one
+> together in FX-4, arms 12–21 together in PROD-05.1 and arms 22–26 together
+> in PROD-01.4a, so the two readers never disagreed in between.
+> `logweir drill verify` prints `checked:   the signature AND all twenty-six
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one
@@ -542,7 +630,14 @@ would break every existing invocation, every document and
 > found (<sources>), so applied through the admin API` or `owner not checked,
 > so how it is applied is not known` — or
 > `topic_configuration: not recorded, …` for a receipt without the block, and
-> the parity script compares those lines too. Both print a pinned
+> the parity script compares those lines too. Both print the topic IDs in the
+> same words, one `generations["<topic>"]:` line per topic — `topic ID <id>
+> before and after the capture (describeTopics), one generation`, `topic ID
+> CHANGED during the capture (<a> before, <b> after): …`, or `topic ID
+> not recorded (<reason>) before the capture and … after it, so its generation
+> is not established by ID and is UNKNOWN` — or `generations: not recorded, …`
+> for a receipt without the block; the parity script compares those lines and
+> derives what each must say from the document. Both print a pinned
 > `archive.manifest_version_id` when the receipt carries one (`manifest version:`
 > and `manifest_version_id=`), and both refuse one that is not a string — Rust
 > at deserialisation, the script in its shape layer (FX-7; verdict parity in
@@ -886,9 +981,11 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
 
 ## Upgrade, rollback and old receipts (format 1.3.0)
 
-- **Every receipt this build signs carries `topic_configuration`, at 1.3.0**,
-  pinned or not; an unpinned one still has no `manifest_version_id` key. The
-  payload type keeps `version=1.0.0`.
+- **Every receipt this build signs carries `topic_configuration`**, pinned or
+  not (at 1.3.0 until PROD-01.4a, at 1.5.0 since,
+  [below](#upgrade-rollback-and-old-receipts-format-150)); an unpinned one
+  still has no `manifest_version_id` key. The payload type keeps
+  `version=1.0.0`.
 - **Readers built before PROD-05.1 accept 1.3.0 receipts** and ignore the
   block: they compare majors only, arms 6 and 10 read the 1.3 minor as at least
   1, and no receipt type refuses an unknown field (measured: script 1.19.0 over
@@ -937,9 +1034,11 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
 - **A receipt is 1.4.0 exactly when its `source.auth.mode` is `scramSha256`,
   `plain` or `mtls`** (PROD-01.3), whatever else it carries — 1.4.0 includes
   PROD-05.1's 1.3.0 `topic_configuration` and FX-7's optional
-  `archive.manifest_version_id`. Every receipt of a `plaintext` or
-  `scramSha512` backup is the 1.3.0 document this build writes for it (or the
-  1.1.0/1.2.0 document an earlier build wrote), byte for byte.
+  `archive.manifest_version_id`. Until PROD-01.4a every receipt of a
+  `plaintext` or `scramSha512` backup was the 1.3.0 document (or the
+  1.1.0/1.2.0 document an earlier build wrote), byte for byte; since
+  PROD-01.4a every receipt is 1.5.0
+  ([below](#upgrade-rollback-and-old-receipts-format-150)).
   `schemas/logweir-backup-receipt-1.4.0.json` differs from the frozen 1.3.0
   file in the `source.auth.mode` and `username` descriptions only: no
   property, type or required field moved. The payload type keeps
@@ -954,6 +1053,34 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
   `scramSha256`, `plain` or `mtls` at all (its `AuthSpec` has no such arm, so
   the spec does not parse), and writes no 1.4.0 receipt. The 1.4.0 receipts
   already written stay valid for every reader from PROD-01.3 on.
+
+## Upgrade, rollback and old receipts (format 1.5.0)
+
+- **Every receipt this build signs is 1.5.0 and carries `generations`**, one
+  entry per named topic, whatever else it carries — 1.5.0 includes every
+  earlier minor (PROD-01.3's auth modes, PROD-05.1's `topic_configuration`,
+  FX-7's optional pin). `schemas/logweir-backup-receipt-1.5.0.json` is the
+  frozen 1.4.0 file plus the optional `generations` property and its
+  `TopicIdentity` definition: no other property, type or required field moved.
+  The payload type keeps `version=1.0.0`.
+- **Readers built before PROD-01.4a accept 1.5.0 receipts** and ignore the
+  block: they compare majors only, every minor arm reads 5 as "at least" its
+  own, and no receipt type refuses an unknown field; a 1.5.0 receipt naming a
+  PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0
+  one. Arms 22–26 read only the new block, so this is MINOR under OD-7 (a).
+  Older readers print no IDs; an auditor who needs them verifies with script
+  1.23.0 or a `logweir` built from PROD-01.4a on.
+- **Old receipts are never reinterpreted.** A receipt before 1.5.0 records no
+  topic ID: every topic's generation in it is UNKNOWN, never the same as
+  another point's.
+- **Rollback.** An older `logweir backup run` writes 1.3.0 or 1.4.0 receipts
+  again, with no IDs; the 1.5.0 receipts already written stay valid under
+  every major-1 reader. A rolled-back build's points read "not established by
+  ID" against their neighbours.
+- **Permissions and brokers.** Nothing new to grant (DescribeTopics needs
+  `Describe`, as the engine does). A cluster below inter-broker protocol 2.8
+  has no topic IDs: its receipts record `null` with `noTopicId` and every
+  generation stays unknown.
 
 ---
 

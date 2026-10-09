@@ -761,7 +761,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.22.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.23.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
@@ -793,11 +793,18 @@ history is:
 | `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
 | `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
 | `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
+| `1.23.0` | Knows backup-receipt and catalog-point format `1.5.0` (PROD-01.4a). Adds the backup receipt's five `generations` arms (22–26: only from 1.5.0; covering exactly the named topic set; every recorded topic ID in Kafka's text — 22 URL-safe base64 characters over 16 bytes, never the all-zero ID; a reason exactly for a null ID, from the closed five; a source exactly for a recorded one), its shape check (each field a string or null), and the `generations` lines: per topic, one generation, the ID CHANGED during the capture, or not established by ID (with the reason). Every document without the block is decided exactly as before. |
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A verifier older than `1.23.0`, and a `logweir` built before PROD-01.4a, accept
+a 1.5.0 backup receipt or catalog point: they ignore `generations` (and the
+record's `topics[].identity`), check none of arms 22 to 26 and print no topic
+ID — so they cannot say whether a topic was recreated between two points or
+during one ([backup-receipt.md](formats/backup-receipt.md#upgrade-rollback-and-old-receipts-format-150)).
 
 A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
 1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`

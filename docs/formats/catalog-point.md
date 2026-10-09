@@ -3,10 +3,15 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.3.0.json`](../../schemas/logweir-catalog-point-1.3.0.json),
+[`schemas/logweir-catalog-point-1.5.0.json`](../../schemas/logweir-catalog-point-1.5.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
 drift apart silently. A MINOR bump is a new schema file beside the old one: the
+[`1.4.0` schema](../../schemas/logweir-catalog-point-1.4.0.json) (PROD-01.3,
+three more `source.auth_mode` values) and the
+[`1.3.0` schema](../../schemas/logweir-catalog-point-1.3.0.json) (PROD-05.1,
+`topics[].configuration`), which describe the records written before
+PROD-01.4a, the
 [`1.2.0` schema](../../schemas/logweir-catalog-point-1.2.0.json) (FX-7,
 `archive.manifest_version_id`) and the
 [`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json) (FX-4,
@@ -135,7 +140,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration` (every receipt it signs), else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.5.0` for a record whose receipt carries `generations` (PROD-01.4a: every receipt it signs), else `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration`, else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -169,6 +174,7 @@ all of them wanted:
 | `topics[].config_coverage` | object, **optional** (1.1.0) | The backup receipt's [`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110) entry for the topic, COPIED: `coverage` (`captured`, `notCaptured`, `captureDenied`), `reason` for `notCaptured`, and the effective `timestamp_type` with its `source`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every 1.0.0 record, and every record derived from a receipt that predates 1.1.0 — and is never read as `captured`. |
 | `topics[].partitions` | int, **optional** | The source's partition count, receipt-derived from the receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) (format 1.3.0): the count the archive manifest records and a restore creates the topic with. ABSENT — every record before 1.3.0, and a 1.3.0 one whose manifest recorded none — is unknown. See [absent means unknown](#absent-means-unknown-never-zero). |
 | `topics[].configuration` | object, **optional** (1.3.0) | The backup receipt's [`topic_configuration`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) entry for the topic, COPIED: `partitions`, `replication_factor`, the recorded `entries` with their `source` and `portability`, and the declarative `owner`. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0 — and is never read as "no configuration". |
+| `topics[].identity` | object, **optional** (1.5.0) | The backup receipt's [`generations`](backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-150) entry for the topic, COPIED: `topic_id` (before the engine) and `topic_id_after`, each Kafka's text or `null` with its reason, and `topic_id_source`. It is what tells a topic deleted and recreated under the same name — a NEW generation, whose offsets mean other records — from the same topic. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every record before 1.5.0 — and is never read as "the same generation". |
 | `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
@@ -231,7 +237,7 @@ and "which shard is it in" are one number.
    schema pins the major with a pattern (`^1\.[0-9]+\.[0-9]+$`) as well, so a
    schema-only validator refuses a `9.9.9` document too.
 2. **Unknown fields are ignored inside major 1.** A minor bump adds optional
-   fields and a 1.0.0 reader must still read a 1.1.0, 1.2.0 or 1.3.0 record.
+   fields and a 1.0.0 reader must still read a 1.1.0 to 1.5.0 record.
 3. **Absent optional fields mean UNKNOWN — never zero.** See below.
 4. **Everything except the receipt-derived facts is informational.** The
    receipt's signature is the verification root. `backup_id`, `run_id`,
@@ -248,7 +254,10 @@ and "which shard is it in" are one number.
    added, an owner dropped, a class changed — is a `RecordMismatch`, and so is
    an `owner_detection` the receipt does not carry (a record claiming the run
    looked for owners it never looked for). Two records conflict on either only
-   where both carry it.
+   where both carry it. `topics[].identity` (1.5.0) follows the same rule: a
+   topic ID the receipt does not back — one swapped, a recreation during the
+   capture hidden, IDs beside a receipt that records none — is a
+   `RecordMismatch`, and two records conflict on it only where both carry it.
 5. **Nothing under `logweir/` is ever rewritten.** Every put is create-only. A
    correction is a new record under a new point id; a removal is a tombstone.
    An existing object at a record key is "already there", which is a success,
@@ -348,6 +357,12 @@ none of them.
   stays as above. No verifier evaluates a catalog record's invariants, so an
   older reader still reads it; the receipt it names is what an older verifier
   refuses.
+  **1.5.0 (PROD-01.4a)** is the fifth: `topics[].identity`, the receipt's topic
+  IDs before and after the engine, from a receipt that carries `generations` —
+  every receipt this build signs, so every record it writes is 1.5.0. A record
+  backfilled from an older receipt keeps the format it would have had, and its
+  topics' generations read unknown. The view and the product API do not show
+  the IDs yet (PROD-02.1's lineage is their first consumer).
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.
