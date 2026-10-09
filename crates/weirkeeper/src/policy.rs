@@ -83,6 +83,12 @@ struct RunPolicyV1<'a> {
     all_user_topics: Option<AllUserTopicsPolicy>,
     archive: ArchivePolicy<'a>,
     active_deadline_seconds: i64,
+    /// **PROD-04.1.** The selected consumer groups, sorted and deduplicated —
+    /// what the run records positions for is part of what it DOES. ABSENT
+    /// (and skipped) when none is selected, so every policy that selects none
+    /// digests exactly as it did before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consumer_groups: Option<Vec<String>>,
 }
 
 fn spelling(mode: IncompleteDiscovery) -> &'static str {
@@ -118,6 +124,16 @@ fn all_user_topics_policy(block: &AllUserTopics) -> AllUserTopicsPolicy {
 /// and `to_deterministic_json` only fails on a value it cannot canonicalise
 /// (a non-finite float, a non-string map key). The `expect` names that, rather
 /// than propagating an error every caller would have to invent a reason for.
+/// **PROD-04.1.** The consumer groups a spec selects: `None` when absent OR
+/// EMPTY, so an empty list is no selection — in the digest, in the frozen
+/// plan and in the runner's document alike.
+#[must_use]
+pub fn selected_groups(spec: &BackupSpec) -> Option<&[String]> {
+    spec.consumer_groups
+        .as_deref()
+        .filter(|groups| !groups.is_empty())
+}
+
 #[must_use]
 pub fn run_policy_sha256(spec: &BackupSpec) -> String {
     let mut topics = spec.topics.clone();
@@ -139,6 +155,12 @@ pub fn run_policy_sha256(spec: &BackupSpec) -> String {
                 .map(|r| NameOnly { name: &r.name }),
         },
         active_deadline_seconds: spec.deadline_seconds,
+        consumer_groups: selected_groups(spec).map(|groups| {
+            let mut groups = groups.to_vec();
+            groups.sort();
+            groups.dedup();
+            groups
+        }),
     };
     let bytes = logweir_core::det_json::to_deterministic_json(&policy)
         .expect("a RunPolicyV1 is strings and integers and always canonicalises");
@@ -187,6 +209,14 @@ pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<Fiel
                 spec.deadline_seconds
             ),
         ));
+    }
+    // PROD-04.1: the runner refuses such a selection at phase −1 (exit 3);
+    // refusing it here keeps a schedule from admitting a policy every run of
+    // which would be refused.
+    if let Some(why) =
+        selected_groups(spec).and_then(logweir_core::consumer_positions::refuse_selection)
+    {
+        errs.push(field_error("spec.consumerGroups", why));
     }
 
     match (errs.is_empty(), shape) {

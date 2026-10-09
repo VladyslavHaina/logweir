@@ -1585,6 +1585,7 @@ pub fn run_policy_spec(spec: &BackupScheduleSpec) -> BackupSpec {
         archive: spec.archive.clone(),
         destination_ref: spec.destination_ref.clone(),
         all_user_topics: spec.all_user_topics.clone(),
+        consumer_groups: spec.consumer_groups.clone(),
         schedule_ref: None,
         slot: None,
         triggered_by: TRIGGERED_BY_SCHEDULE.to_string(),

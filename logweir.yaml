@@ -983,6 +983,18 @@ spec:
                 required:
                 - url
                 type: object
+              consumerGroups:
+                description: |-
+                  **PROD-04.1.** Consumer groups whose committed positions this run records as evidence in its signed receipt (`consumer_positions`), by exact id — never a pattern, never "all groups". Each selected group gets exactly one outcome: captured (one position per partition of every backed-up topic, each judged against the archive), excluded with a reason (a share or streams group, an absent id), or failed with a reason (for example a group this run's principal may not describe). Absence is never offset 0. Positions are read just before the engine while applications may be running, so an active group's positions are not atomic with the records.
+
+                  Optional and additive: ABSENT (or empty) selects no group and the run is the run it was — its plan, its digest and its receipt unchanged. A blank, repeated or control-character id, or more than 100, is refused before any Job (`ExecutionSpecInvalid`). An older controller ignores the field and records no positions.
+                items:
+                  maxLength: 255
+                  minLength: 1
+                  type: string
+                maxItems: 100
+                nullable: true
+                type: array
               deadlineSeconds:
                 description: |-
                   The Job's `activeDeadlineSeconds`.
@@ -1944,6 +1956,18 @@ spec:
                 - Forbid
                 - Allow
                 type: string
+              consumerGroups:
+                description: |-
+                  **PROD-04.1.** Consumer groups whose committed positions each run records as evidence in its signed receipt (`consumer_positions`), by exact id — never a pattern, never "all groups". Each selected group gets exactly one outcome: captured (one position per partition of every backed-up topic, each judged against the archive), excluded with a reason (a share or streams group, an absent id), or failed with a reason (for example a group this run's principal may not describe). Absence is never offset 0. Positions are read just before the engine while applications may be running, so an active group's positions are not atomic with the records.
+
+                  Optional and additive: ABSENT (or empty) selects no group and every run is the run it was — its plan, its digest and its receipt unchanged. A blank, repeated or control-character id, or more than 100, is refused before any Job (`ExecutionSpecInvalid`). An older controller ignores the field and records no positions.
+                items:
+                  maxLength: 255
+                  minLength: 1
+                  type: string
+                maxItems: 100
+                nullable: true
+                type: array
               destinationRef:
                 description: |-
                   The saved `BackupDestination` every run of this schedule writes to, in this namespace.
