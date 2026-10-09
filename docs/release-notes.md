@@ -1218,14 +1218,17 @@ engine exits, and the receipt records both, per topic, in Kafka's own text
 (the `TopicId` `kafka-topics.sh --describe` prints), or `null` with the reason:
 `noTopicId` (a cluster below inter-broker protocol 2.8 has none),
 `notAuthorized` (refused by name, never read as absent), `topicNotFound`,
-`readFailed` or `notRead`. Receipt and catalog point are format **1.5.0**
-(`generations`, `topics[].identity`); every receipt this build signs is 1.5.0.
-Two points' IDs decide their generation: different IDs are a new generation,
-never a continuation; equal IDs the same one; a topic whose ID changed during
-its own capture is flagged; and an unknown ID is "not established", never "the
-same" (`docs/formats/backup-receipt.md`). Both verifiers check five new arms
-(22–26) and print one `generations` line per topic; `verify_scorecard.py` is
-1.24.0. DescribeTopics is the third call family in the one crate that may hold
+`readFailed`, `notRead` or `reservedTopicId` (Kafka's reserved
+`AAAAAAAAAAAAAAAAAAAAAQ`, a sentinel no topic is given). Receipt and catalog
+point are format **1.5.0** (`generations`, `topics[].identity`); every receipt
+this build signs is 1.5.0. Two points' IDs decide their generation: different
+IDs are a new generation, never a continuation; equal IDs the same one only
+when the later capture's read after the engine recorded the same ID too; a
+topic whose ID changed during its own capture is flagged; and an unknown ID is
+"not established", never "the same" (`docs/formats/backup-receipt.md`). Both
+verifiers check five new arms (22–26), refuse Kafka's reserved IDs in a
+receipt and in a catalog point's copy, and print one `generations` line per
+topic; `verify_scorecard.py` is 1.24.0. DescribeTopics is the third call family in the one crate that may hold
 `unsafe` code (item 37); every other crate still forbids it. No command,
 console page or API field compares two points yet: PROD-02.1's coverage view
 is the first consumer.

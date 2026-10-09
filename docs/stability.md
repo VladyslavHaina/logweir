@@ -351,7 +351,8 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
 `target.auth.mode` — and the catalog point record copies the receipt's.
 
 - **The value set is versioned, and only a document that names a new value
-  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
+  moves.** A receipt or catalog point naming one of the three is **1.4.0** (on
+  builds before PROD-01.4a, which writes every receipt as 1.5.0), a
   scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
   written at the version it always was, byte for byte. Each new schema file
   differs from the frozen one beside it in that field's description only.
@@ -410,10 +411,15 @@ librdkafka directly — in Kafka's text form, or `null` with the reason
 
 - **`null` means unknown, never "the same".** A null ID says why
   (`noTopicId` from a broker below inter-broker protocol 2.8, `notAuthorized`,
-  `topicNotFound`, `readFailed`, `notRead`), and the generation rule
-  (`logweir_core::topic_identity`) never reads two unknown IDs as one
-  generation: two different pre-capture IDs are a new generation, two equal
-  ones the same generation, anything else not established. A receipt without
+  `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`), and the
+  generation rule (`logweir_core::topic_identity`) never reads two unknown IDs
+  as one generation: two different pre-capture IDs are a new generation, two
+  equal ones the same generation only when the later capture's own after-read
+  recorded the same ID too, anything else not established. Kafka's reserved
+  IDs (`AAAAAAAAAAAAAAAAAAAAAA`, `AAAAAAAAAAAAAAAAAAAAAQ`), which no topic is
+  ever given, are never recorded (arm 24) and never accepted from a catalog
+  record by either verifier, so no two points read as one generation through a
+  sentinel. A receipt without
   the block — every receipt before 1.5.0 — has every topic's generation
   unknown.
 - **Every receipt this build signs carries the block**, so every one is 1.5.0,

@@ -347,10 +347,10 @@ others** (arm 23), written on every receipt this build signs:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `topic_id` | string or `null`, always written | The topic's ID as `logweir backup run`'s own DescribeTopics read returned it **immediately before the engine** (the last read of phase −1), through the engine's principal. Kafka's text form: 22 characters of URL-safe base64, no padding, over the ID's 16 bytes — exactly what `kafka-topics.sh --describe` prints (arm 24). Derived from the ID's two 64-bit halves, never from librdkafka's `rd_kafka_Uuid_base64str`, whose standard alphabet would print `Cf6zT/mcTNCoxuPmv1Ztxw` for Kafka's `Cf6zT_mcTNCoxuPmv1Ztxw`. The all-zero ID is never written. |
+| `topic_id` | string or `null`, always written | The topic's ID as `logweir backup run`'s own DescribeTopics read returned it **immediately before the engine** (the last read of phase −1), through the engine's principal. Kafka's text form: 22 characters of URL-safe base64, no padding, over the ID's 16 bytes — exactly what `kafka-topics.sh --describe` prints (arm 24). Derived from the ID's two 64-bit halves, never from librdkafka's `rd_kafka_Uuid_base64str`, whose standard alphabet would print `Cf6zT/mcTNCoxuPmv1Ztxw` for Kafka's `Cf6zT_mcTNCoxuPmv1Ztxw`. Kafka's two reserved IDs, which no topic is ever given (`org.apache.kafka.common.Uuid.RESERVED`), are never written: the all-zero ID and `AAAAAAAAAAAAAAAAAAAAAQ` (`ONE_UUID`, `METADATA_TOPIC_ID`). |
 | `topic_id_after` | string or `null`, always written | The same read **immediately after the engine exited**. A different non-null value means the topic was deleted and recreated WHILE the engine ran: the point mixes two generations. Recorded, never refused. |
 | `topic_id_source` | string, present exactly when an ID is recorded (arm 26) | `describeTopics` (Logweir's read through `logweir-rdkafka-ffi`, OD-6 (a2)); `engineManifest` is defined for the engine route (decision §6.3) and written by no build yet. |
-| `topic_id_reason` | string, present exactly when `topic_id` is `null` (arm 25) | Why there is no ID: `noTopicId` (the broker answered with the all-zero ID — a cluster below inter-broker protocol 2.8), `notAuthorized` (the principal may not Describe the topic — refused by name, never read as "absent"), `topicNotFound` (the broker does not hold the topic), `readFailed` (no answer in time, or another error) or `notRead` (the reader that took the backup reads no IDs). |
+| `topic_id_reason` | string, present exactly when `topic_id` is `null` (arm 25) | Why there is no ID: `noTopicId` (the broker answered with the all-zero ID — a cluster below inter-broker protocol 2.8), `notAuthorized` (the principal may not Describe the topic — refused by name, never read as "absent"), `topicNotFound` (the broker does not hold the topic), `readFailed` (no answer in time, or another error), `notRead` (the reader that took the backup reads no IDs) or `reservedTopicId` (the broker answered with Kafka's reserved `AAAAAAAAAAAAAAAAAAAAAQ`, a sentinel no topic is given). |
 | `topic_id_after_reason` | string, present exactly when `topic_id_after` is `null` (arm 25) | The same, for the read after the engine. |
 
 **`null` means UNKNOWN, never "the same".** A null ID always says why, and a
@@ -362,8 +362,8 @@ reader never treats two unknown IDs as one generation.
 |---|---|
 | both recorded before their captures, and different | **a NEW generation**: the topic was deleted and recreated between them (`TopicIdChanged`), never a continuation |
 | this point's own `topic_id` and `topic_id_after` differ | **changed during the capture** (`ChangedDuringCapture`), a break whatever came before |
-| both recorded and equal, and this capture saw no change | **the same generation** (basis `topicId`) |
-| any ID unknown, no previous point, or another source cluster | **not established by ID** — unknown, never the same generation. This is today's fallback, stated rather than guessed: the offset checks of decision §4 (PROD-02.1) are what will decide such links. |
+| both recorded before their captures and equal, AND this point's own two reads recorded and equal | **the same generation** (basis `topicId`) |
+| any ID unknown — including this point's read AFTER its capture (`currentAfterUnread`: whether the topic was recreated while the engine ran is not known) — no previous point, or another source cluster | **not established by ID** — unknown, never the same generation. This is today's fallback, stated rather than guessed: the offset checks of decision §4 (PROD-02.1) are what will decide such links. |
 
 Equal IDs say "the same topic incarnation", not "continuous offsets": a
 same-ID truncation (an unclean leader election) keeps the ID and reuses offsets
@@ -556,13 +556,16 @@ topic arm 24, then 25, then 26, each over `topic_id` before `topic_id_after`.
 
 24. **Every recorded ID is Kafka's text form of a real ID**: 22 URL-safe base64
     characters, no padding, over 16 bytes that re-encode to the same text, and
-    never the all-zero ID. librdkafka's standard-alphabet text is refused here.
+    never one of Kafka's reserved IDs — the all-zero ID or
+    `AAAAAAAAAAAAAAAAAAAAAQ`, which no topic is ever given, so two captures can
+    never read as one generation through a sentinel. librdkafka's
+    standard-alphabet text is refused here too.
 
-    > `generations["orders"].topic_id_after "Cf6zT/mcTNCoxuPmv1Ztxw" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never the all-zero ID`
+    > `generations["orders"].topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID's 16 bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)`
 
 25. **A reason is present exactly when its ID is `null`**, from the closed set.
 
-    > `generations["payments"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is "noTopicId", "notAuthorized", "topicNotFound", "readFailed" or "notRead"`
+    > `generations["payments"].topic_id_after_reason absent does not fit a null topic_id_after: a reason is present exactly when the ID is null, and is "noTopicId", "notAuthorized", "topicNotFound", "readFailed", "notRead" or "reservedTopicId"`
 
 26. **`topic_id_source` is present exactly when an ID is recorded**, from the
     closed set.

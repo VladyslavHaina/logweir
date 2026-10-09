@@ -299,8 +299,14 @@ signature:
 * *verification* — does the backup receipt's DSSE signature verify under a key
   you trust for evidence signing? That is the receipt's signature, not this one.
 
-Both readers say so in as many words and both report SIGNATURE-ONLY for this
-type:
+Both readers say so in as many words. Besides the signature they make ONE
+check of the record's own content (PROD-01.4a, review M1): every topic ID it
+copies (`topics[].identity.topic_id`, `.topic_id_after`) must be a real topic
+ID in Kafka's text — never one of Kafka's reserved IDs
+(`AAAAAAAAAAAAAAAAAAAAAA`, `AAAAAAAAAAAAAAAAAAAAAQ`), never another alphabet.
+A record that copies one is refused by both (`drill verify` exit 4, the script
+exit 1) with the same words, as the receipt it claims to copy would be by its
+arm 24. Nothing else of this type is checked:
 
 ```
 logweir drill verify --payload-type catalog-point \
@@ -310,10 +316,11 @@ python3 docs/verify_scorecard.py --payload-type catalog-point \
   record.json record.sig public.pem
 ```
 
-`scripts/check-verifier-parity.sh` walks three catalog-point documents — a good
-one, one with a byte flipped after signing, and a genuine one presented as a
-scorecard — and fails if the two readers disagree about the verdict or if
-either stops printing its signature-only sentence.
+`scripts/check-verifier-parity.sh` walks the catalog-point documents — a good
+one of each minor, one with a byte flipped after signing, a genuine one
+presented as a scorecard, and a 1.5.0 one copying Kafka's reserved topic ID —
+and fails if the two readers disagree about the verdict or the refusal text,
+or if either stops printing the sentence that says what it checked.
 
 The verification an auditor actually wants is two steps:
 
