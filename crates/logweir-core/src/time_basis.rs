@@ -140,6 +140,8 @@ pub fn recorded_timestamp_type(
 ///   record by its own timestamp at the point, and nothing the manifest holds
 ///   proves the point leaves every record in (a segment records its first and
 ///   last timestamps, not its maximum — PROD-01.1 S6).
+/// * A stated window start (`restore.point_in_time: "<start>/<end>"`) (PROD-11.1) always does, for the same
+///   reason at the other end of the window.
 /// * With no point stated the window's end is `sample.window_end`, and it
 ///   selects by time when that end is EARLIER than the newest timestamp the
 ///   manifest records for the topic: a record the archive certainly holds is
@@ -153,7 +155,9 @@ pub fn recorded_timestamp_type(
 /// "no recorded timestamp", so only a stated point selects it by time.
 #[must_use]
 pub fn selects_by_time(spec: &DrillSpec, topic: Option<&TopicFacts>) -> bool {
-    if spec.restore.point_in_time.is_some() {
+    // PROD-11.1: a stated window START is a selection by time exactly as a
+    // stated point is — it excludes every archived record older than it.
+    if spec.restore.point_in_time.is_some() || spec.restore.window_start.is_some() {
         return true;
     }
     let end = spec.sample.window_end.timestamp_millis();
@@ -215,9 +219,17 @@ pub fn decide(
     if refused.is_empty() {
         return Ok(label);
     }
-    let selection = match spec.restore.point_in_time {
-        Some(point) => format!("restore.point_in_time {}", point.to_rfc3339()),
-        None => format!(
+    // PROD-11.1 (review L2): a stated window start is a time selection too,
+    // and is written inside `point_in_time`, so the refusal names the whole
+    // interval when there is one.
+    let selection = match (spec.restore.window_start, spec.restore.point_in_time) {
+        (Some(start), Some(point)) => format!(
+            "restore.point_in_time {}/{}, a window with a stated start",
+            start.to_rfc3339(),
+            point.to_rfc3339()
+        ),
+        (_, Some(point)) => format!("restore.point_in_time {}", point.to_rfc3339()),
+        (_, None) => format!(
             "sample.window_end {}, which is earlier than the newest timestamp the archive \
              manifest records for the topic",
             spec.sample.window_end.to_rfc3339()
@@ -467,6 +479,35 @@ mod tests {
             err.contains(&format!("restore.point_in_time {}", point.to_rfc3339())),
             "{err}"
         );
+    }
+
+    /// **PROD-11.1 (review L2).** A stated window start — the interval form
+    /// of `restore.point_in_time` — is a selection by time, and the refusal
+    /// names the whole interval, never `sample.window_end`. KILLS: the start
+    /// not counted as a time selection; the refusal naming only the end.
+    #[test]
+    fn a_window_start_over_a_log_append_time_topic_is_refused_and_named() {
+        let mut spec = plan(&["lat"], Some(T0 + 1_500), None, T1);
+        spec.restore.window_start = chrono::DateTime::from_timestamp_millis(T0 + 500);
+        let f = facts(vec![topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)])]);
+        let err = decide(
+            &spec,
+            &f,
+            &SourceConfigCoverage::unknown(),
+            &names(&["lat"]),
+        )
+        .expect_err("a window start over a LogAppendTime topic is refused");
+        let start = chrono::DateTime::from_timestamp_millis(T0 + 500).unwrap();
+        let point = chrono::DateTime::from_timestamp_millis(T0 + 1_500).unwrap();
+        assert!(
+            err.contains(&format!(
+                "restore.point_in_time {}/{}, a window with a stated start",
+                start.to_rfc3339(),
+                point.to_rfc3339()
+            )),
+            "{err}"
+        );
+        assert!(!err.contains("sample.window_end 2"), "{err}");
     }
 
     /// **The broker-default arm.** No override in the manifest; the verified

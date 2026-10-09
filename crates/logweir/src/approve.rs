@@ -313,7 +313,8 @@ pub fn mint_standing(
             format!(
                 "{} is not a RehearsalScope: {e}. It is D3 §4.3's scope in camelCase: \
                  templateDigest, targetClusterId, topicPrefix, topics, maxPartitions, \
-                 recordsPerPartition, deadlineSeconds, modes.",
+                 recordsPerPartition, deadlineSeconds, modes, and optionally coverage \
+                 (sampled or complete) and completeMaxRecords.",
                 standing.scope.display()
             )
         })?;
@@ -342,8 +343,29 @@ pub fn mint_standing(
             "the scope names no `topics`, so it authorises the restore of nothing".to_string(),
         );
     }
+    // PROD-08.1a review M1: a scope that authorises complete coverage signs
+    // `maxPartitions: 0` and nothing else — a complete plan samples no
+    // partitions, and 0 is what makes every reader older than format 1.1.0
+    // refuse every plan under the document (`COMPLETE_SCOPE_MAX_PARTITIONS`).
+    // Refused here, with the value to write, rather than by the admission
+    // below with a reader's wording.
+    let complete = scope.signed_coverage() == logweir_core::spec::Coverage::Complete;
+    if complete
+        && scope.max_partitions != logweir_core::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS
+    {
+        return Err(format!(
+            "the scope says `\"coverage\": \"complete\"` and `\"maxPartitions\": {}`; a scope \
+             that authorises complete coverage states `\"maxPartitions\": 0`. A complete plan \
+             samples no partitions, and 0 is what makes a runner or controller older than \
+             formatVersion {} refuse every plan under it, instead of reading it as a sampled \
+             scope. The schedule's own spec.bounds.maxPartitions still bounds which point a slot \
+             selects, inside the signed templateDigest",
+            scope.max_partitions,
+            wire::STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE
+        ));
+    }
     for (zero, what) in [
-        (scope.max_partitions == 0, "maxPartitions"),
+        (scope.max_partitions == 0 && !complete, "maxPartitions"),
         (scope.records_per_partition == 0, "recordsPerPartition"),
         (scope.deadline_seconds == 0, "deadlineSeconds"),
     ] {
@@ -376,8 +398,11 @@ pub fn mint_standing(
         .map_err(|e| format!("{}: {e}", args.key.display()))?;
 
     let issued_at = standing.issued_at.unwrap_or(now);
+    // PROD-08.1a: 1.1.0 exactly when the scope carries `coverage` or
+    // `completeMaxRecords`, so every other document is minted byte for byte as
+    // before; `admit_standing_authorization` below refuses an incoherent pair.
     let doc = wire::StandingAuthorization {
-        format_version: wire::STANDING_AUTHORIZATION_FORMAT_VERSION.to_string(),
+        format_version: wire::standing_format_version_for(&scope).to_string(),
         kind: wire::STANDING_AUTHORIZATION_KIND.to_string(),
         subject_ref: wire::AuthorizationSubject {
             api_version: wire::SUBJECT_API_VERSION.to_string(),

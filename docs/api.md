@@ -355,10 +355,13 @@ object.** The rules, exactly:
   `RecordedBeforeRevocation`; a client that must read older servers checks
   `trust.basis` as well.
 - `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
-  (`consume-only`) or `none`. **`complete` does not exist in v1.** A Backup is
-  always `none` with the three counts **absent** rather than zero: a receipt
-  attests counts and a window, not a restore, and `0 of 0 sampled records
-  matched` reads as a failed comparison.
+  (`consume-only`) or `none`: HOW records were compared. **`complete` is not a
+  level.** HOW MUCH was compared is `verificationScope.coverage` (PROD-08.1a,
+  [below](#the-restores-coverage-prod-081a)), so a complete verification
+  compared byte for byte reads `level: sampled` beside `coverage: complete`. A
+  Backup is always `none` with the three counts **absent** rather than zero: a
+  receipt attests counts and a window, not a restore, and `0 of 0 sampled
+  records matched` reads as a failed comparison.
 - `stale` is `true`, and the state is `unknown/StatusStale`, when an active run
   has not been observed for 300 s or an object has carried no status for 120 s
   after creation. A **terminal** object never goes stale: nothing is going to
@@ -951,6 +954,65 @@ own clocks". A list longer than this view's bound of 100 omits the whole field
 rather than truncating it, because a partial list would be a claim the signed
 document does not make. The field is additive: a client that predates it
 ignores it.
+
+### The restore's coverage (PROD-08.1a)
+
+**Asking for it.** `POST .../restores` takes two optional fields beside the plan:
+
+```json
+{"coverage": "complete", "completeMaxRecords": 1000000}
+```
+
+They **declare** what `planBytes` says (`sample.coverage`,
+`sample.complete_max_records`) and are stored on `Restore.spec.coverage` and
+`spec.completeMaxRecords`. This route never parses the plan, so it cannot
+compare the two; the controller does, before an approval is waited for, and
+ends a `Restore` whose plan says otherwise `Failed` / `ExecutionSpecInvalid`
+([kubernetes.md](kubernetes.md) §12). Absent means `sampled`, stores nothing,
+and is left out of the idempotency request hash, so a client that predates the
+fields creates the object it always did. Complete coverage reads every archived
+record of the restored topics and the whole restored output: about a minute
+per GiB of one-KiB records with an optimised build on a laptop, against about
+five seconds for the sampled check.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `completeMaxRecords` | `out_of_range` | below 1: a complete verification that may decode no record compares nothing. |
+| `completeMaxRecords` | `requires_complete_coverage` | set without `coverage: complete`: it bounds a complete verification and nothing else. |
+
+**Reading it.** Both restore reads, the list included, carry a required
+`coverage` block:
+
+```json
+{"coverage": {"requested": "complete", "completeMaxRecords": 300,
+              "recorded": "complete", "covered": false,
+              "incompleteReason": "sample.complete_max_records is 300: orders/1 and every later partition were not compared"}}
+```
+
+`requested` is what the `Restore` asks for (`spec.coverage`, absent read as
+`sampled`). `recorded` is what its signed scorecard says it verified, copied by
+the controller onto `status.integrity.coverage` — a claim until the evidence
+verifies, and **absent means not recorded** (a scorecard before format 1.4.0, a
+refused run, or one not read yet), never complete. `covered` and
+`incompleteReason` belong to a recorded complete verification. **`covered:
+false` is never a pass**: `operation.verifiedSuccess` is computed with the
+controller's badge rule, which refuses green beside it (`CompleteNotCovered`),
+even beside an `outcome` that says pass.
+
+The operation route's `verificationScope` (`GET .../operations/restore/{name}`)
+adds `coverage` (the same `recorded` value), `complete` — `covered`,
+`incompleteReason`, `maxRecords`, the archive counts (`segments`,
+`segmentsVerified`, `segmentsFailed`, `segmentsUnverified`, `recordsDecoded`,
+`offsetHoles`), the totals under `replay` (`expected`, `restored`, `matching`,
+`missing`, `unexpected`, `duplicates`, `outOfOrder`, `mismatched`),
+`partitionCount` and, up to 256 partitions, `partitions[]` with each one's own
+`replay` and `compared` (absent past 256; the rows stay in the scorecard) — and
+FX-23's `unsampledTopics` for a sampled check: the restored topics the
+partition cap left without a sampled partition. `complete` is served only beside
+a recorded `coverage: complete`. All three are additive.
+
+`GET .../rehearsal-schedules[/{name}]`'s `bounds` carries `coverage` (`sampled`
+when the schedule states none, or `complete`) and `completeMaxRecords`.
 
 ### Saved destinations
 

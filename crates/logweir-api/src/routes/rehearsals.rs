@@ -94,6 +94,13 @@ pub struct RehearsalBoundsView {
     pub records_per_partition: i32,
     /// The partition ceiling, enforced when the catalog knows the count.
     pub max_partitions: i32,
+    /// **PROD-08.1a.** How much of each rehearsal is verified: `sampled`
+    /// (the schedule states none) or `complete`. Inside the standing
+    /// authorization, whose scope must itself say `complete`.
+    pub coverage: crate::contract::RestoreCoverage,
+    /// **PROD-08.1a.** The bound on each complete verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complete_max_records: Option<i64>,
 }
 
 /// The last rehearsal that passed.
@@ -288,6 +295,15 @@ pub fn view(schedule: &RehearsalSchedule) -> RehearsalScheduleView {
             starting_deadline_seconds: spec.bounds.starting_deadline_seconds,
             records_per_partition: spec.bounds.records_per_partition,
             max_partitions: spec.bounds.max_partitions,
+            coverage: match spec.bounds.coverage {
+                Some(weirkeeper::crds::restore::VerificationCoverage::Complete) => {
+                    crate::contract::RestoreCoverage::Complete
+                }
+                Some(weirkeeper::crds::restore::VerificationCoverage::Sampled) | None => {
+                    crate::contract::RestoreCoverage::Sampled
+                }
+            },
+            complete_max_records: spec.bounds.complete_max_records,
         },
         rto_seconds: spec.objectives.as_ref().and_then(|o| o.rto_seconds),
         standing_approval_ref: name_ref(&spec.authorization.standing_approval_ref),

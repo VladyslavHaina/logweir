@@ -113,7 +113,7 @@ interpolated into a document Logweir then signs and publishes.
 | Field | Type | Meaning |
 |---|---|---|
 | `engine.id` | string | `oso-cli`. |
-| `engine.version` | string | The engine's `--version` token, at or above the supported floor: `0.23.3+logweir.1` for Logweir's build (PROD-00.2), `0.23.3` for OSO's release. |
+| `engine.version` | string | The engine's `--version` token, at or above the supported floor: `0.23.3+logweir.2` for Logweir's build (PROD-00.2; `+logweir.1` before FX-21's patch 0002), `0.23.3` for OSO's release. |
 | `engine.digest` | string | `sha256:…`: Logweir's build-input digest (`third_party/kafka-backup-build.env`) for Logweir's build, the image digest from `third_party/kafka-backup-binary.digest` for OSO's release. Inside the runner image both fields are what the image declares in `/etc/logweir/engine-identity`. |
 
 `digest` is why this block is worth signing. Pinning is by digest and never by

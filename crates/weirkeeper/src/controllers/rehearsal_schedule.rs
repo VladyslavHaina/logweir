@@ -851,6 +851,13 @@ pub fn child_restore(
             },
             deadline_seconds: i64::from(spec.bounds.deadline_seconds),
             runner_resources: spec.bounds.runner_resources.clone(),
+            // PROD-08.1a: the schedule's coverage, VERBATIM — the same value
+            // `render_plan` wrote into `plan_bytes`, so the Restore
+            // controller's agreement check holds by construction, and absent
+            // when the schedule states none (a sampled slot's Restore is the
+            // object it always was).
+            coverage: spec.bounds.coverage,
+            complete_max_records: spec.bounds.complete_max_records,
         },
         status: None,
     })

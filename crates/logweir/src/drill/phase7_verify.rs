@@ -223,6 +223,7 @@ use logweir_core::engine::{
     EngineReport, EngineRun, RecordFingerprint, RestorePlan, SampleSelection, SegmentFacts,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
+use logweir_core::replay_selection::ReplaySelection;
 use logweir_core::scorecard::{Integrity, TopicParity};
 use logweir_core::scorecard::{
     Verification, APPLICATION_NOT_ATTEMPTED, COMPARISON_BASIS_ARCHIVE, HEADER_ORDER_NOT_VERIFIED,
@@ -339,6 +340,11 @@ pub fn compare(
 /// `INTENDED` and applied the scratch rationale in every mode.
 const DECIDED_BY_THE_RESTORE: [&str; 2] = ["cleanup.policy", "retention.ms"];
 
+/// The `<key>` of a partition-count entry in `topic_parity`.
+const PARTITION_COUNT: &str = "partition_count";
+/// The `<key>` of a replication-factor entry in `topic_parity`.
+const REPLICATION_FACTOR: &str = "replication_factor";
+
 /// One topic's deviations, by class. Each entry is a bare key here;
 /// `classify_parity_all` prefixes it with the target topic.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -353,6 +359,12 @@ pub struct ParityClasses {
     /// `topic_parity.not_reconstructed` (format 1.2.0): a `newTopic`
     /// restore's deviations on the four kinds. Always empty in `scratch` mode.
     pub not_reconstructed: Vec<String>,
+    /// **FX-21.** `partition_count` and/or `replication_factor` when the
+    /// SOURCE's value is not recorded, so the two were NOT compared: never a
+    /// match, never a deviation. `classify_parity_all` names each in
+    /// `topic_parity.not_assessed` as `"<target topic>: <key> (notRecorded)"`
+    /// and writes its fail-safe twin into `unexpected_divergence`.
+    pub not_assessed: Vec<String>,
 }
 
 /// Spec §9.3 phase 7(d) requires the replication-factor and partition-count
@@ -379,13 +391,23 @@ pub struct ParityClasses {
 ///   weaker conclusion than the old label and never silence.
 ///
 /// Every other differing key is `unexpected` in both modes.
+///
+/// # A source value that is not recorded is not a match (FX-21)
+///
+/// `src_partitions` and `src_rf` are what the SOURCE's record says, and `None`
+/// when it says nothing. Until FX-21 the caller substituted the TARGET's value
+/// for a missing one, so "not recorded" compared as "no divergence" — and
+/// engine 0.23.3 records the replication factor in the manifest for the first
+/// topic it saves only, so every other topic's factor was signed as matching.
+/// A missing value is now neither compared nor matched: its key goes into
+/// [`ParityClasses::not_assessed`], whatever the mode.
 pub fn classify_parity(
     mode: TargetMode,
     source_cfg: &BTreeMap<String, String>,
     target_cfg: &BTreeMap<String, String>,
-    src_partitions: i32,
+    src_partitions: Option<i32>,
     tgt_partitions: i32,
-    src_rf: i16,
+    src_rf: Option<i16>,
     tgt_rf: i16,
 ) -> ParityClasses {
     // What the restore's creation decided, whatever the mode.
@@ -402,11 +424,19 @@ pub fn classify_parity(
             unexpected.push(k.clone())
         }
     }
-    if src_partitions != tgt_partitions {
-        by_construction.push("partition_count".into());
+    // FX-21: compared only where the source's value is recorded. A recorded
+    // count of 0 or less is no count (the receipt's arm 19 refuses one), so it
+    // is not recorded either.
+    let mut not_assessed = Vec::new();
+    match src_partitions.filter(|n| *n >= 1) {
+        Some(src) if src != tgt_partitions => by_construction.push(PARTITION_COUNT.into()),
+        Some(_) => {}
+        None => not_assessed.push(PARTITION_COUNT.to_string()),
     }
-    if src_rf != tgt_rf {
-        by_construction.push("replication_factor".into());
+    match src_rf.filter(|n| *n >= 1) {
+        Some(src) if src != tgt_rf => by_construction.push(REPLICATION_FACTOR.into()),
+        Some(_) => {}
+        None => not_assessed.push(REPLICATION_FACTOR.to_string()),
     }
     by_construction.sort();
     let mut classes = match mode {
@@ -414,6 +444,7 @@ pub fn classify_parity(
             intended: by_construction,
             unexpected,
             not_reconstructed: Vec::new(),
+            not_assessed,
         },
         TargetMode::NewTopic => {
             // MOVED, never dropped: the twin in the list every reader shows.
@@ -422,6 +453,7 @@ pub fn classify_parity(
                 intended: Vec::new(),
                 unexpected,
                 not_reconstructed: by_construction,
+                not_assessed,
             }
         }
     };
@@ -1298,9 +1330,8 @@ fn verdict_for_selection(
 /// topic-rename mapping (module doc, point 2) before ever calling `reader`.
 /// Target partition count comes from `reader.end_offsets` (one entry per
 /// partition — a real, per-run READ of the cluster). Target replication
-/// factor does NOT have an equivalent read: `ClusterReader` exposes no RF
-/// accessor at all, so `plan.default_replication_factor` is used instead —
-/// this is Task 19 fix round 2's correction (review's FIX 7 remainder) of a
+/// factor is NOT read back: `plan.default_replication_factor` is used instead
+/// — this is Task 19 fix round 2's correction (review's FIX 7 remainder) of a
 /// wording bug in an earlier draft of this comment, which claimed "the exact
 /// value phase 6 rendered when it created the topic" as if it were a
 /// measurement. It is not: `plan.default_replication_factor` is what phase 6
@@ -1310,12 +1341,23 @@ fn verdict_for_selection(
 /// not be detected here. Read this field as an assertion about the PLAN, not
 /// a measurement of the cluster (see this file's `classify_parity` test
 /// `scratch_deviations_are_intentional_and_anything_else_is_not`, which
-/// exercises the same assumption). When a backup predates
-/// original-partition-count/replication-factor capture
-/// (`TopicFacts.original_partition_count`/`source_replication_factor` are
-/// `None`), the target's own value is used as the source value too, so an
-/// unknown quantity is reported as "not different" rather than fabricating a
-/// divergence claim this phase never actually measured.
+/// exercises the same assumption). PROD-05.1 gave `ClusterReader` a
+/// `replication_factors` read since, which this phase does not use yet.
+///
+/// # FX-21: a source value that is not recorded is NOT ASSESSED
+///
+/// The SOURCE's partition count is the manifest's `original_partition_count`
+/// and its replication factor the manifest's `source_replication_factor`,
+/// else the verified receipt's `topic_configuration` factor
+/// ([`SourceConfigCoverage::replication_factor`], format 1.3.0, Logweir's own
+/// metadata read). The manifest's comes first, so a document whose manifest
+/// records the factor is decided exactly as before. Where neither records one
+/// — engine 0.23.3 records the factor for the first topic it saves only, and a
+/// manifest before engine 0.17 records neither — the key is named in
+/// `not_assessed` as `"<target>: <key> (notRecorded)"`, with its fail-safe
+/// twin in `unexpected_divergence`, and is never compared. Until FX-21 the
+/// TARGET's own value stood in for the missing one, so "not recorded" was
+/// signed as "no divergence".
 ///
 /// Refuses `mapping.is_empty()` outright: a parity check folded over zero
 /// topics returns `(vec![], vec![])`, which reads exactly like "checked every
@@ -1343,7 +1385,8 @@ fn verdict_for_selection(
 /// a difference it shows is a fact whatever the coverage. What a `not_assessed`
 /// entry withdraws is the SILENCE — "no divergence" for that topic proves
 /// nothing. Partition count and replication factor come from metadata, not
-/// from DescribeConfigs, and are classified either way.
+/// from DescribeConfigs, and are classified whatever the coverage — wherever
+/// the source's value is recorded (FX-21, above).
 ///
 /// # FX-3: the mode decides `intended` versus `not_reconstructed`
 ///
@@ -1386,15 +1429,23 @@ fn classify_parity_all(
         };
         let tgt_partitions = reader.end_offsets(tgt)?.len() as i32;
         let tgt_rf = plan.default_replication_factor;
-        let src_partitions = t.original_partition_count.unwrap_or(tgt_partitions);
-        let src_rf = t.source_replication_factor.unwrap_or(tgt_rf);
+        // FX-21: what the SOURCE's record says, and nothing when it says
+        // nothing — never the target's own value. The manifest's factor first
+        // (a document whose manifest records it is decided as before), then
+        // the verified receipt's.
+        let src_partitions = t.original_partition_count;
+        let src_rf = t.source_replication_factor.or_else(|| {
+            coverage
+                .replication_factor(src)
+                .and_then(|f| i16::try_from(f).ok())
+        });
         let why = match (coverage.of(src), &target_cfg) {
             (ConfigCoverage::Captured, Some(_)) => None,
             (ConfigCoverage::Captured, None) => Some(NOT_ASSESSED_TARGET_READ_DENIED),
             (source, _) => Some(source.wire_name()),
         };
         if let Some(why) = why {
-            not_assessed.push(format!("{tgt}: configuration ({why})"));
+            not_assessed.push(not_assessed_entry(tgt, CONFIGURATION, why));
             // The fail-safe twin in the array every reader already shows
             // (review M5): a reader that predates `not_assessed` must never
             // see this topic's silence as parity.
@@ -1428,6 +1479,13 @@ fn classify_parity_all(
                 .into_iter()
                 .map(|k| format!("{tgt}: {k}")),
         );
+        // FX-21: a partition count or replication factor the source's record
+        // lacks, named with its fail-safe twin, exactly as FX-4 names a
+        // configuration it could not assess.
+        for key in classes.not_assessed {
+            not_assessed.push(not_assessed_entry(tgt, &key, NOT_ASSESSED_NOT_RECORDED));
+            unexpected_all.push(not_assessed_twin(tgt, &key, NOT_ASSESSED_NOT_RECORDED));
+        }
     }
     intended_all.sort();
     unexpected_all.sort();
@@ -1452,6 +1510,33 @@ fn classify_parity_all(
 /// captured but whose TARGET configuration read was refused (FX-4, T13).
 pub const NOT_ASSESSED_TARGET_READ_DENIED: &str = "targetReadDenied";
 
+/// **FX-21.** The `not_assessed` reason for a `partition_count` or
+/// `replication_factor` the SOURCE's record does not carry: neither the
+/// archive's manifest nor, for the factor, the verified receipt's
+/// `topic_configuration` names one.
+pub const NOT_ASSESSED_NOT_RECORDED: &str = "notRecorded";
+
+/// What FX-4's entries name: a topic's configuration overrides.
+const CONFIGURATION: &str = "configuration";
+
+/// One `topic_parity.not_assessed` entry: `"<target topic>: <what> (<why>)"`,
+/// where `<what>` is `configuration` (FX-4), `partition_count` or
+/// `replication_factor` (FX-21).
+fn not_assessed_entry(target_topic: &str, what: &str, why: &str) -> String {
+    format!("{target_topic}: {what} ({why})")
+}
+
+/// The fail-safe twin of a `not_assessed` entry in `unexpected_divergence`:
+/// `"<target topic>: <what> not assessed (<why>)"` (see
+/// [`not_assessed_marker`], FX-4's, for why it exists). Its `<key>` — the
+/// text after the last `": "` — is `<what> not assessed (<why>)`, never one of
+/// the four settings the restore decides, so the scorecard's NR-5 arm does not
+/// read a `partition_count` or `replication_factor` twin as a deviation
+/// `not_reconstructed` must name.
+fn not_assessed_twin(target_topic: &str, what: &str, why: &str) -> String {
+    format!("{target_topic}: {what} not assessed ({why})")
+}
+
 /// The entry phase 7 ALSO writes into `unexpected_divergence` for every topic
 /// it names in `not_assessed` (FX-4 fix round, review M5).
 ///
@@ -1467,9 +1552,12 @@ pub const NOT_ASSESSED_TARGET_READ_DENIED: &str = "targetReadDenied";
 /// `<why>` is the `not_assessed` reason. A configuration key never contains a
 /// space, so a reader that parses `"<topic>: <key>"` entries can tell this
 /// one apart; the authoritative list stays `not_assessed`.
+///
+/// FX-21 writes the same twin for a `partition_count` or `replication_factor`
+/// the source's record lacks (`not_assessed_twin`).
 #[must_use]
 pub fn not_assessed_marker(target_topic: &str, why: &str) -> String {
-    format!("{target_topic}: configuration not assessed ({why})")
+    not_assessed_twin(target_topic, CONFIGURATION, why)
 }
 
 /// Wraps `DataEngine::validation_run` — see that method's doc comment
@@ -1614,7 +1702,12 @@ fn check_restored_count(
     mapping: &BTreeMap<String, String>,
     floor_ms: i64,
     pit_ms: i64,
+    selection: &ReplaySelection,
 ) -> Result<Option<String>, DrillError> {
+    // PROD-11.1: the bound is the SELECTION's. A partition the plan did not
+    // select is no partition of this restore: it proves nothing and must be
+    // empty on the target (below). A plan with no subset restricts nothing.
+    let facts = &selection.restrict(facts);
     // UNREACHABLE FROM `run` TODAY, and kept deliberately — the same cheap
     // belt-and-braces as `roll_up`'s redundant `!verdicts.is_empty()`
     // conjunct below, and stated here for the same reason: an unexplained
@@ -1698,7 +1791,12 @@ fn check_restored_count(
             }
         }
         for (id, hi) in &ends {
-            if *hi > 0 && !listed.contains(id) {
+            if *hi > 0 && !selection.selects_partition(src, *id) {
+                per_partition.push(format!(
+                    "{target}/{id} holds {hi} records but the plan's restore.partitions does not \
+                     select partition {id} of {src}"
+                ));
+            } else if *hi > 0 && !listed.contains(id) {
                 per_partition.push(format!(
                     "{target}/{id} holds {hi} records but the manifest lists no partition {id} \
                      of {src}"
@@ -1939,6 +2037,10 @@ pub fn run_after_restore(
     // guard: it is the chokepoint's own precondition — `roll_up` can only be
     // sound if the ledger it reads covers every selection.
     let selected: Vec<(String, i32)> = sel.iter().map(|s| (s.topic.clone(), s.partition)).collect();
+    // PROD-11.1: the plan's replay selection (its own start, its subsets),
+    // which every whole-drill check below is judged over. A plan that states
+    // none selects every partition from the archive's floor.
+    let selection = ReplaySelection::from_plan(plan);
     let (verdicts, count_bound, block) = match verify {
         Coverage::Sampled => {
             let archives = probe_archive_modes(engine, sel)?;
@@ -1973,6 +2075,7 @@ pub fn run_after_restore(
                 mapping,
                 plan.time_window.0.timestamp_millis(),
                 plan.time_window.1.timestamp_millis(),
+                &selection,
             )?;
             if let Some(why) = &count_bound {
                 tracing::error!(target: "logweir::verify", detail = %why,
@@ -2022,7 +2125,8 @@ pub fn run_after_restore(
     // in the joined text — both are whole-drill findings `roll_up` takes as
     // one argument and can only turn into a `Fail`.
     let report_finding = check_engine_report(
-        facts,
+        // PROD-11.1: only the selected partitions must be in the report.
+        &selection.restrict(facts),
         mapping,
         plan.time_window.0.timestamp_millis(),
         plan.time_window.1.timestamp_millis(),
@@ -2111,12 +2215,30 @@ mod tests {
             .iter()
             .map(|k| k.to_string())
             .collect();
-        let nt = classify_parity(TargetMode::NewTopic, &source, &BTreeMap::new(), 6, 3, 3, 1);
+        let nt = classify_parity(
+            TargetMode::NewTopic,
+            &source,
+            &BTreeMap::new(),
+            Some(6),
+            3,
+            Some(3),
+            1,
+        );
         assert_eq!(nt.not_reconstructed, core);
         assert!(nt.intended.is_empty());
-        let sc = classify_parity(TargetMode::Scratch, &source, &BTreeMap::new(), 6, 3, 3, 1);
+        assert!(nt.not_assessed.is_empty());
+        let sc = classify_parity(
+            TargetMode::Scratch,
+            &source,
+            &BTreeMap::new(),
+            Some(6),
+            3,
+            Some(3),
+            1,
+        );
         assert_eq!(sc.intended, core);
         assert!(sc.not_reconstructed.is_empty());
+        assert!(sc.not_assessed.is_empty());
         // The other keys stay unexpected in both modes, never decided.
         for classes in [&nt, &sc] {
             assert!(classes
@@ -2126,6 +2248,80 @@ mod tests {
                 .unexpected
                 .contains(&"max.message.bytes".to_string()));
         }
+    }
+
+    /// FX-21: a source partition count or replication factor that is NOT
+    /// RECORDED is neither a match nor a deviation, in both modes, whatever
+    /// the target's value — including the value the old code substituted for
+    /// it (the target's own), which is exactly the false match this closes.
+    /// A recorded `0` or less is no count either. The control: the same
+    /// values recorded are compared as before.
+    #[test]
+    fn a_source_layout_that_is_not_recorded_is_not_assessed_never_matched() {
+        let none = BTreeMap::new();
+        for mode in [TargetMode::Scratch, TargetMode::NewTopic] {
+            for (sp, sr) in [(None, None), (Some(0), Some(0)), (Some(-1), Some(-3))] {
+                let c = classify_parity(mode, &none, &none, sp, 3, sr, 1);
+                assert_eq!(
+                    c.not_assessed,
+                    vec![
+                        "partition_count".to_string(),
+                        "replication_factor".to_string()
+                    ],
+                    "{mode:?} {sp:?} {sr:?}"
+                );
+                assert!(c.intended.is_empty(), "{mode:?}: {c:?}");
+                assert!(c.unexpected.is_empty(), "{mode:?}: {c:?}");
+                assert!(c.not_reconstructed.is_empty(), "{mode:?}: {c:?}");
+            }
+            // Only the factor missing: the count is still compared.
+            let c = classify_parity(mode, &none, &none, Some(6), 3, None, 1);
+            assert_eq!(c.not_assessed, vec!["replication_factor".to_string()]);
+            let decided = if mode == TargetMode::Scratch {
+                &c.intended
+            } else {
+                &c.not_reconstructed
+            };
+            assert_eq!(decided, &vec!["partition_count".to_string()]);
+            // The control: recorded and equal is a match, recorded and
+            // different a deviation, and nothing is not assessed.
+            let same = classify_parity(mode, &none, &none, Some(3), 3, Some(1), 1);
+            assert_eq!(same, ParityClasses::default(), "{mode:?}");
+            let differ = classify_parity(mode, &none, &none, Some(3), 3, Some(3), 1);
+            assert!(differ.not_assessed.is_empty());
+            assert!(
+                differ.intended.contains(&"replication_factor".to_string())
+                    || differ
+                        .not_reconstructed
+                        .contains(&"replication_factor".to_string()),
+                "{mode:?}: {differ:?}"
+            );
+        }
+    }
+
+    /// FX-21: the twin's key, as arm NR-5 reads it (`parity_key`: the text
+    /// after the LAST `": "`), is never one of the settings the restore
+    /// decides, so a `newTopic` document carrying a `replication_factor`
+    /// twin is not refused for omitting it from `not_reconstructed`.
+    #[test]
+    fn a_not_assessed_twin_is_never_a_restore_decided_key() {
+        for what in [CONFIGURATION, PARTITION_COUNT, REPLICATION_FACTOR] {
+            let twin = not_assessed_twin("restore-x-orders", what, NOT_ASSESSED_NOT_RECORDED);
+            let key = twin.rsplit_once(": ").map_or(twin.as_str(), |(_, k)| k);
+            assert!(
+                !logweir_core::scorecard::RESTORE_DECIDED_SETTINGS.contains(&key),
+                "{twin}"
+            );
+            assert_eq!(
+                not_assessed_entry("restore-x-orders", what, NOT_ASSESSED_NOT_RECORDED),
+                format!("restore-x-orders: {what} (notRecorded)")
+            );
+        }
+        assert_eq!(
+            not_assessed_marker("t", "unknown"),
+            "t: configuration not assessed (unknown)",
+            "FX-4's marker is byte for byte what it was"
+        );
     }
 
     fn facts_one_segment() -> BackupSetFacts {
@@ -3764,6 +3960,7 @@ mod tests {
             topic_mapping: BTreeMap::new(),
             time_window: (chrono::Utc::now(), chrono::Utc::now()),
             window_floor_source: logweir_core::engine::WindowFloorSource::ArchiveManifest,
+            source_partitions: Default::default(),
             default_replication_factor: 1,
             checkpoint_state: "/tmp/checkpoint.json".into(),
             checkpoint_interval_secs: 30,

@@ -14,7 +14,7 @@ commented out.
 
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
 shipped. The engine the images carry is **Logweir's build of OSO 0.23.3**,
-`kafka-backup 0.23.3+logweir.1` (PROD-00.2): the vendored OSO source plus
+`kafka-backup 0.23.3+logweir.2` (PROD-00.2; build 2 is FX-21's patch 0002): the vendored OSO source plus
 Logweir's patch folder, built for linux/amd64 and linux/arm64
 ([../third_party/kafka-backup-build.env](../third_party/kafka-backup-build.env)).
 A standalone CLI install needs that binary, because `logweir doctor` accepts

@@ -2857,11 +2857,16 @@ export function revisionLine(ref) {
 //      `NotAttempted`, and the three are three different claims -- about the
 //      SIGNER, about the DOCUMENT and about the CONTROLLER. A single word for
 //      all three destroys the distinction that says what to go and fix.
-//   3. "exhaustive". A restore's record check is a SAMPLE. `verificationScope`
-//      carries the sampled counts and [`verificationScopeSentence`] renders
-//      them with the words "this is a sampled check, not an exhaustive
-//      comparison" -- never "complete", which is a level that does not exist
-//      in v1 (D3 section 2.5).
+//   3. "exhaustive", over a sample. A restore's record check is a SAMPLE
+//      unless its signed scorecard says otherwise. `verificationScope` carries
+//      the sampled counts and [`verificationScopeSentence`] renders them with
+//      the words "this is a sampled check, not an exhaustive comparison". The
+//      word `complete` is rendered ONLY where the signed scorecard recorded
+//      `coverage: complete` (PROD-08.1a), and then always beside `covered`:
+//      a complete verification that did not cover the restore says so, and is
+//      never shown as a pass. An absent coverage is "not recorded", never
+//      complete, and `complete` is still not a value of the LEVEL (D3 section
+//      2.5), which says how records were compared, not how many.
 //   4. "protected", for a policy Logweir could not evaluate. `health: Unknown`
 //      is rendered as unknown, and the `Protected` condition's `Unknown` is
 //      never rounded to `False`: "Logweir checked and you are not protected"
@@ -3120,18 +3125,155 @@ export function unverifiedCaption(verification, runSucceeded) {
   return said.length === 0 ? UNVERIFIED : UNVERIFIED + ": " + said;
 }
 
+/** PROD-08.1a: what complete coverage costs, said wherever an operator can
+ *  choose it. The figures are the PROD-08.1 decision record's (section 7),
+ *  measured on one laptop; the sentence says so rather than promising a rate. */
+export const COMPLETE_COVERAGE_COST =
+  "Complete coverage reads every archived record of the restored topics and every restored " +
+  "record back, and compares each one with the archive -- key, value, timestamp and headers in " +
+  "order -- by its source offset. It costs far more than the sampled check: about a minute per " +
+  "GiB of one-KiB records with an optimised build on a laptop, against about five seconds for " +
+  "the sampled check, and more for a larger archive or a slower object store. A record bound " +
+  "that stops it, or an archive it cannot compare, signs `covered: false`, which is never a pass.";
+
+/** PROD-08.1a: whether a recorded coverage block says the restore was NOT
+ *  covered. The one predicate every badge and list verdict in this tree uses,
+ *  so no surface can read `covered: false` as a pass. */
+export function notCovered(complete) {
+  return complete !== null && typeof complete === "object" && complete.covered === false;
+}
+
+/** PROD-08.1a: the sentence for a recorded complete verification. `complete`
+ *  is the block (`verificationScope.complete` or the custom resource's
+ *  `status.integrity.complete`), or `null` when the coverage was recorded and
+ *  the block could not be read. */
+export function completeCoverageSentence(complete) {
+  const c = complete || null;
+  if (c === null || typeof c !== "object" || typeof c.covered !== "boolean") {
+    return "This restore's signed scorecard records complete coverage, and its counts could not " +
+      "be read here, so whether it covered every partition is not known on this page. It is not " +
+      "shown as a pass.";
+  }
+  const r = c.replay || {};
+  const n = (v) => (typeof v === "number" ? String(v) : ABSENT);
+  if (c.covered !== true) {
+    const rows = Array.isArray(c.partitions) ? c.partitions : [];
+    const compared = rows.filter((p) => p && p.compared === true).length;
+    return "Complete coverage was asked for and did NOT cover this restore: " +
+      (typeof c.incompleteReason === "string" && c.incompleteReason.length > 0
+        ? c.incompleteReason
+        : "the scorecard names no reason") +
+      ". " + (rows.length > 0
+        ? String(compared) + " of " + n(c.partitionCount) + " partitions were compared. "
+        : "") +
+      "A verification that did not cover the restore is never a pass.";
+  }
+  return "Complete coverage: every record of every restored partition was compared with the " +
+    "archive. " + n(r.matching) + " of " + n(r.expected) + " expected records matched byte for " +
+    "byte, headers in order; " + n(r.restored) + " records were restored; missing " +
+    n(r.missing) + ", unexpected " + n(r.unexpected) + ", duplicated " + n(r.duplicates) +
+    ", out of order " + n(r.outOfOrder) + ", different " + n(r.mismatched) + ".";
+}
+
+/** PROD-08.1a: one restore's coverage in a word or three, for a list row or a
+ *  fact line. `recorded` is what the signed scorecard says (absent: not
+ *  recorded, never complete), `requested` what the Restore asked for, and
+ *  `complete` the recorded block when there is one. */
+export function coverageWords(recorded, requested, complete) {
+  if (recorded === "complete") {
+    if (notCovered(complete)) {
+      return "complete, NOT covered -- not a pass";
+    }
+    return complete !== null && typeof complete === "object" && complete.covered === true
+      ? "complete, covered"
+      : "complete, counts not read";
+  }
+  if (recorded === "sampled") {
+    return "sampled";
+  }
+  return requested === "complete"
+    ? "complete asked for; not recorded yet"
+    : "sampled (not recorded)";
+}
+
+/** PROD-08.1a: a recorded complete verification, in full -- the sentence, the
+ *  archive counts and one row per partition with its exact counts and whether
+ *  it was compared. `claim` captions each value the way the page captions every
+ *  scorecard fact (a claim until the evidence verifies); it defaults to the
+ *  plain cell. Empty for anything that is not a complete block. */
+export function renderCompleteCoverage(complete, claim) {
+  const c = complete || null;
+  if (c === null || typeof c !== "object" || typeof c.covered !== "boolean") {
+    return "";
+  }
+  const show = typeof claim === "function" ? claim : cell;
+  const rows = Array.isArray(c.partitions) ? c.partitions : null;
+  const replay = (p) => (p && p.replay) || {};
+  return (
+    "<section class=\"complete-coverage\" id=\"complete-coverage\" data-covered=\"" +
+      (c.covered ? "true" : "false") + "\"><h3>Complete coverage</h3>" +
+    "<p class=\"" + (c.covered ? "scope" : "caveat") + "\" id=\"complete-coverage-sentence\">" +
+      esc(completeCoverageSentence(c)) + "</p>" +
+    facts([
+      ["covered", show(c.covered ? "true" : "false")],
+      ["record bound", show(c.maxRecords)],
+      ["archive segments verified", show(c.segmentsVerified) + " of " + show(c.segments)],
+      ["segments failed", show(c.segmentsFailed)],
+      ["segments not examined", show(c.segmentsUnverified)],
+      ["archived records decoded", show(c.recordsDecoded)],
+      ["compaction holes (disclosed, not a fault)", show(c.offsetHoles)],
+    ]) +
+    (rows === null
+      ? "<p class=\"note\">The signed scorecard lists " + esc(String(c.partitionCount)) +
+        " partitions, more than this page is served; each one's counts are in the scorecard " +
+        "itself.</p>"
+      : table(
+        ["TOPIC", "PARTITION", "COMPARED", "EXPECTED", "RESTORED", "MATCHING", "MISSING",
+          "UNEXPECTED", "DUPLICATES", "OUT OF ORDER", "DIFFERENT"],
+        rows.map((p) => [
+          cell((p || {}).topic),
+          cell((p || {}).partition),
+          (p || {}).compared === true ? "yes" : "<strong>NO</strong>",
+          cell(replay(p).expected),
+          cell(replay(p).restored),
+          cell(replay(p).matching),
+          cell(replay(p).missing),
+          cell(replay(p).unexpected),
+          cell(replay(p).duplicates),
+          cell(replay(p).outOfOrder),
+          cell(replay(p).mismatched),
+        ]),
+        "The signed complete verification lists no partition.",
+      )) +
+    "</section>"
+  );
+}
+
 /** The sentence beside every restore result, from `verificationScope`
  *  (D3 section 2.5 and section 3.5).
  *
  *  THE COUNTS ARE LABELLED EXACTLY, and the last clause is not optional: a
- *  sampled comparison presented without it reads as a full one. `complete`
- *  does not exist as a level in v1 and this function cannot render it. */
+ *  sampled comparison presented without it reads as a full one. `complete` is
+ *  rendered only for a scope whose signed `coverage` is `complete`
+ *  (PROD-08.1a), by [`completeCoverageSentence`], which says whether it
+ *  covered; it is never a value of `level`. */
 export function verificationScopeSentence(scope) {
   const s = scope || null;
   if (s === null || typeof s !== "object") {
     return "No verification scope was recorded for this run, so how much of it was compared is " +
       "not known here. An absent scope is not a complete one.";
   }
+  if (s.coverage === "complete") {
+    return completeCoverageSentence(s.complete || null);
+  }
+  const unsampled = Array.isArray(s.unsampledTopics) && s.unsampledTopics.length > 0
+    ? " The partition cap left " + s.unsampledTopics.join(", ") + " without a sampled " +
+      "partition: counted against the bound, not compared record by record."
+    : "";
+  return sampledScopeSentence(s) + unsampled;
+}
+
+function sampledScopeSentence(s) {
   if (s.level === "none") {
     return "No record check ran for this restore: the run's own evidence attests what was " +
       "written and by whom, and no records were compared.";
@@ -3139,8 +3281,7 @@ export function verificationScopeSentence(scope) {
   if (typeof s.recordsSampled !== "number" && typeof s.recordsSampledMatching !== "number") {
     return "This restore's record check ran at level " + String(s.level) +
       " and recorded no sampled counts, so how many records were compared is not known here. " +
-      "Whatever it compared, it was a sample: a Restore cannot ask for an exhaustive " +
-      "comparison in this version.";
+      "Whatever it compared, it was a sample.";
   }
   const sampled = typeof s.recordsSampled === "number" ? String(s.recordsSampled) : ABSENT;
   const matching = typeof s.recordsSampledMatching === "number"

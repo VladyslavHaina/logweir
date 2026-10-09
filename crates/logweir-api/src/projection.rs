@@ -529,7 +529,28 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 producer_time: tb.producer_time.clone(),
                 not_recorded: tb.not_recorded.clone(),
             }),
+        coverage: restore_coverage(object),
         operation: summary(&operation),
+    }
+}
+
+/// **PROD-08.1a.** A Restore's coverage: what `spec` asks for (absent read as
+/// sampled) and what `status.integrity` copied from the signed scorecard.
+#[must_use]
+pub fn restore_coverage(object: &RestoreCr) -> crate::contract::RestoreCoverageView {
+    use crate::contract::RestoreCoverage;
+    use weirkeeper::crds::restore::VerificationCoverage;
+    let integrity = object.status.as_ref().and_then(|s| s.integrity.as_ref());
+    let complete = crate::status::complete_view(integrity);
+    crate::contract::RestoreCoverageView {
+        requested: match object.spec.coverage {
+            Some(VerificationCoverage::Complete) => RestoreCoverage::Complete,
+            Some(VerificationCoverage::Sampled) | None => RestoreCoverage::Sampled,
+        },
+        complete_max_records: object.spec.complete_max_records,
+        recorded: crate::status::recorded_coverage(integrity),
+        covered: complete.as_ref().map(|c| c.covered),
+        incomplete_reason: complete.and_then(|c| c.incomplete_reason),
     }
 }
 

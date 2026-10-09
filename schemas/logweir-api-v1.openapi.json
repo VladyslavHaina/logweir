@@ -6911,6 +6911,85 @@
           }
         }
       },
+      "CompleteVerificationView": {
+        "description": "**PROD-08.1a.** A complete verification's result, copied from `Restore.status.integrity.complete` (itself copied from the signed scorecard) and never recomputed.",
+        "type": "object",
+        "required": [
+          "covered",
+          "offsetHoles",
+          "partitionCount",
+          "recordsDecoded",
+          "replay",
+          "segments",
+          "segmentsFailed",
+          "segmentsUnverified",
+          "segmentsVerified"
+        ],
+        "properties": {
+          "covered": {
+            "description": "`true` when every partition of every restored topic was compared. `false` is NEVER a pass, on any surface.",
+            "type": "boolean"
+          },
+          "incompleteReason": {
+            "description": "Why `covered` is `false`.",
+            "type": "string",
+            "nullable": true
+          },
+          "maxRecords": {
+            "description": "The record bound the plan set.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "offsetHoles": {
+            "description": "Compaction holes inside the decoded span — disclosed, never a fault.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "partitionCount": {
+            "description": "How many partitions the signed block lists.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "partitions": {
+            "description": "One row per partition — absent when the signed block lists more than the status holds (256); the rows stay in the scorecard.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartitionVerificationView"
+            },
+            "nullable": true
+          },
+          "recordsDecoded": {
+            "description": "Archived records decoded.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "replay": {
+            "description": "The totals over every compared partition.",
+            "$ref": "#/components/schemas/ReplayCountsView"
+          },
+          "segments": {
+            "description": "Segments the manifest lists for the restored partitions.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "segmentsFailed": {
+            "description": "Segments examined and found wrong.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "segmentsUnverified": {
+            "description": "Segments that could not be examined.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "segmentsVerified": {
+            "description": "Segments verified: sha256, decode and manifest count all agreed.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "CompletionView": {
         "description": "D3 §3.5's incident-facing completion panel — a Restore's, copied from the signed scorecard and never recomputed.",
         "type": "object",
@@ -7566,6 +7645,17 @@
           "backupSetRef": {
             "description": "The backup set ID inside the archive.",
             "type": "string"
+          },
+          "completeMaxRecords": {
+            "description": "**PROD-08.1a.** The plan's `sample.complete_max_records`, stored as `Restore.spec.completeMaxRecords`: at least 1, and only with `coverage: complete`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "coverage": {
+            "description": "**PROD-08.1a.** The coverage `planBytes` asks for (`sample.coverage`), stored as `Restore.spec.coverage`. A DECLARATION, like `topicMapping`: this route never parses the plan, so it cannot compare the two; the controller does, before any approval is waited for, and refuses a `Restore` whose plan says otherwise (`ExecutionSpecInvalid`). Absent means `sampled`, is stored as absent, and keeps the idempotency hash unchanged.",
+            "$ref": "#/components/schemas/RestoreCoverage",
+            "nullable": true
           },
           "deadlineSeconds": {
             "description": "The Job deadline, 60 to 86400 seconds.",
@@ -9960,6 +10050,40 @@
           }
         }
       },
+      "PartitionVerificationView": {
+        "description": "One partition of a complete verification.",
+        "type": "object",
+        "required": [
+          "compared",
+          "partition",
+          "replay",
+          "topic"
+        ],
+        "properties": {
+          "compared": {
+            "description": "`false` when this partition was not compared.",
+            "type": "boolean"
+          },
+          "partition": {
+            "description": "The partition.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "replay": {
+            "description": "Its exact counts.",
+            "$ref": "#/components/schemas/ReplayCountsView"
+          },
+          "targetTopic": {
+            "description": "The restored topic it was compared with.",
+            "type": "string",
+            "nullable": true
+          },
+          "topic": {
+            "description": "The source topic.",
+            "type": "string"
+          }
+        }
+      },
       "PointLocationView": {
         "description": "One location a point was seen at.",
         "type": "object",
@@ -11346,15 +11470,26 @@
         "type": "object",
         "required": [
           "concurrencyPolicy",
+          "coverage",
           "deadlineSeconds",
           "maxPartitions",
           "recordsPerPartition",
           "startingDeadlineSeconds"
         ],
         "properties": {
+          "completeMaxRecords": {
+            "description": "*PROD-08.1a.** The bound on each complete verification.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
           "concurrencyPolicy": {
             "description": "`Forbid` — the only policy in v1.",
             "type": "string"
+          },
+          "coverage": {
+            "description": "**PROD-08.1a.** How much of each rehearsal is verified: `sampled` (the schedule states none) or `complete`. Inside the standing authorization, whose scope must itself say `complete`.",
+            "$ref": "#/components/schemas/RestoreCoverage"
           },
           "deadlineSeconds": {
             "description": "The run deadline.",
@@ -11682,12 +11817,69 @@
           }
         }
       },
+      "ReplayCountsView": {
+        "description": "The exact counts of a replay comparison.",
+        "type": "object",
+        "required": [
+          "duplicates",
+          "expected",
+          "matching",
+          "mismatched",
+          "missing",
+          "outOfOrder",
+          "restored",
+          "unexpected"
+        ],
+        "properties": {
+          "duplicates": {
+            "description": "Restored records repeating a source offset.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "expected": {
+            "description": "The expected output: archived records the window selects.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "matching": {
+            "description": "Expected records restored byte for byte, headers in order.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "mismatched": {
+            "description": "Expected records whose restored copy differs.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "missing": {
+            "description": "Expected records with no restored copy.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "outOfOrder": {
+            "description": "Restored records below a source offset seen before them.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "restored": {
+            "description": "Records the target holds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "unexpected": {
+            "description": "Restored records that are no expected record.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Restore": {
         "description": "A restore run.",
         "type": "object",
         "required": [
           "approvalRef",
           "backupSetRef",
+          "coverage",
           "deadlineSeconds",
           "name",
           "namespace",
@@ -11709,6 +11901,10 @@
           "backupSetRef": {
             "description": "The backup set ID.",
             "type": "string"
+          },
+          "coverage": {
+            "description": "**PROD-08.1a.** The coverage this restore asks for and the coverage its signed scorecard says it verified — on the list too, so a row says sampled or complete without a second read.",
+            "$ref": "#/components/schemas/RestoreCoverageView"
           },
           "createdAt": {
             "description": "When the object was created.",
@@ -11795,6 +11991,59 @@
           "uid": {
             "description": "The Kubernetes UID.",
             "type": "string"
+          }
+        }
+      },
+      "RestoreCoverage": {
+        "description": "**PROD-08.1a.** How much of a restore phase 7 verifies: `sampled` (the default) or `complete` — every record of every restored partition, which reads the whole archive of those partitions and the whole output and so costs more.",
+        "oneOf": [
+          {
+            "description": "A sampled check: the canary and the manifest's count bound.",
+            "type": "string",
+            "enum": [
+              "sampled"
+            ]
+          },
+          {
+            "description": "Every record of every restored partition, with exact counts.",
+            "type": "string",
+            "enum": [
+              "complete"
+            ]
+          }
+        ]
+      },
+      "RestoreCoverageView": {
+        "description": "*PROD-08.1a.** `Restore.coverage`: asked for, and signed.",
+        "type": "object",
+        "required": [
+          "requested"
+        ],
+        "properties": {
+          "completeMaxRecords": {
+            "description": "`spec.completeMaxRecords`, the bound on a complete verification.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "covered": {
+            "description": "For a recorded complete verification: whether it covered every partition. `false` is NEVER a pass.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "incompleteReason": {
+            "description": "Why `covered` is `false`.",
+            "type": "string",
+            "nullable": true
+          },
+          "recorded": {
+            "description": "What the signed scorecard says it verified — a CLAIM until the evidence verifies. ABSENT MEANS NOT RECORDED (a scorecard before format 1.4.0, a refused run, or one not read yet), never complete.",
+            "$ref": "#/components/schemas/RestoreCoverage",
+            "nullable": true
+          },
+          "requested": {
+            "description": "What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`.",
+            "$ref": "#/components/schemas/RestoreCoverage"
           }
         }
       },
@@ -14492,7 +14741,7 @@
         "additionalProperties": false
       },
       "VerificationScopeLevel": {
-        "description": "How thorough the record check was. `complete` does not exist in v1.",
+        "description": "HOW records were compared, from the scorecard's `integrity.level`: byte for byte (named `sampled` because that was the only coverage when this enum was frozen), consume-only, or not at all. HOW MUCH was compared is [`VerificationScopeView::coverage`] (PROD-08.1a), so a complete verification compared byte for byte reads `level: sampled` beside `coverage: complete` — the level's three values are unchanged and a client that knows only them never refuses a body.",
         "oneOf": [
           {
             "description": "`byte-fingerprint`: a sample was compared byte for byte.",
@@ -14524,6 +14773,16 @@
           "level"
         ],
         "properties": {
+          "complete": {
+            "description": "**PROD-08.1a.** A complete verification's exact counts, present exactly when `coverage` is `complete` and the signed block was read whole. `covered: false` names its reason and is never a pass.",
+            "$ref": "#/components/schemas/CompleteVerificationView",
+            "nullable": true
+          },
+          "coverage": {
+            "description": "**PROD-08.1a.** HOW MUCH the signed scorecard says it verified: `sampled` or `complete` (its `integrity.verification.coverage`, format 1.4.0). A CLAIM until the evidence verifies. ABSENT MEANS NOT RECORDED — a scorecard before 1.4.0, a refused run, or one not read yet — and is read as a sampled check, never as a complete one.",
+            "$ref": "#/components/schemas/RestoreCoverage",
+            "nullable": true
+          },
           "level": {
             "description": "The level.",
             "$ref": "#/components/schemas/VerificationScopeLevel"
@@ -14545,6 +14804,13 @@
             "type": "integer",
             "format": "int64",
             "nullable": true
+          },
+          "unsampledTopics": {
+            "description": "**FX-23.** The restored topics a SAMPLED check's partition cap left without a sampled partition — counted against their bound, not compared record by record. Empty when none is recorded.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

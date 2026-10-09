@@ -49,7 +49,11 @@ adopter's evidence bucket is a document some reader may already parse, so:
     FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
     point-bound plan that restored another set under the point's receipt is
     now refused before any target is created
-    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)).
+    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)). So are
+    FX-21's `topic_parity` entries for a replication factor or partition
+    count the archive does not record: not assessed where a writer before
+    FX-21 signed a match
+    ([below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -499,6 +503,134 @@ side:
   the 1.6.0 documents already written stay valid under both readers. Its
   `pass` over an early-stopped restore is the defect this section closes.
 
+### A source replication factor the archive does not record is not assessed (FX-21)
+
+Engine 0.23.3 records `source_replication_factor` in the archive's manifest
+for the FIRST topic a backup saves only: its `merge_manifests` carries the
+partition count of a topic the stored manifest already holds and drops the
+factor, and the configuration capture puts every topic into the manifest
+before the first save. Phase 7 then used the TARGET's own factor (the plan's)
+in place of the missing one, so every other topic's replication-factor
+difference was signed as no divergence. Found by PROD-05.1; measured live by
+FX-21 on a three-topic `cluster3` backup (factors 3, 2 and 3): OSO's 0.23.3
+and Logweir's `0.23.3+logweir.1` recorded one factor of three, and the writer
+before FX-21 signed the other two topics with no `replication_factor` entry at
+all.
+
+- **The writer.** Phase 7 compares a topic's replication factor only where the
+  source's is recorded: the manifest's `source_replication_factor`, else the
+  verified receipt's `topic_configuration[<topic>].replication_factor`
+  (format 1.3.0, Logweir's own metadata read). The manifest's comes first, so
+  every document whose manifest records the factor is decided exactly as
+  before. Where neither records one, the topic's factor is named in
+  `topic_parity.not_assessed` as `"<target topic>: replication_factor
+  (notRecorded)"`, and the fail-safe twin `"<target topic>: replication_factor
+  not assessed (notRecorded)"` goes into `unexpected_divergence`, FX-4's marker
+  shape. A partition count the manifest does not record (an archive written
+  before engine 0.17) is the same case: `partition_count (notRecorded)`.
+- **The engine.** Patch 0002 (`third_party/kafka-backup-patches/`) makes
+  `merge_manifests` carry the factor as it carries the partition count, so
+  Logweir's build `0.23.3+logweir.2` records every topic's factor; measured on
+  the same three topics, 3 of 3, each the broker's.
+- **No new field and no version: MINOR, OD-7's third case.** The entries are
+  new content in two existing fields, and they can only move a reader's
+  verdict to the safer side: what a writer before FX-21 signed as matching is
+  now not assessed, and no entry makes any verdict stronger. `outcome` does
+  not depend on either list. Every reader since format 1.1.0 prints the new
+  `not_assessed` entries in its `configuration parity: NOT ASSESSED for …`
+  line, and a reader older than that sees the twin in `unexpected_divergence`.
+  The twin's `<key>`, the text after the last `": "`, is `replication_factor
+  not assessed (notRecorded)`, never one of the four settings the restore
+  decides, so arm NR-5 does not read it as a deviation `not_reconstructed`
+  must name (a unit row in each reader). FX-21 adds no format version of
+  its own: the scorecard carries whatever version the rest of the run writes
+  (1.4.0; 1.5.0 for PROD-01.3's auth modes; 1.6.0 for a sampled run since FX-23).
+- **No new marker; the writer identity and the manifest tell the documents
+  apart** (the orchestrator's decision on FX-21's review M2). Old evidence is
+  not re-read. A reader decides which writer signed a scorecard from fields
+  every scorecard already carries, then reads the archive:
+  - `engine.version` and `engine.digest`. A runner image declares them from
+    its `/etc/logweir/engine-identity` (PROD-00.2), and its engine and its
+    `logweir`, whose phase 7 wrote the document, are built from one commit.
+    `engine.version` `0.23.3+logweir.2` (build-input digest
+    `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+    `third_party/kafka-backup-builds.txt`) or a later `+logweir.<n>` names a
+    runner with FX-21's phase 7: its silence about a topic's replication
+    factor is parity, because a factor it could not compare is named
+    `notRecorded`. Any other value (`0.23.3+logweir.1`, OSO's `0.23.3`, an
+    older release) names a writer before FX-21. The scorecard carries no
+    `logweir` version of its own, so a standalone CLI install that pairs a
+    `logweir` and an engine of different builds is told apart by neither
+    field: read the manifest.
+  - The archive's manifest, named by `source.backup_id` and pinned by
+    `source.manifest_sha256` (and `source.manifest_version_id` on a versioned
+    bucket). For a document from a writer before FX-21, a topic whose
+    `topics[].source_replication_factor` the manifest lacks (absent or `null`)
+    has no replication-factor finding, whatever `topic_parity` lists for it:
+    its silence there is the defect, not parity.
+- **Rollback.** An older `logweir` writes the old documents again (the
+  silence above); the documents this build wrote stay valid for every reader.
+  Rolling the engine back to `+logweir.1` or to OSO's 0.23.3
+  (`ENGINE_SOURCE=oso`) records one factor per backup again; this build then
+  names the rest `notRecorded` where no 1.3.0 receipt is bound, and compares
+  the receipt's factor where one is.
+
+### Scorecard format 1.7.0: `source.selection`, a restore from a stated window start (PROD-11.1)
+
+A plan may state an inclusive window START, written as the interval form of
+`restore.point_in_time`, `"<start>/<end>"`
+([the plan field](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
+Guard G-WIN is amended, not removed: a start STATED in the approved plan is the
+plan's own (`InheritedFromSpec`), is never earlier than the archive set's floor
+(refused, never moved to it), is re-derived by phase 5 from the spec and the
+manifest, and is signed
+([the decision record](to-do/decisions/PROD-11.1-replay-selection.md) §2).
+
+- **The signed block.** A restore from a stated start carries
+  `source.selection {window_start_ms, window_end_ms}` and is format **1.7.0**
+  (MINOR): arms SEL-1 to SEL-3 read only the block or judge an existing field
+  against it and can only refuse (OD-7 (a)). Every other document is the one
+  it was. Each version step keeps the newer minor, so a sampled restore from a
+  start is 1.7.0, never 1.6.0.
+- **Every verdict is the window's.** Samples are drawn from the stated start,
+  the count bound and the per-partition presence check are over
+  `[start, end]`, and a complete verification expects every archived record
+  whose own timestamp is in that window. Every partition of every restored
+  topic is restored: the block narrows the window, never the partitions.
+- **Nothing an older reader prints about it is false** (review N2). What
+  1.21.0, 1.22.0 and main's `logweir drill verify` print for a sampled and a
+  complete document is quoted in
+  [`verify-a-scorecard.md`](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves):
+  a sampled pass's per-partition guarantee holds over the window, and a
+  complete pass's `every selected record compared` is true. They print
+  nothing that names the start: the field that does is the free-text
+  `sample.coverage_note` (it opens with `replay selection: … from epoch-ms S
+  (the plan's stated window start, inclusive) …`), which `logweir drill show`
+  of any version prints; a complete block's `window.start_ms` is the start
+  too, while a sampled document's `sample.window_start` is its sample window,
+  which an unnarrowed document can share. This release's readers print a
+  `replay selection:` line and qualify a sampled pass by the window.
+- **Each lane claims only what it proves about records before the start**
+  (review N1). Only a complete verification that passed proves none was
+  restored (a restored record below the start is `unexpected`, and IV-6 holds
+  a complete pass to none); a sampled check does not, because a segment
+  straddling the start counts all of its records into the per-partition
+  bound. The writer's coverage note never says none was restored, and both
+  readers say it only over a complete pass
+  ([the format](formats/drill-scorecard.md#sourceselection-format-170)).
+- **Partition subsets are refused** (`restore.partitions`,
+  `PartitionSubsetsAwaitOwnerDecision`, exit 3 before anything runs) until the
+  owner decides OD-9. A subset-narrowed document would be misread by every
+  reader before it (its unselected partitions read as restored), so it is a
+  MAJOR change under OD-7; the proposal is a 2.0.0 document written only when a
+  subset is stated.
+- **A runner built before PROD-11.1 refuses a plan stating a start**: it reads
+  `point_in_time` as one instant, so the interval form does not parse
+  (`drill spec does not parse`, exit 1), and it creates and signs nothing. It
+  never restores from the floor what the plan said to restore from a start.
+  That older runner ignores a `restore.partitions` key and restores every
+  partition; no Logweir writer emits that key, and this release refuses it.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -850,7 +982,10 @@ coverage and portability and PROD-05.2 applies a reviewed target configuration:
   from its broker's defaults is not in that record and is never named, and a
   topic whose configuration was not captured is in `not_assessed`
   ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-  The replication factor is compared from the manifest either way.
+  The replication factor is compared from the manifest, else from the bound
+  receipt's `topic_configuration`, either way; where neither records one it is
+  named in `not_assessed` (FX-21,
+  [below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
 - **The partition count is reconstructed** — phase 6 creates the manifest's
   count — so `partition_count` reaches `not_reconstructed` only if a topic
   changes between creation and verification.
@@ -1294,7 +1429,9 @@ offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-
 while treating `point_in_time` as exclusive would silently drop the boundary record. Both
 documents' floors are the minimum segment start over the topics that document names, so a
 receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
-same topics. Both rules apply to the records the engine reads: it selects segments by their first
+same topics — unless the plan states its own inclusive start, `restore.point_in_time:
+"<start>/<end>"` (PROD-11.1), which must be at or after that floor (a start before it is refused,
+never moved to it) and is signed in `source.selection`. Both rules apply to the records the engine reads: it selects segments by their first
 and last record timestamps, and a segment's start is its first record's timestamp, not its
 minimum, so with out-of-order timestamps a record at or before the point can sit in a segment that
 is never read, and a record older than every segment's first record is below every floor — see
@@ -1762,15 +1899,65 @@ a slot may run:
 | `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
 | `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
 | `topics` | The source topics the authorization covers, by exact name. |
-| `maxPartitions` | The partition ceiling: each slot's plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. |
+| `maxPartitions` | The partition ceiling: each slot's sampled plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. **A scope that authorises `coverage: complete` signs exactly `0`** (format 1.1.0, below): a complete plan states no bound (it checks every partition), so this build never reads it for one, and 0 is what makes every older reader refuse every plan under the scope. The schedule's own `spec.bounds.maxPartitions` still bounds the point a slot selects, inside `templateDigest`. |
 | `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
 | `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
 | `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
+| `coverage` (format 1.1.0, optional) | The verification coverage the signer authorises; the plan's `sample.coverage` must be exactly it (PROD-08.1a). **Absent means `sampled`** — every 1.0.0 scope — so a scope signed before the field authorises sampled rehearsals only, and a complete plan under it is refused by name. `complete` (with `maxPartitions: 0`) admits a complete plan (which states no `max_partitions`) and refuses a sampled one. |
+| `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
+
+**Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
+defined from `formatVersion` 1.1.0. `logweir drill approve --standing` mints 1.1.0 exactly when the
+scope carries one of them, and 1.0.0 — byte for byte as before — otherwise; the DSSE payload type is
+unchanged. This build refuses either field under a document whose minor is below 1 or not a number,
+`completeMaxRecords` beside a scope that does not authorise complete coverage, a bound of 0, and
+**a scope that authorises `coverage: complete` with any `maxPartitions` but 0** (the minter refuses
+to sign one, naming the value to write; the runner, the controller's slot and `admit_standing` and
+the `Approval` controller refuse to read one). The 0 is what keeps the format MINOR: OD-7 allows a
+change only when it can move a reader's verdict to the safer side, and every reader, of every
+version, is on that side:
+
+- **This build, a scope that states no `coverage` (every 1.0.0 document) or states `sampled`:** it
+  admits exactly the sampled plans a 1.0.0 reader admitted, and refuses every complete plan by
+  name. An older reader refused a complete plan with no `max_partitions` as an unbounded sample;
+  one with `max_partitions` was refused by the phase 0 of a runner from item 30 of the release
+  notes on, and run as the sampled plan it also is by an older runner. Either way this build only
+  refuses more.
+- **This build, a 1.1.0 scope that states `complete` (and `maxPartitions: 0`):** it admits a
+  complete plan with no `max_partitions` (when the scope signs `completeMaxRecords`, only one whose
+  `complete_max_records` is present and no larger), which every older reader refuses, and refuses
+  every sampled plan by its coverage. This is the new authority, and only a document that signs it
+  grants it.
+- **A runner or controller built before 1.1.0, the same complete-only document:** its admission
+  checks the major only and its scope type ignores unknown fields, so it reads a SAMPLED scope with
+  a partition bound of 0, and runs nothing under it. Its `Approval` controller refuses the scope
+  (`ScopeInvalid`: a bound of 0 is not a positive bound), so the `Approval` is never `Verified`, and
+  its rehearsal slot and its `admit_standing` both need a `Verified` one: no `Restore` and no Job.
+  Its plan-in-scope check — the runner's, and the controller's — refuses an ordinary sampled plan
+  (its bound is above 0) and a complete plan (no bound: unbounded), before any client. The only
+  plans that check passes state `max_partitions: 0`, and they sample no partition: a runner from
+  item 30 on refuses `complete` beside any bound at phase 0, and every build's phase 7 refuses an
+  empty selection before any verdict (exit 1, no scorecard), so none can be signed a pass. A rehearsal slot is refused earlier still: an older controller's
+  `templateDigest` omits `bounds.coverage`, so it no longer matches the signed one.
+- **An older minter** (`logweir drill approve --standing` before 1.1.0) refuses a `scope.json` with
+  `maxPartitions: 0` before signing anything, so it cannot mint a complete-only authorization at
+  all; one that does not state `coverage` mints a sampled scope as before.
+
+Proved against a build from before the format (`main` at `1c3a1b5e`): its runner binary refuses the
+ordinary sampled plan and the complete plan under a complete-only document this build minted, and
+its `Approval` controller refuses the document (`crates/logweir/tests/execution_contract_v2.rs`,
+`an_older_runner_refuses_every_plan_under_a_complete_only_scope_this_build_mints`, run with
+`LOGWEIR_OLDER_RUNNER`). With a positive `maxPartitions` beside `coverage: complete` — which no
+reader of this build accepts — the same older runner admits the sampled plan; that is why the 0 is
+required. As with every scope field, roll the controller and the runner out together.
 
 Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
 approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through
 authorization document v2 — `docs/kubernetes.md` §8), so its readers require `GovernedApproval`
-whatever a namespace is bound to. A higher `formatVersion` major is refused.
+whatever a namespace is bound to. A field that NARROWS what a scope authorises needs more: a
+reader that predates it ignores it and would admit what the field excluded, so it ships beside a
+value of an existing field that such a reader already refuses everything under (format 1.1.0's
+`maxPartitions: 0`, above). A higher `formatVersion` major is refused.
 
 **The runner's order, and what each step buys.** The signature is checked over the envelope bytes
 *before* they are parsed, so nothing read out of the document is believed until those exact bytes
@@ -2439,7 +2626,8 @@ spend).
   CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
   `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
   since PROD-00.2 the engine the images ship is Logweir's build of OSO's
-  **0.23.3** source, `0.23.3+logweir.1` (*Supported engine pin*, below).
+  **0.23.3** source, `0.23.3+logweir.2` since FX-21's patch 0002
+  (*Supported engine pin*, below).
 
 - **Runtime image floor.** The `kafka-backup` binary is dynamically
   linked against **glibc >= 2.36** (`ldd`, 2026-10-08: libc, libm and
@@ -2477,7 +2665,9 @@ spend).
   added in a minor.
 
 - **Supported engine pin.** The engine the images ship is **Logweir's build
-  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.1` (PROD-00.2, OD-3): the
+  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.2` (PROD-00.2, OD-3; build 2
+  adds FX-21's patch 0002, the manifest records every topic's replication
+  factor): the
   vendored source of OSO's newest release on 2026-10-07 (tag commit
   `afb160e7`) plus Logweir's patch folder, built for linux/amd64 and
   linux/arm64 (`third_party/kafka-backup-build.env`; its `engine.digest` is the

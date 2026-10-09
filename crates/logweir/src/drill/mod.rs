@@ -2902,6 +2902,28 @@ fn execute_with_validated_approval(
         logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
             .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
     sc.source = source_info(&facts, time_basis);
+    // **PROD-11.1: THE REPLAY SELECTION, resolved against the archive here**,
+    // the first point at which the manifest is in hand, and BEFORE phase 2:
+    // a window start before the archive's coverage and a window no segment
+    // overlaps are refused exit 3 with no target topic created and no engine
+    // started (a partition subset never gets here: phase 0 refused it by
+    // name, OD-9). `None` for a plan that states no start, which runs exactly
+    // as before. The same function `build_plan` binds the window with, and
+    // the restore preflight previews it with (`logweir_core::replay_selection`).
+    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
+    // PROD-11.1: the window start is SIGNED (`source.selection`, format 1.7.0)
+    // in every document this run writes from here on, and every phase below
+    // judges it: phase 4 samples from the stated start, phase 5 checks the
+    // rendered start against the spec, and phase 7 judges the count bound,
+    // presence and records over the window. The version is raised HERE, with
+    // the block, and every later version step is monotonic, so no document
+    // this run signs carries the block under an older minor.
+    sc.source.selection = replay_selection.as_ref().and_then(selection_label);
+    sc.format_version = logweir_core::scorecard::format_version_with_selection(
+        &sc.format_version,
+        sc.source.selection.as_ref(),
+    )
+    .to_string();
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -2921,7 +2943,13 @@ fn execute_with_validated_approval(
     // 4
     let src_topics: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let mut sel = record(&mut sc, 4, "sample-select", || {
-        phase4_sample::run(&facts, &c.spec.sample, &src_topics)
+        // PROD-11.1: only selected partitions, from the stated start.
+        phase4_sample::run_selected(
+            &facts,
+            &c.spec.sample,
+            &src_topics,
+            replay_selection.as_ref().map(|r| &r.selection),
+        )
     })?;
     // Binding note appended to the brief during Task 16 fix round 1:
     // `phase4_sample::run` emits `per_partition[..].set.manifest_key` EMPTY,
@@ -2937,6 +2965,30 @@ fn execute_with_validated_approval(
         &sc.format_version,
         &sc.sample,
         c.spec.sample.coverage,
+    )
+    .to_string();
+    // PROD-11.1: a narrowed restore's EXISTING `sample.coverage_note` opens
+    // with its window, so a reader that predates `source.selection` reads
+    // what was restored; under the sampled lane it also names the one limit
+    // a start adds (review L6). The version step above is monotonic, and so
+    // is this one, so the 1.7.0 chosen with the block stands.
+    if let Some(label) = &sc.source.selection {
+        let limit = if c.spec.sample.coverage == logweir_core::spec::Coverage::Sampled {
+            "; a sampled check does not find an in-window record held in a segment whose last \
+             record is before the start (the engine skips that segment); sample.coverage: \
+             complete does"
+        } else {
+            ""
+        };
+        sc.sample.coverage_note = format!(
+            "{}{limit}; {}",
+            label.coverage_note(c.spec.sample.coverage),
+            sc.sample.coverage_note
+        );
+    }
+    sc.format_version = logweir_core::scorecard::format_version_with_selection(
+        &sc.format_version,
+        sc.source.selection.as_ref(),
     )
     .to_string();
 
@@ -3006,14 +3058,22 @@ fn execute_with_validated_approval(
     }
     let (verdict, report) = record(&mut sc, 5, "preflight", || {
         // **GUARD G-WIN, THE REFUSING HALF**, and it runs BEFORE
-        // `engine.preflight` writes anything: `check_rendered_window_floor`
-        // renders the document itself, reads the `time_window_start` line back
-        // off the bytes, and compares THAT against a floor it re-derives from
-        // the manifest. Exit 3, "refused by a guard, before anything ran" —
+        // `engine.preflight` writes anything: `check_rendered_selection`
+        // renders every run's document itself, reads the `time_window_start`
+        // line back off the bytes, and compares THAT against the instant it
+        // re-derives from the manifest's floor and the spec's stated start
+        // (PROD-11.1's amendment). Exit 3, "refused by a guard, before anything ran" —
         // NOT the exit 1 of ruling R-E's phase-5/phase-6 render mismatch,
         // which is a different failure at a later point (see the function's
         // own doc comment).
-        phase5_preflight::check_rendered_window_floor(&plan, &facts)?;
+        // PROD-11.1: and the rendered selection of EVERY engine run, against
+        // what the approved spec states (window start (`restore.point_in_time: "<start>/<end>"`),
+        // `restore.partitions`) — re-derived, never read off the plan.
+        phase5_preflight::check_rendered_selection(
+            &plan,
+            &facts,
+            &phase5_preflight::StatedSelection::of(&c.spec),
+        )?;
         let r = c.engine.preflight(&plan)?;
         Ok((phase5_preflight::adjudicate(&r), r))
     })?;
@@ -3584,6 +3644,11 @@ pub fn build_plan(
     // same topics (plan erratum E7(b)). Phase 5 re-derives it from the same
     // field of the plan built here.
     let named_topics: BTreeSet<&str> = mapping.keys().map(String::as_str).collect();
+    // PROD-11.1: a stated window start (`restore.point_in_time: "<start>/<end>"`) is resolved by the shared
+    // selection function, which refuses it before the floor (never moves it
+    // there) and reports the claim the plan makes about it. A plan that states
+    // none takes the archive's floor below, exactly as before.
+    let resolved = resolve_selection(spec, mapping, facts)?;
     let manifest_floor_ms = facts
         .earliest_covered_timestamp_ms(&named_topics)
         .ok_or_else(|| {
@@ -3607,6 +3672,19 @@ pub fn build_plan(
             set.backup_id
         )))
     })?;
+    let (start, source) = match &resolved {
+        Some(r) if r.start_source == WindowFloorSource::InheritedFromSpec => (
+            chrono::DateTime::from_timestamp_millis(r.start_ms).ok_or_else(|| {
+                DrillError::Guard(GuardRefusal(format!(
+                    "this plan's window start of epoch-ms {} is outside the \
+                     representable date range",
+                    r.start_ms
+                )))
+            })?,
+            WindowFloorSource::InheritedFromSpec,
+        ),
+        _ => (start, WindowFloorSource::ArchiveManifest),
+    };
     build_plan_with_floor(
         spec,
         set,
@@ -3614,10 +3692,57 @@ pub fn build_plan(
         run_id,
         WindowFloor {
             start,
-            source: WindowFloorSource::ArchiveManifest,
+            source,
             manifest_floor_ms,
         },
         offset_report_out,
+    )
+}
+
+/// **PROD-11.1.** The plan's replay selection resolved against the archive
+/// set it restores, through the ONE function the restore preflight previews
+/// it with (`logweir_core::replay_selection::ReplaySelection::resolve`).
+///
+/// `Ok(None)` for a plan that states no window start and no partition subset:
+/// nothing is resolved and every caller does exactly what it did before
+/// PROD-11.1. Otherwise the selection is resolved over the mapped source
+/// topics (the keys of `mapping`, the set the G-WIN floor is taken over), and
+/// every refusal — a shape error, a start before the archive's coverage, a
+/// partition the archive does not list, a selection no segment overlaps — is
+/// exit 3, `DrillError::Guard`, before anything runs.
+pub fn resolve_selection(
+    spec: &DrillSpec,
+    mapping: &BTreeMap<String, String>,
+    facts: &BackupSetFacts,
+) -> Result<Option<logweir_core::replay_selection::ResolvedSelection>, DrillError> {
+    let refused = |r: logweir_core::replay_selection::SelectionRefusal| {
+        DrillError::Guard(GuardRefusal(r.to_string()))
+    };
+    let selection =
+        logweir_core::replay_selection::ReplaySelection::from_spec(spec).map_err(refused)?;
+    if selection.is_full() {
+        return Ok(None);
+    }
+    let selection = logweir_core::replay_selection::ReplaySelection {
+        topics: mapping.keys().cloned().collect(),
+        ..selection
+    };
+    selection.resolve(&facts.topics).map(Some).map_err(refused)
+}
+
+/// **PROD-11.1.** The signed `source.selection` block of a resolved
+/// selection: its stated start and its end. `None` unless the plan states its
+/// own start (`InheritedFromSpec`); a partition subset never reaches here
+/// (refused by name at phase 0, OD-9).
+#[must_use]
+pub fn selection_label(
+    r: &logweir_core::replay_selection::ResolvedSelection,
+) -> Option<logweir_core::scorecard::SelectionLabel> {
+    (r.start_source == WindowFloorSource::InheritedFromSpec).then_some(
+        logweir_core::scorecard::SelectionLabel {
+            window_start_ms: r.start_ms,
+            window_end_ms: r.end_ms,
+        },
     )
 }
 
@@ -3685,6 +3810,16 @@ pub fn build_plan_with_floor(
         topic_mapping: mapping.clone(),
         time_window: (floor.start, window_end),
         window_floor_source: floor.source,
+        // PROD-11.1: the spec's per-topic subsets over the mapped topics,
+        // each sorted and unique (the selection's shape refusals ran in
+        // phase 0 and again here). Empty for every plan that states none.
+        source_partitions: logweir_core::replay_selection::ReplaySelection::from_spec(spec)
+            .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+            .partitions
+            .into_iter()
+            .filter(|(topic, _)| mapping.contains_key(topic))
+            .map(|(topic, set)| (topic, set.into_iter().collect()))
+            .collect(),
         default_replication_factor: spec.target.default_replication_factor,
         // Pod-local and never uploaded: a crashed restore is NOT resumable in
         // v0.1 (spec §11).
@@ -3706,6 +3841,22 @@ pub fn build_plan_with_floor(
     // signed `pass` would exist only in the test profile.
     //
     // Exit 3, before anything runs (Global Constraint 11, `crate::exit`).
+    // **AND THE OTHER ARM, since PROD-11.1's G-WIN amendment**: a plan that
+    // says its start came from the spec may state a LATER start than the
+    // archive's floor, never an earlier one. A start before the floor names
+    // instants the archive does not cover; it is refused, never moved to the
+    // floor (which would restore a window nobody approved).
+    if plan.window_floor_source == WindowFloorSource::InheritedFromSpec
+        && plan.time_window.0.timestamp_millis() < floor.manifest_floor_ms
+    {
+        return Err(DrillError::Guard(GuardRefusal(
+            logweir_core::replay_selection::SelectionRefusal::StartBeforeCoverage {
+                start_ms: plan.time_window.0.timestamp_millis(),
+                floor_ms: floor.manifest_floor_ms,
+            }
+            .to_string(),
+        )));
+    }
     if plan.window_floor_source == WindowFloorSource::ArchiveManifest
         && plan.time_window.0.timestamp_millis() != floor.manifest_floor_ms
     {
@@ -3744,6 +3895,18 @@ pub fn build_plan_with_floor(
     // caller — `build_plan`, a restore mode of Task 9b, or a test — can
     // produce an inverted window at all. Not a `debug_assert!`, for the same
     // reason as the check above: that macro is compiled out in release.
+    if plan.time_window.0 >= plan.time_window.1
+        && plan.window_floor_source == WindowFloorSource::InheritedFromSpec
+    {
+        return Err(DrillError::Guard(GuardRefusal(
+            logweir_core::replay_selection::SelectionRefusal::EmptyWindow {
+                start_ms: plan.time_window.0.timestamp_millis(),
+                end_ms: plan.time_window.1.timestamp_millis(),
+                end_field: window_end_field,
+            }
+            .to_string(),
+        )));
+    }
     if plan.time_window.0 >= plan.time_window.1 {
         return Err(DrillError::Guard(GuardRefusal(format!(
             "this plan's {window_end_field} is epoch-ms {end}, at or before the archive set \
@@ -3830,6 +3993,8 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // `time_basis::decide`; a draft that never got that far has not
             // decided it.
             time_basis: None,
+            // PROD-11.1: written once the selection is resolved.
+            selection: None,
         },
         target: TargetInfo {
             cluster_id: String::new(),
@@ -3946,6 +4111,8 @@ fn source_info(
         // FX-8: ALWAYS written once decided, so a 1.3.0 document's empty lists
         // are a claim and an absent block means "not recorded" (pre-1.3.0).
         time_basis: Some(time_basis),
+        // PROD-11.1: set by the caller once the plan's selection is resolved.
+        selection: None,
     }
 }
 

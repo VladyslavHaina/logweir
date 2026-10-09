@@ -1,0 +1,128 @@
+{
+  "requestId": "req-coverage-0001",
+  "item": {
+    "kind": "restore",
+    "name": "orders-drill-complete",
+    "namespace": "logweir-t26",
+    "uid": "5d1c2b3a-4e5f-4a6b-9c8d-7e6f5a4b3c2d",
+    "resourceVersion": "40311",
+    "createdAt": "2026-09-11T12:41:00Z",
+    "state": "failed",
+    "stateReason": "DrillNotPass",
+    "terminal": true,
+    "lastUpdatedAt": "2026-09-11T12:42:32Z",
+    "result": {
+      "status": "notPass",
+      "exitCode": 2,
+      "exitReason": "fail-integrity",
+      "outcome": "fail-integrity",
+      "lastPhaseCompleted": 9
+    },
+    "verification": {
+      "state": "valid",
+      "matchedKeyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012",
+      "verifiedAt": "2026-09-11T12:42:32Z",
+      "payloadType": "application/vnd.logweir.scorecard+json"
+    },
+    "verifiedSuccess": false,
+    "evidence": {
+      "payloadKey": "logweir/drills/01JB7Z0000000000000000000A.json",
+      "payloadSha256": "sha256:1122334455667788990011223344556677889900aabbccddeeff001122334455",
+      "sidecarKey": "logweir/drills/01JB7Z0000000000000000000A.json.sig",
+      "offsetReportKey": "logweir/drills/01JB7Z0000000000000000000A.offsets.json"
+    },
+    "conditions": [
+      {
+        "type": "Failed",
+        "status": "True",
+        "reason": "DrillNotPass",
+        "lastTransitionTime": "2026-09-11T12:42:20Z"
+      },
+      {
+        "type": "EvidenceRecorded",
+        "status": "True",
+        "reason": "EvidenceRecorded",
+        "lastTransitionTime": "2026-09-11T12:42:25Z"
+      },
+      {
+        "type": "Verified",
+        "status": "False",
+        "reason": "CompleteNotCovered",
+        "message": "unverified",
+        "lastTransitionTime": "2026-09-11T12:42:32Z"
+      }
+    ],
+    "stage": "finished",
+    "trust": {
+      "state": "verified",
+      "basis": "None"
+    },
+    "verificationScope": {
+      "level": "sampled",
+      "coverage": "complete",
+      "complete": {
+        "covered": false,
+        "incompleteReason": "sample.complete_max_records is 300: orders/1 and every later partition were not compared",
+        "maxRecords": 300,
+        "segments": 4,
+        "segmentsVerified": 2,
+        "segmentsFailed": 0,
+        "segmentsUnverified": 2,
+        "recordsDecoded": 250,
+        "offsetHoles": 0,
+        "replay": {
+          "expected": 250,
+          "restored": 250,
+          "matching": 250,
+          "missing": 0,
+          "unexpected": 0,
+          "duplicates": 0,
+          "outOfOrder": 0,
+          "mismatched": 0
+        },
+        "partitionCount": 2,
+        "partitions": [
+          {
+            "topic": "orders",
+            "partition": 0,
+            "targetTopic": "drill-20260911-orders",
+            "compared": true,
+            "replay": {
+              "expected": 250,
+              "restored": 250,
+              "matching": 250,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "outOfOrder": 0,
+              "mismatched": 0
+            }
+          },
+          {
+            "topic": "orders",
+            "partition": 1,
+            "targetTopic": "drill-20260911-orders",
+            "compared": false,
+            "replay": {
+              "expected": 0,
+              "restored": 0,
+              "matching": 0,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "outOfOrder": 0,
+              "mismatched": 0
+            }
+          }
+        ]
+      }
+    },
+    "awaitingApproval": false,
+    "stale": false,
+    "readiness": {
+      "state": "unknown",
+      "basis": "notImplemented"
+    },
+    "targetMode": "scratch"
+  }
+}

@@ -103,6 +103,26 @@ function timeBasisOf(value) {
   return value;
 }
 
+/** `sample.coverage`'s one non-default value (PROD-08.1a):
+ *  `logweir_core::spec::Coverage::Complete`'s wire spelling. */
+export const COVERAGE_COMPLETE = "complete";
+
+/** The plan's `sample.coverage`, or `null` for the default (sampled): absent,
+ *  `null`, the empty string and `"sampled"` all mean "not stated", and are not
+ *  rendered. Any other value throws. */
+function coverageOf(value) {
+  if (value === undefined || value === null || value === "" || value === "sampled") {
+    return null;
+  }
+  if (value !== COVERAGE_COMPLETE) {
+    throw new TypeError(
+      "sample.coverage must be \"" + COVERAGE_COMPLETE + "\", \"sampled\" or absent, not " +
+        String(value),
+    );
+  }
+  return value;
+}
+
 /** Renders the restore plan document as a UTF-8 string. Its grammar is the
  *  runner's restore.yaml, defined once in spec 03-spec.md section 6.1: the
  *  document logweir/examples/restore.yaml shows and RestoreSpec deserialises
@@ -214,6 +234,30 @@ export function renderPlanBytes(fields) {
       integer(sample.recordsPerPartition, "sample.recordsPerPartition"),
   );
   out.push("  anchor: " + quote(needed(sample.anchor, "sample.anchor")));
+  // PROD-08.1a: COMPLETE COVERAGE, and only when the operator chose it.
+  // Absent, the bytes are what they were, so every existing plan and its hash
+  // are unchanged. One value, and anything else throws: a typo must never
+  // become the costlier check, and the runner's grammar would refuse it after
+  // the approval anyway. The record bound is rendered only beside it; a bound
+  // beside a sampled plan is refused here, as phase 0 refuses it.
+  const coverage = coverageOf(sample.coverage);
+  const bound = sample.completeMaxRecords;
+  const bounded = bound !== undefined && bound !== null && bound !== "";
+  if (coverage === COVERAGE_COMPLETE) {
+    out.push("  coverage: " + quote(coverage));
+    if (bounded) {
+      const n = integer(bound, "sample.completeMaxRecords");
+      if (Number(n) < 1) {
+        throw new TypeError("sample.completeMaxRecords must be at least 1, not " + String(bound));
+      }
+      out.push("  complete_max_records: " + n);
+    }
+  } else if (bounded) {
+    throw new TypeError(
+      "sample.completeMaxRecords bounds a complete verification and is set only with " +
+        "sample.coverage \"" + COVERAGE_COMPLETE + "\"",
+    );
+  }
 
   // THE THREE OBJECTIVES ARE OPTIONAL IN THE GRAMMAR AND OPTIONAL HERE. Each
   // is an `Option` with a serde default, so an absent one is "not asked for"

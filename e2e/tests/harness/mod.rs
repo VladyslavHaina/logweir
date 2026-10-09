@@ -250,21 +250,33 @@ fn probe_engine_bin() -> PathBuf {
 
 /// The digest that names the engine that runs, recorded into every signed
 /// document a suite writes. Logweir's build (PROD-00.2) is named by its
-/// build-input digest, `ENGINE_DIGEST` in `third_party/kafka-backup-build.env`;
-/// OSO's released binary — the default shim, and every engine-matrix row that
+/// build-input digest, as the build ledger records it (below); OSO's released binary — the default shim, and every engine-matrix row that
 /// extracts one — by the image digest it came from. Which one is decided by
 /// what the engine PRINTS (`engine_version`), never assumed, so a row cannot
 /// record one engine's digest beside another's version.
+///
+/// **FX-21: the ledger, not the build env.** Logweir's build is looked up by
+/// the version it PRINTS in `third_party/kafka-backup-builds.txt`, the
+/// append-only ledger of every build, so an earlier build run at this
+/// checkout (FX-21's old-engine rows run `0.23.3+logweir.1` beside the
+/// current pin) is named by its own digest, never the newest build's. For the
+/// current build the two agree: `scripts/engine-source.sh` refuses a ledger
+/// whose last line is not the build env's pair.
 pub fn engine_digest() -> String {
-    if engine_version().contains("+logweir.") {
-        let build = std::fs::read_to_string(root().join("third_party/kafka-backup-build.env"))
-            .expect("third_party/kafka-backup-build.env");
-        return build
+    let version = engine_version();
+    if version.contains("+logweir.") {
+        let ledger = std::fs::read_to_string(root().join("third_party/kafka-backup-builds.txt"))
+            .expect("third_party/kafka-backup-builds.txt");
+        return ledger
             .lines()
-            .find_map(|l| l.strip_prefix("ENGINE_DIGEST="))
-            .expect("third_party/kafka-backup-build.env sets ENGINE_DIGEST")
-            .trim()
-            .to_string();
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| {
+                let (v, d) = l.split_once(' ')?;
+                (v == version).then(|| d.trim().to_string())
+            })
+            .unwrap_or_else(|| {
+                panic!("engine {version} is not a build in third_party/kafka-backup-builds.txt")
+            });
     }
     std::fs::read_to_string(root().join("third_party/kafka-backup-binary.digest"))
         .expect("third_party/kafka-backup-binary.digest")
@@ -1040,6 +1052,19 @@ pub struct RunOpts<'a> {
     /// coverage at all. `false` keeps every existing caller on `drill run`
     /// byte for byte.
     pub restore_run: bool,
+    /// The `logweir` binary to spawn instead of [`bin`] (PROD-11.1's fix
+    /// round, M2).
+    ///
+    /// `None` for every row but the one that runs an OLDER build — main's
+    /// `logweir` from before PROD-11.1 — against a plan stating a window start,
+    /// to show that a runner which predates the grammar refuses the plan
+    /// rather than restoring more than the plan says.
+    pub bin: Option<PathBuf>,
+    /// PROD-08.1a: the plan as EXACT BYTES, written verbatim instead of
+    /// `spec` re-serialised — for a plan another emitter produced (the
+    /// console's `ui/plan.js`), whose hash an approval binds as written. `None`
+    /// keeps every existing caller byte for byte.
+    pub spec_bytes: Option<&'a str>,
 }
 
 impl<'a> RunOpts<'a> {
@@ -1054,6 +1079,8 @@ impl<'a> RunOpts<'a> {
             pre_create: Vec::new(),
             env: Vec::new(),
             restore_run: false,
+            bin: None,
+            spec_bytes: None,
         }
     }
 }
@@ -1069,7 +1096,14 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
         create_topic(topic, *partitions);
     }
 
-    let sp = write_spec(o.spec);
+    let sp = match o.spec_bytes {
+        Some(bytes) => {
+            let p = demo_dir().join(format!("drill-{}.yaml", std::process::id()));
+            std::fs::write(&p, bytes).unwrap();
+            p
+        }
+        None => write_spec(o.spec),
+    };
     let d = demo_dir();
     let signer = o
         .signing
@@ -1129,7 +1163,7 @@ pub fn run_with(o: RunOpts<'_>) -> Run {
     let _ = std::fs::remove_file(&out_json);
     let _ = std::fs::remove_file(out_json.with_extension("sig"));
 
-    let mut cmd = Command::new(bin());
+    let mut cmd = Command::new(o.bin.clone().unwrap_or_else(bin));
     // `restore run` is the canonical name (interface I20); `drill run` is the
     // tag-0 alias, which prints one deprecation line and does nothing else
     // differently. Both flatten the SAME clap struct, so the flags below are

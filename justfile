@@ -120,6 +120,11 @@ golden:
 # this build writes 1.6.0 for every sampled-lane scorecard, and 1.4.0/1.5.0
 # for a complete verification's.
 #
+# PROD-11.1 moved the scorecard to 1.7.0 (`source.selection`), and FX-23's
+# `-1.6.0.json` is frozen beside the new file
+# (`the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection`); this
+# build writes 1.7.0 only for a restore that states a replay selection.
+#
 # PROD-01.4a moved the receipt and the catalog point to 1.5.0 (`generations`,
 # `topics[].identity`: the topic ID before and after the engine), and
 # PROD-01.3's `-1.4.0.json` files are frozen beside the new ones the same way
@@ -129,12 +134,12 @@ golden:
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`,
+# (`scorecard::FORMAT_VERSION_WITH_SELECTION`,
 # `backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_GENERATIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new.
-scorecard_schema_version := "1.6.0"
+scorecard_schema_version := "1.7.0"
 receipt_schema_version := "1.5.0"
 catalog_schema_version := "1.5.0"
 

@@ -1,0 +1,106 @@
+Reason: FX-21, merge_manifests drops source_replication_factor for every topic after the first one saved, so the manifest records the factor for one topic only; carry it like original_partition_count; oracle: the merge and persistence unit tests in this patch and e2e/tests/replication_factor_parity.rs (every topic's factor recorded)
+
+diff --git a/crates/kafka-backup-core/src/backup/engine.rs b/crates/kafka-backup-core/src/backup/engine.rs
+index 3982804..6a61ff8 100644
+--- a/crates/kafka-backup-core/src/backup/engine.rs
++++ b/crates/kafka-backup-core/src/backup/engine.rs
+@@ -1681,6 +1681,7 @@ async fn save_manifest_snapshot(
+ /// - Topics only in `current`  — appended
+ /// - Topics in both            — partitions are merged recursively:
+ ///   - `original_partition_count` updated from `current` when present
++///   - `source_replication_factor` updated from `current` when present
+ ///   - Partitions only in existing → preserved
+ ///   - Partitions only in current  → appended
+ ///   - Partitions in both: segments deduplicated by (key, start_offset); existing wins on
+@@ -1703,6 +1704,14 @@ fn merge_manifests(mut existing: BackupManifest, current: BackupManifest) -> Bac
+             if cur_topic.original_partition_count.is_some() {
+                 ex_topic.original_partition_count = cur_topic.original_partition_count;
+             }
++            // The replication factor is recorded beside the partition count,
++            // from the same metadata, so it is carried the same way. The first
++            // save already holds every topic the configuration capture named,
++            // without a factor; without this, every topic after the first one
++            // saved kept that missing factor in the stored manifest.
++            if cur_topic.source_replication_factor.is_some() {
++                ex_topic.source_replication_factor = cur_topic.source_replication_factor;
++            }
+             for cur_part in cur_topic.partitions {
+                 if let Some(ex_part) = ex_topic
+                     .partitions
+@@ -2665,6 +2674,76 @@ mod tests {
+         assert_eq!(merged.topics[0].original_partition_count, Some(6));
+     }
+ 
++    #[test]
++    fn test_merge_manifests_updates_replication_factor() {
++        let mut existing = BackupManifest::new("test".to_string());
++        existing.topics.push(make_topic("orders", Some(3), vec![]));
++
++        let mut current = BackupManifest::new("test".to_string());
++        let mut topic = make_topic("orders", Some(3), vec![]);
++        topic.source_replication_factor = Some(3);
++        current.topics.push(topic);
++
++        let merged = merge_manifests(existing, current);
++        assert_eq!(merged.topics[0].source_replication_factor, Some(3));
++    }
++
++    #[test]
++    fn test_merge_manifests_preserves_replication_factor_when_none() {
++        let mut existing = BackupManifest::new("test".to_string());
++        let mut topic = make_topic("orders", Some(3), vec![]);
++        topic.source_replication_factor = Some(3);
++        existing.topics.push(topic);
++
++        let mut current = BackupManifest::new("test".to_string());
++        current.topics.push(make_topic("orders", None, vec![]));
++
++        let merged = merge_manifests(existing, current);
++        assert_eq!(merged.topics[0].source_replication_factor, Some(3));
++    }
++
++    /// The backup loop's own order: the configuration capture puts every
++    /// topic in the manifest, the first topic's metadata and save follow, and
++    /// only then the second topic's. Each topic's factor must reach the stored
++    /// manifest.
++    #[tokio::test]
++    async fn test_manifest_persistence_keeps_every_topics_replication_factor() {
++        let storage: Arc<dyn StorageBackend> = Arc::new(crate::storage::MemoryBackend::new());
++        let manifest = Arc::new(Mutex::new(BackupManifest::new("backup-1".to_string())));
++        {
++            let mut m = manifest.lock().await;
++            m.get_or_create_topic("orders");
++            m.get_or_create_topic("payments");
++        }
++        let persistence = ManifestPersistence::new(
++            "backup-1".to_string(),
++            storage.clone(),
++            manifest.clone(),
++            Duration::from_secs(30),
++        );
++        for (topic, factor) in [("orders", 3), ("payments", 2)] {
++            {
++                let mut m = manifest.lock().await;
++                let entry = m.get_or_create_topic(topic);
++                entry.original_partition_count = Some(1);
++                entry.source_replication_factor = Some(factor);
++            }
++            persistence.save_now().await.unwrap();
++        }
++
++        let data = storage.get("backup-1/manifest.json").await.unwrap();
++        let stored: BackupManifest = serde_json::from_slice(&data).unwrap();
++        let factor = |name: &str| {
++            stored
++                .topics
++                .iter()
++                .find(|t| t.name == name)
++                .and_then(|t| t.source_replication_factor)
++        };
++        assert_eq!(factor("orders"), Some(3));
++        assert_eq!(factor("payments"), Some(2));
++    }
++
+     #[test]
+     fn test_merge_manifests_preserves_partition_count_when_none() {
+         let mut existing = BackupManifest::new("test".to_string());

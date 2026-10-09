@@ -20,7 +20,9 @@ use logweir_core::approval_policy::{
     ApprovalMode, EffectivePolicy, OperatorMode, Requester, RestoreAuthorization,
 };
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
-use weirkeeper::crds::restore::{Restore, RestoreSpec, RestoreTarget, TargetMode, TopicNaming};
+use weirkeeper::crds::restore::{
+    Restore, RestoreSpec, RestoreTarget, TargetMode, TopicNaming, VerificationCoverage,
+};
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use super::{authorize, create_idempotent, get_object, json, list_page, list_query, ApiPath};
@@ -29,8 +31,8 @@ use crate::approval;
 use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
-    ApprovalResponse, AuthorizationState, CreateRestoreRequest, RestoreList, RestoreMode,
-    RestoreResponse, RestoreRoutingView, SubmitApprovalRequest, TopicMappingRow,
+    ApprovalResponse, AuthorizationState, CreateRestoreRequest, RestoreCoverage, RestoreList,
+    RestoreMode, RestoreResponse, RestoreRoutingView, SubmitApprovalRequest, TopicMappingRow,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
@@ -343,6 +345,25 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
             "must be from 60 to 86400",
         ));
     }
+    // PROD-08.1a: the record bound bounds a complete verification and nothing
+    // else — the CEL rule on `Restore.spec` and the runner's phase 0 refuse the
+    // same pair; refusing it here names the field before anything is stored.
+    if let Some(bound) = request.complete_max_records {
+        if bound < 1 {
+            errors.push(FieldError::new(
+                "completeMaxRecords",
+                "out_of_range",
+                "must be at least 1: a complete verification that may decode no record \
+                 compares nothing",
+            ));
+        } else if request.coverage != Some(RestoreCoverage::Complete) {
+            errors.push(FieldError::new(
+                "completeMaxRecords",
+                "requires_complete_coverage",
+                "bounds a complete verification and is set only with coverage `complete`",
+            ));
+        }
+    }
     match (errors.is_empty(), point_in_time) {
         (true, Some(t)) => Ok(t),
         _ => Err(ApiError::validation(errors)),
@@ -407,6 +428,13 @@ pub fn build(
                 },
             },
             deadline_seconds: request.deadline_seconds,
+            // PROD-08.1a: the declaration, verbatim. The controller holds it
+            // to the plan's own `sample.coverage` before anything runs.
+            coverage: request.coverage.map(|c| match c {
+                RestoreCoverage::Sampled => VerificationCoverage::Sampled,
+                RestoreCoverage::Complete => VerificationCoverage::Complete,
+            }),
+            complete_max_records: request.complete_max_records,
         },
         status: None,
     }
