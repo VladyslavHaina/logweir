@@ -739,6 +739,20 @@ pub struct Store {
     /// runner pins the manifest's version id, and readers read by it) has to
     /// be modelled beside it. See [`VersionedBucket`].
     versions: Option<Arc<VersionLog>>,
+    /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_misreporting_size`]
+    /// and `None` for every production constructor (FX-31). Every GET and HEAD
+    /// answer is then rewritten to REPORT a size other than the object's, and
+    /// every body byte a reader takes is counted. Modelled here, beside
+    /// `versions`, rather than as a wrapping `ObjectStore`: that trait cannot
+    /// be implemented without naming its delete, which this crate never does
+    /// (G-RET, `scripts/check-no-archive-write.sh`).
+    misreport: Option<Arc<Misreport>>,
+}
+
+/// What [`Store::in_memory_misreporting_size`] reports, and its meter.
+struct Misreport {
+    reported: u64,
+    streamed: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
@@ -851,6 +865,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -879,6 +894,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -900,6 +916,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -923,6 +940,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -1119,6 +1137,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         }
     }
 
@@ -1166,14 +1185,44 @@ impl Store {
     pub fn in_memory_misreporting_size(prefix: &str, reported: u64) -> (Self, StreamMeter) {
         let meter = StreamMeter::default();
         let store = Self {
-            inner: Arc::new(misreport::MisreportingSize {
-                inner: object_store::memory::InMemory::new(),
+            misreport: Some(Arc::new(Misreport {
                 reported,
                 streamed: Arc::clone(&meter.0),
-            }),
+            })),
             ..Self::in_memory(prefix)
         };
         (store, meter)
+    }
+
+    /// The test double's rewrite of one GET answer (see `misreport`); every
+    /// production store answers `r` unchanged.
+    fn as_answered(&self, mut r: object_store::GetResult) -> object_store::GetResult {
+        use futures::StreamExt as _;
+        use object_store::GetResultPayload;
+        let Some(m) = &self.misreport else {
+            return r;
+        };
+        // THE LIE: the headers say `reported`, the body is whole.
+        r.meta.size = m.reported;
+        r.range = 0..m.reported;
+        // THE METER: every chunk a reader polls out of the body. The double is
+        // built over the in-memory backend, whose body is always a stream.
+        let placeholder = GetResultPayload::Stream(futures::stream::empty().boxed());
+        if let GetResultPayload::Stream(body) = std::mem::replace(&mut r.payload, placeholder) {
+            let streamed = Arc::clone(&m.streamed);
+            r.payload = GetResultPayload::Stream(
+                body.inspect(move |chunk| {
+                    if let Ok(bytes) = chunk {
+                        streamed.fetch_add(
+                            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                })
+                .boxed(),
+            );
+        }
+        r
     }
 
     /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
@@ -1201,6 +1250,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: Some(log.clone()),
+            misreport: None,
         };
         (store, VersionedBucket { backend, log, rt })
     }
@@ -1266,6 +1316,7 @@ impl Store {
                     object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
                     other => StoreError::Io(format!("{key}: {other}")),
                 })?;
+            let r = self.as_answered(r);
             let vid = match &self.versions {
                 // The test double's version log: see `versions`.
                 Some(log) => log.current(key),
@@ -1303,7 +1354,8 @@ impl Store {
                 None => meta.version.clone(),
             };
             Ok(ObjectHead {
-                size: meta.size,
+                // The test double's size claim: see `misreport`.
+                size: self.misreport.as_ref().map_or(meta.size, |m| m.reported),
                 version,
             })
         })
@@ -1364,6 +1416,7 @@ impl Store {
                 .get_opts(&OPath::from(key), options)
                 .await
                 .map_err(|e| version_read_error(key, version, e))?;
+            let r = self.as_answered(r);
             let answered = r.meta.version.clone();
             if answered.as_deref() != Some(version) {
                 return Err(StoreError::Backend(format!(
@@ -2029,149 +2082,6 @@ impl StreamMeter {
     #[must_use]
     pub fn streamed(&self) -> u64 {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-/// The test double behind [`Store::in_memory_misreporting_size`].
-///
-/// `object_store::ObjectStore` is an `async_trait` trait; its methods are
-/// written here in the form that macro expands to (a boxed `Send` future per
-/// call), so the double needs no dependency this crate does not already
-/// declare.
-mod misreport {
-    use futures::future::BoxFuture;
-    use futures::stream::BoxStream;
-    use object_store::path::Path;
-    use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    };
-
-    #[derive(Debug)]
-    pub(super) struct MisreportingSize {
-        pub(super) inner: object_store::memory::InMemory,
-        pub(super) reported: u64,
-        /// [`super::StreamMeter`]'s counter.
-        pub(super) streamed: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    }
-
-    impl std::fmt::Display for MisreportingSize {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "MisreportingSize(reports {} bytes)", self.reported)
-        }
-    }
-
-    impl ObjectStore for MisreportingSize {
-        fn put_opts<'a, 'b, 'c>(
-            &'a self,
-            location: &'b Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> BoxFuture<'c, object_store::Result<PutResult>>
-        where
-            'a: 'c,
-            'b: 'c,
-            Self: 'c,
-        {
-            self.inner.put_opts(location, payload, opts)
-        }
-
-        fn put_multipart_opts<'a, 'b, 'c>(
-            &'a self,
-            location: &'b Path,
-            opts: PutMultipartOptions,
-        ) -> BoxFuture<'c, object_store::Result<Box<dyn MultipartUpload>>>
-        where
-            'a: 'c,
-            'b: 'c,
-            Self: 'c,
-        {
-            self.inner.put_multipart_opts(location, opts)
-        }
-
-        fn get_opts<'a, 'b, 'c>(
-            &'a self,
-            location: &'b Path,
-            options: GetOptions,
-        ) -> BoxFuture<'c, object_store::Result<GetResult>>
-        where
-            'a: 'c,
-            'b: 'c,
-            Self: 'c,
-        {
-            Box::pin(async move {
-                use futures::StreamExt as _;
-                let mut r = self.inner.get_opts(location, options).await?;
-                // THE LIE: the headers say `reported`, the body is whole.
-                r.meta.size = self.reported;
-                r.range = 0..self.reported;
-                // THE METER: every chunk a reader polls out of the body.
-                let streamed = std::sync::Arc::clone(&self.streamed);
-                let body = match r.payload {
-                    object_store::GetResultPayload::Stream(s) => s,
-                    #[allow(unreachable_patterns)]
-                    other => {
-                        return Err(object_store::Error::NotImplemented {
-                            operation: format!("misreporting double over {other:?}"),
-                            implementer: "MisreportingSize".to_string(),
-                        })
-                    }
-                };
-                r.payload = object_store::GetResultPayload::Stream(
-                    body.inspect(move |chunk| {
-                        if let Ok(bytes) = chunk {
-                            streamed.fetch_add(
-                                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                                std::sync::atomic::Ordering::SeqCst,
-                            );
-                        }
-                    })
-                    .boxed(),
-                );
-                Ok(r)
-            })
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, object_store::Result<Path>>,
-        ) -> BoxStream<'static, object_store::Result<Path>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&Path>,
-        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        fn list_with_delimiter<'a, 'b, 'c>(
-            &'a self,
-            prefix: Option<&'b Path>,
-        ) -> BoxFuture<'c, object_store::Result<ListResult>>
-        where
-            'a: 'c,
-            'b: 'c,
-            Self: 'c,
-        {
-            self.inner.list_with_delimiter(prefix)
-        }
-
-        fn copy_opts<'a, 'b, 'c, 'd>(
-            &'a self,
-            from: &'b Path,
-            to: &'c Path,
-            options: CopyOptions,
-        ) -> BoxFuture<'d, object_store::Result<()>>
-        where
-            'a: 'd,
-            'b: 'd,
-            'c: 'd,
-            Self: 'd,
-        {
-            self.inner.copy_opts(from, to, options)
-        }
     }
 }
 
