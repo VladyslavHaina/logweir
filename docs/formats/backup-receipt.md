@@ -455,10 +455,10 @@ run --consumer-group <id>` (repeatable), or a `Backup`/`BackupSchedule`
 `spec.consumerGroups`. **At most 100 exact ids**, each at most 255 bytes;
 anything else is refused before anything runs (phase −1, exit 3; the
 controller's `ExecutionSpecInvalid`) BY NAME: `ConsumerGroupSelectionTooLarge`
-past 100 ids, `ConsumerGroupIdInvalid` for a blank, control-character or
-over-long id, `ConsumerGroupSelectedTwice` for a repeat. A backup that selects
-none writes no block and no positions document, and its receipt is the 1.3.0
-(or 1.4.0) document it was, byte for byte.
+past 100 ids or past the summary's encoded cap (below), `ConsumerGroupIdInvalid`
+for a blank, control-character or over-long id, `ConsumerGroupSelectedTwice`
+for a repeat. A backup that selects none writes no block and no positions
+document.
 
 ### Two documents: the receipt's summary and the positions document
 
@@ -468,11 +468,19 @@ review H1). The catalog reads a receipt whole and refuses one over 256 KiB
 relays at most 1 MiB; positions grow with groups × partitions. So the receipt
 carries only a per-group SUMMARY — outcome, type, states, members, `active` and
 the position COUNTS — the capture window, and the positions document's key,
-SHA-256 and length. Its size depends on the selection alone: the block is
-bounded by `MAX_BLOCK_BYTES` (80 KiB) at 100 groups of 255-byte ids with every
-field at its longest
-(`consumer_positions::tests::the_block_is_bounded_by_the_selection_never_by_partitions`),
-and a few hundred bytes a group for ordinary ids. Measured through the runner's
+SHA-256 and length. Its size depends on the selection alone, and its cap,
+`MAX_BLOCK_BYTES` (80 KiB), is ENFORCED on the block's encoded bytes (review
+N1): `refuse_selection` builds the largest block the selection could produce —
+every group captured, every field at its longest — encodes it as the receipt
+does, and refuses the selection by name (`ConsumerGroupSelectionTooLarge`)
+when it is over, before anything runs. Never a truncated block. Escapes count
+as JSON writes them: 100 ids of 255 bytes that need no escape fit (71,236
+bytes at worst, four-byte characters included), while ids of 255 `"` or `\`
+— two bytes each when encoded — fit 84 to a selection (81,220 bytes at worst)
+and the 85th is refused (82,171; the review's 100 such ids would be 96,436)
+(`consumer_positions::tests::the_cap_is_enforced_on_the_encoded_bytes_with_escape_heavy_ids_at_and_over_it`,
+`consumer_positions_seam::a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name`).
+Ordinary ids cost a few hundred bytes a group. Measured through the runner's
 own builder with every group committed on every partition
 (`check_cli::the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available`):
 
@@ -1486,10 +1494,10 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
 
 ## Upgrade, rollback and old receipts (format 1.5.0, `consumer_positions`)
 
-- **A receipt is 1.5.0 exactly when its backup selected consumer groups**
-  (PROD-04.1), whatever else it carries — 1.5.0 includes every earlier minor's
-  fields. A backup that selects none writes the 1.3.0 or 1.4.0 document it
-  wrote before, byte for byte, and a plan without `source.consumer_groups` is
+- **A receipt carries the block exactly when its backup selected consumer
+  groups** (PROD-04.1), and such a receipt is at least 1.5.0, whatever else it
+  carries — 1.5.0 includes every earlier minor's fields. A backup that selects
+  none writes the document it wrote before PROD-04.1, byte for byte, and a plan without `source.consumer_groups` is
   the plan it was. `schemas/logweir-backup-receipt-1.5.0.json` adds the one
   optional property; the payload type keeps `version=1.0.0`.
 - **MINOR under OD-7 (a).** Arms 30 to 35 read only the new block, and the

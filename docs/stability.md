@@ -412,13 +412,15 @@ each judged against the partition's marks and the archive's offsets
 
 - **Absent means no group was selected**, never "no positions": every receipt
   before 1.5.0, and every later one whose backup selects none, which is
-  written as the 1.3.0 or 1.4.0 document it was, byte for byte, with no
+  written as the document it was before PROD-04.1, byte for byte, with no
   positions document. A partition with no committed offset is counted, never
   offset 0, and a group that is not captured carries no position at all.
 - **The receipt stays bounded.** Its block depends on the selection only —
-  at most 100 groups, under 80 KiB at the worst ids (a proved bound) — never
-  on partitions, so the catalog's 256 KiB read and the evidence fetch's 1 MiB
-  hold; the positions grow in their own document, which neither reads.
+  at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
+  selection whose summary could exceed it as JSON writes it (escapes
+  counted) is refused by name before anything runs — never on partitions, so
+  the catalog's 256 KiB read and the evidence fetch's 1 MiB hold; the
+  positions grow in their own document, which neither reads.
 - **Six receipt arms, 22 to 27, and fourteen document arms, CP-1 to CP-14, are
   MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
   document without it changes verdict; the document's run only when a reader

@@ -14888,4 +14888,40 @@ mod prod_04_1 {
         }
         assert!(desired_execution_inputs(&with_groups(Some(vec!["billing"])), &cluster()).is_ok());
     }
+
+    /// **PROD-04.1 review N1: the 80 KiB summary cap is the ENCODED size, at
+    /// and over it, in the controller.** 84 ids of 255 bytes made of `"` —
+    /// each byte two when the receipt encodes it — are the largest such
+    /// selection the cap admits: the plan renders. The 85th is refused before
+    /// any Job, by name (`ExecutionSpecInvalid`, `ConsumerGroupSelectionTooLarge`,
+    /// the encoded size in the message), never truncated. KILLS: a cap on the
+    /// ids' raw lengths (85 x 255 raw bytes are far under 80 KiB).
+    #[test]
+    fn an_escape_heavy_selection_is_refused_past_the_encoded_cap_and_admitted_at_it() {
+        let ids: Vec<String> = (0..85)
+            .map(|i| format!("{i:03}{}", "\"".repeat(252)))
+            .collect();
+        let at = with_groups(Some(ids[..84].iter().map(String::as_str).collect()));
+        assert!(desired_execution_inputs(&at, &cluster()).is_ok(), "84 fit");
+        assert!(weirkeeper::policy::validate_run_policy(&at.spec).is_ok());
+        let over = with_groups(Some(ids.iter().map(String::as_str).collect()));
+        match desired_execution_inputs(&over, &cluster()) {
+            Err(BackupError::Refused(state, message)) => {
+                assert_eq!(state, "ExecutionSpecInvalid", "{message}");
+                assert!(message.contains("spec.consumerGroups"), "{message}");
+                assert!(
+                    message.contains("ConsumerGroupSelectionTooLarge")
+                        && message.contains("bytes as JSON writes it"),
+                    "{message}"
+                );
+            }
+            other => panic!("85 must be refused: {:?}", other.map(|f| f.sha256)),
+        }
+        let errs = weirkeeper::policy::validate_run_policy(&over.spec).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.field == "spec.consumerGroups"
+                && e.message.contains("ConsumerGroupSelectionTooLarge")),
+            "{errs:?}"
+        );
+    }
 }

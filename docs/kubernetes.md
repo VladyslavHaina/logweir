@@ -5278,7 +5278,9 @@ catalog reads a point that selects 100 groups over many partitions as
   relation is the document's.
 - **Refusals.** The CRD schema bounds the list (100 ids of 1 to 255
   characters). A repeated, blank or control-character id, one over 255 bytes,
-  or more than 100, is refused before any Job by name (`ExecutionSpecInvalid`:
+  more than 100, or a selection whose receipt summary could exceed 80 KiB as
+  the receipt encodes it (ids of `"` or `\` count double, so 84 such 255-byte
+  ids fit), is refused before any Job by name (`ExecutionSpecInvalid`:
   `ConsumerGroupSelectedTwice`, `ConsumerGroupIdInvalid`,
   `ConsumerGroupSelectionTooLarge`), and a schedule carrying one is
   `Ready=False`.

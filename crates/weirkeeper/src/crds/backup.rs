@@ -375,8 +375,10 @@ pub struct BackupSpec {
     ///
     /// Optional and additive: ABSENT (or empty) selects no group and the run
     /// is the run it was — its plan, its digest and its receipt unchanged. A
-    /// blank, repeated or control-character id, one over 255 bytes, or more
-    /// than 100 ids, is refused by name before any Job (`ExecutionSpecInvalid`:
+    /// blank, repeated or control-character id, one over 255 bytes, more than
+    /// 100 ids, or a selection whose receipt summary could exceed 80 KiB as the
+    /// receipt encodes it, is refused by name before any Job
+    /// (`ExecutionSpecInvalid`:
     /// `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
     /// `ConsumerGroupSelectionTooLarge`). An older controller ignores
     /// the field and records no positions.

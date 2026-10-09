@@ -6909,7 +6909,7 @@ fn built_positions(
 /// most a backup may select — over 10 topics of 11. Each receipt is far under
 /// the catalog's 256 KiB read cap (and the evidence fetch's 1 MiB), the catalog
 /// reads the point `Available` with its summary, and the receipt's block alone
-/// is under its proved bound. NEGATIVE CONTROL: the positions themselves —
+/// is under its enforced cap. NEGATIVE CONTROL: the positions themselves —
 /// the document the receipt binds — are over the 256 KiB cap at both sizes,
 /// which is what the receipt carried inline before the fix, so these sizes
 /// would read `Unreadable` had the positions stayed in it.

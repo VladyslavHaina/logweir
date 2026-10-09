@@ -1361,9 +1361,10 @@ receipt (`<run_id>.consumer-positions.json`, format 1.0.0) that carries every
 position. Name the groups in the plan (`source.consumer_groups`), on the
 command line (`logweir backup run --consumer-group <id>`, repeatable) or on a
 `Backup`/`BackupSchedule` (`spec.consumerGroups`): **at most 100 exact ids**,
-each at most 255 bytes, anything else refused by name before anything runs
-(`ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`,
-`ConsumerGroupSelectedTwice`). Every selected group gets exactly one outcome:
+each at most 255 bytes, and a summary at most 80 KiB as the receipt encodes it
+(ids of `"` or `\` count double: 84 such 255-byte ids fit), anything else
+refused by name before anything runs (`ConsumerGroupSelectionTooLarge`,
+`ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`). Every selected group gets exactly one outcome:
 `captured` — its type and state, whether it was active, and every partition of
 every backed-up topic accounted for, each committed position judged against the
 partition's marks and the archive (`withinArchive`, `atArchiveEnd`,

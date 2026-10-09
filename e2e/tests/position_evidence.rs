@@ -1636,7 +1636,7 @@ fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
         });
         eprintln!("[prod-04-1] h1 {size}");
         // The catalog reads a receipt whole up to 256 KiB: this one is under
-        // half of it, and the block in it under its proved bound.
+        // half of it, and the block in it under its enforced cap.
         assert!(
             b.receipt_bytes.len() < 128 * 1024,
             "the receipt is not well under the catalog's 256 KiB read cap: {size}"
