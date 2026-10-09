@@ -2032,6 +2032,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a created topic is used only once served",
             "until every partition of each topic it created has a",
         ),
+        // FX-24 (2026-10-08): a connection that sends nothing meets the
+        // console's header deadline, and the console no longer serves HTTP/2,
+        // so an ingress configured for an `h2c` backend must go back to 1.1.
+        (
+            "a silent connection meets the console's header deadline",
+            "h2c",
+        ),
         // FX-21 (2026-10-08): an unrecorded replication factor is not
         // assessed, never matching; the engine's first patch, build 2.
         (

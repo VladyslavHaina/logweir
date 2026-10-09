@@ -61,10 +61,14 @@ http-body-util = "0.1"
 # on them and `kube-client` pulls `hyper-util`'s `client` feature — so this
 # turns on features of crates already in `Cargo.lock` and leaves the package set
 # and THIRD_PARTY_NOTICES.md unchanged. `tests/linkage.rs` asserts that.
+# HTTP/1 ONLY (FX-24): hyper-util's `server-auto` (the HTTP/1-or-HTTP/2 sniff,
+# which read a connection's first bytes with no deadline) is no longer turned
+# on; its `http1` feature is what lets `GracefulShutdown` watch hyper's own
+# HTTP/1 connection. `src/main.rs` `serve` says why.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = [
+    "http1",
     "server",
-    "server-auto",
     "server-graceful",
     "service",
     "tokio",
