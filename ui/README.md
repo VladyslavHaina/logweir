@@ -209,6 +209,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
 | `tests/complete-coverage.spec.js` | **PROD-08.1a**: complete coverage -- the wizard's closed advanced choice with its cost, unticked by default; the plan line exactly when ticked and the old bytes when not (the golden pair `plan-complete.golden.yaml`, which `ui_lint.rs` also parses into `RestoreSpec`); the review row and cost; the Restore's declaration; the draft; the mounted wizard; the API's coverage decoded and projected; the list row, the detail and the operation view saying sampled or complete with every partition's counts; and `covered: false` never green, even beside a forged pass -- each row with its negative control. |
 | `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
+| `tests/schema-dependency.spec.js` | **PROD-03.0**: the restore review, the recovery-point step and the catalog page name the schema-dependent topics with their sides and schema ids and say "Registry not captured: applications may not read these records after restore."; a `notDetected` topic is not named, and a topic without the field (or `notAssessed`) is said to be not assessed, never "no registry needed" -- over the fixture the product API's own row answers, each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
@@ -1343,6 +1344,40 @@ upgraded first, it is refused, and a retry builds a new plan where the box can
 be ticked. A draft kept before the upgrade carries no choice and comes back
 unticked. Rolling the console back removes the box; a plan already approved with
 the line keeps it. Rows: `ui/tests/time-basis.spec.js`.
+
+## Schema-dependent topics: "registry not captured", where a restore is reviewed (PROD-03.0)
+
+A record a Confluent serializer wrote is a zero byte, a 4-byte schema id and a
+payload only that schema decodes, and Logweir never captures a schema
+registry. So the backup run judges each topic's archived keys and values for
+that framing (receipt format 1.5.0, [`schema_dependency`](../docs/formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)),
+the catalog point copies it, and the product API publishes it per topic as
+`PointView.topics[].schemaDependency` (`verdict`, `basis` or `reason`, the
+dependent `sides`, their `schemaIds` and `schemaIdsOmitted`). No registry is
+contacted to say it, by the backup, the API or this page.
+
+The console says it in three places, in the same words:
+
+* **the restore review** (step 6): a `schema registry` fact for the SELECTED
+  topics, and — when any is schema-dependent — a warning that opens with
+  **"Registry not captured: applications may not read these records after
+  restore."** and names each topic with its sides and ids, for example `orders
+  (key and value: schema ids 2, 3, 4; sampled)`;
+* **the recovery-point step** of a catalog point: the same sentence over all
+  the point's listed topics, before any is named;
+* **the catalog page**: a "Schema-dependent topics" section under the points
+  table, listing each point with schema-dependent topics.
+
+Nothing here blocks a restore: the bytes are restored unchanged either way, and
+what an application needs is the registry that issued those ids, reachable
+from where it runs. **Absent is NOT ASSESSED, never "no registry needed"**: a
+point recorded before format 1.5.0, a catalog synced by an older runner, a
+point listed without its topics, or a topic the backup could not judge
+(`noRecords`, `segmentUnreadable`, `segmentTooLargeForDetection`,
+`detectionTimeBudgetExceeded`) is said to be not assessed, by name; only a
+topic the point says `notDetected` for reads "no schema framing detected".
+`tests/schema-dependency.spec.js` holds each sentence, over the fixture the
+API's own row answers (`tests/fixtures/console/catalog-point-schema-dependency.json`).
 
 ## Complete coverage: asked for as an advanced choice, shown wherever a result is (PROD-08.1a)
 

@@ -2042,6 +2042,9 @@ export function renderCatalogPointStep(state) {
         "</code>"],
       ["manifest sha256", "<code id=\"point-manifest-sha256\">" + esc(c.manifestSha256) +
         "</code>"],
+      // PROD-03.0: the point's schema-dependent topics, before any is named.
+      ["schema registry", "<span id=\"point-schema-dependency\">" +
+        esc(pointSchemaDependencyText(s)) + "</span>"],
       ["offered from", c.backup === null || c.backup === undefined
         ? "the catalog (no Backup object)"
         : "Backup <code>" + esc(c.backup.name) + "</code>, uid <code>" + esc(c.backup.uid) +
@@ -2801,6 +2804,9 @@ export function sourceFactsOfEntry(entry, catalogName) {
       replicationFactor: count(t.replicationFactor),
       configCoverage: typeof t.configCoverage === "string" ? t.configCoverage : null,
       owner: typeof t.owner === "string" ? t.owner : null,
+      // PROD-03.0: the topic's schema dependency, or `null` -- NOT ASSESSED,
+      // never "not schema-dependent".
+      schemaDependency: schemaDependencyOf(t.schemaDependency),
     }));
     return facts;
   }
@@ -2815,6 +2821,145 @@ export function sourceFactsOfEntry(entry, catalogName) {
     "backup receipt predates format 1.3.0, the catalog was synced by an older runner, or the " +
     "point is not Available";
   return facts;
+}
+
+// ------------------------------------------------- schema dependency (PROD-03.0)
+
+/** What the review says, in as many words, about a topic whose archived
+ *  records carry Confluent wire-format framing. The sentence the brief fixes. */
+export const SCHEMA_REGISTRY_NOT_CAPTURED =
+  "Registry not captured: applications may not read these records after restore.";
+
+/** Why, and what it does not change. */
+export const SCHEMA_DEPENDENCY_NOTE =
+  "The backup that wrote this point judged these topics' archived records and found " +
+  "Confluent wire-format framing in their keys or values: a zero byte and a schema id that " +
+  "a schema registry issued. Logweir never contacts or captures a schema registry, so an " +
+  "application that deserializes the restored records needs the registry that issued these " +
+  "ids, reachable from where it runs. The restore copies the bytes unchanged either way, " +
+  "and nothing here blocks it.";
+
+/** Said for selected topics whose schema dependency this page cannot state. */
+export const SCHEMA_DEPENDENCY_NOT_ASSESSED =
+  "Whether these topics' records need a schema registry was not assessed for this point " +
+  "(a backup receipt before format 1.5.0, a catalog synced by an older runner, a point the " +
+  "catalog lists without its topics, or a topic the backup could not judge). Not assessed is " +
+  "not \"no registry needed\".";
+
+const SCHEMA_VERDICTS = ["schemaDependent", "notDetected", "notAssessed"];
+
+/** One topic's `PointTopicView.schemaDependency`, normalised, or `null` for
+ *  anything that is not one -- which every reader takes as NOT ASSESSED. */
+export function schemaDependencyOf(raw) {
+  if (raw === null || typeof raw !== "object" || !SCHEMA_VERDICTS.includes(raw.verdict)) {
+    return null;
+  }
+  return {
+    verdict: raw.verdict,
+    basis: typeof raw.basis === "string" ? raw.basis : null,
+    reason: typeof raw.reason === "string" ? raw.reason : null,
+    sides: (Array.isArray(raw.sides) ? raw.sides : [])
+      .filter((x) => x === "key" || x === "value"),
+    schemaIds: (Array.isArray(raw.schemaIds) ? raw.schemaIds : [])
+      .filter((id) => Number.isInteger(id) && id >= 1),
+    schemaIdsOmitted: raw.schemaIdsOmitted === true,
+  };
+}
+
+/** What the plan's SELECTED topics need from a schema registry, from the
+ *  point's recorded topics: the schema-dependent ones with their sides and
+ *  ids, and the ones nothing can be said about. A topic is "fine" only when
+ *  the point says `notDetected` for it. Pure. */
+export function schemaDependencyReview(state) {
+  const facts = sourceFactsOf(state);
+  const byName = new Map(
+    (Array.isArray(facts.topics) ? facts.topics : []).map((t) => [String(t.name), t]),
+  );
+  const dependent = [];
+  const notAssessed = [];
+  for (const name of selectedTopics(state)) {
+    const d = (byName.get(String(name)) || {}).schemaDependency || null;
+    if (d !== null && d.verdict === "schemaDependent") {
+      dependent.push({ topic: String(name), sides: d.sides, schemaIds: d.schemaIds,
+        schemaIdsOmitted: d.schemaIdsOmitted, basis: d.basis });
+    } else if (d === null || d.verdict !== "notDetected") {
+      notAssessed.push(String(name));
+    }
+  }
+  return { dependent: dependent, notAssessed: notAssessed };
+}
+
+/** One schema-dependent topic in words: its name, the sides and the ids. */
+export function schemaDependentTopicText(entry) {
+  const e = entry || {};
+  const ids = Array.isArray(e.schemaIds) ? e.schemaIds : [];
+  const sides = Array.isArray(e.sides) && e.sides.length > 0 ? e.sides.join(" and ") : "records";
+  return String(e.topic || "") + " (" + sides + ": schema ids " +
+    (ids.length > 0 ? ids.join(", ") : "not listed") +
+    (e.schemaIdsOmitted === true ? " and more" : "") +
+    (typeof e.basis === "string" ? "; " + e.basis : "") + ")";
+}
+
+/** What the recovery-point step says about ALL the point's topics: its
+ *  schema-dependent ones with their ids, or that none of its listed topics
+ *  carries framing, or that this page cannot say. */
+export function pointSchemaDependencyText(state) {
+  const facts = sourceFactsOf(state);
+  if (!Array.isArray(facts.topics)) {
+    return "not assessed: this point's topics are not listed by its catalog";
+  }
+  const dependent = facts.topics
+    .filter((t) => (t.schemaDependency || {}).verdict === "schemaDependent")
+    .map((t) => schemaDependentTopicText({ topic: t.name, sides: t.schemaDependency.sides,
+      schemaIds: t.schemaDependency.schemaIds,
+      schemaIdsOmitted: t.schemaDependency.schemaIdsOmitted,
+      basis: t.schemaDependency.basis }));
+  if (dependent.length > 0) {
+    return SCHEMA_REGISTRY_NOT_CAPTURED + " Schema-dependent topics: " + dependent.join(", ");
+  }
+  const notDetected = facts.topics
+    .filter((t) => (t.schemaDependency || {}).verdict === "notDetected").length;
+  return notDetected === facts.topics.length
+    ? "no schema framing detected in this point's archived records"
+    : "not assessed for " + (facts.topics.length - notDetected) + " of this point's topics";
+}
+
+/** The review's one-line answer for the selected topics. */
+export function schemaDependencyText(state) {
+  const review = schemaDependencyReview(state);
+  if (review.dependent.length > 0) {
+    return "registry not captured for " + review.dependent.length + " schema-dependent topic" +
+      (review.dependent.length === 1 ? "" : "s") + ": " +
+      review.dependent.map(schemaDependentTopicText).join(", ");
+  }
+  if (review.notAssessed.length > 0) {
+    return "not assessed for " + review.notAssessed.join(", ");
+  }
+  return selectedTopics(state).length > 0
+    ? "no schema framing detected in the selected topics' archived records"
+    : "no topic selected";
+}
+
+/** The review's warning block: the sentence, the topics with their ids, and
+ *  the not-assessed note -- or `""` when every selected topic is
+ *  `notDetected`. */
+export function renderSchemaDependencyWarning(state) {
+  const review = schemaDependencyReview(state);
+  return (
+    (review.dependent.length > 0
+      ? "<div class=\"caveat\" id=\"review-schema-dependency-warning\" role=\"note\">" +
+        "<p><strong>" + esc(SCHEMA_REGISTRY_NOT_CAPTURED) + "</strong> Schema-dependent " +
+        "topics: " + review.dependent.map((d) =>
+          "<span class=\"schema-dependent-topic\" data-topic=\"" + esc(d.topic) + "\">" +
+          esc(schemaDependentTopicText(d)) + "</span>").join(", ") + ".</p>" +
+        "<p class=\"note\">" + esc(SCHEMA_DEPENDENCY_NOTE) + "</p></div>"
+      : "") +
+    (review.notAssessed.length > 0
+      ? "<p class=\"note\" id=\"review-schema-dependency-not-assessed\">" +
+        esc(SCHEMA_DEPENDENCY_NOT_ASSESSED) + " Not assessed: " +
+        esc(review.notAssessed.join(", ")) + ".</p>"
+      : "")
+  );
 }
 
 /** The source facts on the state, or the not-read ones. */
@@ -4016,7 +4161,11 @@ export function renderPlanStep(prepared, state) {
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
       // PROD-08.1a: HOW MUCH THE RUN WILL VERIFY, beside the plan that says so.
       ["coverage", "<span id=\"review-coverage\">" + esc(coverageText(s)) + "</span>"],
+      // PROD-03.0: WHAT THE RESTORED RECORDS NEED FROM A REGISTRY.
+      ["schema registry", "<span id=\"review-schema-dependency\">" +
+        esc(schemaDependencyText(s)) + "</span>"],
     ]) +
+    renderSchemaDependencyWarning(s) +
     // AND WHAT IT COSTS, where it is reviewed, when it is chosen.
     ((((s.fields || {}).sample) || {}).coverage === COVERAGE_COMPLETE
       ? "<p class=\"caveat\" id=\"review-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
