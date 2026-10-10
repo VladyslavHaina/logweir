@@ -1412,6 +1412,7 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
                 uid: "fx4".into(),
                 ca_file: None,
                 credentials: CredentialMode::Static,
+                grant_bindings: Vec::new(),
             },
             evidence_destination: None,
             backup_id: "fx4".into(),

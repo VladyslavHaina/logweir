@@ -82,7 +82,7 @@ use logweir_core::check_contract::{
     aggregate, aggregate_expires_at, inputs_digest, redact, ApprovalRef, Authority, BindingInputs,
     CaBundleRef, CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanKind,
     CheckRelay, CheckRequest, CheckScope, CheckState, ConnectionPlan, CredentialMode,
-    DestinationPlan, FrameExpectations, Gating, GrantCredentials, GrantRef,
+    DestinationPlan, FrameExpectations, Gating, GrantBindingRef, GrantCredentials, GrantRef,
     OperationReadinessRequest, OverallState, Referent, RestorePreflightRequest, RosterRef, Stream,
     CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
 };
@@ -540,6 +540,11 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
                     push(destination_row_for(*role));
                 }
             }
+            // FX-20c: `readiness.rs` pushes the binding row through the same
+            // skip filter, when the plan lists a grant.
+            if request.compares_grant_bindings() {
+                push(CheckId::DestinationCredentialBound);
+            }
             if r.signer_path.is_some() {
                 push(CheckId::SignerPrivateKeyUsable);
             }
@@ -548,6 +553,9 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             out.insert(CheckId::RunnerContract);
             for role in &r.roles {
                 out.insert(destination_row_for(*role));
+            }
+            if request.compares_grant_bindings() {
+                out.insert(CheckId::DestinationCredentialBound);
             }
         }
         // TWO ROWS, AND `connection.topicsDescribable` IS NOT ONE OF THEM.
@@ -588,6 +596,10 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             }
             if r.evidence_destination.is_some() && want(CheckId::DestinationEvidenceWritable) {
                 out.insert(CheckId::DestinationEvidenceWritable);
+            }
+            // FX-20c: `restore.rs` reports it first, through `want`.
+            if request.compares_grant_bindings() && want(CheckId::DestinationCredentialBound) {
+                out.insert(CheckId::DestinationCredentialBound);
             }
         }
         // None of these three is ever rendered by this controller: a topic
@@ -4442,6 +4454,10 @@ pub struct Inputs {
     /// [`Inputs::evidence_read_plan`].
     pub evidence_read_grant:
         Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
+    /// FX-20c: the archive destination's `SecretKeys` grants whose binding
+    /// the check compares ([`grant_bindings_of`]); empty when it has none, or
+    /// when no destination object was read.
+    pub grant_bindings: Vec<GrantBindingRef>,
     /// A backup check's topic set.
     pub topics: Vec<String>,
     /// A restore check's plan.
@@ -4509,6 +4525,7 @@ impl Default for Inputs {
             write_probe: false,
             evidence_write_grant: None,
             evidence_read_grant: None,
+            grant_bindings: Vec::new(),
             topics: Vec::new(),
             plan: None,
             bindings: BindingFacts::default(),
@@ -5169,7 +5186,11 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
     }
 }
 
-fn destination_plan(d: &ResolvedDestination, ca_file: Option<&str>) -> DestinationPlan {
+fn destination_plan(
+    d: &ResolvedDestination,
+    ca_file: Option<&str>,
+    grant_bindings: Vec<GrantBindingRef>,
+) -> DestinationPlan {
     DestinationPlan {
         name: d.name.clone(),
         uid: d.uid.clone(),
@@ -5184,6 +5205,40 @@ fn destination_plan(d: &ResolvedDestination, ca_file: Option<&str>) -> Destinati
             destination::ResolvedGrant::ControllerIdentity
             | destination::ResolvedGrant::NotConfigured => CredentialMode::Ambient,
         },
+        grant_bindings,
+    }
+}
+
+/// FX-20c: a Restore's evidence destination lists its `evidenceWrite` grant —
+/// resolved for that role, fall-back included — when it is a Secret.
+fn evidence_grant_bindings(e: &ResolvedDestination) -> Vec<GrantBindingRef> {
+    grant_binding_ref(DestinationRole::EvidenceWrite, &e.grant)
+        .into_iter()
+        .collect()
+}
+
+/// FX-20c: the binding-only pair each listed grant contributes to the check
+/// pod — the grant's Secret's `logweir-binding` as an OPTIONAL `secretKeyRef`
+/// (an unbound or missing Secret still lets the pod start, and the runner
+/// names it) and `expected`, the destination's binding, as a literal. NO
+/// credential variable rides with it: a grant this check does not exercise is
+/// compared and never used.
+fn push_grant_binding_env(
+    bindings: &[GrantBindingRef],
+    expected: &str,
+    env_literal: &mut Vec<(String, String)>,
+    env_from_secret: &mut Vec<crate::job::EnvFromSecret>,
+) {
+    for grant in bindings {
+        let (projected, expected_env) =
+            logweir_core::credential_binding::grant_binding_env(grant.role);
+        env_literal.push((expected_env.to_string(), expected.to_string()));
+        env_from_secret.push(crate::job::EnvFromSecret {
+            name: projected.to_string(),
+            secret_name: grant.secret_name.clone(),
+            optional: true,
+            key: logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
+        });
     }
 }
 
@@ -5244,7 +5299,11 @@ pub fn build_job_shape(
             CheckRequest::OperationReadiness(Box::new(OperationReadinessRequest {
                 operation: CheckOperation::Backup,
                 connection: connection_plan(c),
-                destination: Some(destination_plan(d, Some(ARCHIVE_CA_PATH))),
+                destination: Some(destination_plan(
+                    d,
+                    Some(ARCHIVE_CA_PATH),
+                    inputs.grant_bindings.clone(),
+                )),
                 roles: plan_roles.clone(),
                 topics: inputs.topics.clone(),
                 signer_path: Some(crate::backup_execution::SIGNING_KEY_PATH.to_string()),
@@ -5268,7 +5327,11 @@ pub fn build_job_shape(
             let d = archive.ok_or("the destination did not resolve")?;
             CheckRequest::DestinationAccess(
                 logweir_core::check_contract::DestinationAccessRequest {
-                    destination: destination_plan(d, Some(ARCHIVE_CA_PATH)),
+                    destination: destination_plan(
+                        d,
+                        Some(ARCHIVE_CA_PATH),
+                        inputs.grant_bindings.clone(),
+                    ),
                     roles: plan_roles.clone(),
                     write_probe: inputs.write_probe,
                     evidence_write: evidence_write_grant.clone(),
@@ -5284,8 +5347,14 @@ pub fn build_job_shape(
                 plan_file: RESTORE_PLAN_PATH.to_string(),
                 plan_sha256: plan.recomputed_hash.clone(),
                 target: connection_plan(c),
-                source_destination: destination_plan(d, Some(ARCHIVE_CA_PATH)),
-                evidence_destination: evidence.map(|e| destination_plan(e, Some(EVIDENCE_CA_PATH))),
+                source_destination: destination_plan(
+                    d,
+                    Some(ARCHIVE_CA_PATH),
+                    inputs.grant_bindings.clone(),
+                ),
+                evidence_destination: evidence.map(|e| {
+                    destination_plan(e, Some(EVIDENCE_CA_PATH), evidence_grant_bindings(e))
+                }),
                 backup_id: inputs.backup_id.clone(),
                 // The manifest key is the archive's own convention; the runner
                 // joins it to the destination's prefix.
@@ -5346,6 +5415,23 @@ pub fn build_job_shape(
     let mut service_account: Option<String> = connection
         .map(|c| c.execution.service_account_name.clone())
         .filter(|s| !s.is_empty());
+    // FX-20c: one binding-only pair per grant the plan lists, for EXACTLY the
+    // grants the plan lists — the runner compares the plan's list, and a pair
+    // the plan does not name would be a Secret key projected for nothing.
+    for (_, d) in plan.request.bound_destinations() {
+        let expected = [archive, evidence]
+            .into_iter()
+            .flatten()
+            .find(|r| r.uid == d.uid)
+            .map(ResolvedDestination::credential_binding)
+            .ok_or("a listed grant names a destination this check did not resolve")?;
+        push_grant_binding_env(
+            &d.grant_bindings,
+            &expected,
+            &mut env_literal,
+            &mut env_from_secret,
+        );
+    }
     if let Some(d) = archive {
         let env = d.job_env();
         env_literal.extend(env.literals);
@@ -5697,6 +5783,76 @@ pub struct DestinationSpecFacts {
     /// [`Inputs::evidence_read_grant`].
     pub evidence_read_grant:
         Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
+    /// FX-20c: the destination's `SecretKeys` grants whose binding the check
+    /// compares — [`grant_bindings_of`].
+    pub grant_bindings: Vec<GrantBindingRef>,
+}
+
+/// FX-20c: the `SecretKeys` grants of `object` whose `logweir-binding` a
+/// check for `operation` compares (`destination.credentialBound`) — **pure**.
+///
+/// * **`DestinationAccess`: every grant the destination DECLARES**, whichever
+///   roles the check exercises. *Test access* is a question about the
+///   destination, and a READY answer about a destination whose `archiveWrite`
+///   Secret was written for another one is the PoC batch 4 F6 defect: the
+///   backup would be refused. A role the object does not declare falls back to
+///   `archiveWrite`, which is listed already.
+/// * **`Backup`: `archiveWrite` and `evidenceWrite`** (its fall-back
+///   included) — the two grants a backup Job presents, each compared the way
+///   that Job's runner compares it (`STORE_BINDING_PAIRS`).
+/// * **`Restore`: `archiveRead`** of the source destination. The evidence
+///   destination's `evidenceWrite` is a second object, listed by
+///   [`build_job_shape`] from its own resolution.
+/// * **`SourceConnection`: none** — it names no destination.
+///
+/// A grant that is not `SecretKeys` (a workload identity, the controller's
+/// own identity, none) carries no binding and is not listed; a grant the
+/// resolver refuses is reported by `destination.resolved` and is not listed
+/// either.
+#[must_use]
+pub fn grant_bindings_of(
+    operation: PreflightOperation,
+    object: &crate::crds::backup_destination::BackupDestination,
+    policy: &check_policy::Policy,
+) -> Vec<GrantBindingRef> {
+    let roles: Vec<DestinationRole> = match operation {
+        PreflightOperation::DestinationAccess => DestinationRole::ALL
+            .into_iter()
+            .filter(|role| destination::declares(object, *role))
+            .collect(),
+        PreflightOperation::Backup => {
+            vec![
+                DestinationRole::ArchiveWrite,
+                DestinationRole::EvidenceWrite,
+            ]
+        }
+        PreflightOperation::Restore => vec![DestinationRole::ArchiveRead],
+        PreflightOperation::SourceConnection => Vec::new(),
+    };
+    roles
+        .into_iter()
+        .filter_map(|role| {
+            let grant = destination::resolve(object, role, policy).ok()?.grant;
+            grant_binding_ref(role, &grant)
+        })
+        .collect()
+}
+
+/// One grant as a [`GrantBindingRef`], when it is a Secret.
+#[must_use]
+pub fn grant_binding_ref(
+    role: DestinationRole,
+    grant: &destination::ResolvedGrant,
+) -> Option<GrantBindingRef> {
+    match grant {
+        destination::ResolvedGrant::SecretKeys { secret, .. } => Some(GrantBindingRef {
+            role,
+            secret_name: secret.clone(),
+        }),
+        destination::ResolvedGrant::WorkloadIdentity { .. }
+        | destination::ResolvedGrant::ControllerIdentity
+        | destination::ResolvedGrant::NotConfigured => None,
+    }
 }
 
 /// [`DestinationSpecFacts`] for one check — **pure**.
@@ -5759,6 +5915,7 @@ pub fn destination_spec_facts(
             destination::resolve(object, DestinationRole::EvidenceWrite, policy).map(|d| d.grant)
         }),
         evidence_read_grant: reads_evidence.then_some(evidence_read),
+        grant_bindings: grant_bindings_of(operation, object, policy),
     }
 }
 
@@ -6010,6 +6167,7 @@ pub async fn resolve(
                 inputs.write_probe = facts.write_probe;
                 inputs.evidence_write_grant = facts.evidence_write_grant;
                 inputs.evidence_read_grant = facts.evidence_read_grant;
+                inputs.grant_bindings = facts.grant_bindings;
                 if facts.request_evidence_read {
                     inputs.roles.push(DestinationRole::EvidenceRead);
                 }
