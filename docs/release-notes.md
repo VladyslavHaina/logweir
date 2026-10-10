@@ -1557,8 +1557,9 @@ spaced id's key (a tab, a no-break space, `%20`, a leading or trailing space),
 refused with a read-counting store double untouched; the key-segment rule
 held to the store's own path type for every ASCII byte
 (`crates/logweir/tests/check_cli.rs`, `crates/logweir/src/catalog/record.rs`);
-20 planted mutants, all killed, and in the review round eleven more, all
-killed. Live on compose (2026-10-09, the stack's MinIO, a versioned bucket,
+20 planted mutants, all killed, and after the review fifteen more, all killed
+(the review's ten that are not equivalent, three on the key-segment rule, two
+on the grant lint). Live on compose (2026-10-09, the stack's MinIO, a versioned bucket,
 the built `logweir check run`): unchanged `ready`, written again with
 identical bytes `ManifestSuperseded`, an unversioned copy `ready` with the
 note. The same run measured the grant on MinIO, which serves
