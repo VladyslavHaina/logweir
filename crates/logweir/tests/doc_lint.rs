@@ -2128,6 +2128,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a probe Job being collected does not clear reachable",
             "metadata.deletionTimestamp",
         ),
+        // FX-13a and FX-32 (2026-10-09, item 55): a sign-in state is
+        // single-use on each replica, and a replay there is refused under the
+        // audit code an operator alerts on, before any token request.
+        (
+            "a sign-in state is single-use on each replica",
+            "login_state_replayed",
+        ),
     ];
     assert_eq!(
         items.len(),

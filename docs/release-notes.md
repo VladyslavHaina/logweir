@@ -44,8 +44,10 @@ point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
 format 2.0.0 and named on every surface), 52 (FX-31, every object-store
 read has a size cap), 53 (FX-24c, one peer's share of the console's
-connections, and a rate floor on request bodies) and 54 (FX-19, a probe Job
-Kubernetes is collecting no longer clears `reachable`) so far. Items continue the next entry's
+connections, and a rate floor on request bodies), 54 (FX-19, a probe Job
+Kubernetes is collecting no longer clears `reachable`) and 55 (FX-13a and
+FX-32, a sign-in state is single-use on each replica, and a refused callback
+really clears the login cookie) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -161,6 +163,10 @@ Item 54 is fix-now row FX-19, proven by controller rows over a fake API with
 the controller's own log captured; it changes the controller only, and the PoC
 upgrade that carries it watches every connection's `reachable` and the
 controller's WARN lines across fifteen minutes of probe cycles.
+Item 55 is fix-now rows FX-13a and FX-32, proven by router rows over one and
+two console processes; it changes the console only, and the PoC upgrade that
+carries it signs in through Dex and replays the callback URL against both
+replicas.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2018,6 +2024,74 @@ about twelve a cadence before).
 drops the 630 s bound; the marker annotation it does not read is harmless,
 and nothing stored needs converting.
 
+#### 55. A sign-in state is single-use on each replica; a refused callback really clears the login cookie (FX-13a, FX-32)
+
+**Changed.** The login cookie is sealed and stateless and opens for 600
+seconds, and nothing recorded that its `state` had been used: anyone who kept
+a copy could drive `/auth/callback` again and again, and each callback was a
+token request to the provider authenticated as this console's client. Now,
+once the cookie has opened and its `state` matched and **before the code is
+exchanged**, the callback redeems the state in the console process's own
+record, in memory. A replay on the same replica — later, with another code,
+or racing the first — is refused `401 unauthenticated` ("This sign-in was
+already used. Start again at /auth/login.") with audit failure
+`login_state_replayed`, a warning, the login cookie cleared and **no token
+request**. Nothing is written to Kubernetes and the console's RBAC is
+unchanged. Across replicas the provider is the backstop: an authorization
+code is single-use (RFC 6749 §4.1.2), so a replay cannot obtain a second
+sign-in from a code the provider has exchanged. It costs one token request
+per replica, and again after that replica restarts or evicts the entry: the
+provider refuses it (`code_exchange_failed`), and that replica's record
+refuses it from then on. A code the provider has not consumed is not covered:
+when the first callback's exchange fails without the provider consuming the
+code, the same cookie and URL still sign in on another replica, exactly as
+before this change. The record holds 65,536 states per process; an entry is
+forgotten once its login state could no longer open and the entries redeemed
+before it have gone, or earlier when the record is full: then the oldest is
+forgotten, never a sign-in refused (audit note `usedSignInStates: full`, one
+warning a minute), and a replay of a forgotten state meets the same backstop.
+Separately (FX-32), the problem
+rendering kept only `Allow` from a handler's headers, so the callback's
+`Set-Cookie` clearing `__Host-logweir_login` on a refusal never reached the
+browser; every header now survives except those describing the replaced body
+and its caching ([api.md](api.md#sign-in)).
+**Do:** nothing is required. Alert on `login_state_replayed` (someone
+driving callbacks with a copied cookie) beside `code_exchange_failed`.
+**Scope:** rows through the whole router (`crates/logweir-api/tests/sign_in_state.rs`):
+a replay on one replica — the same code, another code, and 599 s later — is
+refused by name with no token request while the first callback signs in,
+against a provider double that would have accepted the code twice; two
+callbacks with one state at once on one replica, the provider taking 150 ms
+per token request, give one sign-in and one token request; with the provider
+double's codes single-use, a replay on a second console process reaches the
+token request once, is refused by the provider with no session, and is then
+refused by that process's record, and two callbacks at once on two processes
+give exactly one sign-in; a record shrunk to two forgets its oldest entries
+and still signs in every new login, announces it once, and a replay of a
+forgotten state meets the provider's refusal. Each row also asserts the
+callback made no Kubernetes write, and the replay and refused-exchange rows
+find no `state`, authorization code, nonce or sealed cookie in the console's
+logs. `tests/oidc_login.rs` drives seven
+callback refusals and reads the clearing `Set-Cookie` on the response the
+browser gets; unit rows hold what the rendering keeps and drops (the deny
+list's fifteen names are written out and pinned), the record's expiry,
+eviction and bound, and that of eight threads redeeming one state at once
+exactly one is first, 300 times over. Mutants, all killed: the record not
+consulted, the record written after the exchange, a check-then-write race, a
+check and a mark under two lock acquisitions, a
+full record that refuses, no eviction, eviction of the newest, no expiry, the
+eviction announced every time or not reported, a record keyed on the code or
+on nothing, one record shared by both processes, a replay warning that logs
+the authorization code, a refusal without the
+clear, the deny list losing `Cache-Control` or `Content-Length`, and the
+rendering dropping `Set-Cookie` again, keeping a short list,
+carrying the old body's headers or doubling its own.
+[UNVERIFIED — no PoC sign-in has replayed a callback URL against the deployed console yet; the PoC upgrade that carries this item does.]
+**Rollback:** an older console keeps no record (a copied cookie replays
+within its 600 s again, each replay a token request) and
+drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
+converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2089,7 +2163,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53 and 54, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54 and 55, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2135,6 +2209,7 @@ older verifier a subset scorecard); item 52 changes the controller
 the chart, and needs a shared console the chart publishes through its Ingress
 to name its trusted proxy (or set `api.console.trustedProxy: none`) before
 the upgrade renders; item 54 changes the controller
+only and needs nothing; item 55 changes the console
 only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 

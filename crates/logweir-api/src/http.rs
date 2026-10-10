@@ -381,11 +381,53 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
     response
 }
 
-/// Replace a response with the rendered problem, keeping `Allow`.
+/// The headers that describe the BODY `rerender` throws away, or whether
+/// that body may be cached. They are dropped with it; every other header a
+/// handler or an inner layer set survives the rendering.
+///
+/// WHY A DENY LIST AND NOT A KEEP LIST (FX-32). `rerender` once kept `Allow`
+/// and nothing else, so the `Set-Cookie` that `/auth/callback` appends to clear
+/// the login cookie on a refusal never reached the browser, while the module
+/// documentation said it did. A keep list fails the same way for the next
+/// header a handler adds to an error (`WWW-Authenticate` on a 401,
+/// `Connection: close`, a `Location`); a deny list of what genuinely belongs
+/// to the old body cannot. The rendered problem sets its own `Content-Type`
+/// (and `Retry-After` when the error carries one), and those win.
+///
+/// THE CACHE FIELDS GO TOO. A problem document carries this request's ID and
+/// is never a representation anything should store: the request-context
+/// layer gives it `no-store`, and an original `Cache-Control`, `Expires` or
+/// `Vary` carried across would say otherwise.
+pub const REPLACED_BODY_HEADERS: [HeaderName; 15] = [
+    header::CONTENT_TYPE,
+    header::CONTENT_LENGTH,
+    header::CONTENT_ENCODING,
+    header::CONTENT_LANGUAGE,
+    header::CONTENT_LOCATION,
+    header::CONTENT_RANGE,
+    header::CONTENT_DISPOSITION,
+    header::TRANSFER_ENCODING,
+    header::TRAILER,
+    header::ETAG,
+    header::LAST_MODIFIED,
+    header::ACCEPT_RANGES,
+    header::CACHE_CONTROL,
+    header::EXPIRES,
+    header::VARY,
+];
+
+/// Replace a response's body with the rendered problem, KEEPING every header
+/// the original carried except those in [`REPLACED_BODY_HEADERS`] and those the
+/// rendering sets itself. A repeated header (two `Set-Cookie` lines) keeps
+/// every value, in order.
 fn rerender(original: &Response, error: &ApiError, request_id: &str) -> Response {
     let mut rendered = problem::render(error, request_id);
-    if let Some(allow) = original.headers().get(header::ALLOW) {
-        rendered.headers_mut().insert(header::ALLOW, allow.clone());
+    let rendered_own: Vec<HeaderName> = rendered.headers().keys().cloned().collect();
+    for (name, value) in original.headers() {
+        if REPLACED_BODY_HEADERS.contains(name) || rendered_own.contains(name) {
+            continue;
+        }
+        rendered.headers_mut().append(name.clone(), value.clone());
     }
     rendered
 }
@@ -824,6 +866,196 @@ pub fn parse_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse as _;
+    use http::StatusCode;
+
+    fn rerendered(original: Response, error: &ApiError) -> Response {
+        rerender(&original, error, "01TESTREQUESTID")
+    }
+
+    /// **FX-32: a problem response keeps the headers its handler set.**
+    ///
+    /// REGRESSION REASON. `rerender` kept `Allow` and nothing else, so the
+    /// callback's login-cookie clear on a refusal was dropped on the way out
+    /// (found by FX-28). Every header below is one a handler or an inner layer
+    /// may put on an error and that means something to the client; the
+    /// assertions fail on the old keep-only-`Allow` body for all but `Allow`.
+    #[test]
+    fn a_rerendered_problem_keeps_the_handlers_headers() {
+        let mut original = ApiError::new(ProblemCode::Unauthenticated, "x").into_response();
+        let headers = original.headers_mut();
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("a=; Max-Age=0"),
+        );
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("b=; Max-Age=0"),
+        );
+        headers.insert(header::ALLOW, HeaderValue::from_static("GET,HEAD"));
+        headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+        headers.insert(header::LOCATION, HeaderValue::from_static("/ui/"));
+        headers.insert(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        );
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("7"));
+
+        let error = ApiError::new(ProblemCode::Unauthenticated, "The sign-in was refused.");
+        let out = rerendered(original, &error);
+
+        let cookies: Vec<&str> = out
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            cookies,
+            vec!["a=; Max-Age=0", "b=; Max-Age=0"],
+            "every Set-Cookie line survives, in order"
+        );
+        for (name, want) in [
+            (header::ALLOW, "GET,HEAD"),
+            (header::WWW_AUTHENTICATE, "Bearer"),
+            (header::CONNECTION, "close"),
+            (header::LOCATION, "/ui/"),
+            (HeaderName::from_static("x-accel-buffering"), "no"),
+            // The error carries no Retry-After of its own, so the handler's
+            // stands.
+            (header::RETRY_AFTER, "7"),
+        ] {
+            assert_eq!(
+                out.headers().get(&name).map(|v| v.to_str().unwrap()),
+                Some(want),
+                "{name} must survive the rendering"
+            );
+        }
+        assert_eq!(
+            out.headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some(PROBLEM_CONTENT_TYPE),
+            "the body is the problem document"
+        );
+    }
+
+    /// THE DENY LIST, WRITTEN OUT (FX-32 review, L3): the fifteen headers
+    /// that describe the replaced body or its caching, each with a value an
+    /// old body could have carried. The two rows below read THIS list, never
+    /// [`REPLACED_BODY_HEADERS`] alone: a row that loops over the constant it
+    /// tests cannot see an entry leave it.
+    const OLD_BODY_HEADERS: [(&str, &str); 15] = [
+        ("content-type", "text/plain; charset=utf-8"),
+        ("content-length", "8"),
+        ("content-encoding", "gzip"),
+        ("content-language", "en"),
+        ("content-location", "/old"),
+        ("content-range", "bytes 0-7/8"),
+        ("content-disposition", "attachment"),
+        ("transfer-encoding", "chunked"),
+        ("trailer", "expires"),
+        ("etag", "\"v1\""),
+        ("last-modified", "Tue, 15 Sep 2026 12:00:00 GMT"),
+        ("accept-ranges", "bytes"),
+        ("cache-control", "public, max-age=3600"),
+        ("expires", "Tue, 15 Sep 2026 13:00:00 GMT"),
+        ("vary", "accept"),
+    ];
+
+    /// **The deny list is exactly these fifteen headers: its length and its
+    /// membership are both pinned.**
+    ///
+    /// REGRESSION REASON (FX-32 review, L3). With `Cache-Control` or
+    /// `Content-Length` deleted from [`REPLACED_BODY_HEADERS`] every row
+    /// stayed green, because the drop row looped over the constant itself. A
+    /// handler's `Cache-Control: public` would then label a problem document
+    /// that can now carry a `Set-Cookie` as cacheable.
+    #[test]
+    fn the_deny_list_is_exactly_the_fifteen_body_and_cache_headers() {
+        let mut listed: Vec<&str> = REPLACED_BODY_HEADERS
+            .iter()
+            .map(HeaderName::as_str)
+            .collect();
+        listed.sort_unstable();
+        let mut pinned: Vec<&str> = OLD_BODY_HEADERS.iter().map(|(name, _)| *name).collect();
+        pinned.sort_unstable();
+        assert_eq!(pinned.len(), 15);
+        assert_eq!(
+            listed.len(),
+            15,
+            "the deny list has fifteen entries: {listed:?}"
+        );
+        assert_eq!(
+            listed, pinned,
+            "the deny list is these headers and no others (a removal makes an old body's \
+             header survive; an addition drops a header a handler meant the client to get)"
+        );
+        let mut distinct = pinned.clone();
+        distinct.dedup();
+        assert_eq!(distinct, pinned, "no header is listed twice");
+    }
+
+    /// **The headers that describe the replaced body go with it, and the
+    /// rendering's own fields win.**
+    ///
+    /// The control for the keep row above: carrying EVERYTHING would label a
+    /// problem document `text/plain`, give it the old body's length, or let a
+    /// cache keep a per-request answer. The original carries every header of
+    /// [`OLD_BODY_HEADERS`], so each of the fifteen is shown dropped.
+    #[test]
+    fn a_rerendered_problem_drops_what_described_the_old_body() {
+        let mut original = (StatusCode::NOT_FOUND, "old body").into_response();
+        let headers = original.headers_mut();
+        for (name, value) in OLD_BODY_HEADERS {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+        for (name, value) in OLD_BODY_HEADERS {
+            assert_eq!(
+                original.headers().get(name).map(|v| v.to_str().unwrap()),
+                Some(value),
+                "the control: the original carries {name}"
+            );
+        }
+
+        let mut error = ApiError::new(ProblemCode::RateLimited, "Slow down.");
+        error.retry_after_seconds = Some(30);
+        let out = rerendered(original, &error);
+
+        for (name, _) in OLD_BODY_HEADERS {
+            if name == "content-type" {
+                continue;
+            }
+            assert!(
+                out.headers().get(name).is_none(),
+                "{name} described the replaced body and must not survive: {:?}",
+                out.headers().get(name)
+            );
+        }
+        assert_eq!(
+            out.headers()
+                .get_all(header::CONTENT_TYPE)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![PROBLEM_CONTENT_TYPE],
+            "exactly one Content-Type: the problem's"
+        );
+        assert_eq!(
+            out.headers()
+                .get_all(header::RETRY_AFTER)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["30"],
+            "the error's own Retry-After wins and is not doubled"
+        );
+    }
 
     /// **The identity-claiming headers are REMOVED from the map, not merely
     /// left for everyone to ignore.**

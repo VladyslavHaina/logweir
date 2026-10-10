@@ -2736,6 +2736,10 @@ fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
 /// the sixty-second total ended it. Now its window wants [`RATE_FLOOR`] bytes:
 /// it is answered `400 malformed_request`, "arrived too slowly", and closed at
 /// thirty seconds, not sixty. A body floor of one byte fails here.
+///
+/// Its headers are held too, because FX-32 lets a handler's headers through
+/// the problem rendering: `Cache-Control: no-store`, `Content-Type` and
+/// `Content-Length` once each, and no header that described another body.
 #[test]
 fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
     let fixture = Fixture::new("bodyslow");
@@ -2787,6 +2791,55 @@ fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
             && response.contains("arrived too slowly"),
         "a body below the floor was answered with: {response}"
     );
+    // FX-32 lets the headers a handler set through the problem rendering
+    // (`http::rerender`), so this refusal's headers are held on the wire: one
+    // problem document, never stored, described once, and nothing left over
+    // that described another body.
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("the answer has a head and a body: {response}"));
+    let values = |name: &str| -> Vec<String> {
+        head.lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(header, _)| header.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_string())
+            .collect()
+    };
+    assert_eq!(
+        values("cache-control"),
+        ["no-store"],
+        "the refusal says no-store, once: {head}"
+    );
+    assert_eq!(
+        values("content-type"),
+        ["application/problem+json"],
+        "the refusal is one problem document: {head}"
+    );
+    assert_eq!(
+        values("content-length"),
+        [body.len().to_string()],
+        "the refusal's length is its problem document's, once: {head}"
+    );
+    for stale in [
+        "content-encoding",
+        "content-language",
+        "content-location",
+        "content-range",
+        "content-disposition",
+        "transfer-encoding",
+        "trailer",
+        "etag",
+        "last-modified",
+        "accept-ranges",
+        "expires",
+        "vary",
+    ] {
+        assert!(
+            values(stale).is_empty(),
+            "the refusal carries `{stale}`, which describes a body it does not have: {head}"
+        );
+    }
     assert!(
         closed_at >= STALL_DEADLINE.saturating_sub(Duration::from_secs(1)),
         "a body below the floor was ended after {closed_at:?}, before its {STALL_DEADLINE:?} \
