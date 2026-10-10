@@ -9274,10 +9274,11 @@ fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
 }
 
 /// **PROD-15.1 review L6.** The readiness check's `plan.parse` refuses an
-/// original-name block in a shape phase 0 refuses — in scratch mode, or
-/// beside a prefix — in the runner's own words, and nothing after it runs;
-/// the opted-in plan parses. KILLS: a preview that says ready for a plan the
-/// runner refuses at phase 0.
+/// original-name block in a shape phase 0 refuses — in scratch mode, beside a
+/// prefix, or in a SAMPLED plan (an original-name restore requires complete
+/// verification) — in the runner's own words, and nothing after it runs; the
+/// opted-in plan that asks for complete coverage parses. KILLS: a preview
+/// that says ready for a plan the runner refuses at phase 0.
 #[test]
 fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
     let point = ms_to_rfc3339(INSIDE_MS);
@@ -9299,6 +9300,14 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
             ),
             "OriginalNamePrefixNotEmpty",
         ),
+        (
+            "with sampled coverage",
+            base.replace(
+                "  topic_mapping_prefix: 'restore-'\n",
+                "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+            ),
+            "OriginalNameNeedsCompleteCoverage",
+        ),
     ] {
         assert!(yaml.contains("original_name"), "{label}: the fixture carries the block");
         let m = mount(&restore_plan(&yaml, None));
@@ -9312,10 +9321,16 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
         assert!(row.message.starts_with(token), "{label}: {}", row.message);
         assert!(!run.has(CheckId::ArchiveCoverage), "{label}: nothing after plan.parse runs");
     }
-    let opted_in = base.replace(
-        "  topic_mapping_prefix: 'restore-'\n",
-        "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
-    );
+    let opted_in = base
+        .replace(
+            "  topic_mapping_prefix: 'restore-'\n",
+            "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+        )
+        .replace(
+            "  window_end: 2026-09-15T06:00:00Z\n",
+            "  window_end: 2026-09-15T06:00:00Z\n  coverage: complete\n",
+        );
+    assert!(opted_in.contains("coverage: complete"));
     let m = mount(&restore_plan(&opted_in, None));
     let run = drive(
         &m,

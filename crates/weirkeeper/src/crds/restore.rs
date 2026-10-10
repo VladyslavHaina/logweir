@@ -86,8 +86,26 @@ pub const ORIGINAL_NAME_RULE: &str = "!has(self.target.topicNaming.originalName)
 pub const ORIGINAL_NAME_MESSAGE: &str =
     "target.topicNaming.originalName is set only with target.mode newTopic and target.topicNaming.prefix \"\": a restore under the original topic names maps every topic onto its own name";
 
+/// The CEL rule that keeps an original-name restore beside the only
+/// verification it may run with: `topicNaming.originalName: true` only with
+/// `coverage: complete`. A sampled check reads the first records of each
+/// partition and a count bound, which a record another producer wrote into
+/// the restored name can pass; the complete check compares every restored
+/// record with the archive and names a record the archive does not hold.
+///
+/// The earliest of three refusals: the controller refuses a plan that does
+/// not ask for complete coverage before any Job
+/// (`controllers::restore::original_name_agrees`), and the runner at phase 0.
+/// `originalName` is introduced with this rule, so no stored object can
+/// violate it.
+pub const ORIGINAL_NAME_COVERAGE_RULE: &str = "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (has(self.coverage) && self.coverage == 'complete')";
+
+/// The message [`ORIGINAL_NAME_COVERAGE_RULE`] travels with.
+pub const ORIGINAL_NAME_COVERAGE_MESSAGE: &str =
+    "target.topicNaming.originalName is set only with coverage: complete: a restore under the original topic names is verified completely, every restored record compared with the archive, never by sample";
+
 /// The rules on `Restore`'s `.spec`.
-pub const SPEC_RULES: [SpecRule; 6] = [
+pub const SPEC_RULES: [SpecRule; 7] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
@@ -97,6 +115,7 @@ pub const SPEC_RULES: [SpecRule; 6] = [
     ),
     SpecRule::new(COMPLETE_MAX_RECORDS_RULE, COMPLETE_MAX_RECORDS_MESSAGE),
     SpecRule::new(ORIGINAL_NAME_RULE, ORIGINAL_NAME_MESSAGE),
+    SpecRule::new(ORIGINAL_NAME_COVERAGE_RULE, ORIGINAL_NAME_COVERAGE_MESSAGE),
 ];
 
 /// How much of a restore phase 7 verifies, as a `Restore` or
@@ -455,8 +474,8 @@ pub struct TopicPreflight {
     pub timestamp_bound: Option<i64>,
 }
 
-/// A lost creation race, as the runner named it. Every list is at most 100
-/// topic names a broker accepts.
+/// A stopped creation step, as the runner named it. Every list is at most
+/// 100 topic names a broker accepts.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetTopicsAppeared {
@@ -464,15 +483,9 @@ pub struct TargetTopicsAppeared {
     #[serde(default)]
     #[schemars(length(max = 100), inner(length(max = 249)))]
     pub appeared: Vec<String>,
-    /// Topics this run created in the same request and removed again: its own
-    /// creation answer, partition count and configuration proved them its own,
-    /// and each held no record.
-    #[serde(default)]
-    #[schemars(length(max = 100), inner(length(max = 249)))]
-    pub removed: Vec<String>,
-    /// Topics this run created and LEFT under these names, because it could
-    /// not prove them its own and empty — remove them after checking who
-    /// writes to them.
+    /// Topics this run created and LEFT under these names, empty. Logweir
+    /// never deletes them: remove each yourself once you have checked
+    /// nothing writes to it.
     #[serde(default)]
     #[schemars(length(max = 100), inner(length(max = 249)))]
     pub left: Vec<String>,
@@ -813,11 +826,14 @@ pub struct RestoreStatus {
     /// rather than flattened to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
-    /// A creation race the run lost (`exitReason: TargetTopicAppeared`, exit
-    /// 1): mapped target names someone else created after phase 0 proved them
-    /// absent, and the topics this run created in the same request — removed
-    /// when it could prove them its own and empty, left otherwise. Read off
-    /// the runner's `target-topics-appeared=` line; absent on every other run.
+    /// A creation step that stopped (`exitReason: TargetTopicAppeared` for a
+    /// lost race, `CreatedTopicsLeft` for any other stop after a topic was
+    /// created; exit 1): mapped target names someone else created after phase
+    /// 0 proved them absent, and the topics THIS run created and LEFT — each
+    /// created by this restore and left empty; remove it yourself once you
+    /// have checked nothing writes to it. Logweir never deletes them. Read
+    /// off the runner's `target-topics-appeared=` line; absent on every other
+    /// run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_topics_appeared: Option<TargetTopicsAppeared>,
     /// The signed scorecard, the offset report, and the controller's

@@ -887,12 +887,21 @@ pub enum Drill {
     /// end>"`): the restore is the archive's, and the run signs the start.
     StatesAWindowStart,
     /// PROD-15.1: a restore under the ORIGINAL topic names (`orders` →
-    /// `orders`, `newTopic`, the approver's no-owner statement) into a target
-    /// whose brokers report `auto.create.topics.enable=false`, approved with
-    /// the separate subject `originalName`.
+    /// `orders`, `newTopic`, the approver's no-owner statement, and the
+    /// COMPLETE verification such a plan requires, over the same real
+    /// segment as `VerifiesCompletely`) into a target whose brokers report
+    /// `auto.create.topics.enable=false`, approved with the separate subject
+    /// `originalName`.
     RestoresUnderTheOriginalNames,
     /// The same plan under an ORDINARY approval (no `approval_subject`).
     RestoresUnderTheOriginalNamesWithAnOrdinaryApproval,
+    /// `RestoresUnderTheOriginalNames`, with ONE FOREIGN RECORD interleaved
+    /// on the target: a producer nobody stopped wrote into `orders` while
+    /// the engine was restoring it. It sits at target offset 300 (far past
+    /// the 25-record canary), carries no `x-original-offset`, and every
+    /// restored record after it is one offset further on — 501 records on
+    /// the target for the archive's 500.
+    RestoresUnderTheOriginalNamesWhileAProducerWrites,
     /// **PROD-08.1a.** `VerifiesCompletely`, with the plan's
     /// `sample.complete_max_records` at 1: the one partition's 500 archived
     /// records are past the bound, so it is NOT compared and the signed block
@@ -900,6 +909,10 @@ pub enum Drill {
     /// never read as a pass.
     VerifiesCompletelyPastItsBound,
 }
+
+/// PROD-15.1: where `RestoresUnderTheOriginalNamesWhileAProducerWrites` puts
+/// its one foreign record on the target.
+pub const FOREIGN_RECORD_TARGET_OFFSET: i64 = 300;
 
 /// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
 /// checksum, computed here without the decoder's crate.
@@ -1416,11 +1429,18 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     };
     // PROD-08.1: the complete shapes ask for complete coverage; every other
     // shape's spec bytes are what they were.
+    //
+    // PROD-15.1: so do the original-name shapes — a restore under the
+    // original topic names REQUIRES complete verification (a sampled one is
+    // refused by name at phase 0), so their archive is the real segment too.
     let completely = matches!(
         shape,
         Drill::VerifiesCompletely
             | Drill::VerifiesCompletelyAndFindsAChangedRecord
             | Drill::VerifiesCompletelyPastItsBound
+            | Drill::RestoresUnderTheOriginalNames
+            | Drill::RestoresUnderTheOriginalNamesWithAnOrdinaryApproval
+            | Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites
     );
     let coverage_line = if shape == Drill::VerifiesCompletelyPastItsBound {
         "  coverage: complete\n  complete_max_records: 1\n"
@@ -1434,6 +1454,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         shape,
         Drill::RestoresUnderTheOriginalNames
             | Drill::RestoresUnderTheOriginalNamesWithAnOrdinaryApproval
+            | Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites
     );
     let target_topic = if original { "orders" } else { "drill-orders" };
     let target_block = if original {
@@ -1484,7 +1505,11 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         "plan_hash": logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
         "approved_at": "2026-09-02T17:40:00Z",
     });
-    if shape == Drill::RestoresUnderTheOriginalNames {
+    if matches!(
+        shape,
+        Drill::RestoresUnderTheOriginalNames
+            | Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites
+    ) {
         approval_doc["approval_subject"] = serde_json::json!("originalName");
     }
     let approval_bytes = serde_json::to_vec_pretty(&approval_doc).unwrap();
@@ -1632,6 +1657,28 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         if shape == Drill::VerifiesCompletelyAndFindsAChangedRecord {
             records[300].value = Some(b"changed on the target".to_vec());
         }
+        // PROD-15.1: the foreign record. The ARCHIVE is the segment built
+        // above and is unchanged; only the TARGET gains a record, where a
+        // live producer's would land — between two restored ones.
+        if shape == Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites {
+            for restored in records
+                .iter_mut()
+                .skip(FOREIGN_RECORD_TARGET_OFFSET as usize)
+            {
+                restored.offset += 1;
+            }
+            records.insert(
+                FOREIGN_RECORD_TARGET_OFFSET as usize,
+                ConsumedRecord {
+                    partition: 0,
+                    offset: FOREIGN_RECORD_TARGET_OFFSET,
+                    timestamp_ms: newest_ms,
+                    key: Some(b"live-producer".to_vec()),
+                    value: Some(b"written while the restore ran".to_vec()),
+                    headers: Vec::new(),
+                },
+            );
+        }
     }
     let mut engine = FixtureEngine::new(facts, fps);
     let replacement_signing_key = if shape == Drill::RotatesSigningKey {
@@ -1668,6 +1715,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // auto-creation answer.
         | Drill::RestoresUnderTheOriginalNames
         | Drill::RestoresUnderTheOriginalNamesWithAnOrdinaryApproval
+        | Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites
         | Drill::RestoresNothing
         | Drill::MissesTheRpoObjective
         | Drill::ReconcilesWithMismatches
@@ -1728,6 +1776,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::RestoresNothing => 0,
         Drill::RestoresOutsideTheManifestBound => FIXTURE_WINDOW_RECORDS - 100,
         Drill::SamplesAcrossAStraddlingSegment => STRADDLER_IN_WINDOW_RECORDS as i64,
+        // PROD-15.1: the archive's 500 and the live producer's one.
+        Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites => FIXTURE_WINDOW_RECORDS + 1,
         _ => FIXTURE_WINDOW_RECORDS,
     };
     let client = FixtureClient {

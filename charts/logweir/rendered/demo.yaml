@@ -4899,6 +4899,8 @@ spec:
               rule: '!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage == ''complete'')'
             - message: 'target.topicNaming.originalName is set only with target.mode newTopic and target.topicNaming.prefix "": a restore under the original topic names maps every topic onto its own name'
               rule: '!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (self.target.mode == ''newTopic'' && self.target.topicNaming.prefix == '''')'
+            - message: 'target.topicNaming.originalName is set only with coverage: complete: a restore under the original topic names is verified completely, every restored record compared with the archive, never by sample'
+              rule: '!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (has(self.coverage) && self.coverage == ''complete'')'
           status:
             description: '`Restore.status`.'
             nullable: true
@@ -5619,7 +5621,7 @@ spec:
                 nullable: true
                 type: string
               targetTopicsAppeared:
-                description: 'A creation race the run lost (`exitReason: TargetTopicAppeared`, exit 1): mapped target names someone else created after phase 0 proved them absent, and the topics this run created in the same request — removed when it could prove them its own and empty, left otherwise. Read off the runner''s `target-topics-appeared=` line; absent on every other run.'
+                description: 'A creation step that stopped (`exitReason: TargetTopicAppeared` for a lost race, `CreatedTopicsLeft` for any other stop after a topic was created; exit 1): mapped target names someone else created after phase 0 proved them absent, and the topics THIS run created and LEFT — each created by this restore and left empty; remove it yourself once you have checked nothing writes to it. Logweir never deletes them. Read off the runner''s `target-topics-appeared=` line; absent on every other run.'
                 nullable: true
                 properties:
                   appeared:
@@ -5632,15 +5634,7 @@ spec:
                     type: array
                   left:
                     default: []
-                    description: Topics this run created and LEFT under these names, because it could not prove them its own and empty — remove them after checking who writes to them.
-                    items:
-                      maxLength: 249
-                      type: string
-                    maxItems: 100
-                    type: array
-                  removed:
-                    default: []
-                    description: 'Topics this run created in the same request and removed again: its own creation answer, partition count and configuration proved them its own, and each held no record.'
+                    description: 'Topics this run created and LEFT under these names, empty. Logweir never deletes them: remove each yourself once you have checked nothing writes to it.'
                     items:
                       maxLength: 249
                       type: string

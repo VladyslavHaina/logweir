@@ -448,10 +448,24 @@ topic is created by this run, exclusively, and is a new generation of the name
 
 The block is a strict object: an unknown key is a parse error (exit 1).
 
+**It requires `sample.coverage: complete`.** A plan that carries the block
+with a sampled coverage — stated, or left to its default — is refused by
+name, `OriginalNameNeedsCompleteCoverage`, at exit 3 before the runner dials
+anything (and `logweir drill approve --approval-subject original-name` refuses
+to sign it). Under a production name another producer may still be writing: a
+sampled check reads the first `records_per_partition` records of each
+partition and a count bound, which such a record can pass, while the complete
+check compares every restored record with the archive and reports one the
+archive does not hold as unexpected, by its target offset
+([`sample.coverage`](#samplecoverage-and-samplecomplete_max_records-prod-081)). `sample.complete_max_records`
+may bound it; a run the bound stops signs `covered: false`, never a pass.
+
 **What the runner proves at phase 0** (exit 3, `refusal-reason=GuardRefused`,
 each message opening with the condition's name; nothing created): the mode is
 `newTopic` and `prefix` is `""` (`OriginalNameNotNewTopic`,
-`OriginalNamePrefixNotEmpty`); every restored name is absent on the target;
+`OriginalNamePrefixNotEmpty`); the plan asks for complete verification
+(`OriginalNameNeedsCompleteCoverage`); every restored name is absent on the
+target;
 the target is not the source cluster — the source cluster id the bound
 point's VERIFIED receipt measured differs from the target's (the allowlist
 file's `source_cluster_id` never counts: it is unsigned runner input) — or
@@ -477,12 +491,17 @@ document v2 under an `Ordinary` policy) must also carry every one of
 `source.topics` re-typed, exactly (`OriginalNameConfirmationMissing`,
 `OriginalNameConfirmationMismatch`; the owner's decision OD-10).
 
-**Creation is exclusive.** The names are looked for once more right before
-`CreateTopics`, which itself fails on a name that exists; either way the run
-stops before the engine starts, exit 1, `failure-reason=TargetTopicAppeared`.
-A topic this run created in the same request is removed only when it is
-provably its own and empty, and left and named otherwise. Teardown never
-deletes a topic under its original name.
+**Creation is exclusive, and nothing is ever deleted.** The names are looked
+for once more right before `CreateTopics`, which itself fails on a name that
+exists; either way the run stops before the engine starts, exit 1,
+`failure-reason=TargetTopicAppeared`. A topic this run had already created
+when the creation step stopped — for that race, or for any other reason
+(`failure-reason=CreatedTopicsLeft`) — is LEFT in place, empty, and named on
+the line before it, `target-topics-appeared={"appeared":[…],"left":[…]}`:
+"created by this restore and left empty; remove it yourself once you have
+checked nothing writes to it". No code path deletes a topic under an original
+name: Kafka has no conditional delete, so a record a producer wrote between
+any check and the delete would be lost with it.
 
 **It is inside `plan_hash`.** A plan without the block serialises exactly as
 before.

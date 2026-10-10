@@ -1,7 +1,7 @@
 {
   "format_version": "1.8.0",
   "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5A",
-  "outcome": "pass",
+  "outcome": "fail-integrity",
   "last_phase_completed": 7,
   "requested_at": "2026-09-03T09:00:00Z",
   "approval_validated_at": "2026-09-03T09:00:30Z",
@@ -16,7 +16,7 @@
       "dry_run_check_segments": "unknown-not-observable",
       "unknown_key_warnings": []
     },
-    "matrix_verdict": "pass",
+    "matrix_verdict": "pass-degraded",
     "matrix_verdict_reason": null
   },
   "source": {
@@ -39,15 +39,8 @@
       "owner_detection": [
         "plan"
       ],
-      "owners": [
-        {
-          "topic": "orders",
-          "kind": "strimzi",
-          "reference": "kafka/orders",
-          "found_in": "pointReceipt"
-        }
-      ],
-      "owner_path": true
+      "owners": [],
+      "owner_path": false
     }
   },
   "approval": {
@@ -104,92 +97,13 @@
   },
   "integrity": {
     "level": "byte-fingerprint",
-    "result": "pass",
-    "partial_reason": null,
+    "result": "fail",
+    "partial_reason": "the run stopped before phase 7",
     "records_sampled": 75,
     "records_sampled_matching": 75,
     "mismatches": 0,
     "pass_rate_measured": 1.0,
-    "restoredPrincipalCouldConsume": null,
-    "verification": {
-      "coverage": "complete",
-      "comparison_basis": "archive",
-      "header_order": "verified",
-      "application": "notAttempted",
-      "gaps": [],
-      "pruned": [],
-      "complete": {
-        "covered": true,
-        "incomplete_reason": null,
-        "max_records": null,
-        "window": {
-          "start_ms": null,
-          "end_ms": 1760000005000
-        },
-        "archive": {
-          "segments": 4,
-          "segments_verified": 4,
-          "segments_failed": [],
-          "segments_unverified": [],
-          "records_decoded": 14,
-          "offset_holes": 0
-        },
-        "replay": {
-          "expected": 12,
-          "restored": 12,
-          "matching": 12,
-          "missing": 0,
-          "unexpected": 0,
-          "duplicates": 0,
-          "out_of_order": 0,
-          "mismatched": 0
-        },
-        "partitions": [
-          {
-            "topic": "orders",
-            "partition": 0,
-            "target_topic": "orders",
-            "compared": true,
-            "segments": 2,
-            "segments_verified": 2,
-            "records_decoded": 6,
-            "offset_holes": 0,
-            "replay": {
-              "expected": 5,
-              "restored": 5,
-              "matching": 5,
-              "missing": 0,
-              "unexpected": 0,
-              "duplicates": 0,
-              "out_of_order": 0,
-              "mismatched": 0
-            },
-            "findings": []
-          },
-          {
-            "topic": "orders",
-            "partition": 1,
-            "target_topic": "orders",
-            "compared": true,
-            "segments": 2,
-            "segments_verified": 2,
-            "records_decoded": 8,
-            "offset_holes": 0,
-            "replay": {
-              "expected": 7,
-              "restored": 7,
-              "matching": 7,
-              "missing": 0,
-              "unexpected": 0,
-              "duplicates": 0,
-              "out_of_order": 0,
-              "mismatched": 0
-            },
-            "findings": []
-          }
-        ]
-      }
-    }
+    "restoredPrincipalCouldConsume": null
   },
   "topic_parity": {
     "intentionally_deviated": [

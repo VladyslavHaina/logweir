@@ -2979,14 +2979,22 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
 /// on `status.exitReason` and the reconcile outcome, carries the runner's
 /// `target-topics-appeared=` lists on `status.targetTopicsAppeared` (filtered
 /// to legal topic names), and the `Failed` condition's message names the
-/// topics — so the operator reads them on the object, not in a pod log
-/// garbage-collected with the Job. Controls: an exit 1 without the line keeps
-/// the wire reason and no lists; the state on another exit code is not lifted.
+/// topics — every topic the run created and LEFT, with what to do about it —
+/// so the operator reads them on the object, not in a pod log
+/// garbage-collected with the Job. Nothing was deleted, so the status has no
+/// "removed" list: a line that carries one is not copied. The same for a
+/// creation step that stopped for another reason (`CreatedTopicsLeft`).
+/// Controls: an exit 1 without the line keeps the wire reason and no lists.
 /// KILLS: not reading `failure-reason=` on a Restore; dropping the lists;
-/// trusting an arbitrary name from the log.
+/// trusting an arbitrary name from the log; a status that claims a deletion.
 #[tokio::test]
 async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
     let tail = "target-topics-appeared={\"appeared\":[\"payments\"],\"removed\":[\"orders\"],\"left\":[\"audit\",\"bad name\"]}\nfailure-reason=TargetTopicAppeared\n";
+    assert_eq!(
+        weirkeeper::controllers::restore::LEFT_TOPIC_SENTENCE,
+        "created by this restore and left empty; remove it yourself once you have checked \
+         nothing writes to it"
+    );
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(1),
         log_body(tail),
@@ -3018,20 +3026,60 @@ async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
     );
     assert_eq!(
         status["targetTopicsAppeared"],
-        serde_json::json!({"appeared": ["payments"], "removed": ["orders"], "left": ["audit"]}),
-        "{status}"
+        serde_json::json!({"appeared": ["payments"], "left": ["audit"]}),
+        "nothing is ever removed, so no such list is copied: {status}"
     );
     let message = status["conditions"][0]["message"]
         .as_str()
         .unwrap_or_default();
     for needle in [
         "TargetTopicAppeared",
-        "`payments`",
-        "removed `orders`",
-        "left `audit`",
+        "`payments` were created by someone else",
+        "`audit`: created by this restore and left empty; remove it yourself once you have \
+         checked nothing writes to it",
+        "Logweir never deletes",
     ] {
         assert!(message.contains(needle), "{needle}: {message}");
     }
+    assert!(!message.contains("orders"), "{message}");
+
+    // A creation step that stopped for another reason after creating a topic:
+    // the other closed state, the same list and the same sentence.
+    let tail = "target-topics-appeared={\"appeared\":[],\"left\":[\"orders\"]}\nfailure-reason=CreatedTopicsLeft\n";
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(1),
+        log_body(tail),
+        "Failed",
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    assert_eq!(outcome.terminal_state.as_deref(), Some("CreatedTopicsLeft"));
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(status["exitReason"].as_str(), Some("CreatedTopicsLeft"));
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({"appeared": [], "left": ["orders"]}),
+        "{status}"
+    );
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("`orders`: created by this restore and left empty"),
+        "{message}"
+    );
+    assert!(!message.contains("created by someone else"), "{message}");
 
     // Control: a plain exit 1 — no failure line — is the wire reason, no lists.
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
@@ -10410,6 +10458,85 @@ async fn an_original_name_declaration_the_plan_does_not_say_is_refused_before_an
             "{label}: refused before the approval is read"
         );
     }
+}
+
+/// **A SAMPLED original-name Restore ends `Failed` before anything is read**
+/// (an original-name restore requires complete verification). The object's
+/// declaration agrees with its plan on both counts — `originalName: true`,
+/// no `coverage` — so only the plan's own shape is refused:
+/// `ExecutionSpecInvalid`, the condition opening with the runner's token
+/// `OriginalNameNeedsCompleteCoverage`, no Job, the approval never read.
+/// CONTROL: the same object asking for complete coverage is NOT refused for
+/// its shape (it goes on to read its approval). KILLS: the controller
+/// leaving a sampled plan to the runner, after an approver signed it and a
+/// Job was created.
+#[tokio::test]
+async fn a_sampled_original_name_restore_is_refused_before_anything_is_read() {
+    let sampled_plan = original_name_plan_bytes()
+        .replace("  mode: scratch\n", "  mode: newTopic\n")
+        .replace("  marker_topic: logweir.scratch\n", "")
+        .replace("  teardown: delete\n", "");
+    let complete_plan =
+        sampled_plan.replace("  anchor: head\n", "  anchor: head\n  coverage: complete\n");
+    assert_ne!(sampled_plan, complete_plan);
+    let object = |plan: &str, complete: bool| {
+        let mut value: Value =
+            serde_json::to_value(restore_declaring_original_name(plan, Some(true)))
+                .expect("serialises");
+        value["spec"]["target"]["mode"] = serde_json::json!("newTopic");
+        value["spec"]["target"]["topicNaming"]["prefix"] = serde_json::json!("");
+        if complete {
+            value["spec"]["coverage"] = serde_json::json!("complete");
+        }
+        serde_json::from_value::<Restore>(value).expect("the fixture is a Restore")
+    };
+    let run = |object: Restore| async move {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        let bodies = bodies.lock().expect("readable").clone();
+        let calls = recorder.lock().expect("readable").clone();
+        let read_approval = calls.iter().any(|c| path(&c.uri).contains("/approvals/"));
+        (outcome, bodies, read_approval)
+    };
+
+    let (outcome, bodies, read_approval) = run(object(&sampled_plan, false)).await;
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert_eq!(post_count(&bodies, "/jobs"), 0, "no Job");
+    assert!(!read_approval, "refused before the approval is read");
+    let status = patched_statuses(&bodies).remove(0);
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("OriginalNameNeedsCompleteCoverage: "),
+        "{message}"
+    );
+
+    // CONTROL: the complete plan is not refused for its shape.
+    let (outcome, _bodies, read_approval) = run(object(&complete_plan, true)).await;
+    assert_ne!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert!(read_approval, "the complete plan goes on to its approval");
 }
 
 /// **PROD-15.1 review L5 (R07), the Job builder's call site**: it refuses

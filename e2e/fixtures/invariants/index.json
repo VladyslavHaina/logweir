@@ -816,6 +816,29 @@
   "reason": ""
  },
  {
+  "id": "original_name_1_8_stopped_before_verification",
+  "file": "original_name_1_8_stopped_before_verification.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "original_name_over_a_sampled_verification",
+  "file": "original_name_over_a_sampled_verification.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample",
+  "arm": "target.original_name is present but integrity.verification.coverage is not "
+ },
+ {
+  "id": "original_name_pass_without_a_verification",
+  "file": "original_name_pass_without_a_verification.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample",
+  "arm": "target.original_name is present but integrity.verification.coverage is not "
+ },
+ {
   "id": "original_name_under_format_1_7_0",
   "file": "original_name_under_format_1_7_0.json",
   "rust_exit": 4,

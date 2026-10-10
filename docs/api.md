@@ -938,7 +938,8 @@ that predates it replays onto the same object it always did.
 `POST .../restores` takes an optional `target.topicNaming.originalName`:
 
 ```json
-{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}}}
+{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
+ "coverage": "complete"}
 ```
 
 `true` asks for a restore under the source's ORIGINAL topic names, into
@@ -948,12 +949,16 @@ It is stored as `Restore.spec.target.topicNaming.originalName`; the plan must
 say the same (`target.topic_naming.original_name`), which the controller
 holds before any Job. Absent means `false`, is stored as absent, and leaves
 the idempotency request hash unchanged. A declared `topicMapping` maps every
-row onto itself.
+row onto itself. **It requires `coverage: complete`**
+([below](#the-restores-coverage-prod-081a)): a restore under the original
+topic names is verified completely, never by sample, and the controller and
+the runner refuse a plan that does not ask for it.
 
 | `errors[].field` | `errors[].code` | when |
 |---|---|---|
 | `target.topicNaming.originalName` | `requires_new_topic` | `target.mode` is `scratch`: a scratch drill never restores under the original names. |
 | `target.topicNaming.prefix` | `prefix_with_original_name` | `originalName` is `true` and the prefix is not empty. |
+| `coverage` | `original_name_requires_complete` | `originalName` is `true` and `coverage` is absent or `sampled`: an original-name restore is verified completely, every restored record compared with the archive. |
 | `target.topicNaming.prefix` | `invalid_prefix` | without `originalName`, the prefix is empty, longer than 128 characters or not a legal topic name: every other restore writes NEW topics. |
 | `approvalBytes` | `approval_subject_mismatch` | the legacy approval route (`legacy-governed-v1`): the signed document's `approval_subject` is not the one the Restore needs — `originalName` for a Restore that declares it, absent for every other. |
 | `originalNameConfirmation.typedTopics` | `typed_topics_required` | OD-10: a Restore declaring `originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`) without the typed topic names. |
@@ -966,6 +971,7 @@ requester re-typed:
 
 ```json
 {"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
+ "coverage": "complete",
  "originalNameConfirmation": {"typedTopics": ["orders", "payments"]}}
 ```
 
@@ -988,7 +994,29 @@ approval). The console signs `approvalSubject: originalName` into the
 authorization document only for a Restore that declares it, and shows the
 subject on the review step and the approvals page. The controller refuses an
 approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
-terminal), and a standing rehearsal authorization never authorises one.
+terminal), and a standing rehearsal authorization never authorises one. An
+authorization document that carries `approvalSubject` or
+`originalNameConfirmation` is written as `formatVersion` **2.1.0**; every
+other document stays 2.0.0, byte for byte
+([stability.md](stability.md#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)).
+
+**Topics a stopped creation step left.** Both restore reads carry an optional
+**`targetTopicsAppeared`**, present only when the run's creation step stopped
+(the operation's `result.exitReason` is `TargetTopicAppeared` or
+`CreatedTopicsLeft`):
+
+```json
+{"targetTopicsAppeared": {"appeared": ["payments"], "left": ["orders"],
+  "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it"}}
+```
+
+`appeared` are mapped target names someone else created after the restore was
+admitted; the restore wrote nothing into them. `left` are topics THIS restore
+created before it stopped and left in place, empty: Logweir never deletes a
+topic under a name it may not own, so the operator removes each one, and
+`leftInstruction` is the one sentence that says so (the runner, the Restore's
+status and the console say the same words). Each list holds at most 100 topic
+names. Additive; absent on every other Restore.
 
 ### The restore's signed time basis (FX-8)
 

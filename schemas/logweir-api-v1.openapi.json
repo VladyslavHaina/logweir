@@ -7891,6 +7891,35 @@
           }
         }
       },
+      "CreationStopView": {
+        "description": "`Restore.targetTopicsAppeared`: what a stopped creation step left behind, as the controller copied it from the runner onto `status.targetTopicsAppeared`. Each list holds at most 100 topic names.",
+        "type": "object",
+        "required": [
+          "appeared",
+          "left",
+          "leftInstruction"
+        ],
+        "properties": {
+          "appeared": {
+            "description": "Mapped target names someone else created after the restore was admitted. The restore wrote nothing into them.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "left": {
+            "description": "Topics this restore created and LEFT, empty. Never deleted by Logweir: the operator removes each one.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leftInstruction": {
+            "description": "What to do with each topic in `left`, in words: the one sentence the runner, the Restore's status and the console all say.",
+            "type": "string"
+          }
+        }
+      },
       "Destination": {
         "description": "A saved destination.",
         "type": "object",
@@ -12092,6 +12121,11 @@
           "target": {
             "description": "Where it writes.",
             "$ref": "#/components/schemas/RestoreTargetView"
+          },
+          "targetTopicsAppeared": {
+            "description": "Present only when the run's creation step stopped (its operation's `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`): the mapped target names someone else created while the run was admitted, and every topic THIS run created and left in place, empty. Logweir never deletes such a topic.",
+            "$ref": "#/components/schemas/CreationStopView",
+            "nullable": true
           },
           "timeBasis": {
             "description": "FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never \"every selection used the topics' own clocks\".",

@@ -244,7 +244,8 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
 /// **PROD-15.1.** The approval subject this per-run approval carries, refused
 /// at MINTING time when it is not the plan's: an original-name plan needs
 /// `--approval-subject original-name`, and that subject approves nothing
-/// else. A plan this build cannot read as a restore plan is approved as it
+/// else — nor a plan whose original-name shape the runner refuses (a sampled
+/// one included: such a restore requires `sample.coverage: complete`). A plan this build cannot read as a restore plan is approved as it
 /// always was, ordinary — and refused if the original-name subject is asked
 /// for, because nothing could confirm the plan is one.
 fn approval_subject_for(
@@ -258,6 +259,22 @@ fn approval_subject_for(
         .then(|| serde_yaml::from_str::<logweir_core::spec::DrillSpec>(spec_text).ok())
         .flatten();
     let needed = plan.as_ref().map(ApprovalSubject::of_plan);
+    // The original-name subject is never signed over a plan the runner
+    // refuses for its shape — in scratch mode, beside a prefix, or without
+    // the complete verification such a restore requires. The approver is
+    // told now, in the runner's own words, not after the approval is used.
+    if requested == ApprovalSubject::OriginalName {
+        if let Some(refusal) = plan
+            .as_ref()
+            .and_then(logweir_core::original_name::refuse_shape)
+        {
+            return Err(format!(
+                "{} is not a restore under the original topic names the runner accepts: \
+                 {refusal}. Nothing was signed.",
+                spec_path.display()
+            ));
+        }
+    }
     match (needed, requested) {
         (Some(needed), requested) if needed == requested => Ok(requested),
         (Some(ApprovalSubject::OriginalName), _) => Err(format!(

@@ -38,6 +38,7 @@ sample:
   window_end: "2026-09-07T15:00:00Z"
   records_per_partition: 25
   anchor: "head"
+  coverage: "complete"
 objectives:
   rto_seconds: 900
   rpo_seconds: 300

@@ -2441,6 +2441,10 @@ export function setOriginalName(state, on, noOwner) {
     target.originalNameNoOwner = noOwner === true;
     target.topicPrefix = "";
     target.topicMappingPrefix = scratch;
+    // COMPLETE VERIFICATION IS SELECTED WITH IT, AUTOMATICALLY: the runner
+    // refuses a sampled plan under the original names. A bound the operator
+    // typed is kept; the box is shown ticked and locked, with the reason.
+    requireCompleteCoverage(s);
     return;
   }
   const was = target.originalName === true;
@@ -2450,6 +2454,31 @@ export function setOriginalName(state, on, noOwner) {
     setTopicPrefix(s, defaultPrefixFor(s));
   }
 }
+
+/** PROD-15.1: a restore under the original topic names REQUIRES complete
+ *  verification, so choosing it selects `sample.coverage: complete` -- here,
+ *  on a draft that comes back, and on every write of the coverage controls.
+ *  A record bound already chosen is kept. A no-op for every other plan. */
+export function requireCompleteCoverage(state) {
+  const s = state || {};
+  if (!originalNameChosen(s)) {
+    return;
+  }
+  if (s.fields.sample === undefined || s.fields.sample === null) {
+    s.fields.sample = {};
+  }
+  s.fields.sample.coverage = COVERAGE_COMPLETE;
+}
+
+/** PROD-15.1: why the coverage box is ticked and locked for a restore under
+ *  the original topic names -- said beside the box. */
+export const ORIGINAL_NAME_COVERAGE_SENTENCE =
+  "Complete coverage is required for a restore under the original topic names, so it was " +
+  "selected for you and cannot be turned off here. Under a production name another producer " +
+  "may still be writing: a sampled check reads only the first records of each partition and a " +
+  "count bound, which such a record can pass, while the complete check compares every restored " +
+  "record with the archive and names one the archive does not hold. The runner refuses a " +
+  "sampled plan under the original names (OriginalNameNeedsCompleteCoverage).";
 
 /** PROD-15.1: what the original-name choice means, beside the box. */
 export const ORIGINAL_NAME_SENTENCE =
@@ -2629,6 +2658,13 @@ export function mappingProblems(state) {
       problems.originalName =
         "state that no declarative owner manages these names: a restore under the original " +
         "names is refused unless the plan says where an owner was looked for";
+    } else if ((((s.fields || {}).sample) || {}).coverage !== COVERAGE_COMPLETE) {
+      // Never reachable from the controls (the choice selects complete and
+      // locks the box); said by name for a state built any other way.
+      problems.originalName =
+        "OriginalNameNeedsCompleteCoverage: a restore under the original topic names requires " +
+        "complete coverage (every restored record compared with the archive); a sampled " +
+        "check is refused";
     }
     return problems;
   }
@@ -3675,7 +3711,10 @@ export function verificationPlanSentence(state) {
 export function renderCoverageChoice(state) {
   const s = state || {};
   const sample = (s.fields || {}).sample || {};
-  const chosen = sample.coverage === COVERAGE_COMPLETE;
+  // PROD-15.1: REQUIRED, not chosen, for a restore under the original topic
+  // names -- the box is ticked and LOCKED, and the reason is beside it.
+  const required = originalNameChosen(s);
+  const chosen = required || sample.coverage === COVERAGE_COMPLETE;
   const bound = sample.completeMaxRecords === undefined || sample.completeMaxRecords === null
     ? ""
     : String(sample.completeMaxRecords);
@@ -3684,7 +3723,12 @@ export function renderCoverageChoice(state) {
     "<summary>Advanced: verify every record</summary>" +
     "<label class=\"inline\" for=\"coverage-complete\">" +
     "<input type=\"checkbox\" id=\"coverage-complete\" name=\"coverage\"" +
-    (chosen ? " checked" : "") + "> " + esc(COVERAGE_CHOICE_LABEL) + "</label>" +
+    (chosen ? " checked" : "") + (required ? " disabled" : "") + "> " +
+    esc(COVERAGE_CHOICE_LABEL) + "</label>" +
+    (required
+      ? "<p class=\"caveat\" id=\"coverage-required\">" + esc(ORIGINAL_NAME_COVERAGE_SENTENCE) +
+        "</p>"
+      : "") +
     "<p class=\"note\" id=\"coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) + "</p>" +
     "<div class=\"field\"><label for=\"coverage-bound\">record bound (optional)</label>" +
     "<input id=\"coverage-bound\" name=\"completeMaxRecords\" inputmode=\"numeric\" value=\"" +
@@ -3713,7 +3757,10 @@ export function coverageText(state) {
     (typeof sample.completeMaxRecords === "number"
       ? ", complete_max_records: " + String(sample.completeMaxRecords)
       : ", no record bound") +
-    "): every record of every restored partition, compared with the archive";
+    "): every record of every restored partition, compared with the archive" +
+    (originalNameChosen(state)
+      ? " -- required for a restore under the original topic names"
+      : "");
 }
 
 /** Writes the coverage choice from the two controls: the box decides, and the
@@ -3722,7 +3769,10 @@ export function coverageText(state) {
  *  than this page guessing a number. An unticked box clears both. */
 export function setCoverage(state, complete, boundText) {
   const sample = state.fields.sample;
-  if (complete !== true) {
+  // PROD-15.1: a restore under the original topic names is never sampled --
+  // an unticked box (the locked control reads as it is drawn, but a stale
+  // form or an older draft may not) cannot clear what that choice requires.
+  if (complete !== true && !originalNameChosen(state)) {
     delete sample.coverage;
     delete sample.completeMaxRecords;
     return;
@@ -5114,6 +5164,9 @@ export function applyWizardDraft(state, draft) {
   // be; an older draft with none leaves the plan sampled.
   setCoverage(state, d.coverage === COVERAGE_COMPLETE,
     typeof d.completeMaxRecords === "string" ? d.completeMaxRecords : "");
+  // PROD-15.1: a draft kept before complete coverage was required for a
+  // restore under the original names comes back complete, never sampled.
+  requireCompleteCoverage(state);
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
@@ -5214,6 +5267,11 @@ export function draftFrom(object, fields) {
     nextTarget.topicMappingPrefix = target.topicNaming.prefix;
   }
   const next = Object.assign({}, base, { target: nextTarget });
+  if (nextTarget.originalName === true && nextTarget.mode === "newTopic") {
+    // PROD-15.1: and the complete coverage that choice requires, on a copy of
+    // the sample block (this builds a fields object; it mutates nothing).
+    next.sample = Object.assign({}, base.sample || {}, { coverage: COVERAGE_COMPLETE });
+  }
   if (typeof spec.pointInTime === "string") {
     next.pointInTime = spec.pointInTime;
   }
@@ -7712,6 +7770,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       setOriginalName(state, originalName !== null && originalName.checked === true,
         originalNameNoOwner !== null && originalNameNoOwner.checked === true);
     }
+    // The coverage controls were read ABOVE, before this choice: ticking the
+    // box in the same edit selects complete coverage now.
+    requireCompleteCoverage(state);
     if (prefix !== null && !originalNameChosen(state)) {
       // An emptied prefix is the default prefix again: the field SHOWS the
       // default when the value is empty, and the plan must be what it shows.

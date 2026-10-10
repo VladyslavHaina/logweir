@@ -520,6 +520,21 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .into_iter()
             .take(MAX_LIST_ENTRIES)
             .collect(),
+        // PROD-15.1: a stopped creation step's two lists, verbatim (the CRD
+        // bounds each at this view's bound), with the one instruction for a
+        // topic that was left. Logweir deletes none of them.
+        target_topics_appeared: status.and_then(|s| s.target_topics_appeared.as_ref()).map(
+            |stop| crate::contract::CreationStopView {
+                appeared: stop
+                    .appeared
+                    .iter()
+                    .take(MAX_LIST_ENTRIES)
+                    .cloned()
+                    .collect(),
+                left: stop.left.iter().take(MAX_LIST_ENTRIES).cloned().collect(),
+                left_instruction: logweir_core::guard::LEFT_TOPIC_SENTENCE.to_string(),
+            },
+        ),
         queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
         // FX-8 (review M-2): the signed time basis, ALL OF IT OR NOTHING. A
         // list past this view's bound is not truncated: a partial list would

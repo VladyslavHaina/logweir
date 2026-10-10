@@ -1515,7 +1515,21 @@ confirm alone only after re-typing every original topic name, exactly. The
 console signs the typed names into the authorization document
 (`originalNameConfirmation`), and the API (`typed_topics_required`,
 `typed_topics_mismatch`), the controller and the runner refuse anything
-else. A `strict` namespace still needs the second person.
+else. A `strict` namespace still needs the second person. An authorization
+document v2 that carries `approvalSubject` or `originalNameConfirmation` is
+written as `formatVersion` **2.1.0**; every other document stays 2.0.0, byte
+for byte. The controller and the runner accept 2.1.0 and refuse either field
+under 2.0.0; a reader built before the fields refuses every document that
+carries them (an unknown field).
+**It requires complete verification.** An original-name restore runs only with
+`sample.coverage: complete` (`coverage: complete` on the request and the
+`Restore`). A sampled plan with the identity mapping is refused by name,
+`OriginalNameNeedsCompleteCoverage`: by the runner before it dials anything
+(exit 3), by `drill approve`, by the controller before any Job, by a CEL rule,
+by the product API (`original_name_requires_complete`), and by the console,
+which selects complete coverage for such a restore, locks the choice and says
+why. A sampled check can pass a record another producer wrote into the
+restored name; the complete check names it.
 **What the runner proves first** (exit 3, nothing written): every restored name
 is absent; the target is another cluster than the archive's source (the bound
 point's VERIFIED receipt only; the allowlist file's `source_cluster_id` never
@@ -1530,64 +1544,86 @@ or a file holding none, is `OriginalNameOwnerUnreadable`, never "none
 found"); and the `LogAppendTime` probe stays under the scratch prefix, never
 an original name. Creation is exclusive: a name that appears after phase 0
 stops the run before the engine starts, exit 1, with
-`failure-reason=TargetTopicAppeared` as the last line. The controller shows
-the race on the Restore (`status.exitReason`, `status.targetTopicsAppeared`,
-the `Failed` message). A topic this run created in the same request is
-removed only when it is provably its own and empty, and is left and named
-otherwise. Nothing is written into a topic the run did not create, and
-teardown never deletes a topic under its original name. A producer still
-writing while the restore runs is detected, not prevented: phase 7's count
-bound fails and the run signs `fail-integrity`. The scorecard is format
+`failure-reason=TargetTopicAppeared` as the last line. **Logweir never deletes
+a topic under an original name**, not one it created and not after a lost
+race: Kafka has no conditional delete, so a record a producer wrote between
+any check and the delete would be lost with the topic. A topic the run had
+created when its creation step stopped is left in place, empty, and named
+("created by this restore and left empty; remove it yourself once you have
+checked nothing writes to it") on the runner's `target-topics-appeared=`
+line, on the Restore (`status.exitReason` `TargetTopicAppeared` or
+`CreatedTopicsLeft`, `status.targetTopicsAppeared {appeared, left}`, the
+`Failed` message), in the product API's Restore view (`targetTopicsAppeared`)
+and first on the Restore's page in the console. Nothing is written into a
+topic the run did not create. A producer still writing while the restore runs
+is detected and named, not prevented: the complete verification counts each of
+its records as unexpected, names it by its target offset, and the run signs
+`fail-integrity`. The scorecard is format
 **1.8.0** with `target.original_name` (the approval subject and mode, the
 typed confirmation, the cluster condition, the owners, the resources file's
-digest). Both readers check it (arms ON-1 to ON-12, `verify_scorecard.py`
-1.25.0) and print two `original name:` lines, and `logweir drill show` names
+digest). Both readers check it (arms ON-1 to ON-13, `verify_scorecard.py`
+1.25.0; ON-13 refuses the block beside a sampled verification) and print two
+`original name:` lines, and `logweir drill show` names
 it in its footer. The readiness check no longer refuses such a plan as an
 accidental identity map.
 **Do:** nothing for any other restore. Apply the `Restore` CRD before the
 controller rolls, and roll the controller, the runner, the product API and the
 console together. Stop every producer of a restored name before such a
 restore, and repoint consumers after it (consumer positions are not copied).
-The controller does not list `KafkaTopic` resources (PROD-05.1a), so a
-`Restore` relies on the plan's owner statement or the receipt.
+Write such a plan with `sample.coverage: complete`. If a Restore ends
+`TargetTopicAppeared` or `CreatedTopicsLeft`, read
+`status.targetTopicsAppeared.left`, check that nothing writes to each topic it
+names, delete it yourself, and create a new Restore. The controller does not
+list `KafkaTopic` resources (PROD-05.1a), so a `Restore` relies on the plan's
+owner statement or the receipt.
 **Scope:** runner rows over fakes for every condition and its refusal, the
 probe, the exclusive create (the pre-create re-check and `CreateTopics`'
 already-exists answer), the teardown rail and the subject check; controller
-rows for admission step 4b, the declaration and the standing refusal; API rows
-for the create, the identity mapping, the signed subject and the legacy
-route, the typed confirmation and the strict namespace; both verifiers over
-sixteen corpus cases and the parity script; the console's golden plan, parsed
-by the runner, and its typed-names rows. Each of the runner's three
+rows for admission step 4b, the declaration, the sampled refusal, the document
+version and the standing refusal; API rows for the create, the identity
+mapping, the signed subject and its 2.1.0 document, the legacy route, the
+typed confirmation, the strict namespace, the sampled refusal and the
+left-topics view; both verifiers over nineteen corpus cases and the parity
+script; the console's golden plan, parsed by the runner, its typed-names
+rows, the locked coverage choice and the left-topics block. Each of the runner's three
 approval-subject call sites has a CI-run row that fails without it (the
 binary at startup, the orchestrator fixture before phase 0 and after phase 1),
-and so does `drill approve`'s refusal; the race's cleanup has rows for the
-removal and for each reason a topic is left; the lost race is named on the
-Restore by a controller row. Compose rows on slot 1
+and so does `drill approve`'s refusal; a stopped creation step has rows for
+the topic it leaves (still listed by the broker double, named, nothing
+deleted) and a source-text row that fails if any delete enters the creation
+step; the lost race is named on the Restore by a controller row. Compose rows on slot 1
 (`COMPOSE_PROFILES=auth,cluster2,autocreate`; the new `autocreate` profile is
 a one-broker cluster that auto-creates topics), each against the brokers: a
 deleted topic recovered under its name on a second cluster (30 of 30
 records, still there after the run) and on the same cluster with
-auto-creation disabled under a complete verification, refused while the name
-existed; the same cluster with auto-creation enabled refused; a producer that
+auto-creation disabled, each under a complete verification, refused while the
+name existed; the same plan without `coverage: complete` refused by name
+(`OriginalNameNeedsCompleteCoverage`, exit 3, nothing created), and `drill
+approve` refusing to sign it; the same cluster with auto-creation enabled refused; a producer that
 auto-creates the name while the runner is suspended at phase 5 wins, the run
 stops `TargetTopicAppeared` and the topic holds that one record; an ordinary
 approval refused, and `drill approve` refusing to sign one; a `KafkaTopic`
 owner (simulated with a resources file: no Strimzi operator in the lab)
 refused, then restored on the owner path; scratch mode refused; a producer
-writing six records while the restore ran left 36 against a bound of 30 and
-the run signed `fail-integrity` (exit 2); the race printed
-`failure-reason=TargetTopicAppeared` last. Each condition, the exclusive
-create, the subject check, the typed confirmation, the race's naming and its
-cleanup has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
+writing six records while the restore ran left 36 where the archive holds 30,
+the complete verification named all six by target offset and the run signed
+`fail-integrity` (exit 2); the race printed
+`failure-reason=TargetTopicAppeared` last and the topic was still there; a
+restore of two topics whose second name the broker refused printed
+`failure-reason=CreatedTopicsLeft`, named the first as left, and the broker
+still listed it, empty. Each condition, the exclusive create, the subject
+check, the typed confirmation, the required coverage, the document version,
+the race's naming and the no-delete rule has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
 `logweir` built before this item) accept the live 1.8.0 scorecards and print
 nothing about the original name. Not proven live: a
 real Strimzi operator, and the PoC upgrade.
 **Rollback:** an older runner ignores the `original_name` block, sees the
 empty prefix and refuses the plan (exit 3) before it writes anything; an older
 controller ignores `topicNaming.originalName` and its runner refuses the same
-way; an older reader of an authorization document v2 refuses one carrying
-`approvalSubject` or `originalNameConfirmation`; an older controller reads a
-lost race as a plain exit 1. Rolling the CRD back prunes
+way; a reader of an authorization document v2 built before this item refuses
+every 2.1.0 document, which carries `approvalSubject` or
+`originalNameConfirmation` (measured with a runner built from main); an older
+controller reads a stopped creation step as a plain exit 1. Rolling the CRD back prunes
 `topicNaming.originalName` and `status.targetTopicsAppeared` from stored
 objects, whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
 under older readers, which ignore the block.

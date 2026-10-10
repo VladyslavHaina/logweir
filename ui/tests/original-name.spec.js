@@ -17,7 +17,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  ORIGINAL_NAME_COVERAGE_SENTENCE,
   ORIGINAL_NAME_NO_OWNER_STATEMENT,
+  renderCoverageChoice,
+  requireCompleteCoverage,
+  setCoverage,
   applyWizardDraft,
   parseTypedTopics,
   renderTypedConfirmation,
@@ -191,6 +195,113 @@ test("prod151_a_draft_and_an_edit_bring_the_choice_back", () => {
   assert.ok(fields.target.topicMappingPrefix.length > 0);
 });
 
+// ------------------------------------------- complete coverage is required
+
+test("choosing_the_original_names_selects_complete_coverage_and_says_why", async () => {
+  // An original-name restore REQUIRES complete verification: a sampled check
+  // can pass a record another producer wrote into the restored name.
+  // KILLS: a choice that leaves the plan sampled (the runner refuses it after
+  // the approver signed); a box the operator can untick; a locked box with no
+  // reason beside it; the rule applied to an ordinary restore.
+  const state = wizardState();
+  assert.equal(state.fields.sample.coverage, undefined, "sampled by default");
+  const before = renderCoverageChoice(state);
+  assert.doesNotMatch(before, /id="coverage-complete" name="coverage"[^>]*checked/);
+  assert.doesNotMatch(before, /id="coverage-complete"[^>]*disabled/);
+  assert.doesNotMatch(before, /coverage-required/);
+
+  setOriginalName(state, true, true);
+  assert.equal(state.fields.sample.coverage, "complete",
+    "NEGATIVE CONTROL: a choice that does not select complete coverage fails this");
+  const html = renderCoverageChoice(state);
+  assert.match(html, /<details class="advanced" id="coverage-advanced" open>/);
+  assert.match(html, /id="coverage-complete" name="coverage" checked disabled>/,
+    "the box is ticked and locked");
+  const why = /<p class="caveat" id="coverage-required">([^<]*)<\/p>/.exec(html);
+  assert.ok(why !== null, "NEGATIVE CONTROL: a locked box with no reason fails this");
+  assert.equal(visible(why[1]), ORIGINAL_NAME_COVERAGE_SENTENCE);
+  assert.match(ORIGINAL_NAME_COVERAGE_SENTENCE, /required for a restore under the original topic names/);
+  assert.match(ORIGINAL_NAME_COVERAGE_SENTENCE, /selected for you/);
+  assert.match(ORIGINAL_NAME_COVERAGE_SENTENCE, /OriginalNameNeedsCompleteCoverage/);
+  // The bound stays the operator's to set.
+  assert.doesNotMatch(html, /id="coverage-bound"[^>]*disabled/);
+
+  // It cannot be cleared: not by the control's writer, not by a stale form.
+  setCoverage(state, false, "");
+  assert.equal(state.fields.sample.coverage, "complete");
+  setCoverage(state, true, "5000");
+  assert.equal(state.fields.sample.completeMaxRecords, 5000);
+  setCoverage(state, false, "5000");
+  assert.equal(state.fields.sample.coverage, "complete");
+
+  // The plan says so, the request declares it, and the review says why.
+  setCoverage(state, true, "");
+  const prepared = await preparePlanOrProblem(state);
+  assert.equal(typeof prepared.problem, "undefined", String(prepared.problem));
+  assert.match(prepared.bytes, /\n {2}coverage: "complete"\n/);
+  assert.equal(restoreBody(state, prepared).spec.coverage, "complete");
+  assert.match(visible(renderPlanStep(prepared, state)),
+    /coverage\s*complete \(sample\.coverage: complete, no record bound\): every record of every restored partition, compared with the archive -- required for a restore under the original topic names/);
+
+  // Unticking the original-name choice unlocks the box; the operator may
+  // then go back to a sampled check.
+  setOriginalName(state, false, false);
+  const unlocked = renderCoverageChoice(state);
+  assert.doesNotMatch(unlocked, /id="coverage-complete"[^>]*disabled/);
+  assert.doesNotMatch(unlocked, /coverage-required/);
+  setCoverage(state, false, "");
+  assert.equal(state.fields.sample.coverage, undefined);
+
+  // CONTROL: an ordinary restore's coverage is the operator's choice.
+  const plain = wizardState();
+  setCoverage(plain, false, "");
+  assert.equal(plain.fields.sample.coverage, undefined);
+  requireCompleteCoverage(plain);
+  assert.equal(plain.fields.sample.coverage, undefined, "a no-op for every other plan");
+});
+
+test("a_sampled_plan_under_the_original_names_is_never_rendered_or_sent", async () => {
+  // KILLS: a sampled original-name plan rendered (and so hashed, approved and
+  // sent) by any path -- a hand-built state, an older draft, an edit.
+  const fields = fixture("plan-original-name-fields.json");
+  assert.equal(fields.sample.coverage, "complete");
+  for (const coverage of [undefined, "", "sampled"]) {
+    const sampled = JSON.parse(JSON.stringify(fields));
+    if (coverage === undefined) {
+      delete sampled.sample.coverage;
+    } else {
+      sampled.sample.coverage = coverage;
+    }
+    assert.throws(() => renderPlanBytes(sampled), /OriginalNameNeedsCompleteCoverage/,
+      "NEGATIVE CONTROL: a renderer that emits a sampled original-name plan fails this");
+  }
+  // A state built any other way is refused by name before anything is sent.
+  const state = wizardState();
+  setOriginalName(state, true, true);
+  delete state.fields.sample.coverage;
+  assert.match(mappingProblems(state).originalName, /OriginalNameNeedsCompleteCoverage/);
+  assert.ok("originalName" in validateRestore(state));
+  const prepared = await preparePlanOrProblem(state);
+  assert.equal(typeof prepared.bytes, "undefined", "no plan bytes for a sampled plan");
+
+  // A draft kept before the rule (the choice, no coverage) comes back complete.
+  const older = wizardState();
+  setOriginalName(older, true, true);
+  const kept = Object.assign({}, wizardDraftValues(older), { coverage: "" });
+  const fresh = wizardState();
+  assert.equal(applyWizardDraft(fresh, kept), true);
+  assert.equal(originalNameChosen(fresh), true);
+  assert.equal(fresh.fields.sample.coverage, "complete");
+  // An edit of an original-name Restore prefills complete coverage.
+  const edited = draftFrom({ spec: { target: { mode: "newTopic",
+    topicNaming: { prefix: "", originalName: true } } } }, wizardState().fields);
+  assert.equal(edited.sample.coverage, "complete");
+  // CONTROL: an edit of an ordinary Restore leaves the sample block alone.
+  const ordinary = draftFrom({ spec: { target: { mode: "newTopic",
+    topicNaming: { prefix: "restore-" } } } }, wizardState().fields);
+  assert.equal(ordinary.sample.coverage, undefined);
+});
+
 // ------------------------------------------------------------ approvals
 
 test("prod151_an_approval_shows_the_subject_its_signed_bytes_carry", () => {
@@ -328,4 +439,101 @@ test("od10_the_approvals_page_says_a_confirmation_was_made_with_the_names_typed"
   const plain = cr({ approvalSubject: "originalName" });
   assert.equal(typedTopicsOf(plain), null);
   assert.doesNotMatch(visible(renderApprovalStatus(plain)), /re-typed/);
+});
+
+// ------------------------------------------------ a stopped creation step
+
+test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", async () => {
+  // Nothing is ever deleted under an original name, so the page must say what
+  // is on the cluster. KILLS: a detail that never shows the left topics; one
+  // that shows them without the instruction; one that claims a deletion.
+  const { creationStoppedWarning, renderRestoreDetail } = await import("../pages/history.js");
+  const { LEFT_TOPIC_SENTENCE } = await import("../render.js");
+  const restore = (targetTopicsAppeared) => ({
+    metadata: { name: "r", namespace: "team-a" },
+    spec: { planBytes: text("plan-original-name.golden.yaml"),
+      pointInTime: "2026-09-07T14:05:00Z", backupSetRef: "b",
+      target: { mode: "newTopic", topicNaming: { prefix: "", originalName: true } } },
+    status: Object.assign({ phase: "Failed", exitCode: 1, exitReason: "TargetTopicAppeared" },
+      targetTopicsAppeared === undefined ? {} : { targetTopicsAppeared }),
+  });
+  const html = renderRestoreDetail(restore({ appeared: ["payments"], left: ["orders", "audit"] }));
+  const block = /<div class="caveat" id="restore-creation-stopped">[\s\S]*?<\/div>/.exec(html);
+  assert.ok(block !== null, "NEGATIVE CONTROL: a detail without the block fails this");
+  const words = visible(block[0]);
+  assert.ok(words.includes("payments: created by someone else after this restore was admitted. " +
+    "The restore wrote nothing into it."), words);
+  for (const name of ["orders", "audit"]) {
+    assert.ok(words.includes(name + ": created by this restore and left empty; remove it " +
+      "yourself once you have checked nothing writes to it."),
+    "NEGATIVE CONTROL: a left topic without its instruction fails this:\n" + words);
+  }
+  assert.ok(words.includes("Logweir never deletes a topic under a name it may not own"));
+  assert.doesNotMatch(words, /removed|deleted it|cleaned/i);
+  assert.equal(LEFT_TOPIC_SENTENCE,
+    "created by this restore and left empty; remove it yourself once you have checked nothing " +
+      "writes to it");
+  // The block comes before every other fact of the run.
+  assert.ok(html.indexOf("restore-creation-stopped") < html.indexOf("last phase completed"));
+
+  // A race lost before anything was created says so.
+  const none = visible(creationStoppedWarning({ appeared: ["payments"], left: [] }));
+  assert.ok(none.includes("This restore created no topic."), none);
+  // A stop for another reason names what was left and no race.
+  const other = visible(creationStoppedWarning({ appeared: [], left: ["orders"] }));
+  assert.ok(other.includes("orders: created by this restore and left empty"));
+  assert.ok(!other.includes("someone else"));
+  // CONTROL: no block on the status, nothing rendered.
+  assert.equal(creationStoppedWarning(undefined), "");
+  assert.ok(!renderRestoreDetail(restore(undefined)).includes("restore-creation-stopped"));
+  // A hostile name is escaped, never markup.
+  assert.ok(!creationStoppedWarning({ appeared: [], left: ["<img src=x>"] }).includes("<img"));
+});
+
+test("the_console_projection_carries_the_topics_a_stopped_creation_step_left", async () => {
+  // BOTH SIDES READ ONE FIXTURE: `console/restore-creation-stopped.json` is the
+  // product API's projection of a Restore whose status carries
+  // `targetTopicsAppeared` (`crates/logweir-api/tests/original_name.rs`). Read
+  // here through the real console client, decoder and projection. KILLS: a
+  // decoder that refuses, or a projection that drops, the block.
+  const { apiClient, resetMode, selectMode } = await import("../client.js");
+  const { LEFT_TOPIC_SENTENCE } = await import("../render.js");
+  const answer = fixture("console/restore-creation-stopped.json");
+  assert.equal(answer.item.targetTopicsAppeared.leftInstruction, LEFT_TOPIC_SENTENCE,
+    "the console says the API's (and so the runner's) sentence, word for word");
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  // The detail also reads the run's operation, on its own route: a failed
+  // run whose result names the closed state.
+  const operation = fixture("console/operation-restore-completed.json");
+  operation.item.state = "failed";
+  operation.item.result.exitCode = 1;
+  operation.item.result.exitReason = "TargetTopicAppeared";
+  const original = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: () => Promise.resolve(JSON.stringify(
+      String(url).includes("/operations") ? operation : answer)),
+  });
+  try {
+    const object = await apiClient().get("team-a", "restores", answer.item.name);
+    assert.deepEqual(object.status.targetTopicsAppeared,
+      { appeared: ["payments"], left: ["orders"] },
+      "NEGATIVE CONTROL: a decoder that refuses, or a projection that drops, the block " +
+        "fails this");
+    assert.equal(object.status.exitReason, "TargetTopicAppeared");
+    const { renderRestoreDetail } = await import("../pages/history.js");
+    const words = visible(renderRestoreDetail(object));
+    assert.ok(words.includes("orders: " + LEFT_TOPIC_SENTENCE + "."), words);
+    // CONTROL: a Restore without the block carries none.
+    const plain = fixture("console/restore.json");
+    assert.equal(plain.item.targetTopicsAppeared, undefined);
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
 });

@@ -2267,9 +2267,9 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # arms (22-29, format 1.5.0), its shape check and the `schema_dependency`
     # lines. Map still five.
     #
-    # 1.25.0 (PROD-15.1) adds the scorecard's ten `target.original_name` arms
-    # (ON-1 to ON-10, format 1.8.0), its shape check and the two `original
-    # name:` lines. Map still five.
+    # 1.25.0 (PROD-15.1) adds the scorecard's thirteen `target.original_name`
+    # arms (ON-1 to ON-13, format 1.8.0), its shape check and the two
+    # `original name:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
     assert mod.SCRIPT_VERSION == "1.25.0", mod.SCRIPT_VERSION
@@ -3844,7 +3844,7 @@ def test_the_selection_lines_are_the_rust_readers():
     rust_reader = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert '"sample coverage: a sampled pass over a replay selection from epoch-ms {} to \\' in rust_reader
 
-# ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-10 ----
+# ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-13 ----
 
 
 RESOURCES_DIGEST = "sha256:" + "0" * 64
@@ -3865,7 +3865,8 @@ def _original_name_block(**over):
 
 
 def _scorecard_1_8(block=None, version="1.8.0"):
-    doc = _scorecard_1_4(_sampled_block(), version)
+    # A COMPLETE verification: an original-name restore requires one (ON-13).
+    doc = _scorecard_1_4(_complete_block(), version)
     doc["target"]["mode"] = "newTopic"
     doc["target"].pop("marker_topic", None)
     doc["target"]["topic_mapping_prefix"] = ""
@@ -3987,6 +3988,53 @@ def test_each_original_name_arm_refuses_with_the_rust_readers_words():
                              kafka_topic_resources_sha256="sha256:XYZ"),
     ):
         assert mod.check_invariants(_scorecard_1_8(bad)).startswith(on12), bad
+
+
+def test_on13_an_original_name_restore_is_verified_completely_or_is_not_a_pass():
+    # KILLS: an original-name document signed over a SAMPLED verification; a
+    # pass that records no verification; refusing the honest shapes.
+    mod = _verifier_module()
+    on13 = (
+        "target.original_name is present but integrity.verification.coverage is not "
+        "\"complete\", or a pass records no verification; a restore under the original topic "
+        "names is verified completely, never by sample"
+    )
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    assert on13.replace('"', '\\"') in rust, "the Rust reader's words"
+    sampled = _scorecard_1_8()
+    sampled["integrity"]["verification"] = _sampled_block()
+    assert mod.check_invariants(sampled) == on13
+    # ... even when the run did not pass.
+    failed = _scorecard_1_8()
+    failed["integrity"]["verification"] = _sampled_block()
+    _not_a_pass(failed)
+    assert mod.check_invariants(failed) == on13
+    # A pass that records no verification: absent, and `null`.
+    for absent in ("pop", "null"):
+        unverified = _scorecard_1_8()
+        if absent == "pop":
+            unverified["integrity"].pop("verification")
+        else:
+            unverified["integrity"]["verification"] = None
+        assert mod.check_invariants(unverified) == on13, absent
+    # An integrity pass beside a failed objective, with none recorded.
+    objective = _scorecard_1_8()
+    objective["integrity"].pop("verification")
+    objective["outcome"] = "fail-objective"
+    objective["engine"]["matrix_verdict"] = "pass-degraded"
+    assert mod.check_invariants(objective) == on13
+
+    # CONTROLS: a complete verification that found something...
+    found = _scorecard_1_8()
+    _not_a_pass(found)
+    assert mod.check_invariants(found) == ""
+    # ... a run that stopped before phase 7, which is not a pass...
+    stopped = _scorecard_1_8()
+    stopped["integrity"].pop("verification")
+    _not_a_pass(stopped)
+    assert mod.check_invariants(stopped) == ""
+    # ... and a document WITHOUT the block, sampled, decided as before.
+    assert mod.check_invariants(_scorecard_1_4(_sampled_block())) == ""
 
 
 def test_a_malformed_original_name_block_is_refused_at_the_shape_layer():

@@ -39,7 +39,8 @@ fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
 }
 
 /// An original-name plan for `orders` and `payments`: `newTopic`, `prefix:
-/// ""`, and the block. `owners` is the plan's owner statement.
+/// ""`, the block, and COMPLETE verification, which such a plan requires.
+/// `owners` is the plan's owner statement.
 fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
     DrillSpec {
         name: None,
@@ -70,7 +71,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             records_per_partition: 25,
             anchor: Anchor::Head,
             max_partitions: None,
-            coverage: logweir_core::spec::Coverage::Sampled,
+            coverage: logweir_core::spec::Coverage::Complete,
             complete_max_records: None,
         },
         restore: RestoreSpecBlock {
@@ -219,6 +220,9 @@ struct Creator {
     partitions_override: Option<i32>,
     /// Answer only for these names (review L1's short answer).
     answers_only: Option<Vec<String>>,
+    /// Names the broker refuses for a reason that is NOT "already exists",
+    /// and the error it answers.
+    refused: BTreeMap<String, String>,
 }
 
 impl TopicCreator for Creator {
@@ -237,6 +241,8 @@ impl TopicCreator for Creator {
             .map(|t| {
                 if self.taken.contains(&t.name) {
                     (t.name.clone(), Err(rdkafka_already_exists()))
+                } else if let Some(why) = self.refused.get(&t.name) {
+                    (t.name.clone(), Err(why.clone()))
                 } else {
                     if let Some(list) = &self.lists_into {
                         list.lock().unwrap().push(TopicMeta::new(
@@ -270,10 +276,6 @@ fn rdkafka_already_exists() -> String {
 #[derive(Default)]
 struct Deleter {
     calls: Mutex<Vec<String>>,
-    /// Every name handed to the review-M4 cleanup.
-    unwritten_calls: Mutex<Vec<String>>,
-    /// Records a topic holds when the cleanup re-reads its end offsets.
-    records: BTreeMap<String, i64>,
 }
 
 impl TopicDeleter for Deleter {
@@ -283,27 +285,6 @@ impl TopicDeleter for Deleter {
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
         self.calls.lock().unwrap().extend_from_slice(names);
         Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
-    }
-    fn delete_unwritten_created(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.unwritten_calls
-            .lock()
-            .unwrap()
-            .extend_from_slice(names);
-        Ok(names
-            .iter()
-            .map(|n| match self.records.get(n) {
-                Some(r) if *r > 0 => (
-                    n.clone(),
-                    Err(format!(
-                        "left: it holds {r} record(s) this run did not write"
-                    )),
-                ),
-                _ => (n.clone(), Ok(())),
-            })
-            .collect())
     }
 }
 
@@ -417,6 +398,71 @@ fn the_block_beside_a_prefix_is_refused() {
     refused(
         admit(&spec, Some(OTHER), &Broker::disabled(), &no_inputs()),
         "OriginalNamePrefixNotEmpty",
+    );
+}
+
+/// **An original-name restore REQUIRES complete verification** (the
+/// orchestrator's ruling of 2026-10-09). A sampled plan with the identity
+/// mapping is refused BY NAME at phase 0 — exit 3, before any broker is asked
+/// anything, nothing created — whether `sample.coverage` is stated or left to
+/// its default; the same plan asking for complete coverage is admitted.
+/// CONTROL: a sampled plan under a PREFIX is admitted as before. KILLS:
+/// deleting the coverage arm of `refuse_shape`; reading an absent
+/// `sample.coverage` as complete; applying the rule to a prefixed restore.
+#[test]
+fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
+    let mut spec = plan_no_owner();
+    spec.sample.coverage = logweir_core::spec::Coverage::Sampled;
+    let message = refused(
+        admit(&spec, Some(OTHER), &Broker::disabled(), &no_inputs()),
+        "OriginalNameNeedsCompleteCoverage",
+    );
+    for needle in [
+        "sample.coverage is `sampled` (its default)",
+        "requires complete verification",
+        "Set sample.coverage: complete",
+    ] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+
+    // The YAML an operator writes, with no `coverage` key at all, is the
+    // same plan and the same refusal: absent is sampled, never complete.
+    let mut yaml: serde_yaml::Value =
+        serde_yaml::to_value(plan_no_owner()).expect("the plan serialises");
+    yaml["sample"]
+        .as_mapping_mut()
+        .expect("sample is a mapping")
+        .remove("coverage");
+    let parsed: DrillSpec = serde_yaml::from_value(yaml).expect("the plan parses");
+    assert!(parsed.sample.coverage.is_sampled());
+    assert!(logweir_core::original_name::refuse_shape(&parsed)
+        .is_some_and(|m| m.starts_with("OriginalNameNeedsCompleteCoverage: ")));
+
+    // The same plan asking for complete coverage is admitted.
+    let run = admit(
+        &plan_no_owner(),
+        Some(OTHER),
+        &Broker::disabled(),
+        &no_inputs(),
+    );
+    assert!(
+        run.result.is_ok(),
+        "{:?}",
+        run.result.err().map(|e| e.to_string())
+    );
+
+    // CONTROL: a sampled plan under a prefix is what it always was.
+    let mut prefixed = plan_no_owner();
+    prefixed.sample.coverage = logweir_core::spec::Coverage::Sampled;
+    let naming = prefixed.target.topic_naming.as_mut().unwrap();
+    naming.original_name = None;
+    naming.prefix = "restore-".into();
+    assert_eq!(logweir_core::original_name::refuse_shape(&prefixed), None);
+    let run = admit(&prefixed, Some(OTHER), &Broker::disabled(), &no_inputs());
+    assert!(
+        run.result.is_ok(),
+        "{:?}",
+        run.result.err().map(|e| e.to_string())
     );
 }
 
@@ -867,7 +913,6 @@ fn mapping() -> BTreeMap<String, String> {
 fn create(
     broker: &Broker,
     creator: &Creator,
-    deleter: &Deleter,
 ) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
     let facts = logweir_core::engine::BackupSetFacts {
         backup_id: "b".into(),
@@ -894,197 +939,199 @@ fn create(
         configs_set: Vec::new(),
         topics_created: Vec::new(),
     };
-    let r = phase0_admit::create_target_topics(
-        creator,
-        broker,
-        deleter,
-        &mapping(),
-        &facts,
-        1,
-        &mut preflight,
-    );
+    let r =
+        phase0_admit::create_target_topics(creator, broker, &mapping(), &facts, 1, &mut preflight);
     (r, preflight)
 }
 
-fn race(e: DrillError) -> phase0_admit::TargetTopicRace {
+fn stopped(e: DrillError) -> phase0_admit::CreationStop {
     assert_eq!(e.exit_code(), ExitCode::Operational, "{e}");
     match e {
-        DrillError::TargetTopicAppeared(race) => *race,
-        other => panic!("expected the named race, got: {other}"),
+        DrillError::CreationStopped(stop) => *stop,
+        other => panic!("expected the named creation stop, got: {other}"),
     }
 }
 
+fn listed(broker: &Broker) -> Vec<String> {
+    broker
+        .list_topics()
+        .expect("the double lists")
+        .into_iter()
+        .map(|t| t.name)
+        .collect()
+}
+
 /// A name that appeared after phase 0 refuses BEFORE any create, by name, and
-/// nothing is created or deleted. KILLS: deleting the pre-create look (the
-/// creator would then be called); routing the race through a plain exit 1
-/// with no names.
+/// nothing is created. KILLS: deleting the pre-create look (the creator would
+/// then be called); routing the race through a plain exit 1 with no names.
 #[test]
 fn a_name_that_appeared_since_phase_0_loses_before_anything_is_created() {
     let broker = Broker::disabled().having("payments");
     let creator = Creator::default();
-    let deleter = Deleter::default();
-    let (r, preflight) = create(&broker, &creator, &deleter);
-    let race = race(r.expect_err("the race is lost"));
+    let (r, preflight) = create(&broker, &creator);
+    let stop = stopped(r.expect_err("the race is lost"));
+    assert_eq!(stop.reason, "TargetTopicAppeared");
     assert!(
-        race.message.starts_with("TargetTopicAppeared: "),
+        stop.message.starts_with("TargetTopicAppeared: "),
         "{}",
-        race.message
+        stop.message
     );
-    assert!(race.message.contains("`payments`"), "{}", race.message);
+    assert!(stop.message.contains("`payments`"), "{}", stop.message);
     assert!(
-        race.message.contains("This run created no topic."),
+        stop.message.contains("This run created no topic."),
         "{}",
-        race.message
+        stop.message
     );
-    assert_eq!(race.appeared, vec!["payments".to_string()]);
-    assert!(race.removed.is_empty() && race.left.is_empty());
+    assert_eq!(stop.appeared, vec!["payments".to_string()]);
+    assert!(stop.left.is_empty());
     assert!(creator.calls.lock().unwrap().is_empty());
-    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
     assert!(preflight.topics_created.is_empty());
     assert_eq!(
-        race.status_line_value(),
-        r#"{"appeared":["payments"],"removed":[],"left":[]}"#
+        stop.status_line_value(),
+        r#"{"appeared":["payments"],"left":[]}"#
     );
 }
 
-/// Review M4. `CreateTopics` answering "already exists" for one name is the
-/// same named loss; the topic THIS run created in the same request is removed
-/// — its own answer, its partition count and its pinned configuration prove
-/// it this run's, and it holds no record — and the name that appeared is
-/// NEVER handed to any deleter. KILLS: leaving an empty production-named topic
-/// behind; deleting the topic someone else created; skipping the proof.
+/// **After a lost race the topic this run created STILL EXISTS and is
+/// NAMED** (the orchestrator's ruling of 2026-10-09: no code path deletes a
+/// topic under an original name, ever — Kafka has no conditional delete, and
+/// a record a producer wrote between an "it is empty" read and the delete
+/// would be lost under a production name). `CreateTopics` answers "already
+/// exists" for `payments`; `orders`, which this run created in the same
+/// request, is left on the cluster, empty, and named with what to do.
+/// KILLS: any cleanup of a topic the run created; dropping it from the
+/// names; a message that does not tell the operator to remove it.
 #[test]
-fn a_lost_race_removes_only_what_this_run_created_and_proved_empty() {
+fn after_a_lost_race_the_topic_this_run_created_still_exists_and_is_named() {
     let broker = Broker::disabled();
     let creator = Creator {
         taken: vec!["payments".into()],
         lists_into: Some(Arc::clone(&broker.created)),
         ..Creator::default()
     };
-    let deleter = Deleter::default();
-    let (r, preflight) = create(&broker, &creator, &deleter);
-    let race = race(r.expect_err("the race is lost"));
-    assert_eq!(race.appeared, vec!["payments".to_string()]);
-    assert_eq!(race.removed, vec!["orders".to_string()]);
-    assert!(race.left.is_empty(), "{:?}", race.left);
-    assert_eq!(
-        *deleter.unwritten_calls.lock().unwrap(),
-        vec!["orders".to_string()]
-    );
+    let (r, preflight) = create(&broker, &creator);
+    let stop = stopped(r.expect_err("the race is lost"));
+    assert_eq!(stop.reason, "TargetTopicAppeared");
+    assert_eq!(stop.appeared, vec!["payments".to_string()]);
+    assert_eq!(stop.left, vec!["orders".to_string()]);
+    // The broker is the oracle: the topic is still there.
+    assert_eq!(listed(&broker), vec!["orders".to_string()]);
+    assert_eq!(preflight.topics_created, vec!["orders".to_string()]);
     assert!(
-        deleter.calls.lock().unwrap().is_empty(),
-        "the scratch deleter is never used"
-    );
-    assert!(
-        race.message.contains("removed them again"),
+        stop.message.contains(
+            "`orders`: created by this restore and left empty; remove it yourself once you \
+             have checked nothing writes to it"
+        ),
         "{}",
-        race.message
-    );
-    assert!(
-        preflight.topics_created.is_empty(),
-        "a removed topic is not reported created"
+        stop.message
     );
     assert_eq!(
-        race.status_line_value(),
-        r#"{"appeared":["payments"],"removed":["orders"],"left":[]}"#
+        stop.status_line_value(),
+        r#"{"appeared":["payments"],"left":["orders"]}"#
     );
 }
 
-/// Review M4's controls: a created topic is LEFT, and named with the reason,
-/// whenever ownership or emptiness cannot be proved — it holds a record, its
-/// configuration is not the one this run set, or its partition count is not.
-/// KILLS: deleting a topic a producer already wrote into; deleting one that
-/// was recreated by someone else; dropping either proof.
+/// Any other stop of the creation step after this run created a topic names
+/// it and leaves it too: another name the broker refuses, and (review L1) an
+/// answer without exactly one result per name asked. Each is exit 1 with the
+/// closed state `CreatedTopicsLeft`. KILLS: an unnamed empty topic under a
+/// production name; accepting a short answer (the engine would be handed
+/// `payments`).
 #[test]
-fn a_created_topic_that_cannot_be_proved_its_own_and_empty_is_left_and_named() {
-    // A record arrived before the cleanup.
+fn a_creation_that_stops_for_another_reason_names_and_leaves_what_it_created() {
+    // The broker refuses `payments` for a reason that is not a race.
     let broker = Broker::disabled();
     let creator = Creator {
-        taken: vec!["payments".into()],
+        refused: BTreeMap::from([(
+            "payments".to_string(),
+            "PolicyViolation (Broker: Policy violation)".to_string(),
+        )]),
         lists_into: Some(Arc::clone(&broker.created)),
         ..Creator::default()
     };
-    let deleter = Deleter {
-        records: BTreeMap::from([("orders".to_string(), 1)]),
-        ..Deleter::default()
-    };
-    let race_1 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
-    assert!(race_1.removed.is_empty());
-    assert_eq!(race_1.left.len(), 1);
+    let stop = stopped(create(&broker, &creator).0.expect_err("refused"));
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty());
+    assert_eq!(stop.left, vec!["orders".to_string()]);
     assert!(
-        race_1.left[0].1.contains("holds 1 record"),
-        "{:?}",
-        race_1.left
-    );
-    assert!(
-        race_1.message.contains("LEFT `orders`"),
+        stop.message.contains("`payments` could not be created"),
         "{}",
-        race_1.message
+        stop.message
     );
+    assert_eq!(listed(&broker), vec!["orders".to_string()]);
 
-    // Another configuration: never handed to the deleter.
-    let mut broker = Broker::disabled();
-    broker.foreign_configs = true;
-    let creator = Creator {
-        taken: vec!["payments".into()],
-        lists_into: Some(Arc::clone(&broker.created)),
-        ..Creator::default()
-    };
-    let deleter = Deleter::default();
-    let race_2 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
-    assert!(race_2.removed.is_empty());
-    assert!(
-        race_2.left[0].1.contains("configuration is not the one"),
-        "{:?}",
-        race_2.left
-    );
-    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
-
-    // Another partition count: never handed to the deleter.
-    let broker = Broker::disabled();
-    let creator = Creator {
-        taken: vec!["payments".into()],
-        lists_into: Some(Arc::clone(&broker.created)),
-        partitions_override: Some(1),
-        ..Creator::default()
-    };
-    let deleter = Deleter::default();
-    let race_3 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
-    assert!(
-        race_3.left[0].1.contains("1 partition(s), not the 3"),
-        "{:?}",
-        race_3.left
-    );
-    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
-    assert_eq!(
-        race_3.status_line_value(),
-        r#"{"appeared":["payments"],"removed":[],"left":["orders"]}"#
-    );
-}
-
-/// Review L1. A `CreateTopics` answer that names fewer topics than asked is
-/// refused by name before the engine starts — a name without an answer was
-/// neither created nor refused. KILLS: accepting a short answer (the engine
-/// would be handed `payments`).
-#[test]
-fn a_create_answer_without_one_result_per_name_is_refused() {
+    // A short answer: only `orders` is answered for.
     let broker = Broker::disabled();
     let creator = Creator {
         answers_only: Some(vec!["orders".into()]),
+        lists_into: Some(Arc::clone(&broker.created)),
         ..Creator::default()
     };
-    let deleter = Deleter::default();
-    let (r, _) = create(&broker, &creator, &deleter);
-    let e = r.expect_err("a short answer");
-    assert_eq!(e.exit_code(), ExitCode::Operational);
-    let message = e.to_string();
+    let stop = stopped(create(&broker, &creator).0.expect_err("a short answer"));
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert_eq!(stop.left, vec!["orders".to_string()]);
     assert!(
-        message.contains(
+        stop.message.contains(
             "CreateTopics answered for [orders] when this run asked for [orders, payments]"
         ),
-        "{message}"
+        "{}",
+        stop.message
     );
-    assert!(message.contains("left in place: [`orders`]"), "{message}");
+
+    // Nothing created and nothing appeared: an ordinary exit 1, no names.
+    let creator = Creator {
+        refused: BTreeMap::from([
+            ("orders".to_string(), "PolicyViolation".to_string()),
+            ("payments".to_string(), "PolicyViolation".to_string()),
+        ]),
+        ..Creator::default()
+    };
+    let e = create(&Broker::disabled(), &creator)
+        .0
+        .expect_err("refused");
+    assert!(matches!(e, DrillError::Operational(_)), "{e}");
+}
+
+/// **No code path in the creation step can delete.** The step takes no
+/// deleter at all, and phase 0's ONE delete call is the `LogAppendTime`
+/// probe's, of a name under the scratch prefix. KILLS: a cleanup re-added to
+/// the creation step or after it; a second delete in phase 0.
+#[test]
+fn the_creation_step_holds_no_deleter_and_phase_0_deletes_only_its_probe() {
+    let phase0 = include_str!("../src/drill/phase0_admit.rs");
+    let production = phase0
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production half");
+    assert_eq!(
+        production.matches(".delete_topics(").count(),
+        1,
+        "phase 0's only delete is the probe's"
+    );
+    let start = production
+        .find("pub fn create_target_topics(")
+        .expect("the creation step");
+    let step = &production[start..];
+    assert!(
+        !step.contains("TopicDeleter"),
+        "the creation step takes no deleter"
+    );
+    assert!(!step.contains("delete_topics"), "and calls no delete");
+
+    // And between the creation step and phase 6 the orchestrator deletes
+    // nothing either.
+    let orchestrator = include_str!("../src/drill/mod.rs");
+    let from = orchestrator
+        .find("phase0_admit::create_target_topics(")
+        .expect("the call site");
+    let to = from
+        + orchestrator[from..]
+            .find("phase6_restore::run(")
+            .expect("phase 6 follows");
+    assert!(
+        !orchestrator[from..to].contains("delete"),
+        "nothing is deleted between creation and the restore"
+    );
 }
 
 // ---------------------------------------------------------------------------

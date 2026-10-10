@@ -172,8 +172,40 @@ pub const MAX_BINDINGS: usize = 256;
 pub const PAYLOAD_TYPE_RESTORE_AUTHORIZATION: &str =
     "application/vnd.logweir.restore-authorization+json;version=2.0.0";
 
-/// The document's `formatVersion`.
+/// The document's `formatVersion`: what this build reads (major 2), and the
+/// version every document that carries neither `approvalSubject` nor
+/// `originalNameConfirmation` is written at — so every such document is byte
+/// for byte what it was. [`restore_authorization_format_version_for`] picks
+/// [`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`] for one that does.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
+
+/// **PROD-15.1.** The minor that defines `approvalSubject` and
+/// `originalNameConfirmation`. A document declaring an older minor that
+/// carries either is refused: the fields change WHAT the document
+/// authorises (a restore under the original topic names), and a document
+/// that predates them cannot have said so. The standing authorization's
+/// 1.1.0 is the same pattern
+/// (`crate::execution_contract::STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR`).
+pub const RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR: u64 = 1;
+
+/// **PROD-15.1.** The version a document that carries `approvalSubject` or
+/// `originalNameConfirmation` is written at.
+pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT: &str = "2.1.0";
+
+/// The `formatVersion` an authorization document v2 is written at: 2.1.0
+/// when it carries the approval subject or the typed confirmation, 2.0.0
+/// otherwise. The ONE place a writer takes the version from.
+#[must_use]
+pub fn restore_authorization_format_version_for(
+    approval_subject: Option<&str>,
+    original_name_confirmation: Option<&crate::original_name::OriginalNameConfirmation>,
+) -> &'static str {
+    if approval_subject.is_some() || original_name_confirmation.is_some() {
+        RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT
+    } else {
+        RESTORE_AUTHORIZATION_FORMAT_VERSION
+    }
+}
 
 /// The document's `kind`.
 pub const RESTORE_AUTHORIZATION_KIND: &str = "RestoreAuthorization";
@@ -1146,11 +1178,15 @@ pub struct PolicyRef {
 ///
 /// `deny_unknown_fields`: a field this build does not know is a field whose
 /// meaning it cannot enforce, and an authorization is the last place to ignore
-/// one. A future field is a new `formatVersion` major — unless, like
-/// PROD-15.1's `approvalSubject`, it is OPTIONAL, absent from every document
-/// that does not need it, and refuses-closed in an older reader, which this
-/// attribute makes it do; then the documents that carry it are exactly the
-/// ones an older reader refuses, and no other document changes.
+/// one. A new field is a new `formatVersion`: PROD-15.1's `approvalSubject`
+/// and `originalNameConfirmation` are format **2.1.0**
+/// ([`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`]) — OPTIONAL, absent from
+/// every document that does not need them (which stays 2.0.0, byte for byte),
+/// refused by this build under a version that predates them
+/// ([`RestoreAuthorization::check_format_version`]), and refused by every
+/// reader built before them, which this attribute makes it do (an unknown
+/// field). So the documents that carry them are exactly the ones an older
+/// reader refuses, and no other document changes.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RestoreAuthorization {
@@ -1184,12 +1220,12 @@ pub struct RestoreAuthorization {
     /// and every boundary that reads the document holds it to the plan
     /// (`crate::original_name::check_approval_subject`).
     ///
-    /// ADDED WITHOUT A NEW `formatVersion`, and on purpose. Every document
-    /// without it is byte for byte what it was, and this struct is
-    /// `deny_unknown_fields`, so a reader that predates the key REFUSES the
-    /// only documents that carry it (`DocumentInvalid`, unknown field) — it can
-    /// never read one as an ordinary authorization. That is the outcome a new
-    /// major would buy, for the documents that need it and none of the others.
+    /// DEFINED FROM FORMAT 2.1.0. A document that carries it is written as
+    /// 2.1.0 and refused under 2.0.0; every document without it stays 2.0.0,
+    /// byte for byte what it was. This struct is `deny_unknown_fields`, so a
+    /// reader that predates the key REFUSES the only documents that carry it
+    /// (`DocumentInvalid`, unknown field) — it can never read one as an
+    /// ordinary authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_subject: Option<String>,
     /// **OD-10 (2026-10-09): the typed confirmation.** On a one-person
@@ -1197,9 +1233,8 @@ pub struct RestoreAuthorization {
     /// ORIGINAL topic names, the topic names the requester re-typed, as the
     /// console received them; ABSENT on every other document. Every boundary
     /// that reads the document holds them to the plan's `source.topics`
-    /// (`crate::original_name::check_typed_confirmation`). Added without a
-    /// new `formatVersion` for `approval_subject`'s reason: an older reader
-    /// refuses a document carrying it.
+    /// (`crate::original_name::check_typed_confirmation`). Defined from format
+    /// 2.1.0, as `approval_subject` is, and refused under 2.0.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name_confirmation: Option<crate::original_name::OriginalNameConfirmation>,
 }
@@ -1217,11 +1252,52 @@ impl RestoreAuthorization {
     ///
     /// [`AuthorizationRefusal::DocumentInvalid`] naming the parse error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AuthorizationRefusal> {
-        serde_json::from_slice(bytes).map_err(|e| {
+        let doc: Self = serde_json::from_slice(bytes).map_err(|e| {
             AuthorizationRefusal::DocumentInvalid(format!(
                 "the bytes are not an authorization document v2: {e}"
             ))
-        })
+        })?;
+        // PROD-15.1: the 2.1.0 fields under a version that predates them are
+        // refused at EVERY reader, here, before anything reads the fields.
+        doc.check_subject_fields_version()?;
+        Ok(doc)
+    }
+
+    /// Whether the document carries a field defined from format 2.1.0.
+    #[must_use]
+    pub fn carries_subject_fields(&self) -> bool {
+        self.approval_subject.is_some() || self.original_name_confirmation.is_some()
+    }
+
+    /// **PROD-15.1: `approvalSubject` and `originalNameConfirmation` are
+    /// format 2.1.0.** A document that carries either and declares an older
+    /// minor (or none this build can read) is refused: a 2.0.0 document
+    /// authorises an ordinary restore and nothing else, so one that names the
+    /// original-name subject under that version was not written by a console
+    /// that knows the subject. Can only refuse; a document without the fields
+    /// is decided exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorizationRefusal::DocumentInvalid`], naming both versions.
+    pub fn check_subject_fields_version(&self) -> Result<(), AuthorizationRefusal> {
+        if !self.carries_subject_fields() {
+            return Ok(());
+        }
+        let mut parts = self.format_version.split('.');
+        let major = parts.next();
+        let minor = parts.next().and_then(|m| m.parse::<u64>().ok());
+        if major == Some("2")
+            && minor.is_some_and(|m| m >= RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR)
+        {
+            return Ok(());
+        }
+        Err(AuthorizationRefusal::DocumentInvalid(format!(
+            "the document carries `approvalSubject` or `originalNameConfirmation`, which are \
+             defined from formatVersion {RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT}, and it \
+             declares {:?}; a document that predates the fields cannot carry them",
+            self.format_version
+        )))
     }
 }
 
@@ -1339,6 +1415,10 @@ pub fn check_binding(
             doc.format_version, doc.kind
         )));
     }
+    // PROD-15.1: the 2.1.0 fields under 2.0.0 are refused (`from_bytes` did
+    // this for a parsed document; this is the same rule for one built in
+    // memory, so no reader can skip it).
+    doc.check_subject_fields_version()?;
     let subject = &doc.subject;
     let mismatch = if subject.api_version != SUBJECT_API_VERSION {
         Some(format!("apiVersion {}", subject.api_version))
@@ -1751,6 +1831,141 @@ namespaces:
         );
         let bytes = d.to_bytes();
         assert_eq!(RestoreAuthorization::from_bytes(&bytes), Ok(d));
+    }
+
+    /// **PROD-15.1: `approvalSubject` and `originalNameConfirmation` are
+    /// document format 2.1.0** — the standing authorization's 1.1.0 pattern.
+    /// A document that carries either is WRITTEN as 2.1.0 and REFUSED under
+    /// 2.0.0, by the parser and by the binding check; every document without
+    /// them is written as 2.0.0, byte for byte what the writer before the
+    /// fields produced, and read exactly as before.
+    ///
+    /// KILLS: writing 2.0.0 for a document that carries the subject; writing
+    /// 2.1.0 for every document (an ordinary document's bytes would change);
+    /// a reader that accepts the fields under 2.0.0; a reader that refuses
+    /// 2.1.0.
+    #[test]
+    fn the_subject_fields_are_format_2_1_0_and_refused_under_2_0_0() {
+        use crate::original_name::OriginalNameConfirmation;
+
+        let typed = OriginalNameConfirmation {
+            typed_topics: vec!["orders".into()],
+        };
+        // THE WRITER.
+        assert_eq!(
+            restore_authorization_format_version_for(None, None),
+            "2.0.0"
+        );
+        assert_eq!(
+            restore_authorization_format_version_for(Some("originalName"), None),
+            "2.1.0"
+        );
+        assert_eq!(
+            restore_authorization_format_version_for(Some("originalName"), Some(&typed)),
+            "2.1.0"
+        );
+        assert_eq!(
+            restore_authorization_format_version_for(None, Some(&typed)),
+            "2.1.0"
+        );
+        assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION, "2.0.0");
+        assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT, "2.1.0");
+
+        // AN ORDINARY DOCUMENT IS BYTE FOR BYTE WHAT IT WAS: these are the
+        // bytes the writer produced before the fields existed, key for key.
+        let p = policy(ApprovalMode::Ordinary);
+        let ordinary = doc(&p);
+        let was = format!(
+            "{{\"formatVersion\":\"2.0.0\",\"kind\":\"RestoreAuthorization\",\
+             \"authorizationMode\":\"Ordinary\",\"subject\":{{\"apiVersion\":\
+             \"logweir.dev/v1alpha1\",\"kind\":\"Restore\",\"namespace\":\"team-a\",\
+             \"name\":\"rst-1\",\"uid\":\"uid-1\"}},\"planHash\":\"sha256:{}\",\
+             \"requester\":{{\"issuer\":\"https://idp.example\",\"subject\":\"alice\"}},\
+             \"policy\":{{\"name\":\"{}\",\"digest\":\"{}\"}},\
+             \"issuedAt\":\"2026-09-22T10:00:00Z\",\"expiresAt\":\"2026-09-22T10:10:00Z\"}}",
+            "a".repeat(64),
+            p.name,
+            p.digest()
+        );
+        assert_eq!(String::from_utf8(ordinary.to_bytes()).unwrap(), was);
+
+        // THE READER. A document carrying the subject, at its version:
+        let mut subject = doc(&p);
+        subject.approval_subject = Some("originalName".into());
+        subject.original_name_confirmation = Some(typed.clone());
+        subject.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT.into();
+        assert_eq!(check_binding(&subject, &expected(), &p), Ok(()));
+        assert_eq!(
+            RestoreAuthorization::from_bytes(&subject.to_bytes()),
+            Ok(subject.clone())
+        );
+        assert!(String::from_utf8(subject.to_bytes())
+            .unwrap()
+            .starts_with("{\"formatVersion\":\"2.1.0\","));
+        // ... and under a Governed policy, the subject alone.
+        let g = policy(ApprovalMode::Governed);
+        let mut governed = doc(&g);
+        governed.approval_subject = Some("originalName".into());
+        governed.format_version = "2.1.0".into();
+        assert_eq!(check_binding(&governed, &expected(), &g), Ok(()));
+
+        // The same fields under a version that predates them: refused by the
+        // parser and by the binding check, naming both versions.
+        for (label, strip_subject, strip_typed) in [
+            ("both fields", false, false),
+            ("the subject alone", false, true),
+            ("the typed names alone", true, false),
+        ] {
+            for version in ["2.0.0", "2.0.9", "2", "2.x.0"] {
+                let mut old = subject.clone();
+                old.format_version = version.into();
+                if strip_subject {
+                    old.approval_subject = None;
+                }
+                if strip_typed {
+                    old.original_name_confirmation = None;
+                }
+                for refused in [
+                    check_binding(&old, &expected(), &p),
+                    RestoreAuthorization::from_bytes(&old.to_bytes()).map(|_| ()),
+                ] {
+                    let refused = refused.expect_err(label);
+                    assert_eq!(
+                        refused.reason(),
+                        "AuthorizationDocumentInvalid",
+                        "{label}, {version}: {refused}"
+                    );
+                    let text = refused.to_string();
+                    assert!(
+                        text.contains("defined from formatVersion 2.1.0")
+                            && text.contains(&format!("{version:?}")),
+                        "{label}, {version}: {text}"
+                    );
+                }
+            }
+        }
+        // Another major stays refused, whatever it carries.
+        let mut major = subject.clone();
+        major.format_version = "3.1.0".into();
+        assert_eq!(
+            check_binding(&major, &expected(), &p).map_err(|r| r.reason()),
+            Err("AuthorizationDocumentInvalid")
+        );
+
+        // CONTROLS. A 2.0.0 document without the fields is read as before, and
+        // a minor adds optional fields only: 2.1.0 without them is accepted.
+        assert_eq!(check_binding(&ordinary, &expected(), &p), Ok(()));
+        assert_eq!(
+            RestoreAuthorization::from_bytes(&ordinary.to_bytes()),
+            Ok(ordinary.clone())
+        );
+        let mut newer = ordinary.clone();
+        newer.format_version = "2.1.0".into();
+        assert_eq!(check_binding(&newer, &expected(), &p), Ok(()));
+        assert_eq!(
+            RestoreAuthorization::from_bytes(&newer.to_bytes()),
+            Ok(newer)
+        );
     }
 
     #[test]

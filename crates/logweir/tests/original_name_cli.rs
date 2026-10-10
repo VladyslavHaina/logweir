@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const ORIGINAL_PLAN: &str = "source:\n  storage:\n    backend: filesystem\n    path: /logweir-original-name-cli-archive\n  backup: latestCompleted\n  topics: [orders]\ntarget:\n  bootstrap_servers: [127.0.0.1:1]\n  mode: newTopic\n  topic_mapping_prefix: \"drill-\"\n  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n  default_replication_factor: 1\nsample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n  anchor: head\nobjectives: {}\nevidence:\n  backend: filesystem\n  path: /logweir-original-name-cli-evidence\n";
+const ORIGINAL_PLAN: &str = "source:\n  storage:\n    backend: filesystem\n    path: /logweir-original-name-cli-archive\n  backup: latestCompleted\n  topics: [orders]\ntarget:\n  bootstrap_servers: [127.0.0.1:1]\n  mode: newTopic\n  topic_mapping_prefix: \"drill-\"\n  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n  default_replication_factor: 1\nsample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n  anchor: head\n  coverage: complete\nobjectives: {}\nevidence:\n  backend: filesystem\n  path: /logweir-original-name-cli-evidence\n";
 
 fn ordinary_plan() -> String {
     ORIGINAL_PLAN.replace(
@@ -137,6 +137,49 @@ fn an_ordinary_approval_is_refused_before_the_runner_reads_its_inputs() {
     );
 }
 
+/// **An original-name restore requires complete verification, and the
+/// runner says so before it dials anything.** The same plan WITHOUT
+/// `sample.coverage: complete`, under a correct `originalName` approval and
+/// with a target nothing listens on: exit 3, the refusal opening
+/// `OriginalNameNeedsCompleteCoverage`, the last stdout line a
+/// `refusal-reason=`. CONTROL: the complete plan with the same inputs is NOT
+/// refused for its shape (it goes on to fail on the unreachable target or a
+/// later input). KILLS: removing the startup shape check AND phase 0's (the
+/// run would reach the broker and exit 1); refusing the complete plan too.
+#[test]
+fn a_sampled_original_name_plan_is_refused_by_name_before_anything_is_dialled() {
+    let sampled = ORIGINAL_PLAN.replace("  coverage: complete\n", "");
+    assert_ne!(
+        sampled, ORIGINAL_PLAN,
+        "the fixture asks for complete coverage"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("kafkatopics.yaml");
+    std::fs::write(&empty, "").unwrap();
+
+    let b = bundle(&sampled, Some("originalName"));
+    let out = restore_run(&b, &empty);
+    let text = both(&out);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(
+        text.contains("OriginalNameNeedsCompleteCoverage: "),
+        "{text}"
+    );
+    assert!(text.contains("Set sample.coverage: complete"), "{text}");
+    assert!(
+        last_stdout_line(&out).starts_with("refusal-reason="),
+        "{text}"
+    );
+
+    let b = bundle(ORIGINAL_PLAN, Some("originalName"));
+    let out = restore_run(&b, &empty);
+    let text = both(&out);
+    assert!(
+        !text.contains("OriginalNameNeedsCompleteCoverage"),
+        "the complete plan is not refused for its coverage: {text}"
+    );
+}
+
 /// The reverse direction at the same call site: an `originalName` approval
 /// authorises nothing else. KILLS: a one-directional check.
 #[test]
@@ -236,4 +279,31 @@ fn drill_approve_signs_the_original_name_subject_only_when_asked() {
     let doc: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&out_path).unwrap()).unwrap();
     assert_eq!(doc["approval_subject"], "originalName");
+
+    // A SAMPLED original-name plan is never signed for: the runner refuses
+    // it at phase 0, and the approver is told so before signing. KILLS: an
+    // approval minted for a plan that can only be refused.
+    let sampled = bundle(&ORIGINAL_PLAN.replace("  coverage: complete\n", ""), None);
+    let sampled_out = sampled.spec.with_file_name("minted.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_logweir"))
+        .args(["drill", "approve", "--spec"])
+        .arg(&sampled.spec)
+        .arg("--key")
+        .arg(&sampled.key)
+        .args([
+            "--approver",
+            "ops@example.com",
+            "--ticket",
+            "CHG-1",
+            "--out",
+        ])
+        .arg(&sampled_out)
+        .args(["--approval-subject", "original-name"])
+        .output()
+        .unwrap();
+    let text = both(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("OriginalNameNeedsCompleteCoverage"), "{text}");
+    assert!(text.contains("Nothing was signed"), "{text}");
+    assert!(!sampled_out.exists(), "nothing is signed");
 }

@@ -10,11 +10,13 @@
 //!
 //! | row | proves | negative control in the row |
 //! |---|---|---|
-//! | `a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster` | backed up on the default broker, deleted there, restored under its own name into `cluster2`: exit 0, `pass`, every record on `cluster2`, the topic still there after the run (teardown never deletes it), scorecard 1.8.0 `target.original_name` with `targetIsNotSource` and the receipt's source id; both readers accept and print the same `original name:` lines; the approval was minted by `drill approve --approval-subject original-name` | the same plan under an ORDINARY approval is refused, exit 3, `ApprovalSubjectMismatch`, nothing created; `drill approve` without the flag refuses to sign it |
+//! | `a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster` | backed up on the default broker, deleted there, restored under its own name into `cluster2`: exit 0, `pass` over a COMPLETE verification, every record on `cluster2`, the topic still there after the run (teardown never deletes it), scorecard 1.8.0 `target.original_name` with `targetIsNotSource` and the receipt's source id; both readers accept and print the same `original name:` lines; the approval was minted by `drill approve --approval-subject original-name` | the same plan under an ORDINARY approval is refused, exit 3, `ApprovalSubjectMismatch`, nothing created; `drill approve` without the flag refuses to sign it |
 //! | `a_deleted_topic_is_recovered_under_its_name_on_the_same_cluster` | the default broker (auto-creation off) is both source and target: refused while the name exists (exit 3, records untouched), then after the delete recovered with a COMPLETE verification (phase 7's complete lane, exact counts), `autoCreateDisabled` | the run while the name exists |
 //! | `the_same_cluster_with_auto_creation_enabled_is_refused` | backed up on `autocreate`, deleted, restored into `autocreate`: exit 3 `OriginalNameAutoCreateEnabled`, the name stays absent | the assertion that the name is absent fails if anything was written |
-//! | `a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name` | target `autocreate` (another cluster, so admitted): when the runner announces phase 5 a producer sends one record to the name, which the broker auto-creates; the restore stops at creation, exit 1, its LAST line `failure-reason=TargetTopicAppeared` and the line before it naming the topic as `appeared` (review M4), and the topic holds the producer's ONE record and nothing restored | a build that wrote into the existing topic leaves more than one record |
-//! | `a_producer_writing_during_the_restore_fails_its_verification` | review M5: the runner is suspended at phase 6 while a producer writes 6 records into the topic the restore created; the engine restores 30, phase 7's count bound finds 36 against a bound of 30, and the run signs `fail-integrity` (exit 2), the topic holding both | a phase 7 that passed the topic |
+//! | `a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name` | target `autocreate` (another cluster, so admitted): when the runner announces phase 5 a producer sends one record to the name, which the broker auto-creates; the restore stops at creation, exit 1, its LAST line `failure-reason=TargetTopicAppeared` and the line before it naming the topic as `appeared` with nothing `left` and no `removed` list (review M4), and the topic STILL EXISTS holding the producer's ONE record and nothing restored | a build that wrote into the existing topic leaves more than one record; one that deleted it leaves none |
+//! | `a_creation_step_that_stops_leaves_the_topic_it_created_and_names_it` | two topics restored into `cluster2`, where an unrelated topic collides with the second name (`.` against `_`): the broker creates the first and refuses the second in one request; exit 1, the LAST line `failure-reason=CreatedTopicsLeft`, the line before it naming the created topic as `left`, and the broker still lists it, empty — nothing is ever deleted under an original name | a cleanup deletes the topic and the existence assertion fails |
+//! | `a_sampled_plan_under_the_original_names_is_refused_by_name` | the plan without `sample.coverage: complete`: `drill approve --approval-subject original-name` refuses to sign it, and under a hand-signed `originalName` approval the runner refuses it, exit 3 `OriginalNameNeedsCompleteCoverage`, nothing created | the same plan with `coverage: complete` restores and passes, covered |
+//! | `a_producer_writing_during_the_restore_fails_its_verification` | review M5: the runner is suspended at phase 6 while a producer writes 6 records into the topic the restore created; the engine restores 30; phase 7's COMPLETE lane counts 30 expected, 36 restored, 30 matching and 6 unexpected, names each foreign record by its target offset, and the run signs `fail-integrity` (exit 2), the topic holding both | a phase 7 that passed the topic, or counted without naming |
 //! | `a_declarative_owner_blocks_unless_the_owner_path_is_chosen` | a Strimzi `KafkaTopic` for the name given with `--kafka-topic-resources` (simulated: no Strimzi in the lab) refuses, exit 3 `OriginalNameOwnerPresent`; with `owner_path: true` the restore runs and signs the owner and the path; a plan that states no owner and has no resources refuses `OriginalNameOwnerNotChecked` | the two refusals |
 //! | `scratch_mode_keeps_the_identity_ban` | an `original_name` block in a scratch drill: exit 3 `OriginalNameNotNewTopic`, nothing created | — |
 //!
@@ -797,7 +799,7 @@ fn a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster() {
     let b = backup(&format!("prod151-second-{}", nonce()), &s.broker, &topic);
     delete_topic(&s.broker, &topic);
     assert!(!topic_exists(&s.cluster2, &topic));
-    let spec_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), false);
+    let spec_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), true);
     let spec = write_spec(&spec_text, "second");
 
     // `drill approve` refuses an ORDINARY approval for this plan, and signs the
@@ -850,6 +852,10 @@ fn a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster() {
     assert_eq!(on["source_cluster_id"], json!(b.receipt.source.cluster_id));
     assert_eq!(on["owner_detection"], json!(["plan"]));
     assert_eq!(r.scorecard["target"]["topic_mapping_prefix"], "");
+    // Verified COMPLETELY, as every original-name restore is.
+    let verification = &r.scorecard["integrity"]["verification"];
+    assert_eq!(verification["coverage"], "complete", "{verification}");
+    assert_eq!(verification["complete"]["covered"], true, "{verification}");
     // The broker is the oracle: every record, under the original name, and
     // the topic is still there after the run (teardown never deletes it).
     assert!(topic_exists(&s.cluster2, &topic));
@@ -959,7 +965,7 @@ fn the_same_cluster_with_auto_creation_enabled_is_refused() {
     produce(&s.autocreate, &topic, 10);
     let b = backup(&format!("prod151-auto-{}", nonce()), &s.autocreate, &topic);
     delete_topic(&s.autocreate, &topic);
-    let spec_text = restore_spec(&b, &topic, &s.autocreate, Naming::Original(NO_OWNER), false);
+    let spec_text = restore_spec(&b, &topic, &s.autocreate, Naming::Original(NO_OWNER), true);
     let spec = write_spec(&spec_text, "auto");
     let approval = hand_approval(&spec_text, Some("originalName"), "auto");
     let r = restore(&spec, &approval, &s.autocreate, None, "auto");
@@ -995,7 +1001,7 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
     create_topic(&s.broker, &topic);
     produce(&s.broker, &topic, 10);
     let b = backup(&format!("prod151-race-{}", nonce()), &s.broker, &topic);
-    let spec_text = restore_spec(&b, &topic, &s.autocreate, Naming::Original(NO_OWNER), false);
+    let spec_text = restore_spec(&b, &topic, &s.autocreate, Naming::Original(NO_OWNER), true);
     let spec = write_spec(&spec_text, "race");
     let approval = hand_approval(&spec_text, Some("originalName"), "race");
     let out_json = demo_dir().join("prod151-race-scorecard.json");
@@ -1082,9 +1088,14 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
         .and_then(|v| serde_json::from_str(v).ok())
         .unwrap_or_else(|| panic!("no target-topics-appeared= line:\n{all}"));
     assert_eq!(race_line["appeared"], json!([topic.clone()]), "{race_line}");
-    assert_eq!(race_line["removed"], json!([]), "{race_line}");
-    // The broker is the oracle: the topic holds the producer's ONE record and
-    // nothing the restore would have written.
+    // Nothing was created by this run, so nothing is left — and nothing is
+    // ever REMOVED: the line carries no such list (no code path deletes a
+    // topic under an original name).
+    assert_eq!(race_line["left"], json!([]), "{race_line}");
+    assert!(race_line.get("removed").is_none(), "{race_line}");
+    // The broker is the oracle: the topic is STILL THERE, and holds the
+    // producer's ONE record and nothing the restore would have written.
+    assert!(topic_exists(&s.autocreate, &topic), "{all}");
     assert_eq!(record_count(&s.autocreate, &topic), 1, "{all}");
     write_evidence(
         "race",
@@ -1096,7 +1107,188 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
             "message": said(&all, "TargetTopicAppeared"),
             "failure_reason_line": lines.last(),
             "target_topics_appeared_line": race_line,
+            "exists_after_the_run": topic_exists(&s.autocreate, &topic),
             "records_on_target": record_count(&s.autocreate, &topic),
+        }),
+    );
+}
+
+/// **A creation step that stops LEAVES the topic it created, and NAMES it**
+/// (no code path deletes a topic under an original name). Two topics are
+/// restored under their own names into `cluster2`, where an unrelated topic
+/// already holds a name that COLLIDES with the second one (Kafka treats `.`
+/// and `_` as the same character in a topic name, so the exact-name absence
+/// checks pass and `CreateTopics` refuses that one name). The broker creates
+/// the first topic and refuses the second in the same request: the restore
+/// stops before the engine starts, exit 1, its LAST line
+/// `failure-reason=CreatedTopicsLeft` and the line before it naming the
+/// created topic as `left` — and the BROKER still lists that topic, empty.
+/// KILLS: a cleanup that deletes the created topic; a stop that does not name
+/// it; writing anything into either name.
+#[test]
+#[ignore = "needs the compose stack with the cluster2 and autocreate profiles"]
+fn a_creation_step_that_stops_leaves_the_topic_it_created_and_names_it() {
+    let s = stack();
+    let n = nonce();
+    // `-` sorts before `_`, so the kept topic is the first one asked for.
+    let kept = format!("on-kept-{n}");
+    let refused = format!("on_clash-{n}");
+    let colliding = format!("on.clash-{n}");
+    for topic in [&kept, &refused] {
+        create_topic(&s.broker, topic);
+        produce(&s.broker, topic, 10);
+    }
+    let both = format!("{kept}, {refused}");
+    let b = backup(&format!("prod151-left-{n}"), &s.broker, &both);
+    // Someone else's topic on the target, under the colliding name.
+    create_topic(&s.cluster2, &colliding);
+    assert!(!topic_exists(&s.cluster2, &kept));
+    assert!(!topic_exists(&s.cluster2, &refused));
+
+    let spec_text = restore_spec(&b, &both, &s.cluster2, Naming::Original(NO_OWNER), true);
+    let spec = write_spec(&spec_text, "left");
+    let approval = hand_approval(&spec_text, Some("originalName"), "left");
+    let r = restore(&spec, &approval, &s.cluster2, None, "left");
+    let all = text(&r.out);
+    assert_eq!(r.out.status.code(), Some(1), "{all}");
+    let stdout = String::from_utf8_lossy(&r.out.stdout).into_owned();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.last().copied(),
+        Some("failure-reason=CreatedTopicsLeft"),
+        "{all}"
+    );
+    let left_line: Value = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("target-topics-appeared="))
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_else(|| panic!("no target-topics-appeared= line:\n{all}"));
+    assert_eq!(left_line["left"], json!([kept.clone()]), "{left_line}");
+    assert_eq!(left_line["appeared"], json!([]), "{left_line}");
+    assert!(left_line.get("removed").is_none(), "{left_line}");
+    assert!(
+        all.contains("created by this restore and left empty; remove it yourself once you have checked nothing writes to it"),
+        "{all}"
+    );
+    // THE BROKER IS THE ORACLE: the topic this run created is still there,
+    // empty; the refused name was never created; the other topic is untouched.
+    assert!(
+        topic_exists(&s.cluster2, &kept),
+        "the created topic was deleted"
+    );
+    assert_eq!(record_count(&s.cluster2, &kept), 0);
+    assert!(!topic_exists(&s.cluster2, &refused));
+    assert!(topic_exists(&s.cluster2, &colliding));
+    assert_eq!(record_count(&s.cluster2, &colliding), 0);
+    assert_eq!(r.scorecard, Value::Null, "nothing was signed");
+    write_evidence(
+        "created-and-left",
+        &json!({
+            "restored_topics": [kept, refused],
+            "colliding_topic_on_target": colliding,
+            "target_cluster_id": cluster_id(&s.cluster2),
+            "exit": r.out.status.code(),
+            "failure_reason_line": lines.last(),
+            "target_topics_appeared_line": left_line,
+            "message": said(&all, "CreatedTopicsLeft"),
+            "created_topic_exists_after": topic_exists(&s.cluster2, &kept),
+            "created_topic_records": record_count(&s.cluster2, &kept),
+            "refused_topic_exists_after": topic_exists(&s.cluster2, &refused),
+        }),
+    );
+    // The operator's part, done here so the slot is left clean.
+    delete_topic(&s.cluster2, &kept);
+    delete_topic(&s.cluster2, &colliding);
+}
+
+/// **A SAMPLED plan under the original names is refused by name** (an
+/// original-name restore requires complete verification). The same backup,
+/// the same target and a correct `originalName` approval: without
+/// `sample.coverage: complete` the run is refused at exit 3,
+/// `OriginalNameNeedsCompleteCoverage`, before anything is created — and
+/// `drill approve --approval-subject original-name` refuses to sign such a
+/// plan at all. CONTROL: the same plan with `coverage: complete` restores
+/// and passes, every record compared. KILLS: admitting the sampled plan;
+/// refusing the complete one.
+#[test]
+#[ignore = "needs the compose stack with the cluster2 and autocreate profiles"]
+fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
+    let s = stack();
+    let topic = format!("on-sampled-{}", nonce());
+    create_topic(&s.broker, &topic);
+    produce(&s.broker, &topic, 10);
+    let b = backup(&format!("prod151-sampled-{}", nonce()), &s.broker, &topic);
+    delete_topic(&s.broker, &topic);
+
+    let sampled_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), false);
+    assert!(!sampled_text.contains("coverage:"), "the plan is sampled");
+    let sampled_spec = write_spec(&sampled_text, "sampled");
+    // The approver's CLI refuses to sign the original-name subject for it.
+    let (refused_mint, minted_path) = cli_approval(&sampled_spec, true, "sampled");
+    assert_eq!(
+        refused_mint.status.code(),
+        Some(1),
+        "{}",
+        text(&refused_mint)
+    );
+    assert!(
+        text(&refused_mint).contains("OriginalNameNeedsCompleteCoverage"),
+        "{}",
+        text(&refused_mint)
+    );
+    assert!(!minted_path.exists(), "nothing was signed");
+    // A correctly signed originalName approval made by hand: the RUNNER
+    // refuses the plan, by name, and creates nothing.
+    let approval = hand_approval(&sampled_text, Some("originalName"), "sampled");
+    let refused = restore(&sampled_spec, &approval, &s.cluster2, None, "sampled");
+    assert_eq!(refused.out.status.code(), Some(3), "{}", text(&refused.out));
+    assert!(
+        text(&refused.out).contains("OriginalNameNeedsCompleteCoverage"),
+        "{}",
+        text(&refused.out)
+    );
+    assert!(
+        refusal_line(&refused.out).is_some(),
+        "{}",
+        text(&refused.out)
+    );
+    assert!(
+        !topic_exists(&s.cluster2, &topic),
+        "a refused run created the topic"
+    );
+    assert_eq!(refused.scorecard, Value::Null, "nothing was signed");
+
+    // CONTROL: the same restore asking for complete coverage runs and passes.
+    let complete_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), true);
+    let complete_spec = write_spec(&complete_text, "sampled-control");
+    let r = restore(
+        &complete_spec,
+        &hand_approval(&complete_text, Some("originalName"), "sampled-control"),
+        &s.cluster2,
+        None,
+        "sampled-control",
+    );
+    assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
+    assert_eq!(r.scorecard["outcome"], "pass");
+    let verification = &r.scorecard["integrity"]["verification"];
+    assert_eq!(verification["coverage"], "complete");
+    assert_eq!(verification["complete"]["covered"], true, "{verification}");
+    assert_eq!(record_count(&s.cluster2, &topic), 30);
+    write_evidence(
+        "sampled-refused",
+        &json!({
+            "topic": topic,
+            "target_cluster_id": cluster_id(&s.cluster2),
+            "cli_refused_mint_exit": refused_mint.status.code(),
+            "cli_refused_mint_message": said(&text(&refused_mint), "OriginalNameNeedsCompleteCoverage"),
+            "exit": refused.out.status.code(),
+            "refusal": refusal_line(&refused.out),
+            "message": said(&text(&refused.out), "OriginalNameNeedsCompleteCoverage"),
+            "exists_after_the_refusal": false,
+            "control_complete_exit": r.out.status.code(),
+            "control_complete_outcome": r.scorecard["outcome"],
+            "control_complete_covered": verification["complete"]["covered"],
+            "control_records_on_target": record_count(&s.cluster2, &topic),
         }),
     );
 }
@@ -1129,15 +1321,20 @@ fn produce_n(c: &Cluster, topic: &str, n: usize) {
         .unwrap_or_else(|e| panic!("flush {topic}: {e}"));
 }
 
-/// **Review M5: a producer still writing to the name during the restore.**
-/// The restore creates `<topic>` and, when it announces phase 6, the runner
-/// is suspended while an application's producer writes 6 records into it;
-/// then the engine restores the 30 archived ones. The product's answer is
-/// DETECT AND FAIL: phase 7's count bound finds 36 records where the manifest
-/// bounds the window at 30, the run signs `fail-integrity` (exit 2), and the
-/// topic holds both — which is why the runbook says stop every producer of a
-/// restored name first. KILLS: a phase 7 that passes a topic another writer
-/// wrote into.
+/// **A producer still writing to the name during the restore: complete
+/// verification NAMES its records** (review M5, and the orchestrator's ruling
+/// of 2026-10-09 that an original-name restore requires complete
+/// verification). The restore creates `<topic>` and, when it announces phase
+/// 6, the runner is suspended while an application's producer writes 6
+/// records into it; then the engine restores the 30 archived ones into the
+/// same partitions. Phase 7's COMPLETE lane reads every record of the topic
+/// back: 30 expected, 36 restored, 30 matching, and SIX unexpected — each
+/// named by its target offset, because it carries no `x-original-offset` —
+/// and the run signs `fail-integrity` (exit 2). The topic holds both writers'
+/// records and is not deleted, which is why the runbook says stop every
+/// producer of a restored name first. KILLS: a verification that passes a
+/// topic another writer wrote into; one that counts the foreign records
+/// without naming them.
 #[test]
 #[ignore = "needs the compose stack with the cluster2 and autocreate profiles"]
 fn a_producer_writing_during_the_restore_fails_its_verification() {
@@ -1146,7 +1343,7 @@ fn a_producer_writing_during_the_restore_fails_its_verification() {
     create_topic(&s.broker, &topic);
     produce(&s.broker, &topic, 10);
     let b = backup(&format!("prod151-live-{}", nonce()), &s.broker, &topic);
-    let spec_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), false);
+    let spec_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), true);
     let spec = write_spec(&spec_text, "live");
     let approval = hand_approval(&spec_text, Some("originalName"), "live");
     let out_json = demo_dir().join("prod151-live-scorecard.json");
@@ -1209,7 +1406,50 @@ fn a_producer_writing_during_the_restore_fails_its_verification() {
     let scorecard: Value =
         serde_json::from_slice(&std::fs::read(&out_json).expect("signed")).expect("a scorecard");
     assert_eq!(scorecard["outcome"], "fail-integrity", "{scorecard}");
-    // The broker is the oracle: both writers' records are in the topic.
+    // The COMPLETE lane ran, compared every partition, and counted exactly
+    // the six foreign records as unexpected: nothing missing, nothing
+    // different, every archived record matching.
+    let verification = &scorecard["integrity"]["verification"];
+    assert_eq!(verification["coverage"], "complete", "{verification}");
+    let complete = &verification["complete"];
+    assert_eq!(complete["covered"], true, "{complete}");
+    let replay = &complete["replay"];
+    assert_eq!(
+        (
+            replay["expected"].as_u64(),
+            replay["restored"].as_u64(),
+            replay["matching"].as_u64(),
+            replay["unexpected"].as_u64(),
+            replay["missing"].as_u64(),
+            replay["mismatched"].as_u64(),
+        ),
+        (Some(30), Some(36), Some(30), Some(6), Some(0), Some(0)),
+        "{replay}"
+    );
+    // ... and NAMED each one, by the target offset it sits at.
+    let named: Vec<String> = complete["partitions"]
+        .as_array()
+        .expect("partitions")
+        .iter()
+        .flat_map(|p| {
+            let partition = p["partition"].as_i64().unwrap_or(-1);
+            p["findings"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(move |f| f.as_str().map(|f| format!("{partition}: {f}")))
+        })
+        .filter(|f| f.contains("carries no x-original-offset"))
+        .collect();
+    assert_eq!(named.len(), 6, "every foreign record is named: {named:?}");
+    assert!(
+        named.iter().all(|f| f.contains("target offset ")),
+        "{named:?}"
+    );
+    // The broker is the oracle: both writers' records are in the topic, and
+    // the topic is still there.
+    assert!(topic_exists(&s.cluster2, &topic));
     assert_eq!(record_count(&s.cluster2, &topic), 36);
     let r = Restore {
         out: Output {
@@ -1233,6 +1473,9 @@ fn a_producer_writing_during_the_restore_fails_its_verification() {
             "exit": status.code(),
             "outcome": scorecard["outcome"],
             "partial_reason": scorecard["integrity"]["partial_reason"],
+            "verification_coverage": verification["coverage"],
+            "replay": replay,
+            "foreign_records_named": named,
             "original_name": scorecard["target"]["original_name"],
             "records_on_target": record_count(&s.cluster2, &topic),
             "readers": readers,
@@ -1263,7 +1506,7 @@ fn a_declarative_owner_blocks_unless_the_owner_path_is_chosen() {
     .expect("written");
 
     // Nowhere looked: no owner statement, no resources.
-    let unchecked_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(" {}"), false);
+    let unchecked_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(" {}"), true);
     let unchecked_spec = write_spec(&unchecked_text, "owner-unchecked");
     let unchecked = restore(
         &unchecked_spec,
@@ -1309,7 +1552,7 @@ fn a_declarative_owner_blocks_unless_the_owner_path_is_chosen() {
         &topic,
         &s.cluster2,
         Naming::Original(" {owner_path: true}"),
-        false,
+        true,
     );
     let path_spec = write_spec(&path_text, "owner-path");
     let r = restore(

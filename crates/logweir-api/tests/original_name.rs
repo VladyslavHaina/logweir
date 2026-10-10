@@ -84,10 +84,12 @@ fn fresh_install() -> TestApp {
     )
 }
 
-/// The request for a restore under the original topic names.
+/// The request for a restore under the original topic names: the
+/// declaration, and the complete verification it requires.
 fn original_body() -> Value {
     let mut body = support::restore_body(&support::golden_plan());
     body["target"]["topicNaming"] = json!({"prefix": "", "originalName": true});
+    body["coverage"] = json!("complete");
     body
 }
 
@@ -194,6 +196,15 @@ async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subjec
     )
     .expect("a v2 document");
     assert_eq!(doc.approval_subject.as_deref(), Some("originalName"));
+    // A document that carries the subject is format 2.1.0, never 2.0.0: a
+    // reader that predates the subject refuses it.
+    assert_eq!(doc.format_version, "2.1.0");
+    assert!(approval["spec"]["approvalBytes"]
+        .as_str()
+        .unwrap()
+        .starts_with("{\"formatVersion\":\"2.1.0\","));
+    // The declared coverage is stored beside the declaration.
+    assert_eq!(stored["spec"]["coverage"], "complete");
     // OD-10: what the requester typed is signed beside the subject.
     assert_eq!(
         doc.original_name_confirmation
@@ -367,15 +378,49 @@ async fn an_ordinary_restore_carries_no_subject_anywhere() {
     let approval = last_approval_posted(&app.fake);
     let bytes = approval["spec"]["approvalBytes"].as_str().unwrap();
     assert!(!bytes.contains("approvalSubject"), "{bytes}");
+    // ... and stays format 2.0.0, byte for byte: the bytes are exactly a
+    // document with neither field, re-serialised.
+    assert!(
+        bytes.starts_with("{\"formatVersion\":\"2.0.0\",\"kind\":\"RestoreAuthorization\","),
+        "{bytes}"
+    );
+    assert!(!bytes.contains("originalNameConfirmation"), "{bytes}");
+    let doc = RestoreAuthorization::from_bytes(bytes.as_bytes()).expect("a v2 document");
+    assert_eq!(doc.format_version, "2.0.0");
+    assert_eq!(doc.approval_subject, None);
+    assert_eq!(doc.original_name_confirmation, None);
+    assert_eq!(String::from_utf8(doc.to_bytes()).unwrap(), bytes);
 }
 
 /// **The refusals**, each before anything is stored. KILLS: admitting the
-/// declaration in scratch mode or beside a prefix; admitting an empty prefix
-/// without the declaration.
+/// declaration in scratch mode, beside a prefix, or with SAMPLED coverage
+/// (stated or left to its default: an original-name restore requires
+/// complete verification); admitting an empty prefix without the
+/// declaration.
 #[tokio::test]
 async fn an_original_name_request_is_refused_outside_its_one_shape() {
     let app = TestApp::new();
-    let cases: [(&str, Value, &str, &str); 3] = [
+    let cases: [(&str, Value, &str, &str); 5] = [
+        (
+            "with no coverage stated (sampled by default)",
+            {
+                let mut b = original_body();
+                b.as_object_mut().unwrap().remove("coverage");
+                b
+            },
+            "coverage",
+            "original_name_requires_complete",
+        ),
+        (
+            "with sampled coverage",
+            {
+                let mut b = original_body();
+                b["coverage"] = json!("sampled");
+                b
+            },
+            "coverage",
+            "original_name_requires_complete",
+        ),
         (
             "in scratch mode",
             {
@@ -421,6 +466,37 @@ async fn an_original_name_request_is_refused_outside_its_one_shape() {
         );
     }
     assert_eq!(app.fake.count("restores", NS_A), 0);
+
+    // The sampled refusal says why, by name.
+    let mut sampled = original_body();
+    sampled.as_object_mut().unwrap().remove("coverage");
+    let refused = post(&app, NS_A, "original-refuse-sampled", &sampled).await;
+    let message = errors_of(&refused)
+        .into_iter()
+        .find(|(_, code, _)| code == "original_name_requires_complete")
+        .map(|(_, _, message)| message)
+        .expect("the named refusal");
+    assert!(message.contains("verified completely"), "{message}");
+    assert!(message.contains("never by sample"), "{message}");
+
+    // CONTROLS: the complete request is created, and an ORDINARY sampled
+    // request is what it always was.
+    let created = post(&app, NS_A, "original-accept-0001", &original_body()).await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let ordinary = support::restore_body(&support::golden_plan());
+    assert!(ordinary.get("coverage").is_none());
+    let created = post(&app, NS_B, "ordinary-sampled-0001", &ordinary).await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
 }
 
 /// The declared mapping: the identity map is THE mapping of an original-name
@@ -543,5 +619,83 @@ async fn a_legacy_approval_for_the_wrong_subject_is_refused_before_it_is_stored(
         recorded.status == 200 || recorded.status == 201,
         "{}",
         String::from_utf8_lossy(&recorded.body)
+    );
+}
+
+/// The custom resource of a Restore whose creation step lost a race: exit 1,
+/// `exitReason: TargetTopicAppeared`, and the controller's
+/// `status.targetTopicsAppeared` — one name someone else created, one topic
+/// this run created and left.
+fn creation_stopped_cr() -> Value {
+    let mut cr = support::fixture("restore-valid-pass.json");
+    cr["spec"]["target"]["mode"] = json!("newTopic");
+    cr["spec"]["target"]["topicNaming"] = json!({"prefix": "", "originalName": true});
+    cr["spec"]["coverage"] = json!("complete");
+    cr["status"] = json!({
+        "phase": "Failed",
+        "exitCode": 1,
+        "exitReason": "TargetTopicAppeared",
+        "reason": "Operational",
+        "lastPhaseCompleted": 5,
+        "targetTopicsAppeared": {"appeared": ["payments"], "left": ["orders"]},
+        "jobRef": {"name": "orders-drill-a-job"},
+        "conditions": [{
+            "type": "Failed", "status": "True", "reason": "Operational",
+            "lastTransitionTime": "2026-09-11T12:42:20Z", "observedGeneration": 1
+        }]
+    });
+    cr
+}
+
+/// **After a lost race the Restore view names every topic the run created
+/// and left** (the orchestrator's ruling of 2026-10-09: nothing is deleted
+/// under an original name, so the operator must be told what is there). The
+/// view carries the controller's two lists verbatim and the one instruction;
+/// the console fixture `console/restore-creation-stopped.json` IS this
+/// projection, decoded and rendered by `ui/tests/original-name.spec.js`, so
+/// the field names cannot drift. A Restore without the status block has no
+/// key. KILLS: a projection that drops the block or a list; an instruction
+/// that differs from the runner's sentence; a view that claims a deletion.
+#[test]
+fn the_restore_view_names_the_topics_a_stopped_creation_step_left() {
+    use weirkeeper::crds::restore::Restore as RestoreCr;
+
+    let stopped: RestoreCr =
+        serde_json::from_value(creation_stopped_cr()).expect("the fixture deserialises");
+    let projected = serde_json::to_value(logweir_api::projection::restore(&stopped, true))
+        .expect("the projection serialises");
+    assert_eq!(
+        projected["targetTopicsAppeared"],
+        json!({
+            "appeared": ["payments"],
+            "left": ["orders"],
+            "leftInstruction": "created by this restore and left empty; remove it yourself \
+                                once you have checked nothing writes to it"
+        }),
+        "{projected}"
+    );
+    assert_eq!(
+        projected["targetTopicsAppeared"]["leftInstruction"],
+        logweir_core::guard::LEFT_TOPIC_SENTENCE
+    );
+    // The run's operation names the closed state beside it.
+    let operation =
+        serde_json::to_value(logweir_api::status::restore_operation(&stopped)).expect("serialises");
+    assert_eq!(operation["result"]["exitReason"], "TargetTopicAppeared");
+    assert_eq!(operation["result"]["exitCode"], 1);
+    let golden = support::fixture("console/restore-creation-stopped.json");
+    assert_eq!(
+        projected, golden["item"],
+        "the console fixture is this crate's projection of the same status"
+    );
+
+    // No stopped creation step, no key.
+    let passed: RestoreCr = serde_json::from_value(support::fixture("restore-valid-pass.json"))
+        .expect("the fixture deserialises");
+    let projected = serde_json::to_value(logweir_api::projection::restore(&passed, true))
+        .expect("the projection serialises");
+    assert!(
+        projected.get("targetTopicsAppeared").is_none(),
+        "{projected}"
     );
 }

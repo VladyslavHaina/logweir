@@ -403,7 +403,6 @@ fn phase0_calls_broker_configs_and_never_topic_configs_before_creation() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -443,7 +442,6 @@ fn every_mapped_target_topic_is_created_with_the_pinned_config_set() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -649,7 +647,6 @@ fn every_created_target_topic_is_served_before_the_restore_runs() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -704,7 +701,6 @@ fn a_created_target_topic_that_is_never_served_is_operational() {
     let e = phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -1153,7 +1149,6 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -1344,7 +1339,6 @@ fn topics_created_names_only_the_topics_this_run_created() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,
@@ -1386,7 +1380,6 @@ fn topics_created_names_only_the_topics_this_run_created() {
     let e = phase0_admit::create_target_topics(
         &racing,
         &reader,
-        &deleter,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,
@@ -1398,10 +1391,18 @@ fn topics_created_names_only_the_topics_this_run_created() {
         ExitCode::Operational,
         "by here phases 0-5 have run, so Global Constraint 11 does not allow exit 3: {e:?}"
     );
-    let DrillError::Operational(m) = e else {
-        panic!("expected an operational failure")
+    // The stop is NAMED (exit 1, `CreatedTopicsLeft`): the topic this run
+    // created before the broker refused the other is left in place and named,
+    // never deleted (no code path deletes a restored-into name).
+    let DrillError::CreationStopped(stop) = e else {
+        panic!("expected the named creation stop")
     };
+    let m = &stop.message;
     assert!(m.contains("drill-payments"), "{m:?}");
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty(), "{:?}", stop.appeared);
+    assert_eq!(stop.left, preflight.topics_created);
+    assert!(!stop.left.is_empty());
     assert!(
         !preflight
             .topics_created

@@ -1306,61 +1306,6 @@ impl TopicDeleter for RdKafkaReader {
         }));
         Ok(out)
     }
-
-    /// See [`TopicDeleter::delete_unwritten_created`]. Each name's end offsets
-    /// are re-read HERE, immediately before the delete, and a topic with any
-    /// record, no partition, or an unreadable answer is refused and left.
-    fn delete_unwritten_created(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        use rdkafka::admin::AdminOptions;
-        let mut out: Vec<(String, Result<(), String>)> = Vec::new();
-        let mut empty: Vec<&str> = Vec::new();
-        for n in names {
-            match ClusterReader::end_offsets(self, n) {
-                Ok(ends) if ends.is_empty() => out.push((
-                    n.clone(),
-                    Err("left: the cluster reports no partition for it".to_string()),
-                )),
-                Ok(ends) => {
-                    let records: i64 = ends.iter().map(|(_, end)| (*end).max(0)).sum();
-                    if records == 0 {
-                        empty.push(n.as_str());
-                    } else {
-                        out.push((
-                            n.clone(),
-                            Err(format!(
-                                "left: it holds {records} record(s) this run did not write"
-                            )),
-                        ));
-                    }
-                }
-                Err(e) => out.push((
-                    n.clone(),
-                    Err(format!("left: its end offsets could not be read ({e})")),
-                )),
-            }
-        }
-        if empty.is_empty() {
-            return Ok(out);
-        }
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| KafkaError::Client(e.to_string()))?;
-        let res = rt
-            .block_on(
-                self.admin
-                    .delete_topics(&empty, &AdminOptions::new().request_timeout(Some(T))),
-            )
-            .map_err(|e| KafkaError::Client(e.to_string()))?;
-        out.extend(res.into_iter().map(|r| match r {
-            Ok(name) => (name, Ok(())),
-            Err((name, code)) => (name, Err(format!("left: the delete failed ({code})"))),
-        }));
-        Ok(out)
-    }
 }
 
 /// **PROD-05.1.** A topic's replication factor from its partitions' replica

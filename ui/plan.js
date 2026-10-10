@@ -209,6 +209,17 @@ export function renderPlanBytes(fields) {
           "declarative owner manages the names (target.originalNameNoOwner)",
       );
     }
+    // AND ONLY WITH COMPLETE VERIFICATION. The runner refuses a sampled
+    // original-name plan at phase 0 (`OriginalNameNeedsCompleteCoverage`): a
+    // sampled check can pass a record another producer wrote into the
+    // restored name. Such a plan is never rendered, so it is never signed.
+    if (coverageOf(sample.coverage) !== COVERAGE_COMPLETE) {
+      throw new TypeError(
+        "OriginalNameNeedsCompleteCoverage: a restore under the original topic names requires " +
+          "complete verification (sample.coverage \"" + COVERAGE_COMPLETE + "\"), where every " +
+          "restored record is compared with the archive; a sampled check is refused",
+      );
+    }
     out.push("    prefix: \"\"");
     out.push("    original_name:");
     out.push("      owners: []");

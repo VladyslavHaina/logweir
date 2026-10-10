@@ -366,8 +366,8 @@ pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
 /// **PROD-15.1.** The `format_version` of a scorecard that carries
 /// `target.original_name` — a restore under the source's ORIGINAL topic names
 /// into absent topics (OD-2). A MINOR bump for a new optional block, under
-/// OD-7 (a): arms ON-1 to ON-12 read only that block (ON-2, ON-3 and ON-7 judge
-/// existing `target` fields against it) and can only refuse. Written only for
+/// OD-7 (a): arms ON-1 to ON-13 read only that block (ON-2, ON-3, ON-7 and
+/// ON-13 judge existing fields against it) and can only refuse. Written only for
 /// an original-name restore ([`format_version_with_original_name`]), so every
 /// other document is the one it was. The newest minor: the current schema
 /// file is this version's.
@@ -2356,10 +2356,11 @@ impl Scorecard {
             }
         }
         // `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to
-        // ON-12. They fire ONLY on a document that CARRIES the block, so every
+        // ON-13. They fire ONLY on a document that CARRIES the block, so every
         // document without it is decided exactly as before: MINOR under the
-        // owner's OD-7 (a). ON-2, ON-3 and ON-7 judge existing `target` fields
-        // against the block and can only refuse.
+        // owner's OD-7 (a). ON-2, ON-3, ON-7 and ON-13 judge existing fields
+        // (`target`, `integrity.verification`, the outcome) against the block
+        // and can only refuse.
         //
         // NOT INTERPOLATED, except ON-1's version, so the messages join
         // `index.json`'s `arm` fields by literal substring.
@@ -2499,6 +2500,27 @@ impl Scorecard {
                     "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest \
                      exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic \
                      resources a runner looked in are named by their digest"
+                        .into(),
+                ));
+            }
+            // ON-13. An original-name restore is verified COMPLETELY, never
+            // by sample: the runner refuses a sampled original-name plan at
+            // phase 0, so a document carrying the block beside a sampled
+            // verification was not written by one. A run that stopped before
+            // phase 7 records no verification, and is never a pass — so a
+            // PASS that records none is refused too (the third case decided
+            // to the safer side). IV-2 has already refused a coverage that is
+            // neither value.
+            let coverage = self
+                .integrity
+                .verification
+                .as_ref()
+                .map(|v| v.coverage.as_str());
+            let passes =
+                self.outcome == Outcome::Pass || self.integrity.result == IntegrityResult::Pass;
+            if coverage.is_some_and(|c| c != COVERAGE_COMPLETE) || (coverage.is_none() && passes) {
+                return Err(InvariantError(
+                    "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample"
                         .into(),
                 ));
             }
@@ -4859,7 +4881,7 @@ mod tests {
         }
     }
 
-    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-12 ----
+    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-13 ----
 
     fn original_name_block() -> OriginalNameInfo {
         OriginalNameInfo {
@@ -4878,9 +4900,10 @@ mod tests {
     const RESOURCES_DIGEST: &str =
         "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-    /// A valid original-name document: newTopic, the empty prefix, 1.8.0.
+    /// A valid original-name document: newTopic, the empty prefix, 1.8.0, and
+    /// the COMPLETE verification such a restore requires (ON-13).
     fn with_original_name() -> Scorecard {
-        let mut sc = valid_scorecard();
+        let mut sc = with_verification(complete_verification());
         sc.format_version = FORMAT_VERSION_WITH_ORIGINAL_NAME.into();
         sc.target.mode = TargetMode::NewTopic;
         sc.target.marker_topic = None;
@@ -4955,7 +4978,15 @@ mod tests {
     fn on1_refuses_the_block_under_a_version_that_predates_it() {
         for version in ["1.4.0", "1.6.0", "1.7.0", "1.x.0"] {
             assert_eq!(
-                on_err(|sc| sc.format_version = version.into()),
+                on_err(|sc| {
+                    sc.format_version = version.into();
+                    // An unreadable minor also predates the verification
+                    // block (IV-1, an earlier arm): without that block the
+                    // refusal read here is ON-1's own.
+                    if version == "1.x.0" {
+                        sc.integrity.verification = None;
+                    }
+                }),
                 format!(
                     "target.original_name is present but format_version {version:?} predates \
                      it: the block is defined from 1.{ORIGINAL_NAME_SINCE_MINOR}.0"
@@ -5128,7 +5159,49 @@ mod tests {
         );
     }
 
-    /// ON-1 to ON-12 sit after SEL-1 to SEL-3 and before `redactions`.
+    /// ON-13. KILLS: an original-name document signed over a SAMPLED
+    /// verification; a pass that records no verification at all; refusing
+    /// the honest shapes — a complete verification (passing, failing, or not
+    /// covered and not a pass) and a run that stopped before phase 7.
+    #[test]
+    fn on13_an_original_name_restore_is_verified_completely_or_is_not_a_pass() {
+        let msg = "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample";
+        // A sampled verification beside the block.
+        assert_eq!(
+            on_err(|sc| sc.integrity.verification = Some(sampled_verification())),
+            msg
+        );
+        // ... even when the run did not pass.
+        let mut sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        sc.integrity.verification = Some(sampled_verification());
+        assert_eq!(sc.validate_invariants().unwrap_err().0, msg);
+        // A pass that records no verification.
+        assert_eq!(on_err(|sc| sc.integrity.verification = None), msg);
+        // An integrity pass beside a failed objective, with none recorded.
+        let mut sc = with_original_name();
+        sc.integrity.verification = None;
+        sc.outcome = Outcome::FailObjective;
+        sc.engine.matrix_verdict = MatrixVerdict::PassDegraded;
+        assert_eq!(sc.validate_invariants().unwrap_err().0, msg);
+
+        // CONTROLS. The writer's passing shape:
+        assert_eq!(
+            with_original_name().validate_invariants().map_err(|e| e.0),
+            Ok(())
+        );
+        // a complete verification that found something (fail-integrity):
+        let sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        // a run that stopped before phase 7 records none, and is not a pass:
+        let mut sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        sc.integrity.verification = None;
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        // and a document WITHOUT the block is decided as before, sampled.
+        let sc = with_verification(sampled_verification());
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+    }
+
+    /// ON-1 to ON-13 sit after SEL-1 to SEL-3 and before `redactions`.
     /// KILLS: moving the block.
     #[test]
     fn the_original_name_arms_sit_between_the_selection_arms_and_redactions() {

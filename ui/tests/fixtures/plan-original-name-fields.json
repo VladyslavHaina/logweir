@@ -3,7 +3,9 @@
     "PROD-15.1: the wizard state of a restore under the ORIGINAL topic names -- plan-fields.json",
     "with the original-name choice ticked and the owner statement made. The emitter renders",
     "`topic_naming: {prefix: \"\", original_name: {owners: []}}`; `topicMappingPrefix` stays the",
-    "scratch prefix the runner's LogAppendTime probe is created under.",
+    "scratch prefix the runner's LogAppendTime probe is created under. `sample.coverage` is",
+    "`complete`: a restore under the original names requires complete verification, and a",
+    "sampled one is never rendered.",
     "",
     "Both arms read this file: ui/tests/original-name.spec.js renders it and byte-compares the",
     "result with plan-original-name.golden.yaml, and crates/logweir/tests/ui_lint.rs deserialises",
@@ -44,7 +46,8 @@
     "windowStart": "2026-09-07T12:00:00Z",
     "windowEnd": "2026-09-07T15:00:00Z",
     "recordsPerPartition": 25,
-    "anchor": "head"
+    "anchor": "head",
+    "coverage": "complete"
   },
   "objectives": {
     "rtoSeconds": 900,

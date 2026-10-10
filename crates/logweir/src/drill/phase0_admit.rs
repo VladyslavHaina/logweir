@@ -1098,7 +1098,6 @@ fn target_topic_preflight(
 pub fn create_target_topics(
     creator: &dyn TopicCreator,
     reader: &dyn ClusterReader,
-    deleter: &dyn TopicDeleter,
     topic_mapping: &BTreeMap<String, String>,
     facts: &logweir_core::engine::BackupSetFacts,
     default_replication_factor: i16,
@@ -1140,7 +1139,7 @@ pub fn create_target_topics(
         .collect();
     if !appeared.is_empty() {
         let appeared: Vec<String> = appeared.iter().map(|n| (*n).to_string()).collect();
-        return Err(settle_lost_race(reader, deleter, &specs, appeared, &[]));
+        return Err(creation_stopped(appeared, Vec::new(), None));
     }
     // The slice outlives the `NewTopic`s built from it inside the impl — see
     // `RdKafkaReader::create_topics`, which cannot compile otherwise.
@@ -1159,16 +1158,19 @@ pub fn create_target_topics(
         let created: Vec<String> = results
             .iter()
             .filter(|(n, r)| r.is_ok() && asked.contains(&n.as_str()))
-            .map(|(n, _)| format!("`{n}`"))
+            .map(|(n, _)| n.clone())
             .collect();
-        return Err(DrillError::Operational(format!(
-            "CreateTopics answered for [{}] when this run asked for [{}]: a name without exactly \
-             one answer was neither created nor refused, so the restore stops before the engine \
-             starts. Topics the answer says this run created, left in place: [{}]",
-            answered.join(", "),
-            expected.join(", "),
-            created.join(", ")
-        )));
+        return Err(creation_stopped(
+            Vec::new(),
+            created,
+            Some(format!(
+                "CreateTopics answered for [{}] when this run asked for [{}]: a name without \
+                 exactly one answer was neither created nor refused, so the restore stops \
+                 before the engine starts.",
+                answered.join(", "),
+                expected.join(", ")
+            )),
+        ));
     }
     let mut lost: Vec<String> = Vec::new();
     let mut failed: Option<(String, String)> = None;
@@ -1182,19 +1184,26 @@ pub fn create_target_topics(
         }
     }
     if !lost.is_empty() {
-        let created = std::mem::take(&mut preflight.topics_created);
-        return Err(settle_lost_race(reader, deleter, &specs, lost, &created));
+        return Err(creation_stopped(
+            lost,
+            preflight.topics_created.clone(),
+            None,
+        ));
     }
     if let Some((name, e)) = failed {
-        return Err(DrillError::Operational(format!(
-            "target topic `{name}` could not be created with the pinned configuration \
-             ({}): {e}",
-            TARGET_TOPIC_CONFIGS
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Err(creation_stopped(
+            Vec::new(),
+            preflight.topics_created.clone(),
+            Some(format!(
+                "target topic `{name}` could not be created with the pinned configuration \
+                 ({}): {e}",
+                TARGET_TOPIC_CONFIGS
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        ));
     }
     // FX-18: the engine is handed topics the cluster SERVES, not topics the
     // controller has merely committed. The engine retries
@@ -1206,201 +1215,143 @@ pub fn create_target_topics(
         reader
             .await_served(&spec.name, spec.num_partitions, CREATED_TOPIC_SETTLE)
             .map_err(|e| {
-                DrillError::Operational(format!(
-                    "target topic `{}` was created but the cluster did not serve its {} \
-                     partition(s) within {}s: {e}",
-                    spec.name,
-                    spec.num_partitions,
-                    CREATED_TOPIC_SETTLE.as_secs()
-                ))
+                creation_stopped(
+                    Vec::new(),
+                    preflight.topics_created.clone(),
+                    Some(format!(
+                        "target topic `{}` was created but the cluster did not serve its {} \
+                         partition(s) within {}s: {e}",
+                        spec.name,
+                        spec.num_partitions,
+                        CREATED_TOPIC_SETTLE.as_secs()
+                    )),
+                )
             })?;
     }
     Ok(())
 }
 
-/// **PROD-15.1, condition 6, and the review's M4: the race, lost by name.**
+/// **PROD-15.1, condition 6: the creation step stopped, and NOTHING IS
+/// DELETED.**
 ///
 /// Exit 1 (phases 0–5 have run, `docs/stability.md`'s phase-5/6 ruling), with
-/// no write into any name someone else created. What this execution created in
-/// the same request is REMOVED only when this run can prove it is its own and
-/// untouched, and LEFT, named with the reason, otherwise:
+/// no write into any name someone else created. Every topic THIS execution
+/// created before it stopped is LEFT IN PLACE, empty, and named — on stdout
+/// (`target-topics-appeared=`), on the Restore's status and in the console —
+/// so the operator removes it once they have checked nothing writes to it.
 ///
-/// 1. the `CreateTopics` answer to THIS request said it was created (the
-///    caller passes exactly those names);
-/// 2. the cluster still lists it with the partition count this run asked for,
-///    and its configuration carries every pinned entry this run set
-///    ([`TARGET_TOPIC_CONFIGS`]) — a topic someone deleted and recreated, or
-///    auto-created, would not;
-/// 3. it holds no record: the deleter re-reads every partition's end offset
-///    immediately before the delete
-///    (`TopicDeleter::delete_unwritten_created`).
+/// **No code path deletes a topic under an original name, ever** (the
+/// orchestrator's ruling of 2026-10-09, withdrawing the fix round's cleanup).
+/// Kafka has no conditional delete: between any "it is empty" read and the
+/// delete, a producer pointed at the name can write a record, and deleting the
+/// topic would lose it under a production name. Leaving an empty topic is the
+/// recoverable outcome; deleting one a producer just wrote to is not. The same
+/// rule serves a prefixed `newTopic` restore: one step, one rule.
 ///
-/// A name that appeared is NEVER touched: someone else created it. The
-/// returned race carries the names in three lists for the
-/// `target-topics-appeared=` line, and its message says the same in words.
-pub fn settle_lost_race(
-    reader: &dyn ClusterReader,
-    deleter: &dyn TopicDeleter,
-    specs: &[NewTopicSpec],
+/// `appeared` are mapped names someone else created after phase 0 (a lost
+/// race); it is empty when creation stopped for another reason (`why`).
+pub fn creation_stopped(
     appeared: Vec<String>,
-    created_by_this_run: &[String],
+    left: Vec<String>,
+    why: Option<String>,
 ) -> DrillError {
-    let mut removed: Vec<String> = Vec::new();
-    let mut left: Vec<(String, String)> = Vec::new();
-    if !created_by_this_run.is_empty() {
-        let listed = reader.list_topics();
-        let mut provable: Vec<String> = Vec::new();
-        for name in created_by_this_run {
-            let Some(spec) = specs.iter().find(|s| &s.name == name) else {
-                left.push((name.clone(), "not a name this run asked for".to_string()));
-                continue;
-            };
-            let topics = match &listed {
-                Ok(topics) => topics,
-                Err(e) => {
-                    left.push((
-                        name.clone(),
-                        format!("the cluster's topic list could not be read ({e})"),
-                    ));
-                    continue;
-                }
-            };
-            match topics.iter().find(|t| &t.name == name) {
-                None => left.push((name.clone(), "the cluster no longer lists it".to_string())),
-                Some(t) if t.partitions != spec.num_partitions => left.push((
-                    name.clone(),
-                    format!(
-                        "it has {} partition(s), not the {} this run created it with",
-                        t.partitions, spec.num_partitions
-                    ),
-                )),
-                Some(_) => match reader.topic_configs(name) {
-                    Ok(configs)
-                        if spec
-                            .configs
-                            .iter()
-                            .all(|(k, v)| configs.get(k).is_some_and(|got| got == v)) =>
-                    {
-                        provable.push(name.clone());
-                    }
-                    Ok(_) => left.push((
-                        name.clone(),
-                        "its configuration is not the one this run created it with".to_string(),
-                    )),
-                    Err(e) => left.push((
-                        name.clone(),
-                        format!("its configuration could not be read ({e})"),
-                    )),
-                },
-            }
-        }
-        if !provable.is_empty() {
-            match deleter.delete_unwritten_created(&provable) {
-                Ok(results) => {
-                    for (name, r) in results {
-                        match r {
-                            Ok(()) => removed.push(name),
-                            Err(why) => left.push((name, why)),
-                        }
-                    }
-                }
-                Err(e) => {
-                    for name in provable {
-                        left.push((name, format!("the delete call failed ({e})")));
-                    }
-                }
-            }
-        }
+    if appeared.is_empty() && left.is_empty() {
+        // Nothing appeared and nothing was created: an ordinary operational
+        // failure with nothing to name.
+        return DrillError::Operational(why.unwrap_or_else(|| {
+            "the target topics could not be created; nothing was created".to_string()
+        }));
     }
-    DrillError::TargetTopicAppeared(Box::new(TargetTopicRace::new(appeared, removed, left)))
+    DrillError::CreationStopped(Box::new(CreationStop::new(appeared, left, why)))
 }
 
-/// What a lost creation race leaves behind, for the message, the
+/// The sentence every surface says about a topic this execution created and
+/// left: stdout, the Restore's status, the product API and the console.
+pub use logweir_core::guard::LEFT_TOPIC_SENTENCE;
+
+/// What a stopped creation step leaves behind, for the message, the
 /// `target-topics-appeared=` line and `Restore.status.targetTopicsAppeared`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetTopicRace {
+pub struct CreationStop {
+    /// The closed `failure-reason=` state: `TargetTopicAppeared` for a lost
+    /// race, `CreatedTopicsLeft` when creation stopped for another reason
+    /// after this execution had created a topic.
+    pub reason: &'static str,
     /// Mapped target names someone else created after phase 0: never touched.
     pub appeared: Vec<String>,
-    /// Topics this execution created in the same request and removed, proven
-    /// its own and empty.
-    pub removed: Vec<String>,
-    /// Topics this execution created and left, each with the reason it could
-    /// not prove them its own and empty.
-    pub left: Vec<(String, String)>,
-    /// The whole account, in words, opening with `TargetTopicAppeared:`.
+    /// Topics this execution created and LEFT, empty. Never deleted.
+    pub left: Vec<String>,
+    /// The whole account, in words, opening with the reason.
     pub message: String,
 }
 
-/// The stdout key of the race's one structured line.
+/// The stdout key of the stopped creation step's one structured line.
 pub const TARGET_TOPICS_APPEARED_KEY_PREFIX: &str = "target-topics-appeared=";
 
 /// The most names one list of the line carries; the message names them all.
 pub const TARGET_TOPICS_APPEARED_MAX_NAMES: usize = 100;
 
-impl TargetTopicRace {
-    fn new(appeared: Vec<String>, removed: Vec<String>, left: Vec<(String, String)>) -> Self {
-        let names = |list: &mut dyn Iterator<Item = &str>| {
-            list.map(|n| format!("`{n}`"))
+impl CreationStop {
+    fn new(appeared: Vec<String>, left: Vec<String>, why: Option<String>) -> Self {
+        let names = |list: &[String]| {
+            list.iter()
+                .map(|n| format!("`{n}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let mut after = Vec::new();
-        if removed.is_empty() && left.is_empty() {
-            after.push("This run created no topic.".to_string());
-        }
-        if !removed.is_empty() {
-            after.push(format!(
-                "This run created {} in the same request and removed them again: its own \
-                 creation answer, partition count and pinned configuration proved them its own, \
-                 and each held no record.",
-                names(&mut removed.iter().map(String::as_str))
+        let reason = if appeared.is_empty() {
+            logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT
+        } else {
+            logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if !appeared.is_empty() {
+            parts.push(format!(
+                "mapped target topic(s) {} exist now, although phase 0 found every mapped name \
+                 absent: someone created them while this run was admitted (a producer on a \
+                 cluster that auto-creates, an operator, a declarative owner). Creation is \
+                 exclusive, so the restore stops here and writes nothing into a topic it did \
+                 not create.",
+                names(&appeared)
             ));
         }
-        if !left.is_empty() {
-            after.push(format!(
-                "This run created and LEFT {} under these names — remove them once you have \
-                 checked who writes to them; Logweir deletes only a topic it can prove its own \
-                 and empty.",
-                left.iter()
-                    .map(|(n, why)| format!("`{n}` ({why})"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        if let Some(why) = why {
+            parts.push(why);
+        }
+        if left.is_empty() {
+            parts.push("This run created no topic.".to_string());
+        } else {
+            parts.push(format!(
+                "{}: {LEFT_TOPIC_SENTENCE}. Logweir never deletes a topic under a name it may \
+                 not own: a producer could write to it between any check and the delete.",
+                names(&left)
             ));
         }
-        let message = format!(
-            "{}: mapped target topic(s) {} exist now, although phase 0 found every mapped name \
-             absent: someone created them while this run was admitted (a producer on a cluster \
-             that auto-creates, an operator, a declarative owner). Creation is exclusive, so the \
-             restore stops here and writes nothing into a topic it did not create. {}",
-            logweir_core::original_name::TARGET_TOPIC_APPEARED,
-            names(&mut appeared.iter().map(String::as_str)),
-            after.join(" ")
-        );
-        TargetTopicRace {
+        CreationStop {
+            reason,
+            message: format!("{reason}: {}", parts.join(" ")),
             appeared,
-            removed,
             left,
-            message,
         }
     }
 
-    /// `target-topics-appeared={"appeared":[…],"removed":[…],"left":[…]}`:
-    /// every list bounded by [`TARGET_TOPICS_APPEARED_MAX_NAMES`], and only
-    /// names a broker accepts (anything else cannot have been a mapped name),
-    /// so the line can carry no control character or quote into a status.
+    /// `target-topics-appeared={"appeared":[…],"left":[…]}`: both lists
+    /// bounded by [`TARGET_TOPICS_APPEARED_MAX_NAMES`], and only names a
+    /// broker accepts (anything else cannot have been a mapped name), so the
+    /// line can carry no control character or quote into a status.
     #[must_use]
     pub fn status_line_value(&self) -> String {
-        let bounded = |names: &mut dyn Iterator<Item = &String>| -> Vec<String> {
+        let bounded = |names: &[String]| -> Vec<String> {
             names
+                .iter()
                 .filter(|n| logweir_core::guard::topic_name_is_kafka_legal(n))
                 .take(TARGET_TOPICS_APPEARED_MAX_NAMES)
                 .cloned()
                 .collect()
         };
         serde_json::json!({
-            "appeared": bounded(&mut self.appeared.iter()),
-            "removed": bounded(&mut self.removed.iter()),
-            "left": bounded(&mut self.left.iter().map(|(n, _)| n)),
+            "appeared": bounded(&self.appeared),
+            "left": bounded(&self.left),
         })
         .to_string()
     }

@@ -435,38 +435,6 @@ pub trait TopicDeleter: Send + Sync {
         &self,
         names: &[String],
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError>;
-
-    /// **PROD-15.1 review M4.** Delete topics THIS EXECUTION created a moment
-    /// ago in the same `CreateTopics` request that then lost a creation race,
-    /// and only while each still holds no record: every partition's end offset
-    /// is re-read immediately before the delete, and a topic with any record
-    /// is refused and left. The caller has already proved the rest of
-    /// ownership (a success answer to its own request, and the partition count
-    /// and pinned configuration it created the topic with).
-    ///
-    /// Outside [`Self::delete_topics`]'s scratch namespace and protected
-    /// names ON PURPOSE: a restore under the original topic names creates
-    /// exactly those names, and an empty topic it left under a production name
-    /// is what producers would start writing into. Nothing else may call it.
-    ///
-    /// The DEFAULT refuses every name — a deleter that cannot re-read end
-    /// offsets cannot prove a topic empty — so the caller leaves them and
-    /// says so.
-    #[allow(clippy::type_complexity)]
-    fn delete_unwritten_created(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        Ok(names
-            .iter()
-            .map(|n| {
-                (
-                    n.clone(),
-                    Err("this deleter cannot prove the topic empty, so it is left".to_string()),
-                )
-            })
-            .collect())
-    }
 }
 
 /// Where one value in a DescribeConfigs answer came from — Kafka's

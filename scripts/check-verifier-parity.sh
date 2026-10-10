@@ -1799,9 +1799,10 @@ done
 echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"
 
 # ---------------------------------------------------------------------------
-# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-12
+# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-13
 # ---------------------------------------------------------------------------
-# Two documents both readers ACCEPT, and the two `original name:` lines they
+# Three documents both readers ACCEPT (each over the COMPLETE verification an
+# original-name restore requires), and the two `original name:` lines they
 # print compared line for line:
 #
 #   plain       targetIsNotSource, owners looked for in the plan, none found
@@ -1809,9 +1810,10 @@ echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION sc
 #               KafkaTopic resources (named by digest), on the owner path
 #   typed       a one-person confirmation with the names typed (OD-10)
 #
-# and twelve both readers REFUSE with the same full text, one per arm ON-1 to
-# ON-12. Generated and signed here with the throwaway fixture key, like the
-# selection loop above.
+# and fourteen both readers REFUSE with the same full text: one per arm ON-1
+# to ON-12 and two for ON-13 (a sampled verification beside the block, and a
+# pass that records none). Generated and signed here with the throwaway
+# fixture key, like the selection loop above.
 #
 # The scorecard format that defines `target.original_name` —
 # `FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; a
@@ -1843,9 +1845,46 @@ def block(**over):
     return b
 
 
-def doc(b=None, version=current, **target):
+def replay(n):
+    r = dict.fromkeys(("expected", "restored", "matching", "missing", "unexpected",
+                       "duplicates", "out_of_order", "mismatched"), 0)
+    r.update(expected=n, restored=n, matching=n)
+    return r
+
+
+def complete_block():
+    parts = [
+        {"topic": "orders", "partition": p, "target_topic": "orders", "compared": True,
+         "segments": 2, "segments_verified": 2, "records_decoded": n + 1, "offset_holes": 0,
+         "replay": replay(n), "findings": []}
+        for p, n in ((0, 5), (1, 7))
+    ]
+    return {
+        "coverage": "complete", "comparison_basis": "archive", "header_order": "verified",
+        "application": "notAttempted", "gaps": [], "pruned": [],
+        "complete": {
+            "covered": True, "incomplete_reason": None, "max_records": None,
+            "window": {"start_ms": None, "end_ms": 1760000005000},
+            "archive": {"segments": 4, "segments_verified": 4, "segments_failed": [],
+                        "segments_unverified": [], "records_decoded": 14, "offset_holes": 0},
+            "replay": replay(12),
+            "partitions": parts,
+        },
+    }
+
+
+SAMPLED = {"coverage": "sampled", "comparison_basis": "archive", "header_order": "notVerified",
+           "application": "notAttempted", "gaps": [], "pruned": []}
+
+
+def doc(b=None, version=current, verification="complete", **target):
     d = copy.deepcopy(base)
     d["format_version"] = version
+    # An original-name restore requires a COMPLETE verification (ON-13).
+    if verification == "complete":
+        d["integrity"]["verification"] = complete_block()
+    elif verification == "sampled":
+        d["integrity"]["verification"] = copy.deepcopy(SAMPLED)
     t = d["target"]
     t["mode"] = "newTopic"
     t.pop("marker_topic", None)
@@ -1874,6 +1913,8 @@ cases = {
     "on10-owner-path": doc(block(owners=[OWNER])),
     "on11-untyped": doc(block(approval_mode="ordinary")),
     "on12-no-digest": doc(block(owner_detection=["kafkaTopicResources"])),
+    "on13-sampled": doc(verification="sampled"),
+    "on13-unverified-pass": doc(verification=None),
 }
 for name, d in cases.items():
     payload = (json.dumps(d, indent=2) + "\n").encode()
@@ -1928,7 +1969,7 @@ $rust_lines"
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name)"
 done
 
-for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest; do
+for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest on13-sampled on13-unverified-pass; do
     doc="$tmp/scorecard-on/$name.json"
     sig="$tmp/scorecard-on/$name.sig"
     set +e
@@ -1959,6 +2000,7 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
         on10-owner-path) want_msg="target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path" ;;
         on11-untyped) want_msg="target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed" ;;
         on12-no-digest) want_msg="target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest" ;;
+        on13-sampled|on13-unverified-pass) want_msg="target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample" ;;
     esac
     if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
         fail "scorecard/$name: the refusal differs between the two readers or from its arm.
@@ -1968,4 +2010,4 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the twelve original-name arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the thirteen original-name arms with the same words"

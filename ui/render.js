@@ -1461,6 +1461,13 @@ export function runPhaseBadge(status) {
   return phaseBadge(s.phase);
 }
 
+/** What to do with a topic a restore created and left when its creation step
+ *  stopped (PROD-15.1) -- the runner's, the Restore status's and the product
+ *  API's one sentence (`leftInstruction`), word for word. */
+export const LEFT_TOPIC_SENTENCE =
+  "created by this restore and left empty; remove it yourself once you have checked nothing " +
+  "writes to it";
+
 /** What a queued manual run is, in the page's own fixed words (P10). */
 export const QUEUED_RUN_SENTENCE =
   "Queued: this manual run is waiting for a slot. Its namespace lets a fixed number of manual " +

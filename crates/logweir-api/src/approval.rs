@@ -63,8 +63,7 @@ use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
     ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizedSubject, InstallationMarker,
     PolicyRef, Requester, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
-    RESTORE_AUTHORIZATION_FORMAT_VERSION, RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION,
-    SUBJECT_KIND_RESTORE,
+    RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION, SUBJECT_KIND_RESTORE,
 };
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
@@ -401,7 +400,14 @@ pub fn document(
     original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        format_version: RESTORE_AUTHORIZATION_FORMAT_VERSION.to_string(),
+        // PROD-15.1: 2.1.0 exactly when the document carries the approval
+        // subject or the typed confirmation; every other document is 2.0.0,
+        // byte for byte what it was.
+        format_version: logweir_core::approval_policy::restore_authorization_format_version_for(
+            approval_subject.wire(),
+            original_name_confirmation.as_ref(),
+        )
+        .to_string(),
         kind: RESTORE_AUTHORIZATION_KIND.to_string(),
         authorization_mode: policy.mode,
         subject: AuthorizedSubject {

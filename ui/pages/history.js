@@ -50,6 +50,7 @@ import {
   planEvidenceBucket,
   planTimeBasis,
   runPhaseBadge,
+  LEFT_TOPIC_SENTENCE,
   QUEUED_RUN_SENTENCE,
   replace,
   restorePointLink,
@@ -419,6 +420,37 @@ export function signedTimeBasisText(timeBasis) {
       "the archive manifest's segment bounds show";
 }
 
+/** What a Restore whose creation step stopped left on the target cluster
+ *  (PROD-15.1), from `status.targetTopicsAppeared`: the mapped names someone
+ *  else created while the restore was admitted (never written to), and EVERY
+ *  topic this restore created and left, empty, with what to do about it.
+ *  Logweir deletes none of them, so the operator must be told they are there.
+ *  Empty when the status carries no such block. */
+export function creationStoppedWarning(stopped) {
+  if (stopped === null || stopped === undefined || typeof stopped !== "object") {
+    return "";
+  }
+  const names = (list) => (Array.isArray(list) ? list.filter((n) => typeof n === "string") : []);
+  const appeared = names(stopped.appeared);
+  const left = names(stopped.left);
+  return "<div class=\"caveat\" id=\"restore-creation-stopped\">" +
+    "<p>" + esc("This restore stopped while creating its target topics, before anything " +
+      "was restored.") + "</p>" +
+    (appeared.length === 0
+      ? ""
+      : "<p id=\"restore-topics-appeared\">" + esc(appeared.join(", ") + ": created by " +
+        "someone else after this restore was admitted. The restore wrote nothing into " +
+        (appeared.length === 1 ? "it." : "them.")) + "</p>") +
+    (left.length === 0
+      ? "<p id=\"restore-topics-left\">" + esc("This restore created no topic.") + "</p>"
+      : "<ul id=\"restore-topics-left\">" + left.map((name) =>
+        "<li><strong>" + esc(name) + "</strong>" + esc(": " + LEFT_TOPIC_SENTENCE + ".") +
+        "</li>").join("") + "</ul>" +
+        "<p>" + esc("Logweir never deletes a topic under a name it may not own: a producer " +
+          "could write to it between any check and the delete.") + "</p>") +
+    "</div>";
+}
+
 /** The warning a Restore detail carries when its signed time basis names a
  *  topic whose timestamp type was not recorded (FX-8 review M-2): the clock
  *  that topic's point in time was read on is unknown. Empty otherwise. */
@@ -457,6 +489,9 @@ export function renderRestoreDetail(object, operation) {
     "<h2>Restore " + nameOf(object) + "</h2>" +
     restoreBadge(status) +
     (status.phase === "Queued" ? "<p class=\"note queued\">" + esc(QUEUED_RUN_SENTENCE) + "</p>" : "") +
+    // PROD-15.1: WHAT A STOPPED CREATION STEP LEFT ON THE CLUSTER, first, where
+    // it cannot be missed: nothing else on this page says a topic exists.
+    creationStoppedWarning(status.targetTopicsAppeared) +
     (operation ? renderRestoreOperation(object, operation) : "") +
     facts([
       ["phase", runPhaseBadge(status)],

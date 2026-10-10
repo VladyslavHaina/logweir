@@ -94,7 +94,83 @@ fn an_original_name_restore_runs_and_signs_its_block() {
         sc.format_version
     );
     assert_eq!(sc.target.topic_mapping_prefix, "");
+    // The plan asks for COMPLETE verification (a sampled one is refused), and
+    // the run signs it: every one of the 500 restored records compared.
+    let verification = sc
+        .integrity
+        .verification
+        .as_ref()
+        .expect("phase 7 signs what it covered");
+    assert_eq!(verification.coverage, "complete");
+    let complete = verification.complete.as_ref().expect("the complete block");
+    assert!(complete.covered);
+    assert_eq!(
+        (
+            complete.replay.expected,
+            complete.replay.matching,
+            complete.replay.unexpected
+        ),
+        (500, 500, 0)
+    );
     signed_document_is_accepted(&f);
+}
+
+/// **A producer nobody stopped: complete verification NAMES its record**
+/// (the orchestrator's ruling of 2026-10-09 — an original-name restore
+/// requires complete verification, because a sampled check can pass a
+/// foreign record inside a loose count bound). The same restore, with one
+/// foreign record interleaved on the target at offset 300 — past the
+/// 25-record canary a sampled check reads: the run signs `fail-integrity`,
+/// the complete block counts 500 expected, 501 restored, 500 matching and ONE
+/// unexpected, and its findings name the record by its target offset.
+/// CONTROL: the row above — the same restore without the
+/// foreign record — passes with `unexpected: 0`.
+/// KILLS: a complete lane that skips a record with no lineage header; one
+/// that counts it without naming it; a verdict that passes with an
+/// unexpected record.
+#[test]
+fn complete_verification_names_a_foreign_record_interleaved_in_the_restored_name() {
+    use logweir_core::outcome::Outcome;
+
+    let f =
+        fixtures::orchestrator_fixture(Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("a foreign record fails");
+    assert!(matches!(err, DrillError::NotPass(..)), "{err:?}");
+    assert_eq!(err.exit_code(), ExitCode::DrillNotPass);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&std::fs::read(&f.out).expect("the run signed its scorecard"))
+            .expect("a scorecard");
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    assert!(sc.target.original_name.is_some());
+    let verification = sc.integrity.verification.as_ref().expect("signed");
+    assert_eq!(verification.coverage, "complete");
+    let complete = verification.complete.as_ref().expect("the complete block");
+    assert!(complete.covered, "every partition was compared");
+    let r = &complete.replay;
+    assert_eq!(
+        (
+            r.expected,
+            r.restored,
+            r.matching,
+            r.unexpected,
+            r.missing,
+            r.mismatched
+        ),
+        (500, 501, 500, 1, 0, 0),
+        "{r:?}"
+    );
+    let named = format!(
+        "target offset {} carries no x-original-offset",
+        fixtures::FOREIGN_RECORD_TARGET_OFFSET
+    );
+    assert!(
+        complete.partitions[0].findings.iter().any(|l| l == &named),
+        "the foreign record is named: {:?}",
+        complete.partitions[0].findings
+    );
+    assert_eq!(complete.partitions[0].target_topic, "orders");
+    // The signed failure is a document both readers accept.
+    sc.validate_invariants().expect("the readers accept it");
 }
 
 /// Review M3, the call site AFTER PHASE 1: an ordinary v1 approval for an

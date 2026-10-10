@@ -501,10 +501,13 @@ which narrowed `docs/stability.md`'s Never #1 to a LIVE topic. On a
 one-person-confirmation install the requester must also re-type every
 original topic name (OD-10). The conditions are held by the runner, the
 controller and the product API, and the evidence carries them as scorecard
-1.8.0's `target.original_name`. Teardown and the probe never touch such a
-name. The one deletion of an original name Logweir performs is a topic this
-run created in the same request and proved untouched, after a lost creation
-race. No CRD kind is added, so Amendment A's list is unchanged. The contract
+1.8.0's `target.original_name`. Such a restore is verified COMPLETELY, never
+by sample: a sampled plan is refused by name at every boundary. Teardown and
+the probe never touch such a name, and NO code path deletes a topic under
+one: a topic the run created before its creation step stopped (a lost race
+included) is left in place, empty, and named on the Restore for the operator
+to remove, because Kafka has no conditional delete. No CRD kind is added, so
+Amendment A's list is unchanged. The contract
 is [PROD-15.1-original-name.md](to-do/decisions/PROD-15.1-original-name.md),
 and the operator's account is [kubernetes.md](kubernetes.md) §12.
 

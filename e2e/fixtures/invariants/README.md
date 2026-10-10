@@ -677,13 +677,15 @@ a value outside `i64`) are pinned by
 
 ## PROD-15.1: `target.original_name` (scorecard format 1.8.0)
 
-Twelve arms, ON-1 to ON-12, which both readers state in the same position
+Thirteen arms, ON-1 to ON-13, which both readers state in the same position
 (after `source.selection`, before `redactions`). Every case is
 `e2e/fixtures/scorecard-pass.json` turned into a `newTopic` document with an
 empty `target.topic_mapping_prefix`, no `marker_topic`, `format_version`
-`1.8.0` and the block (approval subject `originalName`, mode `governed`,
-`targetIsNotSource` with a source id other than the target's, owners looked
-for in `plan`, none found), with the one field each case names changed.
+`1.8.0`, a COMPLETE `integrity.verification` (covered and exact over two
+partitions, which an original-name restore requires) and the block (approval
+subject `originalName`, mode `governed`, `targetIsNotSource` with a source id
+other than the target's, owners looked for in `plan`, none found), with the
+one field each case names changed.
 
 | case | what it pins |
 |---|---|
@@ -702,6 +704,9 @@ for in `plan`, none found), with the one field each case names changed.
 | `original_name_1_8_typed_confirmation` | ACCEPT: a one-person confirmation (`ordinary`) signed with `confirmation: typedTopicNames` (OD-10) |
 | `original_name_ordinary_without_typed_names` | ON-11: `ordinary` with no `confirmation` |
 | `original_name_resources_without_digest` | ON-12: `kafkaTopicResources` looked in, with no `kafka_topic_resources_sha256` |
+| `original_name_over_a_sampled_verification` | ON-13: the block beside `integrity.verification.coverage: sampled` |
+| `original_name_pass_without_a_verification` | ON-13: a pass that records no `integrity.verification` |
+| `original_name_1_8_stopped_before_verification` | ACCEPT: no `integrity.verification` on a document that is not a pass (`fail-integrity`, a run that stopped before phase 7) |
 
 ON-1's message interpolates the document's `format_version`, so its `arm` is
 the literal text before the placeholder; every other `arm` is the text of the

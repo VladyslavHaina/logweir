@@ -390,8 +390,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
         // refuses.
         CheckCode::TopicMappingIdentity => {
             "The plan maps a topic onto its own name in a shape the runner refuses. A restore \
-             under the original topic names is mode newTopic with topic_naming.prefix \"\" and \
-             the original_name block; every other restore sets a prefix nothing has used."
+             under the original topic names is mode newTopic with topic_naming.prefix \"\", the \
+             original_name block and sample.coverage: complete (it is verified completely, \
+             never by sample); every other restore sets a prefix nothing has used."
         }
         CheckCode::SelectionInvalid => {
             "The plan's replay selection is refused: a partition subset (restore.partitions), which \

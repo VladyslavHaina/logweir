@@ -644,51 +644,86 @@ into topics that do not exist, created by the run itself, exclusively
 [kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
 
 - **The signed block.** Such a restore carries `target.original_name` and is
-  format **1.8.0** (MINOR): arms ON-1 to ON-12 read only the block or judge an
-  existing `target` field against it, and can only refuse (OD-7 (a)). Every
-  other document is the one it was; each version step keeps the newer minor.
+  format **1.8.0** (MINOR): arms ON-1 to ON-13 read only the block or judge an
+  existing field against it (`target`, and for ON-13 `integrity.verification`
+  and the outcome), and can only refuse (OD-7 (a)). Every other document is
+  the one it was; each version step keeps the newer minor.
   A verifier older than `1.25.0` and a `logweir` built before PROD-15.1 accept
   the document, ignore the block and print no `original name:` line
   ([verify-a-scorecard.md](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
 - **A separate approval subject, inside the signed bytes.** A per-run approval
   document v1 gains the optional `approval_subject`; an authorization document
   v2 gains the optional `approvalSubject`. Only `originalName` is written;
-  absent is an ordinary approval, read exactly as before. The v2 document's
-  `formatVersion` stays `"2"`: a reader that predates the field refuses a
-  document carrying it as an unknown field (the safer verdict, OD-7's third
-  case), never reads it as ordinary, and every document without it keeps its
-  bytes. An original-name plan needs the subject and the subject authorises
-  nothing else, in the runner (both directions, exit 3) and in the
-  controller's admission (`ApprovalSubjectMismatch`, terminal). **OD-10:** an
-  authorization document v2 under an `Ordinary` policy (a one-person
-  confirmation) of an original-name restore also carries
-  `originalNameConfirmation.typedTopics`, the original topic names the
-  requester re-typed, held to the plan's topics at every boundary; it is
-  absent on every other document and refused there, under the same
-  no-new-`formatVersion` reasoning.
-- **A lost creation race is named on exit 1.** The runner's last stdout line
-  is `failure-reason=TargetTopicAppeared` (the closed
-  `logweir_core::guard::FAILURE_REASONS` list, paired with exit 1), and the
-  line before it is `target-topics-appeared={"appeared":[…],"removed":[…],"left":[…]}`
+  absent is an ordinary approval, read exactly as before. An original-name
+  plan needs the subject and the subject authorises nothing else, in the
+  runner (both directions, exit 3) and in the controller's admission
+  (`ApprovalSubjectMismatch`, terminal). **OD-10:** an authorization document
+  v2 under an `Ordinary` policy (a one-person confirmation) of an
+  original-name restore also carries `originalNameConfirmation.typedTopics`,
+  the original topic names the requester re-typed, held to the plan's topics
+  at every boundary; it is absent on every other document and refused there.
+- **Authorization document v2 format 2.1.0.** A v2 document that carries
+  `approvalSubject` or `originalNameConfirmation` is written with
+  `formatVersion: "2.1.0"`; every document without them is written as
+  `"2.0.0"` and is byte for byte what it was (the standing authorization's
+  1.1.0 is the same pattern, PROD-08.1a). The DSSE payload type is unchanged
+  (`application/vnd.logweir.restore-authorization+json;version=2.0.0` names
+  the v2 family). **This build's readers** (the controller and the runner,
+  through one function) accept 2.1.0 and REFUSE either field under a version
+  that predates it — `AuthorizationDocumentInvalid`, "defined from
+  formatVersion 2.1.0" — so a 2.0.0 document can never name the original-name
+  subject. A minor adds optional fields only, so a 2.1.0 document without the
+  fields is read as a 2.0.0 one. **A reader built before the fields** reads
+  major 2 and refuses a document that carries either as an unknown field
+  (`AuthorizationDocumentInvalid`, exit 3 in a runner; the safer verdict,
+  OD-7's third case): it never reads one as an ordinary authorization.
+  Every 2.1.0 document this build writes carries at least one of the two, so
+  every one of them is refused there. The v1 approval document has no version
+  field: its `approval_subject` is an optional key an older v1 reader ignores,
+  and the ORIGINAL-NAME PLAN is what that older runner refuses (below), so an
+  ignored subject authorises nothing.
+- **An original-name restore requires complete verification.** A plan that
+  carries the `original_name` block without `sample.coverage: complete` is
+  refused, `OriginalNameNeedsCompleteCoverage`: by the runner before it dials
+  anything (exit 3), by `logweir drill approve --approval-subject
+  original-name`, by the controller before any Job (`ExecutionSpecInvalid`,
+  and a CEL rule on `Restore.spec`), by the product API
+  (`original_name_requires_complete`) and by the console, which selects
+  complete coverage for such a restore and locks the choice. A sampled check
+  can pass a record another producer wrote into the restored name; the
+  complete check names it. Arm ON-13 holds the signed document to the same
+  rule: the block beside a sampled verification, or beside a pass that records
+  none, is refused by both readers.
+- **A stopped creation step is named on exit 1, and nothing is deleted.** The
+  runner's last stdout line is `failure-reason=TargetTopicAppeared` (a mapped
+  name appeared after phase 0) or `failure-reason=CreatedTopicsLeft` (creation
+  stopped for another reason after this run had created a topic) — both on the
+  closed `logweir_core::guard::FAILURE_REASONS` list, paired with exit 1 — and
+  the line before it is `target-topics-appeared={"appeared":[…],"left":[…]}`
   (legal topic names only, at most 100 per list). A controller lifts both
   onto `status.exitReason` and `status.targetTopicsAppeared`; an older one
-  ignores them. Topics this run created in the same request are removed only
-  when proven its own and empty — the one deletion of an original name
-  Logweir performs — and left and named otherwise.
+  ignores them and reports a plain exit 1. **No code path deletes a topic
+  under an original name**: a topic this run created before it stopped is
+  left in place, empty, and named with what to do ("created by this restore
+  and left empty; remove it yourself once you have checked nothing writes to
+  it"). Kafka has no conditional delete, so any cleanup could lose a record a
+  producer wrote between the check and the delete.
 - **An older runner refuses an original-name plan**: it ignores the
   `original_name` block and sees an empty prefix, which maps every topic onto
   itself, so its guard refuses the plan at phase 0 (exit 3) before anything is
   written. An older controller ignores `topicNaming.originalName` and its
   runner refuses the plan the same way.
 - **The `Restore` CRD** gains `spec.target.topicNaming.originalName`, allowed
-  only in `newTopic` mode with an empty prefix (a CEL rule); rolling the CRDs
-  back prunes it from stored objects, whose plans are unchanged and are then
-  refused as above.
+  only in `newTopic` mode with an empty prefix and only with `spec.coverage:
+  complete` (two CEL rules), and `status.targetTopicsAppeared`; rolling the
+  CRDs back prunes them from stored objects, whose plans are unchanged and are
+  then refused as above.
 - **What stays refused**: a name that exists, in any mode; an identity mapping
   in a scratch drill; a target that may be the source cluster unless every
   broker reports `auto.create.topics.enable=false`; a declarative owner found
-  unless the plan chose the owner path, and an owner looked for nowhere.
-  Teardown never deletes a topic under its original name.
+  unless the plan chose the owner path, and an owner looked for nowhere; a
+  sampled verification. Nothing — teardown, a lost race, a stopped creation
+  step — deletes a topic under its original name.
 
 ### The product API's OpenAPI document is pre-release, and says so
 

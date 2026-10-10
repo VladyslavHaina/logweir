@@ -502,13 +502,16 @@ FORMAT_VERSION = "1.4.0"
 # and `schema_dependency` lines say, per topic, what the Rust reader says.
 # 1.25.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
 # `target.original_name`: a restore under the source's ORIGINAL topic names,
-# into absent topics (OD-2). Twelve arms, ON-1 to ON-12, mirrored byte for byte
-# and in position from `Scorecard::validate_invariants`: the block only under a
-# version of at least 1.8.0, only in a newTopic document with the empty prefix,
-# the approval subject `originalName`, the approval mode and the cluster
+# into absent topics (OD-2). Thirteen arms, ON-1 to ON-13, mirrored byte for
+# byte and in position from `Scorecard::validate_invariants`: the block only
+# under a version of at least 1.8.0, only in a newTopic document with the empty
+# prefix, the approval subject `originalName`, the approval mode and the cluster
 # condition from their closed sets, `targetIsNotSource` only beside a known
 # source cluster id that is not the target's, somewhere looked for an owner,
-# each owner from a place looked in, and an owned name only on the owner path.
+# each owner from a place looked in, an owned name only on the owner path, a
+# one-person confirmation only with the names typed, the resources file named
+# by digest, and a COMPLETE verification (never a sampled one, and never a pass
+# that records none).
 # They fire only on a document carrying the block, so every document without
 # it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
 # that is not the writer's shape; two `original name:` lines say what admitted
@@ -1514,7 +1517,7 @@ def check_invariants(doc) -> str:
     # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
     # `Option<OriginalNameInfo>` over there, so `null` is ABSENT and anything
     # that is not the writer's shape is refused at DESERIALISATION. Arms ON-1
-    # to ON-12 below compare its fields, so the shape is asserted first. The
+    # to ON-13 below compare its fields, so the shape is asserted first. The
     # bad shapes are cases in `shape-index.json`.
     original_name = target.get("original_name")
     if original_name is not None and not _original_name_shape_ok(original_name):
@@ -2242,7 +2245,7 @@ def check_invariants(doc) -> str:
                     "the expected output is selected by the plan's own start and end"
                 )
 
-    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-12,
+    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-13,
     # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
     # `redactions`) and with the same words from `Scorecard::validate_invariants`.
     # They fire ONLY on a document carrying the block, so every document before
@@ -2354,6 +2357,20 @@ def check_invariants(doc) -> str:
                 "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest "
                 "exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic "
                 "resources a runner looked in are named by their digest"
+            )
+        # ON-13. An original-name restore is verified COMPLETELY, never by
+        # sample; a pass that records no verification is refused too (the
+        # third case, decided to the safer side). IV-2 has already refused a
+        # coverage that is neither value.
+        on_coverage = verification["coverage"] if verification is not None else None
+        on_passes = doc.get("outcome") == "pass" or integrity.get("result") == "pass"
+        if (on_coverage is not None and on_coverage != "complete") or (
+            on_coverage is None and on_passes
+        ):
+            return (
+                "target.original_name is present but integrity.verification.coverage is not "
+                "\"complete\", or a pass records no verification; a restore under the original "
+                "topic names is verified completely, never by sample"
             )
 
     # T0-3, mirrored: see the `redactions` arm at the end of

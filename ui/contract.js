@@ -727,6 +727,15 @@ const RESTORE_COVERAGE = shapeOf(
   },
 );
 
+// PROD-15.1: what a stopped creation step left behind -- the mapped target
+// names someone else created while the restore was admitted, and every topic
+// this restore created and LEFT, empty. Logweir deletes none of them;
+// `leftInstruction` is the one sentence that says what to do with each.
+const CREATION_STOP = shapeOf(
+  "CreationStopView",
+  { appeared: listOf(str), left: listOf(str), leftInstruction: str },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -744,6 +753,7 @@ const RESTORE = shapeOf(
     createdAt: str, planBytes: opaque,
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
     queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
+    targetTopicsAppeared: objectOf(CREATION_STOP),
   },
 );
 

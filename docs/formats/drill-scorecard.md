@@ -392,7 +392,7 @@ topic id at creation, and none can be preserved.
 | `confirmation` | string, optional | **OD-10.** `typedTopicNames`: the requester confirmed alone and RE-TYPED every original topic name, exactly, and the console signed what was typed. Present exactly when `approval_mode` is `ordinary`. |
 | `kafka_topic_resources_sha256` | string, optional | `sha256:` of the `KafkaTopic` resources file the runner looked in (`--kafka-topic-resources`, unsigned runner input). Present exactly when `owner_detection` lists `kafkaTopicResources`. |
 
-Twelve arms, enforced by both readers in the same position (after
+Thirteen arms, enforced by both readers in the same position (after
 `source.selection`, before `redactions`) and words, fire only on a document
 carrying the block:
 
@@ -410,11 +410,13 @@ carrying the block:
 | ON-10 | an owner found with `owner_path: false` |
 | ON-11 | `confirmation` other than `typedTopicNames`, or present when `approval_mode` is not `ordinary`, or absent when it is |
 | ON-12 | `kafka_topic_resources_sha256` that is not `sha256:` and 64 lowercase hex, or present without `kafkaTopicResources` in `owner_detection`, or absent beside it |
+| ON-13 | the block beside an `integrity.verification` whose `coverage` is not `complete`, or beside a pass (`outcome` or `integrity.result`) that records no `integrity.verification` at all: a restore under the original topic names is verified completely, never by sample. A run that stopped before phase 7 records none and is not a pass, so it is accepted |
 
 A block that is not an object with these fields and types is refused when the
 document is read; an unknown key in it is ignored. Each arm reads only the new
-block, or judges an existing `target` field against it, and can only refuse:
-MINOR under OD-7 (a). Both readers print two lines for a document carrying the
+block, or judges an existing field against it (`target`; for ON-13,
+`integrity.verification` and the outcome), and can only refuse: MINOR under
+OD-7 (a). Both readers print two lines for a document carrying the
 block:
 
 ```text

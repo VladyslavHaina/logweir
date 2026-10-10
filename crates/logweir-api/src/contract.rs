@@ -1462,6 +1462,13 @@ pub struct Restore {
     pub deadline_seconds: i64,
     /// The topics this run created.
     pub new_topics: Vec<String>,
+    /// Present only when the run's creation step stopped (its operation's
+    /// `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`):
+    /// the mapped target names someone else created
+    /// while the run was admitted, and every topic THIS run created and left
+    /// in place, empty. Logweir never deletes such a topic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_topics_appeared: Option<CreationStopView>,
     /// P10: present while this admitted MANUAL restore waits for a slot in its
     /// namespace's manual-restore pool (`operation.state: queued`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1505,6 +1512,23 @@ pub struct RestoreCoverageView {
     /// Why `covered` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_reason: Option<String>,
+}
+
+/// `Restore.targetTopicsAppeared`: what a stopped creation step left behind,
+/// as the controller copied it from the runner onto
+/// `status.targetTopicsAppeared`. Each list holds at most 100 topic names.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreationStopView {
+    /// Mapped target names someone else created after the restore was
+    /// admitted. The restore wrote nothing into them.
+    pub appeared: Vec<String>,
+    /// Topics this restore created and LEFT, empty. Never deleted by
+    /// Logweir: the operator removes each one.
+    pub left: Vec<String>,
+    /// What to do with each topic in `left`, in words: the one sentence the
+    /// runner, the Restore's status and the console all say.
+    pub left_instruction: String,
 }
 
 /// `Restore.timeBasis` (FX-8): the signed time-basis label.

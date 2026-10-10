@@ -103,15 +103,16 @@ pub enum DrillError {
     /// or network side effect at all.
     #[error("signing or lock proof failed: {0}")]
     SigningPrerequisite(String),
-    /// **PROD-15.1 review M4: the creation step lost the race, by name.** A
-    /// mapped target name phase 0 proved absent existed when the run came to
-    /// create it. Exit 1 (phases 0–5 ran), like [`Self::Operational`], but
-    /// carried apart so the runner can say WHICH names appeared, which topics
-    /// this execution created and removed, and which it left (and why) — on
-    /// stdout as `failure-reason=TargetTopicAppeared` and one bounded
-    /// `target-topics-appeared=` line the controller lifts onto the Restore.
+    /// **PROD-15.1 review M4: the creation step stopped, by name.** A mapped
+    /// target name phase 0 proved absent existed when the run came to create
+    /// it (a lost race), or creation failed after this execution had created
+    /// a topic. Exit 1 (phases 0–5 ran), like [`Self::Operational`], but
+    /// carried apart so the runner can say WHICH names appeared and which
+    /// topics this execution created and LEFT — on stdout as
+    /// `failure-reason=` and one bounded `target-topics-appeared=` line the
+    /// controller lifts onto the Restore. Nothing is ever deleted.
     #[error("operational: {}", .0.message)]
-    TargetTopicAppeared(Box<phase0_admit::TargetTopicRace>),
+    CreationStopped(Box<phase0_admit::CreationStop>),
 }
 
 impl DrillError {
@@ -151,7 +152,7 @@ impl DrillError {
             DrillError::Operational(_)
             | DrillError::Kafka(_)
             | DrillError::Engine(_)
-            | DrillError::TargetTopicAppeared(_) => {
+            | DrillError::CreationStopped(_) => {
                 ExitCode::Operational // 1
             }
         }
@@ -1329,10 +1330,10 @@ fn report_with(
         Ok(o) => Some(&o.topic_preflight),
         Err(_) => None,
     };
-    // PROD-15.1 review M4: a lost creation race says which names appeared and
-    // what this run removed or left, by name, where a controller reads it.
+    // PROD-15.1 review M4: a stopped creation step says which names appeared
+    // and which topics this run created and left, where a controller reads it.
     let race = match &outcome {
-        Err(DrillError::TargetTopicAppeared(race)) => Some(race.as_ref()),
+        Err(DrillError::CreationStopped(stop)) => Some(stop.as_ref()),
         _ => None,
     };
     exiting(
@@ -1389,7 +1390,7 @@ fn exiting(
     evidence: Option<&EvidenceKeys>,
     topic_preflight: Option<&phase0_admit::TopicPreflight>,
     scorecard: Option<&Scorecard>,
-    race: Option<&phase0_admit::TargetTopicRace>,
+    race: Option<&phase0_admit::CreationStop>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
@@ -1415,24 +1416,20 @@ fn exiting(
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
     }
-    // **PROD-15.1 review M4: the lost creation race, named.** Exit 1 like any
-    // operational failure, but the controller lifts `failure-reason=` (the
+    // **PROD-15.1 review M4: the stopped creation step, named.** Exit 1 like
+    // any operational failure, but the controller lifts `failure-reason=` (the
     // RECEIPT-DUP mechanism, `logweir_core::guard::FAILURE_REASONS`) onto
     // `status.exitReason`, and the one bounded line before it onto
     // `status.targetTopicsAppeared` — the names that appeared, and the topics
-    // this run created and removed or left. The reason is the LAST line.
+    // this run created and LEFT (nothing is deleted). The reason is the LAST
+    // line.
     if let (ExitCode::Operational, Some(race)) = (code, race) {
         println!(
             "{}{}",
             phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX,
             race.status_line_value()
         );
-        println!(
-            "{}",
-            logweir_core::guard::failure_reason_line(
-                logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED
-            )
-        );
+        println!("{}", logweir_core::guard::failure_reason_line(race.reason));
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
@@ -2476,6 +2473,16 @@ fn execute_for_reporting(
     if let Err(error) = region_refusal {
         return (Err(error.into()), Some(authenticated_spec));
     }
+    // **PROD-15.1: the original-name SHAPE, over the authenticated plan and
+    // BEFORE anything is read or dialled.** The block is legal only in
+    // `newTopic` mode, beside `prefix: ""`, and in a plan that asks for
+    // COMPLETE verification: a sampled plan with the identity mapping is
+    // refused here by name, exit 3, with no broker asked anything. Phase 0
+    // repeats the check (`phase0_admit::local`) for every path that reaches
+    // it another way.
+    if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
+        return (Err(GuardRefusal(refusal).into()), Some(authenticated_spec));
+    }
     // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
     // BEFORE anything is read or dialled.** An original-name plan needs its
     // own approval subject, which an ordinary approval cannot satisfy and a
@@ -3281,7 +3288,6 @@ fn execute_with_validated_approval(
     phase0_admit::create_target_topics(
         creator,
         reader,
-        deleter,
         &admitted.topic_mapping,
         &facts,
         c.spec.target.default_replication_factor,

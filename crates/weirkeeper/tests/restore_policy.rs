@@ -1033,10 +1033,12 @@ const ORIGINAL_NAME: &str = "rst-original-1";
 const ORIGINAL_UID: &str = "5c2e7b91-0000-4000-8000-00000000151a";
 
 /// The same plan restored under the ORIGINAL topic names (`newTopic`,
-/// `prefix: ""`, the no-owner statement).
+/// `prefix: ""`, the no-owner statement, and the complete verification such
+/// a restore requires).
 fn original_plan() -> String {
     PLAN_BYTES
         .replace("  mode: scratch\n", "  mode: newTopic\n")
+        .replace("  anchor: head\n", "  anchor: head\n  coverage: complete\n")
         .replace("  marker_topic: logweir.scratch\n", "")
         .replace("  teardown: delete\n", "")
         .replace(
@@ -1052,6 +1054,8 @@ fn original_restore() -> Restore {
     v["spec"]["planBytes"] = serde_json::json!(original_plan());
     v["spec"]["target"] = serde_json::json!({"clusterRef": {"name": "scratch"}, "mode": "newTopic",
                                             "topicNaming": {"prefix": "", "originalName": true}});
+    v["spec"]["coverage"] = serde_json::json!("complete");
+    assert!(original_plan().contains("coverage: complete"));
     serde_json::from_value(v).expect("a Restore")
 }
 
@@ -1068,6 +1072,29 @@ fn original_approval(
     doc.subject.name = ORIGINAL_NAME.into();
     doc.subject.uid = ORIGINAL_UID.into();
     doc.plan_hash = sha256_prefixed(original_plan().as_bytes());
+    original_approval_at(
+        policy,
+        mode,
+        matched,
+        typed,
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT,
+    )
+}
+
+/// [`original_approval`], with the document declaring `format_version`.
+fn original_approval_at(
+    policy: &str,
+    mode: ApprovalMode,
+    matched: &str,
+    typed: Option<&[&str]>,
+    format_version: &str,
+) -> Approval {
+    let mut doc = document(policy, mode);
+    doc.subject.name = ORIGINAL_NAME.into();
+    doc.subject.uid = ORIGINAL_UID.into();
+    doc.plan_hash = sha256_prefixed(original_plan().as_bytes());
+    // The subject and the typed names are document format 2.1.0.
+    doc.format_version = format_version.into();
     doc.approval_subject = Some("originalName".into());
     doc.original_name_confirmation =
         typed.map(
@@ -1129,6 +1156,45 @@ fn a_one_person_confirmation_of_an_original_name_restore_needs_the_names_typed()
         assert!(refused.is_terminal(), "{names:?}: {refused:?}");
         assert_eq!(refused.reason(), "ApprovalSubjectMismatch", "{refused}");
         assert!(refused.to_string().contains(token), "{refused}");
+    }
+}
+
+/// **The original-name subject is document format 2.1.0, at admission.** The
+/// same verified Approval whose signed document declares 2.0.0 while carrying
+/// `approvalSubject` (and the typed names) is refused before any Job, naming
+/// the version the fields are defined from; at 2.1.0 it is admitted (the row
+/// above, and here as the control). KILLS: a controller that reads the
+/// subject out of a document whose version predates it.
+#[test]
+fn the_original_name_subject_under_format_2_0_0_is_refused_at_admission() {
+    for (policy, mode, key, typed) in [
+        (
+            "team-ordinary",
+            ApprovalMode::Ordinary,
+            CONSOLE_KEY_ID,
+            Some(&["orders"][..]),
+        ),
+        ("prod-governed", ApprovalMode::Governed, BOB_KEY_ID, None),
+    ] {
+        let old = admit_original(
+            &original_approval_at(policy, mode, key, typed, "2.0.0"),
+            policy,
+        );
+        assert_ne!(old, RestoreAdmission::Ok, "{policy}: {old:?}");
+        assert!(old.is_terminal(), "{policy}: {old:?}");
+        assert!(
+            old.to_string().contains("defined from formatVersion 2.1.0"),
+            "{policy}: {old}"
+        );
+        // CONTROL: the same document at its own version is admitted.
+        assert_eq!(
+            admit_original(
+                &original_approval_at(policy, mode, key, typed, "2.1.0"),
+                policy
+            ),
+            RestoreAdmission::Ok,
+            "{policy}"
+        );
     }
 }
 

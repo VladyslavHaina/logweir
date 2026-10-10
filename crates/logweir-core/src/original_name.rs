@@ -15,13 +15,14 @@
 //! | # | condition | where | refusal |
 //! |---|---|---|---|
 //! | 1 | the plan opts in explicitly: `target.topic_naming: {prefix: "", original_name: {…}}` in `newTopic` mode | phase 0, local ([`refuse_shape`]) | [`ORIGINAL_NAME_NOT_NEW_TOPIC`], [`ORIGINAL_NAME_PREFIX_NOT_EMPTY`]; an empty prefix without the block keeps the old "onto itself" refusal |
+//! | 1b | the plan asks for COMPLETE verification, `sample.coverage: complete` (the orchestrator's ruling of 2026-10-09) | phase 0, local ([`refuse_shape`]); runner and controller readiness; controller admission; the product API and the console | [`ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE`] |
 //! | 2 | every restored name is absent on the target | phase 0 (the existing absence refusal, both modes) | "already exists" |
 //! | 3 | the target is not the source cluster, OR every broker reports `auto.create.topics.enable=false` | phase 0 ([`source_relation`], [`require_auto_create_disabled`]) | [`ORIGINAL_NAME_AUTO_CREATE_ENABLED`], [`ORIGINAL_NAME_AUTO_CREATE_UNKNOWN`] |
 //! | 4 | somewhere was looked for a declarative owner, and none was found unless the owner path is chosen | phase 0 ([`owner_verdict`]) | [`ORIGINAL_NAME_OWNER_NOT_CHECKED`], [`ORIGINAL_NAME_OWNER_PRESENT`], [`ORIGINAL_NAME_OWNERS_INVALID`] |
 //! | 5 | the approval names the separate subject `originalName` | runner startup and phase 1, controller admission ([`check_approval_subject`]) | [`APPROVAL_SUBJECT_MISMATCH`] |
 //! | 5b | on a one-person-confirmation (`Ordinary`) authorization, the requester RE-TYPED every original topic name, exactly, and the console signed what was typed (the owner's decision OD-10) | the product API before it signs, controller admission, runner startup and phase 1 ([`check_typed_confirmation`]) | [`ORIGINAL_NAME_CONFIRMATION_MISSING`], [`ORIGINAL_NAME_CONFIRMATION_MISMATCH`], [`ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED`] |
 //! | 6 | creation is exclusive: `CreateTopics` fails on an existing name, and a name that appears after phase 0 loses the race by name | the creation step | [`TARGET_TOPIC_APPEARED`] |
-//! | 7 | the `LogAppendTime` probe and teardown never touch an original name | phase 0 ([`probe_topic_name`]) and phase 9 | — |
+//! | 7 | the `LogAppendTime` probe and teardown never touch an original name, and NO code path deletes a topic under one — not a topic this run created, not after a lost race (the orchestrator's ruling of 2026-10-09: Kafka has no conditional delete) | phase 0 ([`probe_topic_name`]), the creation step and phase 9 | — |
 //!
 //! Every refusal before the creation step is exit 3 before anything is written
 //! (the probe, the one documented exception, writes only under the scratch
@@ -65,6 +66,13 @@ pub const ORIGINAL_NAME_NOT_NEW_TOPIC: &str = "OriginalNameNotNewTopic";
 /// An `original_name` block beside a non-empty `topic_naming.prefix`: the
 /// plan asks for two names at once.
 pub const ORIGINAL_NAME_PREFIX_NOT_EMPTY: &str = "OriginalNamePrefixNotEmpty";
+/// An `original_name` block in a plan whose `sample.coverage` is not
+/// `complete`: a restore under the original topic names is verified
+/// completely — every restored record compared with the archive — or not
+/// run at all. A sampled check reads the first records of each partition and
+/// a count bound, which a record another producer wrote into the restored
+/// name can pass.
+pub const ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE: &str = "OriginalNameNeedsCompleteCoverage";
 /// The target is (or may be) the source cluster and a broker reports
 /// `auto.create.topics.enable=true`: a producer still pointed at the name
 /// would create it under the restore.
@@ -379,10 +387,22 @@ pub fn is_original_name_restore(spec: &DrillSpec) -> bool {
             .is_some_and(|naming| naming.prefix.is_empty())
 }
 
-/// Condition 1, purely local: an `original_name` block is legal only in
-/// `newTopic` mode and only beside `prefix: ""`. `None` for every plan that
-/// carries no block (an empty prefix without one is the mapping guard's, and
-/// it keeps refusing it).
+/// Conditions 1 and 1b, purely local: an `original_name` block is legal only
+/// in `newTopic` mode, only beside `prefix: ""`, and only in a plan that asks
+/// for COMPLETE verification (`sample.coverage: complete`). `None` for every
+/// plan that carries no block (an empty prefix without one is the mapping
+/// guard's, and it keeps refusing it).
+///
+/// **Why complete, and never sampled.** Under a production name another
+/// writer is possible: a producer nobody stopped, pointed at the name the
+/// restore is filling. A sampled check compares the first
+/// `records_per_partition` records of each sampled partition and holds the
+/// partition to the manifest's count BOUND, which is loose whenever the
+/// window does not cover whole segments — so a foreign record inside that
+/// bound can pass. The complete check compares EVERY restored record with the
+/// archive by its `x-original-offset` and reports a record the archive does
+/// not hold as unexpected, by offset. Only that is acceptable under an
+/// original name, so the plan must ask for it.
 #[must_use]
 pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
     spec.target.original_name()?;
@@ -405,6 +425,22 @@ pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
              target.topic_naming.prefix is {prefix:?}. An original-name restore maps every topic \
              onto its own name, which is `prefix: \"\"`; a plan that states both asks for two \
              names at once"
+        ));
+    }
+    if spec.sample.coverage != crate::spec::Coverage::Complete {
+        return Some(format!(
+            "{ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE}: target.topic_naming.original_name is set \
+             and sample.coverage is `{}`{}. A restore under the original topic names requires \
+             complete verification, where every restored record is compared with the archive and \
+             a record the archive does not hold is reported by its offset; a sampled check reads \
+             only the first records of each partition and a count bound, which a record another \
+             producer wrote into the restored name can pass. Set sample.coverage: complete",
+            spec.sample.coverage.as_str(),
+            if spec.sample.coverage.is_sampled() {
+                " (its default)"
+            } else {
+                ""
+            }
         ));
     }
     None

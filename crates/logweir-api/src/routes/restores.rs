@@ -327,6 +327,20 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
                  maps every topic onto its own name",
             ));
         }
+        // A restore under the original topic names REQUIRES complete
+        // verification: a sampled check can pass a record another producer
+        // wrote into the restored name. The runner refuses the sampled plan
+        // at phase 0 and the controller at admission; refusing the request
+        // here names the field before anything is stored or signed.
+        if request.coverage != Some(RestoreCoverage::Complete) {
+            errors.push(FieldError::new(
+                "coverage",
+                "original_name_requires_complete",
+                "must be `complete` with originalName: a restore under the original topic \
+                 names is verified completely, every restored record compared with the \
+                 archive, never by sample",
+            ));
+        }
     } else if prefix.is_empty() || prefix.len() > 128 || !validate::is_topic_name(prefix) {
         errors.push(FieldError::new(
             "target.topicNaming.prefix",

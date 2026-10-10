@@ -1212,6 +1212,17 @@ function projectRestore(item) {
       status.timeBasis.plan = item.timeBasis.plan;
     }
   }
+  // PROD-15.1: A STOPPED CREATION STEP'S TWO LISTS, under the custom
+  // resource's own name (`status.targetTopicsAppeared`): the names someone
+  // else created, and the topics this restore created and LEFT. Nothing is
+  // deleted, so there is no third list to carry.
+  const stopped = item.targetTopicsAppeared;
+  if (stopped !== null && stopped !== undefined) {
+    status.targetTopicsAppeared = {
+      appeared: stopped.appeared.slice(),
+      left: stopped.left.slice(),
+    };
+  }
   // PROD-08.1a: THE COVERAGE, under the custom resource's own names, so one
   // badge rule and one list line read it in both modes: what the Restore asks
   // for on `spec` (absent when sampled, as the CRD stores it), what its signed

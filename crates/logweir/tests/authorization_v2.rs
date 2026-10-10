@@ -460,8 +460,13 @@ struct Mounted {
 }
 
 fn mount(k: &Keys, mode: ApprovalMode, countersign: bool) -> Mounted {
+    mount_with(k, mode, countersign, PLAN, &document(mode).to_bytes())
+}
+
+/// [`mount`], over a given plan and a given signed document.
+fn mount_with(k: &Keys, mode: ApprovalMode, countersign: bool, plan: &str, doc: &[u8]) -> Mounted {
     let dir = tempfile::tempdir().expect("tempdir");
-    let doc = document(mode).to_bytes();
+    let doc = doc.to_vec();
     let m = Mounted {
         plan: dir.path().join("restore.yaml"),
         approval: dir.path().join("approval.json"),
@@ -472,7 +477,7 @@ fn mount(k: &Keys, mode: ApprovalMode, countersign: bool) -> Mounted {
         signing: dir.path().join("signing.pem"),
         _dir: dir,
     };
-    std::fs::write(&m.plan, PLAN).expect("plan");
+    std::fs::write(&m.plan, plan).expect("plan");
     std::fs::write(&m.approval, &doc).expect("doc");
     std::fs::write(
         m.approval.with_extension("sig"),
@@ -526,7 +531,22 @@ fn contract_env(m: &Mounted) -> BTreeMap<String, String> {
 }
 
 fn invoke(m: &Mounted, env: &BTreeMap<String, String>, v2_flags: bool) -> (i32, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    invoke_binary(
+        std::path::Path::new(env!("CARGO_BIN_EXE_logweir")),
+        m,
+        env,
+        v2_flags,
+    )
+}
+
+/// [`invoke`], with the runner binary named: this build's, or an older one.
+fn invoke_binary(
+    binary: &std::path::Path,
+    m: &Mounted,
+    env: &BTreeMap<String, String>,
+    v2_flags: bool,
+) -> (i32, String) {
+    let mut command = Command::new(binary);
     command
         .args(["restore", "run", "--spec"])
         .arg(&m.plan)
@@ -883,4 +903,198 @@ fn a_fresh_install_default_confirm_bundle_verifies_at_the_runner() {
 
 fn policy_of(mode: ApprovalMode) -> logweir_core::approval_policy::ApprovalPolicy {
     policy(mode)
+}
+
+// ---------------------------------------------------------------------------
+// PROD-15.1: the approval subject and the typed names are document format 2.1.0
+// ---------------------------------------------------------------------------
+
+/// A plan restored under the ORIGINAL topic names, in the shape the runner
+/// accepts: `newTopic`, the empty prefix, the block, complete verification.
+const ORIGINAL_PLAN: &str = r#"
+name: p151
+source:
+  storage: {backend: filesystem, path: /tmp/logweir-p151-archive}
+  backup: latestCompleted
+  topics: [orders]
+target:
+  bootstrap_servers: ["127.0.0.1:19099"]
+  mode: newTopic
+  topic_mapping_prefix: "drill-"
+  topic_naming: {prefix: "", original_name: {owners: []}}
+sample:
+  window_start: 2026-01-01T00:00:00Z
+  window_end: 2026-01-02T00:00:00Z
+  records_per_partition: 25
+  coverage: complete
+objectives: {rto_seconds: 1800, pass_rate: 1.0}
+evidence: {backend: filesystem, path: /tmp/logweir-p151-evidence}
+"#;
+
+/// A one-person confirmation of `plan`, carrying the `originalName` subject
+/// and the typed topic names, declaring `format_version`.
+fn subject_document(plan: &str, format_version: &str) -> RestoreAuthorization {
+    let mut doc = document(ApprovalMode::Ordinary);
+    doc.plan_hash = sha256_prefixed(plan.as_bytes());
+    doc.format_version = format_version.into();
+    doc.approval_subject = Some("originalName".into());
+    doc.original_name_confirmation = Some(logweir_core::original_name::OriginalNameConfirmation {
+        typed_topics: vec!["orders".into()],
+    });
+    doc
+}
+
+/// **The real runner reads format 2.1.0, and refuses the subject under
+/// 2.0.0.** The same one-person confirmation of an original-name plan —
+/// `approvalSubject`, the typed names, the console's signature over the exact
+/// bytes — at 2.1.0 gets past every authorization check (and fails later: no
+/// broker listens); declared as 2.0.0 it is refused, exit 3, naming the
+/// version the fields are defined from, before any client is constructed.
+/// KILLS: a runner that reads the subject out of a document older than the
+/// subject; a runner that refuses 2.1.0.
+#[test]
+fn the_real_runner_reads_format_2_1_0_and_refuses_the_subject_under_2_0_0() {
+    let k = keys();
+    // 2.1.0: admitted.
+    let doc = subject_document(ORIGINAL_PLAN, "2.1.0");
+    assert_eq!(
+        logweir_core::approval_policy::restore_authorization_format_version_for(
+            doc.approval_subject.as_deref(),
+            doc.original_name_confirmation.as_ref()
+        ),
+        "2.1.0",
+        "the version the writer gives this document"
+    );
+    let m = mount_with(
+        &k,
+        ApprovalMode::Ordinary,
+        false,
+        ORIGINAL_PLAN,
+        &doc.to_bytes(),
+    );
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    for refusal in AUTHORIZATION_REFUSALS {
+        assert!(
+            !transcript.contains(refusal),
+            "{refusal} (exit {code}):\n{transcript}"
+        );
+    }
+    assert!(
+        !transcript.contains("no data operation was started"),
+        "every startup guard passed; the run must fail LATER (exit {code}):\n{transcript}"
+    );
+    assert!(
+        !transcript.contains("defined from formatVersion"),
+        "{transcript}"
+    );
+    assert_ne!(code, 0, "no broker is running");
+
+    // 2.0.0: refused, by name, before anything is dialled.
+    let old = subject_document(ORIGINAL_PLAN, "2.0.0");
+    let m = mount_with(
+        &k,
+        ApprovalMode::Ordinary,
+        false,
+        ORIGINAL_PLAN,
+        &old.to_bytes(),
+    );
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("defined from formatVersion 2.1.0"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("no data operation was started"),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("19099"),
+        "no broker was dialled:\n{transcript}"
+    );
+}
+
+/// **A runner built BEFORE the subject refuses every 2.1.0 document.** Run
+/// with `LOGWEIR_OLDER_RUNNER_BIN=<a logweir built from main>`; without it
+/// the row measures nothing and says so (CI has no older binary).
+///
+/// - A 2.1.0 document — which always carries `approvalSubject` or the typed
+///   names — over an ORDINARY plan the older runner would otherwise run: exit
+///   3, `unknown field`, before any client exists. It never reads the
+///   document as an ordinary authorization.
+/// - The same over an original-name plan: refused too.
+/// - CONTROL: the 2.0.0 document this build writes for an ordinary restore is
+///   still admitted by the older runner (it fails later, on the broker).
+#[test]
+fn an_older_runner_refuses_every_2_1_0_document() {
+    let Some(older) = std::env::var_os("LOGWEIR_OLDER_RUNNER_BIN") else {
+        eprintln!(
+            "an_older_runner_refuses_every_2_1_0_document: LOGWEIR_OLDER_RUNNER_BIN is not set, \
+             so no older runner was measured"
+        );
+        return;
+    };
+    let older = std::path::PathBuf::from(older);
+    assert!(older.is_file(), "{} is not a file", older.display());
+    let k = keys();
+    for (label, plan) in [
+        ("an ordinary plan", PLAN),
+        ("an original-name plan", ORIGINAL_PLAN),
+    ] {
+        let doc = subject_document(plan, "2.1.0");
+        let m = mount_with(&k, ApprovalMode::Ordinary, false, plan, &doc.to_bytes());
+        let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+        println!("older runner, a 2.1.0 document over {label}: exit {code}\n{transcript}");
+        assert_eq!(code, 3, "{label}: {transcript}");
+        assert!(
+            !transcript.contains("19099"),
+            "{label}: no broker was dialled:\n{transcript}"
+        );
+        if plan == PLAN {
+            assert!(
+                transcript.contains("unknown field `approvalSubject`"),
+                "{label}: {transcript}"
+            );
+            assert!(
+                transcript.contains("no data operation was started"),
+                "{label}: {transcript}"
+            );
+        }
+    }
+    // The typed names alone (a document this build never writes) are an
+    // unknown field to the older reader too.
+    let mut typed_only = subject_document(PLAN, "2.1.0");
+    typed_only.approval_subject = None;
+    let m = mount_with(
+        &k,
+        ApprovalMode::Ordinary,
+        false,
+        PLAN,
+        &typed_only.to_bytes(),
+    );
+    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+    println!("older runner, typed names alone: exit {code}\n{transcript}");
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("unknown field `originalNameConfirmation`"),
+        "{transcript}"
+    );
+
+    // CONTROL: this build's 2.0.0 document for an ordinary restore.
+    let ordinary = document(ApprovalMode::Ordinary);
+    assert_eq!(ordinary.format_version, "2.0.0");
+    let m = mount_with(
+        &k,
+        ApprovalMode::Ordinary,
+        false,
+        PLAN,
+        &ordinary.to_bytes(),
+    );
+    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+    println!("older runner, a 2.0.0 ordinary document: exit {code}\n{transcript}");
+    assert!(
+        !transcript.contains("no data operation was started"),
+        "the older runner admits a 2.0.0 document (exit {code}):\n{transcript}"
+    );
+    assert_ne!(code, 0, "no broker is running");
 }

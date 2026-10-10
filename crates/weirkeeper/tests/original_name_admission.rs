@@ -22,8 +22,8 @@ const NAME: &str = "rst-original";
 const UID: &str = "5c2e7b91-0000-4000-8000-0000000000b1";
 const APPROVAL: &str = "a1";
 
-/// An original-name plan in the runner's grammar: `newTopic`, `prefix: ""`
-/// and the block.
+/// An original-name plan in the runner's grammar: `newTopic`, `prefix: ""`,
+/// the block, and the COMPLETE verification such a restore requires.
 const ORIGINAL_PLAN: &str = "\
 source:
   storage:
@@ -46,6 +46,7 @@ restore:
 sample:
   window_start: \"2026-09-07T12:00:00Z\"
   window_end: \"2026-09-07T15:00:00Z\"
+  coverage: complete
 objectives: {}
 evidence:
   backend: s3
@@ -54,12 +55,20 @@ evidence:
   region: us-east-1
 ";
 
-/// The same restore under a new name: an ordinary plan.
+/// The same restore under a new name: an ordinary plan (sampled, as an
+/// ordinary plan may be).
 fn ordinary_plan() -> String {
-    ORIGINAL_PLAN.replace(
-        "    prefix: \"\"\n    original_name:\n      owners: []\n",
-        "    prefix: \"restore-\"\n",
-    )
+    ORIGINAL_PLAN
+        .replace(
+            "    prefix: \"\"\n    original_name:\n      owners: []\n",
+            "    prefix: \"restore-\"\n",
+        )
+        .replace("  coverage: complete\n", "")
+}
+
+/// The original-name plan WITHOUT `sample.coverage: complete`.
+fn sampled_original_plan() -> String {
+    ORIGINAL_PLAN.replace("  coverage: complete\n", "")
 }
 
 fn restore(plan: &str, declared: Option<bool>, prefix: &str) -> Restore {
@@ -67,7 +76,7 @@ fn restore(plan: &str, declared: Option<bool>, prefix: &str) -> Restore {
     if let Some(d) = declared {
         naming["originalName"] = serde_json::json!(d);
     }
-    serde_json::from_value(serde_json::json!({
+    let mut object = serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
         "metadata": { "name": NAME, "namespace": NS, "uid": UID, "generation": 1,
@@ -85,8 +94,13 @@ fn restore(plan: &str, declared: Option<bool>, prefix: &str) -> Restore {
             },
             "deadlineSeconds": 1800
         }
-    }))
-    .expect("the fixture is a Restore")
+    });
+    // `spec.coverage` declares what the plan says, as the controller holds it
+    // to (`coverage_agrees`).
+    if plan.contains("  coverage: complete\n") {
+        object["spec"]["coverage"] = serde_json::json!("complete");
+    }
+    serde_json::from_value(object).expect("the fixture is a Restore")
 }
 
 fn original_restore() -> Restore {
@@ -279,14 +293,60 @@ fn the_declaration_must_say_what_the_plan_says() {
     assert!(original_name_agrees(&restore("not: [a plan", None, "x-")).is_ok());
 }
 
-/// The CRD's CEL rule keeps the declaration beside the only target it
-/// describes. KILLS: a rule that admits `originalName` in scratch mode or
-/// beside a prefix.
+/// **An original-name restore requires complete verification, and the
+/// controller says so before any Job** (the orchestrator's ruling of
+/// 2026-10-09). A Restore whose plan carries the block without
+/// `sample.coverage: complete` is refused terminally, `ExecutionSpecInvalid`,
+/// its message opening with the runner's own token; the same plan asking for
+/// complete coverage agrees. CONTROL: a sampled ORDINARY plan agrees as it
+/// always did. KILLS: an admission that leaves the sampled plan to the
+/// runner (a Job, an approval asked for, then exit 3); applying the rule to
+/// a prefixed restore.
+#[test]
+fn a_sampled_original_name_restore_is_refused_before_any_job() {
+    use weirkeeper::controllers::restore::coverage_agrees;
+
+    let sampled = restore(&sampled_original_plan(), Some(true), "");
+    // The declaration agrees with the plan on both counts...
+    assert!(coverage_agrees(&sampled).is_ok());
+    // ... and the plan itself is what is refused.
+    match original_name_agrees(&sampled) {
+        Err(RestoreError::Refused(state, message)) => {
+            assert_eq!(state, TERMINAL_STATE_EXECUTION_SPEC_INVALID);
+            assert!(
+                message.starts_with("OriginalNameNeedsCompleteCoverage: "),
+                "{message}"
+            );
+            assert!(message.contains("no Job was created"), "{message}");
+        }
+        other => panic!("expected ExecutionSpecInvalid, got {other:?}"),
+    }
+    let complete = original_restore();
+    assert!(coverage_agrees(&complete).is_ok());
+    assert!(original_name_agrees(&complete).is_ok());
+    // CONTROL: an ordinary sampled restore is what it always was.
+    let ordinary = restore(&ordinary_plan(), None, "restore-");
+    assert!(coverage_agrees(&ordinary).is_ok());
+    assert!(original_name_agrees(&ordinary).is_ok());
+}
+
+/// The CRD's CEL rules keep the declaration beside the only target it
+/// describes and the only verification it may run with. KILLS: a rule that
+/// admits `originalName` in scratch mode, beside a prefix, or without
+/// `coverage: complete`.
 #[test]
 fn the_cel_rule_ties_the_declaration_to_new_topic_and_the_empty_prefix() {
-    use weirkeeper::crds::restore::{ORIGINAL_NAME_RULE, SPEC_RULES};
+    use weirkeeper::crds::restore::{ORIGINAL_NAME_COVERAGE_RULE, ORIGINAL_NAME_RULE, SPEC_RULES};
     assert!(SPEC_RULES.iter().any(|r| r.rule == ORIGINAL_NAME_RULE));
     assert!(ORIGINAL_NAME_RULE.contains("self.target.mode == 'newTopic'"));
     assert!(ORIGINAL_NAME_RULE.contains("self.target.topicNaming.prefix == ''"));
     assert!(ORIGINAL_NAME_RULE.starts_with("!has(self.target.topicNaming.originalName)"));
+    assert!(SPEC_RULES
+        .iter()
+        .any(|r| r.rule == ORIGINAL_NAME_COVERAGE_RULE));
+    assert_eq!(
+        ORIGINAL_NAME_COVERAGE_RULE,
+        "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName \
+         || (has(self.coverage) && self.coverage == 'complete')"
+    );
 }

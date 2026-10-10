@@ -452,8 +452,26 @@ pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnprove
 /// **PROD-15.1 review M4.** A restore whose creation step lost a race: a
 /// mapped target name phase 0 proved absent existed when the run came to
 /// create it. Exit 1 (phases 0–5 ran); the runner names what appeared and
-/// what it created and removed or left on its `target-topics-appeared=` line.
+/// what it created and LEFT on its `target-topics-appeared=` line. Nothing is
+/// deleted.
 pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TARGET_TOPIC_APPEARED;
+
+/// **PROD-15.1.** A restore whose creation step stopped for a reason other
+/// than a race AFTER this execution had created a topic (a broker refused
+/// another name, answered short, or did not serve a created topic in time).
+/// Exit 1; the topics it created are named on `target-topics-appeared=` and
+/// left in place, empty.
+pub const TERMINAL_STATE_CREATED_TOPICS_LEFT: &str = "CreatedTopicsLeft";
+
+/// What EVERY surface says about a topic a stopped creation step created and
+/// left — the runner's message, the Restore's status, the product API and the
+/// console. One sentence, in one place: it is the whole instruction the
+/// operator gets, because Logweir itself never deletes such a topic (Kafka
+/// has no conditional delete, so a record a producer wrote between an "it is
+/// empty" read and the delete would be lost under a production name).
+pub const LEFT_TOPIC_SENTENCE: &str =
+    "created by this restore and left empty; remove it yourself once you have checked nothing \
+     writes to it";
 
 /// The stdout line a runner prints, LAST, when a non-refusal failure (exit 1
 /// or 4) has a state more specific than its code — the exit-1/4 twin of I9's
@@ -466,10 +484,11 @@ pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 /// into `status.exitReason` only when the pair is on this list, so a noisy or
 /// newer runner cannot put an arbitrary string on the object, and a claimed
 /// execution can never be reported under the exit code of an unproven one.
-pub const FAILURE_REASONS: [(&str, i32); 3] = [
+pub const FAILURE_REASONS: [(&str, i32); 4] = [
     (TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, 1),
     (TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN, 4),
     (TERMINAL_STATE_TARGET_TOPIC_APPEARED, 1),
+    (TERMINAL_STATE_CREATED_TOPICS_LEFT, 1),
 ];
 
 /// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.
