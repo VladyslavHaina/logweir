@@ -2178,6 +2178,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a retention status says what the per-run ceiling held back",
             "truncatedByCap",
         ),
+        // FX-27 and FX-42 (2026-10-10, item 59): every engine document turns
+        // the engine's metrics server off; the key it renders.
+        (
+            "the engine's metrics port stays closed",
+            "metrics: {enabled: false}",
+        ),
     ];
     assert_eq!(
         items.len(),
