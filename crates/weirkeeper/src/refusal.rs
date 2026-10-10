@@ -131,9 +131,10 @@ pub enum RunnerReason {
     /// The runner's own reason code and sentence, validated and cleaned.
     Stated(RefusalDetail),
     /// Nothing in the log is this Job's runner's reason: the Job has no line
-    /// token (an older controller built it), or no line carries the Job's
-    /// token (an older runner, or lines that are not the runner's). The
-    /// condition is exactly what it was before the line existed.
+    /// token (a controller from before FX-34 built it, or the random source
+    /// gave none), or no line in the tail carries the Job's token (the
+    /// `refusal-detail=` lines there are not the runner's, or there are
+    /// none). The condition is exactly what it was before the line existed.
     NotStated,
     /// A line carries the Job's token, so the runner wrote it, and it did not
     /// validate: a code outside the run's closed set, nothing printable in
@@ -157,7 +158,7 @@ pub enum RunnerReason {
 impl RunnerReason {
     /// What the terminal condition's message says AFTER its "the runner
     /// exited 3 (guard-refused); …" text. Empty for [`Self::NotStated`], which
-    /// is what keeps an older runner's condition byte-identical.
+    /// is what keeps the condition of a Job with no token byte-identical.
     ///
     /// A pure function of the observation, with no clock and no counter in
     /// it: a pass that recomputes the status of the same finished Job
@@ -211,8 +212,10 @@ impl RunnerReason {
 ///    JSON object) is not read at all, wherever it stands and however
 ///    well-formed it is: before the runner's line, after it, alone at the
 ///    end of the log.
-/// 3. **No such line**: [`RunnerReason::NotStated`] (an older runner, which
-///    prints none; or a runner that was never given the argument).
+/// 3. **No such line**: [`RunnerReason::NotStated`]. (A runner that does not
+///    know `--line-token` never gets this far under a Job that carries one:
+///    it stops on the flag at exit 1, and this function is asked about exit
+///    3 only. So this is a tail in which the runner's own line is missing.)
 /// 4. The runner's line is then held to what a line always was: a code of
 ///    `run`'s closed set and a cleaned, bounded sentence, and the
 ///    `refusal-reason=` line the runner wrote WITH it (the next one after it

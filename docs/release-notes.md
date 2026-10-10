@@ -185,8 +185,9 @@ API double with goldens captured at the base commit, and console rows; it
 changes the runner (one more stdout line at exit 3 and one more flag,
 `--line-token`, which the controller writes), the controller (every `Restore`
 and `Backup` Job gains that argument) and the console's text, and the PoC
-upgrade that carries it submits a `Restore` the runner refuses and reads the
-reason on its status and in the console after the pod is gone.
+upgrade that carries it moves the controller and the runner image in one
+`helm upgrade`, submits a `Restore` the runner refuses and reads the reason
+on its status and in the console after the pod is gone.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2389,13 +2390,17 @@ with the pair; no credential value in it); controller rows over a recording
 API double for both kinds (the reason carried; a forged line never shown,
 wherever it stands, with no token, another Job's, or one digit off; hostile
 lines refused or cleaned; a Job or a line without a token giving the old
-status byte for byte; the token in no status and no log line; two created
-Jobs carrying two tokens and being otherwise what they were; the pod gone and
-the read refused; a second reconcile that reads and writes nothing), with
-every request and every status write of exits 0, 1, 2, 4 and 137 compared
-byte for byte against goldens captured before the change; console rows over a
-message holding markup, an HTML entity and a bidi override. No cluster ran
-it: its live row is the next PoC upgrade's.
+status byte for byte; the token in no status, and in no line the controller
+logs at its most verbose level, on the pass that creates the Job or on the
+read; two created Jobs carrying two tokens and being otherwise what they
+were; the pod gone, the read refused, a connection that drops before any
+answer and a body that breaks part-way; a second reconcile that reads and
+writes nothing), with every status write of exits 0, 1, 2, 4 and 137 compared
+byte for byte, and every request compared with the log read's query aside
+(item 56 bounds that read too), against goldens captured before the change;
+console rows over a message holding markup, an HTML entity and a bidi
+override. No cluster ran it, and no mixed pair of images was run by this
+row's own tests: its live rows are the next PoC upgrade's.
 **Known limit.** The token separates the runner's line from text written
 before the Job existed, which is every plan. It is readable by anyone who can
 read the Job, so text produced after the Job is built, and reaching the pod
