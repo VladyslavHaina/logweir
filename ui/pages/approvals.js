@@ -1471,7 +1471,7 @@ export const TWO_PERSON_ORIGINAL_NAME_SENTENCE =
   "the requester states below: approving accepts that statement.";
 
 /** REVIEW S-1: the requester's owner statement, as the plan signs it, in
- *  plain sentences -- the three cases of `owners`, and the owner path. Every
+ *  plain sentences -- the three cases of `owners`, and `owner_path`. Every
  *  value is escaped text. */
 export function ownerStatementBlock(statement) {
   const st = statement || {};
@@ -1483,7 +1483,8 @@ export function ownerStatementBlock(statement) {
   }).join("");
   let words;
   if (st.ownerPath === true) {
-    words = "<strong>Owner path:</strong> the requester states that each declarative owner's " +
+    words = "<strong>Restore despite an owner (owner_path):</strong> the requester states that " +
+      "each declarative owner's " +
       "reconciliation is paused for this restore and that it adopts the topic afterwards; the " +
       "restore writes under these names although an owner manages them" +
       (owners !== null && owners.length > 0
@@ -1498,7 +1499,7 @@ export function ownerStatementBlock(statement) {
       "KafkaTopic, a GitOps or Terraform definition) manages any of these names. Nothing in " +
       "the console checks this statement: approving accepts it.";
   } else {
-    words = "The requester states these declarative owners and does not choose the owner path, " +
+    words = "The requester states these declarative owners and does not set owner_path, " +
       "so the run will refuse before it writes anything:</p><ul class=\"sets\">" + listed +
       "</ul><p class=\"note\">";
   }

@@ -376,7 +376,7 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
     owners: [{ topic: "orders", kind: "strimzi", reference: "kafka/<orders>" }],
   };
   const pathHtml = renderConsoleApprovalPanel(view(TWO_PERSON, { request: path }));
-  assert.ok(pathHtml.includes("<strong>Owner path:</strong>"), pathHtml);
+  assert.ok(pathHtml.includes("<strong>Restore despite an owner (owner_path):</strong>"), pathHtml);
   assert.ok(pathHtml.includes("<li><code>orders</code> (strimzi <code>kafka/&lt;orders&gt;</code>)" +
     "</li>"), pathHtml);
   assert.ok(!pathHtml.includes("<strong>no declarative owner</strong>"));
@@ -388,7 +388,7 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
   const owned = structuredClone(path);
   owned.scope.target.ownerStatement.ownerPath = false;
   assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: owned }))
-    .includes("does not choose the owner path, so the run will refuse"));
+    .includes("does not set owner_path, so the run will refuse"));
   // An ordinary restore carries no statement and shows none.
   assert.ok(!/id="scope-owner-statement"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
 });
