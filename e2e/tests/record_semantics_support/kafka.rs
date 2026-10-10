@@ -467,7 +467,9 @@ pub fn read_archive(backup_id: &str, topic: &str) -> Result<Archive, String> {
         logweir_engine_oso::storage::Store::read_only_from_url(&archive_location(backup_id))
             .map_err(|e| format!("store for {backup_id}: {e:?}"))?;
     let mk = manifest_key(backup_id);
-    let (manifest_bytes, _) = store.get(&mk).map_err(|e| format!("{mk}: {e:?}"))?;
+    let (manifest_bytes, _) = store
+        .get_capped(&mk, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+        .map_err(|e| format!("{mk}: {e:?}"))?;
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest_bytes).map_err(|e| format!("{mk}: {e}"))?;
     let mut segments = Vec::new();
@@ -499,7 +501,10 @@ pub fn read_archive(backup_id: &str, topic: &str) -> Result<Archive, String> {
                 };
                 let qualified = store.qualify(&key);
                 let (bytes, _) = store
-                    .get(&qualified)
+                    .get_capped(
+                        &qualified,
+                        logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+                    )
                     .map_err(|e| format!("{qualified}: {e:?}"))?;
                 let decoded = logweir_engine_oso::kbak::decode_segment(&bytes)
                     .map_err(|e| format!("{qualified}: {e:?}"))?;
@@ -533,7 +538,13 @@ pub fn manifest_bytes(backup_id: &str) -> Option<Vec<u8>> {
     let store =
         logweir_engine_oso::storage::Store::read_only_from_url(&archive_location(backup_id))
             .ok()?;
-    store.get(&manifest_key(backup_id)).ok().map(|(b, _)| b)
+    store
+        .get_capped(
+            &manifest_key(backup_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .ok()
+        .map(|(b, _)| b)
 }
 
 /// Run `cmd` to completion or kill it after `secs`, reading both pipes

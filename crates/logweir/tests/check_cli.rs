@@ -219,6 +219,11 @@ struct ObjectState {
     /// principal was only ever asked to create one key") is an assertion and
     /// not a reading of the code.
     calls: Vec<String>,
+    /// FX-31: every read's key and the cap it was made with, in call order —
+    /// so "this read is bounded by THAT cap" is an assertion too.
+    read_caps: Vec<(String, u64)>,
+    /// FX-31: sizes the store reports for keys, over their real bytes.
+    reported_sizes: BTreeMap<String, u64>,
     prefix: String,
     /// FX-7: a key's VERSION history, oldest first; the last entry is the
     /// current version, and its bytes are also the key's entry in `objects`.
@@ -247,6 +252,17 @@ impl FakeObjects {
             .unwrap()
             .objects
             .insert(key.to_string(), bytes.to_vec());
+        self
+    }
+
+    /// FX-31: the store REPORTS `size` for `key`, whatever its bytes are —
+    /// so a row can hold a multi-gigabyte object without allocating one.
+    fn reporting_size(self, key: &str, size: u64) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .reported_sizes
+            .insert(key.to_string(), size);
         self
     }
 
@@ -316,22 +332,52 @@ impl FakeObjects {
     fn calls(&self) -> Vec<String> {
         self.state.lock().unwrap().calls.clone()
     }
+
+    fn read_caps(&self) -> Vec<(String, u64)> {
+        self.state.lock().unwrap().read_caps.clone()
+    }
+}
+
+/// `Store::get_capped`'s first fence, in memory (FX-31): an object over the
+/// caller's cap is `TooLarge` and its bytes are not handed back.
+fn within_cap(key: &str, bytes: Vec<u8>, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    let size = bytes.len() as u64;
+    if size > max_bytes {
+        return Err(StoreError::TooLarge {
+            key: key.to_string(),
+            cap: max_bytes,
+            observed: logweir_engine_oso::storage::OverCap::Reported(size),
+        });
+    }
+    Ok(bytes)
 }
 
 impl ObjectAccess for FakeObjects {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(format!("get {key}"));
+        s.read_caps.push((key.to_string(), max_bytes));
         if let Some(f) = s.key_faults.get(key) {
             return Err(f.to_error(key));
         }
         if let Some(f) = &s.get_fault {
             return Err(f.to_error(key));
         }
-        s.objects
+        let bytes = s
+            .objects
             .get(key)
             .cloned()
-            .ok_or_else(|| StoreError::NotFound(key.to_string()))
+            .ok_or_else(|| StoreError::NotFound(key.to_string()))?;
+        if let Some(&size) = s.reported_sizes.get(key) {
+            if size > max_bytes {
+                return Err(StoreError::TooLarge {
+                    key: key.to_string(),
+                    cap: max_bytes,
+                    observed: logweir_engine_oso::storage::OverCap::Reported(size),
+                });
+            }
+        }
+        within_cap(key, bytes, max_bytes)
     }
 
     /// `Store::list_page`'s contract, in memory: ascending keys under
@@ -392,8 +438,12 @@ impl ObjectAccess for FakeObjects {
     }
 
     /// FX-7: the current version, when the key has a history.
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        let bytes = self.get(key)?;
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        let bytes = self.get(key, max_bytes)?;
         let s = self.state.lock().unwrap();
         let current = s
             .versions
@@ -405,10 +455,11 @@ impl ObjectAccess for FakeObjects {
 
     /// FX-7: one retained version by id; an unversioned key cannot be read by
     /// version at all, which is an error and never the current bytes.
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
         let at = format!("{key}?versionId={version}");
         s.calls.push(format!("get {at}"));
+        s.read_caps.push((at.clone(), max_bytes));
         // A fault scoped to ONE version read (FX-7 fix round): `failing_key`
         // with the `<key>?versionId=<id>` spelling.
         if let Some(f) = s.key_faults.get(&at) {
@@ -422,7 +473,8 @@ impl ObjectAccess for FakeObjects {
                 .iter()
                 .find(|(id, _)| id == version)
                 .map(|(_, bytes)| bytes.clone())
-                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}"))),
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")))
+                .and_then(|bytes| within_cap(&at, bytes, max_bytes)),
         }
     }
 }
@@ -436,8 +488,8 @@ impl ObjectAccess for FakeObjects {
 struct SharedStore(Arc<logweir_engine_oso::storage::Store>);
 
 impl ObjectAccess for SharedStore {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        ObjectAccess::get(&*self.0, key)
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get(&*self.0, key, max_bytes)
     }
     fn list_page(
         &self,
@@ -453,11 +505,15 @@ impl ObjectAccess for SharedStore {
     fn qualify(&self, relative_key: &str) -> String {
         ObjectAccess::qualify(&*self.0, relative_key)
     }
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        ObjectAccess::get_with_version(&*self.0, key)
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        ObjectAccess::get_with_version(&*self.0, key, max_bytes)
     }
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
-        ObjectAccess::get_version(&*self.0, key, version)
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get_version(&*self.0, key, version, max_bytes)
     }
 }
 
@@ -2438,6 +2494,39 @@ fn a_separated_evidence_read_principal_that_can_read_is_green_whatever_the_desti
     );
 }
 
+/// **FX-31: the readiness probe reads no body.** It GETs a key nobody wrote
+/// under `caps::PROBE` (0 bytes); when an object IS there, the store's answer
+/// (refused unread, over the cap) still proves the grant, and is green.
+///
+/// KILLS: "the probe reads whatever is at the key" (the cap is not 0);
+/// "TooLarge is a refusal" (the row turns `notReady`/unclassified).
+#[test]
+fn the_evidence_probe_reads_no_body_and_a_planted_object_still_proves_the_grant() {
+    let m = mount(&read_plan(Some(GrantRef::static_secret(
+        EVIDENCE_READ_SECRET,
+    ))));
+    let probe_key = logweir::check::store::absent_probe_key(DEST_UID);
+    let reader = FakeObjects::new().with_object(&probe_key, &vec![b'x'; 1 << 20]);
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+            .with_role(DestinationRole::EvidenceRead, FakeObjects::new())
+            .with_evidence_reader(reader.clone()),
+    );
+    let row = run.row(CheckId::DestinationEvidenceReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::EvidenceReadable),
+        "{row:?}"
+    );
+    assert_eq!(
+        reader.read_caps(),
+        vec![(probe_key, logweir_engine_oso::storage::caps::PROBE)],
+        "the probe's one GET reads no body"
+    );
+}
+
 /// A grant no check pod holds — the controller's identity, or none at all —
 /// is answered `unknown` with NO request by anybody.
 ///
@@ -3221,11 +3310,47 @@ fn an_evidence_fetch_tells_absence_from_denial() {
     assert_eq!(e.code, Some(CheckCode::AccessDenied));
 }
 
+/// **FX-31: an object over `maxBytes` is never read past the cap.** It is
+/// reported present and `truncated`, with NO bytes relayed and no digest: the
+/// controller refuses a truncated object whatever was relayed, so a prefix was
+/// never worth relaying, and the read itself is made UNDER the plan's cap (the
+/// fake records it), where the pre-FX-31 Job read the whole object and then cut
+/// it. An object exactly at the cap is relayed whole.
+///
+/// KILLS: "read whole, then truncate" (the read's cap is not `maxBytes`);
+/// "relay a prefix" (a stream and a digest appear).
 #[test]
-fn an_evidence_fetch_truncates_at_max_bytes_and_says_so() {
+fn an_evidence_fetch_over_max_bytes_is_truncated_relays_nothing_and_reads_under_the_cap() {
     let key = "logweir/backups/20260916/receipt.json";
     let body = vec![b'x'; 4096];
     let m = mount(&fetch_plan(key, 100));
+    let objects = FakeObjects::new().with_object(key, &body);
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_role(DestinationRole::EvidenceRead, objects.clone()),
+    );
+    let e = &run.result().evidence[0];
+    assert!(e.present, "the object is there");
+    assert!(e.truncated, "and over the plan's cap");
+    assert_eq!(e.bytes, None, "nothing was relayed for it");
+    assert_eq!(e.sha256, None, "so there is no digest to declare");
+    assert_eq!(e.code, None);
+    assert!(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::EvidencePayload)
+            .is_none(),
+        "no prefix is relayed"
+    );
+    assert_eq!(
+        objects.read_caps(),
+        vec![(key.to_string(), 100)],
+        "the read itself is bounded by the plan's maxBytes"
+    );
+
+    // AT the cap: relayed whole.
+    let m = mount(&fetch_plan(key, 4096));
     let run = drive(
         &m,
         &FakeWiring::default().with_role(
@@ -3234,22 +3359,30 @@ fn an_evidence_fetch_truncates_at_max_bytes_and_says_so() {
         ),
     );
     let e = &run.result().evidence[0];
-    assert!(e.truncated, "a prefix is not the object");
-    assert_eq!(e.bytes, Some(100));
-    assert_eq!(
-        run.relay
-            .as_ref()
-            .unwrap()
-            .stream(Stream::EvidencePayload)
-            .unwrap()
-            .len(),
-        100
-    );
-    assert_eq!(
-        e.sha256.as_deref(),
-        Some(logweir_core::ids::sha256_prefixed(&body[..100]).as_str()),
-        "the declared digest is the digest of what was RELAYED"
-    );
+    assert!(!e.truncated);
+    assert_eq!(e.bytes, Some(4096));
+}
+
+/// The same refusal through a REAL `Store` that reports a small size and
+/// streams more: the running cap cuts it off, and the relay is the same
+/// truncated, byte-less answer.
+#[test]
+fn an_evidence_fetch_from_a_store_that_misreports_its_size_relays_nothing() {
+    let key = "logweir/backups/20260916/receipt.json";
+    let (store, _meter) =
+        logweir_engine_oso::storage::Store::in_memory_misreporting_size("logweir/", 10);
+    store
+        .put_create_only(key, &vec![b'x'; 4096])
+        .expect("the fixture is written");
+    let m = mount(&fetch_plan(key, 100));
+    let wiring = FakeWiring {
+        shared_store: Some(Arc::new(store)),
+        ..FakeWiring::default()
+    };
+    let run = drive(&m, &wiring);
+    let e = &run.result().evidence[0];
+    assert!(e.present && e.truncated, "{e:?}");
+    assert_eq!((e.bytes, e.sha256.as_deref()), (None, None));
 }
 
 /// A handle that will not build fails every object with one code, and no
@@ -3844,6 +3977,47 @@ fn an_unreadable_manifest_names_the_prefixed_key() {
     );
 }
 
+/// **FX-31: a manifest over the read cap is refused unread, and the row
+/// NAMES the cap** — Logweir's own sentence, never the backend's text.
+#[test]
+fn a_manifest_over_the_read_cap_is_refused_naming_the_cap() {
+    use logweir_engine_oso::storage::caps;
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let objects = FakeObjects::new()
+        .with_prefix(ARCHIVE_PREFIX)
+        .with_object(MANIFEST_OBJECT_KEY, b"{}")
+        .reporting_size(MANIFEST_OBJECT_KEY, 5 << 30);
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(FakeProbe::new())
+            .with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_ne!(row.state, CheckState::Ready, "{row:?}");
+    assert!(
+        row.message.contains(&format!(
+            "larger than the {}-byte read cap for a manifest",
+            caps::MANIFEST
+        )),
+        "the row names the cap: {}",
+        row.message
+    );
+    assert_eq!(
+        objects.read_caps(),
+        vec![(MANIFEST_OBJECT_KEY.to_string(), caps::MANIFEST)],
+        "one read, under the manifest cap"
+    );
+    // REVIEW F7: nothing refused, so the remedy does not blame the store.
+    assert!(
+        row.remedy.contains("larger than this build reads")
+            && !row.remedy.contains("does not classify"),
+        "{row:?}"
+    );
+}
+
 /// The bound arithmetic is the execution guard's, including the
 /// `saturating_sub` that keeps the Apache default from wrapping into the
 /// future.
@@ -4095,7 +4269,10 @@ fn the_pure_manifest_window_agrees_with_the_store() {
     })
     .unwrap();
     let facts = store
-        .manifest_facts(&format!("kafka-backups/{BACKUP_ID}/manifest.json"))
+        .manifest_facts(
+            &format!("kafka-backups/{BACKUP_ID}/manifest.json"),
+            logweir_engine_oso::storage::caps::CONTROLLER_MANIFEST,
+        )
         .expect("the store reads its own manifest");
     let ours = logweir::check::archive::window(&manifest).expect("a bounded window");
     assert_eq!(ours.oldest_ms, facts.oldest_record_ms);
@@ -5417,6 +5594,100 @@ mod live {
         assert!(
             !run.everything().contains("minioadmin"),
             "the MinIO credential reached a frame"
+        );
+    }
+
+    /// **FX-31, live on the compose MinIO.** An evidence fetch of an object
+    /// over the plan's `maxBytes` reports it present and `truncated`, relays
+    /// NO bytes for it and never reads it; a normal object in the same fetch
+    /// is relayed whole.
+    ///
+    /// The oversized object is seeded here at 4 MiB. For a memory reading,
+    /// where the object must not live in this process, seed it out of process
+    /// and name it in `FX31_LIVE_OVERSIZED_KEY` (`claude/fx-31.result.md` §5
+    /// seeds 768 MiB with `curl --aws-sigv4` and reads this process's peak RSS
+    /// with `/usr/bin/time`).
+    #[test]
+    fn an_evidence_fetch_of_an_oversized_receipt_relays_nothing() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
+        std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
+        let run_id = format!(
+            "fx31-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let url = logweir_core::engine::StorageUrl::S3 {
+            bucket: "kafka-backups".to_string(),
+            prefix: "logweir/".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some(s3_endpoint()),
+            path_style: true,
+            allow_http: true,
+        };
+        let opts = logweir_engine_oso::storage::StoreOptions::static_from_env()
+            .with_request_timeout(std::time::Duration::from_secs(20));
+        let writer = logweir_engine_oso::storage::Store::from_url_with(&url, &opts)
+            .expect("a writable evidence handle over the compose MinIO");
+        let normal_key = format!("logweir/backups/{run_id}/normal.receipt.json");
+        let normal = br#"{"fx31":"a receipt well under the cap"}"#;
+        writer
+            .put_create_only(&normal_key, normal)
+            .expect("the normal object is seeded");
+        let oversized_key = match std::env::var("FX31_LIVE_OVERSIZED_KEY") {
+            Ok(key) => key,
+            Err(_) => {
+                let key = format!("logweir/backups/{run_id}/oversized.receipt.json");
+                writer
+                    .put_create_only(&key, &vec![b' '; 4 << 20])
+                    .expect("the oversized object is seeded");
+                key
+            }
+        };
+
+        let plan = plan_of(CheckRequest::EvidenceFetch(EvidenceFetchRequest {
+            destination: minio_destination("fx31"),
+            objects: vec![
+                EvidenceObjectRequest {
+                    role: DestinationRole::EvidenceRead,
+                    key: oversized_key.clone(),
+                    max_bytes: 1024 * 1024,
+                    stream: Stream::EvidencePayload,
+                },
+                EvidenceObjectRequest {
+                    role: DestinationRole::EvidenceRead,
+                    key: normal_key.clone(),
+                    max_bytes: 64 * 1024,
+                    stream: Stream::EvidenceSidecar,
+                },
+            ],
+        }));
+        let m = mount(&plan);
+        let run = drive_live(&m);
+        assert_eq!(run.code, ExitCode::Ok, "stdout:\n{}", run.stdout);
+        let evidence = &run.result().evidence;
+        eprintln!("[fx31-live] evidence-fetch result: {evidence:?}");
+        let big = evidence
+            .iter()
+            .find(|e| e.key == oversized_key)
+            .expect("an answer for the oversized object");
+        assert!(big.present && big.truncated, "{big:?}");
+        assert_eq!((big.bytes, big.sha256.as_deref()), (None, None), "{big:?}");
+        let relay = run.relay.as_ref().expect("the relay decodes");
+        assert!(
+            relay.stream(Stream::EvidencePayload).is_none(),
+            "no byte of the oversized object was relayed"
+        );
+        let small = evidence
+            .iter()
+            .find(|e| e.key == normal_key)
+            .expect("an answer for the normal object");
+        assert!(small.present && !small.truncated, "{small:?}");
+        assert_eq!(
+            relay.stream(Stream::EvidenceSidecar),
+            Some(&normal[..]),
+            "the normal object is relayed whole"
         );
     }
 }
@@ -8738,6 +9009,54 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
         1,
         "{body}"
     );
+}
+
+/// **FX-31: the catalog walk READS under its caps**, not only measures after:
+/// the record and the receipt under `MAX_CATALOG_DOCUMENT_BYTES`, the sidecar
+/// under `caps::SIDECAR`, the manifest under `caps::MANIFEST`. The row above
+/// holds the outcome (`Unreadable`), which the post-read ceiling alone would
+/// also give; this one holds the read.
+///
+/// KILLS: "the walk reads uncapped" (any of the four caps).
+#[test]
+fn a_catalog_walk_reads_every_document_under_its_cap() {
+    use logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES;
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(FakeObjects::new(), &f);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    assert_eq!(
+        summary_of(&body_of(&run), "catalog-counts=")["available"],
+        1,
+        "the point reads"
+    );
+    let document = MAX_CATALOG_DOCUMENT_BYTES as u64;
+    let caps_read = objects.read_caps();
+    let cap_of = |key: &str| {
+        caps_read
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("{key} was not read: {caps_read:?}"))
+    };
+    assert_eq!(cap_of(&f.record_key), document);
+    assert_eq!(cap_of(&f.receipt_key), document);
+    assert_eq!(cap_of(&f.sidecar_key), caps::SIDECAR);
+    for (key, cap) in &caps_read {
+        assert!(
+            *cap <= caps::MANIFEST,
+            "every catalog read is bounded: {key} at {cap}"
+        );
+    }
 }
 
 /// **F5.** A walk stopped by the object budget says so on the WALK, and no

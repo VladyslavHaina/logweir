@@ -348,6 +348,10 @@ pub struct TrustBasis {
     /// asking the archive again can only get the same answer — so this records
     /// the answer instead of the question. It is never written for a read that
     /// failed, and never beside a `signedAt`.
+    ///
+    /// `overCap` (FX-31) when the store answered with a document larger than
+    /// the controller's read cap: also settled, because the next read would
+    /// answer the same, and the stored verdict is kept on an unverified basis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_time_read: Option<String>,
 }

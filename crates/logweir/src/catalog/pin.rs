@@ -19,7 +19,7 @@
 //! | the read of the pinned version | verdict | binding | deep check |
 //! |---|---|---|---|
 //! | its bytes | [`PinVerdict::Superseded`]: written again HERE after the point was signed | exit 3 | `Conflict` |
-//! | `NotFound` — S3's `404 NoSuchVersion`, and `400 InvalidArgument` for an id the store could never have issued (`Store::get_version`) | [`PinVerdict::Unchecked`] | the digest, and [`UNCHECKED_NOTE`] in the log | the digest, and [`UNCHECKED_NOTE`] in `remedy` |
+//! | `NotFound` — S3's `404 NoSuchVersion`, and `400 InvalidArgument` for an id the store could never have issued (`Store::get_version_capped`) | [`PinVerdict::Unchecked`] | the digest, and [`UNCHECKED_NOTE`] in the log | the digest, and [`UNCHECKED_NOTE`] in `remedy` |
 //! | a store that does not read by version (`StoreError::Backend`) | [`PinVerdict::Unchecked`] | the same | the same |
 //! | any other failure | [`PinVerdict::Unreadable`]: could not tell | exit 1 | `Unreadable` |
 //!
@@ -183,7 +183,7 @@ pub fn judge(
         },
         // NOT THIS BUCKET'S HISTORY. `NotFound` covers S3's `400
         // InvalidArgument` for an id the store could never have issued
-        // (`Store::get_version`); `Backend` is a store that does not read by
+        // (`Store::get_version_capped`); `Backend` is a store that does not read by
         // version at all, which answered with another version or none.
         Err(StoreError::NotFound(_) | StoreError::Backend(_)) => PinVerdict::Unchecked { pinned },
         Err(error) => PinVerdict::Unreadable { pinned, error },

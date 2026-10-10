@@ -901,6 +901,102 @@ same reason.
   bucket is now told so*. A `RetentionPolicy` (§7f) is the per-destination
   answer.
 
+### 7b.4 Every object-store read has a size cap (FX-31)
+
+The controller is one process for every namespace. Until FX-31 it read a
+receipt, a scorecard, a sidecar and a manifest **whole**. A tenant could put a
+multi-gigabyte object at its own receipt or sidecar key, and that object would
+then take the controller's memory every time a reconcile read it. The pod's
+memory limit (`controller.resources.limits.memory`, 512Mi in the chart) would
+OOM-kill the controller for every namespace, and every restart read the
+object again.
+
+Every read now names a cap. Nothing in the tree can read an object whole:
+
+- **The size the store reports is checked first.** That is the GET's
+  `Content-Length` or `Content-Range`, or a filesystem's metadata. An object
+  over the cap is refused there, and no body byte is read.
+- **Then a running cap holds over the stream.** A store that reports a small
+  size and then streams more is cut off at the cap.
+- **An existence test reads no body.** The sidecar's presence is a `HEAD`, and
+  the readiness probe's GET has a 0-byte cap.
+
+| Document | Read by | Cap |
+|---|---|---|
+| Receipt, scorecard (the signed document) | the controller | **1 MiB**, the evidence relay's own cap |
+| DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
+| Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
+| Receipt, scorecard, catalog record | runner, CLI, check Jobs | 64 MiB (the catalog walk keeps its own 256 KiB) |
+| Engine manifest | runner, CLI, check Jobs | 256 MiB |
+| Archived segment | runner, CLI | 1 GiB |
+| Consumer-groups snapshot, engine report | runner, CLI | 64 MiB |
+
+The controller's caps are the evidence relay's. A document is therefore
+verifiable through the controller's own handle (`ControllerIdentity`, or the
+inline-archive handle) exactly when an evidence-fetch Job can relay it.
+
+The 1 MiB cap is also what bounds the controller's parse. The controller reads
+a receipt's window and a scorecard's outcome before any digest check, and a
+document of tiny values parses into about 37 times its size. That figure was
+measured by `crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB.
+
+A manifest is never parsed into a tree. The window is folded as the bytes
+stream past, so the retention report holds at most the 64 MiB it read.
+
+**Concurrent reads share one budget.** A cap bounds one read, and the
+controller runs reconciles concurrently: every schedule reconcile evaluates
+its retention report, and a controller start reconciles every schedule at
+once. So every controller read reserves its worst case out of one
+process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
+it reads, and holds the reservation until its bytes and its parse are freed:
+
+- a receipt or scorecard reserves 40 MiB, its 1 MiB cap plus the parse;
+- a manifest reserves 64 MiB.
+
+A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
+- eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
+  memory under the budget, and 504 MB without it;
+- sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
+
+A degraded store makes evidence reads for every namespace wait on one another.
+The store's own request timeout bounds that wait, and it is the trade the
+controller's four-permit evidence-read pool already makes.
+
+**What an operator sees.** An object over its cap is never a crash and never
+a pass:
+
+| Where | What it says |
+|---|---|
+| `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
+| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
+| A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
+| `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
+| Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
+
+**The limit this sets, measured.** A receipt is two-space pretty JSON. With
+FX-4's configuration coverage, PROD-05.1's 14 semantic entries and PROD-03.0's
+schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic,
+so 1 MiB holds about **250–300 topics**: about 300 with no overrides (a
+300-topic receipt measured 1,034,994 bytes through the runner's own
+serializer), and fewer with per-topic configuration overrides (about 250 with
+five each). A run that
+selects more topics writes a receipt that neither path can verify. It reads
+`NotAttempted` naming the cap, and it is not a recovery point. This was
+already true of every evidence-fetch relay before FX-31. It is new for the
+controller's own handle, where such a receipt used to verify. Under OD-7's
+third case this moves a verdict to the safer side only. Lifting it means
+raising the relay and the controller caps together, with a parse that is
+bounded without the cap. It is proposed as a follow-up row and is not done in
+FX-31.
+
+**A manifest has a limit too.** An engine manifest is about 540 bytes per
+segment, so the retention report's 64 MiB holds about 124,000 segments. At
+Logweir's default 10 MiB segment that is about 1.2 TB in one backup set, and
+about 15 TB at the engine's 128 MiB default. A set whose manifest is larger is
+listed under `skipped` on every report, naming the cap, and is never listed as
+removable. Runner-side reads, such as a drill or a restore preflight, take a
+manifest of up to 256 MiB.
+
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
 **In this build, end to end.** The reconciler resolves the connection, renders
@@ -7273,6 +7369,7 @@ key's validity window?**
 |---|---|---|
 | `trust.basis` is `Current` or `Historical` | a signing time was read from the document and compared to the key's validity window | `Untrusted`, `SignedOutsideValidity`, as before — the document itself carries none |
 | `trust.signingTimeRead: absent` | a re-read completed and the document carried no signing time | the same, and no further read: the answer is on the record |
+| `trust.signingTimeRead: overCap` (FX-31) | the store answered with a document larger than the controller's read cap (§7b.4), so it was not re-read | the stored verdict is kept on an unverified basis, the sentence says the document was not re-read and names the cap, and no further read: the next would answer the same |
 | anything else — no `trust` block, a `trust` block with no `basis`, `None`, `Unverified`, or a spelling a later build invents | nothing has been compared to the window yet | one bounded re-read, then decide |
 
 Only `Current` and `Historical` are reachable through the window comparison, and
@@ -7365,8 +7462,9 @@ changes.
 
 **What it costs.** One `get` and one destination resolution per pre-`signedAt`
 object, then nothing: a successful read writes `signedAt`, a document that
-carries none records `signingTimeRead`, and an attempt that learned nothing is
-barred for fifteen minutes by `retryAfter`. The destination handle is UID-cached
+carries none records `signingTimeRead`, as does one over the controller's read
+cap (`overCap`), and an attempt that learned nothing is barred for fifteen
+minutes by `retryAfter`. The destination handle is UID-cached
 and the installation policy is cached, so the marginal cost is the `get` itself.
 A cluster with many such objects and an unreachable archive pays one failed
 `get` and one small patch per object per quarter hour until the archive answers

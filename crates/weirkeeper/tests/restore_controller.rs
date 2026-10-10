@@ -9202,6 +9202,187 @@ mod p12_controller_read_retry {
             ));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // FX-31 review F3 — the over-cap scorecard, through the reconcile
+    // -----------------------------------------------------------------------
+
+    /// A scorecard oracle that reads through the REAL `observe_scorecard`
+    /// over a store reporting every object at five gibibytes (the
+    /// misreporting double), on a blocking thread as the controller's own
+    /// oracle does; or, while `readable` is false, reads nothing.
+    fn oversized_oracle(
+        store: &Arc<Store>,
+        readable: &Arc<AtomicBool>,
+    ) -> impl Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> {
+        let store = Arc::clone(store);
+        let readable = Arc::clone(readable);
+        move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+            let store = Arc::clone(&store);
+            let readable = readable.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if !readable {
+                    return None;
+                }
+                tokio::task::spawn_blocking(move || {
+                    weirkeeper::controllers::restore::observe_scorecard(&store, &key)
+                })
+                .await
+                .ok()
+                .flatten()
+            })
+        }
+    }
+
+    /// The store whose scorecard is over the controller's cap.
+    ///
+    /// Built on a plain thread (a `Store` drives its own runtime, which this
+    /// async test's thread cannot), and kept alive for the process, as the
+    /// controller keeps its handle: the last `Arc` dropped inside the async
+    /// test would drop that runtime where blocking is not allowed.
+    fn oversized_store() -> Arc<Store> {
+        let store = std::thread::spawn(|| {
+            let (store, _meter) = Store::in_memory_misreporting_size("logweir/", 5 << 30);
+            store
+                .put_create_only(SCORECARD_KEY, &signed_fixture_scorecard())
+                .expect("the scorecard is written");
+            Arc::new(store)
+        })
+        .join()
+        .expect("the store is built");
+        std::mem::forget(Arc::clone(&store));
+        store
+    }
+
+    async fn pass_over(
+        restore: &Restore,
+        oracle: &(dyn Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> + Send + Sync),
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Restore, Vec<Value>, RestoreOutcome) {
+        let terminal = restore
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|p| p == "Succeeded" || p == "Failed");
+        let routes = if terminal {
+            terminal_routes()
+        } else {
+            finished_routes(pod_list_terminated(0), log_body(&i8_tail()), "Complete")
+        };
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore_rereading(
+            restore,
+            &client,
+            oracle,
+            &verdict_oracle(VerificationVerdict::Valid),
+            at,
+            &job::RunnerImage::default(),
+            &logweir_core::approval_policy::ApprovalPolicySet::default(),
+            Some(LEGACY_HANDLE),
+            memory,
+        )
+        .await
+        .expect("the reconcile completes");
+        let statuses = patched_statuses(&bodies.lock().expect("readable"));
+        (fold(restore, &statuses), statuses, outcome)
+    }
+
+    fn inline_restore() -> Restore {
+        serde_json::from_str(&restore_json(
+            &legacy_plan_with_evidence_in("kafka-backups"),
+            APPROVAL,
+            NAME,
+        ))
+        .expect("the fixture is a Restore")
+    }
+
+    /// **THE TERMINAL PASS** (`restore.rs`, the `(Some(detail), Record(_))`
+    /// arm). The scorecard is over the controller's cap: the verdict is
+    /// `NotAttempted` naming the cap, FINAL — no `retryAfter`, no requeue for a
+    /// retry — and no completion, rather than the transient "read no such
+    /// document" that would name the wrong reason and be read again on the
+    /// schedule.
+    ///
+    /// KILLS: the reviewer's C1 (the terminal arm disabled).
+    #[tokio::test]
+    async fn an_oversized_scorecard_at_the_terminal_pass_is_not_attempted_naming_the_cap() {
+        let readable = Arc::new(AtomicBool::new(true));
+        let oracle = oversized_oracle(&oversized_store(), &readable);
+        let memory = ReadMemory::new();
+        let (r, _, outcome) = pass_over(&inline_restore(), &oracle, &memory, now()).await;
+        let status = status_json(&r);
+        let v = &status["evidence"]["verification"];
+        assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("1048576-byte cap weirkeeper reads") && detail.contains(SCORECARD_KEY),
+            "the detail names the cap and the key: {detail}"
+        );
+        assert!(
+            !detail.contains("attempt 2"),
+            "a final verdict schedules no attempt: {detail}"
+        );
+        assert!(
+            status["evidence"]["observation"]["retryAfter"].is_null(),
+            "{status}"
+        );
+        assert_eq!(
+            outcome.requeue,
+            Requeue::AwaitChange,
+            "nothing to come back for"
+        );
+        assert!(status["completion"].is_null(), "{status}");
+    }
+
+    /// **THE CONTROLLER READ PASS** (`restore.rs`, the `(_, None) if
+    /// refused.is_some()` arm). Attempt 1 read nothing and scheduled attempt 2;
+    /// by attempt 2 the scorecard is there and over the cap. Attempt 2 records
+    /// `NotAttempted` naming the cap, FINAL: no `retryAfter`, and no attempt 3.
+    ///
+    /// KILLS: the reviewer's C2 (the read-pass arm disabled: attempt 2 would
+    /// write the transient sentence and schedule attempt 3).
+    #[tokio::test]
+    async fn an_oversized_scorecard_at_a_scheduled_read_is_not_attempted_naming_the_cap() {
+        let readable = Arc::new(AtomicBool::new(false));
+        let oracle = oversized_oracle(&oversized_store(), &readable);
+        let memory = ReadMemory::new();
+        // PASS 1 — the terminal pass reads nothing: attempt 2 is scheduled.
+        let (r, _, _) = pass_over(&inline_restore(), &oracle, &memory, now()).await;
+        let status = status_json(&r);
+        assert_eq!(
+            status["evidence"]["observation"]["retryAfter"],
+            json!(stamp(now() + secs(60))),
+            "{status}"
+        );
+        // PASS 2 — attempt 2 meets the oversized scorecard.
+        readable.store(true, Ordering::SeqCst);
+        let (done, written, outcome) = pass_over(&r, &oracle, &memory, now() + secs(61)).await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        let status = status_json(&done);
+        let v = &status["evidence"]["verification"];
+        assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("1048576-byte cap weirkeeper reads"),
+            "attempt 2 names the cap: {detail}"
+        );
+        assert_eq!(
+            status["evidence"]["observation"]["attempt"],
+            json!(2),
+            "{status}"
+        );
+        assert!(
+            status["evidence"]["observation"]["retryAfter"].is_null(),
+            "no attempt 3: {status}"
+        );
+        assert!(status["completion"].is_null(), "{status}");
+        let _ = outcome;
+        // PASS 3 — an hour later: nothing is read or written again.
+        let (_, written, outcome) = pass_over(&done, &oracle, &memory, now() + secs(3_600)).await;
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(outcome.requeue, Requeue::AwaitChange);
+    }
 }
 
 // ===========================================================================

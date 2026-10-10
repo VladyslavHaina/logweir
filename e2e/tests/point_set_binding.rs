@@ -338,7 +338,7 @@ fn archive_get(prefix: &str, key: &str) -> Vec<u8> {
         serde_yaml::from_str(&storage_yaml(prefix, "")).expect("a storage url");
     logweir_engine_oso::storage::Store::read_only_from_url(&url)
         .expect("the archive store")
-        .get(key)
+        .get_capped(key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
         .unwrap_or_else(|e| panic!("read {key}: {e}"))
         .0
 }

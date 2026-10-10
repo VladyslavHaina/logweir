@@ -40,9 +40,10 @@ controller no longer rewrites a status whose content has not changed), 46
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
 deadline), 48 (FX-20c, a destination's Test access compares every grant's
 binding), 49 (PROD-01.4a, each topic's ID in the receipt and the catalog
-point), 50 (PROD-04.1, consumer position evidence for selected groups) and 51
+point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
-format 2.0.0 and named on every surface) so far. Items continue the next entry's
+format 2.0.0 and named on every surface) and 52 (FX-31, every object-store
+read has a size cap) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -143,6 +144,11 @@ preview, both verifiers, the controller's `Restore` status, the product API,
 the console and the runner's notification, and the PoC upgrade that carries
 it runs a subset `Restore`, reads its scorecard with both readers, and reads
 the selection on its status, the API, the console and the notification.
+Item 52 is fix-now row FX-31, proven by store, controller and check rows, by a
+child-process peak-RSS measurement, and on the compose stack against MinIO; it
+changes the controller, the runner and the check Jobs, and the PoC upgrade that
+carries it plants an oversized object at a receipt key in a scratch namespace's
+bucket and reads the controller's verdict and memory.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1722,6 +1728,74 @@ console do not carry `integrity.selection`, so after a rollback they show a
 subset restore without its selection again: read the subset restores' signed
 scorecards (2.0.0) with this release's verifiers.
 
+#### 52. Every object-store read has a size cap; the controller reads evidence under the relay's 1 MiB (FX-31)
+
+**Changed.** A read from an object store took the whole object, so the memory
+it used was whatever the bucket held. In shared mode a namespace whose bucket
+held a multi-gigabyte object at its receipt or sidecar key could OOM-kill the
+controller that serves every namespace, and each restart read it again. The
+check Job's evidence fetch read the whole object before it truncated. Now
+every read names a cap ([kubernetes.md](kubernetes.md) §7b.4). It refuses on
+the size the store reports before a body byte is read, then holds a running
+cap over the stream, so a store that reports a small size and streams more is
+cut off. Existence tests read no body: the sidecar's presence is a `HEAD`, and
+the readiness probe and the backup set check GET with a 0-byte cap. The caps:
+
+- The controller reads a receipt or scorecard under **1 MiB** and a sidecar
+  under **64 KiB**. These are the evidence relay's own caps, so a document is
+  verifiable through the controller's handle exactly when a relay can carry
+  it.
+- The controller's retention report reads a manifest under 64 MiB, folded as
+  it streams, never as a tree.
+- Runner, CLI and check Jobs read documents under 64 MiB, manifests under
+  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB.
+- The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
+  it relayed a prefix the controller refused anyway).
+- Concurrent controller reads share ONE 128 MiB budget, a quarter of the
+  chart's 512Mi limit. Each read reserves its worst case before it reads
+  (a document 40 MiB with its parse, a manifest 64 MiB), and a read that does
+  not fit waits. Eight concurrent retention evaluations of 60 MiB manifests add
+  126 MB of peak memory with the budget, against 504 MB without it.
+
+Over a cap, the controller writes `NotAttempted`, naming the key and the cap.
+That verdict is final, never re-read on the schedule; a signing-time re-read
+of such a document settles as `trust.signingTimeRead: overCap` (a CRD
+description gains the value). The retention report
+lists the set under `skipped`, and the CLI and runner fail operationally,
+naming the cap. Never a crash, never a pass.
+
+**Do:** nothing is required. Know the limit it makes visible. A 1.5.0 receipt
+is about 3.4 KB per topic, so a run that selects more than about **250–300 topics**
+(fewer with per-topic configuration overrides)
+writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
+is not a recovery point. Before this item, the controller's own handle verified
+it, and an evidence-fetch relay did not. This moves a verdict only to the safer
+side (OD-7's third case), and no signed format changes.
+**Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
+- the two fences, including a store whose meter shows no body byte was taken;
+- the version read;
+- `head`;
+- the streaming manifest fold, which answers what the old `Value` walk answered
+  over 39 bodies.
+
+Controller rows (`crates/weirkeeper/tests/read_caps.rs`):
+- an oversized receipt, sidecar, scorecard, signing-time re-read and manifest
+  each name the cap, while the signed fixture verifies;
+- in a child process, the five controller read paths over 512 MiB objects add
+  0 B of peak RSS, while a read under a cap far too large adds hundreds of MiB. Over a 16 MiB
+  manifest of tiny values, the streaming fold adds the bytes, while a
+  `serde_json::Value` of them adds 37 times their size.
+
+Check rows (`crates/logweir/tests/check_cli.rs`): the fetch, the probe, the
+catalog walk and the restore preflight read under their caps.
+
+The live row on compose slot 3 (MinIO) is recorded in
+`claude/fx-31.result.md` §5. The PoC upgrade repeats it on the controller
+image.
+**Rollback:** an older build reads whole objects again; nothing is stored
+differently. A final `NotAttempted` this build wrote for an oversized document
+is treated by an older controller as it treats any final `NotAttempted`.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1787,7 +1861,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50 and 51, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 and 52, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1828,7 +1902,8 @@ item 51 changes the runner, the restore preview, both verifiers, the
 controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
-older verifier a subset scorecard). To roll back to
+older verifier a subset scorecard); item 52 changes the controller
+(and two CRD descriptions), the runner and the check Jobs and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

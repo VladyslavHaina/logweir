@@ -238,7 +238,9 @@ fn archive_side(
             );
             continue;
         }
-        let bytes = match store.get(&seg.key) {
+        // FX-31: under the segment ceiling. FX-30 owns this lane's decode
+        // caps; an object over this one is a read failure below, never a pass.
+        let bytes = match store.get_capped(&seg.key, logweir_engine_oso::storage::caps::SEGMENT) {
             Ok((bytes, _)) => bytes,
             Err(StoreError::NotFound(_)) => {
                 side.failed.push(seg.key.clone());

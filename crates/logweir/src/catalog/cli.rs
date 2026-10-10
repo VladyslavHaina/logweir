@@ -41,7 +41,7 @@ use crate::catalog::writer::{self, RecordInputs};
 use crate::exit::ExitCode;
 use chrono::Datelike;
 use logweir_core::engine::StorageUrl;
-use logweir_engine_oso::storage::{Store, StoreError};
+use logweir_engine_oso::storage::{caps, Store, StoreError};
 use logweir_evidence::keys::VerifyingKey;
 use std::path::PathBuf;
 
@@ -392,7 +392,9 @@ pub fn sync_with(
         if !key.ends_with(".receipt.json") {
             continue;
         }
-        let Ok((bytes, _version)) = evidence.get(&key) else {
+        // FX-31: under the signed-document cap; an object over it is
+        // `Unreadable`, like any receipt this command could not read.
+        let Ok((bytes, _version)) = evidence.get_capped(&key, caps::SIGNED_DOCUMENT) else {
             report.record(&key, "", PointOutcome::Unreadable);
             continue;
         };
@@ -504,7 +506,7 @@ fn existing_record(
     receipt: &logweir_core::backup_receipt::BackupReceipt,
     receipt_bytes: &[u8],
 ) -> Existing {
-    match evidence.get(&record_key(id)) {
+    match evidence.get_capped(&record_key(id), caps::SIGNED_DOCUMENT) {
         Err(StoreError::NotFound(_)) => Existing::Absent,
         // "Could not tell" is not "not there": writing a record here could put
         // a second document beside one this run failed to read.
@@ -537,7 +539,7 @@ fn verified_signer(
     receipt_bytes: &[u8],
     trust: &[VerifyingKey],
 ) -> Option<RecordInstallation> {
-    let (raw, _version) = evidence.get(sidecar_key).ok()?;
+    let (raw, _version) = evidence.get_capped(sidecar_key, caps::SIDECAR).ok()?;
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&raw).ok()?;
     for key in trust {
         if logweir_evidence::verify::verify_detached(
@@ -700,7 +702,7 @@ fn newest_keys_in(store: &Store, shard: &str, args: &ListArgs) -> Result<Vec<Str
 /// vocabulary as a malformed body: both mean "this row could not be read",
 /// and neither is a reason to abandon the listing.
 fn read_one(store: &Store, key: &str) -> reader::LogEntryVerdict {
-    match store.get(key) {
+    match store.get_capped(key, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => reader::read_log_entry(&bytes),
         Err(e) => reader::LogEntryVerdict::Unreadable(format!("{key}: {e}")),
     }

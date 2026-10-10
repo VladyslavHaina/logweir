@@ -806,7 +806,10 @@ fn phase8_uploads_the_offset_report() {
     // document — read back out of `signed.bytes`, never off the in-memory
     // scorecard, because the signature covers the bytes.
     let (stored, _v) = store
-        .get(&format!("logweir/drills/{run_id}.offsets.json"))
+        .get_capped(
+            &format!("logweir/drills/{run_id}.offsets.json"),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the offset report is in the bucket");
     assert_eq!(stored, bytes.to_vec(), "the exact bytes, never a re-emit");
     let doc: serde_json::Value = serde_json::from_slice(&signed.bytes).expect("signed JSON");
@@ -1157,7 +1160,10 @@ fn a_failed_drills_keys_name_the_objects_it_put() {
         let (bytes, _) = f
             .ctx
             .store
-            .get(&keys.scorecard_key)
+            .get_capped(
+                &keys.scorecard_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap_or_else(|e| panic!("{shape:?}: the scorecard key names no object: {e}"));
         let signed: logweir_core::scorecard::Scorecard =
             serde_json::from_slice(&bytes).expect("the put scorecard parses");
@@ -1169,12 +1175,18 @@ fn a_failed_drills_keys_name_the_objects_it_put() {
         );
         f.ctx
             .store
-            .get(&keys.sidecar_key)
+            .get_capped(
+                &keys.sidecar_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap_or_else(|e| panic!("{shape:?}: the sidecar key names no object: {e}"));
         if let Some(k) = &keys.offset_report_key {
-            f.ctx.store.get(k).unwrap_or_else(|e| {
-                panic!("{shape:?}: the offset report key names no object: {e}")
-            });
+            f.ctx
+                .store
+                .get_capped(k, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+                .unwrap_or_else(|e| {
+                    panic!("{shape:?}: the offset report key names no object: {e}")
+                });
         }
     }
 }
