@@ -38,8 +38,9 @@ client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
 (PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) and 48 (FX-20c, a destination's Test access compares every grant's
-binding) so far. Items continue the next entry's
+deadline), 48 (FX-20c, a destination's Test access compares every grant's
+binding) and 49 (FX-22, a `RetentionPolicy`'s status says what the per-run
+ceiling held back) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
