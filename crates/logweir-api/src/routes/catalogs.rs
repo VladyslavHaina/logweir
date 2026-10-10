@@ -658,12 +658,8 @@ pub struct PointView {
 /// The longest topic name Kafka accepts.
 const MAX_TOPIC_NAME: usize = 249;
 
-/// `None` for 0: a catalog entry whose record could not be read carries no
-/// instant (FX-33), and that is shown as unknown, never as 1970.
 fn instant(ms: i64) -> Option<DateTime<Utc>> {
-    (ms > 0)
-        .then(|| DateTime::from_timestamp_millis(ms))
-        .flatten()
+    DateTime::from_timestamp_millis(ms)
 }
 
 /// One row, with the controller's own refusal applied. The ONE place the
@@ -671,13 +667,19 @@ fn instant(ms: i64) -> Option<DateTime<Utc>> {
 /// row can never disagree.
 fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
     let backup_verdict = refusals.refusal_for(entry).map(|r| bounded(r, 32));
+    let recorded = !entry.receipt_sha256.is_empty();
     PointView {
         point_id: bounded(&entry.point_id, 128),
         backup_id: bounded(&entry.backup_id, 128),
         run_id: bounded(&entry.run_id, 64),
-        recovery_point_at: instant(entry.recovery_point_at_ms),
-        covered_from: instant(entry.covered_from_ms),
-        covered_to: instant(entry.covered_to_ms),
+        // FX-33: an entry whose record could not be read (no receipt digest)
+        // carries no instants, and is shown with none rather than as 1970. A
+        // point with a record keeps every instant it states, 0 included.
+        recovery_point_at: recorded
+            .then(|| instant(entry.recovery_point_at_ms))
+            .flatten(),
+        covered_from: recorded.then(|| instant(entry.covered_from_ms)).flatten(),
+        covered_to: recorded.then(|| instant(entry.covered_to_ms)).flatten(),
         availability: entry.availability.as_str().to_string(),
         verification: entry.verification.as_str().to_string(),
         selectable: entry.selectable && backup_verdict.is_none(),
@@ -1481,4 +1483,58 @@ fn verify_page(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weirkeeper::catalog_view::{Availability, ResolvedLocation, Verification};
+
+    fn entry(receipt_sha256: &str, covered_from_ms: i64) -> ViewEntry {
+        ViewEntry {
+            point_id: "lwp1-0123456789abcdef0123456789abcdef".to_string(),
+            backup_id: "set-a".to_string(),
+            run_id: "run-a".to_string(),
+            recovery_point_at_ms: 0,
+            covered_from_ms,
+            covered_to_ms: 1_000,
+            locations: vec![ResolvedLocation {
+                location_id: "s3://lw-archive/team-a".to_string(),
+                availability: Availability::Available,
+            }],
+            receipt_key: "logweir/backups/set-a/run-a.receipt.json".to_string(),
+            receipt_sha256: receipt_sha256.to_string(),
+            manifest_key: None,
+            manifest_sha256: None,
+            format_version: None,
+            availability: Availability::Available,
+            verification: Verification::Verified,
+            signer_key_id: None,
+            selectable: true,
+            remedy: None,
+            topics: Vec::new(),
+            topics_omitted: None,
+            owner_detection: None,
+            consumer_positions: None,
+        }
+    }
+
+    /// **FX-33 fix round, L1: a point with a record keeps a window that
+    /// starts at the epoch.** A topic written with CreateTime 0 makes a real
+    /// `covered.from_ms` of 0; it is published as 1970-01-01, so the console
+    /// can offer the point. CONTROL: a row whose record could not be read (no
+    /// receipt digest) publishes no instants at all.
+    ///
+    /// KILLS: the zero rule applied to every row.
+    #[test]
+    fn fx33_an_epoch_window_of_a_recorded_point_is_published() {
+        let refusals = ControllerRefusals::default();
+        let epoch = DateTime::from_timestamp_millis(0);
+        let real = point_view(&entry(&format!("sha256:{}", "a".repeat(64)), 0), &refusals);
+        assert_eq!(real.covered_from, epoch);
+        assert_eq!(real.recovery_point_at, epoch);
+        let recordless = point_view(&entry("", 0), &refusals);
+        assert!(recordless.covered_from.is_none() && recordless.recovery_point_at.is_none());
+        assert!(recordless.covered_to.is_none());
+    }
 }

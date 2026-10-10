@@ -12298,6 +12298,139 @@ fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
     assert_eq!(ids, evidence, "the evidence stays listed: {listed:?}");
 }
 
+/// The H1 fixture: set `set-x` written twice (a re-created Job), its newer
+/// receipt's read failing in this sync, then `others` older `Available`
+/// points, one a day further back. Returns the store and the newer point's id.
+fn fx33_shared_set(others: usize) -> (FakeObjects, String) {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = |set: &str, run: &str, day: usize| {
+        catalog_fixture(
+            &catalog_receipt(set, run, &format!("2026-09-{day:02}T03:00:00Z")),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let newer = fixture("set-x", "run-b", 16);
+    let older = fixture("set-x", "run-a", 15);
+    let mut objects = place(place(FakeObjects::new(), &newer), &older).failing_key(
+        &newer.receipt_key,
+        Fault::Io("connection reset by peer".to_string()),
+    );
+    for i in 0..others {
+        objects = place(objects, &fixture(&format!("set-o{i}"), "run-a", 14 - i));
+    }
+    (objects, newer.point.point_id.clone())
+}
+
+/// The ids and availabilities a walk at `view_limit` lists.
+fn fx33_listed(objects: &FakeObjects, view_limit: i64) -> Vec<(String, String, String)> {
+    let body = body_of(&drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            view_limit,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    ));
+    entries_of(&body)
+        .iter()
+        .map(|e| {
+            (
+                e["pointId"].as_str().unwrap_or_default().to_string(),
+                e["availability"].as_str().unwrap_or_default().to_string(),
+                e["backupId"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// **Review finding H1, the viewLimit-2 case: a skipped entry that names a
+/// set keeps its place.** Set `set-x` has two receipts; the newer one's read
+/// fails in this sync, so it is `Unreadable` but keeps its record, and with
+/// it the set it names, which retention protects for it. An older
+/// `Available` point arriving at a full window must not push it out (it did:
+/// the window then held the older receipt of `set-x` and an unrelated point,
+/// and retention could plan `set-x` away). CONTROL: with room for all three,
+/// all three are listed.
+///
+/// KILLS: an entry with a record treated as displaceable.
+#[test]
+fn a_skipped_point_that_names_a_set_keeps_its_place_at_view_limit_two() {
+    let (objects, newer) = fx33_shared_set(1);
+    let listed = fx33_listed(&objects, 2);
+    assert!(
+        listed
+            .iter()
+            .any(|(id, a, set)| *id == newer && a == "Unreadable" && set == "set-x"),
+        "the newer receipt of set-x stays listed, naming its set: {listed:?}"
+    );
+    assert_eq!(listed.len(), 2);
+    assert_eq!(fx33_listed(&objects, 3).len(), 3, "CONTROL");
+}
+
+/// **Review finding H1, the viewLimit-3 case: the pair inside the window, and
+/// an unrelated older point arriving.** The window holds the newer and older
+/// receipts of `set-x` and one more point; a fourth, older, `Available` point
+/// does not take the newer receipt's place. CONTROL: with room for all four,
+/// all four are listed.
+///
+/// KILLS: an entry with a record treated as displaceable.
+#[test]
+fn a_skipped_point_that_names_a_set_keeps_its_place_against_an_unrelated_point() {
+    let (objects, newer) = fx33_shared_set(2);
+    let listed = fx33_listed(&objects, 3);
+    assert!(
+        listed
+            .iter()
+            .any(|(id, a, set)| *id == newer && a == "Unreadable" && set == "set-x"),
+        "{listed:?}"
+    );
+    assert_eq!(listed.len(), 3);
+    assert_eq!(fx33_listed(&objects, 4).len(), 4, "CONTROL");
+}
+
+/// **Review finding M1: a record read that did not answer leaves the walk
+/// incomplete.** Such a point is listed by its id only, with no set, so a
+/// view with it in is not whole until a sync reads the record; the cursor
+/// says `complete: false` and the row counts it (`catalogRecordsUnread`).
+/// CONTROL: persistent causes — a record over its bound, bytes that are not
+/// a record — leave the walk complete.
+///
+/// KILLS: the walk reported complete over a record it could not read.
+#[test]
+fn a_record_read_that_did_not_answer_leaves_the_walk_incomplete() {
+    use logweir_engine_oso::storage::caps;
+    let (objects, newer, older) = two_point_objects();
+    let walk = |objects: FakeObjects| {
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+        );
+        let body = body_of(&run);
+        let complete = summary_of(&body, "catalog-cursor=")["complete"].clone();
+        let unread = run
+            .row(CheckId::DestinationArchiveListable)
+            .facts
+            .get("catalogRecordsUnread")
+            .cloned();
+        (complete, unread)
+    };
+    let (complete, unread) =
+        walk(objects.failing_key(&newer.record_key, Fault::Io("timed out".to_string())));
+    assert_eq!(complete, false);
+    assert_eq!(unread.as_deref(), Some("1"));
+    // CONTROL: a size and a content fault are facts that will not change.
+    // (A fresh store: a fake's clones share their faults.)
+    let (objects, newer, older) = two_point_objects();
+    let (complete, unread) = walk(
+        objects
+            .reporting_size(&newer.record_key, caps::CATALOG_RECORD + 1)
+            .with_object(&older.record_key, b"not a record"),
+    );
+    assert_eq!(complete, true);
+    assert!(unread.is_none());
+}
+
 /// **A day shard of more than one page is read to its end (review finding
 /// D4).** Per-minute backups write 1,440 points a day; the walk used to read
 /// a day's first page of keys and report the view complete. Here one day

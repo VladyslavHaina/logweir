@@ -1131,9 +1131,13 @@ could list or verify. After the upgrade:
   more than 1,000 user topics needs exclusions or more than one schedule;
 - a recovery point **already written** by a larger backup is not lost. Its
   archive is intact and `logweir restore` and `logweir verify` read it (they
-  read a receipt of up to 64 MiB). The catalog lists it `Unreadable` with the
-  size and the bound (§7d), and the controller's verdict on it stays
-  `NotAttempted` naming the cap. It is not offered for restore in the console.
+  read a receipt of up to 64 MiB). The caps are in bytes, not topics: a point
+  whose receipt or record is over its bound (an older build's backup of
+  about 1,650 topics or more at broker defaults) is listed `Unreadable` with
+  the size and the bound (§7d) and is not offered for restore in the console,
+  and a destination-backed run's verdict on it stays `NotAttempted` naming
+  the old 1 MiB cap. A smaller older point, 1,001 topics or more but inside
+  both bounds, is listed and verified as usual.
 
 **Why 1,000.** The reader that binds is the evidence relay. On a destination
 whose `evidenceRead` grant only a pod may hold (every `SecretKeys` or
@@ -1649,11 +1653,16 @@ listed by no entry. Now:
   there is no window, location or topic list. It is never `Available`, so
   never selectable, and nothing reads anything else for it;
 - the view is `viewLimit` entries. When it is full, an `Available` point
-  takes the place of an entry that only failed to be read (`Missing`, a
-  read that did not answer, a document over its bound, `UnsupportedFormat`),
-  never of a signature that did not verify, a `Conflict` or bytes that are
-  not the document their key names. The counts name every point, and
+  takes the place only of an entry whose RECORD gave no facts and that only
+  failed to be read (the record is missing, did not answer, is over its
+  bound, or is of a newer format). It never takes the place of an entry with
+  a record, whatever its state (such an entry may name a backup set that
+  retention keeps for it, and carries the signature and `Conflict` verdicts),
+  nor of bytes that are not a record. The counts name every point, and
   `status.truncated` says the view is a window;
+- a point whose record read did not answer leaves the walk incomplete
+  (`catalog-cursor.complete: false`, `catalogRecordsUnread` on the check
+  row) until a sync reads that record, because its entry names no set;
 - `catalog-counts` gains `unreadableOverReadCap` and `unreadableMalformed`,
   the two parts of `unreadable` that are not a permission or transport
   failure, and the `Synced` condition's message counts each by name;

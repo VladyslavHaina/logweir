@@ -1027,12 +1027,23 @@ struct Walk {
     last_record_key: Option<String>,
     /// How many index rows could not be read at all.
     unreadable_rows: i64,
+    /// FX-33 (review finding M1): how many points' RECORD reads did not
+    /// answer. Such a point is listed with no set, so a view with one in it
+    /// is not whole until a sync reads the record: the walk is not complete.
+    records_unread: i64,
     /// Why the walk ended. The walk's own outcome, and never a point's
     /// (review findings F3 and F5).
     stop: WalkStop,
 }
 
 impl Walk {
+    /// Whether the walk saw the whole archive: its range finished, and every
+    /// point's record answered (a point whose record read failed is listed
+    /// by its id only, and is the `ShardUnreadable` rule for one point).
+    fn complete(&self) -> bool {
+        self.stop.complete() && self.records_unread == 0
+    }
+
     fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -1045,6 +1056,7 @@ impl Walk {
             oldest_day: None,
             last_record_key: None,
             unreadable_rows: 0,
+            records_unread: 0,
             stop: WalkStop::Range,
         }
     }
@@ -1127,7 +1139,7 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
         "the durable catalog was walked: {} points examined, {} relayed, walk {}",
         walk.counts.total,
         walk.entries.len(),
-        if walk.stop.complete() {
+        if walk.complete() {
             "complete"
         } else {
             "incomplete — the cursor says where it stopped"
@@ -1138,13 +1150,16 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     .with_fact("catalogEntries", &walk.entries.len().to_string())
     .with_fact("catalogPages", &body.pages.to_string())
     .with_fact("catalogObjectsRead", &walk.objects.to_string())
-    .with_fact("catalogWalkComplete", &walk.stop.complete().to_string())
+    .with_fact("catalogWalkComplete", &walk.complete().to_string())
     .with_fact("catalogTrustKeys", &trust.len().to_string());
     if walk.unreadable_rows > 0 {
         row = row.with_fact(
             "catalogUnreadableIndexRows",
             &walk.unreadable_rows.to_string(),
         );
+    }
+    if walk.records_unread > 0 {
+        row = row.with_fact("catalogRecordsUnread", &walk.records_unread.to_string());
     }
     // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED (review findings F3 and
     // F5). `catalog-cursor.complete: false` says only THAT the walk did not
@@ -1620,6 +1635,13 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     // never of one that is evidence about the archive's integrity. Either way
     // the walk counted more than it listed, so the view says it is a window
     // (`truncated`), and the counts name every point.
+    if observation.point.is_none()
+        && observation.cause.is_some_and(|c| {
+            c.document == CauseDocument::Record && c.reason == CauseReason::ReadFailed
+        })
+    {
+        walk.records_unread = walk.records_unread.saturating_add(1);
+    }
     let can_give_way = displaceable(&observation);
     let entry = build_entry(&observation);
     if walk.entries.len() < view_limit {
@@ -1636,22 +1658,23 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
 }
 
 /// **FX-33.** Whether a listed entry may give its place in a full window to an
-/// `Available` point: only when it carries no evidence about the archive's
-/// integrity — what the walk can tell apart, and no more.
+/// `Available` point: only an entry whose RECORD gave no facts, and of those
+/// only one that carries no evidence about the archive's integrity.
 ///
-/// - **May**: `Missing`, `Deleted`, `Partial`, `UnsupportedFormat`, and an
-///   `Unreadable` point whose document could not be read (a store error) or
-///   is over its read bound (a size). None of these says the bytes are other
-///   than what was written.
-/// - **Never**: a signature that did not verify, whatever the availability; a
-///   `Conflict` (the archive contradicts the signed receipt, or the set was
-///   written again); an `Unreadable` point whose bytes are not the document
-///   their key names (`malformed`), which is what tampered bytes look like —
+/// - **May**: a point whose record is `Missing`, could not be read (a store
+///   error), is over its read bound (a size) or is of a newer format. Such an
+///   entry names no set and no location, so it protects nothing a reader
+///   could lose, and it says nothing about bytes other than what was written.
+/// - **Never**: any entry with a record (review finding H1): whatever its
+///   state, it may name a backup set that retention must keep for it (a
+///   newer receipt of a set whose older receipt is `Available`), and it
+///   carries the signature and `Conflict` verdicts; nor a record whose bytes
+///   are not a record (`malformed`), which is what tampered bytes look like
 ///   and also a crashed run's half-written record, which the walk cannot tell
-///   from them, so both stay listed; an `Unreadable` point with no stated
-///   cause. And an `Available` point is never displaced.
+///   apart. A signature verdict exists only beside a record, so the record
+///   rule covers it.
 fn displaceable(observation: &Observation) -> bool {
-    if observation.signature == SignatureVerdict::Invalid {
+    if observation.point.is_some() {
         return false;
     }
     match observation.availability {
@@ -2479,7 +2502,7 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
         CatalogSyncMode::Index => CursorReport {
             index_shard: walk.oldest_day.map(|d| d.format("%Y-%m-%d").to_string()),
             rescan_start_after: None,
-            complete: walk.stop.complete(),
+            complete: walk.complete(),
         },
         CatalogSyncMode::Full => CursorReport {
             index_shard: None,
@@ -2487,12 +2510,15 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
             // finished walk would make the next one resume past the whole
             // archive and publish an empty view of a full one. An INCOMPLETE
             // one always reports where it got to, whatever stopped it.
+            // (A rescan that finished its range with a record it could not
+            // read is incomplete and resumes from the START: a cursor here
+            // would skip the whole archive.)
             rescan_start_after: if walk.stop.complete() {
                 None
             } else {
                 walk.last_record_key.clone().map(|k| redact_path(&k))
             },
-            complete: walk.stop.complete(),
+            complete: walk.complete(),
         },
     }
 }

@@ -2564,9 +2564,12 @@ bounds what a backup signs ([kubernetes.md](kubernetes.md) §7b.5):
 - **The catalog lists every point it counts.** A point that is not available
   says why: a size gives the document's bytes against the bound and names no
   grant. A point whose record could not be read is listed by its point id
-  alone, with nothing a restore could bind to, and is never selectable.
-  `counts` and the `Synced` message separate a size and a content fault from
-  a permission or transport failure.
+  alone, with nothing a restore could bind to, and is never selectable; in a
+  full view it gives its place to a readable point, and an entry with a
+  record never does. A record read that did not answer leaves the walk
+  incomplete until a sync reads it. `counts` and the `Synced` message
+  separate a size and a content fault from a permission or transport
+  failure.
 
 **The maximum is lower than it was.** A dynamic selection resolved up to
 5,000 names, and a named `spec.topics` list had no bound. Neither was safe: a
@@ -2578,8 +2581,10 @@ names, or last resolved to, more than 1,000 topics, with the two commands in
 the upgrade such an object is **refused by name at each run**; no topic is
 dropped silently and no partial backup is taken. A recovery point a larger
 backup already wrote is not lost: `logweir restore` and `logweir verify` read
-it, the catalog lists it `Unreadable` with its size against the bound, and the
-console does not offer it.
+it. The caps are in bytes: a point whose receipt or record is over its bound
+(an older backup of about 1,650 topics or more at broker defaults) is listed
+`Unreadable` with its size against the bound and is not offered; a smaller
+older point is listed and verified as usual.
 
 **Do, after the runner image rolls:** set each `RecoveryCatalog`'s
 `spec.syncRequest` to a new value. Points of about 80 topics and more that
