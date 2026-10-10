@@ -882,89 +882,339 @@ fn the_new_constructors_do_not_widen_the_write_surface() {
 
 // ------------------------------------------------------- classification
 
-/// The classifier's table, pinned by messages in the shape object_store
-/// actually produces. A token scan is a tripwire on spellings and nothing
-/// more; what makes it safe to act on is that every token has a case here and
-/// that an unmatched message answers `StoreErrorUnclassified` rather than
+/// The classifier's two tables, pinned by messages in the shape
+/// `object_store` 0.14.1 produces: the request line (`RetryError`), then
+/// either the status line and the store's body (`RequestError::Status`) or
+/// the HTTP client's own words. Captured from a real client against a
+/// loopback responder and against MinIO; request ids removed.
+///
+/// A store's ANSWER is classified by its code, or else its status, and its
+/// body is not searched (PROD-01.2 review, M1): each answer below echoes a
+/// bucket and a key that spell a code of ANOTHER class, and the class does
+/// not move. A failure with no answer is matched against the wording table,
+/// and an unmatched one answers `StoreErrorUnclassified` rather than
 /// guessing.
 #[test]
 fn the_classifier_table() {
     use StoreErrorClass as C;
-    let cases: [(&str, C); 16] = [
+    // What every answer below echoes: a bucket and a key that spell codes.
+    const AT: &str = "Error performing GET \
+        http://minio:9000/accessdenied-nosuchbucket/expiredtoken/timeout.json in 1.2ms - ";
+    const ECHO: &str = "<Key>expiredtoken/timeout.json</Key>\
+        <BucketName>accessdenied-nosuchbucket</BucketName>\
+        <Resource>/accessdenied-nosuchbucket/expiredtoken/timeout.json</Resource>";
+    let answered = |status: &str, code: &str| {
+        format!(
+            "expiredtoken/timeout.json: Generic S3 error: {AT}Server returned non-2xx status \
+             code: {status}: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}\
+             </Code><Message>m</Message>{ECHO}</Error>"
+        )
+    };
+    let cases: Vec<(String, C)> = vec![
         // C6: versitygw v1.8.0's answer to an unknown access key id, as
         // PROD-01.5 recorded it from a LIST (request and host ids removed).
-        // A 404, and a credential problem: it must not reach the not-found
-        // tokens its own "404 Not Found: " would match.
+        // A 404, and a credential problem.
         (
-            "Generic S3 error: Error performing list request: Error performing GET http://localhost:19130/kafka-backups?list-type=2 in 1.7745ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code><Message>No user exists with the provided access key ID.</Message></Error>",
+            "Generic S3 error: Error performing list request: Error performing GET http://localhost:19130/kafka-backups?list-type=2 in 1.7745ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code><Message>No user exists with the provided access key ID.</Message></Error>".into(),
             C::InvalidCredentials,
         ),
         // ...and its NEGATIVE CONTROL: the same 404 shape about a key stays
         // not-found.
         (
-            "Generic S3 error: Error performing GET http://localhost:19130/kafka-backups/k in 1.2ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>",
+            "Generic S3 error: Error performing GET http://localhost:19130/kafka-backups/k in 1.2ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>".into(),
             C::ObjectNotFound,
         ),
+        // The code table, each under a 403 whose status alone would say
+        // AccessDenied, or a 404 whose status alone would say ObjectNotFound.
+        (answered("403 Forbidden", "AccessDenied"), C::AccessDenied),
+        (answered("403 Forbidden", "AllAccessDisabled"), C::AccessDenied),
+        (answered("403 Forbidden", "InvalidAccessKeyId"), C::InvalidCredentials),
+        (answered("403 Forbidden", "SignatureDoesNotMatch"), C::InvalidCredentials),
+        (answered("400 Bad Request", "ExpiredToken"), C::InvalidCredentials),
+        (answered("400 Bad Request", "TokenRefreshRequired"), C::InvalidCredentials),
+        (answered("403 Forbidden", "InvalidSecurity"), C::InvalidCredentials),
+        (answered("404 Not Found", "NoSuchBucket"), C::BucketNotFound),
+        (answered("404 Not Found", "NoSuchKey"), C::ObjectNotFound),
+        (answered("404 Not Found", "NoSuchVersion"), C::ObjectNotFound),
+        (answered("301 Moved Permanently", "PermanentRedirect"), C::RegionMismatch),
         (
-            "Generic S3 error: Error performing GET https://minio:9000/b/k: response error \"<?xml version=\\\"1.0\\\"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>\", after 0 retries: HTTP status client error (403 Forbidden)",
-            C::AccessDenied,
-        ),
-        (
-            "The operation lacked the necessary privileges to complete for path b/k: 403",
-            C::AccessDenied,
-        ),
-        (
-            "response error \"<Error><Code>InvalidAccessKeyId</Code></Error>\"",
-            C::InvalidCredentials,
-        ),
-        (
-            "response error \"<Error><Code>SignatureDoesNotMatch</Code></Error>\"",
-            C::InvalidCredentials,
-        ),
-        (
-            "response error \"<Error><Code>ExpiredToken</Code></Error>\"",
-            C::InvalidCredentials,
-        ),
-        (
-            "The operation lacked valid authentication credentials for path b/k",
-            C::InvalidCredentials,
-        ),
-        (
-            "response error \"<Error><Code>NoSuchBucket</Code></Error>\"",
-            C::BucketNotFound,
-        ),
-        (
-            "response error \"<Error><Code>NoSuchKey</Code></Error>\"",
-            C::ObjectNotFound,
-        ),
-        (
-            "response error \"<Error><Code>PermanentRedirect</Code></Error>\"",
+            "Generic S3 error: Error performing GET https://s3.us-east-1.amazonaws.com/b/k in 80ms - Server returned non-2xx status code: 400 Bad Request: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header is malformed; the region 'us-east-1' is wrong; expecting 'eu-west-1'</Message><Region>eu-west-1</Region></Error>".into(),
             C::RegionMismatch,
         ),
         (
-            "<Error><Code>AuthorizationHeaderMalformed</Code><Message>the region us-east-1 is wrong; expecting eu-west-1</Message></Error>",
+            answered("400 Bad Request", "IllegalLocationConstraintException"),
             C::RegionMismatch,
         ),
+        (answered("400 Bad Request", "RequestTimeout"), C::Timeout),
+        // A code is compared whole and without regard to case.
+        (answered("403 Forbidden", "accessdenied"), C::AccessDenied),
         (
-            "error sending request for url (https://minio:9000/b): invalid peer certificate: UnknownIssuer",
-            C::TlsTrustFailed,
+            answered("400 Bad Request", "ExpiredTokenAndMore"),
+            C::StoreErrorUnclassified,
+        ),
+        // No code the table holds: the status decides, for the three statuses
+        // that say something on their own.
+        (answered("401 Unauthorized", "SomethingNew"), C::InvalidCredentials),
+        (answered("403 Forbidden", "SomethingNew"), C::AccessDenied),
+        (answered("404 Not Found", "SomethingNew"), C::ObjectNotFound),
+        (
+            format!("k: Generic S3 error: {AT}Server returned non-2xx status code: 403 Forbidden: "),
+            C::AccessDenied,
+        ),
+        // An answer the tables do not name is unclassified, whatever its
+        // body and its key spell.
+        (answered("503 Service Unavailable", "SlowDown"), C::StoreErrorUnclassified),
+        (answered("400 Bad Request", "InvalidArgument"), C::StoreErrorUnclassified),
+        (
+            format!(
+                "k: Generic S3 error: {AT}Server returned non-2xx status code: 500 Internal \
+                 Server Error: <Error><Message>ExpiredToken AccessDenied NoSuchBucket timed out \
+                 connection refused</Message>{ECHO}</Error>"
+            ),
+            C::StoreErrorUnclassified,
+        ),
+        // `object_store`'s own wording for a typed variant, with no HTTP
+        // answer behind it.
+        (
+            "The operation lacked the necessary privileges to complete for path b/k: 403".into(),
+            C::AccessDenied,
         ),
         (
-            "Generic S3 error: error sending request: operation timed out",
-            C::Timeout,
+            "The operation lacked valid authentication credentials for path b/k".into(),
+            C::InvalidCredentials,
         ),
         (
-            "error sending request for url (https://minio:9000/b): tcp connect error: Connection refused (os error 61)",
+            "Object at location b/k not found: Object at location b/k not found".into(),
+            C::ObjectNotFound,
+        ),
+        // No answer: the HTTP client's words. object_store 0.14.1 prints only
+        // "HTTP error: error sending request" for every transport failure
+        // (captured: a refused connection and a silent listener read the
+        // same), so the cause's own words are matched where a caller kept
+        // them.
+        (
+            format!("timeout-archive/k: Generic S3 error: {AT}HTTP error: error sending request"),
             C::EndpointUnreachable,
         ),
         (
-            "Generic S3 error: something nobody has a table entry for",
+            "error sending request for url (https://minio:9000/timeout): invalid peer certificate: UnknownIssuer".into(),
+            C::TlsTrustFailed,
+        ),
+        (
+            "Generic S3 error: error sending request: operation timed out".into(),
+            C::Timeout,
+        ),
+        ("Generic S3 error: request timeout".into(), C::Timeout),
+        (
+            "error sending request for url (https://minio:9000/timeout-archive): tcp connect error: Connection refused (os error 61)".into(),
+            C::EndpointUnreachable,
+        ),
+        // The bare word is a word: a retry clause and a path are not it.
+        (
+            "Generic S3 error: after 2 retries, max_retries: 2, retry_timeout: 5s: builder error for /data/timeout-archive/timeout/k.timeout".into(),
+            C::StoreErrorUnclassified,
+        ),
+        (
+            "Generic S3 error: something nobody has a table entry for".into(),
             C::StoreErrorUnclassified,
         ),
     ];
-    for (message, want) in cases {
-        let got = StoreErrorClass::classify(&StoreError::Io(message.to_string()));
-        assert_eq!(got, want, "classifying: {message}");
+    for (message, want) in &cases {
+        let got = StoreErrorClass::classify(&StoreError::Io(message.clone()));
+        assert_eq!(got, *want, "classifying: {message}");
+    }
+}
+
+/// One canned HTTP answer for every request, from a loopback listener: the
+/// REAL `object_store` client is driven against it, so the errors below are
+/// the types and the text the product meets, source chain included. Nothing
+/// leaves the loopback interface, and the thread ends with its `served`
+/// connections.
+fn answering(status_line: &'static str, body: String, served: usize) -> u16 {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    std::thread::spawn(move || {
+        for _ in 0..served {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match socket.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            // A HEAD's answer carries the length and no body.
+            let head = request.starts_with(b"HEAD ");
+            let answer = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/xml\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                if head { "" } else { body.as_str() }
+            );
+            let _ = socket.write_all(answer.as_bytes());
+        }
+    });
+    port
+}
+
+fn store_at(port: u16, bucket: &str) -> Store {
+    let location = StorageUrl::S3 {
+        bucket: bucket.into(),
+        prefix: String::new(),
+        region: Some("us-east-1".into()),
+        endpoint: Some(format!("http://127.0.0.1:{port}")),
+        path_style: true,
+        allow_http: true,
+    };
+    Store::read_only_with(
+        &location,
+        &StoreOptions::static_keys("AKIADEST", "s", None)
+            .with_request_timeout(Duration::from_secs(2))
+            .with_max_retries(0),
+    )
+    .expect("the client builds")
+}
+
+/// MinIO's body for an absent object, as PROD-01.2's review captured it on
+/// the compose stack, for `key` in `bucket`.
+fn minio_no_such_key(bucket: &str, key: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The \
+         specified key does not exist.</Message><Key>{key}</Key><BucketName>{bucket}\
+         </BucketName><Resource>/{bucket}/{key}</Resource><RequestId>18DD1B6AA58ED4B2\
+         </RequestId><HostId>dd9025ba</HostId></Error>"
+    )
+}
+
+/// **PROD-01.2 review, M1, through the real client.** A store answers
+/// `404 NoSuchKey` for an object whose bucket, prefix and key each spell a
+/// credential code, and every read of it is `NotFound`: a read, a bounded
+/// read, a read by version id and a `HEAD`.
+///
+/// This is the row the in-crate ones cannot be: the error is the one
+/// `object_store` builds (its retry error, its request error, its `Display`),
+/// so a release that rewords the status line or reshapes the source chain
+/// fails here instead of turning every code into "no code".
+///
+/// CONTROL: versitygw's `404 XAdminUserNotFound`, under the same names, is a
+/// refused credential at the three reads that carry a body.
+#[test]
+fn a_real_404_about_an_object_named_like_a_credential_code_is_not_found() {
+    let bucket = "expiredtoken-archive";
+    let key = "invalidsecurity/xadminusernotfound-2026/signaturedoesnotmatch.json";
+    let absent = store_at(
+        answering("404 Not Found", minio_no_such_key(bucket, key), 4),
+        bucket,
+    );
+    let cap = logweir_store::caps::SIGNED_DOCUMENT;
+    for (read, outcome) in [
+        ("a read", absent.get_capped(key, cap).map(|_| ())),
+        (
+            "a read by version id",
+            absent.get_version_capped(key, "v1", cap).map(|_| ()),
+        ),
+        ("a HEAD", absent.head(key).map(|_| ())),
+        (
+            "a bounded read",
+            absent.get_bounded(key, 1024, None).map(|_| ()),
+        ),
+    ] {
+        match outcome {
+            Err(e @ StoreError::NotFound(_)) => assert_eq!(
+                StoreErrorClass::classify(&e),
+                StoreErrorClass::ObjectNotFound,
+                "{read}"
+            ),
+            other => panic!("{read}: an absent object must be NotFound, got {other:?}"),
+        }
+    }
+
+    let refused = store_at(
+        answering(
+            "404 Not Found",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code>\
+             <Message>No user exists with the provided access key ID.</Message></Error>"
+                .to_string(),
+            2,
+        ),
+        bucket,
+    );
+    for (read, outcome) in [
+        ("a read", refused.get_capped(key, cap).map(|_| ())),
+        (
+            "a read by version id",
+            refused.get_version_capped(key, "v1", cap).map(|_| ()),
+        ),
+    ] {
+        match outcome {
+            Err(e @ StoreError::Io(_)) => {
+                assert_eq!(
+                    StoreErrorClass::classify(&e),
+                    StoreErrorClass::InvalidCredentials,
+                    "{read}: {e}"
+                );
+                // The text is the shape the classifier's rows are written in.
+                let text = e.to_string();
+                assert!(
+                    text.contains(" - Server returned non-2xx status code: 404 Not Found: "),
+                    "{read}: object_store's words moved: {text}"
+                );
+            }
+            other => panic!("{read}: a refused credential must be Io, got {other:?}"),
+        }
+    }
+}
+
+/// The same, for the answers a LIST and a denied read carry: the class is the
+/// answer's code, under a bucket and a key that spell other codes.
+#[test]
+fn a_real_answers_class_is_its_code_whatever_the_names_spell() {
+    let cap = logweir_store::caps::SIGNED_DOCUMENT;
+    let bucket = "nosuchbucket-expiredtoken";
+    let key = "invalidaccesskeyid/timeout.json";
+    let body = |code: &str| {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>m\
+             </Message><Key>{key}</Key><BucketName>{bucket}</BucketName><Resource>/{bucket}/\
+             {key}</Resource></Error>"
+        )
+    };
+    for (status, code, want) in [
+        (
+            "403 Forbidden",
+            "AccessDenied",
+            StoreErrorClass::AccessDenied,
+        ),
+        (
+            "403 Forbidden",
+            "SignatureDoesNotMatch",
+            StoreErrorClass::InvalidCredentials,
+        ),
+        (
+            "503 Service Unavailable",
+            "SlowDown",
+            StoreErrorClass::StoreErrorUnclassified,
+        ),
+    ] {
+        let store = store_at(answering(status, body(code), 2), bucket);
+        let read = store.get_capped(key, cap).expect_err("the read is refused");
+        assert_eq!(StoreErrorClass::classify(&read), want, "a read: {read}");
+        let list = store.list_keys("").expect_err("the list is refused");
+        assert_eq!(
+            StoreErrorClass::classify(&StoreError::Io(list.to_string())),
+            want,
+            "a list: {list}"
+        );
+        assert_eq!(
+            logweir_store::answered_status(&read),
+            status[..3].parse().ok(),
+            "{read}"
+        );
     }
 }
 
@@ -974,10 +1224,12 @@ fn the_classifier_table() {
 /// never reaches a status.
 #[test]
 fn access_denied_is_classified_without_body() {
-    let raw = "Generic S3 error: response error \"<?xml version=\"1.0\"?><Error>\
+    let raw = "Generic S3 error: Error performing list request: Error performing GET \
+               https://s3.eu-west-1.amazonaws.com/b?list-type=2 in 41ms - Server returned \
+               non-2xx status code: 403 Forbidden: <?xml version=\"1.0\"?><Error>\
                <Code>AccessDenied</Code><Message>User arn:aws:iam::1:user/backup is not \
                authorized to perform s3:ListBucket</Message><RequestId>17C3E1</RequestId>\
-               <HostId>abc</HostId></Error>\", after 0 retries";
+               <HostId>abc</HostId></Error>";
     let err = StoreError::Io(raw.to_string());
     let class = StoreErrorClass::classify(&err);
     assert_eq!(class, StoreErrorClass::AccessDenied);
@@ -1051,7 +1303,8 @@ fn the_raw_classifier_uses_structured_variants() {
     );
     let missing_bucket = object_store::Error::NotFound {
         path: "b".into(),
-        source: "<Error><Code>NoSuchBucket</Code></Error>".into(),
+        source: "Server returned non-2xx status code: 404 Not Found: <Error><Code>NoSuchBucket</Code></Error>"
+            .into(),
     };
     assert_eq!(
         StoreErrorClass::classify_object_store(&missing_bucket),
@@ -1060,7 +1313,8 @@ fn the_raw_classifier_uses_structured_variants() {
     );
     let missing_key = object_store::Error::NotFound {
         path: "b/k".into(),
-        source: "<Error><Code>NoSuchKey</Code></Error>".into(),
+        source: "Server returned non-2xx status code: 404 Not Found: <Error><Code>NoSuchKey</Code></Error>"
+            .into(),
     };
     assert_eq!(
         StoreErrorClass::classify_object_store(&missing_key),
@@ -1070,7 +1324,8 @@ fn the_raw_classifier_uses_structured_variants() {
     // reported as the credential problem: a wrong key is not a missing grant.
     let wrong_key = object_store::Error::PermissionDenied {
         path: "b/k".into(),
-        source: "<Error><Code>SignatureDoesNotMatch</Code></Error>".into(),
+        source: "Server returned non-2xx status code: 403 Forbidden: <Error><Code>SignatureDoesNotMatch</Code></Error>"
+            .into(),
     };
     assert_eq!(
         StoreErrorClass::classify_object_store(&wrong_key),

@@ -1944,6 +1944,22 @@ fn an_expected_topic_that_is_hidden_is_not_authorized_and_not_absent() {
 // 4. `destinationAccess`
 // ===========================================================================
 
+/// A store's refusal in the words `object_store` 0.14.1 hands over: its
+/// request line, its status line, and the store's error document (captured
+/// with the real client; `crates/logweir-store/tests/options.rs` holds the
+/// shape to the client itself).
+///
+/// The classifier reads an answer's own status and code and searches no text
+/// (PROD-01.2 review, M1: the text echoes the bucket and the key), so a row
+/// offers a refusal in the shape the product meets. The rows here used to
+/// pass on strings no store sends, with the code anywhere in them.
+fn s3_refusal(status: &str, code: &str) -> String {
+    format!(
+        "Generic S3 error: Error performing GET https://s3.example.com/lw-archive/k in 3ms - \
+         Server returned non-2xx status code: {status}: <Error><Code>{code}</Code></Error>"
+    )
+}
+
 fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
     plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
         destination: destination(),
@@ -2004,11 +2020,8 @@ fn a_destination_access_check_tells_denial_from_not_found() {
     assert_eq!(row.gating, Gating::Advisory);
 
     // Denial: the backend refused before it looked.
-    let denied = FakeObjects::new().failing_get(Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied</Code>\
-         </Error>\", after 0 retries: HTTP status client error (403 Forbidden)"
-            .to_string(),
-    ));
+    let denied =
+        FakeObjects::new().failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive(
         &m,
         &FakeWiring::default().with_role(DestinationRole::EvidenceRead, denied),
@@ -2029,9 +2042,10 @@ fn an_archive_list_denial_is_blocking_and_a_wrong_key_is_invalid_credentials() {
         &m,
         &FakeWiring::default().with_role(
             DestinationRole::ArchiveRead,
-            FakeObjects::new().failing_list(Fault::Io(
-                "Generic S3 error: <Error><Code>SignatureDoesNotMatch</Code></Error>".to_string(),
-            )),
+            FakeObjects::new().failing_list(Fault::Io(s3_refusal(
+                "403 Forbidden",
+                "SignatureDoesNotMatch",
+            ))),
         ),
     );
     let row = run.row(CheckId::DestinationArchiveListable);
@@ -2129,10 +2143,7 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
     let run = drive(
         &m,
         &FakeWiring::default().with_writer(
-            FakeObjects::new().failing_put(Fault::Io(
-                "Generic S3 error: <Error><Code>AccessDenied</Code></Error> (403 Forbidden)"
-                    .to_string(),
-            )),
+            FakeObjects::new().failing_put(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
         ),
     );
     let row = run.row(CheckId::DestinationEvidenceWritable);
@@ -2158,9 +2169,7 @@ fn separated_access_plan(grant: Option<GrantRef>) -> CheckPlan {
 }
 
 fn access_denied() -> Fault {
-    Fault::Io(
-        "Generic S3 error: <Error><Code>AccessDenied</Code></Error> (403 Forbidden)".to_string(),
-    )
+    Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))
 }
 
 /// **The defect's own shape.** A destination whose ARCHIVE principal may write
@@ -3913,9 +3922,7 @@ fn an_evidence_fetch_tells_absence_from_denial() {
         &m,
         &FakeWiring::default().with_role(
             DestinationRole::EvidenceRead,
-            FakeObjects::new().failing_get(Fault::Io(
-                "Generic S3 error: <Error><Code>AccessDenied</Code></Error>".to_string(),
-            )),
+            FakeObjects::new().failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
         ),
     );
     let e = &run.result().evidence[0];
@@ -7128,10 +7135,13 @@ fn a_genuine_timeout_survives_the_strip() {
     }
     // A sentence that merely begins "after " is left alone, and a message with
     // no retry bookkeeping is unchanged.
-    let plain = "Generic S3 error: <Error><Code>AccessDenied</Code></Error> after 3 attempts";
-    assert_eq!(logweir::check::store::strip_retry_noise(plain), plain);
+    let plain = format!(
+        "{} after 3 attempts",
+        s3_refusal("403 Forbidden", "AccessDenied")
+    );
+    assert_eq!(logweir::check::store::strip_retry_noise(&plain), plain);
     assert_eq!(
-        logweir::check::store::classify(&StoreError::Io(plain.to_string())),
+        logweir::check::store::classify(&StoreError::Io(plain.clone())),
         CheckCode::AccessDenied
     );
 }
@@ -7255,9 +7265,8 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
         &FakeWiring::default()
             .with_role(
                 DestinationRole::EvidenceRead,
-                FakeObjects::new().failing_get(Fault::Io(
-                    "Generic S3 error: <Error><Code>AccessDenied</Code></Error>".to_string(),
-                )),
+                FakeObjects::new()
+                    .failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
             )
             .with_writer(FakeObjects::new()),
     );
@@ -9039,11 +9048,9 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
     // UNREADABLE: the same shape of failure, from a denial rather than an
     // absence. A 403 that reported `Missing` is how an operator comes to
     // believe an outage deleted their backups.
-    let denied = objects.clone().failing_get(Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    ));
+    let denied = objects
+        .clone()
+        .failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive_sync(
         sync_request(),
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
@@ -9350,11 +9357,8 @@ fn a_walk_that_never_started_emits_no_body() {
     assert!(!row.remedy.is_empty());
 
     // The FIRST listing is denied.
-    let denied = FakeObjects::new().failing_list(Fault::Io(
-        "Generic S3 error: Error performing LIST: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    ));
+    let denied =
+        FakeObjects::new().failing_list(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive_sync(
         sync_request(),
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
@@ -9739,11 +9743,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         &sidecar,
         CATALOG_CLAIMED_KEY_ID,
     );
-    let denied = Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    );
+    let denied = Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"));
 
     let cases: Vec<(&str, String, Fault, &str, &str)> = vec![
         (

@@ -404,14 +404,19 @@ fn evaluate_storage(
 /// Anything that does not match one of those three (connection refused, DNS
 /// failure, a timeout) is a genuine reachability gap and still SKIPs.
 fn classify_storage_error(loc: &str, e: &str) -> CheckResult {
-    let el = e.to_ascii_lowercase();
-    if el.contains("necessary privileges") || el.contains("valid authentication credentials") {
+    // The store's own classifier (PROD-01.2 review, M1): it reads the answer's
+    // status and code, and `object_store`'s wording only where nothing
+    // answered, so a bucket or a prefix that happens to spell "not found"
+    // does not choose the sentence below.
+    use logweir_engine_oso::storage::{StoreError, StoreErrorClass as Class};
+    let class = Class::classify(&StoreError::Io(e.to_string()));
+    if matches!(class, Class::AccessDenied | Class::InvalidCredentials) {
         CheckResult::Failed(format!(
             "storage credentials at {loc} were rejected: {e}. This is a credentials/permissions \
              problem — `just e2e-up` will not fix it. Check the access key, secret and bucket \
              policy."
         ))
-    } else if el.contains("not found") {
+    } else if matches!(class, Class::ObjectNotFound | Class::BucketNotFound) {
         CheckResult::Failed(format!(
             "storage location {loc} was not found: {e}. This looks like a configuration problem \
              (a typo'd bucket, container or prefix) — `just e2e-up` will not fix it."
