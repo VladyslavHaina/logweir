@@ -166,6 +166,29 @@ pub struct VerifyReport {
     /// What a 2.0.0 document proves about the other partitions of a narrowed
     /// topic (PROD-11.1b), from the same two fields.
     pub outside_the_subset: logweir_core::scorecard::OutsideTheSubset,
+    /// `target.original_name` (scorecard 1.8.0, PROD-15.1), carried as read:
+    /// `None` is a restore that did not write under the original names.
+    /// Boxed: the block is the largest optional one, and `Verdict`'s variants
+    /// stay comparable in size.
+    pub original_name: Option<Box<logweir_core::scorecard::OriginalNameInfo>>,
+}
+
+/// The two `original name:` lines both readers print for a restore under the
+/// ORIGINAL topic names (PROD-15.1): the writer's sentences
+/// (`OriginalNameInfo::lines`) — the approval subject and the document it was
+/// verified in, the cluster condition that admitted it, and where the run
+/// looked for a declarative owner and what it found. Nothing for a document
+/// without `target.original_name`. `docs/verify_scorecard.py::
+/// _original_name_lines` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `original name:` between the two readers.
+#[must_use]
+pub fn original_name_lines(
+    block: Option<&logweir_core::scorecard::OriginalNameInfo>,
+) -> Vec<String> {
+    block
+        .map(logweir_core::scorecard::OriginalNameInfo::lines)
+        .unwrap_or_default()
 }
 
 /// The replay-selection line both readers print for a narrowed restore
@@ -1215,6 +1238,7 @@ pub fn verify_scorecard_with(
             sc.integrity.verification.as_ref(),
         ),
         format_version: sc.format_version.clone(),
+        original_name: sc.target.original_name.clone().map(Box::new),
     }))
 }
 
@@ -1286,6 +1310,11 @@ fn print_report(r: &VerifyReport) {
         r.outside_the_subset,
     ) {
         println!("coverage:  {line}");
+    }
+    // PROD-15.1: nor an ordinary restore when it wrote under the original
+    // topic names — and what admitted that.
+    for line in original_name_lines(r.original_name.as_deref()) {
+        println!("target:    {line}");
     }
 }
 

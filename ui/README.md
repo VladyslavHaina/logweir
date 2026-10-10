@@ -191,6 +191,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
 | `tests/design.spec.js` | the design system's guarantees: the token layer (Clarity's alias names, every token read is declared, the dark theme redefines aliases only), both schemes, reduced motion, the focus ring, badges with words, the stepper. |
 | `tests/datagrid.spec.js` | **PLAT-18.2**: the datagrid's filter, sort and pagination arithmetic, the lists that declare one, the 2,000-topic subset keeping every box, and focus surviving a re-render. |
+| `tests/original-name.spec.js` | **PROD-15.1**: the original-name choice, the owner statement, the complete coverage it requires (selected and locked, with the reason), the golden plan, the request's declaration, the approval subject on the review step and the approvals page, and the topics a stopped creation step left, on the Restore's page. |
 | `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
 | `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
@@ -1047,7 +1048,10 @@ API in the same words** (`routes/restores.rs::validate_topic_mapping`):
 | no topic selected | a restore of no topic is not a restore | `topicMapping` / `empty` |
 | a topic the point did not freeze | names it, and names `PlanTopicsNotInRecoveryPoint` | `topicMapping[i].source` / `invalid_topic` |
 | the same source twice | names both rows and the target they share | `topicMapping[i].target` / `duplicate_mapping` |
-| a prefix that is not a Kafka name, or an empty one (the identity map) | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
+| a prefix that is not a Kafka name, or an empty one (the identity map) without the original-name choice | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
+| the original-name choice without the owner statement | asks for the statement (the runner would refuse `OriginalNameOwnerNotChecked`) | -- (the API never sees the plan; the runner refuses it) |
+| the original-name choice with a sampled coverage (not reachable from the controls, which select complete and lock the box) | names `OriginalNameNeedsCompleteCoverage`; no plan is rendered | `coverage` / `original_name_requires_complete` |
+| a one-person confirmation of the original-name choice without every original topic name re-typed, exactly | names what is missing, extra or repeated | `originalNameConfirmation.typedTopics` / `typed_topics_required` or `typed_topics_mismatch` |
 | a mapped name longer than a broker accepts | names the topic and the bound | `topicMapping[i].target` / `mapped_name_illegal` |
 
 A duplicate target can only be a duplicate SOURCE, because a prefix map over
@@ -1147,6 +1151,93 @@ timestamps. The long form, with the evidence rows, is
 [stability.md](../docs/stability.md), *Known limitations*, and
 [verify-a-scorecard.md](../docs/verify-a-scorecard.md), *What the scorecard does
 not claim*. Rows: `ui/tests/restore-semantics.spec.js`.
+
+## Restoring under the original topic names (PROD-15.1)
+
+**Step 4 offers "Restore under the original topic names" in `newTopic` mode
+only, as an explicit choice.** Ticking it sets the prefix to the identity
+mapping (`""`, the input disabled) and keeps `topic_mapping_prefix`, the
+runner's namespace for its `LogAppendTime` probe; unticking it brings the
+default prefix back, and the identity map is refused again. A switch to
+`scratch` drops the choice: the identity ban stays there. Beside the box the
+page shows `ORIGINAL_NAME_SENTENCE` (only into absent names; a new generation
+of each name, not the original topic; the cluster and owner conditions; its
+own approval subject; stop the producers first).
+
+**The owner statement is required before anything is sent.** The runner
+cannot read Kubernetes or a repository, so it refuses an original-name plan
+that looked for a declarative owner nowhere (`OriginalNameOwnerNotChecked`).
+The page asks the operator to state that no owner manages the names
+(`ORIGINAL_NAME_NO_OWNER_STATEMENT`), and the plan signs that statement as
+`original_name: {owners: []}`. The owner path is not offered here: a plan
+that restores although an owner manages a name is written by hand.
+
+**Complete coverage is required, and the page selects it.** A restore under
+the original topic names is verified completely, never by sample: the runner
+refuses a sampled plan (`OriginalNameNeedsCompleteCoverage`). So ticking the
+original-name box selects "Verify every record (complete coverage)"
+(`requireCompleteCoverage`), and the coverage panel then opens with the box
+ticked and LOCKED and `ORIGINAL_NAME_COVERAGE_SENTENCE` beside it, which says
+why: another producer may still be writing to a production name, a sampled
+check can pass its record, and the complete check names it. The record bound
+stays the operator's to set. `setCoverage` cannot clear the choice while the
+original names are chosen; a draft kept before the rule and an edit of an
+original-name Restore both come back complete; unticking the original-name
+box unlocks the coverage box again. The review step's coverage line ends "--
+required for a restore under the original topic names".
+
+**The plan, the request and the subject.** `ui/plan.js` renders
+`topic_naming: {prefix: "", original_name: {owners: []}}` beside
+`sample.coverage: "complete"` (the golden
+`tests/fixtures/plan-original-name.golden.yaml`, which `ui_lint.rs` parses
+into the runner's `RestoreSpec` and `scripts/check-ui-behaviour.sh`
+re-emits), and refuses to render one without the statement, in scratch
+mode, or with a sampled coverage. The create request declares
+`target.topicNaming.originalName: true` and `coverage: complete`;
+the review step shows the approval subject the plan needs (`originalName`, or
+`ordinary`). In console mode the page signs `approvalSubject: originalName`
+into the authorization document only for a Restore that declares it.
+
+**One person confirms only with the names typed (the owner's decision
+OD-10).** When the namespace is confirmed by one person (`confirm`) and the
+original-name choice is made, the plan step asks the requester to RE-TYPE
+every original topic name, one per line (`ORIGINAL_NAME_TYPED_SENTENCE`).
+Create refuses until the typed list is exactly the plan's topics: each once,
+nothing else, compared byte for byte, with no case folding
+(`typedTopicsProblem`, which names what is missing, extra or repeated). The
+request then carries `originalNameConfirmation.typedTopics`, which the console
+signs. In a `strict` namespace nothing is typed: the second person approves.
+
+**The approvals page shows the subject the SIGNED bytes carry**:
+`originalName`, `ordinary`, or `unknown` when the document cannot be read, with
+`ORIGINAL_NAME_APPROVAL_SENTENCE` beside an original-name Restore waiting for
+an approval (the CLI line, `logweir drill approve --approval-subject
+original-name`, included), and, for a one-person confirmation, the typed
+names the signed document carries (`typedTopicsOf`).
+
+**A Restore whose creation step stopped says what it left on the cluster,
+first.** Logweir never deletes a topic under an original name, so when a run
+stops while creating its target topics (a name lost a race, or the broker
+refused another one) every topic it had created is still there, empty. The
+Restore's page opens with a caveat block (`creationStoppedWarning`, from
+`status.targetTopicsAppeared`; the product API's `targetTopicsAppeared`): the
+names someone else created, which the restore wrote nothing into; each
+topic the restore created and left, with `LEFT_TOPIC_SENTENCE` -- "created by
+this restore and left empty; remove it yourself once you have checked nothing
+writes to it" -- the same words the runner, the Restore's status and the API
+(`leftInstruction`) use; and each name the restore asked for and CANNOT
+ACCOUNT FOR (`unconfirmed`), with `UNCONFIRMED_TOPIC_SENTENCE` ("exists now
+... check what it holds and who writes to it before you remove it", the
+API's `unconfirmedInstruction`), or `UNCONFIRMED_UNLISTED_TOPIC_SENTENCE`
+("may exist now ... look for it") unless the status says `unconfirmedSeen:
+true`. An unconfirmed topic is never shown with the "created by this restore"
+sentence. A list the 100-name bound cut ends "and N more" (from
+`appearedCount`, `leftCount`, `unconfirmedCount`; `creationStopMore`), and
+the block then says that each name is one of the restore's mapped target
+topics and that the runner's log names every one. Every name, in all three
+lists, is escaped. On such a Restore the "new topics" fact lists only what
+the restore left (with "and N more" when cut), never a name someone else
+created or one it cannot account for. Rows: `ui/tests/original-name.spec.js`.
 
 ## The replication factor: a default with its basis, an input, and a refusal before Create
 

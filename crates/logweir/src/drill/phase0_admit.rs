@@ -1,8 +1,9 @@
 use crate::drill::DrillError;
 use logweir_core::guard::{
-    check_topic_mapping_coverage, scan_forbidden_keys, GuardRefusal,
+    check_topic_mapping, scan_forbidden_keys, GuardRefusal,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
 };
+use logweir_core::original_name::{self, OwnerInputs, OwnerVerdict, ReceiptOwners, SourceRelation};
 use logweir_core::spec::{
     target_topic_prefix, AllowedClusters, Anchor, Coverage, DrillSpec, TargetMode,
 };
@@ -39,6 +40,46 @@ pub struct Admitted {
     /// `create_target_topics` — see that function for why the creation itself
     /// cannot happen inside this phase.
     pub topic_preflight: TopicPreflight,
+    /// **PROD-15.1.** What phase 0 PROVED for a restore under the original
+    /// topic names before admitting it — the cluster condition and the owner
+    /// verdict — and `None` for every other restore. The signed scorecard's
+    /// `target.original_name` is built from it after phase 1 has verified the
+    /// approval subject.
+    pub original_name: Option<OriginalNameAdmission>,
+}
+
+/// **PROD-15.1.** What only the runner holds about an original-name restore's
+/// source and owners, beyond the plan and the allowlist file. Every field is
+/// optional and absent means "not known" — never "no source", never "no
+/// owner".
+#[derive(Debug, Clone, Default)]
+pub struct OriginalNameInputs {
+    /// The bound recovery point's VERIFIED receipt's `source.cluster_id`,
+    /// read from the broker at backup time (`binding::VerifiedPoint`).
+    pub receipt_source_cluster_id: Option<String>,
+    /// The same receipt's recorded owners (PROD-05.1): its `owner_detection`
+    /// and each source topic's owner.
+    pub receipt_owners: Option<ReceiptOwners>,
+    /// The Strimzi owners of the restored names in the `KafkaTopic` resources
+    /// the runner was given (`--kafka-topic-resources`): `Some(empty)` is a
+    /// look that found none, `None` is no look.
+    pub kafka_topic_owners: Option<BTreeMap<String, logweir_core::backup_receipt::TopicOwner>>,
+    /// `sha256:<hex>` of that resources file's bytes, signed into
+    /// `target.original_name` so the document names the file it looked in
+    /// (review L2: the file is unsigned runner input). `Some` exactly when
+    /// `kafka_topic_owners` is.
+    pub kafka_topic_resources_sha256: Option<String>,
+}
+
+/// **PROD-15.1.** The conditions phase 0 proved for an original-name restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginalNameAdmission {
+    /// How the target relates to the source cluster.
+    pub relation: SourceRelation,
+    /// Where the run looked for declarative owners and what it found.
+    pub owners: OwnerVerdict,
+    /// The digest of the `KafkaTopic` resources file looked in, if one was.
+    pub kafka_topic_resources_sha256: Option<String>,
 }
 
 /// What phase 0 found out about the target topics before anything was written,
@@ -194,6 +235,32 @@ pub fn run(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
 ) -> Result<Admitted, DrillError> {
+    run_with_original_name(
+        spec,
+        spec_text,
+        allowed,
+        reader,
+        creator,
+        deleter,
+        &OriginalNameInputs::default(),
+    )
+}
+
+/// [`run`], with what the runner holds about an original-name restore's
+/// source and owners (PROD-15.1). [`run`] is this with nothing known, which
+/// is what every caller that is not the drill's own context passes — and for
+/// an original-name plan "nothing known" refuses (`OriginalNameOwnerNotChecked`
+/// unless the plan states its owners; the cluster condition then needs
+/// auto-creation proven disabled).
+pub fn run_with_original_name(
+    spec: &DrillSpec,
+    spec_text: &str,
+    allowed: &AllowedClusters,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
+    original: &OriginalNameInputs,
+) -> Result<Admitted, DrillError> {
     // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
     // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
     // never an empty result silently treated as clean.
@@ -230,6 +297,16 @@ pub fn run(
     // same rule for every caller that reaches phase 0 another way.
     logweir_core::guard::reject_auth_without_required_tls("target.auth", &spec.target.auth)?;
 
+    // **PROD-15.1, condition 1**, purely local: an `original_name` block is
+    // legal only in `newTopic` mode and only beside `prefix: ""` — the identity
+    // ban stays in scratch mode, and a plan that names two names is refused.
+    // An empty prefix WITHOUT the block is the mapping guard's below, which
+    // refuses it exactly as before.
+    if let Some(refusal) = original_name::refuse_shape(spec) {
+        return Err(GuardRefusal(refusal).into());
+    }
+    let is_original_name = original_name::is_original_name_restore(spec);
+
     // The two PURELY LOCAL checks run first, before any network round trip. A
     // local refusal should not need a reachable broker, and putting them first
     // is what lets `guard_cli.rs` distinguish "refused by the mapping guard"
@@ -247,9 +324,12 @@ pub fn run(
         .iter()
         .map(|t| (t.clone(), format!("{prefix}{t}")))
         .collect();
-    // `check_topic_mapping_coverage` returns `Result<(), GuardRefusal>`; `?`
-    // converts it into `DrillError::Guard` via the `#[from]` impl.
-    check_topic_mapping_coverage(&spec.source.topics, &topic_mapping)?;
+    // `check_topic_mapping` returns `Result<(), GuardRefusal>`; `?` converts
+    // it into `DrillError::Guard` via the `#[from]` impl. The identity mapping
+    // is allowed ONLY for a plan whose shape opted in above (PROD-15.1), and
+    // there it is required for every topic; the conditions it needs are proved
+    // below, before anything is written.
+    check_topic_mapping(&spec.source.topics, &topic_mapping, is_original_name)?;
 
     // **PROD-11.1, the SHAPE of the replay selection**, purely local: a
     // partition subset for a topic the plan does not select, an empty subset,
@@ -627,18 +707,112 @@ pub fn run(
         .into());
     }
 
+    // **PROD-15.1, conditions 3 and 4**, after the absence refusal above
+    // (condition 2, the same refusal every restore gets) and BEFORE G-TS,
+    // whose `LogAppendTime` arm is the one write phase 0 makes. Every refusal
+    // here is exit 3 with nothing written.
+    let (original_name_admission, probe) = if is_original_name {
+        let admission = original_name_conditions(spec, reader, &target_cluster_id, original)?;
+        // **Condition 7.** The probe never borrows an original name: it is
+        // created under the scratch prefix the deleter is scoped to, named
+        // from the approved bytes, and it must be free.
+        let probe = original_name::probe_topic_name(
+            &spec.target.topic_mapping_prefix,
+            &logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+        );
+        let unusable = if !logweir_core::guard::topic_name_is_kafka_legal(&probe) {
+            Some("is not a name a broker accepts")
+        } else if topic_mapping.contains_key(&probe) {
+            Some("is one of the restored names")
+        } else if topics.iter().any(|t| t.name == probe) {
+            Some("already exists on the target")
+        } else {
+            None
+        };
+        if let Some(why) = unusable {
+            return Err(GuardRefusal(format!(
+                "{}: the LogAppendTime override probe of an original-name restore is created \
+                 under target.topic_mapping_prefix, never under an original name, as `{probe}`, \
+                 which {why}; delete it or change target.topic_mapping_prefix (the plan's \
+                 scratch prefix); nothing was written",
+                original_name::ORIGINAL_NAME_PROBE_UNUSABLE
+            ))
+            .into());
+        }
+        (Some(admission), Some(probe))
+    } else {
+        (None, None)
+    };
+
     // **Guard G-TS.** The target-topic preflight, after the cluster-identity,
     // marker and target-absence checks and before anything else. The absence
     // check comes FIRST on purpose: the `LogAppendTime` arm below creates the
     // first mapped target name as its probe, and it may only do that to a name
-    // this phase has just proved absent.
-    let topic_preflight = target_topic_preflight(spec, &topic_mapping, reader, creator, deleter)?;
+    // this phase has just proved absent. An original-name restore's probe is
+    // its own scratch name (condition 7 above).
+    let topic_preflight = target_topic_preflight(
+        spec,
+        &topic_mapping,
+        probe.as_deref(),
+        reader,
+        creator,
+        deleter,
+    )?;
 
     Ok(Admitted {
         target_cluster_id,
         topic_mapping,
         topic_mapping_prefix: prefix,
         topic_preflight,
+        original_name: original_name_admission,
+    })
+}
+
+/// **PROD-15.1, conditions 3 and 4**, for a plan that passed condition 1 and
+/// whose every restored name phase 0 has just proved absent.
+///
+/// 3. The target is not the source cluster — every known source cluster id
+///    (the verified receipt's, then the allowlist file's) differs from it — or
+///    every broker reports `auto.create.topics.enable=false`. A broker that
+///    cannot be read is exit 1 (a `KafkaError`, FX-4's rule for a refused
+///    read); one that answers without the key, or with anything but `false`,
+///    is a refusal (exit 3).
+/// 4. Somewhere was looked for a declarative owner of the restored names, and
+///    none was found unless the plan chose the owner path.
+fn original_name_conditions(
+    spec: &DrillSpec,
+    reader: &dyn ClusterReader,
+    target_cluster_id: &str,
+    original: &OriginalNameInputs,
+) -> Result<OriginalNameAdmission, DrillError> {
+    // ONLY THE VERIFIED RECEIPT'S MEASURED ID (review L3). The allowlist
+    // file's `source_cluster_id` is unsigned runner input outside the plan
+    // hash: counting it would let a wrong value make the target "not the
+    // source" and skip the auto-creation read. Without a bound point the
+    // source is unknown, and auto-creation must be proven disabled.
+    let known: Vec<String> = original.receipt_source_cluster_id.iter().cloned().collect();
+    let relation = original_name::source_relation(&known, target_cluster_id);
+    if !matches!(relation, SourceRelation::TargetIsNotSource { .. }) {
+        let answers = reader.broker_config_value_all(original_name::AUTO_CREATE_TOPICS_KEY)?;
+        original_name::require_auto_create_disabled(&relation, target_cluster_id, &answers)
+            .map_err(GuardRefusal)?;
+    }
+    let block = spec.target.original_name().cloned().unwrap_or_default();
+    let owners = original_name::owner_verdict(
+        &spec.source.topics,
+        OwnerInputs {
+            declared: block.owners.as_deref(),
+            kafka_topic_resources: original.kafka_topic_owners.as_ref(),
+            receipt: original.receipt_owners.as_ref(),
+        },
+        block.owner_path,
+        &relation,
+    )
+    .map_err(GuardRefusal)?;
+    Ok(OriginalNameAdmission {
+        relation,
+        owners,
+        kafka_topic_resources_sha256: original.kafka_topic_resources_sha256.clone(),
     })
 }
 
@@ -689,6 +863,7 @@ pub fn run(
 fn target_topic_preflight(
     spec: &DrillSpec,
     topic_mapping: &BTreeMap<String, String>,
+    probe_name: Option<&str>,
     reader: &dyn ClusterReader,
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
@@ -767,7 +942,13 @@ fn target_topic_preflight(
     if timestamp_type != LOG_APPEND_TIME {
         return Ok(preflight);
     }
-    let Some(probe) = topic_mapping.values().next().cloned() else {
+    // PROD-15.1: an original-name restore's probe is its own scratch name
+    // (`original_name::probe_topic_name`), never a restored name; every other
+    // restore borrows the first mapped target, as before.
+    let Some(probe) = probe_name
+        .map(str::to_string)
+        .or_else(|| topic_mapping.values().next().cloned())
+    else {
         // No mapped target topic at all. `check_topic_mapping_coverage` above
         // has already refused an unmapped SELECTED topic, so this is reachable
         // only from a spec that selects nothing — there is nothing to probe and
@@ -941,14 +1122,112 @@ pub fn create_target_topics(
     if specs.is_empty() {
         return Ok(());
     }
+    // **PROD-15.1, condition 6: CREATION IS EXCLUSIVE, AND A RACE LOSES BY
+    // NAME.** Phase 0 proved every mapped name absent; phases 1–5 have run
+    // since. A name that exists NOW was created by someone else in between —
+    // a producer on a cluster that auto-creates, an operator, a declarative
+    // owner — and this run must never write into it. Looked for once more
+    // here, so the common race refuses before ANY topic of this run is
+    // created; `CreateTopics` itself then fails on a name that appears in the
+    // last instant, and that answer is the same refusal. Both modes: the
+    // creation step is one step, and the rule is the same.
+    let existing = reader.list_topics()?;
+    let appeared: Vec<&str> = specs
+        .iter()
+        .filter(|spec| existing.iter().any(|t| t.name == spec.name))
+        .map(|spec| spec.name.as_str())
+        .collect();
+    if !appeared.is_empty() {
+        let appeared: Vec<String> = appeared.iter().map(|n| (*n).to_string()).collect();
+        return Err(creation_stopped(
+            appeared,
+            Vec::new(),
+            Unconfirmed::none(),
+            None,
+        ));
+    }
+    let asked: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
     // The slice outlives the `NewTopic`s built from it inside the impl — see
     // `RdKafkaReader::create_topics`, which cannot compile otherwise.
-    let results = creator.create_topics(&specs)?;
-    for (name, r) in results {
-        match r {
-            Ok(()) => preflight.topics_created.push(name),
-            Err(e) => {
-                return Err(DrillError::Operational(format!(
+    let results = match creator.create_topics(&specs) {
+        Ok(results) => results,
+        // **THE WHOLE CALL FAILED** (PROD-15.1 review 2, M2 (a)): no answer
+        // for ANY name, and that is not "nothing was created". A request the
+        // broker applied after this client gave up leaves every topic in
+        // place, empty, under its target name. So the cluster is listed once
+        // more (a read), and every asked name it shows is named as
+        // UNCONFIRMED: this run cannot say whether its own request made it
+        // or someone else did. Nothing exists: the plain failure it was.
+        Err(e) => {
+            let unconfirmed = Unconfirmed::look(reader, &asked);
+            if unconfirmed.names.is_empty() {
+                return Err(e.into());
+            }
+            return Err(creation_stopped(
+                Vec::new(),
+                Vec::new(),
+                unconfirmed,
+                Some(format!(
+                    "CreateTopics failed as a whole, with no answer for any of [{}]: {e}",
+                    asked.join(", ")
+                )),
+            ));
+        }
+    };
+    // **ONE ANSWER PER NAME ASKED, AND NOTHING ELSE** (PROD-15.1 review L1).
+    // librdkafka refuses an answer naming MORE topics than requested, not
+    // fewer: a short answer would leave a name neither created nor refused,
+    // and the engine would be handed it.
+    //
+    // EVERY ASKED NAME IS CLASSIFIED BY ITS OWN ANSWER, and only a DEFINITE
+    // one puts it in a list that makes a claim (review 2, M2 and L2):
+    //
+    // - exactly one answer, `Ok`: this run created it (`topics_created`, and
+    //   `left` if the step then stops);
+    // - exactly one answer, `TOPIC_ALREADY_EXISTS`: someone else created it
+    //   (`appeared`), never this run;
+    // - anything else — no answer, two answers, or an error that is not
+    //   "already exists" (Kafka goes on creating a topic whose request it
+    //   answered `REQUEST_TIMED_OUT`) — is INDEFINITE: the run cannot account
+    //   for the name, and it is neither called created nor called foreign.
+    let mut lost: Vec<String> = Vec::new();
+    let mut indefinite: Vec<String> = Vec::new();
+    let mut failed: Option<(String, String)> = None;
+    for name in &asked {
+        let answers: Vec<&Result<(), String>> = results
+            .iter()
+            .filter(|(answered, _)| answered == name)
+            .map(|(_, answer)| answer)
+            .collect();
+        match answers.as_slice() {
+            [Ok(())] => preflight.topics_created.push(name.clone()),
+            [Err(e)] if logweir_kafka::rdkafka_reader::is_topic_already_exists(e) => {
+                lost.push(name.clone());
+            }
+            [Err(e)] => {
+                indefinite.push(name.clone());
+                failed.get_or_insert_with(|| (name.clone(), e.clone()));
+            }
+            _ => indefinite.push(name.clone()),
+        }
+    }
+    let mut answered: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+    answered.sort_unstable();
+    let mut expected: Vec<&str> = asked.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    let exact = answered == expected;
+    if !exact || !lost.is_empty() || !indefinite.is_empty() {
+        let why = if !exact {
+            Some(format!(
+                "CreateTopics answered for [{}] when this run asked for [{}]: a name without \
+                 exactly one answer was neither created nor refused, so the restore stops \
+                 before the engine starts.",
+                answered.join(", "),
+                expected.join(", ")
+            ))
+        } else {
+            failed.map(|(name, e)| {
+                format!(
                     "target topic `{name}` could not be created with the pinned configuration \
                      ({}): {e}",
                     TARGET_TOPIC_CONFIGS
@@ -956,9 +1235,22 @@ pub fn create_target_topics(
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect::<Vec<_>>()
                         .join(", ")
-                )))
-            }
-        }
+                )
+            })
+        };
+        // Listed once more only when a name is unaccounted for: a stop made
+        // of definite answers alone needs no second look.
+        let unconfirmed = if indefinite.is_empty() {
+            Unconfirmed::none()
+        } else {
+            Unconfirmed::look(reader, &indefinite)
+        };
+        return Err(creation_stopped(
+            lost,
+            preflight.topics_created.clone(),
+            unconfirmed,
+            why,
+        ));
     }
     // FX-18: the engine is handed topics the cluster SERVES, not topics the
     // controller has merely committed. The engine retries
@@ -970,16 +1262,263 @@ pub fn create_target_topics(
         reader
             .await_served(&spec.name, spec.num_partitions, CREATED_TOPIC_SETTLE)
             .map_err(|e| {
-                DrillError::Operational(format!(
-                    "target topic `{}` was created but the cluster did not serve its {} \
-                     partition(s) within {}s: {e}",
-                    spec.name,
-                    spec.num_partitions,
-                    CREATED_TOPIC_SETTLE.as_secs()
-                ))
+                creation_stopped(
+                    Vec::new(),
+                    preflight.topics_created.clone(),
+                    Unconfirmed::none(),
+                    Some(format!(
+                        "target topic `{}` was created but the cluster did not serve its {} \
+                         partition(s) within {}s: {e}",
+                        spec.name,
+                        spec.num_partitions,
+                        CREATED_TOPIC_SETTLE.as_secs()
+                    )),
+                )
             })?;
     }
     Ok(())
+}
+
+/// **PROD-15.1, condition 6: the creation step stopped, and NOTHING IS
+/// DELETED.**
+///
+/// Exit 1 (phases 0–5 have run, `docs/stability.md`'s phase-5/6 ruling), with
+/// no write into any name someone else created. Every topic THIS execution
+/// created before it stopped is LEFT IN PLACE, empty, and named — on stdout
+/// (`target-topics-appeared=`), on the Restore's status and in the console —
+/// so the operator removes it once they have checked nothing writes to it.
+///
+/// **No code path deletes a topic under an original name, ever** (the
+/// orchestrator's ruling of 2026-10-09, withdrawing the fix round's cleanup).
+/// Kafka has no conditional delete: between any "it is empty" read and the
+/// delete, a producer pointed at the name can write a record, and deleting the
+/// topic would lose it under a production name. Leaving an empty topic is the
+/// recoverable outcome; deleting one a producer just wrote to is not. The same
+/// rule serves a prefixed `newTopic` restore: one step, one rule.
+///
+/// THREE LISTS, and a name is in at most one
+/// (`logweir_core::creation_stop`):
+///
+/// - `appeared`: mapped names someone else created after phase 0 (a lost
+///   race); empty when creation stopped for another reason (`why`).
+/// - `left`: topics this execution created, by its own `CreateTopics`
+///   answer.
+/// - `unconfirmed`: names it asked for, got no definite answer about, and
+///   cannot account for (review 2, M2). Never called `left`, which claims
+///   ownership, nor `appeared`, which says someone else made the topic.
+pub fn creation_stopped(
+    appeared: Vec<String>,
+    left: Vec<String>,
+    unconfirmed: Unconfirmed,
+    why: Option<String>,
+) -> DrillError {
+    if appeared.is_empty() && left.is_empty() && unconfirmed.names.is_empty() {
+        // Nothing appeared, nothing was created and nothing is unaccounted
+        // for: an ordinary operational failure with nothing to name.
+        return DrillError::Operational(why.unwrap_or_else(|| {
+            "the target topics could not be created; nothing was created".to_string()
+        }));
+    }
+    DrillError::CreationStopped(Box::new(CreationStop::new(
+        appeared,
+        left,
+        unconfirmed,
+        why,
+    )))
+}
+
+/// The sentence every surface says about a topic this execution created and
+/// left: stdout, the Restore's status, the product API and the console.
+pub use logweir_core::guard::LEFT_TOPIC_SENTENCE;
+
+/// The names of a stopped creation step this run CANNOT ACCOUNT FOR: it
+/// asked the cluster to create each and got no definite answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unconfirmed {
+    /// The names. With `seen`, each one the cluster LISTED after the stop;
+    /// without it, every name that got no definite answer.
+    pub names: Vec<String>,
+    /// Whether the cluster was listed after the stop. `false`: the listing
+    /// failed too, so each name MAY exist and the run says so, never that it
+    /// does.
+    pub seen: bool,
+    /// Why the cluster could not be listed, when it could not.
+    pub listing_error: Option<String>,
+}
+
+impl Unconfirmed {
+    /// No name is unaccounted for.
+    #[must_use]
+    pub fn none() -> Self {
+        Unconfirmed {
+            names: Vec::new(),
+            seen: true,
+            listing_error: None,
+        }
+    }
+
+    /// **The one more look** (review 2, M2): lists the cluster — a READ — and
+    /// keeps each of `candidates` that EXISTS NOW. Phase 0 and the creation
+    /// step's own listing found every one of them absent moments ago, so a
+    /// candidate that exists was created since: by this run's request, whose
+    /// answer never came, or by someone else. The run cannot tell which.
+    ///
+    /// When the listing itself fails, EVERY candidate is kept, marked not
+    /// seen: a cluster that stopped answering mid-request is exactly where a
+    /// request can have been applied, and naming none would be the silence
+    /// this exists to end. The surfaces then say "may exist".
+    ///
+    /// WHAT THIS DOES NOT SEE: a topic the broker finishes creating AFTER
+    /// this look. It is one read at one moment.
+    #[must_use]
+    pub fn look(reader: &dyn ClusterReader, candidates: &[String]) -> Self {
+        match reader.list_topics() {
+            Ok(existing) => Unconfirmed {
+                names: candidates
+                    .iter()
+                    .filter(|name| existing.iter().any(|t| &t.name == *name))
+                    .cloned()
+                    .collect(),
+                seen: true,
+                listing_error: None,
+            },
+            Err(e) => Unconfirmed {
+                names: candidates.to_vec(),
+                seen: false,
+                listing_error: Some(e.to_string()),
+            },
+        }
+    }
+}
+
+/// What a stopped creation step leaves behind, for the message, the
+/// `target-topics-appeared=` line and `Restore.status.targetTopicsAppeared`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreationStop {
+    /// The closed `failure-reason=` state: `TargetTopicAppeared` for a lost
+    /// race, `CreatedTopicsLeft` when creation stopped for another reason
+    /// and left a topic this execution created or cannot account for.
+    pub reason: &'static str,
+    /// Mapped target names someone else created after phase 0: never touched.
+    pub appeared: Vec<String>,
+    /// Topics this execution created and LEFT, empty. Never deleted.
+    pub left: Vec<String>,
+    /// Names this execution asked for and cannot account for. Never deleted,
+    /// never called its own.
+    pub unconfirmed: Vec<String>,
+    /// Whether the cluster was listed after the stop and showed every
+    /// `unconfirmed` name (`Unconfirmed::seen`).
+    pub unconfirmed_seen: bool,
+    /// The whole account, in words, opening with the reason. It names EVERY
+    /// topic, past the line's bound.
+    pub message: String,
+}
+
+/// The stdout key of the stopped creation step's one structured line.
+pub use logweir_core::creation_stop::LINE_PREFIX as TARGET_TOPICS_APPEARED_KEY_PREFIX;
+
+/// The most names one list of the line carries; the message names them all,
+/// and the line carries each list's count.
+pub use logweir_core::creation_stop::MAX_NAMES as TARGET_TOPICS_APPEARED_MAX_NAMES;
+
+impl CreationStop {
+    fn new(
+        appeared: Vec<String>,
+        left: Vec<String>,
+        unconfirmed: Unconfirmed,
+        why: Option<String>,
+    ) -> Self {
+        let names = |list: &[String]| {
+            list.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let reason = if appeared.is_empty() {
+            logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT
+        } else {
+            logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if !appeared.is_empty() {
+            parts.push(format!(
+                "mapped target topic(s) {} exist now, although phase 0 found every mapped name \
+                 absent: someone created them while this run was admitted (a producer on a \
+                 cluster that auto-creates, an operator, a declarative owner). Creation is \
+                 exclusive, so the restore stops here and writes nothing into a topic it did \
+                 not create.",
+                names(&appeared)
+            ));
+        }
+        if let Some(why) = why {
+            // One sentence among others: a broker's error text carries no
+            // full stop, and the next part names what was left.
+            let why = why.trim_end();
+            parts.push(if why.ends_with('.') {
+                why.to_string()
+            } else {
+                format!("{why}.")
+            });
+        }
+        if !left.is_empty() {
+            parts.push(format!(
+                "{}: {LEFT_TOPIC_SENTENCE}. Logweir never deletes a topic under a name it may \
+                 not own: a producer could write to it between any check and the delete.",
+                names(&left)
+            ));
+        } else if unconfirmed.names.is_empty() {
+            parts.push("This run created no topic.".to_string());
+        } else {
+            // Not "created no topic": for the names below it does not know.
+            parts.push("No CreateTopics answer says this run created a topic.".to_string());
+        }
+        if !unconfirmed.names.is_empty() {
+            let sentence = if unconfirmed.seen {
+                logweir_core::guard::UNCONFIRMED_TOPIC_SENTENCE
+            } else {
+                logweir_core::guard::UNCONFIRMED_UNLISTED_TOPIC_SENTENCE
+            };
+            let mut part = format!("{}: {sentence}.", names(&unconfirmed.names));
+            if let Some(e) = &unconfirmed.listing_error {
+                part.push_str(&format!(" (The cluster could not be listed: {e}.)"));
+            }
+            part.push_str(" Logweir deletes none of them.");
+            parts.push(part);
+        }
+        CreationStop {
+            reason,
+            message: format!("{reason}: {}", parts.join(" ")),
+            appeared,
+            left,
+            unconfirmed_seen: unconfirmed.seen,
+            unconfirmed: unconfirmed.names,
+        }
+    }
+
+    /// The three lists as the line and every surface carry them: each
+    /// bounded by [`TARGET_TOPICS_APPEARED_MAX_NAMES`] with its count, and
+    /// only names a broker accepts (anything else cannot have been a mapped
+    /// name), so the line can carry no control character or quote into a
+    /// status.
+    #[must_use]
+    pub fn lists(&self) -> logweir_core::creation_stop::CreationStopLists {
+        use logweir_core::creation_stop::{CreationStopLists, NameList};
+        CreationStopLists {
+            appeared: NameList::of(&self.appeared),
+            left: NameList::of(&self.left),
+            unconfirmed: NameList::of(&self.unconfirmed),
+            // Meaningful only beside an unconfirmed name, and written only
+            // then: with none, it is the absent flag a reader reads.
+            unconfirmed_seen: self.unconfirmed_seen && !self.unconfirmed.is_empty(),
+        }
+    }
+
+    /// `target-topics-appeared=`'s value: [`Self::lists`] as one JSON object
+    /// (`logweir_core::creation_stop::CreationStopLists::line_value`).
+    #[must_use]
+    pub fn status_line_value(&self) -> String {
+        self.lists().line_value()
+    }
 }
 
 #[cfg(test)]

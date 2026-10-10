@@ -691,9 +691,11 @@ const BACKUP = shapeOf(
   },
 );
 
+// PROD-15.1: `originalName` -- whether the restore writes under the ORIGINAL
+// topic names -- required, as the schema requires it.
 const RESTORE_TARGET = shapeOf(
   "RestoreTargetView",
-  { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str },
+  { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str, originalName: bool },
 );
 
 // FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
@@ -725,6 +727,22 @@ const RESTORE_COVERAGE = shapeOf(
   },
 );
 
+// PROD-15.1: what a stopped creation step left behind -- the mapped target
+// names someone else created while the restore was admitted, and every topic
+// this restore created and LEFT, empty. Logweir deletes none of them;
+// `leftInstruction` is the one sentence that says what to do with each.
+// Review 2, M2: a THIRD list, `unconfirmed` (names the restore asked for and
+// cannot account for, with their own sentence), and a count beside each list
+// so a list the 100-name bound cut says how many more there are.
+const CREATION_STOP = shapeOf(
+  "CreationStopView",
+  {
+    appeared: listOf(str), left: listOf(str), unconfirmed: listOf(str),
+    appearedCount: int, leftCount: int, unconfirmedCount: int, leftInstruction: str,
+  },
+  { unconfirmedSeen: bool, unconfirmedInstruction: str },
+);
+
 // PROD-11.1b: a Restore's signed replay selection -- a window from a stated
 // start, or a partition subset of each narrowed topic. ABSENT means the
 // scorecard states none (every partition of every restored topic, from the
@@ -753,11 +771,15 @@ const RESTORE = shapeOf(
     target: objectOf(RESTORE_TARGET), deadlineSeconds: int,
     newTopics: listOf(str), operation: objectOf(OPERATION_SUMMARY),
     coverage: objectOf(RESTORE_COVERAGE),
+    // PROD-15.1: the approval subject this restore needs -- `originalName` or
+    // `ordinary`.
+    approvalSubject: str,
   },
   {
     createdAt: str, planBytes: opaque,
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
     queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
+    targetTopicsAppeared: objectOf(CREATION_STOP),
     selection: objectOf(RESTORE_SELECTION),
   },
 );
@@ -783,6 +805,9 @@ const APPROVAL = shapeOf(
     subjectRef: objectOf(SUBJECT_REF), planHash: str,
     approvalBytesLength: int, sidecarBytesLength: int,
     conditions: listOf(objectOf(CONDITION)),
+    // PROD-15.1: the approval subject the SIGNED document carries --
+    // `originalName`, `ordinary`, or `unknown` (not readable).
+    approvalSubject: str,
   },
   {
     createdAt: str, verified: bool, matchedKeyId: str, approver: str,
@@ -1057,7 +1082,7 @@ const CREATE_SCHEDULE_REQUEST = shapeOf(
   },
 );
 
-const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str });
+const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str }, { originalName: bool });
 
 const RESTORE_TARGET_REQUEST = shapeOf(
   "RestoreTargetRequest",

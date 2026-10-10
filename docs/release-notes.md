@@ -45,9 +45,12 @@ point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 format 2.0.0 and named on every surface), 52 (FX-31, every object-store
 read has a size cap), 53 (FX-24c, one peer's share of the console's
 connections, and a rate floor on request bodies), 54 (FX-19, a probe Job
-Kubernetes is collecting no longer clears `reachable`) and 55 (FX-13a and
+Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
 FX-32, a sign-in state is single-use on each replica, and a refused callback
-really clears the login cookie) so far. Items continue the next entry's
+really clears the login cookie), 56 (PROD-15.1, a deleted topic
+restored under its own name, behind its own approval subject) and 57 (FX-33,
+one backup names at most 1,000 topics, and a backup of many topics stays
+listed and verified) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -167,7 +170,17 @@ Item 55 is fix-now rows FX-13a and FX-32, proven by router rows over one and
 two console processes; it changes the console only, and the PoC upgrade that
 carries it signs in through Dex and replays the callback URL against both
 replicas.
-Item 56 is fix-now row FX-33, proven by runner, check, store, controller, API
+Item 56 is row PROD-15.1 (the owner's decision OD-2), proven by unit, phase,
+runner, controller, API and console rows, the parity script and the invariant
+corpus, and on the compose stack (a deleted topic recovered on the same
+cluster and on a second one, a lost creation race, a creation step that
+stops, a producer writing during the restore, and each refusal); it changes
+the `Restore` CRD, the controller, the runner, both verifiers, the
+authorization document (format 2.1.0), the product API and the console, and
+the PoC upgrade that carries it applies the CRD first, creates an
+original-name restore through the console, and reads the Approval's bytes,
+the `Restore`'s status and the scorecard.
+Item 57 is fix-now row FX-33, proven by runner, check, store, controller, API
 and console rows, by child-process peak-RSS measurements, and on the compose
 stack with a backup of 500 topics; it changes the runner, the check Jobs, the
 controller, the product API and the console, signs nothing differently, and
@@ -1768,12 +1781,12 @@ the readiness probe and the backup set check GET with a 0-byte cap. The caps:
 - The controller reads a receipt or scorecard under **1 MiB** and a sidecar
   under **64 KiB**. These are the evidence relay's own caps, so a document is
   verifiable through the controller's handle exactly when a relay can carry
-  it. (Since item 56 a backup receipt is read under 5,131,072 bytes.)
+  it. (Since item 57 a backup receipt is read under 5,131,072 bytes.)
 - The controller's retention report reads a manifest under 64 MiB, folded as
   it streams, never as a tree.
 - Runner, CLI and check Jobs read documents under 64 MiB, manifests under
   256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB
-  (item 56 replaces it with a cap for each document).
+  (item 57 replaces it with a cap for each document).
 - The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
   it relayed a prefix the controller refused anyway).
 - Concurrent controller reads share ONE 128 MiB budget, a quarter of the
@@ -1795,7 +1808,7 @@ is about 3.4 KB per topic, so a run that selects more than about **250–300 top
 writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
 is not a recovery point. Before this item, the controller's own handle verified
 it, and an evidence-fetch relay did not. This moves a verdict only to the safer
-side (OD-7's third case), and no signed format changes. **Item 56 lifts this
+side (OD-7's third case), and no signed format changes. **Item 57 lifts this
 limit**: a backup receipt has its own cap, 5,131,072 bytes, and one backup
 names at most 1,000 topics.
 **Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
@@ -2101,7 +2114,196 @@ within its 600 s again, each replay a token request) and
 drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
 converting.
 
-#### 56. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
+#### 56. A deleted topic can be restored under its own name, into a topic that does not exist, behind its own approval subject (PROD-15.1)
+
+**Added.** A restore under the ORIGINAL topic names: `orders` is recreated as
+`orders`, not beside it under a prefix — the recovery of a deleted topic, or
+of a lost cluster onto a replacement. The owner's decision OD-2 narrowed
+[stability.md](stability.md)'s Never #1 to a LIVE topic; this is the one path
+it no longer covers. The plan states it in `newTopic` mode:
+`target.topic_naming: {prefix: "", original_name: {owners: []}}`
+([drill-spec.md](formats/drill-spec.md#targettopic_namingoriginal_name-prod-151));
+the `Restore` declares `spec.target.topicNaming.originalName: true` (a CEL
+rule allows it only in `newTopic` mode with an empty prefix, and the
+controller refuses an object whose declaration and plan disagree,
+`ExecutionSpecInvalid`); the console offers it as an explicit choice in the
+restore wizard with the owner statement it needs
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+**Its own approval subject.** Only an approval whose signed bytes carry the
+approval subject `originalName` authorises it, and such an approval authorises
+nothing else: `logweir drill approve --approval-subject original-name` (v1
+`approval_subject`), or the console's confirmation (v2 `approvalSubject`,
+signed only for a Restore that declares it). The controller refuses a
+mismatched pair terminally before any Job (`ApprovalSubjectMismatch`), the
+runner refuses it again (exit 3), and a standing rehearsal authorization never
+authorises one. The product API's restore reads and approvals list carry
+`approvalSubject`, and the console shows it on the review step and the
+approvals page. **On a one-person-confirmation install the names are typed
+(the owner's decision OD-10):** in a `confirm` namespace the requester may
+confirm alone only after re-typing every original topic name, exactly. The
+console signs the typed names into the authorization document
+(`originalNameConfirmation`), and the API (`typed_topics_required`,
+`typed_topics_mismatch`), the controller and the runner refuse anything
+else. A `strict` namespace still needs the second person. An authorization
+document v2 that carries `approvalSubject` or `originalNameConfirmation` is
+written as `formatVersion` **2.1.0**; every other document stays 2.0.0, byte
+for byte. The controller and the runner accept 2.1.0 and refuse either field
+under 2.0.0; a reader built before the fields refuses every document that
+carries them (an unknown field).
+**It requires complete verification.** An original-name restore runs only with
+`sample.coverage: complete` (`coverage: complete` on the request and the
+`Restore`). A sampled plan with the identity mapping is refused by name,
+`OriginalNameNeedsCompleteCoverage`: by the runner before it dials anything
+(exit 3), by `drill approve`, by the controller before any Job, by a CEL rule,
+by the product API (`original_name_requires_complete`), and by the console,
+which selects complete coverage for such a restore, locks the choice and says
+why. A sampled check can pass a record another producer wrote into the
+restored name; the complete check names it.
+**It restores whole topics.** A plan that carries the block and
+`restore.partitions` (item 51) is refused by name,
+`OriginalNameNeedsWholeTopics`: by the runner before it dials anything (exit
+3), by `drill approve`, by both readiness checks and by the controller before
+any Job (there is no CEL rule for it: a `Restore` declares no partitions).
+The run would create each topic under its own name with every partition and
+fill only the selected ones, and the rest could never be restored under that
+name afterwards. A stated window, a start or an end, stays allowed; restore a
+subset under a prefix.
+**What the runner proves first** (exit 3, nothing written): every restored name
+is absent; the target is another cluster than the archive's source (the bound
+point's VERIFIED receipt only; the allowlist file's `source_cluster_id` never
+counts), or every metadata-listed broker reports
+`auto.create.topics.enable=false` (`OriginalNameAutoCreateEnabled`,
+`OriginalNameAutoCreateUnknown`); an owner was looked for — the plan's
+statement, the `KafkaTopic` resources given to `logweir restore run
+--kafka-topic-resources`, or the receipt's recorded owners — and none found
+unless the plan chose the owner path (`OriginalNameOwnerNotChecked`,
+`OriginalNameOwnerPresent`; a `KafkaTopic` that cannot be read or recorded,
+or a file holding none, is `OriginalNameOwnerUnreadable`, never "none
+found"); and the `LogAppendTime` probe stays under the scratch prefix, never
+an original name. Creation is exclusive: a name that appears after phase 0
+stops the run before the engine starts, exit 1, with
+`failure-reason=TargetTopicAppeared` as the last line. **Logweir never deletes
+a topic under an original name**, not one it created and not after a lost
+race: Kafka has no conditional delete, so a record a producer wrote between
+any check and the delete would be lost with the topic. A topic the run had
+created when its creation step stopped is left in place, empty, and named
+("created by this restore and left empty; remove it yourself once you have
+checked nothing writes to it") on the runner's `target-topics-appeared=`
+line, on the Restore (`status.exitReason` `TargetTopicAppeared` or
+`CreatedTopicsLeft`, `status.targetTopicsAppeared`, the `Failed` message), in
+the product API's Restore view (`targetTopicsAppeared`) and first on the
+Restore's page in the console. **Three lists, each saying only what the run
+knows:** `appeared` (someone else created the name), `left` (this run's own
+`CreateTopics` answer says it created the topic) and `unconfirmed` (the run
+asked for the name and got no definite answer — the whole call failed, or an
+error that is not "already exists" — and the cluster lists it when the run
+looks once more: "exists now … it may be this restore's or someone else's:
+check what it holds and who writes to it before you remove it"; when the
+cluster cannot be listed, every such name is listed as "may exist now"). A
+list carries at most 100 names with its full count beside it, and every
+surface says "and N more" when the bound cuts. The names are read from the
+runner's last two log lines only and held to the Restore's own mapped target
+names, and the runner prints every error text on one line, so no string of a
+plan or a broker can start a line of its log; with a runner image OLDER than
+the controller, check the list against the cluster before acting on it
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+`status.newTopics` is exactly `left` after such a stop. Nothing is written
+into a topic the run did not create. A producer still writing while the restore runs
+is detected and named, not prevented: the complete verification counts each of
+its records as unexpected, names it by its target offset, and the run signs
+`fail-integrity`. The scorecard is format
+**1.8.0** with `target.original_name` (the approval subject and mode, the
+typed confirmation, the cluster condition, the owners, the resources file's
+digest). Both readers check it (arms ON-1 to ON-14, `verify_scorecard.py`
+1.28.0; ON-13 refuses the block beside a sampled verification, ON-14 beside
+a partition subset, so no 2.x scorecard carries it) and print two
+`original name:` lines, and `logweir drill show` names
+it in its footer. Its schema is `schemas/logweir-drill-scorecard-1.8.0.json`,
+format 1's newest minor; the 2.0.0 file is unchanged. The readiness check no longer refuses such a plan as an
+accidental identity map.
+**Do:** nothing for any other restore. Apply the `Restore` CRD before the
+controller rolls, and roll the controller, the runner, the product API and the
+console together. Stop every producer of a restored name before such a
+restore, and repoint consumers after it (consumer positions are not copied).
+Write such a plan with `sample.coverage: complete` and without
+`restore.partitions`. If a Restore ends `TargetTopicAppeared` or
+`CreatedTopicsLeft`, read `status.targetTopicsAppeared`: check that nothing
+writes to each `left` topic, and what each `unconfirmed` topic holds and who
+writes to it, delete it yourself, and create a new Restore. After any
+`Failed` original-name Restore whose creation step did not answer, list the
+plan's target names on the cluster yourself: a topic the broker finished
+creating after the run looked again is not named. The controller does not
+list `KafkaTopic` resources (PROD-05.1a), so a `Restore` relies on the plan's
+owner statement or the receipt.
+**Scope:** runner rows over fakes for every condition and its refusal, the
+probe, the exclusive create (the pre-create re-check and `CreateTopics`'
+already-exists answer), the teardown rail and the subject check; controller
+rows for admission step 4b, the declaration, the sampled refusal, the document
+version and the standing refusal; API rows for the create, the identity
+mapping, the signed subject and its 2.1.0 document, the legacy route, the
+typed confirmation, the strict namespace, the sampled refusal, the
+left-topics view with its third list and counts, and the approvals view read
+through the typed parser; both verifiers over twenty-one corpus cases and the
+parity script; the console's golden plan, parsed by the runner, its
+typed-names rows, the locked coverage choice and the left-topics block (a
+hostile name in each list). The whole-topics refusal has a row at every
+boundary beside its controls (the same plan without the subset, from a
+window start, and the subset under a prefix). Each of the runner's three
+approval-subject call sites has a CI-run row that fails without it (the
+binary at startup, the orchestrator fixture before phase 0 and after phase 1),
+and so does `drill approve`'s refusal; a stopped creation step has rows for
+the topic it leaves (still listed by the broker double, named, nothing
+deleted), for a call that fails after the broker applied it, a name answered
+with an error and created anyway, a cluster that cannot be listed afterwards
+and a list of more than 100; a source-text row that fails if any delete
+enters the creation step, and an inventory row over every source file of the
+workspace (the one broker delete call is the scratch-scoped deleter's, and
+the real creator names none); the lost race is named on the Restore by a
+controller row, and controller rows hold the names to the plan, to the log's
+last two lines and to a per-kind set of states. A plan string carrying line
+breaks is run through the real binary and starts no line of its output. Compose rows on slot 1
+(`COMPOSE_PROFILES=auth,cluster2,autocreate`; the new `autocreate` profile is
+a one-broker cluster that auto-creates topics), each against the brokers: a
+deleted topic recovered under its name on a second cluster (30 of 30
+records, still there after the run) and on the same cluster with
+auto-creation disabled, each under a complete verification, refused while the
+name existed; the same plan without `coverage: complete` refused by name
+(`OriginalNameNeedsCompleteCoverage`, exit 3, nothing created), and `drill
+approve` refusing to sign it; the same cluster with auto-creation enabled refused; a producer that
+auto-creates the name while the runner is suspended at phase 5 wins, the run
+stops `TargetTopicAppeared` and the topic holds that one record; an ordinary
+approval refused, and `drill approve` refusing to sign one; a `KafkaTopic`
+owner (simulated with a resources file: no Strimzi operator in the lab)
+refused, then restored on the owner path; scratch mode refused; a producer
+writing six records while the restore ran left 36 where the archive holds 30,
+the complete verification named all six by target offset and the run signed
+`fail-integrity` (exit 2); the race printed
+`failure-reason=TargetTopicAppeared` last and the topic was still there; a
+restore of two topics whose second name the broker refused printed
+`failure-reason=CreatedTopicsLeft`, named the first as left, and the broker
+still listed it, empty. Each condition, the exclusive create, the subject
+check, the typed confirmation, the required coverage, the whole-topics rule,
+the document version, the race's naming, the three lists and the no-delete
+rule has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
+`logweir` built before this item) accept the live 1.8.0 scorecards and print
+nothing about the original name. Not proven live: a
+real Strimzi operator, and the PoC upgrade.
+**Rollback:** an older runner ignores the `original_name` block, sees the
+empty prefix and refuses the plan (exit 3) before it writes anything; an older
+controller ignores `topicNaming.originalName` and its runner refuses the same
+way; a reader of an authorization document v2 built before this item refuses
+every 2.1.0 document, which carries `approvalSubject` or
+`originalNameConfirmation` (measured with a runner built from main); an older
+controller reads a stopped creation step as a plain exit 1, or (one built
+during this item's review) its two lists without the third or the counts. An
+older RUNNER under this controller prints error text raw: its stopped
+creation step is still named, and the names shown are what its log gives, so
+check them against the cluster. Rolling the CRD back prunes
+`topicNaming.originalName` and `status.targetTopicsAppeared` from stored
+objects, whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
+under older readers, which ignore the block.
+
+#### 57. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
 
 **Changed.** A backup receipt records about 3 KB for every topic, and the
 catalog point record copies it. Both were read under caps nobody had tied to a
@@ -2212,7 +2414,7 @@ together.
 In addition to the next entry's six, in its order:
 
 - **Before the upgrade, split every `Backup` and `BackupSchedule` that names
-  or resolves to more than 1,000 topics** (item 56). The two commands in
+  or resolves to more than 1,000 topics** (item 57). The two commands in
   [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
   selection is refused by name at each run.
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
@@ -2282,7 +2484,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54 and 55, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56 and 57, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2329,7 +2531,14 @@ the chart, and needs a shared console the chart publishes through its Ingress
 to name its trusted proxy (or set `api.console.trustedProxy: none`) before
 the upgrade renders; item 54 changes the controller
 only and needs nothing; item 55 changes the console
-only and needs nothing. To roll back to
+only and needs nothing; item 56
+changes the `Restore` CRD (apply it before the controller rolls), the
+controller, the runner, the product API and the console, and needs nothing
+for any other restore (an older runner refuses an original-name plan); item 57
+changes the runner, the check Jobs, the controller, the product API and the
+console, and needs every `Backup` and `BackupSchedule` that names or resolves
+to more than 1,000 topics split before the upgrade, and each
+`RecoveryCatalog` synced again after the runner image rolls. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -2363,6 +2572,15 @@ only and needs nothing. To roll back to
    its schedule: an older controller refuses such a frozen plan
    (`PlanConfigMapConflict`). The 1.7.0 receipts, their positions documents
    and the records already written stay valid.
+7. Item 56 needs no rollback step of its own: an older runner refuses an
+   original-name plan before it writes anything, an older controller ignores
+   `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
+   field. Finish or delete any original-name `Restore` first, so none is left
+   waiting on a runner that refuses it.
+8. Item 57 needs no rollback step of its own: an older runner accepts a
+   selection of more than 1,000 topics again, and an older controller reads a
+   receipt under 1 MiB again, so a backup of about 300 topics and more is
+   `NotAttempted` again. Roll the runner and the controller together.
 
 ---
 

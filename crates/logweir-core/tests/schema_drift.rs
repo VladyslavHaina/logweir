@@ -41,6 +41,10 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
         logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
     );
     assert_eq!(
+        justfile_schema_version("scorecard_format_1"),
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+    );
+    assert_eq!(
         justfile_schema_version("receipt"),
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
@@ -809,6 +813,147 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
         "2.0.0"
     );
     assert_eq!(logweir_core::scorecard::PARTITION_SUBSETS_MAJOR, 2);
+}
+
+/// **PROD-15.1: PROD-11.1's 1.7.0 scorecard schema is FROZEN** beside the
+/// 1.8.0 one, format 1's newest minor, and still describes every scorecard of
+/// a restore that states a window start and is not an original-name restore,
+/// which this build writes as 1.7.0: it names itself 1.7.0, describes
+/// `source.selection`, and its `target` does not describe `original_name`. The
+/// 1.8.0 file does, as an optional block.
+#[test]
+fn the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-drill-scorecard-1.7.0.json"
+    ))
+    .expect("the frozen 1.7.0 scorecard schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.7.0.json"
+    );
+    assert!(frozen["definitions"]["SourceInfo"]["properties"]["selection"].is_object());
+    assert!(
+        frozen["definitions"]["TargetInfo"]["properties"]
+            .get("original_name")
+            .is_none(),
+        "the frozen 1.7.0 schema must not describe the 1.8.0 block"
+    );
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_ne!(format_1["$id"], frozen["$id"]);
+    assert!(format_1["definitions"]["TargetInfo"]["properties"]["original_name"].is_object());
+    assert!(format_1["definitions"]["OriginalNameInfo"].is_object());
+    assert!(
+        !format_1["definitions"]["TargetInfo"]["required"]
+            .as_array()
+            .expect("TargetInfo has required fields")
+            .iter()
+            .any(|r| r == "original_name"),
+        "target.original_name is OPTIONAL: absent on every document that is not an \
+         original-name restore"
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
+        "1.8.0"
+    );
+    assert_eq!(logweir_core::scorecard::ORIGINAL_NAME_SINCE_MINOR, 8);
+}
+
+/// The text of the frozen 1.7.0 scorecard schema, format 1's last file
+/// before PROD-15.1's block.
+const FROZEN_1_7_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-1.7.0.json");
+
+/// What `just schema` writes as format 1's newest minor (the 1.8.0 file).
+fn format_1_scorecard_schema() -> String {
+    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_7_0_SCORECARD_SCHEMA)
+}
+
+/// **PROD-15.1 after PROD-11.1b: the scorecard has two generated files, and
+/// the 1.8.0 one is checked in as the generator writes it.** The type reads
+/// both majors, so the 1.8.0 file is built from the frozen 1.7.0 file plus
+/// the block the type derives. KILLS: a change to `OriginalNameInfo` without
+/// `just schema`; a hand edit of the 1.8.0 file.
+#[test]
+fn checked_in_format_1_scorecard_schema_matches_the_types() {
+    let checked_in = current_schema(
+        "drill-scorecard",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
+    );
+    assert_eq!(
+        format_1_scorecard_schema().trim_end(),
+        checked_in.trim_end(),
+        "schemas/logweir-drill-scorecard-{}.json is stale. Run `just schema` and review the \
+         diff: only `target.original_name` and its two definitions may move.",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+    );
+}
+
+/// **A MINOR adds optional fields only, and this one adds exactly one
+/// block.** The 1.8.0 file is the frozen 1.7.0 file, value for value, once
+/// its `$id`, `target.original_name` and the block's two definitions are set
+/// aside; it still pins major 1 and its selection block is still a start and
+/// an end. KILLS: a generator that derives format 1's file from the type
+/// (which would describe 2.0.0's partition subsets in a 1.x file), or that
+/// moves anything else of format 1.
+#[test]
+fn the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block() {
+    let frozen: serde_json::Value =
+        serde_json::from_str(FROZEN_1_7_0_SCORECARD_SCHEMA).expect("the frozen 1.7.0 parses");
+    let mut format_1: serde_json::Value =
+        serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_eq!(
+        format_1["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.8.0.json"
+    );
+    assert_eq!(
+        format_1["properties"]["format_version"]["pattern"],
+        r"^1\.[0-9]+\.[0-9]+$"
+    );
+    let label = &format_1["definitions"]["SelectionLabel"];
+    assert_eq!(
+        label["required"],
+        serde_json::json!(["window_end_ms", "window_start_ms"])
+    );
+    assert!(label["properties"].get("partitions").is_none());
+    assert!(format_1["definitions"].get("TopicPartitions").is_none());
+
+    // Set the block aside; what is left is the frozen file.
+    format_1["$id"] = frozen["$id"].clone();
+    let definitions = format_1["definitions"].as_object_mut().unwrap();
+    for name in ["OriginalNameInfo", "OriginalNameOwner"] {
+        assert!(definitions.remove(name).is_some(), "1.8.0 defines {name}");
+    }
+    assert!(format_1["definitions"]["TargetInfo"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("original_name")
+        .is_some());
+    assert_eq!(format_1, frozen);
+}
+
+/// **The block never appears in a 2.x document, so the 2.0.0 file does not
+/// describe it** (an original-name restore restores whole topics:
+/// `OriginalNameNeedsWholeTopics`, arm ON-14). The 2.0.0 file therefore stays
+/// the one PROD-11.1b published. KILLS: a 2.0.0 generator that lets the block
+/// through.
+#[test]
+fn the_2_0_0_scorecard_schema_does_not_describe_the_original_name() {
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        current["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.0.0.json"
+    );
+    assert!(current["definitions"]["TargetInfo"]["properties"]
+        .get("original_name")
+        .is_none());
+    for name in ["OriginalNameInfo", "OriginalNameOwner"] {
+        assert!(current["definitions"].get(name).is_none(), "{name}");
+    }
+    // The type itself still derives the block: the 2.0.0 file leaves it out,
+    // the 1.8.0 file carries it.
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert!(format_1["definitions"]["OriginalNameInfo"].is_object());
 }
 
 /// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It

@@ -63,8 +63,7 @@ use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
     ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizedSubject, InstallationMarker,
     PolicyRef, Requester, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
-    RESTORE_AUTHORIZATION_FORMAT_VERSION, RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION,
-    SUBJECT_KIND_RESTORE,
+    RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION, SUBJECT_KIND_RESTORE,
 };
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
@@ -397,9 +396,18 @@ pub fn document(
     requester: Requester,
     issued_at: DateTime<Utc>,
     ticket: Option<String>,
+    approval_subject: logweir_core::original_name::ApprovalSubject,
+    original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        format_version: RESTORE_AUTHORIZATION_FORMAT_VERSION.to_string(),
+        // PROD-15.1: 2.1.0 exactly when the document carries the approval
+        // subject or the typed confirmation; every other document is 2.0.0,
+        // byte for byte what it was.
+        format_version: logweir_core::approval_policy::restore_authorization_format_version_for(
+            approval_subject.wire(),
+            original_name_confirmation.as_ref(),
+        )
+        .to_string(),
         kind: RESTORE_AUTHORIZATION_KIND.to_string(),
         authorization_mode: policy.mode,
         subject: AuthorizedSubject {
@@ -418,6 +426,15 @@ pub fn document(
         issued_at,
         expires_at: issued_at + chrono::Duration::seconds(policy.max_age_seconds),
         ticket,
+        // PROD-15.1: the separate approval subject, from the Restore's own
+        // declaration and nothing else — absent for an ordinary restore, so
+        // its document is byte for byte what it was.
+        approval_subject: approval_subject.wire().map(str::to_string),
+        // OD-10: the topic names the requester re-typed, signed beside the
+        // subject — only on a one-person confirmation of an original-name
+        // restore (`routes::restores::refuse_typed_confirmation` admitted the
+        // request only then).
+        original_name_confirmation,
     }
 }
 
@@ -523,6 +540,8 @@ mod tests {
                 subject: "s".into(),
             },
             at,
+            None,
+            logweir_core::original_name::ApprovalSubject::Ordinary,
             None,
         );
         assert_eq!(

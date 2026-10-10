@@ -702,3 +702,44 @@ fn show_names_the_unsampled_topics_in_the_qualifiers_footer() {
          counted, not reconciled"
     );
 }
+
+// ------------------------------------------------------------------ PROD-15.1
+
+/// Guarantee: the footer says when a restore wrote under the source's
+/// ORIGINAL topic names (`target.original_name`, scorecard 1.8.0) — the
+/// approval subject, the cluster condition and the owners — and prints
+/// nothing for any other document, so every other table is unchanged.
+///
+/// KILLS: deleting the footer line; printing it for an absent block;
+/// dropping the owner path.
+#[test]
+fn show_names_an_original_name_restore_in_the_qualifiers_footer() {
+    let mut sc = fixtures::scorecard_pass();
+    let table = logweir::show::render_table(&sc);
+    assert!(!table.contains("target.original_name"), "{table}");
+    sc.target.original_name = Some(logweir_core::scorecard::OriginalNameInfo {
+        approval_subject: "originalName".into(),
+        approval_mode: "v1Approval".into(),
+        cluster_condition: "targetIsNotSource".into(),
+        source_cluster_id: Some("SOURCE".into()),
+        owner_detection: vec!["kafkaTopicResources".into()],
+        owners: vec![logweir_core::scorecard::OriginalNameOwner {
+            topic: "orders".into(),
+            kind: "strimzi".into(),
+            reference: "kafka/orders".into(),
+            found_in: "kafkaTopicResources".into(),
+        }],
+        owner_path: true,
+        confirmation: None,
+        kafka_topic_resources_sha256: Some(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+    });
+    let table = logweir::show::render_table(&sc);
+    assert_eq!(
+        footer_line(&table, "target.original_name").trim_start(),
+        "target.original_name      restored under the original topic names (a new generation \
+         of each name); approval subject originalName (v1Approval); targetIsNotSource; owners \
+         looked for in kafkaTopicResources: orders (strimzi kafka/orders); owner path"
+    );
+}

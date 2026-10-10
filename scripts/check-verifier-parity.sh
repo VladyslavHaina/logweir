@@ -2245,3 +2245,237 @@ for name in ps1-start-only ps1-no-block ps2-subset-under-1.7.0 ps3-unsorted ps4-
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (partition subset refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_SUBSET_VERSION partition-subset scorecards, say the same about the subset, what a narrowed sampled pass proves and what each verdict proves of the other partitions and before a start, read major 2 only for that shape, and refuse each of PS-1 to PS-5 with the same words"
+
+# ---------------------------------------------------------------------------
+# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-14
+# ---------------------------------------------------------------------------
+# Four documents both readers ACCEPT (each over the COMPLETE verification an
+# original-name restore requires), and the two `original name:` lines they
+# print compared line for line:
+#
+#   plain       targetIsNotSource, owners looked for in the plan, none found
+#   owner-path  autoCreateDisabled with no known source, an owner found in
+#               KafkaTopic resources (named by digest), on the owner path
+#   typed       a one-person confirmation with the names typed (OD-10)
+#   windowed    whole topics from a stated window start (a window is allowed)
+#
+# and fifteen both readers REFUSE with the same full text: one per arm ON-1
+# to ON-12, two for ON-13 (a sampled verification beside the block, and a
+# pass that records none) and one for ON-14 (the block in a 2.0.0
+# partition-subset document: an original-name restore restores whole topics).
+# Generated and signed here with the throwaway fixture key, like the selection
+# loop above.
+#
+# The scorecard format that defines `target.original_name` —
+# `FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; a
+# renumber moves all three.
+SCORECARD_ORIGINAL_NAME_VERSION="1.8.0"
+mkdir -p "$tmp/scorecard-on"
+"$PY" - "$ROOT" "$tmp/scorecard-on" "$SC_PT" "$SCORECARD_ORIGINAL_NAME_VERSION" <<'PYEOF'
+import base64, copy, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+OWNER = {"topic": "orders", "kind": "strimzi", "reference": "kafka/orders", "found_in": "plan"}
+DIGEST = "sha256:" + "0" * 64
+
+
+def block(**over):
+    b = {"approval_subject": "originalName", "approval_mode": "governed",
+         "cluster_condition": "targetIsNotSource", "source_cluster_id": "SOURCE-CLUSTER",
+         "owner_detection": ["plan"], "owners": [], "owner_path": False}
+    b.update(over)
+    return b
+
+
+def replay(n):
+    r = dict.fromkeys(("expected", "restored", "matching", "missing", "unexpected",
+                       "duplicates", "out_of_order", "mismatched"), 0)
+    r.update(expected=n, restored=n, matching=n)
+    return r
+
+
+def complete_block():
+    parts = [
+        {"topic": "orders", "partition": p, "target_topic": "orders", "compared": True,
+         "segments": 2, "segments_verified": 2, "records_decoded": n + 1, "offset_holes": 0,
+         "replay": replay(n), "findings": []}
+        for p, n in ((0, 5), (1, 7))
+    ]
+    return {
+        "coverage": "complete", "comparison_basis": "archive", "header_order": "verified",
+        "application": "notAttempted", "gaps": [], "pruned": [],
+        "complete": {
+            "covered": True, "incomplete_reason": None, "max_records": None,
+            "window": {"start_ms": None, "end_ms": 1760000005000},
+            "archive": {"segments": 4, "segments_verified": 4, "segments_failed": [],
+                        "segments_unverified": [], "records_decoded": 14, "offset_holes": 0},
+            "replay": replay(12),
+            "partitions": parts,
+        },
+    }
+
+
+SAMPLED = {"coverage": "sampled", "comparison_basis": "archive", "header_order": "notVerified",
+           "application": "notAttempted", "gaps": [], "pruned": []}
+
+
+def doc(b=None, version=current, verification="complete", **target):
+    d = copy.deepcopy(base)
+    d["format_version"] = version
+    # An original-name restore requires a COMPLETE verification (ON-13).
+    if verification == "complete":
+        d["integrity"]["verification"] = complete_block()
+    elif verification == "sampled":
+        d["integrity"]["verification"] = copy.deepcopy(SAMPLED)
+    t = d["target"]
+    t["mode"] = "newTopic"
+    t.pop("marker_topic", None)
+    t["topic_mapping_prefix"] = ""
+    t["original_name"] = block() if b is None else b
+    t.update(target)
+    return d
+
+
+cases = {
+    "plain": doc(),
+    "owner-path": doc(block(cluster_condition="autoCreateDisabled", source_cluster_id=None,
+                            owner_detection=["plan", "kafkaTopicResources"],
+                            owners=[dict(OWNER, found_in="kafkaTopicResources")],
+                            owner_path=True, kafka_topic_resources_sha256=DIGEST)),
+    "typed": doc(block(approval_mode="ordinary", confirmation="typedTopicNames")),
+    "on1-under-1.7.0": doc(version="1.7.0"),
+    "on2-scratch": doc(mode="scratch", marker_topic="logweir.scratch"),
+    "on3-prefix": doc(topic_mapping_prefix="restore-"),
+    "on4-subject": doc(block(approval_subject="ordinary")),
+    "on5-mode": doc(block(approval_mode="standing")),
+    "on6-condition": doc(block(cluster_condition="sameCluster")),
+    "on7-own-source": doc(block(source_cluster_id=base["target"]["cluster_id"])),
+    "on8-nowhere": doc(block(owner_detection=[])),
+    "on9-place": doc(block(owners=[dict(OWNER, found_in="pointReceipt")], owner_path=True)),
+    "on10-owner-path": doc(block(owners=[OWNER])),
+    "on11-untyped": doc(block(approval_mode="ordinary")),
+    "on12-no-digest": doc(block(owner_detection=["kafkaTopicResources"])),
+    "on13-sampled": doc(verification="sampled"),
+    "on13-unverified-pass": doc(verification=None),
+}
+
+# A stated window START beside the block: whole partitions, bounded in time.
+END = complete_block()["complete"]["window"]["end_ms"]
+windowed = doc()
+windowed["source"]["selection"] = {"window_start_ms": END - 3_600_000, "window_end_ms": END}
+windowed["integrity"]["verification"]["complete"]["window"]["start_ms"] = END - 3_600_000
+cases["windowed"] = windowed
+# ON-14: the same document as a 2.0.0 partition-subset restore of exactly the
+# partitions its complete block compared. Valid as either; refused as both.
+subset = doc(version="2.0.0")
+subset["source"]["selection"] = {
+    "window_end_ms": END,
+    "partitions": [{"topic": "orders", "partitions": [0, 1]}],
+    "engine_runs": 1,
+}
+cases["on14-subset"] = subset
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+on_head="original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by governed; "
+for name in plain owner-path typed windowed; do
+    doc="$tmp/scorecard-on/$name.json"
+    sig="$tmp/scorecard-on/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE 'original name: .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE 'original name: .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/$name: the two readers say different things about the original names.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    case "$name" in
+        plain|windowed) want="${on_head}the target cluster is not the source cluster (SOURCE-CLUSTER)
+original name: declarative owners looked for in plan: none found" ;;
+        owner-path) want="${on_head}no source cluster id was known and every broker reported auto.create.topics.enable=false
+original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path; KafkaTopic resources sha256:0000000000000000000000000000000000000000000000000000000000000000" ;;
+        typed) want="original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by ordinary (the requester re-typed every original topic name); the target cluster is not the source cluster (SOURCE-CLUSTER)
+original name: declarative owners looked for in plan: none found" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/$name: expected the original-name lines to be
+$want
+got:
+$rust_lines"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name)"
+done
+
+for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest on13-sampled on13-unverified-pass on14-subset; do
+    doc="$tmp/scorecard-on/$name.json"
+    sig="$tmp/scorecard-on/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        on1-under-1.7.0) want_msg="target.original_name is present but format_version \"1.7.0\" does not define it: the block is format 1's, from $SCORECARD_ORIGINAL_NAME_VERSION, and no other major carries it" ;;
+        on14-subset) want_msg="target.original_name is present beside source.selection.partitions; a restore under the original topic names restores whole topics, never a partition subset" ;;
+        on2-scratch) want_msg="target.original_name is present but target.mode is scratch; a scratch drill never restores under the original topic names" ;;
+        on3-prefix) want_msg="target.original_name is present but target.topic_mapping_prefix is not empty; an original-name restore maps every topic onto its own name" ;;
+        on4-subject) want_msg="target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject" ;;
+        on5-mode) want_msg="target.original_name.approval_mode is not one of \"v1Approval\", \"governed\", \"ordinary\"" ;;
+        on6-condition) want_msg="target.original_name.cluster_condition is not one of \"targetIsNotSource\", \"autoCreateDisabled\"" ;;
+        on7-own-source) want_msg="target.original_name.cluster_condition is targetIsNotSource but source_cluster_id is absent or equals target.cluster_id; the condition is a comparison of two known cluster ids" ;;
+        on8-nowhere) want_msg="target.original_name.owner_detection is empty, repeats a place, or names one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner nobody looked for is never read as no owner" ;;
+        on9-place) want_msg="target.original_name.owners names a place owner_detection does not list, a kind outside \"strimzi\" and \"external\", or a blank topic" ;;
+        on10-owner-path) want_msg="target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path" ;;
+        on11-untyped) want_msg="target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed" ;;
+        on12-no-digest) want_msg="target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest" ;;
+        on13-sampled|on13-unverified-pass) want_msg="target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the fourteen original-name arms with the same words"

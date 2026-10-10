@@ -250,6 +250,9 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   ["spec.evidenceDestinationRef", "evidenceDestination"],
   // PLAT-19.2: the change ticket a Governed policy requires (D0).
   ["ticket", "ticket"],
+  // OD-10 (PROD-15.1): the original topic names re-typed on a one-person
+  // confirmation, beside the field they are typed into.
+  ["originalNameConfirmation", "originalNameTyped"],
 ]);
 
 /** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
@@ -2437,6 +2440,102 @@ export function setTopicPrefix(state, value) {
   target.topicMappingPrefix = next;
 }
 
+/** PROD-15.1: whether this plan restores under the ORIGINAL topic names --
+ *  `newTopic` mode with the choice ticked. Scratch never does: the identity
+ *  ban stays in scratch mode. */
+export function originalNameChosen(state) {
+  const target = ((state || {}).fields || {}).target || {};
+  return target.mode === "newTopic" && target.originalName === true;
+}
+
+/** PROD-15.1: THE ONE PLACE THE ORIGINAL-NAME CHOICE IS WRITTEN.
+ *
+ *  On: `topicNaming.prefix` becomes the empty string -- the identity mapping
+ *  the plan's `topic_naming: {prefix: "", original_name: {...}}` is -- and the
+ *  scratch prefix (`topicMappingPrefix`, where the runner's LogAppendTime probe
+ *  is created and the only names its deleter may touch) keeps a real value.
+ *  `noOwner` is the operator's statement that no declarative owner manages any
+ *  restored name: the plan carries it as `owners: []`, signed with the plan.
+ *  Off: the default prefix comes back, both keys equal again. */
+export function setOriginalName(state, on, noOwner) {
+  const s = state || {};
+  const target = (s.fields || {}).target;
+  if (target === undefined || target === null) {
+    return;
+  }
+  if (on === true && target.mode === "newTopic") {
+    const scratch = typeof target.topicMappingPrefix === "string" &&
+        target.topicMappingPrefix.length > 0
+      ? target.topicMappingPrefix
+      : defaultPrefixFor(s);
+    target.originalName = true;
+    target.originalNameNoOwner = noOwner === true;
+    target.topicPrefix = "";
+    target.topicMappingPrefix = scratch;
+    // COMPLETE VERIFICATION IS SELECTED WITH IT, AUTOMATICALLY: the runner
+    // refuses a sampled plan under the original names. A bound the operator
+    // typed is kept; the box is shown ticked and locked, with the reason.
+    requireCompleteCoverage(s);
+    return;
+  }
+  const was = target.originalName === true;
+  target.originalName = false;
+  target.originalNameNoOwner = false;
+  if (was || target.topicPrefix === "") {
+    setTopicPrefix(s, defaultPrefixFor(s));
+  }
+}
+
+/** PROD-15.1: a restore under the original topic names REQUIRES complete
+ *  verification, so choosing it selects `sample.coverage: complete` -- here,
+ *  on a draft that comes back, and on every write of the coverage controls.
+ *  A record bound already chosen is kept. A no-op for every other plan. */
+export function requireCompleteCoverage(state) {
+  const s = state || {};
+  if (!originalNameChosen(s)) {
+    return;
+  }
+  if (s.fields.sample === undefined || s.fields.sample === null) {
+    s.fields.sample = {};
+  }
+  s.fields.sample.coverage = COVERAGE_COMPLETE;
+}
+
+/** PROD-15.1: why the coverage box is ticked and locked for a restore under
+ *  the original topic names -- said beside the box. */
+export const ORIGINAL_NAME_COVERAGE_SENTENCE =
+  "Complete coverage is required for a restore under the original topic names, so it was " +
+  "selected for you and cannot be turned off here. Under a production name another producer " +
+  "may still be writing: a sampled check reads only the first records of each partition and a " +
+  "count bound, which such a record can pass, while the complete check compares every restored " +
+  "record with the archive and names one the archive does not hold. The runner refuses a " +
+  "sampled plan under the original names (OriginalNameNeedsCompleteCoverage).";
+
+/** PROD-15.1: what the original-name choice means, beside the box. */
+export const ORIGINAL_NAME_SENTENCE =
+  "Restore under the ORIGINAL topic names: each topic is recreated under its own name -- a " +
+  "new generation of the name, not the original topic -- instead of beside it under a prefix. " +
+  "Only into topics that do not exist: the runner refuses if a name exists; unless the target " +
+  "is a different cluster from the archive's source, it also refuses while any broker " +
+  "auto-creates topics; and it refuses when a declarative owner (a Strimzi KafkaTopic, GitOps, " +
+  "Terraform) manages a name. It needs its own approval subject, originalName: an ordinary " +
+  "approval cannot authorise it. Stop every producer of these names first.";
+
+/** PROD-15.1: the owner statement the plan signs as `owners: []`. */
+export const ORIGINAL_NAME_NO_OWNER_STATEMENT =
+  "No declarative owner -- a Strimzi KafkaTopic, a GitOps or Terraform definition -- manages " +
+  "any of these names. (The runner cannot look for one itself; an owner recreates a deleted " +
+  "name and reverts the restored topic's settings. To restore although an owner manages a " +
+  "name, its reconciliation paused, write the plan by hand with owner_path: true.)";
+
+/** PROD-15.1: the approval subject a plan on screen needs, in words. */
+export function approvalSubjectText(state) {
+  return originalNameChosen(state)
+    ? "originalName -- a restore under the ORIGINAL topic names; only an approval signed for " +
+      "this subject authorises it"
+    : "ordinary";
+}
+
 /** The prefix the RUN will map through, for the mode this plan is in -- the
  *  JavaScript half of `logweir_core::spec::target_topic_prefix` over the
  *  domain this page can produce.
@@ -2582,6 +2681,23 @@ export function mappingProblems(state) {
       return problems;
     }
     seen.set(target, source);
+  }
+  // PROD-15.1: the original names ARE the identity mapping, and the one
+  // statement it needs is the owner statement.
+  if (originalNameChosen(s)) {
+    if ((((s.fields || {}).target) || {}).originalNameNoOwner !== true) {
+      problems.originalName =
+        "state that no declarative owner manages these names: a restore under the original " +
+        "names is refused unless the plan says where an owner was looked for";
+    } else if ((((s.fields || {}).sample) || {}).coverage !== COVERAGE_COMPLETE) {
+      // Never reachable from the controls (the choice selects complete and
+      // locks the box); said by name for a state built any other way.
+      problems.originalName =
+        "OriginalNameNeedsCompleteCoverage: a restore under the original topic names requires " +
+        "complete coverage (every restored record compared with the archive); a sampled " +
+        "check is refused";
+    }
+    return problems;
   }
   if (typeof prefix !== "string" || prefix.length === 0) {
     problems.topicPrefix =
@@ -3626,7 +3742,10 @@ export function verificationPlanSentence(state) {
 export function renderCoverageChoice(state) {
   const s = state || {};
   const sample = (s.fields || {}).sample || {};
-  const chosen = sample.coverage === COVERAGE_COMPLETE;
+  // PROD-15.1: REQUIRED, not chosen, for a restore under the original topic
+  // names -- the box is ticked and LOCKED, and the reason is beside it.
+  const required = originalNameChosen(s);
+  const chosen = required || sample.coverage === COVERAGE_COMPLETE;
   const bound = sample.completeMaxRecords === undefined || sample.completeMaxRecords === null
     ? ""
     : String(sample.completeMaxRecords);
@@ -3635,7 +3754,12 @@ export function renderCoverageChoice(state) {
     "<summary>Advanced: verify every record</summary>" +
     "<label class=\"inline\" for=\"coverage-complete\">" +
     "<input type=\"checkbox\" id=\"coverage-complete\" name=\"coverage\"" +
-    (chosen ? " checked" : "") + "> " + esc(COVERAGE_CHOICE_LABEL) + "</label>" +
+    (chosen ? " checked" : "") + (required ? " disabled" : "") + "> " +
+    esc(COVERAGE_CHOICE_LABEL) + "</label>" +
+    (required
+      ? "<p class=\"caveat\" id=\"coverage-required\">" + esc(ORIGINAL_NAME_COVERAGE_SENTENCE) +
+        "</p>"
+      : "") +
     "<p class=\"note\" id=\"coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) + "</p>" +
     "<div class=\"field\"><label for=\"coverage-bound\">record bound (optional)</label>" +
     "<input id=\"coverage-bound\" name=\"completeMaxRecords\" inputmode=\"numeric\" value=\"" +
@@ -3664,7 +3788,10 @@ export function coverageText(state) {
     (typeof sample.completeMaxRecords === "number"
       ? ", complete_max_records: " + String(sample.completeMaxRecords)
       : ", no record bound") +
-    "): every record of every restored partition, compared with the archive";
+    "): every record of every restored partition, compared with the archive" +
+    (originalNameChosen(state)
+      ? " -- required for a restore under the original topic names"
+      : "");
 }
 
 /** Writes the coverage choice from the two controls: the box decides, and the
@@ -3673,7 +3800,10 @@ export function coverageText(state) {
  *  than this page guessing a number. An unticked box clears both. */
 export function setCoverage(state, complete, boundText) {
   const sample = state.fields.sample;
-  if (complete !== true) {
+  // PROD-15.1: a restore under the original topic names is never sampled --
+  // an unticked box (the locked control reads as it is drawn, but a stale
+  // form or an older draft may not) cannot clear what that choice requires.
+  if (complete !== true && !originalNameChosen(state)) {
     delete sample.coverage;
     delete sample.completeMaxRecords;
     return;
@@ -3803,7 +3933,9 @@ export function renderTargetStep(state) {
     (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     markerWarning +
     "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
-    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\"" +
+    "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" +
+    esc(originalNameChosen(s) ? "" : prefix) + "\"" +
+    (originalNameChosen(s) ? " disabled" : "") +
     invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
     fieldErrorLine("topic-prefix", errors.topicPrefix) +
     (typeof mapping.topicPrefix === "string"
@@ -3812,10 +3944,40 @@ export function renderTargetStep(state) {
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
+    renderOriginalNameChoice(s) +
     renderReplicationField(s) +
     renderTopicSubset(s) +
     renderRecoveryLimits(s) +
     "</section>"
+  );
+}
+
+/** PROD-15.1: the original-name choice -- `newTopic` mode only -- and, once
+ *  chosen, the owner statement the plan signs. */
+export function renderOriginalNameChoice(state) {
+  const s = state || {};
+  const target = ((s.fields || {}).target) || {};
+  if (target.mode !== "newTopic") {
+    return "";
+  }
+  const chosen = originalNameChosen(s);
+  const problem = mappingProblems(s).originalName;
+  return (
+    "<div class=\"field\" id=\"original-name-field\">" +
+    "<label class=\"inline\" for=\"original-name\">" +
+    "<input type=\"checkbox\" id=\"original-name\" name=\"originalName\"" +
+    (chosen ? " checked" : "") + "> Restore under the original topic names</label>" +
+    "<p class=\"note\" id=\"original-name-meaning\">" + esc(ORIGINAL_NAME_SENTENCE) + "</p>" +
+    (chosen
+      ? "<label class=\"inline\" for=\"original-name-no-owner\">" +
+        "<input type=\"checkbox\" id=\"original-name-no-owner\" name=\"originalNameNoOwner\"" +
+        (target.originalNameNoOwner === true ? " checked" : "") + "> " +
+        esc(ORIGINAL_NAME_NO_OWNER_STATEMENT) + "</label>" +
+        (typeof problem === "string"
+          ? "<p class=\"complaint\" id=\"original-name-complaint\">" + esc(problem) + "</p>"
+          : "")
+      : "") +
+    "</div>"
   );
 }
 
@@ -4217,8 +4379,15 @@ export function renderPlanStep(prepared, state) {
       // PROD-03.0: WHAT THE RESTORED RECORDS NEED FROM A REGISTRY.
       ["schema registry", "<span id=\"review-schema-dependency\">" +
         esc(schemaDependencyText(s)) + "</span>"],
+      // PROD-15.1: THE APPROVAL SUBJECT, distinct where the approver reads it.
+      ["approval subject", "<span id=\"review-approval-subject\">" +
+        esc(approvalSubjectText(s)) + "</span>"],
     ]) +
     renderSchemaDependencyWarning(s) +
+    (originalNameChosen(s)
+      ? "<p class=\"caveat\" id=\"review-original-name\">" + esc(ORIGINAL_NAME_SENTENCE) +
+        "</p>"
+      : "") +
     // AND WHAT IT COSTS, where it is reviewed, when it is chosen.
     ((((s.fields || {}).sample) || {}).coverage === COVERAGE_COMPLETE
       ? "<p class=\"caveat\" id=\"review-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
@@ -4250,6 +4419,7 @@ export function renderPlanStep(prepared, state) {
     "<p class=\"note\" id=\"restore-semantics\">" + messageText(RESTORE_SEMANTICS_SENTENCE) +
     "</p>" +
     approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
+    renderTypedConfirmation(s, errors.originalNameTyped) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
     (pending || !renderable || blocked !== null || policyRefusal(s) !== null ? " disabled" : "") +
@@ -4892,6 +5062,9 @@ export function wizardDraftValues(state) {
     pointInTime: f.pointInTime,
     mode: target.mode,
     topicPrefix: target.topicPrefix,
+    // PROD-15.1: the choice and the owner statement, as booleans.
+    originalName: target.originalName === true,
+    originalNameNoOwner: target.originalNameNoOwner === true,
     targetCluster: s.targetClusterName,
     targetClusterUid: s.targetClusterUid,
     endpoint: source.endpoint,
@@ -5001,8 +5174,13 @@ export function applyWizardDraft(state, draft) {
       selectTarget(state, byName.uid, byName.name);
     }
   }
-  if (typeof d.topicPrefix === "string") {
+  if (typeof d.topicPrefix === "string" && d.topicPrefix.length > 0) {
     setTopicPrefix(state, d.topicPrefix);
+  }
+  // PROD-15.1: the original-name choice comes back only as a ticked box in
+  // `newTopic` mode; anything else leaves the prefix the draft kept.
+  if (d.originalName === true) {
+    setOriginalName(state, true, d.originalNameNoOwner === true);
   }
   // FX-5: a factor the operator SET comes back as set. An empty one -- or an
   // older draft with none -- leaves the default to be worked out again from
@@ -5017,6 +5195,9 @@ export function applyWizardDraft(state, draft) {
   // be; an older draft with none leaves the plan sampled.
   setCoverage(state, d.coverage === COVERAGE_COMPLETE,
     typeof d.completeMaxRecords === "string" ? d.completeMaxRecords : "");
+  // PROD-15.1: a draft kept before complete coverage was required for a
+  // restore under the original names comes back complete, never sampled.
+  requireCompleteCoverage(state);
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
@@ -5102,7 +5283,14 @@ export function draftFrom(object, fields) {
   if (typeof target.mode === "string") {
     nextTarget.mode = target.mode;
   }
-  if (typeof (target.topicNaming || {}).prefix === "string") {
+  if ((target.topicNaming || {}).originalName === true) {
+    // PROD-15.1: an original-name Restore prefills the choice; its scratch
+    // prefix stays the one the fields carry (the runner's probe namespace),
+    // and the owner statement is the operator's to make again.
+    nextTarget.originalName = true;
+    nextTarget.originalNameNoOwner = false;
+    nextTarget.topicPrefix = "";
+  } else if (typeof (target.topicNaming || {}).prefix === "string") {
     // BOTH KEYS, for `setTopicPrefix`'s reason. This one builds a fields
     // object rather than mutating a state, so it writes them here; the row
     // `the_prefix_is_one_value_in_both_modes` walks this call site too.
@@ -5110,6 +5298,11 @@ export function draftFrom(object, fields) {
     nextTarget.topicMappingPrefix = target.topicNaming.prefix;
   }
   const next = Object.assign({}, base, { target: nextTarget });
+  if (nextTarget.originalName === true && nextTarget.mode === "newTopic") {
+    // PROD-15.1: and the complete coverage that choice requires, on a copy of
+    // the sample block (this builds a fields object; it mutates nothing).
+    next.sample = Object.assign({}, base.sample || {}, { coverage: COVERAGE_COMPLETE });
+  }
   if (typeof spec.pointInTime === "string") {
     next.pointInTime = spec.pointInTime;
   }
@@ -5196,7 +5389,11 @@ export function restoreBody(state, prepared) {
     target: {
       clusterRef: { name: s.targetClusterName },
       mode: target.mode,
-      topicNaming: { prefix: target.topicPrefix },
+      // PROD-15.1: the original-name declaration rides beside the empty
+      // prefix, and only for that plan: every other object is what it was.
+      topicNaming: originalNameChosen(s)
+        ? { prefix: "", originalName: true }
+        : { prefix: target.topicPrefix },
     },
     deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
   };
@@ -5244,7 +5441,99 @@ export function restoreBody(state, prepared) {
     // console signs into the authorization document. Sent only under an
     // explicit binding; an unbound namespace signs nothing.
     ticket: ticketFor(s),
+    // OD-10 (PROD-15.1): the original topic names the requester re-typed,
+    // sent only on a one-person confirmation of an original-name restore --
+    // the console signs them into the authorization document, and the
+    // controller and the runner hold them to the plan again.
+    originalNameConfirmation: typedConfirmationRequired(s)
+      ? { typedTopics: parseTypedTopics(s.originalNameTyped) }
+      : undefined,
   };
+}
+
+/** OD-10: what a requester confirming alone is asked to do, beside the field. */
+export const ORIGINAL_NAME_TYPED_SENTENCE =
+  "This namespace is confirmed by one person (confirm). A restore under the ORIGINAL topic " +
+  "names is confirmed only by RE-TYPING every original topic name below, exactly, one per " +
+  "line: the console signs what you typed, and the controller and the runner hold it to the " +
+  "plan again (the owner's decision OD-10). A namespace where a second person approves needs " +
+  "no typed names.";
+
+/** OD-10: whether this submission is a one-person confirmation of a restore
+ *  under the original topic names -- the one case the typed names are owed. */
+export function typedConfirmationRequired(state) {
+  const s = state || {};
+  const p = s.approvalPolicy;
+  return originalNameChosen(s) && p !== null && typeof p === "object" &&
+    p.legacy === false && p.mode === "ordinary";
+}
+
+/** The typed names, one per line (a comma also separates), surrounding
+ *  spaces trimmed, empty entries dropped. Never case-folded: the names are
+ *  compared byte for byte. */
+export function parseTypedTopics(text) {
+  return String(typeof text === "string" ? text : "")
+    .split(/[\n,]/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/** OD-10: what the typed names get wrong against the topics this plan
+ *  restores, or `null` when they are exactly them -- each once, nothing else.
+ *  The product API answers the same refusal (`typed_topics_mismatch`). */
+export function typedTopicsProblem(state) {
+  const s = state || {};
+  if (!typedConfirmationRequired(s)) {
+    return null;
+  }
+  const typed = parseTypedTopics(s.originalNameTyped);
+  if (typed.length === 0) {
+    return "re-type every original topic name, exactly, to confirm this restore under the " +
+      "original topic names alone";
+  }
+  const wanted = new Set(selectedTopics(s).map(String));
+  const seen = new Set();
+  const repeated = new Set();
+  for (const t of typed) {
+    if (seen.has(t)) {
+      repeated.add(t);
+    }
+    seen.add(t);
+  }
+  const missing = [...wanted].filter((t) => !seen.has(t));
+  const extra = [...seen].filter((t) => !wanted.has(t));
+  const parts = [];
+  if (missing.length > 0) {
+    parts.push("not typed: " + missing.join(", "));
+  }
+  if (extra.length > 0) {
+    parts.push("typed but not restored by this plan: " + extra.join(", "));
+  }
+  if (repeated.size > 0) {
+    parts.push("typed more than once: " + [...repeated].join(", "));
+  }
+  return parts.length === 0 ? null : "the typed names are not exactly the topics this plan " +
+    "restores (" + parts.join("; ") + ")";
+}
+
+/** OD-10: the typed-names field, rendered only when it is owed. */
+export function renderTypedConfirmation(state, typedErrors) {
+  const s = state || {};
+  if (!typedConfirmationRequired(s)) {
+    return "";
+  }
+  return (
+    "<div class=\"field\" id=\"original-name-typed-field\">" +
+    "<label for=\"original-name-typed\">Re-type the original topic names</label>" +
+    "<p class=\"note\" id=\"original-name-typed-meaning\">" +
+    esc(ORIGINAL_NAME_TYPED_SENTENCE) + "</p>" +
+    "<textarea id=\"original-name-typed\" name=\"originalNameTyped\" rows=\"4\" " +
+    "autocomplete=\"off\" spellcheck=\"false\"" +
+    invalidAttributes("original-name-typed", typedErrors) + ">" +
+    esc(typeof s.originalNameTyped === "string" ? s.originalNameTyped : "") + "</textarea>" +
+    fieldErrorLine("original-name-typed", typedErrors) +
+    "</div>"
+  );
 }
 
 /** The ticket this state sends, or `undefined`. */
@@ -5362,6 +5651,12 @@ export async function submitRestore(state, deps, lifecycle, options) {
       ticket: "a namespace under a Governed approval policy requires a change ticket; it is " +
         "signed into the confirmation the approver countersigns",
     });
+  }
+  // OD-10: a one-person confirmation of an original-name restore needs every
+  // original topic name re-typed, exactly, before anything is sent.
+  const typedProblem = typedTopicsProblem(s);
+  if (typedProblem !== null) {
+    throw invalidInput({ originalNameTyped: typedProblem });
   }
   const reviewed = (options || {}).reviewedHash;
   if (typeof reviewed === "string" && reviewed !== prepared.hash) {
@@ -7466,6 +7761,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const timeBasis = node.querySelector("#time-basis");
   const coverage = node.querySelector("#coverage-complete");
   const coverageBound = node.querySelector("#coverage-bound");
+  const originalName = node.querySelector("#original-name");
+  const originalNameNoOwner = node.querySelector("#original-name-no-owner");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -7497,7 +7794,17 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (mode !== null) {
       state.fields.target.mode = valueOf(mode);
     }
-    if (prefix !== null) {
+    // PROD-15.1: the box decides, the owner statement beside it; leaving
+    // `newTopic` mode clears the choice (scratch never restores under the
+    // original names).
+    if (originalName !== null || state.fields.target.originalName === true) {
+      setOriginalName(state, originalName !== null && originalName.checked === true,
+        originalNameNoOwner !== null && originalNameNoOwner.checked === true);
+    }
+    // The coverage controls were read ABOVE, before this choice: ticking the
+    // box in the same edit selects complete coverage now.
+    requireCompleteCoverage(state);
+    if (prefix !== null && !originalNameChosen(state)) {
       // An emptied prefix is the default prefix again: the field SHOWS the
       // default when the value is empty, and the plan must be what it shows.
       setTopicPrefix(state, valueOf(prefix) || defaultPrefixFor(state));
@@ -7703,6 +8010,14 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   if (ticket !== null) {
     listen(ticket, "input", () => {
       state.ticket = valueOf(ticket);
+    }, lifecycle);
+  }
+  // OD-10: THE TYPED NAMES ARE NOT IN THE PLAN BYTES either; read into the
+  // state and sent beside the create body.
+  const typedNames = node.querySelector("#original-name-typed");
+  if (typedNames !== null) {
+    listen(typedNames, "input", () => {
+      state.originalNameTyped = valueOf(typedNames);
     }, lifecycle);
   }
   for (const box of node.querySelectorAll(".topic-box")) {

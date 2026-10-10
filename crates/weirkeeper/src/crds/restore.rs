@@ -70,8 +70,42 @@ pub const COMPLETE_MAX_RECORDS_RULE: &str =
 pub const COMPLETE_MAX_RECORDS_MESSAGE: &str =
     "completeMaxRecords bounds a complete verification and is set only with coverage: complete";
 
+/// **PROD-15.1.** The CEL rule that keeps the original-name declaration
+/// beside the only target it describes: `topicNaming.originalName: true` only
+/// in `newTopic` mode and only with the empty prefix — the identity mapping
+/// the plan's `topic_naming: {prefix: "", original_name: {…}}` is.
+///
+/// ONE DIRECTION ONLY. An empty prefix WITHOUT the declaration is not refused
+/// here: such an object could have been stored before this rule existed, and
+/// the runner refuses its plan as it always has (a topic mapped onto itself).
+/// The controller holds the declaration to the plan in both directions
+/// (`controllers::restore::original_name_agrees`) before anything runs.
+pub const ORIGINAL_NAME_RULE: &str = "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (self.target.mode == 'newTopic' && self.target.topicNaming.prefix == '')";
+
+/// The message [`ORIGINAL_NAME_RULE`] travels with.
+pub const ORIGINAL_NAME_MESSAGE: &str =
+    "target.topicNaming.originalName is set only with target.mode newTopic and target.topicNaming.prefix \"\": a restore under the original topic names maps every topic onto its own name";
+
+/// The CEL rule that keeps an original-name restore beside the only
+/// verification it may run with: `topicNaming.originalName: true` only with
+/// `coverage: complete`. A sampled check reads the first records of each
+/// partition and a count bound, which a record another producer wrote into
+/// the restored name can pass; the complete check compares every restored
+/// record with the archive and names a record the archive does not hold.
+///
+/// The earliest of three refusals: the controller refuses a plan that does
+/// not ask for complete coverage before any Job
+/// (`controllers::restore::original_name_agrees`), and the runner at phase 0.
+/// `originalName` is introduced with this rule, so no stored object can
+/// violate it.
+pub const ORIGINAL_NAME_COVERAGE_RULE: &str = "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (has(self.coverage) && self.coverage == 'complete')";
+
+/// The message [`ORIGINAL_NAME_COVERAGE_RULE`] travels with.
+pub const ORIGINAL_NAME_COVERAGE_MESSAGE: &str =
+    "target.topicNaming.originalName is set only with coverage: complete: a restore under the original topic names is verified completely, every restored record compared with the archive, never by sample";
+
 /// The rules on `Restore`'s `.spec`.
-pub const SPEC_RULES: [SpecRule; 5] = [
+pub const SPEC_RULES: [SpecRule; 7] = [
     SpecRule::new(super::SPEC_IMMUTABLE_RULE, super::SPEC_IMMUTABLE_MESSAGE),
     SpecRule::new(DESTINATIONS_TOGETHER_RULE, DESTINATIONS_TOGETHER_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
@@ -80,6 +114,8 @@ pub const SPEC_RULES: [SpecRule; 5] = [
         EXACTLY_ONE_AUTHORIZATION_MESSAGE,
     ),
     SpecRule::new(COMPLETE_MAX_RECORDS_RULE, COMPLETE_MAX_RECORDS_MESSAGE),
+    SpecRule::new(ORIGINAL_NAME_RULE, ORIGINAL_NAME_MESSAGE),
+    SpecRule::new(ORIGINAL_NAME_COVERAGE_RULE, ORIGINAL_NAME_COVERAGE_MESSAGE),
 ];
 
 /// How much of a restore phase 7 verifies, as a `Restore` or
@@ -157,6 +193,30 @@ pub struct TopicNaming {
     /// result is what `status.newTopics` records, and — for `mode: scratch` —
     /// what phase 9 tears down.
     pub prefix: String,
+    /// **Restore under the ORIGINAL topic names**, into topics that do not
+    /// exist: `true` declares what the plan's
+    /// `target.topic_naming.original_name` block says, beside `prefix: ""` in
+    /// `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and
+    /// the console read to show the restore — and its separate approval
+    /// subject, `originalName` — distinctly, without parsing the plan; the
+    /// controller refuses an object whose declaration and plan disagree
+    /// (`ExecutionSpecInvalid`) and an approval whose signed subject is not
+    /// the plan's (`ApprovalSubjectMismatch`), before any Job exists.
+    ///
+    /// ABSENT MEANS FALSE and is not serialised, so every object written
+    /// before this field is byte-identical. An older controller ignores the
+    /// key; its runner refuses the plan (a topic mapped onto itself), so
+    /// nothing runs under a reading that drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<bool>,
+}
+
+impl TopicNaming {
+    /// Whether this object declares a restore under the original names.
+    #[must_use]
+    pub fn is_original_name(&self) -> bool {
+        self.original_name == Some(true)
+    }
 }
 
 /// Where the restore writes, and in which mode.
@@ -491,6 +551,55 @@ pub struct TopicPreflight {
     /// rewriting the record, derived from `retentionMs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_bound: Option<i64>,
+}
+
+/// A stopped creation step, as the runner named it and as the controller
+/// held it to this Restore's plan: three lists, each at most 100 of the
+/// plan's mapped target topic names, and how many names each list has in
+/// all. A name is in at most one list. Logweir deletes none of them.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetTopicsAppeared {
+    /// Mapped target names someone else created after phase 0: never touched.
+    #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub appeared: Vec<String>,
+    /// Topics this run created and LEFT under these names, empty. Logweir
+    /// never deletes them: remove each yourself once you have checked
+    /// nothing writes to it.
+    #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub left: Vec<String>,
+    /// Names this run ASKED the cluster to create and CANNOT ACCOUNT FOR: it
+    /// got no definite answer (the whole request failed, or the name was
+    /// answered with an error that is not "already exists"). With
+    /// `unconfirmedSeen: true` each one exists now; it may be this
+    /// restore's or someone else's, so check what it holds and who writes
+    /// to it before you remove it. Never listed in `left`, which claims
+    /// ownership, nor in `appeared`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub unconfirmed: Vec<String>,
+    /// How many names `appeared` has in all. More than the list holds when
+    /// the 100-name bound cut it: the runner's log names every one, and each
+    /// is one of this restore's mapped target topics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub appeared_count: Option<i64>,
+    /// How many names `left` has in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub left_count: Option<i64>,
+    /// How many names `unconfirmed` has in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub unconfirmed_count: Option<i64>,
+    /// Whether the runner LISTED the cluster after the stop and saw every
+    /// `unconfirmed` name. `false`: it could not list the cluster, so each
+    /// name MAY exist; look for it. Present only beside an `unconfirmed`
+    /// name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_seen: Option<bool>,
 }
 
 /// Where the signed evidence is, and what the controller made of it.
@@ -831,12 +940,33 @@ pub struct RestoreStatus {
     /// rather than flattened to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
+    /// A creation step that stopped (`exitReason: TargetTopicAppeared` for a
+    /// lost race, `CreatedTopicsLeft` for any other stop that left a topic;
+    /// exit 1): mapped target names someone else created after phase 0
+    /// proved them absent (`appeared`), the topics THIS run created and LEFT
+    /// (`left`: each created by this restore and left empty; remove it
+    /// yourself once you have checked nothing writes to it), and the names it
+    /// asked for and cannot account for (`unconfirmed`). Logweir never
+    /// deletes any of them. Read off the LAST TWO lines of the runner's log
+    /// (`target-topics-appeared=`, then `failure-reason=`) and held to this
+    /// Restore's mapped target names; absent on every other run. The names
+    /// are what the runner's log gives: with a runner image older than this
+    /// controller, check the list against the cluster before acting on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_topics_appeared: Option<TargetTopicsAppeared>,
     /// The signed scorecard, the offset report, and the controller's
     /// verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<RestoreEvidence>,
-    /// The topics this run CREATED. For `mode: scratch`, exactly what phase 9
-    /// tears down.
+    /// The target topic names of this run. For a run that REACHED its restore
+    /// these are the topics it created (for `mode: scratch`, exactly what
+    /// phase 9 tears down). After a stopped creation step
+    /// (`targetTopicsAppeared`) it is exactly `targetTopicsAppeared.left`,
+    /// the topics the run's own `CreateTopics` answers say it created, never
+    /// a name someone else created or one it cannot account for; and it is
+    /// ABSENT when that list could not be read. For a run that was refused
+    /// or failed before the creation step, it is the names the plan maps,
+    /// none of which the run created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_topics: Option<Vec<String>>,
     /// The source topics the new ones were restored from. Nothing here was

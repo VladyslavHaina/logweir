@@ -291,6 +291,7 @@ fn restore_inputs(
         plan_hash: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
         approved_at: chrono::Utc::now(),
         subject_kind: logweir_core::spec::SUBJECT_KIND_RESTORE.into(),
+        approval_subject: None,
     };
     let mut approval_bytes = serde_json::to_vec_pretty(&approval_doc).unwrap();
     approval_bytes.push(b'\n');

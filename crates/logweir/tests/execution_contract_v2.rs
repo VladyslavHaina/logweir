@@ -83,6 +83,7 @@ fn fixture_with_plan(plan: Vec<u8>) -> Fixture {
         plan_hash: sha256_prefixed(&plan),
         approved_at: Utc::now(),
         subject_kind: "Restore".to_string(),
+        approval_subject: None,
     };
     let approval = serde_json::to_vec(&doc).unwrap();
     let sidecar =
@@ -203,6 +204,7 @@ fn minted_authorization(uid: &str, scope: &serde_json::Value) -> SignedAuthoriza
         ticket: String::new(),
         out: out.clone(),
         subject_kind: "RehearsalSchedule".to_string(),
+        approval_subject: None,
         standing: Some(StandingArgs {
             schedule_namespace: "team-a".to_string(),
             schedule_name: "weekly-orders".to_string(),

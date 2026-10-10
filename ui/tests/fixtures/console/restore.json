@@ -43,9 +43,11 @@
         "name": "orders-scratch"
       },
       "mode": "scratch",
-      "topicPrefix": "drill-20260911-"
+      "topicPrefix": "drill-20260911-",
+      "originalName": false
     },
-    "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c11"
+    "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c11",
+    "approvalSubject": "ordinary"
   },
   "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
 }
