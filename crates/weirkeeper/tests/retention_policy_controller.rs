@@ -27,7 +27,9 @@ use serde_json::{json, Value};
 use weirkeeper::catalog_view::{Availability, Verification};
 use weirkeeper::check;
 use weirkeeper::controllers::retention_policy as ctrl;
-use weirkeeper::crds::retention_policy::RetentionPolicy;
+use weirkeeper::crds::retention_policy::{
+    RetentionAccounting, RetentionEvaluation, RetentionPolicy,
+};
 use weirkeeper::job::RunnerImage;
 use weirkeeper::retention_plan as plan;
 use weirkeeper::testing::{mock_client_recording_bodies, Recorder, Route, SeenBody};
@@ -749,9 +751,15 @@ fn the_deletion_ceiling_never_splits_a_shared_set() {
         one.truncated_by_cap, 2,
         "both receipts of the pair are counted"
     );
+    // FX-22: held back TOGETHER, and neither is reported as kept — `p1` is
+    // the one point `keepLast 1` keeps.
+    assert_eq!(one.held_back, vec!["p2", "p3"]);
+    assert_eq!(one.kept, vec!["p1"]);
     let two = at_cap(2);
     assert_eq!(candidate_ids(&two), vec!["p2", "p3"]);
     assert_eq!(two.truncated_by_cap, 1);
+    assert_eq!(two.held_back, vec!["p4"]);
+    assert_eq!(two.kept, vec!["p1"]);
 }
 
 /// Review M2: two receipts over ONE set that are BOTH due render ONE plan
@@ -968,8 +976,16 @@ fn a_point_with_no_manifest_key_is_protected_as_unknown() {
     assert_eq!(protected_reason(&evaluation, "p6"), Some("Unknown"));
 }
 
-/// The per-run point ceiling truncates the candidate list AND says how many it
-/// left behind.
+/// The per-run point ceiling truncates the candidate list, says how many it
+/// left behind, and **never files them under "kept"** (FX-22).
+///
+/// This row used to assert the defect: `kept` contained `p10`, "the ones over
+/// the ceiling are KEPT". A point the rules would remove and nothing protects
+/// is not kept by anything; the ceiling only decides which RUN takes it.
+///
+/// MUTANT (FX-22 M1, "held-back counted as kept"): push the over-ceiling point
+/// onto `out.kept` in `evaluate` step 5. `kept` is then eight ids and `p10` is
+/// among them.
 #[test]
 fn the_deletion_ceiling_truncates_and_counts_what_it_left() {
     let points: Vec<plan::PointFacts> = (1..=10).map(|d| point(&format!("p{d:02}"), d)).collect();
@@ -982,16 +998,26 @@ fn the_deletion_ceiling_truncates_and_counts_what_it_left() {
         now: now(),
         max_deletions_per_run: 2,
     });
-    assert_eq!(evaluation.candidates.len(), 2);
+    assert_eq!(candidate_ids(&evaluation), vec!["p04", "p05"]);
     assert_eq!(
         evaluation.truncated_by_cap, 5,
         "seven points are beyond keepLast: 3, two fit the ceiling and five are counted — a \
          console that showed 2 of 7 without saying so would read as '2 is all there is'"
     );
-    assert!(
-        evaluation.kept.iter().any(|k| k == "p10"),
-        "and the ones over the ceiling are KEPT, never silently dropped"
+    assert_eq!(
+        evaluation.held_back,
+        vec!["p06", "p07", "p08", "p09", "p10"],
+        "the ones over the ceiling are named, newest first, never silently dropped"
     );
+    assert_eq!(
+        evaluation.kept,
+        vec!["p01", "p02", "p03"],
+        "and they are NOT kept: keepLast 3 keeps three points, whatever the ceiling is"
+    );
+    assert!(evaluation.accounts_for_every_point(), "{evaluation:?}");
+    // What stays in the archive after this run is still what the plan
+    // writer's rail protects: a held-back point's set is retained THIS run.
+    assert!(evaluation.retained.backup_ids.contains("set-p10"));
 }
 
 // ===========================================================================
@@ -7553,4 +7579,877 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
         ("LogweirWorker".to_string(), "LogweirEnforced".to_string()),
         "a later successful run releases the fields too: {next}"
     );
+}
+
+// ===========================================================================
+// FX-22 — the status says what the per-run ceiling held back, and never calls
+// it kept
+// ===========================================================================
+//
+// THE EVIDENCE (PoC batch 3, F-3): 371 points, a `Report` policy. With
+// `keepLast: 300` and with `keepLast: 10` the object read "321 kept, 50
+// candidate(s)" — the 21 and the 311 points the rules would remove and the
+// default ceiling of 50 left out of the plan were pushed onto `kept`, and
+// nothing published `truncated_by_cap`.
+
+/// `n` view entries `p001…`, `p001` the newest (one day old) and each next one
+/// a day older — so `keepLast: k` keeps `p001..=p<k>`.
+fn fx22_entries(n: usize) -> Vec<Value> {
+    (1..=n)
+        .map(|d| {
+            view_entry(
+                &format!("p{d:03}"),
+                i64::try_from(d).expect("a small count"),
+            )
+        })
+        .collect()
+}
+
+/// A `Report` policy with `keepLast: keep_last` (and the fixture's
+/// `minUsablePoints: 3`).
+fn fx22_rules(keep_last: i64) -> Value {
+    json!({"rules": {"keepLast": keep_last, "minUsablePoints": 3}})
+}
+
+/// The status one pass writes for `spec` over `entries`, from no status.
+async fn fx22_status(entries: &[Value], spec: Value) -> Value {
+    let f = fixture(happy_routes(entries));
+    run(&f, &policy(spec, json!({}))).await;
+    f.status()
+}
+
+fn fx22_ids(list: &Value) -> Vec<String> {
+    list.as_array()
+        .expect("a list")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .or_else(|| v["pointId"].as_str())
+                .expect("a point id")
+                .to_string()
+        })
+        .collect()
+}
+
+fn fx22_names(range: std::ops::RangeInclusive<usize>) -> Vec<String> {
+    range.map(|d| format!("p{d:03}")).collect()
+}
+
+fn fx22_message(status: &Value, r#type: &str) -> String {
+    condition_of(status, r#type).expect("the condition")["message"]
+        .as_str()
+        .expect("a message")
+        .to_string()
+}
+
+/// `status.lastEvaluation`, read through the CRD's OWN type — the type the API
+/// projects from and the controller reads its status back through.
+fn fx22_typed(status: &Value) -> RetentionEvaluation {
+    serde_json::from_value(status["lastEvaluation"].clone())
+        .expect("the published block is the CRD's RetentionEvaluation")
+}
+
+/// **The pure rule, at the evidence's own size.** 371 points under the default
+/// ceiling of 50: `keepLast: 300` keeps 300, plans 50 and holds 21 back;
+/// `keepLast: 10` keeps 10, plans 50 and holds 311 back. The two used to be
+/// indistinguishable.
+///
+/// MUTANTS: M1 "held-back counted as kept" (push the over-ceiling point onto
+/// `out.kept`): both read 321 kept. M2 "the truncation flag never set"
+/// (`out.truncated_by_cap = 0`): both read 0. M3 "the counts swapped" is the
+/// controller's, below.
+#[test]
+fn fx22_371_points_evaluate_differently_under_keep_last_300_and_10() {
+    let points: Vec<plan::PointFacts> = (1..=371).map(|d| point(&format!("p{d:03}"), d)).collect();
+    let at = |keep_last: i64| evaluate(&points, rules(Some(keep_last), None, 3));
+
+    let three_hundred = at(300);
+    assert_eq!(three_hundred.points_evaluated, 371);
+    assert_eq!(three_hundred.kept, fx22_names(1..=300));
+    assert_eq!(
+        candidate_ids(&three_hundred),
+        fx22_names(301..=350)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(three_hundred.held_back, fx22_names(351..=371));
+    assert_eq!(three_hundred.truncated_by_cap, 21);
+    assert!(three_hundred.accounts_for_every_point());
+
+    let ten = at(10);
+    assert_eq!(ten.kept, fx22_names(1..=10));
+    assert_eq!(ten.candidates.len(), 50);
+    assert_eq!(ten.held_back, fx22_names(61..=371));
+    assert_eq!(ten.truncated_by_cap, 311);
+    assert!(ten.accounts_for_every_point());
+
+    assert_ne!(
+        (three_hundred.kept.len(), three_hundred.truncated_by_cap),
+        (ten.kept.len(), ten.truncated_by_cap),
+        "the defect: both read 321 kept and nothing about the ceiling"
+    );
+    // NOTHING IS IN TWO PLACES: a held-back point is not kept and not planned.
+    for evaluation in [&three_hundred, &ten] {
+        let kept: BTreeSet<&str> = evaluation.kept.iter().map(String::as_str).collect();
+        let planned: BTreeSet<&str> = candidate_ids(evaluation).into_iter().collect();
+        for held in &evaluation.held_back {
+            assert!(
+                !kept.contains(held.as_str()),
+                "{held} is held back, not kept"
+            );
+            assert!(
+                !planned.contains(held.as_str()),
+                "{held} is not in this plan"
+            );
+        }
+    }
+}
+
+/// **A plan under the ceiling shows no truncation**: nothing is held back, the
+/// count is 0, and `kept` is exactly what the rules keep.
+///
+/// CONTROL for the row above — without it "held back is never empty" would
+/// pass every assertion there.
+#[test]
+fn fx22_a_plan_under_the_ceiling_holds_nothing_back() {
+    let points: Vec<plan::PointFacts> = (1..=371).map(|d| point(&format!("p{d:03}"), d)).collect();
+    // 371 - 350 = 21 due, under the ceiling of 50.
+    let evaluation = evaluate(&points, rules(Some(350), None, 3));
+    assert_eq!(evaluation.candidates.len(), 21);
+    assert!(
+        evaluation.held_back.is_empty(),
+        "{:?}",
+        evaluation.held_back
+    );
+    assert_eq!(evaluation.truncated_by_cap, 0);
+    assert_eq!(evaluation.kept.len(), 350);
+    assert!(evaluation.accounts_for_every_point());
+
+    // EXACTLY AT the ceiling is not truncation either: 50 due, 50 planned.
+    let at_the_ceiling = evaluate(&points, rules(Some(321), None, 3));
+    assert_eq!(at_the_ceiling.candidates.len(), 50);
+    assert_eq!(at_the_ceiling.truncated_by_cap, 0);
+    // And one more due point is one held back.
+    let one_over = evaluate(&points, rules(Some(320), None, 3));
+    assert_eq!(one_over.candidates.len(), 50);
+    assert_eq!(one_over.held_back, vec!["p371"]);
+}
+
+/// A PROTECTED point is kept, a SKIPPED one is neither kept nor held back, and
+/// the accounting still closes with both present under a ceiling that cuts.
+#[test]
+fn fx22_the_accounting_closes_with_protected_and_skipped_points() {
+    let mut points: Vec<plan::PointFacts> =
+        (1..=12).map(|d| point(&format!("p{d:02}"), d)).collect();
+    points[10].availability = Availability::Unreadable; // p11: skipped
+    let holds = [plan::Hold {
+        point_id: "p12".to_string(),
+        reason: "case 7".to_string(),
+        until: None,
+    }];
+    let evaluation = plan::evaluate(&plan::Input {
+        destination: &destination(),
+        points: &points,
+        rules: rules(Some(2), None, 1),
+        holds: &holds,
+        protection: &plan::Protection::default(),
+        now: now(),
+        max_deletions_per_run: 3,
+    });
+    // p01 p02 kept by the rules, p12 by the hold; p03..p05 planned; p06..p10
+    // held back; p11 skipped.
+    assert_eq!(evaluation.kept, vec!["p01", "p02", "p12"]);
+    assert_eq!(protected_reason(&evaluation, "p12"), Some("Hold"));
+    assert_eq!(candidate_ids(&evaluation), vec!["p03", "p04", "p05"]);
+    assert_eq!(
+        evaluation.held_back,
+        vec!["p06", "p07", "p08", "p09", "p10"]
+    );
+    assert_eq!(evaluation.skipped.len(), 1);
+    assert_eq!(evaluation.points_evaluated, 12);
+    assert!(evaluation.accounts_for_every_point(), "{evaluation:?}");
+}
+
+/// **THE ROW (the controller, at the evidence's own size).** A `Report` policy
+/// over 371 points publishes, for `keepLast: 300` and for `keepLast: 10`, a
+/// kept count, a plan count and a held-back count that are each correct and
+/// that differ between the two — in `status.lastEvaluation` and in the
+/// `Evaluated` condition's own words.
+///
+/// MUTANTS: M1 held-back counted as kept (`keptCount` 321 for both, and the
+/// `kept` list names held-back points); M2 the truncation never published
+/// (`"truncatedByCap": 0`, or the member dropped); M3 the counts swapped
+/// (`keptCount` and `truncatedByCap`, or `candidateCount` and
+/// `truncatedByCap`, written from each other's values); M4 the published
+/// ceiling a constant.
+#[tokio::test]
+async fn fx22_the_status_tells_300_kept_from_the_cap_stopped_at_50() {
+    let entries = fx22_entries(371);
+
+    // ---- keepLast: 300 ----------------------------------------------------
+    let status = fx22_status(&entries, fx22_rules(300)).await;
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
+    assert_eq!(ev["keptCount"], 300);
+    assert_eq!(ev["candidateCount"], 50);
+    assert_eq!(ev["truncatedByCap"], 21);
+    assert_eq!(
+        ev["maxDeletionsPerRun"], 50,
+        "a Report policy has no spec.enforcement; its preview is bounded by the default"
+    );
+    assert_eq!(fx22_ids(&ev["kept"]), fx22_names(1..=300));
+    assert_eq!(fx22_ids(&ev["candidates"]), fx22_names(301..=350));
+    assert_eq!(
+        fx22_typed(&status).accounting(),
+        Some(RetentionAccounting {
+            points_evaluated: 371,
+            kept: 300,
+            candidates: 50,
+            held_back: 21,
+            skipped: 0,
+        }),
+        "the CRD's own type reads the four counts, and they close"
+    );
+    let message_300 = fx22_message(&status, ctrl::CONDITION_EVALUATED);
+    assert!(
+        message_300.starts_with(
+            "371 point(s) evaluated at this destination: 300 kept, 50 candidate(s), 0 \
+             protected, 0 skipped. 21 more point(s) are due under the rules and held back by \
+             the per-run ceiling (maxDeletionsPerRun 50): they are not kept and not in this \
+             plan, and they stay due until a later plan names them."
+        ),
+        "{message_300}"
+    );
+    assert!(
+        message_300.ends_with("50 point(s) would be removed by this plan."),
+        "{message_300}"
+    );
+
+    // ---- keepLast: 10 -----------------------------------------------------
+    let status = fx22_status(&entries, fx22_rules(10)).await;
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
+    assert_eq!(ev["keptCount"], 10);
+    assert_eq!(ev["candidateCount"], 50);
+    assert_eq!(ev["truncatedByCap"], 311);
+    assert_eq!(ev["maxDeletionsPerRun"], 50);
+    assert_eq!(fx22_ids(&ev["kept"]), fx22_names(1..=10));
+    assert_eq!(fx22_ids(&ev["candidates"]), fx22_names(11..=60));
+    assert_eq!(
+        fx22_typed(&status).accounting(),
+        Some(RetentionAccounting {
+            points_evaluated: 371,
+            kept: 10,
+            candidates: 50,
+            held_back: 311,
+            skipped: 0,
+        })
+    );
+    let message_10 = fx22_message(&status, ctrl::CONDITION_EVALUATED);
+    assert!(
+        message_10.starts_with(
+            "371 point(s) evaluated at this destination: 10 kept, 50 candidate(s), 0 \
+             protected, 0 skipped. 311 more point(s) are due under the rules and held back by \
+             the per-run ceiling (maxDeletionsPerRun 50)"
+        ),
+        "{message_10}"
+    );
+
+    // NO HELD-BACK POINT IS IN ANY LIST: not kept, not in this plan.
+    let listed: BTreeSet<String> = fx22_ids(&ev["kept"])
+        .into_iter()
+        .chain(fx22_ids(&ev["candidates"]))
+        .chain(fx22_ids(&ev["protected"]))
+        .collect();
+    for held in fx22_names(61..=371) {
+        assert!(!listed.contains(&held), "{held} is held back and is listed");
+    }
+    assert_ne!(
+        message_300, message_10,
+        "the defect: one sentence, '321 kept, 50 candidate(s)', for both policies"
+    );
+}
+
+/// **A plan under the ceiling publishes `truncatedByCap: 0`** — the member is
+/// PRESENT and zero (an answer), not absent (not recorded) — and the
+/// `Evaluated` message is the one it always was.
+///
+/// MUTANT M5: write the member only when it is above zero. An under-ceiling
+/// evaluation then reads "not recorded", which is what an OLDER controller's
+/// status reads as, and the console could not tell them apart.
+#[tokio::test]
+async fn fx22_a_plan_under_the_ceiling_publishes_zero_and_says_nothing_of_a_ceiling() {
+    // The fixture's own six points: keepLast 2, minUsablePoints 3.
+    let status = fx22_status(&six_points(), json!({})).await;
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["truncatedByCap"], json!(0), "present and zero: {ev}");
+    assert_eq!(ev["keptCount"], 3);
+    assert_eq!(ev["candidateCount"], 3);
+    assert_eq!(ev["maxDeletionsPerRun"], 50);
+    assert_eq!(
+        fx22_typed(&status).accounting().map(|a| a.held_back),
+        Some(0)
+    );
+    let message = fx22_message(&status, ctrl::CONDITION_EVALUATED);
+    assert!(
+        message.starts_with(
+            "6 point(s) evaluated at this destination: 3 kept, 3 candidate(s), 1 protected, 0 \
+             skipped. This catalog view carries no segment keys."
+        ),
+        "no ceiling sentence under the ceiling: {message}"
+    );
+    assert!(!message.contains("held back"), "{message}");
+    assert!(
+        message.ends_with("3 point(s) would be removed."),
+        "and not 'by this plan': the plan is everything the rules remove: {message}"
+    );
+
+    // AT THE EVIDENCE'S SIZE TOO: 371 points, 21 due, ceiling 50.
+    let status = fx22_status(&fx22_entries(371), fx22_rules(350)).await;
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["keptCount"], 350);
+    assert_eq!(ev["candidateCount"], 21);
+    assert_eq!(ev["truncatedByCap"], json!(0));
+    assert!(!fx22_message(&status, ctrl::CONDITION_EVALUATED).contains("held back"));
+}
+
+/// **The published ceiling is the one the evaluation applied.** An `Enforce`
+/// policy's own `maxDeletionsPerRun` — 2, then 1 — is what `maxDeletionsPerRun`
+/// reads, what the message names, and what splits the three due points into
+/// "this plan" and "held back".
+///
+/// MUTANT M4: publish a constant 50, or the CRD default instead of the
+/// policy's own value.
+#[tokio::test]
+async fn fx22_the_published_ceiling_is_the_policys_own() {
+    for (ceiling, planned, held) in [(2, 2, 1), (1, 1, 2)] {
+        let mut block = enforcing(None);
+        block["enforcement"]["maxDeletionsPerRun"] = json!(ceiling);
+        let status = fx22_status(&six_points(), block).await;
+        let ev = &status["lastEvaluation"];
+        assert_eq!(ev["maxDeletionsPerRun"], ceiling, "{ev}");
+        assert_eq!(ev["candidateCount"], planned);
+        assert_eq!(ev["truncatedByCap"], held);
+        assert_eq!(ev["keptCount"], 3);
+        let message = fx22_message(&status, ctrl::CONDITION_EVALUATED);
+        assert!(
+            message.contains(&format!(
+                " {held} more point(s) are due under the rules and held back by the per-run \
+                 ceiling (maxDeletionsPerRun {ceiling})"
+            )),
+            "{message}"
+        );
+    }
+}
+
+/// **FX-29, over a truncated plan: the status is written only when its content
+/// changes.** A policy whose plan the ceiling cut settles like any other — the
+/// passes after the settling one send NO patch and `lastEvaluation.at` keeps
+/// naming the evaluation that reached these findings — and a real change is
+/// written once, with a new instant and the new held-back count.
+///
+/// This is also the guard for the four new members themselves: the second
+/// pass reads its status back through the CRD's TYPE, so a member the patch
+/// carries and the type does not would be absent from the read-back, differ on
+/// every pass and be written on every pass (FX-29's hot loop).
+/// MUTANT M6: remove `truncated_by_cap` (or any of the four) from
+/// `crds::retention_policy::RetentionEvaluation`.
+#[tokio::test]
+async fn fx22_a_truncated_policy_writes_nothing_once_settled() {
+    let entries = fx22_entries(371);
+    let spec = fx22_rules(10);
+
+    let first = fixture(happy_routes(&entries));
+    run_at(&first, &policy(spec.clone(), json!({})), now()).await;
+    let mut written = first.status();
+    assert_eq!(written["lastEvaluation"]["at"], json!(now()));
+    assert_eq!(written["lastEvaluation"]["truncatedByCap"], 311);
+
+    // The settling pass (the first pass saw no `observedGeneration`).
+    let settle = fixture(happy_routes(&entries));
+    run_at(
+        &settle,
+        &policy(spec.clone(), written.clone()),
+        now() + chrono::Duration::milliseconds(500),
+    )
+    .await;
+    for patch in settle.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut written, &patch["status"]);
+    }
+    assert_eq!(written["lastEvaluation"]["at"], json!(now()), "{written}");
+
+    for later in [
+        now() + chrono::Duration::seconds(1),
+        now() + chrono::Duration::minutes(1),
+        now() + chrono::Duration::minutes(30),
+    ] {
+        let again = fixture(happy_routes(&entries));
+        run_at(&again, &policy(spec.clone(), written.clone()), later).await;
+        assert!(
+            again.status_patches().is_empty(),
+            "at {later}: the same 371 points evaluate to the same findings, so nothing is \
+             written: {:?}",
+            again.status_patches()
+        );
+    }
+
+    // CONTROL: A REAL CHANGE STILL WRITES. One more point, older than every
+    // other: the plan is the same fifty points (the digest does not move), and
+    // the held-back count is what changed.
+    let more = fx22_entries(372);
+    let changed = fixture(happy_routes(&more));
+    let later = now() + chrono::Duration::hours(2);
+    run_at(&changed, &policy(spec, written.clone()), later).await;
+    let patches = changed.status_patches();
+    assert_eq!(patches.len(), 1, "a changed evaluation is written once");
+    let ev = &patches[0]["status"]["lastEvaluation"];
+    assert_eq!(
+        ev["planSha256"], written["lastEvaluation"]["planSha256"],
+        "the plan did not move"
+    );
+    assert_eq!(ev["truncatedByCap"], 312, "and the held-back count did");
+    assert_eq!(ev["pointsEvaluated"], 372);
+    assert_eq!(ev["keptCount"], 10);
+    assert_eq!(
+        ev["at"],
+        json!(later),
+        "so the instant is the evaluation that found the change"
+    );
+}
+
+/// A status as an API server whose CRD predates FX-22 stores it: the four new
+/// `lastEvaluation` members pruned.
+fn fx22_pruned(mut status: Value) -> Value {
+    if let Some(block) = status["lastEvaluation"].as_object_mut() {
+        for key in ctrl::ADDITIVE_EVALUATION_FIELDS {
+            block.remove(key);
+        }
+    }
+    status
+}
+
+/// **A controller ahead of its CRD does not loop.** Over a CRD that predates
+/// the four members the API server prunes them from every write. The passes
+/// after the settling one still SEND them (so a CRD that knows them stores
+/// them), and what the server would store afterwards is byte-for-byte what it
+/// stored before — in particular `lastEvaluation.at` does not move — so the
+/// write is a no-op and nothing wakes the next pass.
+///
+/// MUTANT M7: compare the instant against the stored block as it is
+/// (`keep_instant_unless_changed(stored_block, …)` without
+/// `stored_for_instant`). The absent members read as "the findings changed",
+/// `at` becomes this pass's clock, the write is a real one, and this
+/// controller's own status write is what starts its next pass: FX-29's loop
+/// for every policy while the controller is ahead of its CRD.
+#[tokio::test]
+async fn fx22_a_crd_that_prunes_the_new_members_never_moves_the_instant() {
+    let entries = fx22_entries(371);
+    let spec = fx22_rules(10);
+
+    let first = fixture(happy_routes(&entries));
+    run_at(&first, &policy(spec.clone(), json!({})), now()).await;
+    let mut stored = fx22_pruned(first.status());
+    assert!(stored["lastEvaluation"].get("truncatedByCap").is_none());
+    assert_eq!(stored["lastEvaluation"]["at"], json!(now()));
+
+    // The settling pass, stored as that server stores it.
+    let settle = fixture(happy_routes(&entries));
+    run_at(
+        &settle,
+        &policy(spec.clone(), stored.clone()),
+        now() + chrono::Duration::milliseconds(500),
+    )
+    .await;
+    for patch in settle.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut stored, &patch["status"]);
+    }
+    stored = fx22_pruned(stored);
+
+    for later in [
+        now() + chrono::Duration::seconds(1),
+        now() + chrono::Duration::minutes(1),
+        now() + chrono::Duration::minutes(30),
+    ] {
+        let again = fixture(happy_routes(&entries));
+        run_at(&again, &policy(spec.clone(), stored.clone()), later).await;
+        let patches = again.status_patches();
+        assert_eq!(
+            patches.len(),
+            1,
+            "at {later}: the members are still sent, so a CRD that knows them stores them"
+        );
+        assert_eq!(
+            patches[0]["status"]["lastEvaluation"]["truncatedByCap"],
+            311
+        );
+        let mut after = stored.clone();
+        weirkeeper::conditions::apply_merge_patch(&mut after, &patches[0]["status"]);
+        assert_eq!(
+            fx22_pruned(after),
+            stored,
+            "at {later}: what a pruning server stores is unchanged, so the write is a no-op \
+             and wakes nothing"
+        );
+        assert_eq!(
+            patches[0]["status"]["lastEvaluation"]["at"],
+            json!(now()),
+            "at {later}: the instant is still the evaluation that reached these findings"
+        );
+    }
+}
+
+/// **Upgrade, the documented order (CRDs first): an older controller's status
+/// is converted by ONE write.**
+///
+/// * Under the ceiling: the four members are added and `at` stays — the
+///   findings did not change, only what is recorded about them.
+/// * Over the ceiling, from the PRE-FIX shape (the held-back points in `kept`):
+///   `kept` loses them, the counts appear, and `at` moves — what the object
+///   says was found did change.
+///
+/// Then nothing more is written.
+#[tokio::test]
+async fn fx22_an_older_controllers_status_is_converted_by_one_write() {
+    // ---- under the ceiling ------------------------------------------------
+    let six = six_points();
+    let first = fixture(happy_routes(&six));
+    run_at(&first, &policy(json!({}), json!({})), now()).await;
+    let mut settled = first.status();
+    let settle = fixture(happy_routes(&six));
+    run_at(
+        &settle,
+        &policy(json!({}), settled.clone()),
+        now() + chrono::Duration::seconds(1),
+    )
+    .await;
+    for patch in settle.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut settled, &patch["status"]);
+    }
+    // What an older controller left: the same block without the four members.
+    let mut older = fx22_pruned(settled.clone());
+    // Inside the plan's own window (`planMaxAgeSeconds`, an hour): past it the
+    // plan is re-previewed and `planExpiresAt` is a real change of its own.
+    let upgrade_at = now() + chrono::Duration::minutes(10);
+    let upgraded = fixture(happy_routes(&six));
+    run_at(&upgraded, &policy(json!({}), older.clone()), upgrade_at).await;
+    let patches = upgraded.status_patches();
+    assert_eq!(patches.len(), 1, "one converting write: {patches:?}");
+    weirkeeper::conditions::apply_merge_patch(&mut older, &patches[0]["status"]);
+    assert_eq!(
+        older, settled,
+        "it adds the four members and changes nothing else"
+    );
+    assert_eq!(
+        older["lastEvaluation"]["at"],
+        json!(now()),
+        "the findings did not change, so their instant does not"
+    );
+    let quiet = fixture(happy_routes(&six));
+    run_at(
+        &quiet,
+        &policy(json!({}), older),
+        upgrade_at + chrono::Duration::minutes(1),
+    )
+    .await;
+    assert!(quiet.status_patches().is_empty(), "and then nothing");
+
+    // ---- over the ceiling, from the pre-fix shape -------------------------
+    let entries = fx22_entries(371);
+    let spec = fx22_rules(10);
+    let first = fixture(happy_routes(&entries));
+    run_at(&first, &policy(spec.clone(), json!({})), now()).await;
+    let mut pre_fix = fx22_pruned(first.status());
+    // THE DEFECT'S OWN STATUS: the ten kept points, then the 311 the ceiling
+    // held back, all under `kept` — 321, as PoC batch 3 read it.
+    let old_kept: Vec<String> = fx22_names(1..=10)
+        .into_iter()
+        .chain(fx22_names(61..=371))
+        .collect();
+    assert_eq!(old_kept.len(), 321);
+    pre_fix["lastEvaluation"]["kept"] = json!(old_kept);
+    let upgraded = fixture(happy_routes(&entries));
+    run_at(
+        &upgraded,
+        &policy(spec.clone(), pre_fix.clone()),
+        upgrade_at,
+    )
+    .await;
+    for patch in upgraded.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut pre_fix, &patch["status"]);
+    }
+    let ev = &pre_fix["lastEvaluation"];
+    assert_eq!(fx22_ids(&ev["kept"]), fx22_names(1..=10), "{ev}");
+    assert_eq!(ev["keptCount"], 10);
+    assert_eq!(ev["truncatedByCap"], 311);
+    assert_eq!(
+        ev["at"],
+        json!(upgrade_at),
+        "what the object says was found changed, so the instant moves once"
+    );
+}
+
+/// [`catalog_body`] with the catalog's own statement about its view's bound.
+fn fx22_routes_with_catalog_status(entries: &[Value], status_extra: Value) -> Vec<Route> {
+    let mut catalog: Value = serde_json::from_str(&catalog_body(
+        Some(DEST),
+        json!([{
+            "configMapName": "page-0", "index": 0,
+            "count": entries.len(),
+            "sha256": published_page_digest_of(entries)
+        }]),
+    ))
+    .expect("the catalog fixture");
+    for (key, value) in status_extra.as_object().expect("an object") {
+        catalog["status"][key] = value.clone();
+    }
+    let mut routes = happy_routes(entries);
+    routes.retain(|r| r.path_suffix != "/recoverycatalogs/primary");
+    routes.push(route(
+        "GET",
+        "/recoverycatalogs/primary",
+        catalog.to_string(),
+    ));
+    routes
+}
+
+/// **The class sweep, in this controller: a catalog view that does not hold
+/// every point is said on the evaluation.** `RecoveryCatalog.spec.sync
+/// .viewLimit` makes the view a window of the newest points over a larger
+/// archive (`status.truncated`), and a walk its object budget stops publishes
+/// its pages anyway (`status.cursor.complete: false`,
+/// `Synced=False/ScanIncomplete`). The retention evaluation of either used to
+/// read `EvaluationComplete` with nothing saying that the points outside the
+/// view — in a window the OLDEST, the ones a retention rule is for — were
+/// never looked at.
+///
+/// CONTROLS: a catalog that says its walk finished and its view is whole
+/// publishes `false` and no sentence; a catalog that says only one of the two,
+/// or neither, publishes NO member (absent is "did not say", never `false`).
+///
+/// MUTANT M8: publish `"viewIncomplete": false` whatever the catalog said (or
+/// drop the catalog's `truncated` / `cursor.complete` on the way out of
+/// `view_entries`).
+#[tokio::test]
+async fn fx22_a_catalog_view_that_is_not_the_whole_archive_is_said_on_the_evaluation() {
+    let six = six_points();
+    let at = |status_extra: Value| {
+        let routes = fx22_routes_with_catalog_status(&six, status_extra);
+        async move {
+            let f = fixture(routes);
+            run(&f, &policy(json!({}), json!({}))).await;
+            f.status()
+        }
+    };
+    let evaluated = |status: &Value| fx22_message(status, ctrl::CONDITION_EVALUATED);
+
+    // ---- a window ---------------------------------------------------------
+    let windowed = at(json!({
+        "truncated": true, "counts": {"total": 9}, "cursor": {"complete": true}
+    }))
+    .await;
+    assert_eq!(windowed["lastEvaluation"]["viewIncomplete"], json!(true));
+    assert_eq!(windowed["lastEvaluation"]["pointsEvaluated"], 6);
+    assert!(
+        evaluated(&windowed).contains(
+            " The catalog view is a window: RecoveryCatalog primary counted 9 point(s) and its \
+             view holds 6. The points outside it were not evaluated, are in none of these \
+             counts, and are never candidates while they stay outside the view \
+             (spec.sync.viewLimit)."
+        ),
+        "{}",
+        evaluated(&windowed)
+    );
+    assert!(!evaluated(&windowed).contains("stopped on its object budget"));
+    assert_eq!(
+        condition_of(&windowed, ctrl::CONDITION_EVALUATED).expect("Evaluated")["status"],
+        "True",
+        "the window IS evaluated; what is said is that it is a window"
+    );
+
+    // A window whose total the catalog did not publish is still a window.
+    let uncounted = at(json!({"truncated": true})).await;
+    assert_eq!(uncounted["lastEvaluation"]["viewIncomplete"], json!(true));
+    assert!(
+        evaluated(&uncounted).contains(
+            "The catalog view is a window: RecoveryCatalog primary reports status.truncated and \
+             its view holds 6."
+        ),
+        "{}",
+        evaluated(&uncounted)
+    );
+
+    // ---- a walk the object budget stopped ---------------------------------
+    let unfinished = at(json!({
+        "truncated": false, "counts": {"total": 6}, "cursor": {"complete": false}
+    }))
+    .await;
+    assert_eq!(unfinished["lastEvaluation"]["viewIncomplete"], json!(true));
+    assert!(
+        evaluated(&unfinished).contains(
+            " The catalog view is incomplete: RecoveryCatalog primary's walk stopped on its \
+             object budget before it finished (status.cursor.complete is false) and its view \
+             holds 6 point(s). The points the walk has not reached were not evaluated, are in \
+             none of these counts, and are never candidates until a sync reaches them."
+        ),
+        "{}",
+        evaluated(&unfinished)
+    );
+    assert!(!evaluated(&unfinished).contains("is a window"));
+
+    // ---- CONTROL: the catalog said the view is the whole archive ----------
+    let whole = at(json!({
+        "truncated": false, "counts": {"total": 6}, "cursor": {"complete": true}
+    }))
+    .await;
+    assert_eq!(whole["lastEvaluation"]["viewIncomplete"], json!(false));
+    assert!(!evaluated(&whole).contains("catalog view is"));
+
+    // ---- CONTROL: the catalog did not say, wholly or by half --------------
+    for partial in [
+        json!({}),
+        json!({"truncated": false}),
+        json!({"cursor": {"complete": true}}),
+    ] {
+        let silent = at(partial.clone()).await;
+        assert!(
+            silent["lastEvaluation"].get("viewIncomplete").is_none(),
+            "{partial}: absent, never false: {}",
+            silent["lastEvaluation"]
+        );
+        assert!(!evaluated(&silent).contains("catalog view is"), "{partial}");
+    }
+}
+
+/// A view the catalog STOPS describing clears the member a previous pass
+/// wrote: `null` in the merge patch, so the stored `true` does not outlive the
+/// fact.
+#[tokio::test]
+async fn fx22_a_view_the_catalog_no_longer_describes_clears_the_member() {
+    let six = six_points();
+    let windowed = fixture(fx22_routes_with_catalog_status(
+        &six,
+        json!({"truncated": true, "counts": {"total": 9}}),
+    ));
+    run(&windowed, &policy(json!({}), json!({}))).await;
+    let mut status = windowed.status();
+    assert_eq!(status["lastEvaluation"]["viewIncomplete"], json!(true));
+
+    let silent = fixture(happy_routes(&six));
+    run_at(
+        &silent,
+        &policy(json!({}), status.clone()),
+        now() + chrono::Duration::minutes(5),
+    )
+    .await;
+    for patch in silent.status_patches() {
+        weirkeeper::conditions::apply_merge_patch(&mut status, &patch["status"]);
+    }
+    assert!(
+        status["lastEvaluation"].get("viewIncomplete").is_none(),
+        "{}",
+        status["lastEvaluation"]
+    );
+}
+
+/// **The accounting is `None` unless it closes** — the rule every reader of
+/// the four counts goes through (`RetentionEvaluation::accounting`).
+///
+/// * An evaluation an OLDER controller wrote carries no `keptCount` and no
+///   `truncatedByCap`: `None`, so no surface derives "kept" from its list,
+///   which may hold held-back points.
+/// * After a rollback of the controller image alone, the older controller's
+///   merge patch rewrites `pointsEvaluated`, `candidateCount` and the lists and
+///   cannot remove the two counts: they describe an earlier archive. `None`.
+///
+/// MUTANT M9: return the counts without checking the sum.
+#[test]
+fn fx22_the_accounting_is_none_unless_it_closes() {
+    let block = |value: Value| -> RetentionEvaluation {
+        serde_json::from_value(value).expect("a RetentionEvaluation")
+    };
+    let closing = json!({
+        "pointsEvaluated": 372, "keptCount": 10, "candidateCount": 50,
+        "truncatedByCap": 311,
+        "skipped": [{"pointId": "p900", "reason": "Unreadable"}]
+    });
+    assert_eq!(
+        block(closing.clone()).accounting(),
+        Some(RetentionAccounting {
+            points_evaluated: 372,
+            kept: 10,
+            candidates: 50,
+            held_back: 311,
+            skipped: 1,
+        })
+    );
+
+    for absent in [
+        "pointsEvaluated",
+        "keptCount",
+        "candidateCount",
+        "truncatedByCap",
+    ] {
+        let mut value = closing.clone();
+        value.as_object_mut().expect("an object").remove(absent);
+        assert_eq!(
+            block(value).accounting(),
+            None,
+            "without {absent} the block was not written by a controller that records the \
+             ceiling's effect"
+        );
+    }
+
+    // The rollback shape: the archive moved (373 points, 51 skipped away…)
+    // under an older controller, and the two counts did not.
+    let mut stale = closing.clone();
+    stale["pointsEvaluated"] = json!(373);
+    assert_eq!(block(stale).accounting(), None);
+    let mut stale = closing.clone();
+    stale["candidateCount"] = json!(49);
+    assert_eq!(block(stale).accounting(), None);
+    let mut stale = closing.clone();
+    stale["skipped"] = json!([]);
+    assert_eq!(block(stale).accounting(), None);
+
+    // Never a negative count dressed as a total.
+    let mut negative = closing;
+    negative["truncatedByCap"] = json!(-1);
+    negative["keptCount"] = json!(322);
+    assert_eq!(block(negative).accounting(), None);
+}
+
+/// `stored_for_instant`, the pure half of the skew rule.
+#[test]
+fn fx22_only_a_member_the_stored_block_lacks_is_compared_as_stored() {
+    let next = json!({
+        "at": "2026-09-17T05:00:00Z", "pointsEvaluated": 6, "keptCount": 3,
+        "truncatedByCap": 0, "maxDeletionsPerRun": 50, "viewIncomplete": null
+    });
+    // Lacking members are taken from `next`; a `null` is not.
+    let lacking = json!({"at": "2026-09-17T04:17:00Z", "pointsEvaluated": 6});
+    assert_eq!(
+        ctrl::stored_for_instant(Some(&lacking), &next),
+        Some(json!({
+            "at": "2026-09-17T04:17:00Z", "pointsEvaluated": 6, "keptCount": 3,
+            "truncatedByCap": 0, "maxDeletionsPerRun": 50
+        }))
+    );
+    // CONTROL: a member the stored block CARRIES is left as stored, so a real
+    // change of the held-back count still moves the instant.
+    let carrying = json!({
+        "at": "2026-09-17T04:17:00Z", "pointsEvaluated": 6, "keptCount": 3,
+        "truncatedByCap": 2, "maxDeletionsPerRun": 50
+    });
+    assert_eq!(
+        ctrl::stored_for_instant(Some(&carrying), &next),
+        Some(carrying)
+    );
+    // Nothing else is ever taken from `next`.
+    let other = json!({"at": "2026-09-17T04:17:00Z"});
+    assert_eq!(
+        ctrl::stored_for_instant(Some(&other), &next).expect("an object")["pointsEvaluated"],
+        Value::Null
+    );
+    assert_eq!(ctrl::stored_for_instant(None, &next), None);
 }

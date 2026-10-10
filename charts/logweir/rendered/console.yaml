@@ -5744,6 +5744,9 @@ spec:
     - jsonPath: .status.lastEvaluation.candidateCount
       name: CANDIDATES
       type: integer
+    - jsonPath: .status.lastEvaluation.truncatedByCap
+      name: HELD-BACK
+      type: integer
     - jsonPath: .status.lastEvaluation.at
       name: EVALUATED
       type: date
@@ -6108,12 +6111,12 @@ spec:
                     nullable: true
                     type: string
                   candidateCount:
-                    description: How many candidates there are, for the printer column.
+                    description: 'How many points THIS plan would remove: at most the per-run ceiling, and not every point the rules would remove when `truncatedByCap` is above 0.'
                     format: int64
                     nullable: true
                     type: integer
                   candidates:
-                    description: The points that would go.
+                    description: The points this plan would remove.
                     items:
                       description: One point the evaluation would remove.
                       properties:
@@ -6146,12 +6149,22 @@ spec:
                     nullable: true
                     type: array
                   kept:
-                    description: The point ids that stay.
+                    description: The point ids that stay. `keptCount` is their number.
                     items:
                       type: string
                     maxItems: 500
                     nullable: true
                     type: array
+                  keptCount:
+                    description: 'How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back. Absent on an evaluation written by a controller that did not record it; `kept` may then also list points the ceiling held back.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  maxDeletionsPerRun:
+                    description: 'The per-run ceiling this evaluation applied: `spec.enforcement.maxDeletionsPerRun`, or 50 for a policy with no `spec.enforcement` (a preview is bounded as a run would be).'
+                    format: int64
+                    nullable: true
+                    type: integer
                   planExpiresAt:
                     description: When the plan stops being usable.
                     format: date-time
@@ -6172,7 +6185,7 @@ spec:
                     nullable: true
                     type: string
                   pointsEvaluated:
-                    description: How many points were considered.
+                    description: 'How many points were considered: every point of this destination in the catalog view the evaluation read. Each is counted once, in `keptCount`, `candidateCount`, `truncatedByCap` or `skipped`.'
                     format: int64
                     nullable: true
                     type: integer
@@ -6216,6 +6229,15 @@ spec:
                     maxItems: 500
                     nullable: true
                     type: array
+                  truncatedByCap:
+                    description: 'How many more points the rules would remove, that nothing protects and that the per-run ceiling (`maxDeletionsPerRun`) left out of this plan. They are due, not kept: no run deletes them until a later plan names them. `0` means this plan is everything the rules would remove. Absent means not recorded (an older controller), never 0.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  viewIncomplete:
+                    description: 'Whether the catalog said the view this evaluation read does not hold every point of the archive: the view is a window (`RecoveryCatalog.status.truncated`), or the catalog''s walk had not finished (`status.cursor.complete: false`). The points outside the view were not evaluated, are in none of the counts above, and are never candidates while they stay outside it. `false` means the catalog said its walk finished and its view holds every point it counted. Absent means the catalog did not say, never `false`.'
+                    nullable: true
+                    type: boolean
                 type: object
               lease:
                 description: The points a run has claimed.
