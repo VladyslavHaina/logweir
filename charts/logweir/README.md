@@ -1387,7 +1387,9 @@ the facts it does not have room for, measured 2026-09-12:
   broker (Apache Kafka 4.3.1, never on MSK), removing one grant at a time
   ([support-matrix.md, *Minimum permissions*](../../docs/support-matrix.md#minimum-permissions)):
   * **Source, for a backup:** Read on the source topics (Read implies
-    Describe). No cluster-level grant is needed. Add **DescribeConfigs on the source topics** so the
+    Describe). The compose measurement needed no cluster-level grant; this
+    list named DescribeCluster before it, and no MSK cluster has been run
+    against to say whether MSK's authorizer asks for it. Add **DescribeConfigs on the source topics** so the
     backup receipt records each topic's configuration as `captured`. Without
     it the backup still succeeds, the topic reads `captureDenied`, and a later
     restore reports that topic's configuration parity as not assessed.
