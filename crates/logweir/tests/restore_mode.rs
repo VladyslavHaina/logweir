@@ -93,6 +93,7 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
             time_basis: None,
             window_start: None,
             partitions: std::collections::BTreeMap::new(),
+            allow_transaction_markers: false,
         },
         objectives: ObjectivesSpec {
             rto_seconds: None,

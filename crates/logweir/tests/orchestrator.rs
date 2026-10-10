@@ -2668,3 +2668,126 @@ fn a_sampled_run_never_claims_complete_in_the_notification_or_the_metrics() {
         "{t}"
     );
 }
+
+// ----------------------------------------------------------------- PROD-01.1a
+
+/// **PROD-01.1a, R1 in the doubles, both target modes.** The archive's
+/// segment holds a commit and an abort marker beside a data record and the
+/// plan does not allow them: exit 3, `refusal-reason=
+/// TransactionMarkersInArchive`, naming the topic, the partition and the count
+/// — and NO target topic, NO fingerprint, NO scorecard.
+///
+/// KILLS: the detection always false, or the refusal skipped for `newTopic`
+/// (the run passes); the check moved after the creation step
+/// (`created_topics` is not empty).
+#[test]
+fn an_archive_holding_transaction_markers_is_refused_in_both_target_modes() {
+    for shape in [
+        Drill::HoldsTransactionMarkers,
+        Drill::HoldsTransactionMarkersInANewTopicRestore,
+    ] {
+        let f = fixtures::orchestrator_fixture(shape);
+        assert_eq!(
+            f.ctx.spec.target.mode == logweir_core::spec::TargetMode::NewTopic,
+            shape == Drill::HoldsTransactionMarkersInANewTopicRestore,
+            "{shape:?} restores in the mode it names"
+        );
+        let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+        let (message, code, line) = refusal(err);
+        assert_eq!(code, ExitCode::GuardRefused, "{shape:?}");
+        assert_eq!(
+            line, "refusal-reason=TransactionMarkersInArchive",
+            "{shape:?}"
+        );
+        assert!(
+            message.contains("holds 2 record(s)")
+                && message.contains("2 in topic `orders` (partitions 0)"),
+            "{shape:?}: {message}"
+        );
+        assert!(fixtures::created_topics(&f).is_empty(), "{shape:?}");
+        assert!(fixtures::fingerprint_calls(&f).is_empty(), "{shape:?}");
+        assert!(
+            f.ctx
+                .store
+                .get_capped(
+                    &format!("logweir/drills/{}.json", f.run_id),
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+                )
+                .is_err(),
+            "{shape:?}: a refused run signs nothing"
+        );
+    }
+}
+
+/// **PROD-01.1a, R2 in the doubles.** The same archive with
+/// `restore.allow_transaction_markers: true` in the approved plan: the run
+/// passes, and its signed scorecard's `sample.coverage_note` says the override
+/// was used. The control is the row above (the same archive, refused).
+///
+/// KILLS: the override ignored (the run is refused); the note dropped.
+#[test]
+fn the_override_restores_the_archive_and_the_scorecard_says_so() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsTransactionMarkersAndAllowsThem);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the override runs");
+    assert_eq!(fixtures::created_topics(&f).len(), 1);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert!(
+        sc.sample
+            .coverage_note
+            .ends_with(logweir_core::transaction_markers::OVERRIDE_NOTE),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(sc.validate_invariants().is_ok());
+    // The control: an archive without markers and no override carries no note.
+    let plain = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&plain.args, &plain.run_id, &plain.ctx).expect("passes");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&plain)).unwrap();
+    assert!(
+        !sc.sample
+            .coverage_note
+            .contains("allow_transaction_markers"),
+        "{}",
+        sc.sample.coverage_note
+    );
+}
+
+/// **PROD-01.1a: the override is inside the approved bytes.** An approval
+/// minted over the plan WITHOUT `restore.allow_transaction_markers` does not
+/// authorise the same plan WITH it: phase 1 refuses before the archive is
+/// read, and nothing is created.
+#[test]
+fn an_approval_without_the_override_does_not_authorise_it() {
+    let without = fixtures::orchestrator_fixture(Drill::HoldsTransactionMarkers);
+    let mut with = fixtures::orchestrator_fixture(Drill::HoldsTransactionMarkersAndAllowsThem);
+    with.args.approval = without.args.approval.clone();
+    let err = execute_with(&with.args, &with.run_id, &with.ctx)
+        .expect_err("an approval over other bytes");
+    let (message, code, _) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert!(
+        !message.starts_with("TransactionMarkersInArchive"),
+        "refused at phase 1, not by the marker check: {message}"
+    );
+    assert!(fixtures::created_topics(&with).is_empty());
+}
+
+/// **PROD-01.1a: a segment the check cannot read refuses the run.** It cannot
+/// say the partition holds no marker, so it never reads as clean.
+#[test]
+fn a_segment_the_marker_check_cannot_read_refuses_the_run() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsAnUnreadableSegment);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.contains("could not read archive segment")
+            && message.contains(fixtures::FIXTURE_SEGMENT_KEY),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+}

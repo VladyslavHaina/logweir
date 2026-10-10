@@ -909,6 +909,54 @@ pub enum Drill {
     /// says `covered: false` — the run the notification and the metrics must
     /// never read as a pass.
     VerifiesCompletelyPastItsBound,
+    /// **PROD-01.1a.** `Passes`, with the archive's segment holding a commit
+    /// and an abort marker beside a data record: the run is refused
+    /// `TransactionMarkersInArchive` before phase 2.
+    HoldsTransactionMarkers,
+    /// **PROD-01.1a.** `HoldsTransactionMarkers`, restored in `newTopic` mode.
+    HoldsTransactionMarkersInANewTopicRestore,
+    /// **PROD-01.1a.** `HoldsTransactionMarkers`, with
+    /// `restore.allow_transaction_markers: true` in the approved plan: the run
+    /// passes and its scorecard says so.
+    HoldsTransactionMarkersAndAllowsThem,
+    /// **PROD-01.1a.** `Passes`, with an archive segment that is not a KBAK
+    /// segment, which the marker check cannot read.
+    HoldsAnUnreadableSegment,
+}
+
+/// **PROD-01.1a.** The fixture segment's records: one data record and, for
+/// the marker shapes, a commit and an abort marker as the engine archives
+/// them (key `00 00 00 0t`, a 6-byte `EndTransactionMarker` value, the two
+/// lineage headers).
+fn archived_records(shape: Drill, ts_ms: i64) -> Vec<ConsumedRecord> {
+    let lineage = |off: i64| {
+        vec![
+            ("x-original-offset".to_string(), Some(le_offset(off))),
+            (
+                "x-original-timestamp".to_string(),
+                Some(ts_ms.to_le_bytes().to_vec()),
+            ),
+        ]
+    };
+    let record = |off: i64, key: &[u8], value: &[u8]| ConsumedRecord {
+        partition: 0,
+        offset: off,
+        timestamp_ms: ts_ms,
+        key: Some(key.to_vec()),
+        value: Some(value.to_vec()),
+        headers: lineage(off),
+    };
+    let mut out = vec![record(0, b"k0", b"v0")];
+    if matches!(
+        shape,
+        Drill::HoldsTransactionMarkers
+            | Drill::HoldsTransactionMarkersInANewTopicRestore
+            | Drill::HoldsTransactionMarkersAndAllowsThem
+    ) {
+        out.push(record(1, &[0, 0, 0, 1], &[0, 0, 0, 0, 0, 3]));
+        out.push(record(2, &[0, 0, 0, 0], &[0, 0, 0, 0, 0, 3]));
+    }
+    out
 }
 
 /// PROD-15.1: where `RestoresUnderTheOriginalNamesWhileAProducerWrites` puts
@@ -1429,6 +1477,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::StatesAWindowStart => {
             format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_START}/{FIXTURE_WINDOW_END}\"\n")
         }
+        Drill::HoldsTransactionMarkersAndAllowsThem => {
+            "restore:\n  allow_transaction_markers: true\n".to_string()
+        }
         _ => String::new(),
     };
     // PROD-08.1: the complete shapes ask for complete coverage; every other
@@ -1461,7 +1512,14 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             | Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites
     );
     let target_topic = if original { "orders" } else { "drill-orders" };
-    let target_block = if original {
+    let target_block = if shape == Drill::HoldsTransactionMarkersInANewTopicRestore {
+        "target:\n  \
+           bootstrap_servers: [localhost:9092]\n  \
+           mode: newTopic\n  \
+           topic_mapping_prefix: \"drill-\"\n  \
+           default_replication_factor: 1\n"
+            .to_string()
+    } else if original {
         "target:\n  \
            bootstrap_servers: [localhost:9092]\n  \
            mode: newTopic\n  \
@@ -1545,7 +1603,14 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     .unwrap();
 
     // ---- the archive: one segment, stored under its own manifest key ----
-    let segment_bytes = b"logweir-fixture-segment-0".to_vec();
+    // PROD-01.1a: a real KBAK segment, because the runner reads every
+    // restored segment for transaction markers before phase 2. The sampled
+    // shapes' fingerprints still come from the engine double.
+    let segment_bytes = if shape == Drill::HoldsAnUnreadableSegment {
+        b"logweir-fixture-segment-0".to_vec()
+    } else {
+        kbak_segment(&archived_records(shape, window_end_ms))
+    };
     let archive = logweir_engine_oso::storage::Store::in_memory("");
     archive
         .put_create_only(FIXTURE_SEGMENT_KEY, &segment_bytes)
@@ -1745,6 +1810,12 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::StatesAPartitionSelection
         | Drill::StatesAWindowStart
         | Drill::VerifiesCompletelyPastItsBound
+        // PROD-01.1a. The engine is the passing one: the variables are the
+        // archive's segment and the plan's override or target mode.
+        | Drill::HoldsTransactionMarkers
+        | Drill::HoldsTransactionMarkersInANewTopicRestore
+        | Drill::HoldsTransactionMarkersAndAllowsThem
+        | Drill::HoldsAnUnreadableSegment
         | Drill::LeavesATopicBehind => {}
     }
 

@@ -280,13 +280,14 @@ fn opt_bytes(
 // ---------------------------------------------------------------------------
 
 /// What [`scan_segment`] keeps of one record: its offset and at most the
-/// first `prefix` bytes of its key and of its value (`None` is null). Never a
-/// whole payload.
+/// first `prefix` bytes of its key, of its value (`None` is null) and of each
+/// header's key, in order. Never a whole payload, and never a header value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPrefix {
     pub offset: i64,
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
+    pub header_keys: Vec<Vec<u8>>,
 }
 
 /// Why [`scan_segment`] stopped without reading the segment.
@@ -589,14 +590,16 @@ impl<R: std::io::Read> std::io::Read for Capped<R> {
 }
 
 /// **Streams** a KBAK v1 segment's records in order and hands each one's
-/// [`RecordPrefix`] to `visit`, keeping at most `prefix` bytes of every key
-/// and value; `visit` returns `false` to stop early. Returns how many records
-/// were handed over.
+/// [`RecordPrefix`] to `visit`, keeping at most `prefix` bytes of every key,
+/// value and header key; `visit` returns `false` to stop early. Returns how
+/// many records were handed over.
 ///
 /// Bounded in memory whatever the segment says, for a reader that runs inside
-/// a backup that already succeeded (PROD-03.0's detector). Beyond the `bytes`
-/// the caller holds, it allocates a few hundred KiB of stream buffers and,
-/// for zstd, a window of at most 2^[`ZSTD_WINDOW_LOG_MAX`] bytes:
+/// a backup that already succeeded (PROD-03.0's detector) or before a restore
+/// (PROD-01.1a's marker check). Beyond the `bytes` the caller holds, it
+/// allocates a few hundred KiB of stream buffers, one record's header keys
+/// (at most 65,535 of `prefix` bytes) and, for zstd, a window of at most
+/// 2^[`ZSTD_WINDOW_LOG_MAX`] bytes:
 /// - no record is materialised, and no allocation is sized on a length the
 ///   segment declares;
 /// - zstd is decoded as a stream, and a frame declaring a window above the cap
@@ -742,15 +745,23 @@ fn read_prefix_record(
     let value_len = frame.read_i32::<LE>()?;
     let value = prefix_of(frame, value_len, prefix)?;
     let header_count = frame.read_u16::<LE>()?;
+    let mut header_keys = Vec::new();
     for _ in 0..header_count {
         let hk_len = frame.read_u16::<LE>()?;
-        skip(frame, u64::from(hk_len))?;
+        if let Some(k) = prefix_of(frame, i32::from(hk_len), prefix)? {
+            header_keys.push(k);
+        }
         let hv_len = frame.read_i32::<LE>()?;
         if hv_len >= 0 {
             skip(frame, hv_len as u64)?;
         }
     }
-    Ok(RecordPrefix { offset, key, value })
+    Ok(RecordPrefix {
+        offset,
+        key,
+        value,
+        header_keys,
+    })
 }
 
 /// A nullable field's first `prefix` bytes (`-1` is `None`), the rest skipped.

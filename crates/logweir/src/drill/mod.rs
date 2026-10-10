@@ -3104,6 +3104,26 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // **PROD-01.1a: TRANSACTION MARKERS, checked here**, before phase 2 and
+    // in every target mode: an archive whose restored partitions hold records
+    // shaped like transaction markers is refused exit 3,
+    // `TransactionMarkersInArchive`, with no target topic created and no
+    // engine started, unless the approved plan allows them. Under the
+    // override the check is skipped and the scorecard says so below.
+    let marker_note = if c.spec.restore.allow_transaction_markers {
+        Some(logweir_core::transaction_markers::OVERRIDE_NOTE)
+    } else {
+        let counts = count_transaction_markers(
+            &c.archive,
+            &facts,
+            &selected,
+            replay_selection.as_ref().map(|r| &r.selection),
+        )?;
+        if let Some(refusal) = logweir_core::transaction_markers::refusal(&counts) {
+            return Err(DrillError::Guard(GuardRefusal(refusal)));
+        }
+        None
+    };
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3175,6 +3195,11 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-01.1a: the override, in the note `logweir show` prints under the
+    // table (free text: no format change).
+    if let Some(note) = marker_note {
+        sc.sample.coverage_note = format!("{}; {note}", sc.sample.coverage_note);
+    }
 
     // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
     // record's own `duration_ms` is the number `compute_measured` subtracts
@@ -3912,6 +3937,68 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
+}
+
+/// **PROD-01.1a.** The archived records of the restored partitions that have
+/// a transaction marker's shape, per topic and partition. It reads EVERY
+/// segment the manifest lists for those partitions, whatever the window (a
+/// marker after the window's end closes a transaction whose aborted records
+/// the window can hold), streamed through the bounded `kbak::scan_segment`:
+/// one stored segment and a few hundred KiB held at a time. A segment the
+/// scan cannot read refuses the run (`GuardRefused`): it cannot say there is
+/// no marker in it.
+fn count_transaction_markers(
+    archive: &Store,
+    facts: &BackupSetFacts,
+    topics: &[String],
+    selection: Option<&logweir_core::replay_selection::ReplaySelection>,
+) -> Result<logweir_core::transaction_markers::MarkerCounts, DrillError> {
+    use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
+    use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
+    use logweir_engine_oso::storage::caps;
+    let limits = ScanLimits {
+        max_decompressed: caps::SEGMENT,
+        deadline: None,
+    };
+    let mut counts = MarkerCounts::new();
+    for topic in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
+        for p in topic
+            .partitions
+            .iter()
+            .filter(|p| selection.is_none_or(|s| s.selects_partition(&topic.name, p.partition_id)))
+        {
+            for seg in &p.segments {
+                let (bytes, _) = archive
+                    .get_capped(&seg.key, caps::SEGMENT)
+                    .map_err(logweir_core::engine::EngineError::from)?;
+                let mut found = 0u64;
+                scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
+                    if is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys) {
+                        found += 1;
+                    }
+                    true
+                })
+                .map_err(|e| {
+                    DrillError::Guard(GuardRefusal(format!(
+                        "the transaction-marker check could not read archive segment `{}` of \
+                         topic `{}` partition {} ({e}), so it cannot say the restored \
+                         partitions hold no transaction marker. The run stopped before any \
+                         target topic was created. State `restore.allow_transaction_markers: \
+                         true` in the plan to restore without the check.",
+                        seg.key, topic.name, p.partition_id
+                    )))
+                })?;
+                if found > 0 {
+                    *counts
+                        .entry(topic.name.clone())
+                        .or_default()
+                        .entry(p.partition_id)
+                        .or_default() += found;
+                }
+            }
+        }
+    }
+    Ok(counts)
 }
 
 /// **PROD-11.1.** The signed `source.selection` block of a resolved
