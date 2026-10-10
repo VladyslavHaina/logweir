@@ -2387,6 +2387,14 @@ in the environment: a rollout that upgraded one and not the other is refused rat
   `deny_unknown_fields`). **The evidence-read probe follows the same rule**: `evidenceRead` names
   its grant, its keys arrive as `LOGWEIR_EVIDENCE_READ_AWS_*`, and a `controllerIdentity` or
   `notConfigured` grant is answered `unknown` (`EvidenceReadNotConfigured`) with no request.
+  **A destination plan lists the `SecretKeys` grants whose binding it compares** (FX-20c):
+  `grantBindings: [{role, secretName}]`, references only, absent when empty (so such a plan is
+  byte-identical to an earlier controller's), on the three readiness kinds only and one role per
+  request; an older runner refuses a plan that carries it (exit 3, `deny_unknown_fields`). Each
+  listed grant arrives as a binding-only pair, `LOGWEIR_<ROLE>_GRANT_BINDING[_EXPECTED]`, with
+  no credential beside it, and the runner answers the blocking `destination.credentialBound`
+  row (`CredentialBound`, or `CredentialBindingMismatch` naming each refused grant) with no
+  request. The id and the ready code are additive members of the closed vocabularies.
 * It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
   targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
   topic has no counterpart here.

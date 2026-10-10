@@ -116,6 +116,16 @@ pub trait Wiring {
 
     /// The observation clock.
     fn now(&self) -> DateTime<Utc>;
+
+    /// One variable of this pod's environment — the FX-20c grant binding
+    /// pairs `destination.credentialBound` compares
+    /// ([`access::credential_bound_row`]). A PROVIDED method reading the
+    /// process environment, so the shipped wiring and every existing fake keep
+    /// it, and a test overrides it with a map instead of mutating the
+    /// process's environment. A non-UTF-8 value reads as absent.
+    fn env(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
 }
 
 /// The shipped wiring.
@@ -307,11 +317,16 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The destination asks for workload identity and none was injected. Annotate the \
              runner ServiceAccount, or switch the destination to static credentials."
         }
+        // FX-20c (review LOW-2): never "write this destination's binding into
+        // the Secret" — the Secret may be ANOTHER destination's, and binding
+        // it here hands this destination that credential.
         CheckCode::CredentialBindingMismatch => {
-            "The destination's credential Secret carries no `logweir-binding`, or one written \
-             for another object or endpoint, so the check refused to present it anywhere. Enter \
-             the credential again through the console, or set the Secret's `logweir-binding` \
-             key to the destination's status.credentialBinding (docs/kubernetes.md §20.10)."
+            "A Secret this destination names carries no `logweir-binding`, or one written for \
+             another object or endpoint, so the check presented it nowhere. Give this \
+             destination its own Secret: enter the credential through the console, or bind a \
+             Secret only it names with scripts/bind-credential.py (which refuses a Secret \
+             another object names). A Secret two objects name is an incident to investigate; \
+             never bind it to this one (docs/kubernetes.md §20.10)."
         }
         CheckCode::CredentialSecretKeyMissing => {
             "A credential the check plan says is projected is not in the check pod's \

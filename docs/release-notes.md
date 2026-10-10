@@ -38,8 +38,9 @@ client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
 (PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline), 48 (PROD-01.4a, each topic's ID in the receipt and the catalog
-point), 49 (PROD-04.1, consumer position evidence for selected groups) and 50
+deadline), 48 (FX-20c, a destination's Test access compares every grant's
+binding), 49 (PROD-01.4a, each topic's ID in the receipt and the catalog
+point), 50 (PROD-04.1, consumer position evidence for selected groups) and 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
 format 2.0.0 and named on every surface) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
@@ -117,18 +118,23 @@ Item 47 is fix-now row FX-28, proven by rows over a loopback identity
 provider that stalls and on the built console binary; it changes the console
 only, and the PoC upgrade that carries it signs in through Dex (a stall cannot
 be simulated on the live Dex).
-Item 48 is PROD-01.4a, proven on a compose stack on the 3.7.1, 3.9.2 and 4.3.1
+Item 48 is fix-now row FX-20c, proven by contract, runner, controller, API and
+console rows over one shared fixture; it changes the controller and the
+runner (the check plan, a new check row, and a `RetentionPolicy`'s `Enforced`
+after a binding refusal), and the PoC upgrade that carries
+it re-creates PoC batch 4's F6 thief destination, tests it, and deletes it.
+Item 49 is PROD-01.4a, proven on a compose stack on the 3.7.1, 3.9.2 and 4.3.1
 broker lines against the brokers' own tools; it changes the runner's signed
 receipt and catalog record only, and the PoC upgrade that carries it runs one
 scheduled backup and checks its receipt's `generations` against the source's
 topic IDs.
-Item 49 is row PROD-04.1, proven by unit, seam, corpus and parity rows and on
+Item 50 is row PROD-04.1, proven by unit, seam, corpus and parity rows and on
 the compose stack (Kafka 4.3.1 with the `acl` and `streams-protocol` profiles,
 and the default 3.7.1 line); it changes the runner's signed receipt and
 catalog record, the catalog's view (runner and controller), the product API
 and the `Backup` and `BackupSchedule` CRDs, and the PoC upgrade that carries it
 runs a schedule selecting a group and reads its point.
-Item 50 is row PROD-11.1b (the owner's decision OD-9 (a)), proven by unit,
+Item 51 is row PROD-11.1b (the owner's decision OD-9 (a)), proven by unit,
 phase, preview and reader rows, the parity script and the invariant corpus,
 and on the compose stack (subset restores, a faulty engine, older runners and
 older readers); it changes the runner (the plan grammar, phase 7's evidence
@@ -1062,7 +1068,7 @@ sampled check does not prove it.
 **Refused:** `restore.partitions` (a partition subset), by name,
 `PartitionSubsetsAwaitOwnerDecision`, until the owner decides how a
 subset-narrowed scorecard is versioned (OD-9; decided and implemented by
-item 50); and a plan stating a start under a standing rehearsal
+item 51); and a plan stating a start under a standing rehearsal
 authorization, which restores every partition from the floor.
 **Do:** nothing for a plan without a start. A runner older than this release
 refuses a plan with a start (`drill spec does not parse`, exit 1) before it
@@ -1429,7 +1435,78 @@ Live: the PoC upgrade that carries this item signs in through Dex; a stall
 cannot be simulated on the live Dex.
 **Rollback:** an older console reads a stalled provider's body with no
 deadline again; nothing is stored, so nothing needs converting.
-#### 48. A backup receipt records each topic's ID before and after the engine; a recreated topic is a new generation (PROD-01.4a)
+#### 48. A destination's *Test access* compares every grant's binding, and is never READY for a destination a backup would refuse (FX-20c)
+
+**Changed.** A readiness check compared a credential's binding (item 38) only
+where it opened a store, and a check never opens one for some grants: a
+destination's `archiveWrite` (a check may not write into the archive prefix)
+and a separate `evidenceWrite` Secret when no marker probe runs. So a
+destination whose only grant named another destination's `archiveWrite`
+Secret tested **ready** on the PoC (`destination.credentialProjected:
+Projected`) while its backup was refused `CredentialBindingMismatch`. Now a
+`Preflight` lists, in its check plan, every `SecretKeys` grant the run would
+present — on *Test access* every grant the destination declares, whichever
+roles are exercised; on a backup readiness check `archiveWrite` and
+`evidenceWrite`; on a restore preflight the source's `archiveRead` and the
+evidence destination's `evidenceWrite` — and projects each one's
+`logweir-binding` key, and nothing else of it, beside its destination's
+expected binding. The new blocking row **`destination.credentialBound`**
+compares them in the check pod with no request: `ready`/`CredentialBound`, or
+`notReady`/`CredentialBindingMismatch`, leading with each refused grant's
+`spec.access` field, its Secret, and whether its binding was absent or
+foreign, with one `<grant>=bound|CredentialBindingMismatch` fact per grant;
+its remedy gives the destination its own Secret and never suggests binding the
+refused one to it (every binding refusal's text now says the same). The controller
+expects the row whenever a grant is listed, so a check that does not answer it
+is `unknown`, never `ready`. No Secret value and no binding value reaches a
+status, the API or the console, and nothing is dialled with a foreign
+credential. The product API returns the row in the preflight's `checks` and
+the destination's `lastTest` follows the verdict; the console's *Test access*
+panel shows it among the blocking rows. A workload-identity grant carries no
+binding and is not listed (FX-20b). The same sweep fixed one more surface: a
+`RetentionPolicy` whose run was refused `CredentialBindingMismatch` read
+`Enforced=True` again on the next evaluation pass (`UnattendedDeletionEnabled`
+or `RunInProgress`), and its console panel said "enforced by Logweir"
+throughout; the refusal now stands until a later run is harvested, with
+`status.enforcement: RecommendationOnly` and `guarantees.ageExpiry:
+NotEnforced`, and the panel prints the `Enforced=False` reason.
+**Do:** roll the controller and the runner image together (the chart does):
+an older runner refuses a plan that lists a grant (`phase: Failed`,
+`CheckContractMismatch`, naming `grantBindings`). Re-run *Test access* on each
+destination after the upgrade; a grant that now reads
+`CredentialBindingMismatch` would have been refused by the next run that
+presents it (a backup for `archiveWrite`, a restore or a verification for the
+read grants) — bind its own Secret, or stop naming another destination's
+([kubernetes.md](kubernetes.md) §20.10).
+**Scope:** the plan contract's rows (`crates/logweir-core/tests/check_contract.rs`,
+`crates/logweir-core/src/credential_binding.rs`); the runner's rows over each
+kind with a map for the pod's environment — the F6 thief `notReady` by name
+and its bound control `ready`, one foreign grant among bound ones named alone,
+absent, foreign and lost-expectation refusals, a backup readiness check's
+unprobed `evidenceWrite`, a restore preflight's two destinations, and no store
+handle built for any of it (`crates/logweir/tests/check_grant_binding.rs`);
+the controller's rendered plans and pods for every operation, a
+`DestinationAccess` that exercises one grant and compares four while
+projecting only one credential, and the verdict through `assemble` (`notReady`
+with the row, `unknown` without it, `ready` only when it is ready)
+(`crates/weirkeeper/tests/preflight_controller.rs`); the product API
+(`crates/logweir-api/tests/destinations.rs`) and the console
+(`ui/tests/credential-binding.spec.js`) over one fixture, which the runner's
+and the controller's rows hold their output to; the retention hold over real
+passes, with a generic refusal and a later successful run as its controls
+(`crates/weirkeeper/tests/retention_policy_controller.rs`) and the console's
+retention panel over the fields it writes (`ui/tests/credential-binding.spec.js`);
+a thief's Test access through the controller's real reconcile, the plan and
+Job it POSTs (`preflight_controller.rs`); and every binding refusal's text
+(`crates/logweir-core/src/credential_binding.rs`). The live row — PoC batch 4's
+F6 thief re-created, tested and deleted — is the next PoC upgrade's.
+**Rollback:** an older controller lists no grant and an older runner emits no
+binding row: *Test access* reverts to the overclaim this item fixes (and a
+refused retention run's `Enforced` flips back to `True` on the next pass), and
+every run still refuses a foreign Secret. Nothing is stored, so nothing needs
+converting.
+
+#### 49. A backup receipt records each topic's ID before and after the engine; a recreated topic is a new generation (PROD-01.4a)
 
 **Added.** A topic deleted and created again under the same name is a new
 topic: its offsets restart at zero and mean other records. Until now no
@@ -1444,7 +1521,7 @@ engine exits, and the receipt records both, per topic, in Kafka's own text
 `readFailed`, `notRead` or `reservedTopicId` (Kafka's reserved
 `AAAAAAAAAAAAAAAAAAAAAQ`, a sentinel no topic is given). Receipt and catalog
 point are format **1.6.0** (`generations`, `topics[].identity`); every receipt
-this build signs is at least 1.6.0 (item 49's consumer selection makes it
+this build signs is at least 1.6.0 (item 50's consumer selection makes it
 1.7.0). Two points' IDs decide their generation: different
 IDs are a new generation, never a continuation; equal IDs the same one only
 when the later capture's read after the engine recorded the same ID too; a
@@ -1480,7 +1557,7 @@ the backup.
 with no IDs, and its points' generations read "not established" against newer
 ones. The 1.6.0 receipts and records already written stay valid under every
 major-1 reader; readers before 1.25.0 ignore the IDs.
-#### 49. A backup can record the committed positions of the consumer groups it names, as signed evidence (PROD-04.1)
+#### 50. A backup can record the committed positions of the consumer groups it names, as signed evidence (PROD-04.1)
 
 **Added.** A backup now records, for each consumer group it is asked about,
 where that group would resume — read through Logweir's own client just before
@@ -1528,7 +1605,7 @@ with the records the engine reads (the receipt says when and which groups were
 active); on Kafka 3.7.x, which types no group, every selected group is
 `excluded: GroupTypeNotCaptured`; a topic recreated and refilled past its old
 marks during the run is not detected by the position evidence itself (the same
-receipt's `generations`, item 48, records each topic's ID before and after
+receipt's `generations`, item 49, records each topic's ID before and after
 the engine);
 the product API and the console neither set nor show `spec.consumerGroups`
 (set it with `kubectl`); nothing resets a group — applying positions is
@@ -1570,7 +1647,7 @@ older controller refuses a run whose frozen inputs carry `consumerGroups`
 (`PlanConfigMapConflict`): let those runs finish, or remove
 `spec.consumerGroups` from the schedule, first.
 
-#### 50. A restore can select a partition subset, and its scorecard is format 2.0.0 (PROD-11.1b)
+#### 51. A restore can select a partition subset, and its scorecard is format 2.0.0 (PROD-11.1b)
 
 **Added.** A drill or restore plan may name per-topic partition subsets,
 `restore.partitions: {orders: [0, 2], payments: [1]}`, written beside the
@@ -1710,7 +1787,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49 and 50, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50 and 51, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1740,11 +1817,14 @@ authorization); item 44 changes the console only and needs nothing; item 45
 changes the controller only (and two CRD descriptions) and needs nothing; item 46
 changes the runner's receipts and catalog records, the catalog's view (runner
 and controller), the product API and the console, and needs nothing; item 47
-changes the console only and needs nothing; item 48 changes the runner's
-receipts and catalog records and needs nothing; item 49 changes the runner's
+changes the console only and needs nothing; item 48
+changes the controller and the runner together (the check plan and a check
+row, and the retention controller's `Enforced` after a binding refusal) and
+needs nothing beyond rolling them together; item 49 changes the runner's
+receipts and catalog records and needs nothing; item 50 changes the runner's
 receipts and records, the catalog's view, the product API and two CRDs (apply
 the CRDs), and needs nothing until a plan or object selects consumer groups;
-item 50 changes the runner, the restore preview, both verifiers, the
+item 51 changes the runner, the restore preview, both verifiers, the
 controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
@@ -1777,7 +1857,7 @@ older verifier a subset scorecard). To roll back to
    the new status fields, and the bound Secrets keep working. Roll the console
    back with them (an older console offers `existing` on a create again,
    which only this API refuses).
-6. Before rolling the controller back past item 49, let every run whose frozen
+6. Before rolling the controller back past item 50, let every run whose frozen
    inputs carry `consumerGroups` finish, or remove `spec.consumerGroups` from
    its schedule: an older controller refuses such a frozen plan
    (`PlanConfigMapConflict`). The 1.7.0 receipts, their positions documents
