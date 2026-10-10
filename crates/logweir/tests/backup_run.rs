@@ -178,18 +178,48 @@ fn empty_archive() -> Store {
 /// has no use for.
 struct StubReader {
     cluster_id: Result<String, KafkaError>,
+    /// PROD-02.1: what `partition_marks` answers; `None` is the trait's
+    /// default (not read).
+    marks: Option<BTreeMap<String, logweir_kafka::capture::TopicMarks>>,
 }
 
 impl StubReader {
     fn answering(id: &str) -> Self {
         Self {
             cluster_id: Ok(id.to_string()),
+            marks: None,
         }
     }
     fn unreachable() -> Self {
         Self {
             cluster_id: Err(KafkaError::Unreachable("no broker answered".into())),
+            marks: None,
         }
+    }
+    /// PROD-02.1: each named topic's partitions as `(low, high)` pairs.
+    fn with_marks(mut self, topics: &[(&str, &[(i64, i64)])]) -> Self {
+        self.marks = Some(
+            topics
+                .iter()
+                .map(|(t, pairs)| {
+                    let parts = pairs
+                        .iter()
+                        .enumerate()
+                        .map(|(p, (lo, hi))| {
+                            (
+                                p as i32,
+                                Ok(logweir_kafka::capture::Marks {
+                                    log_start: *lo,
+                                    high_watermark: *hi,
+                                }),
+                            )
+                        })
+                        .collect();
+                    ((*t).to_string(), Ok(parts))
+                })
+                .collect(),
+        );
+        self
     }
 }
 
@@ -223,6 +253,18 @@ impl ClusterReader for StubReader {
         _max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError> {
         Ok(vec![])
+    }
+    fn partition_marks(
+        &self,
+        topics: &[String],
+    ) -> BTreeMap<String, logweir_kafka::capture::TopicMarks> {
+        match &self.marks {
+            Some(m) => m.clone(),
+            None => topics
+                .iter()
+                .map(|t| (t.clone(), Err("not read".to_string())))
+                .collect(),
+        }
     }
 }
 
@@ -2434,4 +2476,142 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
             "{name}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// PROD-02.1: the empty capture
+// ---------------------------------------------------------------------------
+
+/// A topic the archive mentions with NO segment: what the engine writes for a
+/// source retention emptied (`"partitions": []`, measured on compose).
+fn empty_topic(name: &str) -> TopicFacts {
+    let mut t = topic_facts(name, vec![]);
+    t.partitions.clear();
+    t
+}
+
+/// **R1 (in process).** A source whose every partition was empty before the
+/// engine (`low == high`) backs up as a signed EMPTY CAPTURE: exit 0, a 1.8.0
+/// receipt with the watermarks, zero records and the empty window, and no
+/// catalog point (not a recovery point).
+#[test]
+fn a_source_whose_records_all_expired_is_a_signed_empty_capture() {
+    let f = ok_fixture("nightly");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .with_marks(&[("orders", &[(30, 30), (0, 0)])]);
+    let engine = RecordingEngine::ok(vec![empty_topic("orders")]);
+    let (store, _k, _b) = archive_for("nightly");
+    let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store)
+        .expect("an empty capture is not an operational failure");
+    assert_eq!(outcome.covered_from_ms, outcome.covered_to_ms);
+    assert_eq!(
+        outcome.covered_from_ms,
+        ts("2026-09-09T00:00:00Z").timestamp_millis()
+    );
+    assert_eq!(
+        outcome.catalog_key, None,
+        "an empty capture gets no catalog point"
+    );
+    let (bytes, _) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    receipt.validate_invariants().unwrap();
+    assert!(receipt.is_empty_capture());
+    assert_format_at_least(
+        &receipt.format_version,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS,
+        "an empty capture's receipt",
+    );
+    assert_eq!(
+        receipt.source_watermarks,
+        Some(BTreeMap::from([(
+            "orders".to_string(),
+            vec![[30, 30], [0, 0]]
+        )]))
+    );
+    assert_eq!(receipt.records, BTreeMap::from([("orders".to_string(), 0)]));
+}
+
+/// **R1's negative arms.** Nothing captured over a source that was NOT empty
+/// before the engine, or whose watermarks could not be read, is still exit 1
+/// and signs nothing: an empty capture is claimed only when it is proved.
+#[test]
+fn nothing_captured_is_an_empty_capture_only_when_the_watermarks_prove_it() {
+    let f = ok_fixture("nightly");
+    for (reader, want) in [
+        (
+            StubReader::answering("SOURCE-CLUSTER-00000001")
+                .with_marks(&[("orders", &[(30, 30), (0, 4)])]),
+            "source_watermarks[\"orders\"] partition 1 has low 0 and high 4",
+        ),
+        (
+            StubReader::answering("SOURCE-CLUSTER-00000001"),
+            "the source's watermarks could not be read before the engine (not read)",
+        ),
+    ] {
+        let engine = RecordingEngine::ok(vec![empty_topic("orders")]);
+        let (store, _k, _b) = archive_for("nightly");
+        match exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
+            BackupError::Operational(msg) => {
+                assert!(
+                    msg.contains("declares no segment for any of the named topics"),
+                    "{msg}"
+                );
+                assert!(msg.contains(want), "{msg}");
+            }
+            other => panic!("expected exit 1, got {other:?}"),
+        }
+        let (keys, _) = store
+            .list_page("logweir/backups/nightly/", None, 100)
+            .unwrap();
+        assert!(
+            !keys.iter().any(|k| k.ends_with(".receipt.json")),
+            "nothing is signed: {keys:?}"
+        );
+    }
+}
+
+/// **R2 (in process).** A partly empty source is an ordinary backup: the
+/// captured topic keeps its window and counts, and the empty partitions are
+/// named in the signed watermarks (`low == high`), never failed.
+#[test]
+fn a_partly_empty_source_is_an_ordinary_backup_that_names_its_empty_partitions() {
+    let f = fixture(
+        &spec_yaml("nightly", "[orders, payments]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .with_marks(&[("orders", &[(0, 7), (5, 5)]), ("payments", &[(9, 9)])]);
+    let engine = RecordingEngine::ok(vec![
+        topic_facts(
+            "orders",
+            vec![segment(7, 1_756_000_000_000, 1_756_000_060_000)],
+        ),
+        empty_topic("payments"),
+    ]);
+    let (store, _k, _b) = archive_for("nightly");
+    let outcome = exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
+    assert_eq!(outcome.covered_from_ms, 1_756_000_000_000);
+    assert_eq!(outcome.covered_to_ms, 1_756_000_060_001);
+    assert!(
+        outcome.catalog_key.is_some(),
+        "an ordinary backup is a recovery point"
+    );
+    let (bytes, _) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    receipt.validate_invariants().unwrap();
+    assert!(!receipt.is_empty_capture());
+    assert_eq!(
+        logweir_core::backup_receipt::empty_partitions(receipt.source_watermarks.as_ref().unwrap()),
+        vec![("orders".to_string(), 1), ("payments".to_string(), 0)]
+    );
 }

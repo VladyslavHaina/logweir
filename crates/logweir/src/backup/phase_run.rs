@@ -1021,17 +1021,16 @@ pub(crate) fn persist_receipt(
     //    **PROD-02.1: an EMPTY CAPTURE is not a recovery point**, so it gets
     //    no catalog point: nothing in it can be restored, and a point would
     //    take a retention `keepLast` rank from a real one.
-    keys.catalog_key = if receipt.is_empty_capture() {
+    if receipt.is_empty_capture() {
         tracing::info!(
             run_id = %outcome.run_id,
             backup_id = %outcome.backup_id,
             "an empty capture holds no record and is not a recovery point; no catalog point \
              is written for it"
         );
-        None
     } else {
-        write_catalog_point(outcome, &receipt, &bytes, &keys, signer, store)
-    };
+        keys.catalog_key = write_catalog_point(outcome, &receipt, &bytes, &keys, signer, store);
+    }
 
     // 5. **I6.** The local pair, with the sidecar beside the document under the
     //    extension `.sig` — the pairing `drill run --out` already uses
