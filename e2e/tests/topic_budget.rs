@@ -193,8 +193,10 @@ fn overrides(i: usize) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Create every topic in batches of 50, one partition each, and wait until
-/// the cluster serves the last of each batch (FX-18).
-fn create_topics(names: &[String]) {
+/// the cluster serves EVERY one of them (FX-18: listed is not served, and the
+/// engine's first metadata read does not retry). One reader, one wait a
+/// topic.
+fn create_and_await(names: &[String]) {
     use rdkafka::admin::{AdminOptions, NewTopic, TopicReplication};
     let admin = admin();
     for (batch_index, batch) in names.chunks(50).enumerate() {
@@ -222,7 +224,12 @@ fn create_topics(names: &[String]) {
                 panic!("create {topic}: {code}");
             }
         }
-        harness::await_created(batch.last().expect("a batch is not empty"), 1);
+    }
+    let reader = harness::reader();
+    let settle = Duration::from_secs(60);
+    for name in names {
+        logweir_kafka::reader::ClusterReader::await_served(&reader, name, 1, settle)
+            .unwrap_or_else(|e| panic!("{name} was created but not served within 60 s: {e}"));
     }
 }
 
@@ -780,8 +787,8 @@ fn a_backup_of_500_topics_is_listed_verified_and_restored() {
         "FX33_TOPICS is 1 to {MAX_BACKUP_TOPICS}"
     );
     let n = nonce();
-    // 46-character names: a realistic length, and what the budget is quoted
-    // for (50).
+    // 48-character names: a realistic length, and about what the budget is
+    // quoted for (50).
     let topics: Vec<String> = (0..count)
         .map(|i| format!("fx33-{n}-orders-eu-west-1-ledger-events-{i:03}"))
         .collect();
@@ -798,7 +805,7 @@ fn a_backup_of_500_topics_is_listed_verified_and_restored() {
 
     // ---- 1. the cluster ----------------------------------------------------
     let started = Instant::now();
-    create_topics(&topics);
+    create_and_await(&topics);
     produce(&topics, 3);
     let source_records = records_on(&topics);
     assert!(

@@ -2407,7 +2407,11 @@ signs them as not reconstructed (172 here), as before this item.
 controller reads a receipt under 1 MiB again; nothing is stored differently.
 An older controller skips a catalog entry that carries `factsFrom` (it has no
 receipt key) and counts it as malformed. Roll the runner and the controller
-together.
+together: this controller asks an evidence-fetch Job for a receipt of up to
+5,131,072 bytes, and an OLDER runner image refuses a request over 1 MiB, for
+every receipt however small. Under that pair no backup on a destination the
+controller cannot read itself is verified, and after four attempts each is
+`NotAttempted`. An older controller with this runner works as before.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
