@@ -2611,7 +2611,7 @@ about 134 KB, both verifiers accept it, every restored topic holds its
 source's records, and every topic was judged against the receipt's recorded
 configuration. A `newTopic` restore does not apply a source's overrides: it
 signs them as not reconstructed, as before this item.
-[UNVERIFIED — no cluster has run this build: the controller, API and console rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
+[UNVERIFIED — no cluster has run this build: the controller and API rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
 **Rollback:** an older runner accepts larger selections again and an older
 controller reads a receipt under 1 MiB again; nothing is stored differently.
 Roll the runner and the controller together: this controller asks an
