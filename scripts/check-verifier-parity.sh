@@ -270,6 +270,9 @@ receipt_sd_entry_cases=0
 receipt_gen_same_cases=0
 receipt_gen_changed_cases=0
 receipt_gen_unknown_cases=0
+receipt_sw_absent_cases=0
+receipt_sw_recorded_cases=0
+receipt_sw_empty_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -550,6 +553,45 @@ $rust_gen"
         case "$want_gen" in *"] one generation"*) receipt_gen_same_cases=$((receipt_gen_same_cases + 1)) ;; esac
         case "$want_gen" in *"] CHANGED"*) receipt_gen_changed_cases=$((receipt_gen_changed_cases + 1)) ;; esac
         case "$want_gen" in *"] not established"*) receipt_gen_unknown_cases=$((receipt_gen_unknown_cases + 1)) ;; esac
+        # PROD-02.1: both readers print the source's coverage — "coverage not
+        # recorded" for a receipt without source_watermarks, never complete —
+        # and the SAME lines; what they say (recorded or not, an EMPTY CAPTURE,
+        # which partitions were empty) is derived here from the DOCUMENT.
+        rust_sw="$(grep -oE 'source_watermarks(\[|:).*' "$tmp/rust.all" || true)"
+        py_sw="$(grep -oE 'source_watermarks(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_sw" ] || fail "$name: drill verify printed no source_watermarks line for an accepted receipt"
+        if [ "$rust_sw" != "$py_sw" ]; then
+            fail "$name: the two readers print DIFFERENT source_watermarks lines.
+  rust:
+$rust_sw
+  python:
+$py_sw"
+        fi
+        want_sw="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+block = doc.get("source_watermarks")
+if block is None:
+    print("source_watermarks: coverage not recorded")
+elif doc["covered"]["from_ms"] == doc["covered"]["to_ms"]:
+    print("source_watermarks: an EMPTY CAPTURE")
+for t in sorted(block or {}):
+    empty = [str(p) for p, (lo, hi) in enumerate(block[t]) if lo == hi]
+    print("source_watermarks[" + json.dumps(t) + "]: coverage recorded over %d partition(s) %s" % (len(block[t]), ", ".join(empty) or "none"))' "$doc")"
+        got_sw="$(printf '%s\n' "$rust_sw" | sed -n \
+            -e 's/^\(source_watermarks: coverage not recorded\),.*/\1/p' \
+            -e 's/^\(source_watermarks: an EMPTY CAPTURE\):.*/\1/p' \
+            -e 's/^\(source_watermarks\[".*"\]: coverage recorded over [0-9]* partition(s)\), none empty at capture$/\1 none/p' \
+            -e 's/^\(source_watermarks\[".*"\]: coverage recorded over [0-9]* partition(s)\), [0-9]* empty at capture (low == high): \(.*\)$/\1 \2/p')"
+        if [ "$got_sw" != "$want_sw" ]; then
+            fail "$name: the source_watermarks lines do not say what the receipt's watermarks say.
+  want:
+$want_sw
+  got:
+$rust_sw"
+        fi
+        case "$want_sw" in *"coverage not recorded"*) receipt_sw_absent_cases=$((receipt_sw_absent_cases + 1)) ;; esac
+        case "$want_sw" in *"coverage recorded over"*) receipt_sw_recorded_cases=$((receipt_sw_recorded_cases + 1)) ;; esac
+        case "$want_sw" in *"EMPTY CAPTURE"*) receipt_sw_empty_cases=$((receipt_sw_empty_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -576,6 +618,9 @@ if [ "$receipt_sd_dependent_cases" -eq 0 ] || [ "$receipt_sd_key_cases" -eq 0 ] 
 fi
 if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ] || [ "$receipt_gen_unknown_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include a topic with one generation ($receipt_gen_same_cases), one recreated during the capture ($receipt_gen_changed_cases) and one whose ID is unknown ($receipt_gen_unknown_cases), so the generations lines (PROD-01.4a) were never told apart"
+fi
+if [ "$receipt_sw_absent_cases" -eq 0 ] || [ "$receipt_sw_recorded_cases" -eq 0 ] || [ "$receipt_sw_empty_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a receipt without source_watermarks ($receipt_sw_absent_cases), one with them ($receipt_sw_recorded_cases) and an empty capture ($receipt_sw_empty_cases), so the coverage lines (PROD-02.1) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 

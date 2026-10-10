@@ -2085,9 +2085,9 @@ impl BackupReceipt {
             if empty_window {
                 if let Some(why) = empty_capture_contradiction(&self.records, watermarks) {
                     return Err(format!(
-                        "covered [{}, {}) is empty, an empty capture, but {why}: an empty capture \
-                         counts no record for any topic and recorded equal low and high \
-                         watermarks for every partition",
+                        "covered.from_ms {} equals covered.to_ms {}, an empty capture, but \
+                         {why}: an empty capture counts no record for any topic and recorded \
+                         equal low and high watermarks for every partition",
                         self.covered.from_ms, self.covered.to_ms
                     ));
                 }

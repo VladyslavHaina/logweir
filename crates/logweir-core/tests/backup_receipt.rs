@@ -3775,9 +3775,10 @@ fn arm_45_refuses_an_empty_capture_the_watermarks_or_records_contradict() {
     assert_eq!(
         doc.validate_invariants(),
         Err(format!(
-            "covered [{t}, {t}) is empty, an empty capture, but source_watermarks[\"orders\"] \
-             partition 1 has low 15 and high 20: an empty capture counts no record for any topic \
-             and recorded equal low and high watermarks for every partition"
+            "covered.from_ms {t} equals covered.to_ms {t}, an empty capture, but \
+             source_watermarks[\"orders\"] partition 1 has low 15 and high 20: an empty capture \
+             counts no record for any topic and recorded equal low and high watermarks for every \
+             partition"
         ))
     );
     let mut doc = empty_capture();
@@ -3785,9 +3786,9 @@ fn arm_45_refuses_an_empty_capture_the_watermarks_or_records_contradict() {
     assert_eq!(
         doc.validate_invariants(),
         Err(format!(
-            "covered [{t}, {t}) is empty, an empty capture, but records[\"payments\"] is 3: an \
-             empty capture counts no record for any topic and recorded equal low and high \
-             watermarks for every partition"
+            "covered.from_ms {t} equals covered.to_ms {t}, an empty capture, but \
+             records[\"payments\"] is 3: an empty capture counts no record for any topic and \
+             recorded equal low and high watermarks for every partition"
         ))
     );
 }
