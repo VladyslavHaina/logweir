@@ -2373,6 +2373,13 @@ export const APPROVED_PLAN_STATES = Object.freeze([
   "expired", "unknown",
 ]);
 
+/** `RetentionAccountingState` -- whether a retention evaluation's counts and
+ *  `kept` rows are published (FX-22 review M1). The API writes it on every
+ *  `lastEvaluation`; with `NotRecorded` an absent `kept` says nothing. The
+ *  schema's declared default for an answer WITHOUT the member (a build that
+ *  predates it) is `NotRecorded`. */
+export const RETENTION_ACCOUNTING_STATES = Object.freeze(["Recorded", "NotRecorded"]);
+
 /** `EvaluationState` -- whether a trust evaluation is believed. The API
  *  decides this, against ITS OWN clock, and publishes the instant it decided
  *  against; the page renders the answer. */
@@ -2943,6 +2950,20 @@ const D3_LAST_EVALUATION = shapeOf(
   { truncated: bool },
   {
     at: str, pointsEvaluated: int, candidateCount: int,
+    // FX-22 review M1: the API says on every answer whether the three counts
+    // and `kept` below are published, so this client does not infer it from a
+    // count that is missing. OPTIONAL HERE AS IN THE SCHEMA, which declares
+    // the default `NotRecorded`: an answer from a build that predates the
+    // member still DECODES (the policy list is not lost to a contract
+    // failure) and reads as not recorded -- `null` after the decode.
+    accounting: oneOf(RETENTION_ACCOUNTING_STATES),
+    // FX-22: the closed accounting. Each is ABSENT when `accounting` is
+    // `NotRecorded` (an older controller's evaluation, or two controllers'
+    // numbers in one block), and then `kept` is absent too.
+    keptCount: int, truncatedByCap: int, maxDeletionsPerRun: int,
+    // `true` whenever the status says it; `false` only with
+    // `accounting: Recorded`; absent is "not recorded".
+    viewIncomplete: bool,
     kept: listOf(str),
     candidates: listOf(objectOf(D3_CANDIDATE)),
     protected: listOf(objectOf(D3_PROTECTED_POINT)),
@@ -2959,6 +2980,9 @@ const D3_LAST_ENFORCEMENT = shapeOf(
   {
     runId: str, startedAt: str, finishedAt: str, planSha256: str,
     deleted: listOf(str), failed: listOf(objectOf(D3_FAILED_DELETION)),
+    // FX-22: present, and `true`, only when `failed` was cut at the route's
+    // row bound.
+    failedTruncated: bool,
     objectsDeleted: int, recordKey: str, recordSha256: str, exitCode: int,
   },
 );
@@ -3149,7 +3173,7 @@ export const D3_SHAPES = Object.freeze({
   NamespaceConflictView: D3_NAMESPACE_CONFLICT,
 });
 
-/** The vocabularies D3 adds, by the name the document publishes. The eight
+/** The vocabularies D3 adds, by the name the document publishes. The nine
  *  TYPED ones are pinned member-for-member by `d3.spec.js`; the rest are
  *  published as `string` and are this client's rendering lists (see point 2 of
  *  this section's header). */
@@ -3158,6 +3182,7 @@ export const D3_ENUMS = Object.freeze({
   TrustState: TRUST_STATES,
   VerificationScopeLevel: SCOPE_LEVELS,
   ApprovedPlanState: APPROVED_PLAN_STATES,
+  RetentionAccountingState: RETENTION_ACCOUNTING_STATES,
   EvaluationState: EVALUATION_STATES,
   EvaluationReason: EVALUATION_REASONS,
   ConnectSyncMode: CONNECT_SYNC_MODES,

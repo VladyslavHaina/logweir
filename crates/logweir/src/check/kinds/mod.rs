@@ -378,6 +378,15 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The object at the manifest key is not a backup manifest. Check that the prefix \
              points at the archive root this backup set was written to."
         }
+        // FX-14: the point-bound restore preflight, in the binding's words.
+        CheckCode::ManifestSuperseded => crate::catalog::pin::SUPERSEDED_REMEDY,
+        CheckCode::PointBindingMismatch => {
+            "The plan's recovery point binding is not this archive's: it is malformed, names a \
+             receipt outside its own backup set's receipts, or binds a receipt or manifest this \
+             archive does not hold as bound. The restore would be refused before any data \
+             moved. Check that the source destination is the bucket and prefix the point was \
+             recorded in, and draft the plan again from a point the catalog lists as selectable."
+        }
         CheckCode::PointInTimeBeforeCoverage => {
             "The requested point in time is older than anything this backup set covers. Pick a \
              later point, or another recovery point."

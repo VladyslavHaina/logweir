@@ -44,6 +44,11 @@ def row(name: str, ok: bool, detail: str = "") -> None:
 KEEP_B = {
     "pointsEvaluated": 6,
     "candidateCount": 3,
+    # FX-22: what the per-run ceiling held back. Zero, WRITTEN, is the premise
+    # of every row that reads `kept` as "the points that stay".
+    "keptCount": 3,
+    "truncatedByCap": 0,
+    "maxDeletionsPerRun": 50,
     "candidates": [
         {"pointId": "lwp1-8033c08b", "reason": "BeyondKeepLast"},
         {"pointId": "lwp1-c45de002", "reason": "BeyondKeepLast"},
@@ -67,6 +72,9 @@ KEEP_A = {
 # `reason`, and `protected` meaning the whole retained set.
 KEEP_B_AS_THE_ROW_READ_IT = {
     "pointsEvaluated": 6,
+    # The ceiling premise HOLDS here, so the rows that refuse this shape refuse
+    # it for the reading it stands for and not for a missing count.
+    "truncatedByCap": 0,
     "candidates": [{"backupId": None, "reason": "BeyondKeepLast"}] * 3,
     "kept": ["lwp1-7b42facc", "lwp1-bfe50a47", "lwp1-f491e748"],
     "protected": [{"backupId": None, "reason": "MinUsablePoints"}] * 3,
@@ -131,6 +139,27 @@ def test_protected_is_the_override_not_the_retained_set() -> None:
     row("MUTANT: a candidate reason outside the vocabulary is refused",
         not d3.overlapping_keep_rules_ok(
             invented, d3.evaluation_point_ids({"status": {"lastEvaluation": invented}}), want, 6))
+    # FX-22 review L7: THE CEILING PREMISE. `candidates = points - kept` is the
+    # arithmetic of a plan the per-run ceiling did not cut, and the row says so
+    # instead of assuming it. Each of these differs from KEEP_B ONLY in the
+    # count, so only the premise can refuse it.
+    row("CONTROL: the premise holds for the published evaluation (truncatedByCap is 0)",
+        d3.ceiling_held_nothing_back(KEEP_B))
+    for label, value in [("above zero", 2), ("absent", None), ("a string", "0"),
+                         ("a bool", False), ("negative", -1)]:
+        cut = json.loads(json.dumps(KEEP_B))
+        if value is None:
+            del cut["truncatedByCap"]
+        else:
+            cut["truncatedByCap"] = value
+        row(f"PREMISE: an evaluation whose truncatedByCap is {label} is not judged by the keep "
+            f"rule's arithmetic",
+            not d3.ceiling_held_nothing_back(cut)
+            and not d3.overlapping_keep_rules_ok(
+                cut, d3.evaluation_point_ids({"status": {"lastEvaluation": cut}}), want, 6),
+            f"{cut.get('truncatedByCap')!r}")
+    row("the premise is a sentence a row's detail can print",
+        "truncatedByCap == 0" in d3.CEILING_PREMISE)
 
 
 def test_an_unreadable_point_is_named_explained_and_never_a_candidate() -> None:
@@ -3204,19 +3233,49 @@ def test_a_shared_set_must_not_be_planned_under_a_retained_point() -> None:
         {"pointId": "lwp1-b", "backupId": "set-1", "availability": "Available",
          "verification": "Verified"},
     ]
-    exposed = {"kept": ["lwp1-b"], "candidates": [{"pointId": "lwp1-a"}], "protected": []}
+    # `truncatedByCap: 0` on each: the per-run ceiling held nothing back, which
+    # is the premise under which `kept` is every point that stays (FX-22).
+    exposed = {"kept": ["lwp1-b"], "candidates": [{"pointId": "lwp1-a"}], "protected": [],
+               "truncatedByCap": 0}
     verdict, clauses = d3.shared_set_is_protected(entries, exposed)
     row("shared set: a candidate over a retained point's set -> FAIL", verdict == "FAIL",
         str(clauses))
     guarded = {"kept": ["lwp1-a", "lwp1-b"], "candidates": [],
-               "protected": [{"pointId": "lwp1-a", "reason": "SharedSegment"}]}
+               "protected": [{"pointId": "lwp1-a", "reason": "SharedSegment"}],
+               "truncatedByCap": 0}
     verdict, clauses = d3.shared_set_is_protected(entries, guarded)
     row("shared set: the older point protected SharedSegment -> PASS", verdict == "PASS",
         str(clauses))
-    both_gone = {"kept": [], "candidates": [{"pointId": "lwp1-a"}, {"pointId": "lwp1-b"}]}
+    both_gone = {"kept": [], "candidates": [{"pointId": "lwp1-a"}, {"pointId": "lwp1-b"}],
+                 "truncatedByCap": 0}
     verdict, _ = d3.shared_set_is_protected(entries, both_gone)
     row("shared set: both planned together (nothing retained over it) -> PASS",
         verdict == "PASS")
+    # FX-22 review L7: THE CEILING PREMISE. With points held back, `kept` is
+    # not every point that stays, and the row cannot see a candidate that
+    # shares its set with a held-back point. It says NOT-REACHED and names the
+    # premise; it does not pass on half the retained set.
+    for label, value in [("above zero", 1), ("absent", None)]:
+        cut = dict(guarded)
+        if value is None:
+            del cut["truncatedByCap"]
+        else:
+            cut["truncatedByCap"] = value
+        verdict, clauses = d3.shared_set_is_protected(entries, cut)
+        named = [k for k, v in clauses.items() if k.startswith(d3.CEILING_PREMISE) and v is False]
+        row(f"PREMISE: a shared-set evaluation whose truncatedByCap is {label} -> NOT-REACHED, "
+            f"with the premise named",
+            verdict == "NOT-REACHED" and len(named) == 1, f"{verdict} {clauses}")
+    # THE CASE THE PREMISE EXISTS FOR: one receipt of the pair planned, the
+    # other held back by the ceiling (in no list). Read without the premise
+    # this is "both points gone together" minus one, and nothing is exposed.
+    split = {"kept": [], "candidates": [{"pointId": "lwp1-a"}], "protected": [],
+             "truncatedByCap": 1}
+    verdict, clauses = d3.shared_set_is_protected(entries, split)
+    row("PREMISE: a set split by the ceiling is NOT-REACHED, never PASS", verdict == "NOT-REACHED",
+        f"{verdict} {clauses}")
+    verdict, _ = d3.shared_set_is_protected(entries, guarded)
+    row("CONTROL: the same evaluation with truncatedByCap 0 is judged (PASS)", verdict == "PASS")
     one = [entries[0], dict(entries[1], backupId="set-2")]
     verdict, _ = d3.shared_set_is_protected(one, exposed)
     row("shared set: no two points over one set -> NOT-REACHED", verdict == "NOT-REACHED")

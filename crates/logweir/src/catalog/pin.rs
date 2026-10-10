@@ -1,7 +1,11 @@
 //! **FX-7 — what a receipt's manifest-version pin proves IN THE BUCKET BEING
-//! READ**, decided once for both readers that act on it: the drill's point
-//! binding ([`crate::drill::binding::verify_point_binding`]) and the
-//! `catalogSync` deep check ([`crate::check::kinds::catalog_sync`]).
+//! READ**, decided once for every reader that acts on it: the drill's point
+//! binding ([`crate::drill::binding::verify_point_binding`]), the
+//! `catalogSync` deep check ([`crate::check::kinds::catalog_sync`]) and, since
+//! FX-14, the restore preflight of a plan bound to a point
+//! ([`crate::check::kinds::restore`]), which answers `ManifestSuperseded`,
+//! the store's code with [`UNREADABLE_REMEDY`], or `ready` with
+//! [`UNCHECKED_NOTE`] for the three rows of the table below.
 //!
 //! # A version id belongs to one object in ONE bucket
 //!

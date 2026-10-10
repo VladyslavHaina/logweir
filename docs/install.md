@@ -692,17 +692,29 @@ grant actually needs, measured*. This is a set to lock down to.
 | Role | Actions | Resources |
 |---|---|---|
 | `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`, `s3:PutObject` | the bucket for the listing; `arn:aws:s3:::<bucket>/<prefix>/*` for both object actions, plus `s3:PutObject` on `arn:aws:s3:::<bucket>/logweir/*` for the execution claim, the receipt and the catalog record — the claim is a conditional create (`If-None-Match: *`), so the store must honour it or every backup exits 4 `ExecutionClaimUnproven` ([why](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)) |
-| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` |
+| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`; to restore a catalog point, also `s3:GetObject` on its receipt and, on a versioned bucket, `s3:GetObjectVersion` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*`; the receipt is under `arn:aws:s3:::<bucket>/logweir/backups/*`; `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
 | `evidenceWrite` | `s3:PutObject` (conditional create) | `arn:aws:s3:::<bucket>/logweir/*` |
 | `evidenceRead` | `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
 | write probe (opt-in; run as the `evidenceWrite` grant, already inside its `logweir/*`) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
-| `RecoveryCatalog` sync | `s3:ListBucket` (condition `s3:prefix` in `logweir/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` AND `arn:aws:s3:::<bucket>/logweir/*` |
+| `RecoveryCatalog` sync | `s3:ListBucket` (condition `s3:prefix` in `logweir/*`), `s3:GetObject`; on a versioned bucket, `s3:GetObjectVersion` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` AND `arn:aws:s3:::<bucket>/logweir/*`; `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
 
 **`s3:AbortMultipartUpload` and `s3:GetBucketLocation` are in no row**, because
 the measurement removed each of them and every operation still succeeded: the
 engine is given an explicit region and never asks the bucket for one, and no
 upload in the acceptance was large enough to abort. Grant them if your own
 sizes differ; nothing here needs them.
+
+**`s3:GetObjectVersion` is for a versioned bucket, and it was not part of the
+2026-09-21 measurement.** A backup taken on a versioned bucket pins its
+manifest's version in its signed receipt, and when the current version is not
+the pinned one (a copy of the archive, or a set written again) the catalog
+sync, a restore of that point and its preflight read the pinned version by id.
+AWS S3 authorises that read as `s3:GetObjectVersion`
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]; without it
+those points read `Unreadable` and their restores stop before any data moves.
+MinIO serves it under `s3:GetObject` (measured 2026-10-09). Grant it on any
+versioned bucket; `docs/kubernetes.md` §7a, *The read of a pinned version*,
+has the measurement.
 
 **The `RecoveryCatalog` sync row is not `archiveRead`**, though the sync uses
 that grant: it lists only under `logweir/*` and reads under BOTH roots, where

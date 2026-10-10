@@ -930,7 +930,9 @@ pub struct CompletionView {
     /// The canary size.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub records_expected: Option<i64>,
-    /// How many records were restored in the sampled window.
+    /// How many records the check read back from the restored topics
+    /// (`sample.records_restored`): the sample, not every record the restore
+    /// wrote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub records_restored: Option<i64>,
     /// How many records were sampled.

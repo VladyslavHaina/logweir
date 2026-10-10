@@ -3063,7 +3063,28 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   `Enforced=False` reason as a complaint (`data-enforced-refusal`): a run
   refused on its credential's binding leaves it `RecommendationOnly` with
   `ageExpiry: NotEnforced` until a human gives it its own Secret (FX-20c), and
-  that reason is the only place that says why. **The covering policy is named only by the schedule report's
+  that reason is the only place that says why. **The last evaluation is four
+  numbers that add up** (FX-22): points evaluated, kept, in this plan, and
+  held back by the per-run ceiling, read through `evaluationAccounting`
+  (`render.js`). A point the ceiling held back is due, not kept, and the panel
+  says so in a sentence when the count is above zero (and the sentence does
+  not promise a later plan when this plan is empty, because then no due point
+  fits the ceiling); a count is never read off a list, so an evaluation that
+  does not record the accounting reads `not recorded` in both cells. **Console
+  mode reads the product API's own word**, `lastEvaluation.accounting`
+  (`Recorded` or `NotRecorded`), and never infers it from an absent count. An
+  answer without the word, from an API that predates it, still decodes (the
+  member is optional in the schema, default `NotRecorded`) and reads as not
+  recorded.
+  Legacy mode reads the custom resource, which has no such member, and applies
+  the controller's rule itself wherever the lists in hand are whole: the four
+  counts add up and the `kept` list is `keptCount` long. A negative number is
+  never a count. **The catalog view has its own row with three answers**
+  (`evaluationView`): "not the whole archive" for `viewIncomplete: true`,
+  printed with or without the accounting, with the sentence under it; "the
+  whole archive, the catalog said" for `false` beside a recorded accounting;
+  and "not recorded" for an absent member or a `false` beside counts that are
+  not recorded. **The covering policy is named only by the schedule report's
   `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination
