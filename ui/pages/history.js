@@ -43,6 +43,7 @@ import {
   detailLink,
   errorBox,
   esc,
+  inert,
   evidenceBlock,
   facts,
   independentCheck,
@@ -409,7 +410,7 @@ export function renderRestoreOperation(object, operation) {
   const approval = o.approvalError
     ? "<p class=\"complaint\">Approval " + esc(s.approvalName) + " could not be read, so its " +
       "state is unknown: " + esc(o.approvalError.status ? String(o.approvalError.status) + " " +
-        String(o.approvalError.reason || "") : "error") + " " + esc(o.approvalError.message) + "</p>"
+        String(o.approvalError.reason || "") : "error") + " " + esc(inert(o.approvalError.message)) + "</p>"
     : renderApprovalState(o.found, s, s.approvalName);
   const verified = ((o.found || {}).state) === "verified";
   return (

@@ -245,7 +245,7 @@ pub fn probe(reader: &dyn ClusterReader, marker_topic: Option<&str>) -> ProbeOut
 /// The writer seam exists so a test can assert the EXACT BYTES on each stream —
 /// `the_probe_prints_exactly_two_stdout_lines` counts the newlines on one and
 /// finds the diagnostic on the other — instead of trusting a `println!` nobody
-/// can observe. It is the same arrangement `exit::print_refusal_reason_to` uses
+/// can observe. It is the same arrangement `exit::print_refusal_to` uses
 /// and for the same reason.
 ///
 /// # Errors

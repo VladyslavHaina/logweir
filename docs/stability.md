@@ -1934,6 +1934,106 @@ them after this line, exactly as exit 0 does.) The key is carried on the scoreca
 phase-9 record, which is pushed after phase 8 froze and signed the document, so nothing that
 delivers it can reach the signed bytes.
 
+### `refusal-detail=` carries a guard refusal's reason code and sentence (FX-34)
+
+```
+refusal-detail={"token":"<the Job's line token>","code":"StorageRegionInvalid","message":"source.storage.region is not an S3 region name: …"}
+refusal-reason=GuardRefused
+```
+
+`logweir restore run` (and its `drill run` alias) and `logweir backup run` print this line at
+**every exit 3 and at no other exit**, immediately before `refusal-reason=`. Interface I9 is
+unchanged: `refusal-reason=<TerminalState>` is still the final stdout line of a refused run, and the
+human line on stderr and the tracing lines are what they were. The two lines are the last two the
+runner writes, in one write, and the detail line is printed also for a refusal that has nothing to
+say (its `message` is then `the refusal carried no sentence`).
+
+**Why a second line.** `refusal-reason=` names a state from a closed list, and most refusals have
+none of their own: they are a plain `GuardRefused`. The sentence that says which guard fired and
+what to change was on the human line only, in a pod log that goes with the pod, so a `Restore` or a
+`Backup` said "the runner exited 3 (guard-refused)" and nothing more (PoC batch 5, finding F-1).
+
+**The value is one JSON object: two string members, and a third when the run was given a token.**
+
+| member | what it is |
+|---|---|
+| `token` | The value of `--line-token`, when the run was started with one; written first. ABSENT when it was not (a run started by a person). The runner never prints it anywhere else. |
+| `code` | A member of the CLOSED set of reason codes that kind of run can print (below). It is the name the refusal's sentence opens with (`<Code>: ` or `<Code>. `) when that name is in the set, and `GuardRefused` otherwise; a sentence that opens with any other word keeps the word. ASCII letters and digits, a letter first, at most 64 bytes. |
+| `message` | The rest of the refusal's sentence, cleaned: printable ASCII and `§ – — … →` are kept, a run of whitespace or control characters is one space, a run of anything else is one `U+FFFD`; a URL has no query string and no userinfo; credential shapes read `[redacted]`. At most 760 bytes, cut on a character boundary, and a cut sentence ends with `…`. |
+
+The line is at most 2048 bytes, so CRI's 16 KiB line split never divides it.
+
+**`--line-token <hex>` and the line token.** A new flag of `restore run`, `drill run` and
+`backup run`: 32 to 128 lower-case hex digits. `weirkeeper` writes it, as the last two arguments of
+the `runner` container of every `Restore` and `Backup` Job it creates: 40 digits (160 bits) from the
+operating system's random source, fresh for each Job object, derived from nothing. A value that is
+not shaped like one is a usage error (exit 1), and so is the flag given twice. It is not a
+credential (it is in the Job's pod template for anyone who can read the Job) and it is treated as
+one in output: it is in that pod template and in the runner's one line, and in no status,
+condition, event, annotation, API response or controller log line.
+
+**A reader honours the line only when it carries the Job's token, and that is the whole test of
+whose line it is.** A pod log is stdout and stderr merged into one stream, the sentence repeats
+text from the plan, the broker and the archive, and the plan's author can start a line in the log.
+The runner escapes every line break in the error text it prints itself (`logweir::exit::one_line`,
+PROD-15.1); the Kafka client's own stderr logging is not escaped, and it can repeat a plan value
+that holds a line break. So neither a line's shape nor its place says who wrote it. The token does: it is made
+when the Job is built, and a plan is older than its Job. `weirkeeper` therefore does NOT read this
+line by key name over a tail, as erratum E4 reads the others. It reads the Job's token off the
+Job, takes the LAST `refusal-detail=` line whose `token` equals it (compared in constant time), and
+ignores every other one: a line with no token, with another Job's, or that is not the JSON object.
+A Job with no token has no line that is read. The line it takes must then be at most 2048 bytes,
+carry a code of that kind's closed set, agree with the `refusal-reason=` line written after it,
+and its sentence is cleaned again whatever the runner did. A line that carries the token and fails
+one of those is reported as "no readable reason"; another line is never used in its place.
+`logweir_core::refusal_detail` is the one implementation of both sides. What the controller does
+with it is in [docs/kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34).
+
+**The closed sets, one per kind of run.** Adding a code to a set is additive; a reader that predates
+the code does not show that line (it shows "the runner gave no readable reason").
+
+| run | codes |
+|---|---|
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation` |
+| `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
+
+**The two lines agree.** Both come from one refusal: the state on `refusal-reason=` is the detail's
+code (when the code is one of I9's states and the sentence named it with `: `) or `GuardRefused`.
+
+**Mixed versions.**
+
+- *A new runner under an older controller.* The older controller passes no `--line-token`, so the
+  line is printed without a token; it scans for `refusal-reason=` by name and ignores a line it
+  does not know. The status is what it was.
+- *A runner that does not know the flag, under this controller.* **Not supported: the runner
+  image must be at least as new as the controller.** The controller passes `--line-token` to every
+  `Restore` and `Backup` Job it creates, and such a runner stops while parsing its arguments,
+  before any work: exit 1, stdout empty, and stderr opening with
+  `error: unexpected argument '--line-token' found`. The object says `exitCode: 1`,
+  `exitReason: operational` and names no cause. This is EVERY runner image published before this
+  change, the images published from `main` since `v0.2.0-rc.1` included, and not only an older
+  release. No tagged release's runner loses a working run to it: since PROD-00.2 (release-notes
+  item 35) a runner image published before that change declares no engine, the controller gives it
+  none, and its runs already stop at exit 1 before the engine starts. The execution-contract
+  version is not what refuses anything here: it is `"2"` in `v0.2.0-rc.1` and now. One
+  `helm upgrade` of the packaged chart moves both images in one rollout (`controllerImage` and
+  `runnerImage` are rendered into one Deployment); the three ways the pair can still differ, what
+  it looks like and what to do are in
+  [docs/kubernetes.md](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
+  To roll back, move both together or the controller first. (A Job a controller had created
+  before the upgrade has no token and its run is unaffected.)
+- *A newer runner whose code this controller does not know.* The line is not shown; the state on
+  `refusal-reason=` and the exit code are recorded as always.
+- *A Job with no token, read by this controller* (it was created before the upgrade). No line is
+  read as a reason, and the condition's message is byte for byte what it was before this line
+  existed.
+
+**Not printed by the other three binaries that exit 3.** `logweir check run` prints
+`refusal-reason=CheckContractMismatch` and nothing else on stdout, `logweir notify deliver` prints
+no line at all for a refused event document, and `logweir-retention` prints
+`retention-refusal=<code>` for the one refusal the controller names. Their contracts are below and
+are unchanged, and none of them is given a line token.
+
 ### Execution contract v2: what v1 still buys, and what it may no longer carry
 
 `logweir_core::execution_contract::VERSION` is `"2"` (decision D3 §8, Amendment I). The bump is the
