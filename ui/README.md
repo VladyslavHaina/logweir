@@ -3089,7 +3089,8 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   recorded.
   Legacy mode reads the custom resource, which has no such member, and applies
   the controller's rule itself wherever the lists in hand are whole: the four
-  counts add up and the `kept` list is `keptCount` long. A negative number is
+  counts add up (with `skippedCount` where the status has it) and the `kept`
+  list is `keptCount` long, up to the status's bound of 500. A negative number is
   never a count. **The catalog view has its own row with three answers**
   (`evaluationView`): "not the whole archive" for `viewIncomplete: true`,
   printed with or without the accounting, with the sentence under it; "the

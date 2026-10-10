@@ -12745,7 +12745,7 @@
         "description": "Whether a retention evaluation records its accounting — the member a client reads BEFORE it reads `kept` (FX-22 review M1).\n\nThe response withholds `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and the `kept` rows when the status does not record an accounting that closes. Until this member existed nothing in the response said so: a client that read `kept`, the one member that predates FX-22, got no member and `truncated: false`, and read \"nothing is kept\". A policy that keeps nothing and records it publishes no `kept` member either, so the absence of the list never told the two apart.\n\nTHE DEFAULT IS `NotRecorded`, AND IT IS THE SCHEMA'S DECLARED DEFAULT. This build writes the member on every answer. A response WITHOUT it comes from a build that predates it, which publishes no accounting this reader can rely on, and \"not recorded\" is the only reading of an absent word that asserts nothing.",
         "oneOf": [
           {
-            "description": "The status records `keptCount`, `candidateCount` and `truncatedByCap`, they add up to `pointsEvaluated` with the skipped points, and its `kept` list is `keptCount` long. The counts and the `kept` rows in this response are that status's own. `keptCount: 0` with no `kept` member then means nothing is kept.",
+            "description": "The status records `keptCount`, `candidateCount` and `truncatedByCap`, they add up to `pointsEvaluated` with the skipped points, and its `kept` list is `keptCount` long (its first 500 when more are kept). The counts and the `kept` rows in this response are that status's own. `keptCount: 0` with no `kept` member then means nothing is kept.",
             "type": "string",
             "enum": [
               "Recorded"
@@ -12799,7 +12799,7 @@
             }
           },
           "keptCount": {
-            "description": "How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back.\n\nABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22); `accounting` says which. The status of a controller that did not record what the per-run ceiling held back lists those points under `kept`, so its list is not published as kept and no count is derived from it. The same holds when the status's counts do not add up to `pointsEvaluated`, or its `kept` list is not `keptCount` long, which is what an older controller leaves behind after a rollback of its image alone.",
+            "description": "How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back.\n\nABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22); `accounting` says which. The status of a controller that did not record what the per-run ceiling held back lists those points under `kept`, so its list is not published as kept and no count is derived from it. The same holds when the status's counts do not add up to `pointsEvaluated`, or its `kept` list is not `keptCount` long (up to 500), which is what an older controller leaves behind after a rollback of its image alone.",
             "type": "integer",
             "format": "int64",
             "nullable": true

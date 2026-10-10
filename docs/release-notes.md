@@ -54,8 +54,10 @@ ceiling held back), 59 (FX-48, the shared console shows what the product API pub
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
 the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
 guard-refused Restore or Backup says why in its status), 62 (FX-27 and FX-42, the engine's metrics port stays
-closed and a failed RetentionPolicy read says so) and 63 (FX-35, a restore started from a Backup is bound to
-its recovery point) so far. Items continue the next entry's
+closed and a failed RetentionPolicy read says so), 63 (FX-35, a restore started from a Backup is bound to
+its recovery point) and 64 (FX-39 and FX-40, a retention policy over more than
+500 points keeps enforcing, and no run deletes from a partial or expired
+catalog view) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -220,6 +222,10 @@ Item 62 is fix-now rows FX-27 and FX-42 (its first item), proven by render
 rows, the real-engine backup row on the compose stack and a console row
 through the page's own decoder; it changes the runner's engine documents and
 the console.
+Item 64 is fix-now rows FX-39 and FX-40 (its fail-safe only), proven by
+controller rows over a fake API and a console row; it changes the controller,
+the `RetentionPolicy` CRD (two additive status fields) and the console's legacy
+mode, and the PoC upgrade that carries it reads the two new counts.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2898,9 +2904,77 @@ Backups page and reads its review and its scorecard's time basis.
 **Rollback:** the console image; an older console builds the set-only plan
 again. Nothing is stored.
 
+#### 64. A retention policy that keeps or skips more than 500 points keeps enforcing, and an `Enforce` run never deletes from a partial or expired catalog view (FX-39, FX-40)
+
+**Changed.** `status.lastEvaluation`'s lists (`kept`, `candidates`,
+`protected`, `skipped`) are bounded at 500 by the CRD, and the controller wrote
+them whole. A policy that kept more than 500 points (hourly backups under
+`keepDays: 30` keep 720) or skipped more than 500 (a revoked signer) had its
+status write refused by the API server, published nothing new, and stopped
+enforcing. Each list now holds its first 500 entries, and two new counts,
+`protectedCount` and `skippedCount`, stand beside `keptCount` and
+`candidateCount`; the accounting adds up over the counts. An `Enforce` policy
+now starts no run from a catalog view that may not hold every point (a window,
+an unfinished walk, or a catalog that did not say: `Enforced=False/ViewIncomplete`)
+or that is past, or states no, `status.viewExpiresAt`
+(`Enforced=False/ViewExpired`). The message names what helps, the evaluation
+is still published, and nothing is deleted. A `mode: Full` catalog now
+publishes a sync resumed from its cursor as a window (`truncated: true`): that
+sync lists only the archive's tail. Where a walk began is read from the plan
+the sync Job ran under, and a sync whose plan cannot be read is a window too. **On v1 an archive of more than 5000
+points, a view the catalog cut for page space, and a Full catalog whose walk
+does not finish in one sync are never enforced.** Under both reasons
+`status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
+`LogweirEnforced`, as under `NothingFitsCeiling`; the `Enforced` condition is
+the authority. `Report` policies are unchanged,
+and so is what a run from a complete, current view deletes: its plan and
+`planSha256` are the same, so an approved digest stays approved
+([kubernetes.md](kubernetes.md) §7f).
+**Do:** apply the CRDs before the controller rolls (two additive `status`
+fields). Before the upgrade, read `status.lastEvaluation.viewIncomplete` of
+every `Enforce` policy: where it is `true`, the policy stops deleting until the
+catalog's view is whole. When the catalog's `spec.sync.viewLimit` cut the view,
+re-create the `RecoveryCatalog` with a larger one (`spec.sync` is immutable;
+5000 at most); when its walk stopped, its `Synced` condition says why; a
+`mode: Full` catalog needs a `maxObjectsPerRun` that finishes in one sync, or
+`mode: Index`.
+**Scope:** the controller over a fake API: a policy keeping 720 points and one
+skipping 600 write statuses the generated CRD schema accepts (the uncut list,
+as the control, is refused by `maxItems`) and start their approved run; a small
+policy's status is the pre-FX-39 bytes plus the two counts; an approved plan
+over a window, an unfinished walk, a silent catalog, an expired view and one
+with no expiry starts nothing and names the reason; a complete, current view
+runs the plan rendered directly from the same view; a `Report` policy over a
+partial, expired view is unchanged; a `skipped` list that is not
+`skippedCount` long reads "not recorded"
+(`crates/weirkeeper/tests/retention_policy_controller.rs`). A Full catalog's
+budget-stopped sync and its resumed sync both publish a view a retention pass
+refuses, and the same points in one sync do not
+(`crates/weirkeeper/tests/catalog_controller.rs`).
+The console's legacy mode reads the counts past the bound and applies the same
+`skipped` check (`ui/tests/d3.spec.js`). Over the 437 fixtures of FX-22's plan probe, the plan
+bytes and digests are identical to the build before. Not proven live: the PoC
+upgrade that carries it reads `protectedCount` and `skippedCount` on its
+policies.
+**Rollback:** an older controller writes the lists whole again (a policy over
+500 stops enforcing again) and starts runs from a partial view. It does not
+rewrite `protectedCount` or `skippedCount`; the accounting then compares a
+stale `skippedCount` with fresh counts and reads "not recorded" when they no
+longer add up, or when the `skipped` list it rewrote is not as long as the
+stale `skippedCount` (up to 500). An older catalog controller publishes a
+resumed Full rescan as whole again. Re-applying the older CRDs prunes the two
+fields.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
+  of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
+  policy deletes nothing from the upgrade on until its catalog's view is
+  whole. Re-create a catalog whose `viewLimit` cut its view with a larger one
+  (`spec.sync` is immutable), and read a stopped walk's `Synced` condition. An
+  archive of more than 5000 points is not enforced on v1.
 
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
   chart publishes** (item 53): with `api.console.mode: shared` and
@@ -2997,7 +3071,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62 and 63, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 and 64, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3065,7 +3139,9 @@ every `Restore` and `Backup` Job, and every runner image published before the
 change exits 1 on it (for a tagged release's runner item 35 already required
 the roll); item 62 changes the
 runner's engine documents and the console, and needs nothing; item 63 changes the
-console only and needs nothing. To roll back to
+console only and needs nothing; item 64 changes the
+controller, the `RetentionPolicy` CRD (two additive status fields) and the
+console, and needs the CRDs applied before the controller rolls. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

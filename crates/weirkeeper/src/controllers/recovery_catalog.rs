@@ -59,7 +59,9 @@ use kube::{Resource as _, ResourceExt as _};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use logweir_core::check_contract::{CheckCode, FrameExpectations, Stream};
+use logweir_core::check_contract::{
+    CatalogSyncMode, CheckCode, CheckPlan, CheckRequest, FrameExpectations, Stream,
+};
 use logweir_core::destination::DestinationRole;
 
 use crate::catalog_view::{self as view, PageConflict, SyncTrigger, TrustView, ViewLimits};
@@ -1238,6 +1240,9 @@ impl Pass<'_> {
             )
         };
 
+        // A WALK THAT DID NOT START AT THE BEGINNING OF THE ARCHIVE IS A
+        // WINDOW (FX-40 review D1): a resumed Full rescan lists only the tail.
+        let truncated = materialised.truncated || !self.walked_from_start(job).await?;
         let expires_at = view::view_expires_at(finished_at, self.interval());
         let mut status = json!({
             "observedGeneration": self.generation(),
@@ -1249,7 +1254,7 @@ impl Pass<'_> {
                 complete: Some(complete),
             },
             "counts": tally.counts,
-            "truncated": materialised.truncated,
+            "truncated": truncated,
             "histogram": view::histogram(&counts),
             "signers": signers,
             "pages": materialised
@@ -1287,9 +1292,40 @@ impl Pass<'_> {
             synced_reason,
             pages: materialised.pages.len(),
             entries: materialised.entries,
-            truncated: materialised.truncated,
+            truncated,
             job_name: Some(job_name),
         })
+    }
+
+    /// Whether the harvested Job's walk began at the start of the archive, read
+    /// from the plan it ran under: the plan `ConfigMap` the Job owns, whose
+    /// bytes must digest to the `LOGWEIR_CHECK_PLAN_SHA256` the relay was
+    /// verified against, and never from the status in hand, which may have
+    /// moved since the Job was created. A Full rescan given `rescanStartAfter`
+    /// walked only the tail; an Index walk always starts today. Anything this
+    /// cannot establish is "no", so the view is published as a window.
+    async fn walked_from_start(&self, job: &Job) -> Result<bool, ReconcileError> {
+        let pinned = frame_expectations(job, &self.uid).plan_sha256;
+        let maps: Api<ConfigMap> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
+        let Some(text) = maps
+            .get_opt(&check::plan::plan_config_map_name(&job.name_any()))
+            .await?
+            .and_then(|cm| cm.data)
+            .and_then(|mut data| data.remove(check::job::CHECK_PLAN_KEY))
+        else {
+            return Ok(false);
+        };
+        if pinned.is_empty() || logweir_core::ids::sha256_prefixed(text.as_bytes()) != pinned {
+            return Ok(false);
+        }
+        Ok(
+            match serde_json::from_str::<CheckPlan>(&text).map(|plan| plan.request) {
+                Ok(CheckRequest::CatalogSync(request)) => {
+                    request.mode == CatalogSyncMode::Index || request.rescan_start_after.is_none()
+                }
+                _ => false,
+            },
+        )
     }
 
     /// Create one immutable `ConfigMap`, accepting an identical one this sync

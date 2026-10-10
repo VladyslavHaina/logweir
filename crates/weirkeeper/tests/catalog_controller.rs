@@ -281,6 +281,16 @@ fn counts_value(total: i64, available: i64) -> Value {
 }
 
 fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool) -> String {
+    body_with_cursor(
+        pages,
+        counts,
+        signers,
+        json!({"indexShard": "2026/09/16", "complete": complete}),
+    )
+}
+
+/// [`body_for`] with the runner's cursor line spelled by the caller.
+fn body_with_cursor(pages: &[Vec<Value>], counts: Value, signers: Value, cursor: Value) -> String {
     let mut out = format!(
         "{}{}\n",
         view::FORMAT_LINE_PREFIX,
@@ -295,11 +305,7 @@ fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool)
         ));
     }
     out.push_str(&format!("{}{counts}\n", view::COUNTS_LINE_PREFIX));
-    out.push_str(&format!(
-        "{}{}\n",
-        view::CURSOR_LINE_PREFIX,
-        json!({"indexShard": "2026/09/16", "complete": complete})
-    ));
+    out.push_str(&format!("{}{cursor}\n", view::CURSOR_LINE_PREFIX));
     out.push_str(&format!("{}{signers}\n", view::SIGNERS_LINE_PREFIX));
     out
 }
@@ -447,7 +453,45 @@ fn harvest_routes(plan_sha: &str, log: String, job_owner_uid: &str) -> Vec<Route
             "/recoverycatalogs/primary/status",
             patched_catalog(),
         ),
+        plan_route(Some(plan_text(&sync_request()))),
     ]
+}
+
+/// The plan document a sync Job runs under, as its `ConfigMap` holds it.
+fn plan_text(request: &view::CatalogSyncRequest) -> String {
+    String::from_utf8(view::plan_document(UID, 900, None, request).expect("the plan renders"))
+        .expect("a plan is UTF-8")
+}
+
+/// The digest of the Index plan [`harvest_routes`] serves: what a harvested
+/// Job pins in `LOGWEIR_CHECK_PLAN_SHA256`.
+fn index_plan_sha() -> String {
+    logweir_core::ids::sha256_prefixed(plan_text(&sync_request()).as_bytes())
+}
+
+/// The `GET` of the harvested Job's own plan `ConfigMap`: `text`, or a 404
+/// for a plan that is gone.
+fn plan_route(text: Option<String>) -> Route {
+    let name = check::plan::plan_config_map_name(&periodic_stem());
+    let suffix: &'static str = Box::leak(format!("/configmaps/{name}").into_boxed_str());
+    match text {
+        Some(text) => route(
+            "GET",
+            suffix,
+            json!({"apiVersion": "v1", "kind": "ConfigMap",
+                   "metadata": {"name": name, "namespace": NS},
+                   "data": {check::job::CHECK_PLAN_KEY: text}})
+            .to_string(),
+        ),
+        None => Route {
+            method: "GET",
+            path_suffix: suffix,
+            status: 404,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                         "reason": "NotFound", "code": 404, "message": "not found"})
+            .to_string(),
+        },
+    }
 }
 
 /// A minimal but WELL-FORMED answer: `kube` deserialises every response into
@@ -1829,7 +1873,7 @@ async fn the_sync_job_carries_the_destinations_explicit_environment_and_no_crede
 /// pointer, counts, a histogram and a signer summary — and still no DELETE.
 #[tokio::test]
 async fn a_finished_sync_publishes_a_bounded_view() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let log = framed(&plan_sha, UID, &happy_body());
     let f = fixture(harvest_routes(&plan_sha, log, UID));
     let outcome = run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
@@ -1888,7 +1932,7 @@ async fn a_finished_sync_publishes_a_bounded_view() {
 /// entries and `Synced=False/PartialScan`, and NEVER `Missing`.
 #[tokio::test]
 async fn a_403_on_part_of_the_archive_is_unreadable_and_never_missing() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let mut counts = counts_value(3, 2);
     counts["unreadable"] = json!(1);
     counts["available"] = json!(2);
@@ -1942,7 +1986,7 @@ async fn a_403_on_part_of_the_archive_is_unreadable_and_never_missing() {
 /// ONE entry's state; the sync still completes.
 #[tokio::test]
 async fn a_record_from_a_future_major_is_one_unsupported_entry_and_not_a_failed_sync() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let mut future = entry_value(
         "lwp1-dddddddddddddddddddddddddddddddd",
         10,
@@ -1985,7 +2029,7 @@ async fn a_record_from_a_future_major_is_one_unsupported_entry_and_not_a_failed_
 /// summary names the key id an administrator has to act on.
 #[tokio::test]
 async fn an_unknown_signer_is_untrusted_and_never_offered() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let body = body_for(
         &[vec![entry_value(
             "lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -2030,7 +2074,7 @@ async fn an_unknown_signer_is_untrusted_and_never_offered() {
 /// `False`, and nothing is presented as verified evidence.
 #[tokio::test]
 async fn with_no_trust_material_nothing_is_offered_and_the_condition_says_why() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &happy_body()), UID);
     routes[0] = route("GET", "/trustrosters/default", empty_roster_body());
     let f = fixture(routes);
@@ -2062,7 +2106,7 @@ async fn with_no_trust_material_nothing_is_offered_and_the_condition_says_why() 
 /// impostor's output. D-SEAMS **S6**, defect `SEC-PODLOG`.
 #[tokio::test]
 async fn an_impostor_pod_is_never_read() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &happy_body()), UID);
     // The listing answers with a pod whose controller owner is NOT this Job.
     let pods = routes
@@ -2102,7 +2146,7 @@ async fn an_impostor_pod_is_never_read() {
 /// and nothing is read from it — a name is not an identity.
 #[tokio::test]
 async fn a_job_owned_by_something_else_is_refused_and_never_read() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
@@ -2132,7 +2176,7 @@ async fn a_job_owned_by_something_else_is_refused_and_never_read() {
 /// view is retained.
 #[tokio::test]
 async fn a_tampered_relay_writes_no_page_and_keeps_the_previous_view() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let body = happy_body().replace(
         "\"availability\":\"Available\"",
         "\"availability\":\"Missing\"",
@@ -2368,7 +2412,7 @@ async fn a_legacy_archive_catalog_is_refused_by_name_and_creates_no_job() {
 /// A foreign page name refuses the whole publish rather than adopting it.
 #[tokio::test]
 async fn a_page_name_taken_by_a_foreign_object_refuses_the_publish() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let stem = periodic_stem();
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let page_path: &'static str =
@@ -2418,7 +2462,7 @@ async fn a_page_name_taken_by_a_foreign_object_refuses_the_publish() {
 /// **Seam S7 in both halves, on every status write this reconciler makes.**
 #[tokio::test]
 async fn every_status_write_is_a_conditional_merge_patch() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let f = fixture(harvest_routes(
         &plan_sha,
         framed(&plan_sha, UID, &happy_body()),
@@ -2743,7 +2787,7 @@ fn a_revoked_key_is_not_trusted_and_its_points_are_named() {
 /// not over the sixteen rows `status.signers` can display.
 #[tokio::test]
 async fn the_status_counts_every_untrusted_signer_and_displays_sixteen() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let signers: Vec<Value> = (0..20)
         .map(|i| json!({"keyId": format!("{i:064x}"), "points": 1}))
         .collect();
@@ -2852,7 +2896,7 @@ async fn an_expired_view_is_cleared_on_the_refusal_path_too() {
 /// **Review finding F2, the sync-failure path.**
 #[tokio::test]
 async fn an_expired_view_is_cleared_when_a_sync_result_does_not_read() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let stem = periodic_stem();
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     // The tracked Job is present but its RESULT does not read; the PREVIOUS
@@ -3397,7 +3441,7 @@ fn policy_list(items: Vec<Value>) -> String {
 /// roster route stays and still lists [`TRUSTED_KEY`]: a namespace a policy
 /// governs must not consult it.
 fn harvest_with_policies(body: &str, policies: String) -> Fixture {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, body), UID);
     let at = routes
         .iter()
@@ -4061,7 +4105,7 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
 /// refuses the unrecorded route).
 #[tokio::test]
 async fn a_synced_policy_store_resolves_the_catalog_without_a_list() {
-    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let plan_sha = index_plan_sha();
     let routes: Vec<Route> = harvest_routes(
         &plan_sha,
         framed(&plan_sha, UID, &policy_signed_body()),
@@ -4327,4 +4371,284 @@ fn a_schema_dependency_over_its_id_or_side_cap_is_a_malformed_entry() {
         assert_eq!(parsed.skipped_entries, 1, "{what}");
         assert_eq!(parsed.pages[0].skipped, 1, "{what}");
     }
+}
+
+// ===========================================================================
+// FX-40 review D1: a resumed Full rescan is the archive's tail, not the whole
+// ===========================================================================
+
+/// A runner entry for point `i` of a Full walk, in its own backup set.
+fn full_entry(i: usize) -> Value {
+    let mut entry = ok_entry(
+        &format!("lwp1-{i:032}"),
+        1_758_000_000_000 - i64::try_from(i).expect("small") * 3_600_000,
+    );
+    entry["backupId"] = json!(format!("set-{i}"));
+    entry["manifestKey"] = json!(format!("team-a/set-{i}/manifest.json"));
+    entry
+}
+
+/// What the harvest finds at the Job's own plan `ConfigMap`.
+enum PlanAtHarvest {
+    /// The plan the Job was given: a Full rescan after this key, or from the
+    /// start.
+    Given(Option<&'static str>),
+    /// No plan: an older Job, or one whose plan is gone.
+    Gone,
+    /// A plan whose bytes are not the ones the Job pinned.
+    NotPinned,
+}
+
+/// A Full plan with `maxObjectsPerRun: 1000`, resuming after `start_after`.
+fn full_plan(start_after: Option<&str>) -> String {
+    let mut request = sync_request();
+    request.mode = weirkeeper::crds::recovery_catalog::SyncMode::Full.into();
+    request.max_objects_per_run = 1000;
+    request.rescan_start_after = start_after.map(ToString::to_string);
+    plan_text(&request)
+}
+
+/// One harvest of a `mode: Full` catalog (`maxObjectsPerRun: 1000`) whose
+/// status in hand carries `cursor_in_hand` and whose Job finds `plan`, over
+/// the runner's `entries` and its cursor line. Returns the published status
+/// and the page `ConfigMap`s.
+async fn full_harvest(
+    cursor_in_hand: Option<Value>,
+    plan: PlanAtHarvest,
+    entries: &[Value],
+    cursor: Value,
+) -> (Value, Vec<Value>) {
+    let total = i64::try_from(entries.len()).expect("small");
+    let body = body_with_cursor(
+        &[entries.to_vec()],
+        counts_value(total, total),
+        json!([{"keyId": TRUSTED_KEY, "points": total, "principalHint": "runner"}]),
+        cursor,
+    );
+    let (pinned, served) = match plan {
+        PlanAtHarvest::Given(after) => (full_plan(after), Some(full_plan(after))),
+        PlanAtHarvest::Gone => (full_plan(Some("k")), None),
+        PlanAtHarvest::NotPinned => (full_plan(Some("k")), Some(full_plan(None))),
+    };
+    let plan_sha = logweir_core::ids::sha256_prefixed(pinned.as_bytes());
+    let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &body), UID);
+    routes.pop();
+    routes.push(plan_route(served));
+    let f = fixture(routes);
+    let mut status = tracked_status(&periodic_stem());
+    if let Some(cursor) = cursor_in_hand {
+        status["cursor"] = cursor;
+    }
+    let spec = json!({"sync": {"intervalSeconds": 3600, "mode": "Full",
+        "maxObjectsPerRun": 1000, "deepCheck": "ManifestDigest", "viewLimit": 2000}});
+    run(&f, &catalog(spec.clone(), status)).await;
+    (
+        f.patched_status()["status"].clone(),
+        f.posted("/configmaps"),
+    )
+}
+
+/// The `Enforced` reason of one `Enforce` retention pass over the catalog that
+/// published `status` and `pages`, the points it evaluated, and the methods it
+/// sent. No digest is
+/// approved, so no pass creates a Job; the reason says which gate stopped it
+/// (`fx40_` in `retention_policy_controller.rs` approve one).
+async fn retention_over(status: &Value, pages: &[Value]) -> (String, Value, Vec<String>) {
+    use weirkeeper::controllers::retention_policy as retention;
+    let catalog_body = catalog_value(json!({}), status.clone()).to_string();
+    let list = |kind: &str| {
+        json!({"apiVersion": "v1", "kind": format!("{kind}List"),
+               "metadata": {"resourceVersion": "1"}, "items": []})
+        .to_string()
+    };
+    let policy = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RetentionPolicy",
+        "metadata": {"name": "retain", "namespace": NS,
+                     "uid": "16161616-0000-4000-8000-000000000016",
+                     "generation": 1, "resourceVersion": "9"},
+        "spec": {
+            "destinationRef": {"name": DEST}, "catalogRef": {"name": NAME},
+            "scope": {"prefix": "team-a"},
+            "rules": {"keepLast": 2, "minUsablePoints": 3},
+            "mode": "Enforce",
+            "enforcement": {"credentialSecretRef": {"name": "retention-delete"},
+                "schedule": "17 4 * * *", "requireApprovedPlan": true,
+                "planMaxAgeSeconds": 3600, "maxDeletionsPerRun": 50,
+                "maxObjectsPerRun": 20000, "deadlineSeconds": 1800}
+        },
+        "status": {}
+    });
+    let mut routes = vec![
+        route("GET", "/retentionpolicies", list("RetentionPolicy")),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("GET", "/recoverycatalogs/primary", catalog_body),
+        route("GET", "/backups", list("Backup")),
+        route("GET", "/restores", list("Restore")),
+        route(
+            "PATCH",
+            "/retentionpolicies/retain/status",
+            policy.to_string(),
+        ),
+    ];
+    for page in pages {
+        let name = page["metadata"]["name"].as_str().expect("a page name");
+        let suffix: &'static str = Box::leak(format!("/configmaps/{name}").into_boxed_str());
+        routes.push(route("GET", suffix, page.to_string()));
+    }
+    let f = fixture(routes);
+    let installation = check::policy::Policy::defaults();
+    let image = RunnerImage::default();
+    let outcome = retention::reconcile_policy(
+        &serde_json::from_value(policy).expect("a RetentionPolicy"),
+        &retention::PolicyContext {
+            client: &f.client,
+            policy: &installation,
+            runner_image: &image,
+            now: now(),
+        },
+    )
+    .await
+    .expect("the retention pass reaches a verdict");
+    let evaluated = f
+        .bodies
+        .lock()
+        .expect("the body recorder")
+        .iter()
+        .filter(|b| b.method == "PATCH")
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("JSON"))
+        .find_map(|p| {
+            p["status"]["lastEvaluation"]
+                .get("pointsEvaluated")
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    let methods = f.seen().into_iter().map(|(m, _)| m).collect();
+    (outcome.enforced_reason.to_string(), evaluated, methods)
+}
+
+/// **A `mode: Full` catalog whose walk its budget stops (`maxObjectsPerRun:
+/// 1000`, about 199 points of a 300-point archive) is refused by an `Enforce`
+/// retention policy on the budget-stopped sync AND on the resumed one.** The
+/// resumed sync lists only the keys after its cursor and reaches the end, so
+/// its walk is `complete` and its 101 points fit `viewLimit`; it published
+/// that tail with `truncated: false`, and the run guard let a run start on
+/// 101 of 300 points. It is now published as a window.
+///
+/// CONTROL: a Full walk that finishes in one sync (no cursor in hand) is not
+/// a window, and the run guard passes it.
+///
+/// MUTANT: `"truncated": materialised.truncated` (the resumed flag dropped).
+#[tokio::test]
+async fn fx40_a_resumed_full_rescan_is_a_window_and_starts_no_run() {
+    let head: Vec<Value> = (0..199).map(full_entry).collect();
+    let tail: Vec<Value> = (199..300).map(full_entry).collect();
+    let cursor_key = "logweir/backups/set-198/r.receipt.json";
+
+    let (stopped, stopped_pages) = full_harvest(
+        None,
+        PlanAtHarvest::Given(None),
+        &head,
+        json!({"rescanStartAfter": cursor_key, "complete": false}),
+    )
+    .await;
+    assert_eq!(stopped["cursor"]["complete"], false);
+    assert_eq!(stopped["cursor"]["rescanStartAfter"], cursor_key);
+    let (reason, evaluated, methods) = retention_over(&stopped, &stopped_pages).await;
+    assert_eq!(reason, "ViewIncomplete", "the budget-stopped sync");
+    assert_eq!(evaluated, 199, "the evaluation is still published");
+    assert!(!methods.iter().any(|m| m == "POST"), "{methods:?}");
+
+    let (resumed, resumed_pages) = full_harvest(
+        Some(stopped["cursor"].clone()),
+        PlanAtHarvest::Given(Some(cursor_key)),
+        &tail,
+        json!({"complete": true}),
+    )
+    .await;
+    assert_eq!(resumed["cursor"]["complete"], true);
+    assert_eq!(resumed["counts"]["total"], 101, "the tail alone");
+    assert_eq!(resumed["truncated"], true, "the tail is a window");
+    let (reason, evaluated, methods) = retention_over(&resumed, &resumed_pages).await;
+    assert_eq!(reason, "ViewIncomplete", "the resumed sync");
+    assert_eq!(evaluated, 101);
+    assert!(!methods.iter().any(|m| m == "POST"), "{methods:?}");
+
+    // CONTROL: the same 300 points in one sync.
+    let all: Vec<Value> = (0..300).map(full_entry).collect();
+    let (whole, whole_pages) = full_harvest(
+        None,
+        PlanAtHarvest::Given(None),
+        &all,
+        json!({"complete": true}),
+    )
+    .await;
+    assert_eq!(whole["truncated"], false);
+    let (reason, evaluated, _) = retention_over(&whole, &whole_pages).await;
+    assert_eq!(evaluated, 300);
+    assert_eq!(
+        reason, "NothingToDo",
+        "past the view gate, stopped by the cadence (04:17 is older than planMaxAgeSeconds)"
+    );
+}
+
+/// **The tail is a window whatever the status says at harvest** (the
+/// security note on D1). Whether a walk began at the start is read from the
+/// plan the harvested Job ran under, never from the status in hand, which
+/// another pass, a later write or an upgrade may have moved: a Job given
+/// `rescanStartAfter` is a window though the status's cursor was cleared or
+/// replaced before its harvest, and so is a Job whose plan is gone or is not
+/// the one it pinned (fail closed). No retention run starts from it.
+///
+/// MUTANTS: `resumed` read from the status again; a missing plan read as
+/// "from the start"; the digest check removed.
+#[tokio::test]
+async fn fx40_a_tail_is_a_window_whatever_the_status_says_at_harvest() {
+    let tail: Vec<Value> = (199..300).map(full_entry).collect();
+    let given = "logweir/backups/set-198/r.receipt.json";
+    for (what, in_hand, plan) in [
+        (
+            "the status cursor cleared",
+            None,
+            PlanAtHarvest::Given(Some(given)),
+        ),
+        (
+            "the status cursor replaced",
+            Some(json!({"complete": true})),
+            PlanAtHarvest::Given(Some(given)),
+        ),
+        (
+            "the plan gone",
+            Some(json!({"rescanStartAfter": given, "complete": false})),
+            PlanAtHarvest::Gone,
+        ),
+        (
+            "a plan the Job did not pin",
+            Some(json!({"rescanStartAfter": given, "complete": false})),
+            PlanAtHarvest::NotPinned,
+        ),
+    ] {
+        let (status, pages) = full_harvest(in_hand, plan, &tail, json!({"complete": true})).await;
+        assert_eq!(status["truncated"], true, "{what}");
+        let (reason, _, methods) = retention_over(&status, &pages).await;
+        assert_eq!(reason, "ViewIncomplete", "{what}");
+        assert!(!methods.iter().any(|m| m == "POST"), "{what}: {methods:?}");
+    }
+}
+
+/// **CONTROL: a Job given no cursor whose walk finishes is not a window**,
+/// though the status in hand carries a cursor a later write left there.
+#[tokio::test]
+async fn fx40_a_walk_given_no_cursor_is_whole_whatever_the_status_says() {
+    let all: Vec<Value> = (0..300).map(full_entry).collect();
+    let (status, _) = full_harvest(
+        Some(
+            json!({"rescanStartAfter": "logweir/backups/set-9/r.receipt.json",
+                    "complete": false}),
+        ),
+        PlanAtHarvest::Given(None),
+        &all,
+        json!({"complete": true}),
+    )
+    .await;
+    assert_eq!(status["truncated"], false);
 }

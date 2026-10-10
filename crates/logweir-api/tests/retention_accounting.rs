@@ -361,6 +361,7 @@ async fn the_response_says_whether_the_accounting_is_recorded() {
             {"pointId": "a", "reason": "Unreadable"},
             {"pointId": "b", "reason": "Unreadable"}
         ]);
+        ev["skippedCount"] = json!(2);
     }
 
     let fake = FakeKube::new();
