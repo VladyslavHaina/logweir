@@ -3458,9 +3458,12 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
             CONFLICT_BODY.to_string(),
         )
     };
-    for (what, routes) in [
+    let reachable = reachable_cluster().await;
+    for (what, object, at, routes) in [
         (
             "the crash of a finished pod-less Job",
+            cluster(),
+            now(),
             superseded(every_route(
                 reaping_job(true, false, false),
                 NO_PODS.to_string(),
@@ -3468,6 +3471,8 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
         ),
         (
             "the refusal of a finished pod-less Job",
+            cluster(),
+            now(),
             superseded(podless_probe_routes(
                 podless_probe_job("2026-09-10T11:59:15Z", true),
                 probe_events(Some(QUOTA_REFUSAL)),
@@ -3475,6 +3480,8 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
         ),
         (
             "the fail-fast refusal of a running Job",
+            cluster(),
+            now(),
             superseded(podless_probe_routes(
                 podless_probe_job("2026-09-10T11:59:15Z", false),
                 probe_events(Some(QUOTA_REFUSAL)),
@@ -3482,12 +3489,30 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
         ),
         (
             "ProbeRunning",
+            cluster(),
+            now(),
             superseded(every_route(running_job_body(), NO_PODS.to_string())),
+        ),
+        // FX-19 fix round: the two `ProbeStale` writes.
+        (
+            "ProbeStale for a stalled deletion",
+            reachable.clone(),
+            past_the_bound(),
+            superseded(every_route(
+                reaping_job(true, true, true),
+                NO_PODS.to_string(),
+            )),
+        ),
+        (
+            "ProbeStale for a reading too old to write",
+            cluster(),
+            past_the_bound(),
+            superseded(finished_routes(0, log_body(&i14_tail()))),
         ),
     ] {
         let log = CapturedLog::start();
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
-        let outcome = reconcile_cluster(&cluster(), &client, now())
+        let outcome = reconcile_cluster(&object, &client, at)
             .await
             .expect("a lost precondition is an outcome");
         let seen = bodies.lock().expect("readable").clone();
@@ -3496,6 +3521,7 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
             Some(Deferred::StatusSuperseded),
             "{what}: {outcome:?}"
         );
+        assert_eq!(outcome.reason, None, "{what}: nothing was recorded");
         assert_eq!(
             count(&seen, "PATCH", "/status"),
             1,
