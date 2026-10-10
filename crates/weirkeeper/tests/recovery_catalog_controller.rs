@@ -2068,3 +2068,116 @@ async fn fx11_control_no_event_keeps_the_deadline_path() {
         "DeadlineExceeded"
     );
 }
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished sync Job flaps nothing here
+// ===========================================================================
+
+/// **FX-19 CLASS SWEEP, catalog sync: A HARVESTED SYNC JOB THE TTL CONTROLLER
+/// IS COLLECTING IS NOT RE-JUDGED.** The sync Job carries its TTL from
+/// creation (`catalog_view::ttl_seconds`, at least an hour), so its foreground
+/// delete — `deletionTimestamp` set, pod gone — reaches a catalog whose record
+/// already names THIS Job's completion (`recovery_catalog::harvested_record`,
+/// checked before `harvest` in `run`). No pod list, no log, no `Synced=False`,
+/// nothing above debug.
+///
+/// NEGATIVE CONTROL: the same Job under a record that does NOT name its
+/// completion (`finishedAt` absent: never harvested) is harvested — pod-less,
+/// so `Synced=False` and a WARN — which is the read the gate prevents.
+#[tokio::test]
+async fn fx19_a_harvested_sync_job_being_collected_is_not_rejudged() {
+    let stem = leak(request_stem("token-1"));
+    let published_at = at(2026, 9, 16, 12, 2, 0);
+    let collected_job = || {
+        let mut job: Value = serde_json::from_str(&job_body(
+            stem,
+            JOB_UID_1,
+            "sha256:first",
+            Some((published_at - chrono::Duration::seconds(120), published_at)),
+        ))
+        .expect("the fixture is JSON");
+        job["spec"]["ttlSecondsAfterFinished"] = json!(view::ttl_seconds(INTERVAL));
+        job["metadata"]["deletionTimestamp"] = json!(stamp(at(2026, 9, 16, 12, 30, 0)));
+        job["metadata"]["finalizers"] = json!(["foregroundDeletion"]);
+        job.to_string()
+    };
+    let routes = |extra: Vec<Route>| {
+        let mut routes = vec![
+            route("GET", "/trustrosters/default", roster_body()),
+            route("GET", "/trustpolicies", no_trust_policies()),
+            route("GET", job_path(stem), collected_job()),
+            status_route(),
+        ];
+        routes.extend(extra);
+        routes
+    };
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let f = fixture(routes(Vec::new()));
+    let outcome = run_at(
+        &f,
+        &catalog(
+            json!({"syncRequest": "token-1"}),
+            published_status(stem, "token-1", published_at),
+        ),
+        at(2026, 9, 16, 12, 30, 0),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Idle);
+    assert!(
+        !f.listed_pods() && !f.read_a_pod_log(),
+        "a harvested Job being collected is not read: {:?}",
+        f.seen()
+    );
+    for patch in f.status_patches() {
+        if let Some(conditions) = patch["status"]["conditions"].as_array() {
+            assert!(
+                !conditions
+                    .iter()
+                    .any(|c| c["type"] == "Synced" && c["status"] == "False"),
+                "the published sync is not re-judged: {patch}"
+            );
+        }
+    }
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: never harvested — the same Job IS read, and judged.
+    let mut unharvested = published_status(stem, "token-1", published_at);
+    unharvested["lastSyncJob"]["finishedAt"] = Value::Null;
+    let log = weirkeeper::testing::CapturedLog::start();
+    let f = fixture(routes(vec![
+        route(
+            "GET",
+            "/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+        ),
+        route(
+            "GET",
+            "/events",
+            json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": []})
+                .to_string(),
+        ),
+    ]));
+    run_at(
+        &f,
+        &catalog(json!({"syncRequest": "token-1"}), unharvested),
+        at(2026, 9, 16, 12, 30, 0),
+    )
+    .await;
+    assert!(
+        f.listed_pods(),
+        "the unharvested Job is read: {:?}",
+        f.seen()
+    );
+    assert_eq!(
+        condition(&f.patched_status(), "Synced")["status"],
+        "False",
+        "and, pod-less, judged a failed sync"
+    );
+    assert_eq!(log.at("WARN").len(), 1, "{:?}", log.messages_at("WARN"));
+}

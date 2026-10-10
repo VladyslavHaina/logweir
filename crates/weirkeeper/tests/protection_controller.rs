@@ -5810,3 +5810,63 @@ fn fx20_a_refused_sink_is_a_failed_delivery_named_credential_binding_mismatch() 
     assert_eq!(delivered["status"], json!("False"));
     assert_eq!(delivered["reason"], json!("CredentialBindingMismatch"));
 }
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished delivery Job flaps nothing
+// ===========================================================================
+
+/// **FX-19 CLASS SWEEP, `ProtectionPolicy` delivery: A RECORDED DELIVERY
+/// WHOSE JOB THE TTL CONTROLLER IS COLLECTING IS NEVER READ.** The delivery
+/// TTL is patched only on a committed status (`controllers/protection_policy.rs`,
+/// "The TTL, LAST, and only on a committed status"), and a delivery Job is
+/// read only while its ledger entry is `Pending` (`observe_delivery`'s first
+/// guard) — so the Job's foreground delete (`deletionTimestamp`, TTL, pod gone)
+/// reaches an entry already `Delivered`, which costs no Job read and logs
+/// nothing above debug.
+///
+/// NEGATIVE CONTROL: the same Job under the same entry still `Pending` IS read
+/// (and, pod-less, judged a failed attempt) — the read this row's zero is
+/// about is reachable.
+#[test]
+fn fx19_a_recorded_delivery_whose_job_is_being_collected_is_never_read() {
+    let collected = |name: &str| {
+        let mut job: Value =
+            serde_json::from_str(&finished_job(name, "Complete")).expect("the fixture is JSON");
+        job["spec"]["ttlSecondsAfterFinished"] = json!(pp::DELIVERY_TTL_SECONDS);
+        job["metadata"]["deletionTimestamp"] = json!(p::rfc3339(now()));
+        job["metadata"]["finalizers"] = json!(["foregroundDeletion"]);
+        job.to_string()
+    };
+    let (pending, routes, job_path) = pending_delivery(1, collected, None);
+    let mut value = serde_json::to_value(&pending).expect("the policy serialises");
+    value["status"]["alerts"][0]["delivery"]["state"] = json!("Delivered");
+    let recorded: ProtectionPolicy =
+        serde_json::from_value(value).expect("the recorded policy parses");
+    let read_the_job = |recorder: &Recorder| {
+        requests(recorder)
+            .iter()
+            .any(|(m, u)| m == "GET" && path_of(u).ends_with(job_path))
+    };
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let (_outcome, recorder, _bodies) = drive(&recorded, routes.clone());
+    assert!(
+        !read_the_job(&recorder),
+        "a recorded delivery's Job is not read: {:?}",
+        requests(&recorder)
+    );
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: the entry still Pending — the Job IS read.
+    let (_outcome, recorder, _bodies) = drive(&pending, routes);
+    assert!(
+        read_the_job(&recorder),
+        "a pending delivery's Job is read: {:?}",
+        requests(&recorder)
+    );
+}

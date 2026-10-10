@@ -2122,6 +2122,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "one peer's share of the console's connections",
             "MAX_CONNECTIONS_PER_PEER",
         ),
+        // FX-19 (2026-10-09, item 54): a probe Job Kubernetes is collecting
+        // is not a crash; the field that says it is being collected.
+        (
+            "a probe Job being collected does not clear reachable",
+            "metadata.deletionTimestamp",
+        ),
     ];
     assert_eq!(
         items.len(),
