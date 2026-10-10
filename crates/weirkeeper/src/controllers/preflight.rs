@@ -2637,6 +2637,25 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
             let f = found.as_ref();
             let e = &f.entry;
             let at = scope(&f.catalog, Some(f.catalog_uid.clone()));
+            // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS REFUSED FIRST, and
+            // for what it is. Asked of `facts_from` itself and before
+            // anything else of the row is read: nothing such an entry says is
+            // a fact about a recovery point, so no binding is compared with
+            // it, no signer is judged from it and no refusal is tied to it.
+            if !e.is_evidence() {
+                return Some(
+                    mk(CheckState::NotReady, CheckCode::CatalogPointNotSelectable)
+                        .with_scope(at)
+                        .with_message(&format!(
+                            "the catalog lists `{}` as {} without a record it could read; what                              the entry shows is the catalog index's unverified claim, and a                              restore is never bound to it",
+                            e.point_id,
+                            e.availability.as_str()
+                        ))
+                        .with_remedy(e.remedy.as_deref().unwrap_or(
+                            "Choose a point the catalog marks restorable, or restore this                              archive from the command line, which reads and verifies the                              signed receipt itself.",
+                        )),
+                );
+            }
             if let Some(verdict) = &f.refused_by {
                 return Some(
                     mk(CheckState::NotReady, CheckCode::CatalogPointRefusedByController)

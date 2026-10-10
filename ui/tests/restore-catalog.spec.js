@@ -48,6 +48,8 @@ import {
   restoreCatalogPointRoute,
   restoreReadinessRequest,
   restoreRouteParams,
+  isIndexClaim,
+  INDEX_CLAIM_REFUSAL,
   setCatalogTopics,
   validateRestore,
   wizardDraftValues,
@@ -55,11 +57,19 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
+  indexClaimNote,
   pointRow,
   consumerPositionsNote,
   renderPoints,
 } from "../pages/catalog.js";
-import { latestRestorablePoint, readSchedulePoints, restoreCell } from "../pages/schedules.js";
+import {
+  catalogRefuses,
+  latestRestorablePoint,
+  pointsForRun,
+  readSchedulePoints,
+  restoreCell,
+  verdictCells,
+} from "../pages/schedules.js";
 import { renderPlanBytes } from "../plan.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -1018,4 +1028,115 @@ test("prod041_h1_a_point_selecting_the_most_groups_is_offered_and_counts_what_it
   const unreadable = row({ availability: "Unreadable", selectable: false,
     consumerPositions: undefined });
   assert.equal(catalogPointOffer(unreadable, page([])).offer, false);
+});
+
+// ------------------------------------------------------------------- FX-33
+//
+// A ROW WITH NO RECORD BEHIND IT IS INFORMATION, NEVER EVIDENCE. The catalog
+// lists every point it counts, so a point whose record it could not read is a
+// row too -- built from an object key and, at best, an UNSIGNED index row,
+// which anyone who can write a key under the catalog's log prefix can plant.
+
+/** Such a row, exactly as `GET .../catalogs/{name}/points` publishes one: no
+ *  receipt key or digest, no manifest, no window, no location, no signer. */
+function claimRow(over) {
+  return Object.assign({
+    pointId: OTHER,
+    backupId: SET,
+    runId: "01JB7Z00000000000000000000",
+    recoveryPointAt: "2026-09-22T14:00:00Z",
+    availability: "Unreadable",
+    verification: "NotAttempted",
+    selectable: false,
+    receiptKey: "",
+    receiptSha256: "",
+    cause: { document: "record", reason: "overReadCap", bytes: 15820066, capBytes: 6131072 },
+    factsFrom: "indexRow",
+    remedy: "The catalog record of this recovery point is larger than the 6131072-byte bound.",
+  }, over || {});
+}
+
+test("fx33_a_row_with_no_record_behind_it_is_never_offered_whatever_it_carries", () => {
+  assert.equal(isIndexClaim(claimRow()), true);
+  assert.equal(isIndexClaim(row()), false);
+  const refused = catalogPointOffer(claimRow(), page([]));
+  assert.equal(refused.offer, false);
+  assert.ok(refused.reason.indexOf(INDEX_CLAIM_REFUSAL) === 0, refused.reason);
+  // THE RULE IS ASKED OF `factsFrom` ITSELF. A row that carried a whole
+  // selectable binding AND `factsFrom` -- which no server publishes -- is
+  // still refused, for that reason and no other; a word a newer server adds
+  // is still one.
+  for (const from of ["indexRow", "key", "somethingNewer", ""]) {
+    const forged = catalogPointOffer(row({ factsFrom: from }), page([]));
+    assert.equal(forged.offer, false, JSON.stringify(from));
+    assert.ok(forged.reason.indexOf(INDEX_CLAIM_REFUSAL) === 0, forged.reason);
+  }
+  // CONTROL: the same row without it is offered.
+  assert.deepEqual(catalogPointOffer(row(), page([])), { offer: true, reason: null });
+});
+
+test("fx33_a_planted_row_naming_a_runs_set_changes_nothing_about_that_run", () => {
+  // The run's set id is in the planted row; nothing else ties them.
+  const planted = noteCatalogSource(claimRow(), "archive", page([]), "primary");
+  const mine = noteCatalogSource(row(), "archive", page([]), "primary");
+  const digestless = unverifiedRun("NotAttempted", "");
+  // 1. The run's catalog rows: the planted one is not among them, so a run
+  //    that reported no digest still has exactly one row and is offered.
+  assert.deepEqual(catalogRowsForBackup(digestless, [planted, mine]), [mine]);
+  assert.deepEqual(pointsForRun(digestless, [planted, mine]), [mine]);
+  assert.equal(backupCatalogOffer(digestless, [planted, mine], page([])).offer, true);
+  // 2. The schedule detail: the same cells, the same link, the same verdict
+  //    words, with the planted row and without it.
+  for (const run of [unverifiedRun("NotAttempted"), digestless]) {
+    assert.equal(restoreCell(NS, run, [planted, mine]), restoreCell(NS, run, [mine]));
+    assert.deepEqual(verdictCells(pointsForRun(run, [planted, mine]), null),
+      verdictCells(pointsForRun(run, [mine]), null));
+    assert.equal(catalogRefuses(run, [planted, mine]), false);
+  }
+  // 3. Alone, it is nothing: the run is "not in the catalog", never refused
+  //    by it and never offered from it.
+  assert.deepEqual(pointsForRun(digestless, [planted]), []);
+  assert.equal(catalogRefuses(digestless, [planted]), false);
+  assert.equal(backupCatalogOffer(digestless, [planted], page([])).offer, false);
+  // CONTROL: a row WITH a record that is not selectable does refuse the set
+  // -- the rule the planted row must not be able to trigger.
+  const real = noteCatalogSource(row({ pointId: OTHER, availability: "Unreadable",
+    selectable: false }), "archive", page([]), "primary");
+  assert.equal(catalogRefuses(digestless, [real, mine]), true);
+  assert.equal(catalogRowsForBackup(digestless, [real, mine]).length, 2);
+});
+
+test("fx33_the_catalog_table_shows_such_a_row_as_unverified_and_offers_no_restore", () => {
+  const cells = pointRow(claimRow(), NS, "archive", "primary", page([]));
+  assert.match(cells[0], /data-restore-refused="unverified"/);
+  assert.doesNotMatch(cells.join(""), /data-restore-point=|Restore this point/);
+  assert.match(cells[1], /Not verified/);
+  assert.match(cells[1], /data-facts-from="indexRow"/);
+  assert.match(cells[1], /Its record is 15820066 bytes; the bound is 6131072\./);
+  assert.match(cells[1], /Its unsigned index row says: backup set <code>/);
+  assert.match(cells[1], /Nothing verified that\./);
+  // Even a row forged to look selectable, with a whole binding, gets no link.
+  const forged = pointRow(row({ factsFrom: "indexRow" }), NS, "archive", "primary", page([]));
+  assert.match(forged[0], /data-restore-refused="unverified"/);
+  assert.doesNotMatch(forged.join(""), /data-restore-point=|Restore this point/);
+  // A KEY-ONLY ROW names no set, and says so.
+  const keyOnly = indexClaimNote(claimRow({ factsFrom: "key", backupId: "", runId: "",
+    cause: { document: "record", reason: "malformed" } }));
+  assert.match(keyOnly, /Only its object key names it\./);
+  assert.doesNotMatch(keyOnly, /index row says|bytes/);
+  // WHAT THE ROW CLAIMS IS TEXT NOBODY SIGNED: an id that is not an
+  // identifier is not printed at all, and nothing reaches the page unescaped.
+  const hostile = pointRow(claimRow({
+    backupId: "<img src=x onerror=alert(1)>",
+    runId: "a".repeat(200),
+    factsFrom: "\"><script>alert(1)</script>",
+    cause: { document: "<b>", reason: "overReadCap", bytes: 1, capBytes: 2 },
+  }), NS, "archive", "primary", page([])).join("");
+  assert.doesNotMatch(hostile, /<img|<script|<b>|onerror=alert\(1\)>/);
+  assert.doesNotMatch(hostile, /a{200}/);
+  assert.doesNotMatch(hostile, /index row says/, "neither id is an identifier");
+  // CONTROL: a row with a record carries none of this.
+  const real = pointRow(row(), NS, "archive", "primary", page([]));
+  assert.doesNotMatch(real.join(""), /Not verified|data-facts-from|data-restore-refused/);
+  assert.match(real[0], /Restore this point/);
 });

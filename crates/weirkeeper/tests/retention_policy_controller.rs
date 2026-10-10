@@ -74,6 +74,7 @@ fn point(id: &str, age_days: i64) -> plan::PointFacts {
         segment_keys: Vec::new(),
         bytes: Some(1024),
         refused_by_controller: false,
+        claim_only: false,
     }
 }
 
@@ -7656,4 +7657,176 @@ async fn fx19_a_harvested_runs_job_being_collected_is_never_read() {
         "the unharvested run's Job is read: {:?}",
         f.seen()
     );
+}
+
+// ===========================================================================
+// FX-33 — a point that is only a claim may keep more, and never less
+// ===========================================================================
+
+/// A point with no record behind it, as `point_facts` projects the view's
+/// entry: no location, no manifest, `Unreadable`, and the set its UNSIGNED
+/// index row names.
+fn claim(id: &str, set: &str, age_days: i64) -> plan::PointFacts {
+    plan::PointFacts {
+        point_id: id.to_string(),
+        backup_id: set.to_string(),
+        recovery_point_at_ms: now_ms() - age_days * DAY_MS,
+        locations: Vec::new(),
+        availability: Availability::Unreadable,
+        verification: Verification::NotAttempted,
+        manifest_key: None,
+        segment_keys: Vec::new(),
+        bytes: None,
+        refused_by_controller: false,
+        claim_only: true,
+    }
+}
+
+/// **The view's entry becomes a claim, and only a claim.** `point_facts`
+/// marks an entry with `factsFrom`, and gives it no location and no manifest
+/// because the entry has none.
+#[test]
+fn fx33_a_view_entry_with_no_record_behind_it_is_projected_as_a_claim() {
+    use weirkeeper::controllers::retention_policy::point_facts;
+    let entry: weirkeeper::catalog_view::ViewEntry = serde_json::from_value(serde_json::json!({
+        "pointId": "lwp1-cccccccccccccccccccccccccccccccc",
+        "backupId": "set-p2",
+        "recoveryPointAtMs": now_ms(),
+        "availability": "Unreadable",
+        "verification": "NotAttempted",
+        "selectable": false,
+        "cause": {"document": "record", "reason": "overReadCap",
+                  "bytes": 15_820_066_u64, "capBytes": 6_131_072_u64},
+        "factsFrom": "indexRow",
+    }))
+    .expect("a claim is a view entry");
+    let facts = point_facts(&entry, &Default::default());
+    assert!(facts.claim_only);
+    assert_eq!(facts.backup_id, "set-p2");
+    assert!(facts.locations.is_empty() && facts.manifest_key.is_none());
+    assert!(!facts.refused_by_controller);
+}
+
+/// **Retention may keep more on an index row's word, and never less.**
+///
+/// Three real points under `keepLast 1`: `p2` and `p3` are candidates. Then
+/// a claim that names `p2`'s set, dated newest of all:
+///
+/// - it is never counted, never usable, never kept, never a candidate;
+/// - it takes NO keep rank: `p1` is still the kept point;
+/// - the set it names is retained — `p2` is protected `SharedSegment` —
+///   because "the catalog could not read this point" must not authorise
+///   deleting what the point says it is made of;
+/// - nothing else moves: `p3` is still a candidate, and the candidates with
+///   the claim are a subset of the candidates without it.
+///
+/// That protection is exactly as good as the row: whoever can write a key
+/// under the catalog's log prefix can keep a set from expiring. They cannot
+/// make retention delete one. (The stronger rule is FX-40's.)
+///
+/// KILLS: retention releasing a protection, or taking a keep rank, on the
+/// row's word (the forged claim below takes rank 0 and `p1` is planned).
+#[test]
+fn fx33_a_point_that_is_only_a_claim_keeps_more_and_never_less() {
+    let real = || vec![point("p1", 1), point("p2", 2), point("p3", 3)];
+    let without = evaluate(&real(), rules(Some(1), None, 1));
+    assert_eq!(candidate_ids(&without), vec!["p2", "p3"], "CONTROL");
+
+    let mut points = real();
+    points.push(claim("ghost", "set-p2", 0));
+    let with = evaluate(&points, rules(Some(1), None, 1));
+    assert_eq!(with.points_evaluated, 3, "a claim is not counted");
+    assert!(
+        !with.kept.iter().any(|id| id == "ghost")
+            && !candidate_ids(&with).contains(&"ghost")
+            && !with.skipped.iter().any(|s| s.point_id == "ghost"),
+        "a claim is not a point of this destination at all"
+    );
+    assert_eq!(with.kept[0], "p1", "the newest real point keeps its rank");
+    assert_eq!(candidate_ids(&with), vec!["p3"]);
+    assert_eq!(protected_reason(&with, "p2"), Some("SharedSegment"));
+    assert!(with.retained.backup_ids.contains("set-p2"));
+    for id in candidate_ids(&with) {
+        assert!(
+            candidate_ids(&without).contains(&id),
+            "{id} is planned only because of a claim"
+        );
+    }
+
+    // THE RULE DOES NOT REST ON THE CLAIM BEING EMPTY. A claim forged to
+    // carry this destination's location, a manifest key and both passing
+    // axes, dated newest: still never ranked, never usable, never planned.
+    let mut forged = claim("ghost", "set-ghost", 0);
+    forged.locations = vec![LOCATION.to_string()];
+    forged.availability = Availability::Available;
+    forged.verification = Verification::Verified;
+    forged.manifest_key = Some(format!("{SCOPE}/set-ghost/manifest.json"));
+    assert!(plan::skip_reason(&forged).is_some(), "never usable");
+    let mut points = real();
+    points.push(forged.clone());
+    let with = evaluate(&points, rules(Some(1), None, 1));
+    assert_eq!(with.points_evaluated, 3);
+    assert_eq!(with.kept[0], "p1");
+    assert_eq!(candidate_ids(&with), vec!["p2", "p3"]);
+    // An old forged claim is never planned either, whatever the rules want.
+    let mut old = forged.clone();
+    old.recovery_point_at_ms = now_ms() - 400 * DAY_MS;
+    let mut points = real();
+    points.push(old);
+    let with = evaluate(&points, rules(Some(1), Some(30), 1));
+    assert!(!candidate_ids(&with).contains(&"ghost"));
+
+    // NEGATIVE CONTROL: the same forged facts WITHOUT the mark are a real
+    // point: it takes the keep rank, and `p1` — the newest real point — is
+    // planned. That is what the mark forbids.
+    let mut unmarked = forged;
+    unmarked.claim_only = false;
+    let mut points = real();
+    points.push(unmarked);
+    let with = evaluate(&points, rules(Some(1), None, 1));
+    assert_eq!(with.kept[0], "ghost");
+    assert!(candidate_ids(&with).contains(&"p1"));
+}
+
+/// **A claim releases no protection of another kind either**: a hold and an
+/// active restore on a real point stand, with the claim present, exactly as
+/// without it.
+#[test]
+fn fx33_a_claim_releases_no_hold_and_no_active_restore() {
+    let hold = plan::Hold {
+        point_id: "p2".to_string(),
+        reason: "case 4471".to_string(),
+        until: None,
+    };
+    let protection = plan::Protection {
+        active_restore: std::collections::BTreeSet::from(["p3".to_string()]),
+        refused: std::collections::BTreeMap::new(),
+    };
+    let real = || {
+        vec![
+            point("p1", 1),
+            point("p2", 2),
+            point("p3", 3),
+            point("p4", 4),
+        ]
+    };
+    let run = |points: &[plan::PointFacts]| {
+        evaluate_with(
+            points,
+            rules(Some(1), None, 1),
+            &protection,
+            std::slice::from_ref(&hold),
+        )
+    };
+    let without = run(&real());
+    let mut points = real();
+    // Claims naming the held set, the restoring set and a set of their own.
+    points.push(claim("ghost-a", "set-p2", 0));
+    points.push(claim("ghost-b", "set-p3", 0));
+    points.push(claim("ghost-c", "set-ghost", 0));
+    let with = run(&points);
+    assert_eq!(protected_reason(&with, "p2"), Some("Hold"));
+    assert_eq!(protected_reason(&with, "p3"), Some("ActiveRestore"));
+    assert_eq!(candidate_ids(&with), candidate_ids(&without));
+    assert_eq!(candidate_ids(&with), vec!["p4"]);
 }

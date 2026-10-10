@@ -4051,6 +4051,9 @@ pub fn point_facts(entry: &ViewEntry, refusals: &view::ControllerRefusals) -> Po
         segment_keys: Vec::new(),
         bytes: None,
         refused_by_controller: refusals.refusal_for(entry).is_some(),
+        // FX-33: an entry with no record behind it is a claim. It keeps the
+        // set it names and decides nothing else (`PointFacts::claim_only`).
+        claim_only: !entry.is_evidence(),
     }
 }
 

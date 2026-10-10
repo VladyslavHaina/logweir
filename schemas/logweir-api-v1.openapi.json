@@ -10084,6 +10084,38 @@
           }
         }
       },
+      "PointCauseView": {
+        "description": "*FX-33.** Why a point's examination stopped at one document.",
+        "type": "object",
+        "required": [
+          "document",
+          "reason"
+        ],
+        "properties": {
+          "bytes": {
+            "description": "The document's size in bytes, when the store reported one (`overReadCap`).",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "capBytes": {
+            "description": "The bound it was read under, in bytes (`overReadCap`).",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "document": {
+            "description": "`record`, `receipt` or `manifest`. An open word: a newer runner may name another document.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "`overReadCap`, `readFailed`, `notFound`, `malformed` or `unsupportedFormat`. An open word, for the same reason.",
+            "type": "string"
+          }
+        }
+      },
       "PointConsumerPositionsView": {
         "description": "**PROD-04.1.** A recovery point's consumer position evidence, as the catalog's view lists it: how fresh the snapshot is against the recovery point, and per selected group its outcome and how many of its positions relate to archived data. Never a position: the positions are in the signed receipt, which the point record binds by digest.",
         "type": "object",
@@ -10448,6 +10480,11 @@
             "type": "string",
             "nullable": true
           },
+          "cause": {
+            "description": "**FX-33.** The document the catalog's examination of this point stopped at, and why — present when the point is not `Available` because of one document. A SIZE (`overReadCap`, with the size and the bound in bytes) and a CONTENT fault (`malformed`) are named as what they are; neither is a permission or network failure.",
+            "$ref": "#/components/schemas/PointCauseView",
+            "nullable": true
+          },
           "consumerPositions": {
             "description": "**PROD-04.1.** The consumer position evidence of the groups the backup selected, from a point record that agreed with its verified receipt. ABSENT is NOT PUBLISHED: the backup selected no group, the point predates format 1.7.0, the catalog was synced by an older runner, or the point is not `Available`.",
             "$ref": "#/components/schemas/PointConsumerPositionsView",
@@ -10463,6 +10500,11 @@
             "description": "The end of the window it covers. The restore window's end is inclusive, so a plan restores to `coveredTo` minus one millisecond.",
             "type": "string",
             "format": "date-time",
+            "nullable": true
+          },
+          "factsFrom": {
+            "description": "**FX-33.** Present when NO RECORD stands behind this entry — the catalog counted the point and could not read its record: `indexRow` (`backupId` and `runId` are what the catalog's UNSIGNED index row says) or `key` (they are empty; only the object key named the point).\n\n**Such an entry is information and never evidence.** It is never `selectable`; `receiptKey` and `receiptSha256` are empty strings and there is no manifest, window, location, signer or topic list — nothing a restore plan could be bound to. `recoveryPointAt`, when present, is the instant the index key carries. Nothing in it was verified.",
+            "type": "string",
             "nullable": true
           },
           "formatVersion": {

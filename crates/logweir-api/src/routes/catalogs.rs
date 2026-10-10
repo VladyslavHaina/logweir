@@ -653,6 +653,44 @@ pub struct PointView {
     /// the point is not `Available`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<PointConsumerPositionsView>,
+    /// **FX-33.** The document the catalog's examination of this point
+    /// stopped at, and why — present when the point is not `Available`
+    /// because of one document. A SIZE (`overReadCap`, with the size and the
+    /// bound in bytes) and a CONTENT fault (`malformed`) are named as what
+    /// they are; neither is a permission or network failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<PointCauseView>,
+    /// **FX-33.** Present when NO RECORD stands behind this entry — the
+    /// catalog counted the point and could not read its record: `indexRow`
+    /// (`backupId` and `runId` are what the catalog's UNSIGNED index row
+    /// says) or `key` (they are empty; only the object key named the point).
+    ///
+    /// **Such an entry is information and never evidence.** It is never
+    /// `selectable`; `receiptKey` and `receiptSha256` are empty strings and
+    /// there is no manifest, window, location, signer or topic list — nothing
+    /// a restore plan could be bound to. `recoveryPointAt`, when present, is
+    /// the instant the index key carries. Nothing in it was verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facts_from: Option<String>,
+}
+
+/// **FX-33.** Why a point's examination stopped at one document.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointCauseView {
+    /// `record`, `receipt` or `manifest`. An open word: a newer runner may
+    /// name another document.
+    pub document: String,
+    /// `overReadCap`, `readFailed`, `notFound`, `malformed` or
+    /// `unsupportedFormat`. An open word, for the same reason.
+    pub reason: String,
+    /// The document's size in bytes, when the store reported one
+    /// (`overReadCap`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// The bound it was read under, in bytes (`overReadCap`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_bytes: Option<u64>,
 }
 
 /// The longest topic name Kafka accepts.
@@ -666,23 +704,55 @@ fn instant(ms: i64) -> Option<DateTime<Utc>> {
 /// published `selectable` is computed, so the `selectable=true` filter and the
 /// row can never disagree.
 fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
+    // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS PUBLISHED AS WHAT IT IS.
+    // Asked of `facts_from` itself: never selectable, whatever else the entry
+    // carries; no window (it has none, and `0` is not 1970); and its instant
+    // only when its key carried one.
+    let evidence = entry.is_evidence();
     let backup_verdict = refusals.refusal_for(entry).map(|r| bounded(r, 32));
     PointView {
         point_id: bounded(&entry.point_id, 128),
         backup_id: bounded(&entry.backup_id, 128),
         run_id: bounded(&entry.run_id, 64),
-        recovery_point_at: instant(entry.recovery_point_at_ms),
-        covered_from: instant(entry.covered_from_ms),
-        covered_to: instant(entry.covered_to_ms),
+        recovery_point_at: Some(entry.recovery_point_at_ms)
+            .filter(|ms| evidence || *ms > 0)
+            .and_then(instant),
+        covered_from: evidence.then(|| instant(entry.covered_from_ms)).flatten(),
+        covered_to: evidence.then(|| instant(entry.covered_to_ms)).flatten(),
         availability: entry.availability.as_str().to_string(),
         verification: entry.verification.as_str().to_string(),
-        selectable: entry.selectable && backup_verdict.is_none(),
+        selectable: evidence && entry.selectable && backup_verdict.is_none(),
         backup_verdict,
         signer_key_id: entry.signer_key_id.as_deref().map(|k| bounded(k, 64)),
-        receipt_key: bounded(&entry.receipt_key, 1024),
-        receipt_sha256: bounded(&entry.receipt_sha256, 80),
-        manifest_key: entry.manifest_key.as_deref().map(|k| bounded(k, 1024)),
-        manifest_sha256: entry.manifest_sha256.as_deref().map(|d| bounded(d, 80)),
+        // NOTHING A PLAN COULD BE BOUND TO leaves here for such an entry,
+        // whatever it carries.
+        receipt_key: if evidence {
+            bounded(&entry.receipt_key, 1024)
+        } else {
+            String::new()
+        },
+        receipt_sha256: if evidence {
+            bounded(&entry.receipt_sha256, 80)
+        } else {
+            String::new()
+        },
+        manifest_key: entry
+            .manifest_key
+            .as_deref()
+            .filter(|_| evidence)
+            .map(|k| bounded(k, 1024)),
+        manifest_sha256: entry
+            .manifest_sha256
+            .as_deref()
+            .filter(|_| evidence)
+            .map(|d| bounded(d, 80)),
+        cause: entry.cause.as_ref().map(|c| PointCauseView {
+            document: bounded(&c.document, 32),
+            reason: bounded(&c.reason, 32),
+            bytes: c.bytes,
+            cap_bytes: c.cap_bytes,
+        }),
+        facts_from: entry.facts_from.map(|f| f.as_str().to_string()),
         locations: entry
             .locations
             .iter()

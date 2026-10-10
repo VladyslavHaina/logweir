@@ -5870,3 +5870,102 @@ fn fx19_a_recorded_delivery_whose_job_is_being_collected_is_never_read() {
         requests(&recorder)
     );
 }
+
+// ===========================================================================
+// FX-33 — a catalog entry with no record behind it answers nothing
+// ===========================================================================
+
+/// **A catalog entry with no record behind it answers nothing for a policy:
+/// it makes no point available, places none in time, is no second match for
+/// a `Backup`, and opens no `ArchiveUnavailable`.**
+///
+/// The catalog lists every point it counts, so a point whose record it could
+/// not read is in the view too, carrying at best the `backupId` an UNSIGNED
+/// index row names — and whoever can write a key under the catalog's log
+/// prefix chooses that. A candidate with no receipt digest is joined to the
+/// view by set id, so without this rule a planted row would (1) make the real
+/// row ambiguous, leaving the point unplaceable, and (2) page
+/// `ArchiveUnavailable` over a healthy archive.
+///
+/// KILLS: `entries_for` matching a `factsFrom` entry (any of the three
+/// effects below returns); a claim counted as protection.
+#[test]
+fn fx33_a_catalog_entry_with_no_record_behind_it_answers_nothing_for_a_policy() {
+    let spec = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let unread = [no_receipt_point(2)];
+    let real = || entry_in_set(&point_id("b-1"), "set-1", "Available", "Verified");
+    // As the view publishes a claim that names this policy's set.
+    let claim: p::CatalogEntry = serde_json::from_value(json!({
+        "pointId": point_id("ghost"),
+        "backupId": "set-1",
+        "recoveryPointAtMs": 1_700_000_000_000_i64,
+        "availability": "Unreadable",
+        "verification": "NotAttempted",
+        "selectable": false,
+        "cause": {"document": "record", "reason": "overReadCap"},
+        "factsFrom": "indexRow",
+    }))
+    .expect("a claim parses leniently");
+    assert!(!claim.is_evidence() && real().is_evidence());
+    let verdict_over = |catalog: &p::CatalogAnswer| {
+        p::evaluate(&inputs(
+            &spec,
+            &unread,
+            catalog,
+            &schedules,
+            &[],
+            &rehearsal,
+        ))
+    };
+
+    // 1. BESIDE THE REAL ROW IT CHANGES NOTHING.
+    let honest = p::CatalogAnswer::Fresh(vec![real()]);
+    let planted = p::CatalogAnswer::Fresh(vec![claim.clone(), real()]);
+    assert!(p::is_available(&unread[0], &spec, &planted));
+    assert_eq!(
+        p::catalog_entry_for(&unread[0], &planted),
+        p::catalog_entry_for(&unread[0], &honest),
+        "the real row is still THE row: a claim is no second match"
+    );
+    assert!(p::catalog_entry_for(&unread[0], &planted).is_some());
+    let (with, without) = (verdict_over(&planted), verdict_over(&honest));
+    assert_eq!(with.health, without.health);
+    assert_eq!(with.health, p::Health::Healthy);
+    assert_eq!(with.open_kinds, without.open_kinds);
+
+    // 2. ALONE, the catalog does not know this point: not available, not
+    //    placed, and no archive alert on a row's word.
+    let alone = p::CatalogAnswer::Fresh(vec![claim.clone()]);
+    assert!(!p::is_available(&unread[0], &spec, &alone));
+    assert!(p::catalog_entry_for(&unread[0], &alone).is_none());
+    assert!(!verdict_over(&alone)
+        .open_kinds
+        .contains(&p::PolicyAlertKind::ArchiveUnavailable));
+
+    // 3. FORGED to carry everything a sound row carries: still nothing, for
+    //    any value of the field (a word a newer controller adds is still one).
+    for from in [json!("indexRow"), json!("key"), json!("newer"), json!({})] {
+        let forged = p::CatalogEntry {
+            facts_from: Some(from.clone()),
+            ..real()
+        };
+        assert!(
+            !p::is_available(&unread[0], &spec, &p::CatalogAnswer::Fresh(vec![forged])),
+            "{from}"
+        );
+    }
+
+    // CONTROLS: the same rows WITH a record behind them do each of those
+    // things, so the three assertions above can fail.
+    let unreadable = || entry_in_set(&point_id("ghost"), "set-1", "Unreadable", "NotAttempted");
+    let two = p::CatalogAnswer::Fresh(vec![unreadable(), real()]);
+    assert!(
+        p::catalog_entry_for(&unread[0], &two).is_none(),
+        "two rows with records for one set ARE ambiguous"
+    );
+    assert!(verdict_over(&p::CatalogAnswer::Fresh(vec![unreadable()]))
+        .open_kinds
+        .contains(&p::PolicyAlertKind::ArchiveUnavailable));
+}

@@ -1242,6 +1242,8 @@ fn the_counters_are_a_projection_and_the_residue_is_named() {
             not_attempted: 3,
         },
         by_day: vec![],
+        unreadable_over_read_cap: 0,
+        unreadable_malformed: 0,
     };
     let signers = vec![
         SignerSummary {
@@ -3114,6 +3116,11 @@ fn the_frame_expectations_come_from_the_job_that_ran() {
 
 /// The runner's pinned body, read out of `crates/logweir/tests/check_cli.rs`.
 fn runner_pinned_body() -> String {
+    runner_pinned("PINNED_SYNC_BODY")
+}
+
+/// The raw literal `name` out of the runner's own test file.
+fn runner_pinned(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -3121,15 +3128,15 @@ fn runner_pinned_body() -> String {
         .join("crates/logweir/tests/check_cli.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-    const OPEN: &str = "const PINNED_SYNC_BODY: &str = r#\"";
-    let at = source.find(OPEN).unwrap_or_else(|| {
+    let open = format!("const {name}: &str = r#\"");
+    let at = source.find(&open).unwrap_or_else(|| {
         panic!(
-            "`PINNED_SYNC_BODY` is gone from {}; the runner no longer pins the body this parser \
+            "`{name}` is gone from {}; the runner no longer pins the body this parser \
              is the oracle for",
             path.display()
         )
     });
-    let rest = &source[at + OPEN.len()..];
+    let rest = &source[at + open.len()..];
     let end = rest.find("\"#;").expect("the raw literal closes");
     let body = rest[..end].to_string();
     assert!(
@@ -4327,4 +4334,501 @@ fn a_schema_dependency_over_its_id_or_side_cap_is_a_malformed_entry() {
         assert_eq!(parsed.skipped_entries, 1, "{what}");
         assert_eq!(parsed.pages[0].skipped, 1, "{what}");
     }
+}
+
+// ===========================================================================
+// FX-33 — an entry with no record behind it: listed, and never evidence
+// ===========================================================================
+
+/// What a published entry with no record behind it may carry on a page line.
+const RECORDLESS_PAGE_FIELDS: [&str; 10] = [
+    "pointId",
+    "backupId",
+    "runId",
+    "recoveryPointAtMs",
+    "formatVersion",
+    "availability",
+    "verification",
+    "selectable",
+    "remedy",
+    "cause",
+];
+
+/// The pinned record-less body's three entries: one with a record, one whose
+/// facts are an index row's claim, one whose facts are its key's alone.
+fn recordless_entries() -> (RunnerEntry, RunnerEntry, RunnerEntry, RunnerCounts) {
+    let body = runner_pinned("PINNED_RECORDLESS_SYNC_BODY");
+    let parsed = view::parse_body(&body, 2000).unwrap_or_else(|e| {
+        panic!("the runner's own pinned record-less body does not parse here: {e}\n{body}")
+    });
+    assert_eq!(parsed.skipped_entries, 0, "no entry line was skipped");
+    let mut entries = parsed.entries();
+    assert_eq!(entries.len(), 3);
+    let key_only = entries.pop().unwrap();
+    let claim = entries.pop().unwrap();
+    let real = entries.pop().unwrap();
+    (real, claim, key_only, parsed.counts.expect("a counts line"))
+}
+
+/// The claim's own line of the pinned body, as JSON.
+fn claim_line() -> Value {
+    runner_pinned("PINNED_RECORDLESS_SYNC_BODY")
+        .lines()
+        .filter_map(|l| l.strip_prefix(view::ENTRY_LINE_PREFIX))
+        .map(|l| serde_json::from_str::<Value>(l).expect("an entry line is JSON"))
+        .find(|e| e["factsFrom"] == "indexRow")
+        .expect("the pinned body carries an index-row claim")
+}
+
+fn body_of_one(entry: &Value) -> String {
+    body_for(&[vec![entry.clone()]], counts_value(1, 0), json!([]), true)
+}
+
+/// **THE CROSS-CRATE GUARD, for an entry with no record behind it.** The
+/// bytes the runner emits for a point whose record gave no facts are bytes
+/// this parser reads, as what they are — and the view the controller
+/// publishes from them lists the point, says why, and carries nothing a
+/// restore could be bound to.
+///
+/// KILLS: the controller skipping (or refusing the body over) an entry that
+/// carries a `cause` and no receipt facts — the point vanishing from the
+/// view again, one layer up.
+#[test]
+fn the_runners_pinned_recordless_body_is_one_this_parser_reads() {
+    let (real, claim, key_only, counts) = recordless_entries();
+    assert!(real.facts_from.is_none() && real.cause.is_none());
+    assert_eq!(real.availability, Availability::Available);
+    assert!(!real.receipt_key.is_empty());
+
+    assert_eq!(claim.facts_from, Some(view::FactsFrom::IndexRow));
+    assert_eq!(claim.availability, Availability::Unreadable);
+    assert_eq!(claim.signature, SignatureVerdict::NotAttempted);
+    assert_eq!(
+        (claim.backup_id.as_str(), claim.run_id.as_str()),
+        ("set-b", "run-b")
+    );
+    assert!(claim.recovery_point_at_ms > 0, "the index key's instant");
+    let cause = claim.cause.as_ref().expect("a cause");
+    assert_eq!(
+        (cause.document.as_str(), cause.reason.as_str()),
+        ("record", "overReadCap")
+    );
+    assert_eq!(
+        (cause.bytes, cause.cap_bytes),
+        (Some(6_131_073), Some(6_131_072))
+    );
+
+    assert_eq!(key_only.facts_from, Some(view::FactsFrom::Key));
+    assert!(key_only.backup_id.is_empty() && key_only.run_id.is_empty());
+    assert_eq!(
+        key_only.cause.as_ref().map(|c| c.reason.as_str()),
+        Some("malformed")
+    );
+    for entry in [&claim, &key_only] {
+        assert!(
+            entry.receipt_key.is_empty()
+                && entry.receipt_sha256.is_empty()
+                && entry.manifest_key.is_none()
+                && entry.manifest_sha256.is_none()
+                && entry.locations.is_empty()
+                && entry.signer_key_id.is_none()
+                && entry.topics.is_empty()
+                && (entry.covered_from_ms, entry.covered_to_ms) == (0, 0),
+            "nothing a restore binds to: {entry:?}"
+        );
+        assert!(entry.remedy.is_some(), "a point not offered says why");
+    }
+    assert_eq!(
+        (
+            counts.total,
+            counts.unreadable,
+            counts.unreadable_over_read_cap,
+            counts.unreadable_malformed
+        ),
+        (3, 2, 1, 1)
+    );
+
+    // THE VIEW THE CONTROLLER PUBLISHES FROM IT, under a trust source that
+    // would accept the signer of every point.
+    let trust = trust_with(
+        "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        TrustKeyState::Active,
+        None,
+    );
+    let published = view::materialise(
+        vec![real, claim.clone(), key_only],
+        counts.total,
+        &trust,
+        &ViewLimits::from_settings(&catalog(json!({}), json!({})).spec.sync),
+        now(),
+    );
+    assert_eq!(published.entries, 3, "every counted point is in the view");
+    let page = &published.pages[0];
+    let lines: Vec<&str> = page.body.lines().collect();
+    assert_eq!(lines.len(), 3);
+    for (entry, line) in page.entries.iter().zip(&lines) {
+        let Some(from) = entry.facts_from else {
+            continue;
+        };
+        assert!(!entry.selectable && !entry.is_evidence());
+        assert_eq!(entry.verification, Verification::NotAttempted);
+        assert_eq!(entry.availability, Availability::Unreadable);
+        assert!(entry.cause.is_some());
+        // The page line: what a reader of the ConfigMap sees.
+        let on_the_page: Value = serde_json::from_str(line).expect("a page line is JSON");
+        for field in on_the_page.as_object().expect("an object").keys() {
+            assert!(
+                RECORDLESS_PAGE_FIELDS.contains(&field.as_str()) || field == "factsFrom",
+                "a published claim carries `{field}`: {line}"
+            );
+        }
+        assert_eq!(on_the_page["factsFrom"], from.as_str());
+        assert_eq!(on_the_page["selectable"], false);
+        // And it reads back as the same entry.
+        let back: view::ViewEntry = serde_json::from_str(line).expect("the line parses");
+        assert_eq!(&back, entry);
+    }
+    assert_eq!(
+        page.entries
+            .iter()
+            .filter(|e| e.facts_from.is_some())
+            .count(),
+        2
+    );
+}
+
+/// **An entry line that is both a claim and evidence is MALFORMED, and is not
+/// published.** `factsFrom` beside `Available`, a receipt key, a digest, a
+/// manifest, a window, a location, a signer, topics, a signature verdict, a
+/// point id or an identifier that is not one, or the wrong identifiers for
+/// its kind: each is skipped and counted, as any malformed entry is. The body
+/// is a pod's stdout, so the runner's own rule is applied again to what was
+/// read.
+///
+/// KILLS: `Available` for a `factsFrom` entry; a `factsFrom` entry supplying
+/// a receipt key or a digest; an index row's text published unchecked.
+#[test]
+fn fx33_an_entry_line_that_is_both_a_claim_and_evidence_is_malformed() {
+    let base = claim_line();
+    let parsed = view::parse_body(&body_of_one(&base), 2000).expect("the body parses");
+    assert_eq!(
+        (parsed.entries().len(), parsed.skipped_entries),
+        (1, 0),
+        "CONTROL: the runner's own claim line is an entry"
+    );
+    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        (
+            "Available",
+            Box::new(|e| e["availability"] = json!("Available")),
+        ),
+        (
+            "a receipt key",
+            Box::new(|e| e["receiptKey"] = json!("logweir/backups/x/y.receipt.json")),
+        ),
+        (
+            "an empty receipt key",
+            Box::new(|e| e["receiptKey"] = json!("")),
+        ),
+        (
+            "a receipt digest",
+            Box::new(|e| e["receiptSha256"] = json!(format!("sha256:{}", "a".repeat(64)))),
+        ),
+        (
+            "a manifest key",
+            Box::new(|e| e["manifestKey"] = json!("x/manifest.json")),
+        ),
+        (
+            "a manifest digest",
+            Box::new(|e| e["manifestSha256"] = json!(format!("sha256:{}", "b".repeat(64)))),
+        ),
+        (
+            "a window start",
+            Box::new(|e| e["coveredFromMs"] = json!(1)),
+        ),
+        ("a window end", Box::new(|e| e["coveredToMs"] = json!(2))),
+        (
+            "a location",
+            Box::new(|e| e["locations"] = json!([{"locationId": "s3://lw/x"}])),
+        ),
+        (
+            "a signer",
+            Box::new(|e| e["signerKeyId"] = json!(TRUSTED_KEY)),
+        ),
+        (
+            "topics",
+            Box::new(|e| e["topics"] = json!([{"name": "orders"}])),
+        ),
+        ("a topic count", Box::new(|e| e["topicsOmitted"] = json!(3))),
+        (
+            "owner detection",
+            Box::new(|e| e["ownerDetection"] = json!([])),
+        ),
+        (
+            "a verified signature",
+            Box::new(|e| e["signature"] = json!("verified")),
+        ),
+        (
+            "an invalid signature",
+            Box::new(|e| e["signature"] = json!("invalid")),
+        ),
+        (
+            "no evidence",
+            Box::new(|e| e["signature"] = json!("noEvidence")),
+        ),
+        (
+            "markup as a point id",
+            Box::new(|e| e["pointId"] = json!("<script>alert(1)</script>")),
+        ),
+        (
+            "a point id that is not hex",
+            Box::new(|e| e["pointId"] = json!(format!("lwp1-{}", "z".repeat(32)))),
+        ),
+        (
+            "a short point id",
+            Box::new(|e| e["pointId"] = json!("lwp1-abc")),
+        ),
+        (
+            "markup as a set id",
+            Box::new(|e| e["backupId"] = json!("<img src=x onerror=alert(1)>")),
+        ),
+        (
+            "a set id with a space",
+            Box::new(|e| e["backupId"] = json!("set b")),
+        ),
+        (
+            "a path as a set id",
+            Box::new(|e| e["backupId"] = json!("../../etc/passwd")),
+        ),
+        (
+            "a set id past its bound",
+            Box::new(|e| e["backupId"] = json!("a".repeat(129))),
+        ),
+        (
+            "a run id past its bound",
+            Box::new(|e| e["runId"] = json!("r".repeat(65))),
+        ),
+        (
+            "a key-only entry that names a set",
+            Box::new(|e| e["factsFrom"] = json!("key")),
+        ),
+        (
+            "an index-row entry that names nothing",
+            Box::new(|e| {
+                let o = e.as_object_mut().unwrap();
+                o.remove("backupId");
+                o.remove("runId");
+            }),
+        ),
+        (
+            "a factsFrom nobody defined",
+            Box::new(|e| e["factsFrom"] = json!("signedRecord")),
+        ),
+        (
+            "a cause reason that is not a word",
+            Box::new(|e| e["cause"]["reason"] = json!("over read cap")),
+        ),
+        (
+            "a cause document past its bound",
+            Box::new(|e| e["cause"]["document"] = json!("d".repeat(33))),
+        ),
+        (
+            "an empty cause word",
+            Box::new(|e| e["cause"]["reason"] = json!("")),
+        ),
+    ];
+    for (what, edit) in &edits {
+        let mut line = base.clone();
+        edit(&mut line);
+        let parsed = view::parse_body(&body_of_one(&line), 2000).expect("the body still parses");
+        assert_eq!(
+            (parsed.entries().len(), parsed.skipped_entries),
+            (0, 1),
+            "a claim carrying {what} is malformed and is not published: {line}"
+        );
+    }
+    // AND AN ENTRY WITHOUT `factsFrom` STILL CARRIES ALL SEVEN FACTS, as every
+    // entry always has: leaving one out does not make it a claim.
+    let whole = ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1_758_000_000_000);
+    for fact in [
+        "backupId",
+        "runId",
+        "recoveryPointAtMs",
+        "coveredFromMs",
+        "coveredToMs",
+        "receiptKey",
+        "receiptSha256",
+    ] {
+        let mut line = whole.clone();
+        line.as_object_mut().unwrap().remove(fact);
+        let parsed = view::parse_body(&body_of_one(&line), 2000).expect("the body parses");
+        assert_eq!(
+            (parsed.entries().len(), parsed.skipped_entries),
+            (0, 1),
+            "an entry with a record behind it and no `{fact}` is malformed"
+        );
+    }
+}
+
+/// **A claim never replaces, merges into or contradicts an entry with a
+/// record, and two claims of one point are one.** A planted row for a point
+/// whose record reads cannot reach the view as that point (the runner never
+/// emits one), and if it did, the entry with the record is the entry.
+///
+/// KILLS: a `factsFrom` entry replacing a real point, or flagging it
+/// `Conflict` (a planted row hiding a restorable point).
+#[test]
+fn fx33_a_claim_never_replaces_merges_with_or_contradicts_an_entry_with_a_record() {
+    let (real, claim, _, _) = recordless_entries();
+    let mut about_the_real_point = claim.clone();
+    about_the_real_point.point_id = real.point_id.clone();
+    for order in [
+        vec![real.clone(), about_the_real_point.clone()],
+        vec![about_the_real_point.clone(), real.clone()],
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1, "one point is one entry");
+        assert_eq!(merged[0], real, "the entry with the record, untouched");
+    }
+    // Two claims of one point, saying different things, are one claim: the
+    // first, and never a `Conflict` about a point.
+    let mut second = claim.clone();
+    second.backup_id = "another-set".to_string();
+    let merged = view::merge_entries(vec![claim.clone(), second]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0], claim);
+
+    // CONTROL: two entries WITH records that disagree about one point are a
+    // `Conflict` — the rule a claim must not be able to trigger.
+    let mut disagrees = real.clone();
+    disagrees.backup_id = "another-set".to_string();
+    let merged = view::merge_entries(vec![real, disagrees]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].availability, Availability::Conflict);
+}
+
+/// **A published claim is never selectable, whatever it carries and whatever
+/// the trust source says** — decided from `factsFrom` itself — and a page
+/// line that says otherwise is not a view entry.
+///
+/// KILLS: `selectable` computed from the two axes alone for a `factsFrom`
+/// entry; a page line with `factsFrom` and a receipt key read as an entry.
+#[test]
+fn fx33_a_published_claim_is_never_selectable_whatever_it_carries() {
+    let (real, claim, _, _) = recordless_entries();
+    let signer = real
+        .signer_key_id
+        .clone()
+        .expect("the real point names its signer");
+    let trust = trust_with(&signer, TrustKeyState::Active, None);
+    // An entry no parser would produce: everything a selectable point has,
+    // a signature this installation trusts, AND `facts_from`.
+    let mut forged = real.clone();
+    forged.signature = SignatureVerdict::Verified;
+    assert!(
+        view::view_entry(forged.clone(), &trust, now()).selectable,
+        "CONTROL: with a record behind it, this entry IS selectable"
+    );
+    for from in [view::FactsFrom::IndexRow, view::FactsFrom::Key] {
+        forged.facts_from = Some(from);
+        let published = view::view_entry(forged.clone(), &trust, now());
+        assert!(!published.selectable, "{from:?}");
+        assert_eq!(published.verification, Verification::NotAttempted);
+        assert!(!published.is_evidence());
+    }
+    let published = view::view_entry(claim, &trust, now());
+    assert!(!published.selectable);
+
+    // A page line cannot say both.
+    let line = serde_json::to_value(&published).expect("a view entry serialises");
+    assert!(
+        serde_json::from_value::<view::ViewEntry>(line.clone()).is_ok(),
+        "CONTROL"
+    );
+    for (field, value) in [
+        ("selectable", json!(true)),
+        ("availability", json!("Available")),
+        ("verification", json!("Verified")),
+        ("receiptKey", json!("logweir/backups/x/y.receipt.json")),
+        ("receiptSha256", json!(format!("sha256:{}", "a".repeat(64)))),
+        (
+            "manifestSha256",
+            json!(format!("sha256:{}", "b".repeat(64))),
+        ),
+        ("coveredToMs", json!(2)),
+        ("pointId", json!("not-a-point-id")),
+        ("backupId", json!("<b>")),
+    ] {
+        let mut forged = line.clone();
+        forged[field] = value;
+        assert!(
+            serde_json::from_value::<view::ViewEntry>(forged.clone()).is_err(),
+            "a page line with `factsFrom` and {field} is not an entry: {forged}"
+        );
+    }
+}
+
+/// **The `Synced` message counts each cause by name, and a size is never
+/// called a permission or transport failure.** A body from an older runner,
+/// which carries no sub-counts, reads as it did.
+///
+/// KILLS: the one sentence for every unreadable point put back.
+#[test]
+fn fx33_the_synced_message_counts_each_cause_by_name() {
+    let counts = |unreadable: i64, over: i64, malformed: i64| RunnerCounts {
+        total: 10,
+        unreadable,
+        unreadable_over_read_cap: over,
+        unreadable_malformed: malformed,
+        ..RunnerCounts::default()
+    };
+    let size_only = view::unreadable_message(&counts(2, 2, 0));
+    assert!(
+        size_only.starts_with("2 of 10 points could not be read: 2 because a document is larger")
+            && size_only.contains("no permission or network change lists it")
+            && !size_only.contains("permission or transport failure"),
+        "{size_only}"
+    );
+    let mixed = view::unreadable_message(&counts(6, 2, 1));
+    assert!(
+        mixed.contains("2 because a document is larger")
+            && mixed.contains("1 because an object is not the document its key names")
+            && mixed.contains(
+                "3 for a permission or transport failure, which is NOT the same as absent"
+            )
+            && mixed.ends_with("those entries say Unreadable and never Missing"),
+        "{mixed}"
+    );
+    // An older runner: no sub-counts, so every one is what it always was.
+    let older = view::unreadable_message(&counts(4, 0, 0));
+    assert!(
+        older.contains("4 for a permission or transport failure") && !older.contains("larger"),
+        "{older}"
+    );
+    // Sub-counts that exceed the whole are clamped, never a negative rest.
+    let absurd = view::unreadable_message(&counts(1, 5, 5));
+    assert!(
+        absurd.contains("1 because a document is larger") && !absurd.contains("-"),
+        "{absurd}"
+    );
+}
+
+/// **A `Backup`'s refusal is never tied to a claim.** A refusal is attributed
+/// to a point by its receipt digest or its set id, and a claim has no digest
+/// and a set id that is an unsigned row's word.
+#[test]
+fn fx33_a_refusal_is_never_tied_to_a_claim() {
+    use weirkeeper::catalog_view::{BackupVerdictFacts, ControllerRefusals};
+    let (real, claim, _, _) = recordless_entries();
+    let refused = |set: &str| {
+        ControllerRefusals::from_facts([BackupVerdictFacts::from_json(&json!({
+            "status": {"backupId": set,
+                       "evidence": {"verification": {"result": "Invalid"}}}
+        }))])
+    };
+    let trust = TrustView::default();
+    let claim = view::view_entry(claim, &trust, now());
+    assert_eq!(refused(&claim.backup_id).refusal_for(&claim), None);
+    // CONTROL: the same refusal IS tied to an entry with a record.
+    let real = view::view_entry(real, &trust, now());
+    assert_eq!(refused(&real.backup_id).refusal_for(&real), Some("Invalid"));
 }

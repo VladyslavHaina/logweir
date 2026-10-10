@@ -814,3 +814,109 @@ fn a_row_the_catalog_already_refused_keeps_its_own_code() {
         "catalog refusal first",
     );
 }
+
+// ===========================================================================
+// FX-33 — an entry with no record behind it is information, never evidence
+// ===========================================================================
+
+/// **A catalog entry with no record behind it is refused by name, whatever
+/// it carries, and no restore is bound to it.**
+///
+/// The catalog lists every point it counts, so a point whose record it could
+/// not read is in the view too — built from an object key and, at best, an
+/// UNSIGNED index row. Three ways such an entry can reach this check:
+///
+/// 1. as the view publishes one (`Unreadable`, not selectable, no receipt
+///    key): `notReady CatalogPointNotSelectable`, saying it is the index's
+///    unverified claim;
+/// 2. as a page line FORGED to carry a whole selectable binding beside
+///    `factsFrom`: the line is not an entry at all (`ViewEntry` refuses it),
+///    so the point is not in the view;
+/// 3. as an entry no parser would hand over — built in memory with
+///    `selectable: true`, the plan's own binding and a trusted signer: the
+///    row rule itself still refuses it, FIRST, asked of `facts_from`.
+///
+/// KILLS: a consumer that takes the receipt key from a `factsFrom` entry
+/// (case 3 answers `ready`, and a plan is bound to an unsigned row's word).
+#[test]
+fn fx33_an_entry_with_no_record_behind_it_is_refused_by_name_whatever_it_carries() {
+    let with_page = |rows: &[Value]| {
+        let mut f = Fixture::healthy();
+        let p = page("archive-g1-p0", rows, true);
+        f.catalog = Some(catalog(
+            std::slice::from_ref(&p),
+            now() + Duration::hours(1),
+        ));
+        f.pages = vec![(p.0, Some(p.1))];
+        f
+    };
+
+    // 1. As the view publishes one.
+    let claim = json!({
+        "pointId": POINT,
+        "backupId": SET,
+        "runId": "01JB7Z00000000000000000000",
+        "recoveryPointAtMs": 1_758_549_600_000_i64,
+        "availability": "Unreadable",
+        "verification": "NotAttempted",
+        "selectable": false,
+        "remedy": "The catalog record of this recovery point is larger than the bound.",
+        "cause": {"document": "record", "reason": "overReadCap",
+                  "bytes": 15_820_066_u64, "capBytes": 6_131_072_u64},
+        "factsFrom": "indexRow",
+    });
+    let row = with_page(&[claim]).row();
+    assert_row(
+        &row,
+        CheckState::NotReady,
+        CheckCode::CatalogPointNotSelectable,
+        "a published claim",
+    );
+    assert!(
+        row.message.contains("without a record it could read")
+            && row.message.contains("unverified claim")
+            && row.message.contains("never bound"),
+        "{}",
+        row.message
+    );
+
+    // 2. A line forged to look selectable is not an entry.
+    let mut forged = entry(POINT, true);
+    forged["factsFrom"] = json!("indexRow");
+    assert!(
+        serde_json::from_value::<weirkeeper::catalog_view::ViewEntry>(forged.clone()).is_err(),
+        "a page line cannot be both a claim and a binding"
+    );
+    assert_row(
+        &with_page(&[forged]).row(),
+        CheckState::NotReady,
+        CheckCode::RecoveryPointNotFound,
+        "a forged line",
+    );
+
+    // 3. The row rule itself.
+    let CatalogPointFacts::Found(found) = Fixture::healthy().facts() else {
+        panic!("the healthy fixture finds its point");
+    };
+    assert_row(
+        &catalog_point_row(&CatalogPointFacts::Found(found.clone()), now()).expect("a row"),
+        CheckState::Ready,
+        CheckCode::CatalogPointSelectable,
+        "CONTROL: this entry, with a record behind it, is ready",
+    );
+    for from in [
+        weirkeeper::catalog_view::FactsFrom::IndexRow,
+        weirkeeper::catalog_view::FactsFrom::Key,
+    ] {
+        let mut claimed = found.clone();
+        claimed.entry.facts_from = Some(from);
+        let row = catalog_point_row(&CatalogPointFacts::Found(claimed), now()).expect("a row");
+        assert_row(
+            &row,
+            CheckState::NotReady,
+            CheckCode::CatalogPointNotSelectable,
+            "the same entry as a claim",
+        );
+        assert!(row.message.contains("unverified claim"), "{}", row.message);
+    }
+}

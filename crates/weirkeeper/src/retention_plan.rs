@@ -129,6 +129,22 @@ pub struct PointFacts {
     /// [`skip_reason`]). Always `false` for a point no `Backup` in the namespace
     /// names (a catalog-only point), whose behaviour is unchanged.
     pub refused_by_controller: bool,
+    /// **FX-33.** The catalog counted this point and could not read its
+    /// record: `point_id` is an object key's text and `backup_id` is at best
+    /// what an UNSIGNED index row says (`ViewEntry::facts_from`).
+    ///
+    /// **Such a point may only ever keep more.** It is never counted, never
+    /// usable, never ranked and never a candidate, whatever else it carries;
+    /// and the set it names is retained — a candidate in that set is
+    /// protected `SharedSegment` — because "the catalog could not read this
+    /// point" must not authorise deleting what it says it is made of. That
+    /// protection is exactly as good as the row: whoever can write a key
+    /// under the catalog's log prefix can name any set and so keep it from
+    /// expiring. They can never make retention delete one, release a hold or
+    /// take a keep rank from a real point. (The stronger rule — what a
+    /// retention run may conclude about a destination whose catalog holds
+    /// points it cannot read — is FX-40's.)
+    pub claim_only: bool,
 }
 
 /// What to keep — `RetentionPolicy.spec.rules`, in the pure layer's shape.
@@ -488,11 +504,12 @@ impl<'a> Located<'a> {
     /// location is one whose location the catalog could not establish — which
     /// is the "could not tell" case, and "could not tell" never authorises a
     /// delete.
+    ///
+    /// And a point that is only a CLAIM ([`PointFacts::claim_only`]) is
+    /// refused whatever location it carries: nothing verified says where it
+    /// is, or that it is.
     fn at(point: &'a PointFacts, location_id: &str) -> Option<Self> {
-        point
-            .locations
-            .iter()
-            .any(|l| l == location_id)
+        (!point.claim_only && point.locations.iter().any(|l| l == location_id))
             .then_some(Self { point })
     }
 }
@@ -701,10 +718,14 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     //    `locations[]` at all, review L1) is retained too. It is never counted
     //    here and never a candidate — but if it names a candidate's set, "could
     //    not tell where it lives" must not authorise deleting what it names.
+    //
+    //    AND SO IS A POINT THAT IS ONLY A CLAIM (FX-33,
+    //    [`PointFacts::claim_only`]): the set an unsigned index row names is
+    //    kept, never planned. It can only ever KEEP MORE.
     let location_less: Vec<&PointFacts> = input
         .points
         .iter()
-        .filter(|p| p.locations.is_empty())
+        .filter(|p| p.locations.is_empty() || p.claim_only)
         .collect();
     let grouped: Vec<&PointFacts> = here
         .iter()
@@ -826,6 +847,11 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
 /// second when the first is true sends an operator to the wrong place.
 #[must_use]
 pub fn skip_reason(point: &PointFacts) -> Option<SkipReason> {
+    // FX-33: a point that is only a claim is never usable, whatever axes it
+    // carries. (`evaluate` never asks this of one: it is not `Located`.)
+    if point.claim_only {
+        return Some(SkipReason::Unreadable);
+    }
     match point.availability {
         Availability::Available => {}
         Availability::Deleted => return Some(SkipReason::AlreadyDeleted),

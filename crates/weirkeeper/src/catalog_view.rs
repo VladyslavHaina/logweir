@@ -466,8 +466,15 @@ impl ControllerRefusals {
 
     /// The refused verdict for this view row's point, or `None` when no
     /// `Backup` in the set refused it.
+    ///
+    /// `None` for an entry with no record behind it (FX-33): a refusal is
+    /// tied to a point by its receipt digest or its set id, and such an entry
+    /// has no digest and a set id that is only an unsigned row's word.
     #[must_use]
     pub fn refusal_for(&self, entry: &ViewEntry) -> Option<&str> {
+        if !entry.is_evidence() {
+            return None;
+        }
         self.by_receipt
             .get(&entry.receipt_sha256)
             .or_else(|| {
@@ -1159,6 +1166,165 @@ pub struct EntrySchemaDependency {
     pub schema_ids_omitted: bool,
 }
 
+view_vocabulary! {
+    /// **FX-33.** Where the facts of an entry came from, for a point whose
+    /// RECORD gave none. Absent on every entry built from a record.
+    ///
+    /// **An entry that carries this is information, never evidence.** See
+    /// [`recordless_rules`], which this controller applies to every such
+    /// entry it reads, whoever wrote it.
+    FactsFrom {
+        IndexRow => "indexRow",
+        Key => "key",
+    }
+}
+
+/// **FX-33.** The document a point's examination stopped at, and why — with
+/// its size against the bound when the reason is a size. The runner's
+/// `catalog_sync::EntryCause`, as this controller reads it.
+///
+/// `document` and `reason` are WORDS, not enums: a runner one release newer
+/// may name a reason this build has no word for, and an entry dropped for
+/// that would be a point dropped from the catalog — the defect this field
+/// exists to end. They are held to a word's shape instead ([`is_cause_word`]),
+/// so they carry nothing but a word into a page and a browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryCause {
+    /// `record`, `receipt` or `manifest`.
+    pub document: String,
+    /// `overReadCap`, `readFailed`, `notFound`, `malformed` or
+    /// `unsupportedFormat`.
+    pub reason: String,
+    /// The object's size as its store reported it, for `overReadCap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// The bound the object is over, for `overReadCap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap_bytes: Option<u64>,
+}
+
+/// The `reason` of a document over its read bound.
+pub const CAUSE_OVER_READ_CAP: &str = "overReadCap";
+/// The `reason` of a document that is not what its key names.
+pub const CAUSE_MALFORMED: &str = "malformed";
+/// The `reason` of a read that did not answer.
+pub const CAUSE_READ_FAILED: &str = "readFailed";
+
+/// The longest `cause` word this controller reads.
+pub const MAX_CAUSE_WORD_CHARS: usize = 32;
+
+/// Whether `word` is a `cause` word: 1 to [`MAX_CAUSE_WORD_CHARS`] ASCII
+/// letters and digits.
+#[must_use]
+pub fn is_cause_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= MAX_CAUSE_WORD_CHARS
+        && word.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// The longest `backupId` an entry may carry on an index row's word — the
+/// runner's `catalog_sync::MAX_INDEX_BACKUP_ID_CHARS`.
+pub const MAX_INDEX_BACKUP_ID_CHARS: usize = 128;
+/// The longest `runId` an entry may carry on an index row's word.
+pub const MAX_INDEX_RUN_ID_CHARS: usize = 64;
+
+/// Whether `value` is an identifier an UNSIGNED index row may contribute: 1
+/// to `max` characters of `A-Z a-z 0-9 . _ : -`. The runner applies the same
+/// rule before it writes one (`catalog_sync::index_claim`); it is applied
+/// again here, to what was read, because a body is a pod's stdout.
+#[must_use]
+pub fn is_index_claim(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+/// Whether `id` is a recovery point id: `lwp1-` and 32 lowercase hex
+/// characters (D3 §5.1; the runner's `catalog::reader::is_point_id`).
+#[must_use]
+pub fn is_point_id(id: &str) -> bool {
+    id.strip_prefix("lwp1-").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// What an entry may and may not be when no parsed record stands behind it
+/// (`factsFrom` is present) — **FX-33, and the rule every reader of the view
+/// relies on.**
+pub struct RecordlessFacts<'a> {
+    pub point_id: &'a str,
+    pub facts_from: FactsFrom,
+    pub availability: Availability,
+    pub signature_attempted: bool,
+    pub backup_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    /// Whether the entry carries anything a restore binds to, a rehearsal
+    /// selects by or an objective is measured from: a receipt key or digest,
+    /// a manifest key or digest, a window, a location, a signer, topics or
+    /// consumer positions.
+    pub carries_evidence: bool,
+}
+
+/// **An entry built from no record is information, never evidence.** `Err`
+/// names the rule a record-less entry breaks; such an entry is MALFORMED and
+/// is not published.
+///
+/// Its `backupId` and `runId` are at best what an unsigned index row says,
+/// and whoever can write a key under the catalog's log prefix chooses a
+/// row's bytes. So, whoever wrote the entry:
+///
+/// 1. **it is never `Available`** — so it is never selectable;
+/// 2. **it carries no receipt key, digest, manifest, window, location, signer,
+///    topics or positions** — there is nothing in it a restore plan could
+///    bind to or a rehearsal could select by; a reader that needs the receipt
+///    of such a point reads and verifies the signed receipt itself;
+/// 3. **its signature verdict is `notAttempted`** — nothing was verified;
+/// 4. **its identifiers are identifiers** ([`is_index_claim`]), present only
+///    with `factsFrom: indexRow`;
+/// 5. **its point id is a point id** ([`is_point_id`]) — it is the text of an
+///    object key, which whoever wrote the object chose.
+///
+/// # Errors
+///
+/// The rule broken, as a fixed sentence.
+pub fn recordless_rules(facts: &RecordlessFacts<'_>) -> Result<(), &'static str> {
+    if facts.availability == Availability::Available {
+        return Err("an entry with `factsFrom` is never Available");
+    }
+    if !is_point_id(facts.point_id) {
+        return Err("an entry with `factsFrom` names a point id of the `lwp1-` shape");
+    }
+    if facts.carries_evidence {
+        return Err(
+            "an entry with `factsFrom` carries no receipt, manifest, window, location, signer, \
+             topics or positions",
+        );
+    }
+    if facts.signature_attempted {
+        return Err("an entry with `factsFrom` has no signature verdict but notAttempted");
+    }
+    let fit = |value: Option<&str>, max| value.is_none_or(|v| is_index_claim(v, max));
+    if !fit(facts.backup_id, MAX_INDEX_BACKUP_ID_CHARS)
+        || !fit(facts.run_id, MAX_INDEX_RUN_ID_CHARS)
+    {
+        return Err("an index row's `backupId` or `runId` is not an identifier");
+    }
+    let named = facts.backup_id.is_some() || facts.run_id.is_some();
+    match facts.facts_from {
+        FactsFrom::Key if named => Err("`factsFrom: key` carries no `backupId` or `runId`"),
+        FactsFrom::IndexRow if !named => {
+            Err("`factsFrom: indexRow` carries a `backupId` or a `runId`")
+        }
+        _ => Ok(()),
+    }
+}
+
 /// One point, as the sync Job reports it.
 ///
 /// **The receipt-derived facts are the binding** (D3 §5.2 rule 3): the point
@@ -1171,8 +1337,20 @@ pub struct EntrySchemaDependency {
 /// skipped — and the runner drops the list (counting it in `topicsOmitted`)
 /// before it would push a point out of the body. The full topic set and its
 /// configuration model live in the point's signed record in object storage.
+///
+/// # FX-33: an entry with no record behind it
+///
+/// `facts_from` is `Some` for a point whose record gave no facts. Such an
+/// entry is INFORMATION, NEVER EVIDENCE ([`recordless_rules`], applied when
+/// one is read): never `Available`, with an empty `receipt_key` and
+/// `receipt_sha256`, a zero window, no manifest, no location and no topics;
+/// `backup_id` and `run_id` are what an unsigned index row says, or empty;
+/// `recovery_point_at_ms` is the instant its object key carries, or `0` when
+/// the key carries none. On the wire the facts it does not have are ABSENT
+/// ([`RunnerEntryWire`]); an entry WITHOUT `factsFrom` must carry all seven,
+/// as every entry always has.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "RunnerEntryWire", into = "RunnerEntryWire")]
 pub struct RunnerEntry {
     /// `lwp1-<32 hex>` — content-derived from the receipt bytes (D3 §5.1).
     pub point_id: String,
@@ -1246,6 +1424,195 @@ pub struct RunnerEntry {
     /// entry listing more is malformed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
+    /// **FX-33.** The document the point's examination stopped at, and why.
+    /// Absent on an `Available` point, and on every entry an older runner
+    /// wrote.
+    pub cause: Option<EntryCause>,
+    /// **FX-33.** `Some` for an entry with no record behind it: where the few
+    /// facts it has came from. See the type's own note.
+    pub facts_from: Option<FactsFrom>,
+}
+
+/// [`RunnerEntry`] as it is written on a `catalog-entry=` line: the seven
+/// receipt-derived facts are optional HERE, so that an entry with no record
+/// behind it writes none it does not have, where a zero or an empty string
+/// would be a value nobody read. [`RunnerEntry`]'s `TryFrom` holds the two
+/// shapes apart: without `factsFrom` all seven are required; with it,
+/// [`recordless_rules`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerEntryWire {
+    pub point_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_point_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_from_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_to_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<EntryLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<Time>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<String>,
+    pub availability: Availability,
+    pub signature: SignatureVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<EntryTopic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<EntryConsumerPositions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<EntryCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts_from: Option<FactsFrom>,
+}
+
+/// A `cause` whose two words are words, or the reason it is malformed.
+fn checked_cause(cause: Option<EntryCause>) -> Result<Option<EntryCause>, String> {
+    match cause {
+        Some(c) if !is_cause_word(&c.document) || !is_cause_word(&c.reason) => {
+            Err("an entry's `cause` names a document or a reason that is not a word".to_string())
+        }
+        other => Ok(other),
+    }
+}
+
+impl TryFrom<RunnerEntryWire> for RunnerEntry {
+    type Error = String;
+
+    fn try_from(w: RunnerEntryWire) -> Result<Self, String> {
+        let cause = checked_cause(w.cause)?;
+        let Some(facts_from) = w.facts_from else {
+            // AN ENTRY WITH A RECORD BEHIND IT CARRIES ALL SEVEN FACTS, as
+            // every entry has since the grammar's first version.
+            let missing = || "an entry without `factsFrom` carries every receipt-derived fact";
+            return Ok(Self {
+                point_id: w.point_id,
+                backup_id: w.backup_id.ok_or_else(missing)?,
+                run_id: w.run_id.ok_or_else(missing)?,
+                recovery_point_at_ms: w.recovery_point_at_ms.ok_or_else(missing)?,
+                covered_from_ms: w.covered_from_ms.ok_or_else(missing)?,
+                covered_to_ms: w.covered_to_ms.ok_or_else(missing)?,
+                locations: w.locations,
+                receipt_key: w.receipt_key.ok_or_else(missing)?,
+                receipt_sha256: w.receipt_sha256.ok_or_else(missing)?,
+                manifest_key: w.manifest_key,
+                manifest_sha256: w.manifest_sha256,
+                recorded_at: w.recorded_at,
+                format_version: w.format_version,
+                availability: w.availability,
+                signature: w.signature,
+                signer_key_id: w.signer_key_id,
+                remedy: w.remedy,
+                topics: w.topics,
+                topics_omitted: w.topics_omitted,
+                owner_detection: w.owner_detection,
+                consumer_positions: w.consumer_positions,
+                cause,
+                facts_from: None,
+            });
+        };
+        recordless_rules(&RecordlessFacts {
+            point_id: &w.point_id,
+            facts_from,
+            availability: w.availability,
+            signature_attempted: w.signature != SignatureVerdict::NotAttempted,
+            backup_id: w.backup_id.as_deref(),
+            run_id: w.run_id.as_deref(),
+            carries_evidence: w.receipt_key.is_some()
+                || w.receipt_sha256.is_some()
+                || w.manifest_key.is_some()
+                || w.manifest_sha256.is_some()
+                || w.covered_from_ms.is_some()
+                || w.covered_to_ms.is_some()
+                || !w.locations.is_empty()
+                || w.signer_key_id.is_some()
+                || w.recorded_at.is_some()
+                || !w.topics.is_empty()
+                || w.topics_omitted.is_some()
+                || w.owner_detection.is_some()
+                || w.consumer_positions.is_some(),
+        })?;
+        Ok(Self {
+            point_id: w.point_id,
+            backup_id: w.backup_id.unwrap_or_default(),
+            run_id: w.run_id.unwrap_or_default(),
+            recovery_point_at_ms: w.recovery_point_at_ms.unwrap_or(0),
+            covered_from_ms: 0,
+            covered_to_ms: 0,
+            locations: Vec::new(),
+            receipt_key: String::new(),
+            receipt_sha256: String::new(),
+            manifest_key: None,
+            manifest_sha256: None,
+            recorded_at: None,
+            format_version: w.format_version,
+            availability: w.availability,
+            signature: SignatureVerdict::NotAttempted,
+            signer_key_id: None,
+            remedy: w.remedy,
+            topics: Vec::new(),
+            topics_omitted: None,
+            owner_detection: None,
+            consumer_positions: None,
+            cause,
+            facts_from: Some(facts_from),
+        })
+    }
+}
+
+impl From<RunnerEntry> for RunnerEntryWire {
+    fn from(e: RunnerEntry) -> Self {
+        // An entry with no record behind it writes only the facts it has.
+        let backed = e.facts_from.is_none();
+        let known = |s: String| (backed || !s.is_empty()).then_some(s);
+        Self {
+            point_id: e.point_id,
+            backup_id: known(e.backup_id),
+            run_id: known(e.run_id),
+            recovery_point_at_ms: (backed || e.recovery_point_at_ms != 0)
+                .then_some(e.recovery_point_at_ms),
+            covered_from_ms: backed.then_some(e.covered_from_ms),
+            covered_to_ms: backed.then_some(e.covered_to_ms),
+            locations: e.locations,
+            receipt_key: backed.then_some(e.receipt_key),
+            receipt_sha256: backed.then_some(e.receipt_sha256),
+            manifest_key: e.manifest_key,
+            manifest_sha256: e.manifest_sha256,
+            recorded_at: e.recorded_at,
+            format_version: e.format_version,
+            availability: e.availability,
+            signature: e.signature,
+            signer_key_id: e.signer_key_id,
+            remedy: e.remedy,
+            topics: e.topics,
+            topics_omitted: e.topics_omitted,
+            owner_detection: e.owner_detection,
+            consumer_positions: e.consumer_positions,
+            cause: e.cause,
+            facts_from: e.facts_from,
+        }
+    }
 }
 
 impl RunnerEntry {
@@ -1324,8 +1691,18 @@ pub struct ResolvedLocation {
 /// **`selectable` is materialised and not derived by the reader.** D3 §5.4's
 /// rule is one conjunction, and a UI that recomputed it from two enums it had
 /// to parse would be a second implementation of the rule that matters most.
+///
+/// # FX-33: an entry with no record behind it
+///
+/// `facts_from` is `Some` for a point whose record gave no facts
+/// ([`RunnerEntry`]'s own note says what such an entry holds). **It is never
+/// selectable** — [`view_entry`] decides that from `facts_from` itself, not
+/// only from the two axes — and a page line that says otherwise does not
+/// parse ([`recordless_rules`]). Every reader of the view takes a point's
+/// receipt key and digests from an entry only when it is selectable, so a
+/// record-less entry supplies none: it has none to supply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "ViewEntryWire", into = "ViewEntryWire")]
 pub struct ViewEntry {
     /// See [`RunnerEntry::point_id`].
     pub point_id: String,
@@ -1379,6 +1756,195 @@ pub struct ViewEntry {
     /// See [`RunnerEntry::consumer_positions`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
+    /// See [`RunnerEntry::cause`].
+    pub cause: Option<EntryCause>,
+    /// See [`RunnerEntry::facts_from`].
+    pub facts_from: Option<FactsFrom>,
+}
+
+/// [`ViewEntry`] as it is written on a page line — [`RunnerEntryWire`]'s
+/// twin, for the same reason: an entry with no record behind it writes only
+/// the facts it has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewEntryWire {
+    pub point_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_point_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_from_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_to_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<ResolvedLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<String>,
+    pub availability: Availability,
+    pub verification: Verification,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_id: Option<String>,
+    pub selectable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<EntryTopic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topics_omitted: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_detection: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<EntryConsumerPositions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<EntryCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts_from: Option<FactsFrom>,
+}
+
+impl TryFrom<ViewEntryWire> for ViewEntry {
+    type Error = String;
+
+    fn try_from(w: ViewEntryWire) -> Result<Self, String> {
+        let cause = checked_cause(w.cause)?;
+        let Some(facts_from) = w.facts_from else {
+            let missing = || "an entry without `factsFrom` carries every receipt-derived fact";
+            return Ok(Self {
+                point_id: w.point_id,
+                backup_id: w.backup_id.ok_or_else(missing)?,
+                run_id: w.run_id.ok_or_else(missing)?,
+                recovery_point_at_ms: w.recovery_point_at_ms.ok_or_else(missing)?,
+                covered_from_ms: w.covered_from_ms.ok_or_else(missing)?,
+                covered_to_ms: w.covered_to_ms.ok_or_else(missing)?,
+                locations: w.locations,
+                receipt_key: w.receipt_key.ok_or_else(missing)?,
+                receipt_sha256: w.receipt_sha256.ok_or_else(missing)?,
+                manifest_key: w.manifest_key,
+                manifest_sha256: w.manifest_sha256,
+                format_version: w.format_version,
+                availability: w.availability,
+                verification: w.verification,
+                signer_key_id: w.signer_key_id,
+                selectable: w.selectable,
+                remedy: w.remedy,
+                topics: w.topics,
+                topics_omitted: w.topics_omitted,
+                owner_detection: w.owner_detection,
+                consumer_positions: w.consumer_positions,
+                cause,
+                facts_from: None,
+            });
+        };
+        recordless_rules(&RecordlessFacts {
+            point_id: &w.point_id,
+            facts_from,
+            availability: w.availability,
+            // A page carries the controller's own word for the signature
+            // axis; with nothing verified it is `NotAttempted`.
+            signature_attempted: w.verification != Verification::NotAttempted,
+            backup_id: w.backup_id.as_deref(),
+            run_id: w.run_id.as_deref(),
+            carries_evidence: w.receipt_key.is_some()
+                || w.receipt_sha256.is_some()
+                || w.manifest_key.is_some()
+                || w.manifest_sha256.is_some()
+                || w.covered_from_ms.is_some()
+                || w.covered_to_ms.is_some()
+                || !w.locations.is_empty()
+                || w.signer_key_id.is_some()
+                || !w.topics.is_empty()
+                || w.topics_omitted.is_some()
+                || w.owner_detection.is_some()
+                || w.consumer_positions.is_some(),
+        })?;
+        if w.selectable {
+            return Err("an entry with `factsFrom` is never selectable".to_string());
+        }
+        Ok(Self {
+            point_id: w.point_id,
+            backup_id: w.backup_id.unwrap_or_default(),
+            run_id: w.run_id.unwrap_or_default(),
+            recovery_point_at_ms: w.recovery_point_at_ms.unwrap_or(0),
+            covered_from_ms: 0,
+            covered_to_ms: 0,
+            locations: Vec::new(),
+            receipt_key: String::new(),
+            receipt_sha256: String::new(),
+            manifest_key: None,
+            manifest_sha256: None,
+            format_version: w.format_version,
+            availability: w.availability,
+            verification: Verification::NotAttempted,
+            signer_key_id: None,
+            selectable: false,
+            remedy: w.remedy,
+            topics: Vec::new(),
+            topics_omitted: None,
+            owner_detection: None,
+            consumer_positions: None,
+            cause,
+            facts_from: Some(facts_from),
+        })
+    }
+}
+
+impl From<ViewEntry> for ViewEntryWire {
+    fn from(e: ViewEntry) -> Self {
+        let backed = e.facts_from.is_none();
+        let known = |s: String| (backed || !s.is_empty()).then_some(s);
+        Self {
+            point_id: e.point_id,
+            backup_id: known(e.backup_id),
+            run_id: known(e.run_id),
+            recovery_point_at_ms: (backed || e.recovery_point_at_ms != 0)
+                .then_some(e.recovery_point_at_ms),
+            covered_from_ms: backed.then_some(e.covered_from_ms),
+            covered_to_ms: backed.then_some(e.covered_to_ms),
+            locations: e.locations,
+            receipt_key: backed.then_some(e.receipt_key),
+            receipt_sha256: backed.then_some(e.receipt_sha256),
+            manifest_key: e.manifest_key,
+            manifest_sha256: e.manifest_sha256,
+            format_version: e.format_version,
+            availability: e.availability,
+            verification: e.verification,
+            signer_key_id: e.signer_key_id,
+            selectable: e.selectable,
+            remedy: e.remedy,
+            topics: e.topics,
+            topics_omitted: e.topics_omitted,
+            owner_detection: e.owner_detection,
+            consumer_positions: e.consumer_positions,
+            cause: e.cause,
+            facts_from: e.facts_from,
+        }
+    }
+}
+
+impl ViewEntry {
+    /// **Whether a reader may take this entry's receipt key, digests, window
+    /// or backup set as facts about a recovery point** — FX-33's question,
+    /// asked in one place: `false` for an entry with no record behind it,
+    /// whose few facts are a key's and an unsigned index row's.
+    ///
+    /// A reader that selects, binds, rehearses or measures from the view asks
+    /// `selectable`, which is already `false` for such an entry. This is for
+    /// the readers that look at entries that are NOT selectable — retention
+    /// links points by backup set — so that each says what it does with one.
+    #[must_use]
+    pub fn is_evidence(&self) -> bool {
+        self.facts_from.is_none()
+    }
 }
 
 /// What the sync counted over the WHOLE walk, not only over the window.
@@ -1418,6 +1984,63 @@ pub struct RunnerCounts {
     /// Points per day, newest day first. Bounded by [`MAX_HISTOGRAM_DAYS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_day: Vec<DayCount>,
+    /// **FX-33.** How many of `unreadable` are a document over its read
+    /// bound: a SIZE, never a permission or transport failure. Absent (zero)
+    /// from an older runner, which then says nothing about why.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_over_read_cap: i64,
+    /// **FX-33.** How many of `unreadable` are a document that is not what
+    /// its key names.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_malformed: i64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes `&T`.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+/// **FX-33 — why points could not be read, in words that fit the cause.**
+/// The `Synced` condition's message for a walk whose `unreadable` is not
+/// zero.
+///
+/// It used to be one sentence, "a permission or transport failure", for
+/// every unreadable point — including a backup of 110 topics whose record
+/// was over the walk's read cap, which no grant and no network change would
+/// ever list. A document's SIZE and a document's CONTENT are named as what
+/// they are; only what is left is called a permission or transport failure,
+/// and an older runner's body, which carries no sub-counts, reads as before.
+#[must_use]
+pub fn unreadable_message(counts: &RunnerCounts) -> String {
+    let over = counts.unreadable_over_read_cap.clamp(0, counts.unreadable);
+    let malformed = counts
+        .unreadable_malformed
+        .clamp(0, counts.unreadable - over);
+    let rest = counts.unreadable - over - malformed;
+    let mut parts: Vec<String> = Vec::new();
+    if over > 0 {
+        parts.push(format!(
+            "{over} because a document is larger than the bound Logweir reads for one (its \
+             size: no permission or network change lists it; the point's entry states the size \
+             and the bound)"
+        ));
+    }
+    if malformed > 0 {
+        parts.push(format!(
+            "{malformed} because an object is not the document its key names"
+        ));
+    }
+    if rest > 0 {
+        parts.push(format!(
+            "{rest} for a permission or transport failure, which is NOT the same as absent"
+        ));
+    }
+    format!(
+        "{} of {} points could not be read: {}; those entries say Unreadable and never Missing",
+        counts.unreadable,
+        counts.total,
+        parts.join("; ")
+    )
 }
 
 /// The signature half of [`RunnerCounts`].
@@ -1935,6 +2558,16 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
             None => {
                 by_id.insert(entry.point_id.clone(), entry);
             }
+            // FX-33: AN ENTRY WITH NO RECORD BEHIND IT NEVER REPLACES, MERGES
+            // INTO OR CONTRADICTS ONE WITH A RECORD. Its facts are a key's and
+            // an unsigned row's; a disagreement with them is not a `Conflict`
+            // about a point, and a point's record-backed entry is the entry.
+            // Two record-less entries of one id are one: the first is kept.
+            Some(kept) if kept.facts_from.is_some() || entry.facts_from.is_some() => {
+                if kept.facts_from.is_some() && entry.facts_from.is_none() {
+                    *kept = entry;
+                }
+            }
             Some(kept) => {
                 if kept.facts() != entry.facts() {
                     conflicted.insert(entry.point_id.clone());
@@ -2403,8 +3036,18 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         now,
     );
     let availability = entry.availability;
+    // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS NEVER SELECTABLE, decided
+    // from `facts_from` itself and not only from the two axes (which already
+    // say so: such an entry is never `Available` and nothing verified it).
+    // Its signature axis is `NotAttempted` whatever the trust source holds.
+    let recordless = entry.facts_from.is_some();
+    let verification = if recordless {
+        Verification::NotAttempted
+    } else {
+        verification
+    };
     ViewEntry {
-        selectable: selectable(availability, verification),
+        selectable: !recordless && selectable(availability, verification),
         point_id: entry.point_id,
         backup_id: entry.backup_id,
         run_id: entry.run_id,
@@ -2432,6 +3075,8 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         topics_omitted: entry.topics_omitted,
         owner_detection: entry.owner_detection,
         consumer_positions: entry.consumer_positions,
+        cause: entry.cause,
+        facts_from: entry.facts_from,
     }
 }
 

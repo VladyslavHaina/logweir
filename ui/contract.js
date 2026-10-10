@@ -2722,6 +2722,14 @@ const D3_POINT_CONSUMER_POSITIONS = shapeOf(
   },
 );
 
+/** FX-33: the document a point's examination stopped at, and why. Both words
+ *  are open (a newer runner may name another), so they are read as strings. */
+const D3_POINT_CAUSE = shapeOf(
+  "PointCauseView",
+  { document: str, reason: str },
+  { bytes: int, capBytes: int },
+);
+
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2750,6 +2758,12 @@ const D3_POINT = shapeOf(
     // PROD-04.1: the consumer position evidence of the groups the backup
     // selected. ABSENT is not published, never "no positions".
     consumerPositions: objectOf(D3_POINT_CONSUMER_POSITIONS),
+    // FX-33: why the point is not Available, when one document is why; and
+    // `factsFrom`, present on a row with NO RECORD behind it -- information,
+    // never evidence: never offered, never joined to a run
+    // (`isIndexClaim` in pages/restore-wizard.js).
+    cause: objectOf(D3_POINT_CAUSE),
+    factsFrom: str,
   },
 );
 

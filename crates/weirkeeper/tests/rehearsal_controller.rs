@@ -5385,3 +5385,64 @@ fn a_slot_whose_complete_verification_did_not_cover_is_never_recorded_as_a_pass(
     let passed = rs::observe(Some(&restore(true)), now());
     assert!(passed.passed, "the control: {passed:?}");
 }
+
+/// **FX-33 — a catalog entry with no record behind it is no rehearsal
+/// candidate, and enriches none.** Its few facts are an object key's and an
+/// unsigned index row's; a rehearsal selects, dates and binds from signed
+/// facts only. Asked of `facts_from` itself, on an entry carrying everything
+/// a selectable row carries.
+///
+/// KILLS: a consumer that takes the receipt key, the window or the
+/// selectability from a `factsFrom` entry (the claim becomes a candidate, or
+/// makes a `Backup` the controller could not read selectable).
+#[test]
+fn fx33_an_entry_with_no_record_behind_it_is_no_candidate_and_enriches_none() {
+    use weirkeeper::catalog_view::FactsFrom;
+    let ms = 1_758_240_000_000;
+    for from in [FactsFrom::IndexRow, FactsFrom::Key] {
+        let mut claim = matching_catalog_row(ms);
+        claim.facts_from = Some(from);
+
+        // 1. On its own it is not a candidate.
+        let mut by_id = std::collections::BTreeMap::new();
+        rs::merge_catalog_entry(
+            &mut by_id,
+            claim.clone(),
+            Some(DESTINATION.to_string()),
+            &Default::default(),
+        );
+        assert!(by_id.is_empty(), "a claim is not a point to rehearse");
+
+        // 2. Beside a `Backup` the controller could not read, it changes
+        //    nothing: not selectable, not dated, no window, no key.
+        let candidate = capture_less_candidate("b-unread", "NotAttempted");
+        let before = candidate.clone();
+        let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+        rs::merge_catalog_entry(
+            &mut by_id,
+            claim,
+            Some(DESTINATION.to_string()),
+            &Default::default(),
+        );
+        assert_eq!(by_id[POINT_ID], before);
+    }
+    // CONTROLS: the same row with a record behind it is a candidate, and
+    // makes that `Backup` selectable.
+    let mut by_id = std::collections::BTreeMap::new();
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(ms),
+        Some(DESTINATION.to_string()),
+        &Default::default(),
+    );
+    assert_eq!(by_id.len(), 1);
+    let candidate = capture_less_candidate("b-unread", "NotAttempted");
+    let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(ms),
+        Some(DESTINATION.to_string()),
+        &Default::default(),
+    );
+    assert!(by_id[POINT_ID].selectable);
+}

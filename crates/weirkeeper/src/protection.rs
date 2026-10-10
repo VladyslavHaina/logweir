@@ -795,9 +795,32 @@ pub struct CatalogEntry {
     /// back to the two axes; `Some(false)` is a real refusal and is honoured.
     #[serde(default)]
     pub selectable: Option<bool>,
+    /// **FX-33.** Present on an entry with NO RECORD behind it: a point the
+    /// catalog counted and could not read, whose `backupId` is at best what
+    /// an unsigned index row says. Read leniently, as everything here is —
+    /// ANY value means "not evidence" — and such an entry answers nothing
+    /// ([`CatalogEntry::is_evidence`]).
+    #[serde(default)]
+    pub facts_from: Option<serde_json::Value>,
 }
 
 impl CatalogEntry {
+    /// Whether this entry may answer anything about a recovery point —
+    /// `false` for one with no record behind it (FX-33).
+    ///
+    /// Such an entry is INFORMATION: it never makes a point available, never
+    /// places one in time, never names one, and never opens
+    /// `ArchiveUnavailable` over a `Backup` either — the only thing tying it
+    /// to a `Backup` would be a set id that whoever can write a key under
+    /// the catalog's log prefix chose. A policy whose point the catalog could
+    /// not read finds no entry for it, which is "not available" under
+    /// `requireCatalogAvailability`, exactly as when the catalog did not
+    /// list the point at all.
+    #[must_use]
+    pub fn is_evidence(&self) -> bool {
+        self.facts_from.is_none()
+    }
+
     /// The verification verdicts D3 §5.4 calls selectable.
     pub const VERIFIED: [&'static str; 2] = ["Verified", "VerifiedHistorical"];
 
@@ -1172,7 +1195,11 @@ fn entries_for<'e>(
     // view that does not write the field, and joining on it would make every
     // such entry an answer for every candidate whose receipt went unread.
     let backup_id = candidate.backup_id.clone().filter(|id| !id.is_empty());
-    entries.iter().filter(move |e| match &receipt_sha256 {
+    // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS NEVER AN ANSWER FOR A
+    // CANDIDATE — not available, not degraded, not a second match that makes
+    // the real one ambiguous ([`CatalogEntry::is_evidence`]).
+    let entries = entries.iter().filter(|e| e.is_evidence());
+    entries.filter(move |e| match &receipt_sha256 {
         // The full digest decides. The point id is checked too when present,
         // but can never substitute for the collision-resistant identity.
         Some(digest) => {
