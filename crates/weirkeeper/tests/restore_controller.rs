@@ -3382,8 +3382,8 @@ async fn a_forged_pair_or_a_name_outside_the_plan_never_reaches_the_restore() {
 /// behaviour so nobody takes the place rule for more than it is. What closes
 /// it for this build is the runner's escape (no error text can contain a
 /// line break); what closes it for every runner is a value the plan cannot
-/// know (the per-Job token of the follow-up row). `docs/kubernetes.md` says
-/// what an operator does meanwhile. This row changes when that row lands.
+/// know (the per-Job token of row FX-43). `docs/kubernetes.md` says what an
+/// operator does meanwhile. This row changes when that row lands.
 #[tokio::test]
 async fn an_older_runners_raw_error_text_ending_in_the_pair_is_lifted_and_that_is_the_stated_residual(
 ) {
