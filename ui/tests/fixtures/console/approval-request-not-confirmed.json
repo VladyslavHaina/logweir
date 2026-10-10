@@ -1,0 +1,19 @@
+{
+  "item": {
+    "approvalName": "approval-x",
+    "approve": {
+      "offered": false,
+      "refusal": "notPending",
+      "sentence": "There is no pending request to approve."
+    },
+    "confirmationName": "approval-x-confirmation",
+    "namespace": "team-a",
+    "policy": "prod-pair",
+    "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "restore": "restore-x",
+    "restoreUid": "uid-x",
+    "state": "notConfirmed",
+    "stateSentence": "No request this console confirmed exists for this Restore, this plan and the current policy. Nothing of what is stored is shown, and it is never approved."
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6H"
+}

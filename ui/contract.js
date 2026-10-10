@@ -840,8 +840,46 @@ const APPROVAL_POLICY = shapeOf(
     operatorMode: str, basis: str,
     requireDistinctPrincipal: bool, installationDigest: str,
     ordinaryConfirmationAvailable: bool, ticketRequired: bool,
+    // PROD-16.2: whether THIS console takes a second person's approval here
+    // (a two-person policy, the shared console, its key present).
+    consoleApprovalAvailable: bool,
   },
   { maxAgeSeconds: int, digest: str, confirmationKeyId: str },
+);
+
+// PROD-16.2: whether this session may approve a two-person request, decided
+// by the server with the rules the click is held to, and the one sentence the
+// page shows either way. `refusal` is read as a string and never switched on:
+// the sentence is the server's.
+const APPROVE_OFFER = shapeOf(
+  "ApproveOfferView", { offered: bool, sentence: str }, { refusal: str },
+);
+
+// PROD-16.2: a two-person request as the approver is shown it. Every optional
+// field comes from the request's SIGNED bytes, after the console verified its
+// own signature on them; a request that does not verify carries none of them.
+// `state` is pending | approved | expired | notConfirmed, read as a string by
+// the one function that renders it (`ui/pages/approvals.js`).
+const APPROVAL_REQUEST = shapeOf(
+  "ApprovalRequestView",
+  {
+    namespace: str, restore: str, restoreUid: str, approvalName: str, confirmationName: str,
+    policy: str, policyDigest: str, state: str, stateSentence: str,
+    approve: objectOf(APPROVE_OFFER),
+  },
+  {
+    requester: str, planHash: str, approvalSubject: str,
+    originalTopics: listOf(str), originalTopicsCount: int,
+    ticket: str, issuedAt: str, expiresAt: str, confirmationSha256: str,
+    approver: str, approvedAt: str,
+  },
+);
+
+// PROD-16.2: the second person's click. ONE field, which names the request
+// the approver was shown by the hash of its signed bytes; nothing an
+// authorization carries is ever sent from this page.
+const CONSOLE_APPROVAL_REQUEST = shapeOf(
+  "ConsoleApprovalRequest", { confirmationSha256: str },
 );
 
 // PLAT-19.2: a governed approver's countersigned sidecar.
@@ -941,6 +979,7 @@ const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
 const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
 const OPERATION_RESPONSE = readOnlyItem("OperationResponse", OPERATION);
 const APPROVAL_POLICY_RESPONSE = readOnlyItem("ApprovalPolicyResponse", APPROVAL_POLICY);
+const APPROVAL_REQUEST_RESPONSE = readOnlyItem("ApprovalRequestResponse", APPROVAL_REQUEST);
 
 // ------------------------------------------- D1 W7: the three W6 answers
 
@@ -1666,6 +1705,8 @@ export const CONSOLE_REQUESTS = Object.freeze({
   backups: CREATE_BACKUP_REQUEST,
   // PLAT-19.2: a governed approver's countersignature, keyed by the action.
   "restores:approval": SUBMIT_APPROVAL_REQUEST,
+  // PROD-16.2: a second person's approval in the console, keyed by the action.
+  "restores:console-approval": CONSOLE_APPROVAL_REQUEST,
 });
 
 /** Checks a body this client BUILT against the shape the server publishes.
@@ -1740,6 +1781,10 @@ export const CONSOLE_SHAPES = Object.freeze({
   ApprovalPolicyView: APPROVAL_POLICY,
   ApprovalPolicyResponse: APPROVAL_POLICY_RESPONSE,
   SubmitApprovalRequest: SUBMIT_APPROVAL_REQUEST,
+  ApproveOfferView: APPROVE_OFFER,
+  ApprovalRequestView: APPROVAL_REQUEST,
+  ApprovalRequestResponse: APPROVAL_REQUEST_RESPONSE,
+  ConsoleApprovalRequest: CONSOLE_APPROVAL_REQUEST,
   ApprovalResponse: APPROVAL_RESPONSE,
   ApprovalPacketResponse: APPROVAL_PACKET_RESPONSE,
   OperationResponse: OPERATION_RESPONSE,
@@ -1948,6 +1993,12 @@ export function decodeConsoleItem(plural, value) {
 /** PLAT-19.2: a namespace's effective approval policy. @returns {Decoded} */
 export function decodeApprovalPolicy(value) {
   return decodeWith(APPROVAL_POLICY_RESPONSE, value);
+}
+
+/** PROD-16.2: a two-person request as the approver is shown it.
+ *  @returns {Decoded} */
+export function decodeApprovalRequest(value) {
+  return decodeWith(APPROVAL_REQUEST_RESPONSE, value);
 }
 
 /** @returns {Decoded} */

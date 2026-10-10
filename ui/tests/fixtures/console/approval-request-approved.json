@@ -1,0 +1,28 @@
+{
+  "item": {
+    "approvalName": "approval-x",
+    "approve": {
+      "offered": false,
+      "refusal": "notPending",
+      "sentence": "This request is already approved."
+    },
+    "confirmationName": "approval-x-confirmation",
+    "confirmationSha256": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "expiresAt": "2026-10-10T13:00:00Z",
+    "issuedAt": "2026-10-10T12:00:00Z",
+    "namespace": "team-a",
+    "planHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "approvalSubject": "ordinary",
+    "policy": "prod-pair",
+    "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requester": "https://idp.example#alice",
+    "restore": "restore-x",
+    "restoreUid": "uid-x",
+    "state": "approved",
+    "stateSentence": "A second person approved this request in the console.",
+    "ticket": "CHG-4711",
+    "approver": "https://idp.example#bob",
+    "approvedAt": "2026-10-10T12:04:00Z"
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6G"
+}

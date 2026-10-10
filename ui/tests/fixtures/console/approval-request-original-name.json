@@ -1,0 +1,30 @@
+{
+  "item": {
+    "approvalName": "approval-x",
+    "approve": {
+      "offered": true,
+      "sentence": "You are an approver in this namespace and not the requester. Approving records your identity and the time, and the console signs both; the Restore then runs once weirkeeper verifies it."
+    },
+    "confirmationName": "approval-x-confirmation",
+    "confirmationSha256": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "expiresAt": "2026-10-10T13:00:00Z",
+    "issuedAt": "2026-10-10T12:00:00Z",
+    "namespace": "team-a",
+    "planHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "approvalSubject": "originalName",
+    "policy": "prod-pair",
+    "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requester": "https://idp.example#alice",
+    "restore": "restore-x",
+    "restoreUid": "uid-x",
+    "state": "pending",
+    "stateSentence": "The console confirmed this request and it is waiting for a second person to approve it.",
+    "ticket": "CHG-4711",
+    "originalTopics": [
+      "orders",
+      "payments"
+    ],
+    "originalTopicsCount": 2
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6G"
+}

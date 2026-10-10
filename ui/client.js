@@ -42,6 +42,7 @@ import {
   cadencePreview,
   consoleAction,
   consoleApprovalPolicy,
+  consoleApprovalRequest,
   consoleCreate,
   consoleGet,
   consoleList,
@@ -61,6 +62,7 @@ import {
   contractFailure,
   decodeApprovalPacket,
   decodeApprovalPolicy,
+  decodeApprovalRequest,
   decodeCadencePreview,
   decodeCancel,
   decodeCheckOperation,
@@ -1804,6 +1806,18 @@ const legacyApi = Object.freeze({
         "product API console; this page is served by kubectl proxy and has no such route",
     );
   },
+  // PROD-16.2. THIS MODE HAS NO SECOND PERSON TO ASK: it is one viewer's own
+  // cluster authority behind `kubectl proxy`, with no session the console
+  // attests. No request is shown and none is approved from here.
+  async approvalRequest() {
+    return null;
+  },
+  async approveInConsole() {
+    throw noRoute(
+      "a two-person approval is given by a second person signed in to the shared console; " +
+        "this page is served by kubectl proxy and has no such route",
+    );
+  },
   async listCluster(plural, options) {
     return decodeLegacyList(plural, await listCluster(plural, options)).value;
   },
@@ -2236,6 +2250,52 @@ const consoleApi = Object.freeze({
     let answer;
     try {
       answer = await consoleAction(ns, "restores:approval", restoreName, body, {
+        token: decided === null ? null : decided.token,
+      });
+    } catch (refused) {
+      throw withCauses(refused, "approvals");
+    }
+    const decoded = decodeConsoleItem("approvals", answer);
+    const made = note(projectApproval(decoded.value.item), "approvals", decoded.unknown);
+    made.__contract.replayed = decoded.value.replayed === true;
+    return made;
+  },
+  // PROD-16.2: one Restore's two-person request, as the approver is shown
+  // it -- or `null` when this session may not read approvals there (the route
+  // is gated on the same read). Every field the page renders is the server's,
+  // taken from bytes the console verified its own signature on.
+  async approvalRequest(ns, restoreName, options) {
+    if (!granted(ns, "approvalsRead")) {
+      return null;
+    }
+    try {
+      return decodeApprovalRequest(
+        await consoleApprovalRequest(ns, restoreName, options),
+      ).value.item;
+    } catch (refused) {
+      throw withCauses(refused, "approvals");
+    }
+  },
+  // PROD-16.2: THE SECOND PERSON'S CLICK. The body is ONE field: the hash of
+  // the request's signed bytes, exactly as the view showed it. It names what
+  // was reviewed; it supplies nothing an authorization carries. The product
+  // API refuses the requester and anyone who is not an Approver (403), a
+  // request that changed or expired (409), and a cross-site or tokenless
+  // request before any of that; this page renders each refusal as it arrives.
+  async approveInConsole(ns, restoreName, confirmationSha256) {
+    requireGrant(ns, "approvalSubmit");
+    const body = { confirmationSha256: String(confirmationSha256) };
+    const checked = decodeRequest("restores:console-approval", body);
+    if (checked.unknown.length > 0) {
+      throw contractFailure(
+        "ConsoleApprovalRequest",
+        checked.unknown[0],
+        "this page built an approval this API does not declare; it was not sent",
+      );
+    }
+    let answer;
+    try {
+      answer = await consoleAction(ns, "restores:console-approval", restoreName, body, {
         token: decided === null ? null : decided.token,
       });
     } catch (refused) {
@@ -3053,6 +3113,13 @@ export function apiClient() {
     submitGovernedApproval(ns, restoreName, sidecarBytes, approvalBytes) {
       return dispatch((api) => api.submitGovernedApproval(ns, restoreName, sidecarBytes,
         approvalBytes));
+    },
+    // PROD-16.2.
+    approvalRequest(ns, restoreName, options) {
+      return dispatch((api) => api.approvalRequest(ns, restoreName, options));
+    },
+    approveInConsole(ns, restoreName, confirmationSha256) {
+      return dispatch((api) => api.approveInConsole(ns, restoreName, confirmationSha256));
     },
 
     // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
