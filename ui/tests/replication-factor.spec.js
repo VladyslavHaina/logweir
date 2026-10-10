@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { decoded } from "./console-fixture.js";
+import { decoded, handedPage, handedPoint } from "./console-fixture.js";
 
 import {
   BROKERS_NOT_READ,
@@ -789,8 +789,8 @@ function catalogObject(ns) {
   };
 }
 
-/** The point, as `GET .../catalogs/{name}/points` publishes it. */
-function catalogPointEntry() {
+/** The point, as `GET .../catalogs/{name}/points` publishes it -- ON THE WIRE. */
+function wirePointEntry() {
   return {
     pointId: catalogPointId(), backupId: "set-fx5", runId: "01JB7Z00000000000000000000",
     recoveryPointAt: "2026-09-22T14:00:00Z", coveredFrom: "2026-09-22T13:00:00Z",
@@ -801,6 +801,18 @@ function catalogPointEntry() {
     manifestSha256: "sha256:" + "b2".repeat(32),
     locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }],
   };
+}
+
+/** THE POINT, AS THE WIZARD IS HANDED IT: the wire row through the catalog's
+ *  own decoder (`handedPoint`). `over` adds or replaces members of the wire
+ *  row, and `change` edits it, BEFORE the decode -- a row a page function is
+ *  given is never the wire object itself. */
+function catalogPointEntry(over, change) {
+  const wireRow = Object.assign(wirePointEntry(), over || {});
+  if (typeof change === "function") {
+    change(wireRow);
+  }
+  return handedPoint(wireRow);
 }
 
 /** A catalog point the wizard restores from, with no Backup behind it. */
@@ -825,10 +837,7 @@ test("fx5_a_catalog_point_mount_reads_the_targets_discovery_before_the_first_pai
     catalogReaders: {
       listCatalogs: async () => ({ items: [catalogObject(ns)] }),
       readCatalog: async () => catalogObject(ns),
-      readPoints: async () => ({
-        requestId: "r", items: [catalogPointEntry()], truncated: false, viewExpired: false,
-        page: { limit: 200, nextCursor: null },
-      }),
+      readPoints: async () => handedPage([catalogPointEntry()]),
       ownVerdict: async () => ({ verdict: null }),
     },
   });
@@ -914,15 +923,15 @@ import {
 /** The catalog row, as the product API publishes it, with the point's topics:
  *  `orders` kept on 3 replicas and owned by a Strimzi KafkaTopic, `payments`
  *  on 1. */
-function catalogPointEntryWithTopics() {
-  return Object.assign(catalogPointEntry(), {
+function catalogPointEntryWithTopics(over, change) {
+  return catalogPointEntry(Object.assign({
     topics: [
       { name: "orders", partitions: 6, replicationFactor: 3, configCoverage: "captured",
         owner: "strimzi", applyRoute: "desiredStateExport" },
       { name: "payments", partitions: 2, replicationFactor: 1, configCoverage: "captured",
         applyRoute: "adminApi" },
     ],
-  });
+  }, over || {}), change);
 }
 
 /** A catalog-point state whose row lists its topics, `orders` and `payments`
@@ -1010,8 +1019,8 @@ test("prod051_the_default_follows_the_selected_subset", async () => {
     "1 (the source's, as recovery catalog `archive` records point `" + catalogPointId() + "`)",
     "NEGATIVE CONTROL: 3 -- the whole point's largest -- fails this: the SELECTED topics' factor");
   // A selected topic the row records no factor for: the largest of the rest, and said.
-  const entry = catalogPointEntryWithTopics();
-  delete entry.topics[0].replicationFactor;
+  const entry = catalogPointEntryWithTopics(undefined,
+    (wireRow) => { delete wireRow.topics[0].replicationFactor; });
   const partial = withBrokers(await catalogStateWithTopics("team-p051-partial", entry), 5);
   assert.equal(replicationText(partial), "1 (the source's, as recovery catalog `archive` records " +
     "point `" + catalogPointId() + "`; not recorded for 1 of the 2 selected topics)");
@@ -1025,7 +1034,7 @@ test("prod051_a_row_without_topics_says_why_and_falls_back_to_the_brokers", asyn
   assert.equal(sourceFactorNote(state), SOURCE_FACTOR_NOTE + " For this point: recovery catalog " +
     "`archive` publishes no topic layout for this point: its backup receipt predates format " +
     "1.3.0, the catalog was synced by an older runner, or the point is not Available.");
-  const omitted = Object.assign(catalogPointEntry(), { topicsOmitted: 70 });
+  const omitted = catalogPointEntry({ topicsOmitted: 70 });
   const facts = sourceFactsOfEntry(omitted, "archive");
   assert.equal(facts.topics, null);
   assert.match(facts.why, /lists this point without its 70 topics/);
@@ -1039,14 +1048,14 @@ test("prod051_a_backups_point_is_found_in_the_namespaces_catalogs_by_its_receipt
     state.point.status.evidence = Object.assign({}, state.point.status.evidence || {},
       { receiptSha256: digest });
     const asked = [];
-    const row = Object.assign(catalogPointEntryWithTopics(), { pointId: pointId });
+    const row = catalogPointEntryWithTopics({ pointId: pointId });
     const readers = (rows) => ({
       catalogReaders: {
         listCatalogs: async () => ({ items: [{ metadata: { name: "empty" } },
           { metadata: { name: "primary" } }] }),
         readPoints: async (name, query) => {
           asked.push(name + "?" + (query.cursor || ""));
-          return { items: name === "primary" ? rows : [], page: { nextCursor: null } };
+          return handedPage(name === "primary" ? rows : []);
         },
       },
     });
@@ -1066,8 +1075,8 @@ test("prod051_a_backups_point_is_found_in_the_namespaces_catalogs_by_its_receipt
     // A ROW THE CATALOG DOES NOT STAND BEHIND sets nothing: not selectable.
     const unsure = wizardState("team-p051-backup-unsure");
     unsure.point.status.evidence = { receiptSha256: digest };
-    await refreshSourceFacts(unsure, readers([Object.assign({}, row,
-      { selectable: false, verification: "UntrustedSigner" })]));
+    await refreshSourceFacts(unsure, readers([catalogPointEntryWithTopics(
+      { pointId: pointId, selectable: false, verification: "UntrustedSigner" })]));
     assert.equal(sourceReplicationFactorsOf(unsure), null,
       "NEGATIVE CONTROL: [3, 1] -- an untrusted row's layout setting the default -- fails this");
     assert.match(unsure.sourceFacts.why, /as not selectable \(Available, UntrustedSigner\)/);
@@ -1127,11 +1136,8 @@ test("prod051_the_mount_reads_the_backups_catalog_row_before_the_first_paint", a
     list: async (_ns, plural) => (plural === "kafkaclusters" ? clusters() : backups),
     catalogReaders: {
       listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
-      readPoints: async () => ({
-        items: [Object.assign(catalogPointEntryWithTopics(), {
-          pointId: pointIdOfReceiptDigest(digest) })],
-        page: { nextCursor: null },
-      }),
+      readPoints: async () => handedPage([catalogPointEntryWithTopics(
+        { pointId: pointIdOfReceiptDigest(digest) })]),
     },
   });
   await mountRestoreWizard(view.root, "team-p051-mount", pointParams(), viewParse, api);

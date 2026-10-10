@@ -262,6 +262,46 @@ export function decoded(name, change) {
   return decode(name, change).value;
 }
 
+/** ONE PAGE OF CATALOG POINTS, AS A PAGE IS HANDED IT, from rows a row of the
+ *  suite writes out: the rows inside the `PointPageResponse` the route answers,
+ *  through `decodeCatalogPoints` -- the decoder `readCatalogPoints` applies
+ *  between the API and the catalog page, the wizard and the schedule page.
+ *
+ *  A ROW WRITTEN IN A TEST IS STILL THE PRODUCT API'S DOCUMENT, and until
+ *  FX-48 the suite handed such rows straight to the page functions. Decoded,
+ *  it is what the page is handed: an absent optional is `null`, and a member
+ *  the product API does not publish is not on it -- which this refuses by
+ *  name, so a row cannot teach a page a member the API never sends.
+ *  `envelope` overrides the page's own members (`truncated`, `viewExpired`,
+ *  `backupVerdictsIncomplete`, `page`); a member given as `undefined` is left
+ *  out, as the API leaves an absent one out. */
+export function handedPoints(rows, envelope) {
+  const body = JSON.parse(JSON.stringify(Object.assign({
+    requestId: "handed-points", page: { limit: 200 }, truncated: false, viewExpired: false,
+  }, envelope || {}, { items: rows })));
+  const read = decodeCatalogPoints(body);
+  if (read.unknown.length > 0) {
+    throw new Error("a point written in this test carries " + read.unknown.join(", ") +
+      ", which the product API does not publish (or ui/contract.js does not declare)");
+  }
+  return read.value;
+}
+
+/** ONE CATALOG POINT, AS A PAGE IS HANDED IT. See [`handedPoints`]. */
+export function handedPoint(row) {
+  return handedPoints([row]).items[0];
+}
+
+/** A PAGE AROUND POINTS THAT WERE ALREADY HANDED ON: the page's own members
+ *  through the decoder, and `items` the rows given -- the same objects, so a
+ *  row of the suite can still say "that one". For a reader double that
+ *  answers what `readCatalogPoints` answers. */
+export function handedPage(points, envelope) {
+  const read = handedPoints([], envelope);
+  read.items = points;
+  return read;
+}
+
 /** The reader for a published response schema, or a throw naming it. */
 export function readerFor(schema) {
   const reader = READERS[schema];

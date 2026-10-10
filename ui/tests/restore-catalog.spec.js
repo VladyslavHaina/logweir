@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { decoded } from "./console-fixture.js";
+import { decoded, handedPage, handedPoint } from "./console-fixture.js";
 
 import {
   applyWizardDraft,
@@ -77,9 +77,11 @@ const RECEIPT_KEY = "logweir/backups/" + SET + "/01JB7Z00000000000000000000.rece
 const RECEIPT = "sha256:" + "a1".repeat(32);
 const MANIFEST = "sha256:" + "b2".repeat(32);
 
-/** One point, as `GET .../catalogs/{name}/points` publishes it. */
+/** One point, as `GET .../catalogs/{name}/points` publishes it and AS A PAGE IS
+ *  HANDED IT: the wire row through the catalog's own decoder (`handedPoint`).
+ *  A row a page function is given is never the wire object itself. */
 function row(over) {
-  return Object.assign({
+  return handedPoint(Object.assign({
     pointId: POINT,
     backupId: SET,
     runId: "01JB7Z00000000000000000000",
@@ -95,7 +97,7 @@ function row(over) {
     manifestKey: SET + "/manifest.json",
     manifestSha256: MANIFEST,
     locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }],
-  }, over || {});
+  }, over || {}));
 }
 
 function catalogObject(over) {
@@ -176,11 +178,12 @@ function readersOver(pages, catalog, verdicts) {
   };
 }
 
+/** One page of points, as `readCatalogPoints` hands it on: the page's own
+ *  members through the decoder, around rows that already went through it. */
 function page(items, over, next) {
-  return Object.assign({
-    requestId: "r", items: items, truncated: false, viewExpired: false,
+  return handedPage(items, Object.assign({
     page: { limit: 200, nextCursor: next === undefined ? null : next },
-  }, over || {});
+  }, over || {}));
 }
 
 const apiWithDestination = {
@@ -347,11 +350,11 @@ test("fx17_the_first_page_of_scheduled_points_is_offered_and_says_why_when_it_is
   const many = (redacted) => Array.from({ length: 20 }, (_, i) => Object.assign(pocRow(redacted), {
     pointId: "lwp1-" + (i.toString(16).padStart(2, "0")).repeat(16),
   }));
-  const before = renderPoints({ items: many(true), page: {} }, NS, "archive", "primary");
+  const before = renderPoints(page(many(true)), NS, "archive", "primary");
   assert.equal((before.match(/data-restore-refused="wizard"/g) || []).length, 20);
   assert.equal((before.match(/data-restore-point=/g) || []).length, 0);
   assert.match(before, /data-redacted-binding="true"/);
-  const after = renderPoints({ items: many(false), page: {} }, NS, "archive", "primary");
+  const after = renderPoints(page(many(false)), NS, "archive", "primary");
   assert.equal((after.match(/data-restore-point=/g) || []).length, 20,
     "every scheduled point on the page is offered");
   assert.equal((after.match(/data-restore-refused/g) || []).length, 0);
@@ -960,7 +963,12 @@ test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
 
 test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () => {
   const cp = {
-    observedFromMs: 1, observedToMs: 2, observedBeforeRecoveryPointMs: 1500, listing: "complete",
+    // The view's own members: two instants, and the freshness in milliseconds.
+    // (Until FX-48 this row carried the catalog ENTRY's `observedFromMs` and
+    // `observedToMs`, which the product API does not publish; no page read
+    // them, and the decoder now refuses a row that carries them.)
+    observedFrom: "2026-09-22T13:59:57Z", observedTo: "2026-09-22T13:59:58.5Z",
+    observedBeforeRecoveryPointMs: 1500, listing: "complete",
     groups: [
       { groupId: "billing", outcome: "captured", groupType: "consumer", active: true,
         positions: { related: 5, notRelated: 1, neverCommitted: 2, beyondEnd: 0, failed: 0,
@@ -1009,8 +1017,9 @@ test("prod041_h1_a_point_selecting_the_most_groups_is_offered_and_counts_what_it
   // counts, never partitions -- and the view lists none of the groups past
   // its cap of 32, only how many. Such a row is offered for restore like any
   // other, and its note says the groups were left out of the list.
-  const big = row({ consumerPositions: { observedFromMs: 1, observedToMs: 2,
-    observedBeforeRecoveryPointMs: 2000, listing: "complete", groupsOmitted: 100 } });
+  const big = row({ consumerPositions: { observedFrom: "2026-09-22T13:59:57Z",
+    observedTo: "2026-09-22T13:59:58Z", observedBeforeRecoveryPointMs: 2000,
+    listing: "complete", groupsOmitted: 100 } });
   assert.deepEqual(catalogPointOffer(big, page([])), { offer: true, reason: null });
   assert.match(consumerPositionsNote(big),
     /100 group\(s\) not listed here; the signed receipt names each/);

@@ -796,6 +796,38 @@ test("fx48_an_original_name_restore_leaves_the_console_as_the_route_requires", a
   }
 });
 
+test("fx48_behind_kubectl_proxy_the_object_carries_no_request_only_member", async () => {
+  // LEGACY MODE: the same pre-send check refused the same body there. What is
+  // sent is the custom resource -- the declaration in `spec`, and none of the
+  // three members that belong to the product API's REQUEST.
+  const { apiClient, resetMode, selectMode } = await import("../client.js");
+  const state = confirmState(ORDINARY);
+  state.originalNameTyped = selectedTopics(state).join("\n");
+  const body = restoreBody(state, await preparePlan(state));
+  assert.ok(body.originalNameConfirmation !== undefined && body.topicMapping !== undefined);
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
+  const sent = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    sent.push({ url: String(url), body: JSON.parse(init.body) });
+    return Promise.resolve({ ok: true, status: 201, text: () => Promise.resolve(init.body) });
+  };
+  try {
+    await apiClient().create(state.ns, "restores", body);
+    assert.equal(sent.length, 1, "THE DEFECT: the page refused its own body here too");
+    assert.ok(sent[0].url.indexOf("/apis/logweir.dev/v1alpha1/namespaces/" + state.ns +
+      "/restores") === 0, sent[0].url);
+    assert.deepEqual(sent[0].body.spec.target.topicNaming, { prefix: "", originalName: true });
+    for (const member of ["originalNameConfirmation", "topicMapping", "ticket"]) {
+      assert.equal(sent[0].body[member], undefined, member + " is not a field of a Restore");
+    }
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
+});
+
 test("fx48_an_ordinary_restore_sends_what_it_did_and_an_empty_prefix_is_refused", async () => {
   // NEGATIVE CONTROL of the row above: no declaration, no typed names, a
   // non-empty prefix -- and the page's own check still refuses an empty one.

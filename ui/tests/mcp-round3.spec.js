@@ -20,7 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { decoded } from "./console-fixture.js";
+import { decoded, handedPage, handedPoint } from "./console-fixture.js";
 
 import { renderIdentity } from "../app.js";
 import { resetMode, selectMode, sessionIdentity } from "../client.js";
@@ -175,10 +175,11 @@ async function signedInAs(session) {
   await selectMode({ probe: async () => ({ ok: true, status: 200, body: session }) });
 }
 
-/** A catalog row the wizard would offer, as `restore-catalog.spec.js` builds it. */
+/** A catalog row the wizard would offer, as `restore-catalog.spec.js` builds
+ *  it: the wire row through the catalog's own decoder, as a page is handed it. */
 function catalogRow() {
   const set = "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260922-140000";
-  return {
+  return handedPoint({
     pointId: "lwp1-0123456789abcdef0123456789abcdef", backupId: set,
     runId: "01JB7Z00000000000000000000", recoveryPointAt: "2026-09-22T14:00:00Z",
     coveredFrom: "2026-09-22T13:00:00Z", coveredTo: "2026-09-22T14:00:00Z",
@@ -188,11 +189,10 @@ function catalogRow() {
     receiptSha256: "sha256:" + "a1".repeat(32), manifestKey: set + "/manifest.json",
     manifestSha256: "sha256:" + "b2".repeat(32),
     locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }],
-  };
+  });
 }
 
-const catalogPage = () => ({ requestId: "r", items: [], truncated: false, viewExpired: false,
-  page: { limit: 200, nextCursor: null } });
+const catalogPage = () => handedPage([]);
 
 test("r3_2_a_role_that_cannot_restore_reads_who_can_instead_of_a_link", async () => {
   // THE HELPER every "Restore this point" goes through.

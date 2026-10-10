@@ -555,16 +555,16 @@ export const NOT_PUBLISHED_SENTENCE =
   "and partial reason, the objectives and the measured values are also in the run's signed " +
   "scorecard, which the commands under Check it yourself fetch and verify.";
 
-/** Whether a console projection names `path`, or a block that holds it, among
+/** Whether a console projection names `field`, or a block that holds it, among
  *  the fields it could not supply (`__contract.absent`, `ui/client.js`). False
  *  for a custom resource: in legacy mode an absent field is one the controller
  *  did not record, and the cell says "-" as it always has. */
-export function notPublishedIn(object, path) {
+export function notPublishedIn(object, field) {
   const absent = ((object || {}).__contract || {}).absent;
   if (!Array.isArray(absent)) {
     return false;
   }
-  return absent.some((named) => path === named || path.indexOf(named + ".") === 0);
+  return absent.some((named) => field === named || field.indexOf(named + ".") === 0);
 }
 
 /** One Restore, in full. With `operation`, the view opens with where the
@@ -601,10 +601,10 @@ export function renderRestoreDetail(object, operation) {
   // when there is one and the not-published cell when the projection named
   // its absence; the sentence under the Integrity table is printed once.
   let unpublished = false;
-  const shown = (path, value, render) => {
-    if ((value === undefined || value === null) && notPublishedIn(object, path)) {
+  const shown = (field, value, render) => {
+    if ((value === undefined || value === null) && notPublishedIn(object, field)) {
       unpublished = true;
-      return "<span class=\"note\" data-not-published=\"" + esc(path) + "\">" +
+      return "<span class=\"note\" data-not-published=\"" + esc(field) + "\">" +
         esc(NOT_PUBLISHED) + "</span>";
     }
     return render(value);

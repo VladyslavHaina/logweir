@@ -1399,12 +1399,24 @@ const RAW_MEMBER = new RegExp(
   ")\\s*(?:\\.|\\[)",
 );
 
-/** The lines of `source` that take a member off an undecoded console fixture. */
+/** A CATALOG POINT, OR A PAGE OF THEM, WRITTEN OUT AS THE ARGUMENT of one of
+ *  the functions the catalog page, the wizard and the schedule page read a
+ *  point with. This is the surface the schema dependency was lost on, and a
+ *  row written in a test is the product API's document as much as a fixture
+ *  file is: it goes through `handedPoint` / `handedPoints` / `handedPage`
+ *  (ui/tests/console-fixture.js), or through `readCatalogPoints` itself. */
+const POINT_LITERAL = new RegExp(
+  "\\b(?:renderPoints|pointRow|sourceFactsOfEntry|schemaDependentTopicsOf|" +
+    "consumerPositionsNote|catalogPointOffer|renderSchemaDependentPoints)\\(\\s*\\{",
+);
+
+/** The lines of `source` that take a member off an undecoded console fixture,
+ *  or hand a catalog function a point written out in place. */
 export function rawMemberLines(source) {
   const out = [];
   String(source).split("\n").forEach((line, i) => {
     const code = line.replace(/^\s*(?:\/\/|\*).*$/, "");
-    if (RAW_MEMBER.test(code)) {
+    if (RAW_MEMBER.test(code) || POINT_LITERAL.test(code)) {
       out.push(String(i + 1) + ": " + line.trim());
     }
   });
@@ -1427,8 +1439,9 @@ test("no_spec_takes_a_member_off_an_undecoded_console_fixture", () => {
   assert.deepEqual(found, [],
     "a page is never handed the product API's document: it is handed what ui/contract.js " +
       "decoded. Take the member off `decoded(name)` (ui/tests/console-fixture.js), or change " +
-      "the wire document first and decode it -- `decoded(name, (body) => { ... })`:\n" +
-      found.join("\n"));
+      "the wire document first and decode it -- `decoded(name, (body) => { ... })`; and hand " +
+      "a catalog function a point through `handedPoint` / `handedPage`, not one written out " +
+      "in place:\n" + found.join("\n"));
 });
 
 test("the_lint_refuses_each_spelling_and_ignores_a_whole_document", () => {
@@ -1439,6 +1452,9 @@ test("the_lint_refuses_each_spelling_and_ignores_a_whole_document", () => {
     "const w = wire(\"restore.json\").item.name;",
     "  new URL(\"./fixtures/console/preflight-ready.json\", import.meta.url), \"utf8\")).item;",
     "const first = fixture(\"console/backups-list.json\")[\"items\"];",
+    "const html = renderPoints({ items: [row], page: {} }, \"team-a\", \"c1\", \"dest\");",
+    "assert.equal(consumerPositionsNote({ consumerPositions: cp }), \"\");",
+    "const facts = sourceFactsOfEntry({ pointId: \"p1\", topics: [] }, \"archive\");",
   ];
   for (const line of refused) {
     assert.equal(rawMemberLines(line).length, 1, line);
@@ -1450,6 +1466,8 @@ test("the_lint_refuses_each_spelling_and_ignores_a_whole_document", () => {
     "const item = decoded(\"destination.json\").item;",
     "// const d = fixture(\"console/destination.json\").item;",
     "const plan = fixture(\"plan-fields.json\").topics;",
+    "const html = renderPoints(handedPage([row]), \"team-a\", \"c1\", \"dest\");",
+    "const facts = sourceFactsOfEntry(handedPoint(wireRow), \"archive\");",
   ];
   for (const line of allowed) {
     assert.deepEqual(rawMemberLines(line), [], line);
