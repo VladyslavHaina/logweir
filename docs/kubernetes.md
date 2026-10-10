@@ -2532,7 +2532,8 @@ largest `viewLimit`) is never enforced, nor is one whose view the catalog cut
 for page space**, and a `mode: Full` catalog whose walk does not finish in one
 sync (`spec.sync.maxObjectsPerRun`) publishes each resumed sync as a window, so
 it never enforces either: use `mode: Index`, or a budget that finishes in one
-sync. Under `ViewIncomplete` and `ViewExpired`, as under `NothingFitsCeiling`,
+sync. The catalog learns where a walk began from the plan its sync Job ran
+under, and publishes a sync whose plan it cannot read as a window too. Under `ViewIncomplete` and `ViewExpired`, as under `NothingFitsCeiling`,
 `status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
 `LogweirEnforced`; the `Enforced` condition is the authority on whether a run
 can start.

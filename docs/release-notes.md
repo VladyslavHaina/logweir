@@ -2546,7 +2546,8 @@ or that is past, or states no, `status.viewExpiresAt`
 (`Enforced=False/ViewExpired`). The message names what helps, the evaluation
 is still published, and nothing is deleted. A `mode: Full` catalog now
 publishes a sync resumed from its cursor as a window (`truncated: true`): that
-sync lists only the archive's tail. **On v1 an archive of more than 5000
+sync lists only the archive's tail. Where a walk began is read from the plan
+the sync Job ran under, and a sync whose plan cannot be read is a window too. **On v1 an archive of more than 5000
 points, a view the catalog cut for page space, and a Full catalog whose walk
 does not finish in one sync are never enforced.** Under both reasons
 `status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
