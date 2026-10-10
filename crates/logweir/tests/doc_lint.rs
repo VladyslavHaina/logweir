@@ -2178,7 +2178,28 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a retention status says what the per-run ceiling held back",
             "truncatedByCap",
         ),
-        // FX-33 (2026-10-10, item 59): one backup names at most 1,000
+        // FX-48 (2026-10-10, item 59): the shared console shows what the
+        // product API publishes; the sentence a cell carries for a value the
+        // API does not publish, which an operator will read on the Restore
+        // detail.
+        (
+            "the shared console shows what the product API publishes",
+            "not published by the product API",
+        ),
+        // PROD-01.2 (2026-10-10, item 60): a readiness check asks the
+        // endpoint what it can do, and the runner image moves with the
+        // controller because every Backup and Restore plan lists the rows.
+        (
+            "capability rows, and the compatibility contract",
+            "capabilityChecks",
+        ),
+        // FX-34 (2026-10-10, item 61): a guard-refused Restore or Backup says
+        // why in its status, off the one stdout line the runner adds for it.
+        (
+            "a guard-refused run says why in its status",
+            "refusal-detail=",
+        ),
+        // FX-33 (2026-10-10, item 62): one backup names at most 1,000
         // topics; the name a selection over it is refused under, at every
         // entry, before the engine runs.
         (
@@ -2645,4 +2666,77 @@ fn a_read_by_version_is_seen_however_the_call_is_spelled() {
             "crates/a/src/trait_path_form.rs",
         ])
     );
+}
+
+/// **FX-34's review (H1, MED-1, MED-2): the three documents say which runner
+/// images stop under a controller that passes `--line-token`, what that looks
+/// like, the chart keys that exist, and the rollback order that is safe.**
+///
+/// The first version of these paragraphs named a chart key the chart does not
+/// have (`image`), gave the rollback order that PRODUCES the failure (the
+/// runner image first), and said "a runner older than this release" where the
+/// truth is every runner image published before the change. Each is a
+/// sentence a later merge can put back, so each is held here, against the
+/// chart's own values file.
+#[test]
+fn the_line_token_skew_is_documented_with_real_chart_keys_and_the_safe_rollback_order() {
+    let values = read("charts/logweir/values.yaml");
+    for key in ["controllerImage:", "runnerImage:"] {
+        assert!(
+            values.lines().any(|l| l.starts_with(key)),
+            "charts/logweir/values.yaml has no top-level `{key}`; the docs name it"
+        );
+    }
+    assert!(
+        !values.lines().any(|l| l.starts_with("image:")),
+        "the chart has no top-level `image` key, and the docs must not name one"
+    );
+    for doc in [
+        "docs/kubernetes.md",
+        "docs/stability.md",
+        "docs/release-notes.md",
+    ] {
+        // One line, lower case, emphasis marks aside: the three documents
+        // wrap and stress the same sentences differently.
+        let text = read(doc)
+            .replace('*', "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for owed in [
+            // The keys an operator sets, as the chart spells them.
+            "`controllerimage`",
+            "`runnerimage`",
+            // Which images: not "older than this release".
+            "every runner image published before this change",
+            // What it looks like, on the object and in the pod log.
+            "`exitcode: 1`",
+            "`exitreason: operational`",
+            "error: unexpected argument '--line-token' found",
+            // The single safe step of a two-step rollback.
+            "or the controller first",
+            // Why a tagged release's runner already needed the roll.
+            "item 35",
+        ] {
+            assert!(
+                text.contains(owed),
+                "{doc} no longer says `{owed}` about a runner image that does not know \
+                 `--line-token`"
+            );
+        }
+        for wrong in [
+            // The order that leaves this controller over an older runner.
+            "or the runner image first",
+            // A key the chart does not have.
+            "`image` and `runnerimage`",
+            // The reason that no longer exists (item 28's stamp).
+            "which item 28 already orders",
+        ] {
+            assert!(
+                !text.contains(wrong),
+                "{doc} says `{wrong}` again; see FX-34's review, MED-1, MED-2 and H1"
+            );
+        }
+    }
 }

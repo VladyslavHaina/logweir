@@ -1,0 +1,681 @@
+{
+  "capturedFrom": "claude/integrate-5 7e415dbb (pre-FX-34)",
+  "cases": {
+    "exit-0-with-keys": {
+      "exitCode": 0,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Succeeded",
+              "exitCode": 0,
+              "exitReason": "ok",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence"
+                }
+              ],
+              "evidence": {
+                "receiptKey": "logweir/backups/b1/r1.receipt.json",
+                "sidecarKey": "logweir/backups/b1/r1.receipt.sig",
+                "receiptSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "progress": {
+                "stage": "Finished",
+                "reason": "Ok",
+                "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "evidence": {
+                "verification": {
+                  "result": "NotAttempted",
+                  "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+                  "detail": "no evidence credential is configured in this row",
+                  "verifiedAt": "2026-11-09T03:20:00Z",
+                  "matchedKeyId": null,
+                  "signedAt": null,
+                  "trust": null
+                }
+              },
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence"
+                },
+                {
+                  "type": "Verified",
+                  "status": "False",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "VerificationNotAttempted",
+                  "message": "unverified"
+                }
+              ]
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4072"
+            }
+          }
+        }
+      ]
+    },
+    "exit-0-without-keys": {
+      "exitCode": 0,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Succeeded",
+              "exitCode": 0,
+              "exitReason": "ok",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "False",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "EvidenceKeysUnreadable",
+                  "message": "the pod log did not carry both `receipt-key=` and `sidecar-key=`; neither evidence key is set, and none was guessed from the backup id"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Ok",
+                "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-1": {
+      "exitCode": 1,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 1,
+              "exitReason": "operational",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Operational",
+                  "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Operational",
+                "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-1-claimed": {
+      "exitCode": 1,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 1,
+              "exitReason": "ExecutionAlreadyClaimed",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Operational",
+                  "message": "the runner exited 1 (operational: ExecutionAlreadyClaimed); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode and the state from the runner's final `failure-reason=` line"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Operational",
+                "message": "the runner exited 1 (operational: ExecutionAlreadyClaimed); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode and the state from the runner's final `failure-reason=` line",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-2": {
+      "exitCode": 2,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 2,
+              "exitReason": "drill-not-pass",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "DrillNotPass",
+                  "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "DrillNotPass",
+                "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-4": {
+      "exitCode": 4,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 4,
+              "exitReason": "signing-or-lock",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "SigningOrLock",
+                  "message": "the runner exited 4 (signing-or-lock); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "SigningOrLock",
+                "message": "the runner exited 4 (signing-or-lock); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-4-unproven": {
+      "exitCode": 4,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 4,
+              "exitReason": "ExecutionClaimUnproven",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "SigningOrLock",
+                  "message": "the runner exited 4 (signing-or-lock: ExecutionClaimUnproven); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode and the state from the runner's final `failure-reason=` line"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "SigningOrLock",
+                "message": "the runner exited 4 (signing-or-lock: ExecutionClaimUnproven); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode and the state from the runner's final `failure-reason=` line",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-137": {
+      "exitCode": 137,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 137,
+              "exitReason": "operational",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "Operational",
+                  "message": "the runner exited 137 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Operational",
+                "message": "the runner exited 137 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-named-state": {
+      "exitCode": 3,
+      "terminalState": "CredentialNotRenderable",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "CredentialNotRenderable",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-no-line": {
+      "exitCode": 3,
+      "terminalState": "GuardRefusedUnknownReason",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "GuardRefusedUnknownReason",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-k3": {
+      "exitCode": 3,
+      "terminalState": "GuardRefused",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-backup-nightly-20261109-031700",
+        "GET /api/v1/namespaces/logweir-t17/pods/logweir-backup-nightly-20261109-031700-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t17/backups/logweir-backup-nightly-20261109-031700/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "GuardRefused",
+              "backupId": "3f1c8a5e-0000-4000-8000-0000000000a1",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 3,
+                  "lastTransitionTime": "2026-11-09T03:20:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-11-09T03:20:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-backup-nightly-20261109-031700",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t17/jobs/logweir-backup-nightly-20261109-031700?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    }
+  }
+}

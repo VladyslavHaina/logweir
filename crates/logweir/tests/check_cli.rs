@@ -55,6 +55,7 @@ use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
 };
 use logweir_engine_oso::storage::{PutOutcome, StoreError};
+use logweir_kafka::api_versions::ApiVersions;
 use logweir_kafka::inventory::{
     CheckFailure, InventoryProbe, ListedTopic, Listing, TopicCreateOutcome, TopicPresence,
 };
@@ -543,6 +544,13 @@ struct ProbeState {
     create_fault: Option<(CheckCode, String)>,
     create_calls: Vec<Vec<NewTopicSpec>>,
     describe_calls: Vec<String>,
+    /// PROD-01.2: what the endpoint answered ApiVersions. `None` is the
+    /// trait's own default: not observed.
+    api_versions: Option<Result<ApiVersions, (CheckCode, String)>>,
+    api_versions_calls: usize,
+    /// PROD-01.2: topics whose DescribeConfigs fails, and how.
+    topic_config_faults: BTreeMap<String, (CheckCode, String)>,
+    topic_config_calls: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -551,11 +559,68 @@ struct FakeProbe {
 }
 
 impl FakeProbe {
+    /// A healthy Apache Kafka broker: it names a cluster id, and its
+    /// configuration reports the record-timestamp bound, as every Apache
+    /// Kafka broker does (unbounded is the value `i64::MAX`). PROD-01.2: a
+    /// broker answer WITHOUT the key is "not reported", which is its own row
+    /// (`without_broker_config`).
     fn new() -> Self {
         let p = Self::default();
         p.state.lock().unwrap().cluster_id = Some("M29I2S7FQPyHBEX12Vx7XA".to_string());
         p.state.lock().unwrap().listing.broker_count = 3;
-        p
+        p.with_broker_config(
+            logweir::check::kinds::restore::BROKER_TIMESTAMP_BEFORE_MAX_MS,
+            &i64::MAX.to_string(),
+        )
+    }
+
+    fn without_broker_config(self, k: &str) -> Self {
+        self.state.lock().unwrap().broker_configs.remove(k);
+        self
+    }
+
+    /// PROD-01.2: the endpoint's ApiVersions answer, as `(key, min, max)`.
+    fn with_api_versions(self, ranges: &[(i16, i16, i16)]) -> Self {
+        self.state.lock().unwrap().api_versions = Some(Ok(ApiVersions::of(ranges)));
+        self
+    }
+
+    /// The whole view of a cluster of `brokers` brokers: its weakest answer,
+    /// and whether the brokers' answers differed.
+    fn with_cluster_api_versions(
+        self,
+        ranges: &[(i16, i16, i16)],
+        brokers: usize,
+        differ: bool,
+    ) -> Self {
+        self.state.lock().unwrap().api_versions =
+            Some(Ok(ApiVersions::of_cluster(ranges, brokers, differ)));
+        self
+    }
+
+    fn failing_api_versions(self, message: &str) -> Self {
+        self.state.lock().unwrap().api_versions = Some(Err((
+            CheckCode::ApiVersionsNotObserved,
+            message.to_string(),
+        )));
+        self
+    }
+
+    fn api_versions_calls(&self) -> usize {
+        self.state.lock().unwrap().api_versions_calls
+    }
+
+    fn failing_topic_configs(self, topic: &str, code: CheckCode, message: &str) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .topic_config_faults
+            .insert(topic.to_string(), (code, message.to_string()));
+        self
+    }
+
+    fn topic_config_calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().topic_config_calls.clone()
     }
 
     fn with_topics(self, topics: &[(&str, u32)]) -> Self {
@@ -656,8 +721,16 @@ impl InventoryProbe for FakeProbe {
         Ok(answer)
     }
 
-    fn topic_configs(&self, _name: &str) -> Result<BTreeMap<String, String>, CheckFailure> {
-        Ok(BTreeMap::new())
+    fn topic_configs(&self, name: &str) -> Result<BTreeMap<String, String>, CheckFailure> {
+        let mut s = self.state.lock().unwrap();
+        s.topic_config_calls.push(name.to_string());
+        match s.topic_config_faults.get(name) {
+            Some((c, m)) => Err(CheckFailure::new(*c, m)),
+            None => Ok(BTreeMap::from([(
+                "cleanup.policy".to_string(),
+                "delete".to_string(),
+            )])),
+        }
     }
 
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, CheckFailure> {
@@ -665,6 +738,20 @@ impl InventoryProbe for FakeProbe {
         match &s.broker_configs_fault {
             Some((c, m)) => Err(CheckFailure::new(*c, m)),
             None => Ok(s.broker_configs.clone()),
+        }
+    }
+
+    fn api_versions(&self, _within: std::time::Duration) -> Result<ApiVersions, CheckFailure> {
+        let mut s = self.state.lock().unwrap();
+        s.api_versions_calls += 1;
+        match &s.api_versions {
+            Some(Ok(v)) => Ok(v.clone()),
+            Some(Err((c, m))) => Err(CheckFailure::new(*c, m)),
+            // The trait's own default: this probe observed nothing.
+            None => Err(CheckFailure::new(
+                CheckCode::ApiVersionsNotObserved,
+                "this probe does not observe the endpoint's ApiVersions answer",
+            )),
         }
     }
 
@@ -1882,6 +1969,22 @@ fn an_expected_topic_that_is_hidden_is_not_authorized_and_not_absent() {
 // 4. `destinationAccess`
 // ===========================================================================
 
+/// A store's refusal in the words `object_store` 0.14.1 hands over: its
+/// request line, its status line, and the store's error document (captured
+/// with the real client; `crates/logweir-store/tests/options.rs` holds the
+/// shape to the client itself).
+///
+/// The classifier reads an answer's own status and code and searches no text
+/// (PROD-01.2 review, M1: the text echoes the bucket and the key), so a row
+/// offers a refusal in the shape the product meets. The rows here used to
+/// pass on strings no store sends, with the code anywhere in them.
+fn s3_refusal(status: &str, code: &str) -> String {
+    format!(
+        "Generic S3 error: Error performing GET https://s3.example.com/lw-archive/k in 3ms - \
+         Server returned non-2xx status code: {status}: <Error><Code>{code}</Code></Error>"
+    )
+}
+
 fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
     plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
         destination: destination(),
@@ -1942,11 +2045,8 @@ fn a_destination_access_check_tells_denial_from_not_found() {
     assert_eq!(row.gating, Gating::Advisory);
 
     // Denial: the backend refused before it looked.
-    let denied = FakeObjects::new().failing_get(Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied</Code>\
-         </Error>\", after 0 retries: HTTP status client error (403 Forbidden)"
-            .to_string(),
-    ));
+    let denied =
+        FakeObjects::new().failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive(
         &m,
         &FakeWiring::default().with_role(DestinationRole::EvidenceRead, denied),
@@ -1967,9 +2067,10 @@ fn an_archive_list_denial_is_blocking_and_a_wrong_key_is_invalid_credentials() {
         &m,
         &FakeWiring::default().with_role(
             DestinationRole::ArchiveRead,
-            FakeObjects::new().failing_list(Fault::Io(
-                "Generic S3 error: <Error><Code>SignatureDoesNotMatch</Code></Error>".to_string(),
-            )),
+            FakeObjects::new().failing_list(Fault::Io(s3_refusal(
+                "403 Forbidden",
+                "SignatureDoesNotMatch",
+            ))),
         ),
     );
     let row = run.row(CheckId::DestinationArchiveListable);
@@ -2067,10 +2168,7 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
     let run = drive(
         &m,
         &FakeWiring::default().with_writer(
-            FakeObjects::new().failing_put(Fault::Io(
-                "Generic S3 error: <Error><Code>AccessDenied</Code></Error> (403 Forbidden)"
-                    .to_string(),
-            )),
+            FakeObjects::new().failing_put(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
         ),
     );
     let row = run.row(CheckId::DestinationEvidenceWritable);
@@ -2096,9 +2194,7 @@ fn separated_access_plan(grant: Option<GrantRef>) -> CheckPlan {
 }
 
 fn access_denied() -> Fault {
-    Fault::Io(
-        "Generic S3 error: <Error><Code>AccessDenied</Code></Error> (403 Forbidden)".to_string(),
-    )
+    Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))
 }
 
 /// **The defect's own shape.** A destination whose ARCHIVE principal may write
@@ -2999,6 +3095,7 @@ fn readiness_plan(topics: Vec<&str>, write_probe: bool, signer: Option<&str>) ->
             evidence_write: None,
             evidence_read: None,
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         },
     )))
 }
@@ -3070,6 +3167,768 @@ fn a_readiness_check_reports_every_row_it_owns() {
         auth.expires_at.unwrap() - auth.observed_at.unwrap(),
         chrono::Duration::minutes(15)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 5a. PROD-01.2 — the capability rows. For each: the capability PRESENT (no
+//     finding), ABSENT (the finding, with its fallback text), and NOT
+//     OBSERVED (unknown, never ready).
+// ---------------------------------------------------------------------------
+
+/// Apache Kafka 4.3.1's ranges for the APIs these rows read
+/// (`docs/support-matrix.md`, measured).
+const KAFKA_4_3: [(i16, i16, i16); 8] = [
+    (0, 0, 13), // Produce
+    (1, 4, 18), // Fetch
+    (2, 1, 11), // ListOffsets
+    (3, 0, 13), // Metadata
+    (16, 0, 5), // ListGroups
+    (17, 0, 1), // SaslHandshake
+    (32, 1, 4), // DescribeConfigs
+    (36, 0, 2), // SaslAuthenticate
+];
+
+/// Redpanda v26.2.4's, measured: Produce stops at v7 and ListGroups at v4.
+const REDPANDA_26_2: [(i16, i16, i16); 8] = [
+    (0, 0, 7),
+    (1, 4, 13),
+    (2, 0, 6),
+    (3, 0, 12),
+    (16, 0, 4),
+    (17, 0, 1),
+    (32, 0, 4),
+    (36, 0, 2),
+];
+
+fn backup_capabilities() -> Vec<CheckId> {
+    logweir_core::check_contract::capability_checks_for(
+        logweir_core::check_contract::CheckOperation::Backup,
+    )
+    .to_vec()
+}
+
+/// `readiness_plan`, listing the capability rows `listed`.
+fn capability_plan(topics: Vec<&str>, listed: Vec<CheckId>) -> CheckPlan {
+    let mut plan = readiness_plan(topics, false, None);
+    let CheckRequest::OperationReadiness(r) = &mut plan.request else {
+        unreachable!("readiness_plan builds an operationReadiness request")
+    };
+    r.capability_checks = listed;
+    plan
+}
+
+fn capability_wiring(probe: FakeProbe) -> FakeWiring {
+    FakeWiring::default()
+        .with_probe(probe)
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_role(DestinationRole::EvidenceRead, FakeObjects::new())
+}
+
+/// **Listed by the plan, or not emitted.** A plan WITHOUT `capabilityChecks`
+/// (every plan an older controller renders) gets no capability row and no
+/// ApiVersions observation, so that controller never receives an id it cannot
+/// read; the same plan listing them gets exactly those rows, pinned for the
+/// controller's mirror (`weirkeeper::controllers::preflight::job_rows`).
+#[test]
+fn a_readiness_check_with_capability_checks_reports_every_row_it_owns() {
+    let probe = || {
+        FakeProbe::new()
+            .with_presence("orders", TopicPresence::Present { partitions: 6 })
+            .with_api_versions(&KAFKA_4_3)
+    };
+    // Not listed: nothing emitted, nothing observed.
+    let unlisted = probe();
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &capability_wiring(unlisted.clone()),
+    );
+    for id in logweir_core::check_contract::CAPABILITY_CHECKS {
+        assert!(
+            !run.has(id),
+            "`{id}` was emitted for a plan that does not list it"
+        );
+    }
+    assert_eq!(unlisted.api_versions_calls(), 0);
+    assert!(unlisted.topic_config_calls().is_empty());
+
+    // Listed.
+    let listed = probe();
+    let m = mount(&{
+        let mut plan = readiness_plan(vec!["orders"], true, Some("/signing/key.pem"));
+        let CheckRequest::OperationReadiness(r) = &mut plan.request else {
+            unreachable!()
+        };
+        r.capability_checks = backup_capabilities();
+        plan
+    });
+    let run = drive(
+        &m,
+        &capability_wiring(listed.clone())
+            .with_writer(FakeObjects::new())
+            .with_signer(Ok("abc123".to_string())),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = [
+        "runner.contract",
+        "connection.authenticated",
+        "connection.topicsDescribable",
+        "connection.topicsReadable",
+        "connection.engineProtocol",
+        "connection.topicConfigsReadable",
+        "connection.groupTypes",
+        "destination.archiveListable",
+        "destination.evidenceWritable",
+        "destination.evidenceReadable",
+        "signer.privateKeyUsable",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+    // ONE observation serves both rows that read it.
+    assert_eq!(listed.api_versions_calls(), 1);
+    assert_eq!(listed.topic_config_calls(), vec!["orders".to_string()]);
+    // The catalogue's gating: the engine row blocks, the other two advise.
+    assert_eq!(
+        run.row(CheckId::ConnectionEngineProtocol).gating,
+        Gating::Blocking
+    );
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicConfigsReadable).gating,
+        Gating::Advisory
+    );
+    assert_eq!(
+        run.row(CheckId::ConnectionGroupTypes).gating,
+        Gating::Advisory
+    );
+}
+
+/// `connection.engineProtocol`. PRESENT on Apache Kafka's ranges and on
+/// Redpanda's (a capture sends Metadata v9, ListOffsets v5, Fetch v11 and
+/// DescribeConfigs v1, all inside both). ABSENT when the endpoint does not
+/// serve one of them: the row names the request, both versions and the
+/// fallback, and blocks.
+#[test]
+fn connection_engine_protocol_names_the_request_an_endpoint_does_not_serve() {
+    let plan = || {
+        mount(&capability_plan(
+            vec![],
+            vec![CheckId::ConnectionEngineProtocol],
+        ))
+    };
+    for present in [&KAFKA_4_3, &REDPANDA_26_2] {
+        let run = drive(
+            &plan(),
+            &capability_wiring(FakeProbe::new().with_api_versions(present)),
+        );
+        let row = run.row(CheckId::ConnectionEngineProtocol);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Ready, CheckCode::EngineProtocolSupported),
+            "{row:?}"
+        );
+        assert_eq!(
+            row.facts.get("engineRequests").map(String::as_str),
+            Some("Metadata v9, ListOffsets v5, Fetch v11, DescribeConfigs v1")
+        );
+        assert!(row.remedy.is_empty(), "a ready row has nothing to fix");
+    }
+
+    // ABSENT: an endpoint whose Fetch stops at v10 (one below what the engine
+    // sends) and that does not serve DescribeConfigs at all.
+    let mut lacking: Vec<(i16, i16, i16)> = KAFKA_4_3
+        .iter()
+        .copied()
+        .filter(|(key, _, _)| *key != 32)
+        .collect();
+    lacking.iter_mut().find(|(k, _, _)| *k == 1).unwrap().2 = 10;
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_api_versions(&lacking)),
+    );
+    let row = run.row(CheckId::ConnectionEngineProtocol);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::EngineProtocolUnsupported,
+            Gating::Blocking
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .contains("Fetch v11 and this endpoint serves Fetch v4-v10")
+            && row
+                .message
+                .contains("DescribeConfigs v1 and this endpoint serves DescribeConfigs not served")
+            && row.message.contains("cannot back up from this endpoint"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.contains("Use an endpoint that serves")
+            && row.remedy.contains("docs/support-matrix.md"),
+        "the fallback says what to use and where the measured endpoints are: {}",
+        row.remedy
+    );
+    assert!(!row.remedy.ends_with('…'), "the remedy fits its cap whole");
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["Fetch v11", "DescribeConfigs v1"])
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+
+    // NOT OBSERVED: unknown, blocking, never ready.
+    for probe in [
+        FakeProbe::new(),
+        FakeProbe::new().failing_api_versions("no broker answered ApiVersions"),
+    ] {
+        let run = drive(&plan(), &capability_wiring(probe));
+        let row = run.row(CheckId::ConnectionEngineProtocol);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "{row:?}"
+        );
+        assert!(row.remedy.contains("Re-run the check"), "{}", row.remedy);
+        assert_ne!(
+            logweir_core::check_contract::aggregate(&run.result().checks),
+            logweir_core::check_contract::OverallState::Ready
+        );
+    }
+}
+
+/// On a SASL connection the engine also sends SaslHandshake v1 and
+/// SaslAuthenticate v2, and an endpoint that does not serve them is refused
+/// for those; on a plaintext connection they are not asked for.
+#[test]
+fn connection_engine_protocol_asks_for_the_sasl_requests_only_on_a_sasl_connection() {
+    let no_sasl_v2: Vec<(i16, i16, i16)> = KAFKA_4_3
+        .iter()
+        .map(|(k, a, b)| if *k == 36 { (*k, *a, 1) } else { (*k, *a, *b) })
+        .collect();
+    let plan = |mode: &str| {
+        let mut plan = capability_plan(vec![], vec![CheckId::ConnectionEngineProtocol]);
+        let CheckRequest::OperationReadiness(r) = &mut plan.request else {
+            unreachable!()
+        };
+        r.connection.auth_mode = mode.to_string();
+        mount(&plan)
+    };
+    let run = drive(
+        &plan("plaintext"),
+        &capability_wiring(FakeProbe::new().with_api_versions(&no_sasl_v2)),
+    );
+    assert_eq!(
+        run.row(CheckId::ConnectionEngineProtocol).code,
+        CheckCode::EngineProtocolSupported
+    );
+    let run = drive(
+        &plan("scramSha512"),
+        &capability_wiring(FakeProbe::new().with_api_versions(&no_sasl_v2)),
+    );
+    let row = run.row(CheckId::ConnectionEngineProtocol);
+    assert_eq!(row.code, CheckCode::EngineProtocolUnsupported, "{row:?}");
+    assert!(
+        row.message
+            .contains("SaslAuthenticate v2 and this endpoint serves SaslAuthenticate v0-v1"),
+        "{}",
+        row.message
+    );
+}
+
+/// **PROD-01.2 review, M3: a capability row is about EVERY broker of the
+/// cluster, or it is `unknown`.** The first version said `ready` from
+/// whichever brokers the observing client had dialled.
+///
+/// * All three brokers answered and agree: `ready`, and both the message and
+///   the fact say three, as DISTINCT BROKERS of how many.
+/// * They answered and do not agree (a rolling upgrade): the row is judged on
+///   what every one of them serves, here Produce v3-v7, so the restore row is
+///   `notReady` although one broker serves v8, and the message says they
+///   differ.
+/// * Two of three answered: `unknown`, never `ready`, with the count and the
+///   silent broker in the message. The reason is the observation's own
+///   (`logweir_kafka::api_versions::full_view`), built here from the lines a
+///   two-of-three log holds.
+#[test]
+fn a_capability_row_is_about_every_broker_or_it_is_unknown() {
+    use logweir_kafka::api_versions::{answers, full_view, Broker};
+    let plan = || {
+        mount(&capability_plan(
+            vec![],
+            vec![
+                CheckId::ConnectionEngineProtocol,
+                CheckId::ConnectionGroupTypes,
+            ],
+        ))
+    };
+
+    // All three, agreeing.
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_cluster_api_versions(&KAFKA_4_3, 3, false)),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(row.state, CheckState::Ready, "{row:?}");
+        assert!(
+            row.message
+                .starts_with("all 3 brokers of this endpoint serve"),
+            "{}",
+            row.message
+        );
+        assert!(!row.message.contains("do not all serve"), "{}", row.message);
+        assert_eq!(
+            row.facts.get("brokersAnswered").map(String::as_str),
+            Some("3 of 3"),
+            "distinct brokers of how many, not connections: {row:?}"
+        );
+    }
+
+    // All three, DIFFERING: the weakest answer, ListGroups v0-v4 and Fetch
+    // v4-v10 (one broker has not been upgraded).
+    let mut weakest = KAFKA_4_3.to_vec();
+    weakest.iter_mut().find(|(k, _, _)| *k == 16).unwrap().2 = 4;
+    weakest.iter_mut().find(|(k, _, _)| *k == 1).unwrap().2 = 10;
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_cluster_api_versions(&weakest, 3, true)),
+    );
+    let row = run.row(CheckId::ConnectionEngineProtocol);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::EngineProtocolUnsupported),
+        "one broker that cannot be read from is enough: {row:?}"
+    );
+    assert!(
+        row.message
+            .contains("Fetch v11 and all 3 brokers of this endpoint serve Fetch v4-v10")
+            && row
+                .message
+                .contains("The brokers do not all serve the same versions"),
+        "{}",
+        row.message
+    );
+    let row = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(row.code, CheckCode::GroupTypesNotListed, "{row:?}");
+    assert!(
+        row.message
+            .contains("The brokers do not all serve the same versions"),
+        "{}",
+        row.message
+    );
+
+    // TWO OF THREE: the reason the observation itself gives.
+    let listed: Vec<Broker> = (1..=3)
+        .map(|id| Broker::new(id, &format!("b{id}.example"), 9092))
+        .collect();
+    let lines: Vec<(&str, String)> = [1, 3]
+        .iter()
+        .flat_map(|id| {
+            let at = format!("[thrd:b{id}.example:9092/{id}]: b{id}.example:9092/{id}: ");
+            vec![
+                ("APIVERSION", format!("{at}Broker API support:")),
+                (
+                    "APIVERSION",
+                    format!("{at}  ApiKey Produce (0) Versions 0..13"),
+                ),
+            ]
+        })
+        .collect();
+    let partial = full_view(
+        &answers(lines.iter().map(|(f, m)| (*f, m.as_str()))),
+        true,
+        &listed,
+        &[],
+    )
+    .expect_err("broker 2 did not answer");
+    let probe = FakeProbe::new().failing_api_versions(&partial.to_string());
+    let run = drive(&plan(), &capability_wiring(probe));
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "a partial view is never ready: {row:?}"
+        );
+        assert!(
+            row.message.contains("2 of 3 broker(s)")
+                && row.message.contains("broker 2 (b2.example:9092)"),
+            "{}",
+            row.message
+        );
+        assert!(!row.facts.contains_key("brokersAnswered"), "{row:?}");
+    }
+    assert_ne!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+}
+
+/// **Review L9: the observation is not started with no budget left.** A row
+/// that reads the ApiVersions answer is `unknown` and says the endpoint was
+/// not asked; the probe is never called, so nothing is dialled after the
+/// check's deadline.
+///
+/// CONTROL: with budget left the same probe is called once and the rows are
+/// `ready`.
+#[test]
+fn the_api_versions_observation_does_not_start_with_no_budget_left() {
+    use logweir::check::kinds::readiness::capability_rows;
+    let plan = capability_plan(vec![], backup_capabilities());
+    let CheckRequest::OperationReadiness(r) = &plan.request else {
+        unreachable!()
+    };
+    let listed = [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ];
+    let now = chrono::Utc::now();
+
+    let probe = FakeProbe::new().with_api_versions(&KAFKA_4_3);
+    let rows = capability_rows(
+        &listed,
+        &r.connection,
+        &probe,
+        &[],
+        (true, true),
+        logweir::check::Deadline::new(0),
+        now,
+    );
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "{row:?}"
+        );
+        assert!(
+            row.message.contains("was not asked"),
+            "the row says it did not ask: {}",
+            row.message
+        );
+    }
+    assert_eq!(
+        probe.api_versions_calls(),
+        0,
+        "no dial after the check's deadline"
+    );
+
+    let rows = capability_rows(
+        &listed,
+        &r.connection,
+        &probe,
+        &[],
+        (true, true),
+        logweir::check::Deadline::new(60),
+        now,
+    );
+    assert!(
+        rows.iter().all(|row| row.state == CheckState::Ready),
+        "{rows:?}"
+    );
+    assert_eq!(probe.api_versions_calls(), 1);
+}
+
+/// `connection.groupTypes`. PRESENT from ListGroups v5 (Apache Kafka 3.9 and
+/// 4.x). ABSENT below it (Redpanda v26.2.4 and Apache Kafka 3.7.1, measured):
+/// the row says what a backup will record for a selected group, and the
+/// fallback; it ADVISES, so the verdict stays `ready`.
+#[test]
+fn connection_group_types_says_when_a_group_cannot_be_typed() {
+    let plan = || {
+        mount(&capability_plan(
+            vec![],
+            vec![CheckId::ConnectionGroupTypes],
+        ))
+    };
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_api_versions(&KAFKA_4_3)),
+    );
+    let row = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::GroupTypesListed),
+        "{row:?}"
+    );
+    assert!(row.message.contains("ListGroups v0-v5"), "{}", row.message);
+
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_api_versions(&REDPANDA_26_2)),
+    );
+    let row = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::GroupTypesNotListed,
+            Gating::Advisory
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("ListGroups v0-v4") && row.message.contains("GroupTypeNotCaptured"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.contains("ListGroups v5") && row.remedy.contains("never as offset 0"),
+        "{}",
+        row.remedy
+    );
+    // Advisory: a warning beside a verdict it does not change.
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+    assert_eq!(
+        logweir_core::check_contract::advisory_warnings(&run.result().checks)
+            .iter()
+            .map(|c| c.id)
+            .collect::<Vec<_>>(),
+        vec![CheckId::ConnectionGroupTypes]
+    );
+
+    let run = drive(&plan(), &capability_wiring(FakeProbe::new()));
+    let row = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+        "{row:?}"
+    );
+}
+
+/// `connection.topicConfigsReadable`. PRESENT when DescribeConfigs answers
+/// for every selected topic. ABSENT when one is refused (FX-4's `acl` fixture,
+/// measured): the row names the topic, says the backup records it as
+/// `captureDenied`, and gives the grant and the alternative. A read that did
+/// not answer is unknown; topics the principal cannot even describe leave the
+/// row blocked on that one.
+#[test]
+fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
+    let listed = vec![CheckId::ConnectionTopicConfigsReadable];
+    let both_present = || {
+        FakeProbe::new()
+            .with_presence("orders", TopicPresence::Present { partitions: 6 })
+            .with_presence("payments", TopicPresence::Present { partitions: 3 })
+    };
+    let m = mount(&capability_plan(vec!["orders", "payments"], listed.clone()));
+
+    let run = drive(&m, &capability_wiring(both_present()));
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::TopicConfigsReadable),
+        "{row:?}"
+    );
+
+    let run = drive(
+        &m,
+        &capability_wiring(both_present().failing_topic_configs(
+            "payments",
+            CheckCode::TopicAuthorizationFailed,
+            "DescribeConfigs on topic payments answered with no configuration",
+        )),
+    );
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::TopicConfigsNotReadable,
+            Gating::Advisory
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("1 of 2") && row.message.contains("captureDenied"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["payments"])
+    );
+    assert!(
+        row.remedy.contains("Grant this principal DescribeConfigs")
+            && row.remedy.contains("not recorded"),
+        "{}",
+        row.remedy
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready,
+        "the backup still runs: the row advises"
+    );
+
+    // NO TOPIC SELECTED: nothing was read, so the row is not `ready` (review
+    // L12: it was, with the words "the operation selects no topic by name").
+    // It is `unknown` and says no configuration was read. Advisory, so the
+    // verdict is not moved.
+    let none = mount(&capability_plan(vec![], listed.clone()));
+    let probe = both_present();
+    let run = drive(&none, &capability_wiring(probe));
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::Unknown,
+            CheckCode::BlockedByPrerequisite,
+            Gating::Advisory
+        ),
+        "a row that read nothing does not answer `ready`: {row:?}"
+    );
+    assert!(
+        row.message.contains("no topic's configuration was read"),
+        "{}",
+        row.message
+    );
+    assert!(row.remedy.contains("Name the topics"), "{}", row.remedy);
+
+    // A read that timed out is "could not tell", never "readable" or "refused".
+    let run = drive(
+        &m,
+        &capability_wiring(both_present().failing_topic_configs(
+            "orders",
+            CheckCode::MetadataTimeout,
+            "no answer",
+        )),
+    );
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::MetadataTimeout),
+        "{row:?}"
+    );
+
+    // A selected topic that is not describable: no configuration read is
+    // attempted, and the row points at the row to fix first.
+    let hidden = FakeProbe::new().default_presence(TopicPresence::NotAuthorized);
+    let run = drive(&m, &capability_wiring(hidden.clone()));
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::BlockedByPrerequisite),
+        "{row:?}"
+    );
+    assert!(hidden.topic_config_calls().is_empty());
+}
+
+/// **PROD-01.2: a bootstrap that answers and advertised brokers that do not**
+/// (measured on the `confluent` profile's OFFNET listener, which advertises
+/// `127.0.0.1:1`). The cluster id is read off the bootstrap connection and the
+/// listing then cannot reach a broker: the row stays `BrokerUnreachable` and
+/// blocking, and says it is the ADVERTISED address, with a remedy about
+/// `advertised.listeners` instead of the generic one about the bootstrap
+/// address, which is the one thing that works.
+///
+/// CONTROLS: a connection whose cluster id read fails too keeps the generic
+/// remedy; and a listing that fails for another reason (authorization) keeps
+/// its own.
+#[test]
+fn an_unreachable_advertised_address_is_named_as_one() {
+    let m = mount(&readiness_plan(vec!["orders"], false, None));
+    let advertised_away = FakeProbe::new().failing_listing(
+        CheckCode::BrokerUnreachable,
+        "all-topics metadata reported BrokerUnreachable",
+    );
+    let run = drive(&m, &capability_wiring(advertised_away));
+    let row = run.row(CheckId::ConnectionAuthenticated);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::BrokerUnreachable,
+            Gating::Blocking
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("named cluster M29I2S7FQPyHBEX12Vx7XA")
+            && row
+                .message
+                .contains("advertised listeners are not reachable"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.contains("advertised.listeners") && !row.remedy.ends_with('…'),
+        "{}",
+        row.remedy
+    );
+    assert_eq!(
+        row.facts.get("clusterId").map(String::as_str),
+        Some("M29I2S7FQPyHBEX12Vx7XA")
+    );
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicsDescribable).code,
+        CheckCode::BlockedByPrerequisite
+    );
+
+    // CONTROL: nothing answered at all. The generic remedy, about the
+    // bootstrap address, is the right one.
+    let dead = FakeProbe::new().failing_cluster_id(CheckCode::BrokerUnreachable, "no route");
+    let row = drive(&m, &capability_wiring(dead)).row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.code, CheckCode::BrokerUnreachable);
+    assert!(
+        row.remedy.contains("bootstrap addresses") && !row.remedy.contains("advertised.listeners"),
+        "{}",
+        row.remedy
+    );
+    // CONTROL: the listing failed for another reason.
+    let denied = FakeProbe::new().failing_listing(
+        CheckCode::ClusterAuthorizationFailed,
+        "all-topics metadata reported ClusterAuthorizationFailed",
+    );
+    let row = drive(&m, &capability_wiring(denied)).row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.code, CheckCode::ClusterAuthorizationFailed);
+    assert!(
+        !row.remedy.contains("advertised.listeners"),
+        "{}",
+        row.remedy
+    );
+}
+
+/// A connection that does not authenticate leaves every listed capability row
+/// blocked on that, and observes nothing.
+#[test]
+fn a_connection_that_does_not_authenticate_blocks_every_capability_row() {
+    let m = mount(&capability_plan(vec!["orders"], backup_capabilities()));
+    let run = drive(
+        &m,
+        &FakeWiring::default().broker_fails(CheckCode::AuthenticationFailed, "SASL refused"),
+    );
+    for id in backup_capabilities() {
+        let row = run.row(id);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::BlockedByPrerequisite),
+            "{row:?}"
+        );
+    }
+    let probe = FakeProbe::new().failing_cluster_id(CheckCode::AuthenticationFailed, "refused");
+    let run = drive(&m, &capability_wiring(probe.clone()));
+    for id in backup_capabilities() {
+        assert_eq!(run.row(id).code, CheckCode::BlockedByPrerequisite);
+    }
+    assert_eq!(probe.api_versions_calls(), 0);
 }
 
 #[test]
@@ -3312,9 +4171,7 @@ fn an_evidence_fetch_tells_absence_from_denial() {
         &m,
         &FakeWiring::default().with_role(
             DestinationRole::EvidenceRead,
-            FakeObjects::new().failing_get(Fault::Io(
-                "Generic S3 error: <Error><Code>AccessDenied</Code></Error>".to_string(),
-            )),
+            FakeObjects::new().failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
         ),
     );
     let e = &run.result().evidence[0];
@@ -3528,6 +4385,7 @@ fn restore_plan(yaml: &str, sha_override: Option<&str>) -> CheckPlan {
             manifest_key: MANIFEST_KEY.to_string(),
             checks: Vec::new(),
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         },
     )))
 }
@@ -3650,6 +4508,140 @@ fn a_healthy_restore_preflight_reports_every_row_it_owns() {
     assert_eq!(
         a.expires_at.unwrap() - a.observed_at.unwrap(),
         chrono::Duration::minutes(30)
+    );
+}
+
+/// **PROD-01.2: `target.engineProtocol`, the row Redpanda v26.2.4 is missing.**
+/// A replay sends Metadata v9 and Produce v8. PRESENT on Apache Kafka's
+/// ranges: ready, and the verdict is `ready`. ABSENT on Redpanda's (Produce
+/// v0-v7, measured: the restore then fails with "early eof" after five
+/// retries): the row names Produce v8 against v0-v7 and the fallback, and the
+/// verdict is `notReady` BEFORE a restore starts. Not listed: not emitted.
+#[test]
+fn target_engine_protocol_refuses_an_endpoint_that_does_not_serve_the_engines_produce() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let listing = |listed: Vec<CheckId>| {
+        let mut plan = restore_plan(&yaml, None);
+        let CheckRequest::RestorePreflight(r) = &mut plan.request else {
+            unreachable!("restore_plan builds a restorePreflight request")
+        };
+        r.capability_checks = listed;
+        mount(&plan)
+    };
+    let probe = |ranges: &[(i16, i16, i16)]| {
+        FakeProbe::new()
+            .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+            .default_presence(TopicPresence::NotFound)
+            .with_api_versions(ranges)
+    };
+
+    // Not listed: an older controller's plan. No row, no observation.
+    let unlisted = probe(&REDPANDA_26_2);
+    let run = drive(
+        &listing(Vec::new()),
+        &restore_wiring(&yaml, &manifest_json(), unlisted.clone()),
+    );
+    assert!(!run.has(CheckId::TargetEngineProtocol));
+    assert_eq!(unlisted.api_versions_calls(), 0);
+
+    let m = listing(vec![CheckId::TargetEngineProtocol]);
+
+    // PRESENT.
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), probe(&KAFKA_4_3)),
+    );
+    let row = run.row(CheckId::TargetEngineProtocol);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::Ready,
+            CheckCode::EngineProtocolSupported,
+            Gating::Blocking
+        ),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.facts.get("engineRequests").map(String::as_str),
+        Some("Metadata v9, Produce v8")
+    );
+    assert!(
+        row.message.contains("Produce v8 (served v0-v13)"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    assert!(
+        got.contains("target.engineProtocol") && got.len() == 12,
+        "{got:?}"
+    );
+
+    // ABSENT: Redpanda v26.2.4.
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), probe(&REDPANDA_26_2)),
+    );
+    let row = run.row(CheckId::TargetEngineProtocol);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::EngineProtocolUnsupported),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .contains("Produce v8 and this endpoint serves Produce v0-v7")
+            && row.message.contains("never negotiates")
+            && row.message.contains("cannot restore into this endpoint"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.contains("can still be a backup source")
+            && row
+                .remedy
+                .contains("restore its archive into a cluster that serves them"),
+        "the fallback is actionable: {}",
+        row.remedy
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["Produce v8"])
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady,
+        "a restore that cannot run is refused by the verdict before it starts"
+    );
+
+    // NOT OBSERVED: unknown, and the verdict is not `ready`.
+    let unobserved = FakeProbe::new()
+        .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+        .default_presence(TopicPresence::NotFound);
+    let run = drive(&m, &restore_wiring(&yaml, &manifest_json(), unobserved));
+    let row = run.row(CheckId::TargetEngineProtocol);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+        "{row:?}"
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Unknown
+    );
+
+    // A target that does not dial: the row is blocked on that.
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), FakeProbe::new())
+            .broker_fails(CheckCode::BrokerUnreachable, "no route"),
+    );
+    assert_eq!(
+        run.row(CheckId::TargetEngineProtocol).code,
+        CheckCode::BlockedByPrerequisite
     );
 }
 
@@ -4074,12 +5066,130 @@ fn the_timestamp_bound_is_the_execution_guards_arithmetic() {
             &yaml,
             &manifest_json(),
             FakeProbe::new()
+                .without_broker_config("log.message.timestamp.before.max.ms")
                 .with_broker_config("log.message.timestamp.difference.max.ms", "3600000"),
         ),
     );
     assert_eq!(
         run.row(CheckId::TargetTimestampBound).code,
         CheckCode::TimestampBoundExceeded
+    );
+}
+
+/// **PROD-01.2: an answer WITHOUT the bound is "not reported", never "no
+/// bound".** Every Apache Kafka broker reports at least one of the two keys;
+/// Redpanda v26.2.4's broker resource answers nine keys and neither (it keeps
+/// the bound per topic). This row answered `ready`, "the target declares no
+/// record-timestamp bound", for it: an empty answer recorded as a fact.
+///
+/// CONTROL, in the same test: the SAME broker answer plus the key is `ready`,
+/// so the unknown is about the missing key and nothing else.
+///
+/// Negative control (mutant): restore the `ready(TimestampWithinBound)` arm
+/// for a missing key and the first assertion fails with `TimestampWithinBound`.
+///
+/// **The code is one the plan's controller can read.** The code vocabulary is
+/// closed on the reading side, and this row is answered for EVERY restore
+/// plan. A plan that lists capability rows came from a controller that knows
+/// `TimestampBoundNotReported`; a plan that lists none came from an older
+/// one, which would refuse the whole result over the new code, so it gets the
+/// same `unknown`, message and remedy under `BrokerConfigsNotReadable`.
+/// Mutant: answer the new code for both and the older-plan assertion fails.
+#[test]
+fn a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let mut plan = restore_plan(&yaml, None);
+    let CheckRequest::RestorePreflight(r) = &mut plan.request else {
+        unreachable!("restore_plan builds a restorePreflight request")
+    };
+    r.capability_checks = vec![CheckId::TargetEngineProtocol];
+    let m = mount(&plan);
+    // Redpanda's nine broker keys, as measured (values abridged).
+    let redpanda_like = || {
+        let mut p = FakeProbe::new()
+            .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+            .default_presence(TopicPresence::NotFound)
+            .without_broker_config("log.message.timestamp.before.max.ms");
+        for (k, v) in [
+            ("advertised.listeners", "internal://redpanda:9094"),
+            ("auto.create.topics.enable", "false"),
+            ("default.replication.factor", "1"),
+            ("listeners", "internal://0.0.0.0:9094"),
+            ("log.dirs", "/var/lib/redpanda/data"),
+            ("log.retention.bytes", "18446744073709551615"),
+            ("log.retention.ms", "604800000"),
+            ("log.segment.bytes", "134217728"),
+            ("num.partitions", "1"),
+        ] {
+            p = p.with_broker_config(k, v);
+        }
+        p
+    };
+    let run = drive(
+        &m,
+        &restore_wiring(&yaml, &manifest_json(), redpanda_like()),
+    );
+    let row = run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::TimestampBoundNotReported),
+        "{row:?}"
+    );
+    assert!(row.message.contains("9 key(s)"), "{}", row.message);
+    assert!(
+        row.remedy.contains("has not declared that it has none")
+            && row.remedy.contains("message.timestamp.before.max.ms"),
+        "the remedy names the fallback: {}",
+        row.remedy
+    );
+    // A blocking row with no answer keeps the verdict from being `ready`.
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Unknown
+    );
+
+    // AN OLDER CONTROLLER'S PLAN (no capability rows listed): the same
+    // finding under the code that controller already reads.
+    let older = mount(&restore_plan(&yaml, None));
+    let older_run = drive(
+        &older,
+        &restore_wiring(&yaml, &manifest_json(), redpanda_like()),
+    );
+    let older_row = older_run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (older_row.state, older_row.code),
+        (CheckState::Unknown, CheckCode::BrokerConfigsNotReadable),
+        "{older_row:?}"
+    );
+    assert_eq!(
+        (&older_row.message, &older_row.remedy),
+        (&row.message, &row.remedy),
+        "the same message and remedy under either code"
+    );
+    assert!(
+        older_run
+            .result()
+            .checks
+            .iter()
+            .all(|c| !c.id.is_capability()),
+        "and no capability row it did not ask for"
+    );
+
+    // CONTROL: the same answer WITH the key.
+    let run = drive(
+        &m,
+        &restore_wiring(
+            &yaml,
+            &manifest_json(),
+            redpanda_like()
+                .with_broker_config("log.message.timestamp.before.max.ms", "9223372036854"),
+        ),
+    );
+    let row = run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::TimestampWithinBound),
+        "{row:?}"
     );
 }
 
@@ -4636,7 +5746,7 @@ fn the_point_bound_preflight_and_the_runners_binding_agree_on_every_pin_case() {
     p.bucket
         .as_ref()
         .expect("versioned")
-        .fail_version_reads("403 Forbidden: AccessDenied");
+        .fail_version_reads(&s3_refusal("403 Forbidden", "AccessDenied"));
     assert_eq!(
         bound_binding(&p)
             .expect_err("the runner cannot tell")
@@ -5426,7 +6536,7 @@ fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stor
     for (case, text, state, code) in [
         (
             "403",
-            format!("Client error with status 403 Forbidden: AccessDenied {tail}"),
+            format!("{} {tail}", s3_refusal("403 Forbidden", "AccessDenied")),
             CheckState::NotReady,
             CheckCode::AccessDenied,
         ),
@@ -5474,7 +6584,10 @@ fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stor
     p.bucket
         .as_ref()
         .expect("versioned")
-        .fail_version_reads(&format!("403 Forbidden: AccessDenied {tail}"));
+        .fail_version_reads(&format!(
+            "{} {tail}",
+            s3_refusal("403 Forbidden", "AccessDenied")
+        ));
     let run = bound_preflight(p.store, Some(&p.binding));
     let row = run.row(CheckId::ArchiveBackupSet);
     assert_eq!(
@@ -6136,6 +7249,10 @@ fn every_failing_code_the_runner_emits_has_a_remedy() {
         CheckCode::TimestampWithinBound,
         // FX-20c: `destination.credentialBound`'s ready code.
         CheckCode::CredentialBound,
+        // PROD-01.2: the capability rows' ready codes.
+        CheckCode::EngineProtocolSupported,
+        CheckCode::TopicConfigsReadable,
+        CheckCode::GroupTypesListed,
         CheckCode::CheckContractMismatch,
         CheckCode::ResultUnreadable,
         CheckCode::StoreErrorUnclassified,
@@ -7762,10 +8879,13 @@ fn a_genuine_timeout_survives_the_strip() {
     }
     // A sentence that merely begins "after " is left alone, and a message with
     // no retry bookkeeping is unchanged.
-    let plain = "Generic S3 error: <Error><Code>AccessDenied</Code></Error> after 3 attempts";
-    assert_eq!(logweir::check::store::strip_retry_noise(plain), plain);
+    let plain = format!(
+        "{} after 3 attempts",
+        s3_refusal("403 Forbidden", "AccessDenied")
+    );
+    assert_eq!(logweir::check::store::strip_retry_noise(&plain), plain);
     assert_eq!(
-        logweir::check::store::classify(&StoreError::Io(plain.to_string())),
+        logweir::check::store::classify(&StoreError::Io(plain.clone())),
         CheckCode::AccessDenied
     );
 }
@@ -7889,9 +9009,8 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
         &FakeWiring::default()
             .with_role(
                 DestinationRole::EvidenceRead,
-                FakeObjects::new().failing_get(Fault::Io(
-                    "Generic S3 error: <Error><Code>AccessDenied</Code></Error>".to_string(),
-                )),
+                FakeObjects::new()
+                    .failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))),
             )
             .with_writer(FakeObjects::new()),
     );
@@ -9680,11 +10799,9 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
     // UNREADABLE: the same shape of failure, from a denial rather than an
     // absence. A 403 that reported `Missing` is how an operator comes to
     // believe an outage deleted their backups.
-    let denied = objects.clone().failing_get(Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    ));
+    let denied = objects
+        .clone()
+        .failing_get(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive_sync(
         sync_request(),
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
@@ -10020,11 +11137,8 @@ fn a_walk_that_never_started_emits_no_body() {
     assert!(!row.remedy.is_empty());
 
     // The FIRST listing is denied.
-    let denied = FakeObjects::new().failing_list(Fault::Io(
-        "Generic S3 error: Error performing LIST: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    ));
+    let denied =
+        FakeObjects::new().failing_list(Fault::Io(s3_refusal("403 Forbidden", "AccessDenied")));
     let run = drive_sync(
         sync_request(),
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
@@ -10409,11 +11523,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         &sidecar,
         CATALOG_CLAIMED_KEY_ID,
     );
-    let denied = Fault::Io(
-        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
-         </Code></Error>\", status: 403 Forbidden"
-            .to_string(),
-    );
+    let denied = Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"));
 
     // The last column is the cause (FX-33): the document the examination
     // stopped at and why, or `None` for a point that is `Available`. Only a
@@ -12400,7 +13510,7 @@ fn a_skipped_point_that_names_a_set_keeps_its_place_against_an_unrelated_point()
 #[test]
 fn a_record_read_that_did_not_answer_leaves_the_walk_incomplete() {
     use logweir_engine_oso::storage::caps;
-    let (objects, newer, older) = two_point_objects();
+    let (objects, newer, _) = two_point_objects();
     let walk = |objects: FakeObjects| {
         let run = drive_sync(
             sync_request(),

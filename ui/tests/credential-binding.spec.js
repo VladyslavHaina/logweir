@@ -14,6 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { decoded } from "./console-fixture.js";
 
 import {
   CREATE_GRANT_SOURCES,
@@ -92,8 +93,7 @@ test("fx20_the_inline_archive_secret_field_says_what_the_secret_must_carry", asy
 // `fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant`) sends
 // and the runner's message (`crates/logweir/tests/check_grant_binding.rs`) is
 // held to.
-const bindingMismatch = () => JSON.parse(readFileSync(
-  new URL("./fixtures/console/preflight-binding-mismatch.json", import.meta.url), "utf8")).item;
+const bindingMismatch = () => decoded("preflight-binding-mismatch.json").item;
 
 function rowOf(html, id) {
   const at = html.indexOf("<code>" + id + "</code>");

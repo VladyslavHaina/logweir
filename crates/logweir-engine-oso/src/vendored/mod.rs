@@ -6,4 +6,5 @@ pub mod consumer_groups;
 pub mod manifest;
 pub mod offset_report;
 pub mod preflight;
+pub mod request_versions;
 pub mod topic_config;

@@ -271,6 +271,14 @@ closed_vocabulary! {
         // (`destination.credentialBound`). Compared in the check pod; nothing
         // is dialled to find out.
         CredentialBound => "CredentialBound",
+        // PROD-01.2: the three capability rows' ready codes. The endpoint
+        // serves every request version the engine sends without negotiating
+        // (`*.engineProtocol`); it answers DescribeConfigs for every selected
+        // topic (`connection.topicConfigsReadable`); its group listing names
+        // each group's type (`connection.groupTypes`).
+        EngineProtocolSupported => "EngineProtocolSupported",
+        TopicConfigsReadable => "TopicConfigsReadable",
+        GroupTypesListed => "GroupTypesListed",
         Succeeded => "Succeeded",
         // -- notReady codes (D2 §6.3, §3.3, §3.4) ------------------------
         ConnectionNotFound => "ConnectionNotFound",
@@ -383,6 +391,16 @@ closed_vocabulary! {
         // second create of the readiness marker SUCCEEDED. Every backup to
         // such a store exits 4 `ExecutionClaimUnproven` before its engine.
         ConditionalCreateUnsupported => "ConditionalCreateUnsupported",
+        // PROD-01.2: a capability the endpoint was SEEN not to have. The
+        // endpoint's own ApiVersions answer excludes a request version the
+        // engine sends (the engine never negotiates, so the operation cannot
+        // work there); a selected topic's DescribeConfigs is refused (the
+        // backup records its configuration as not captured); the endpoint
+        // serves ListGroups below v5 (a selected consumer group cannot be
+        // typed, so its positions are not captured).
+        EngineProtocolUnsupported => "EngineProtocolUnsupported",
+        TopicConfigsNotReadable => "TopicConfigsNotReadable",
+        GroupTypesNotListed => "GroupTypesNotListed",
         NotReady => "NotReady",
         // -- unknown / execution-only codes (D2 §6.3) --------------------
         PodNotStarted => "PodNotStarted",
@@ -427,6 +445,14 @@ closed_vocabulary! {
         // trust could not be READ (the `TrustPolicy` list failed): which trust
         // governs has no answer, and the roster's answer is not it.
         TrustUnknown => "TrustUnknown",
+        // PROD-01.2: the endpoint's ApiVersions answer was not observed on
+        // this connection, so a row that reads it has no answer (never
+        // `ready`); and the target's broker configuration answered WITHOUT
+        // either record-timestamp bound key, so `target.timestampBound` has
+        // nothing to compare: an endpoint that does not report the bound has
+        // not declared that it has none.
+        ApiVersionsNotObserved => "ApiVersionsNotObserved",
+        TimestampBoundNotReported => "TimestampBoundNotReported",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",
@@ -450,6 +476,12 @@ closed_vocabulary! {
         ConnectionClusterIdentity => "connection.clusterIdentity",
         ConnectionTopicsDescribable => "connection.topicsDescribable",
         ConnectionTopicsReadable => "connection.topicsReadable",
+        // PROD-01.2: the three source-side capability rows. Emitted only
+        // when the plan asks for them (`capabilityChecks`), so an older
+        // controller never receives an id it cannot read.
+        ConnectionEngineProtocol => "connection.engineProtocol",
+        ConnectionTopicConfigsReadable => "connection.topicConfigsReadable",
+        ConnectionGroupTypes => "connection.groupTypes",
         DestinationResolved => "destination.resolved",
         DestinationCredentialProjected => "destination.credentialProjected",
         DestinationArchiveListable => "destination.archiveListable",
@@ -476,6 +508,8 @@ closed_vocabulary! {
         TargetTopicCreate => "target.topicCreate",
         TargetTimestampBound => "target.timestampBound",
         TargetLogAppendTime => "target.logAppendTime",
+        // PROD-01.2: the target-side capability row (`capabilityChecks`).
+        TargetEngineProtocol => "target.engineProtocol",
         PlanParse => "plan.parse",
         PlanBindings => "plan.bindings",
         PlanNames => "plan.names",
@@ -497,6 +531,50 @@ impl CheckId {
             Some((head, _)) => head,
             None => s,
         }
+    }
+
+    /// PROD-01.2: whether this id is a CAPABILITY row — one a runner emits
+    /// only when the plan lists it in `capabilityChecks`.
+    #[must_use]
+    pub fn is_capability(self) -> bool {
+        CAPABILITY_CHECKS.contains(&self)
+    }
+}
+
+/// PROD-01.2: every capability row, in catalogue order.
+///
+/// A capability row answers "does this endpoint HAVE what the operation
+/// needs", from the endpoint's own answers, before the operation starts. It
+/// is listed by the plan (`capabilityChecks`) and never emitted otherwise:
+/// the id vocabulary is closed on the reading side too, so a runner that
+/// volunteered a new id to an older controller would make that controller
+/// refuse the whole result as unreadable.
+pub const CAPABILITY_CHECKS: [CheckId; 4] = [
+    CheckId::ConnectionEngineProtocol,
+    CheckId::ConnectionTopicConfigsReadable,
+    CheckId::ConnectionGroupTypes,
+    CheckId::TargetEngineProtocol,
+];
+
+/// PROD-01.2: the capability rows that exist for one operation — what a
+/// controller lists in `capabilityChecks`, and the only ids a plan for that
+/// operation may list there.
+///
+/// A backup asks its SOURCE three things: does it serve the engine's capture
+/// requests, can each selected topic's configuration be read, and can a
+/// consumer group be typed. A restore asks its TARGET one: does it serve the
+/// engine's replay requests. The other operations dial nothing an engine
+/// would, or name no topic, and ask nothing.
+#[must_use]
+pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
+    match operation {
+        CheckOperation::Backup => &[
+            CheckId::ConnectionEngineProtocol,
+            CheckId::ConnectionTopicConfigsReadable,
+            CheckId::ConnectionGroupTypes,
+        ],
+        CheckOperation::Restore => &[CheckId::TargetEngineProtocol],
+        CheckOperation::DestinationAccess | CheckOperation::SourceConnection => &[],
     }
 }
 
@@ -1234,6 +1312,13 @@ pub struct OperationReadinessRequest {
     pub evidence_read: Option<GrantRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
+    /// PROD-01.2: the capability rows this check answers
+    /// ([`capability_checks_for`] its operation). Absent when empty, so a plan
+    /// without one is byte-identical to every plan rendered before the field
+    /// existed, and a runner emits no capability row for it; an older runner
+    /// refuses a plan that carries it (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_checks: Vec<CheckId>,
 }
 
 /// `restorePreflight` (D2 §4.2, §6.7).
@@ -1255,6 +1340,12 @@ pub struct RestorePreflightRequest {
     pub checks: Vec<CheckId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
+    /// PROD-01.2: the capability rows this check answers — see
+    /// [`OperationReadinessRequest::capability_checks`]. `checks` being empty
+    /// ("every row this kind owns") never includes one: a capability row is
+    /// listed here or not emitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_checks: Vec<CheckId>,
 }
 
 /// `sourceConnection` (D2-SOURCECHECK, the addition D2 §4.2's table owes).
@@ -1488,6 +1579,23 @@ impl CheckRequest {
         }
     }
 
+    /// PROD-01.2: the capability rows this request lists, and the operation
+    /// they are about. The ONE reading both the runner and the controller's
+    /// expected-row mirror (`weirkeeper::controllers::preflight::job_rows`)
+    /// take; empty for every kind that has none.
+    #[must_use]
+    pub fn capability_checks(&self) -> &[CheckId] {
+        match self {
+            Self::OperationReadiness(r) => &r.capability_checks,
+            Self::RestorePreflight(r) => &r.capability_checks,
+            Self::TopicInventory(_)
+            | Self::DestinationAccess(_)
+            | Self::EvidenceFetch(_)
+            | Self::CatalogSync(_)
+            | Self::SourceConnection(_) => &[],
+        }
+    }
+
     /// Whether the runner emits `destination.credentialBound` for this
     /// request: when, and only when, one of its
     /// [`bound_destinations`](Self::bound_destinations) names a grant binding.
@@ -1545,6 +1653,55 @@ fn validate_grant_bindings(request: &CheckRequest) -> Result<(), CheckPlanError>
                 ));
             }
             seen.push(g.role);
+        }
+    }
+    Ok(())
+}
+
+/// PROD-01.2: the shape rules `capabilityChecks` obeys.
+///
+/// * Every entry is a capability row OF THIS OPERATION
+///   ([`capability_checks_for`]). A source-side row on a restore preflight,
+///   or any ordinary row smuggled into the list, is a plan no runner would
+///   answer as written, refused rather than ignored.
+/// * No entry is named twice, and none is also skipped: "answer it" and "do
+///   not answer it" in one plan has no reading.
+fn validate_capability_checks(request: &CheckRequest) -> Result<(), CheckPlanError> {
+    let (field, operation, listed, skipped): (&str, CheckOperation, &[CheckId], &[CheckId]) =
+        match request {
+            CheckRequest::OperationReadiness(r) => (
+                "request.operationReadiness.capabilityChecks",
+                r.operation,
+                &r.capability_checks,
+                &r.skip_checks,
+            ),
+            CheckRequest::RestorePreflight(r) => (
+                "request.restorePreflight.capabilityChecks",
+                CheckOperation::Restore,
+                &r.capability_checks,
+                &r.skip_checks,
+            ),
+            _ => return Ok(()),
+        };
+    let allowed = capability_checks_for(operation);
+    for (i, id) in listed.iter().enumerate() {
+        if !allowed.contains(id) {
+            return Err(CheckPlanError::field(
+                &format!("{field}[{i}]"),
+                format!("{id} is not a capability row of this operation"),
+            ));
+        }
+        if listed[..i].contains(id) {
+            return Err(CheckPlanError::field(
+                &format!("{field}[{i}]"),
+                format!("{id} is listed twice"),
+            ));
+        }
+        if skipped.contains(id) {
+            return Err(CheckPlanError::field(
+                &format!("{field}[{i}]"),
+                format!("{id} is both listed and skipped"),
+            ));
         }
     }
     Ok(())
@@ -1668,6 +1825,7 @@ impl CheckPlan {
             ));
         }
         validate_grant_bindings(&self.request)?;
+        validate_capability_checks(&self.request)?;
         match &self.request {
             CheckRequest::TopicInventory(r) => {
                 if r.expected_topics.len() > MAX_EXPECTED_TOPICS {

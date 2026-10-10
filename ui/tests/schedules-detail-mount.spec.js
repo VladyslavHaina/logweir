@@ -14,6 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   CATALOG_VIEW_EXPIRED,
@@ -84,7 +85,7 @@ function detailPage(ns, state, overrides, catalog) {
     // box, as it always did beside a non-empty list without it.
     destinations() {
       return Promise.resolve({
-        items: [Object.assign(fixture("console/destination.json").item, { name: "dest" })],
+        items: [Object.assign(decoded("destination.json").item, { name: "dest" })],
       });
     },
     detailReaders: {
@@ -185,7 +186,9 @@ test("back_up_now_on_the_detail_re_reads_the_history_and_keeps_the_run_on_screen
   // run it had just made was not in the table until the next page load.
   const ns = "detail-run-now";
   const state = { schedule: scheduleIn(ns), backups: [] };
-  const answer = fixture("console/manual-backup.json");
+  // What `runBackupNow` hands on is the DECODED answer's `schedule` and a run
+  // projected from its `item`; the double answers with the decoded document.
+  const answer = decoded("manual-backup.json");
   const page = detailPage(ns, state, {
     runBackupNow(namespace) {
       const made = runOf(state.schedule, "logweir-manual-1", "set-new");

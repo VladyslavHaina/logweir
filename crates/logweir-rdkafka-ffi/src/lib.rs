@@ -17,6 +17,7 @@
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
 //! | the broker's ACL bindings | `rd_kafka_DescribeAcls` | [`acls::describe_acls`] |
 //! | topic IDs (KIP-516) of named topics (PROD-01.4a) | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
+//! | the client's own log lines, as events on a private queue (PROD-01.2: the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
 //!
 //! # The obligations every call keeps
 //!
@@ -90,6 +91,7 @@
 pub mod acls;
 pub mod cluster;
 pub mod groups;
+pub mod logs;
 mod raw;
 mod sys;
 pub mod topics;
@@ -119,6 +121,9 @@ pub mod code {
     pub const PARTIAL: i32 = -158;
     /// `RD_KAFKA_RESP_ERR__INVALID_ARG`.
     pub const INVALID_ARG: i32 = -186;
+    /// `RD_KAFKA_RESP_ERR__NOT_CONFIGURED`: `rd_kafka_set_log_queue` on a
+    /// handle created without `log.queue=true`.
+    pub const NOT_CONFIGURED: i32 = -145;
 }
 
 /// Text librdkafka returned, copied byte for byte before its owner was

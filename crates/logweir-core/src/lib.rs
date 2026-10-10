@@ -64,6 +64,9 @@ pub mod outcome;
 /// FX-33: the facts a reader takes from a backup receipt without building a
 /// tree of it — the shared controller's bounded read.
 pub mod receipt_facts;
+/// FX-34: a guard refusal's reason code and sentence as one validated,
+/// cleaned and bounded `refusal-detail=` line.
+pub mod refusal_detail;
 /// PLAT-19.1 / decision D3 §4.3: the scope a standing rehearsal
 /// authorization signs over. Types only — the `plan ∈ scope` predicate is
 /// W7's, against W5's execution contract v2.

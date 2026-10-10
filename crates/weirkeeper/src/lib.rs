@@ -160,6 +160,10 @@ pub mod protection;
 /// filter chain, the rendered plan and the scope the controller proves it falls
 /// inside. `controllers::rehearsal_schedule` is the thin half.
 pub mod read_budget;
+/// FX-34: why a guard refused a run, read off the runner's one
+/// `refusal-detail=` line by a bounded read made once, validated and cleaned
+/// before it reaches a `Restore`'s or a `Backup`'s terminal condition.
+pub mod refusal;
 pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;

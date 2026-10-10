@@ -10,7 +10,7 @@
 //!
 //! | row | proves |
 //! |---|---|
-//! | `a_denied_describe_configs_is_a_refusal_at_every_reader` | T13 at the reader: rdkafka 0.36.2 answers a refused topic or broker with ZERO entries and no error; `RdKafkaReader` and `KafkaInventory` now return the refusal; the restore readiness row `target.timestampBound` goes from READY (the pre-fix flattening of that live answer) to UNKNOWN |
+//! | `a_denied_describe_configs_is_a_refusal_at_every_reader` | T13 at the reader: rdkafka 0.36.2 answers a refused topic or broker with ZERO entries and no error; `RdKafkaReader` and `KafkaInventory` now return the refusal; the restore readiness row `target.timestampBound` is UNKNOWN over the live inventory, and since PROD-01.2 UNKNOWN over the pre-fix flattening of that live answer too (it was READY there until then) |
 //! | `phase_0_never_assumes_create_time_for_a_refused_broker_read` | T13 at phase 0, by PROCESS: on a `LogAppendTime` broker, a restore identity without cluster DescribeConfigs is admitted as `CreateTime` by the pre-FX-4 binary (`FX4_BEFORE_BIN`) and stopped at phase 0 by this build |
 //! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not; a restore identity that may not DescribeConfigs its TARGET topics gets `targetReadDenied` for a topic whose backup recorded no overrides, and exit 1 in phase 6 with no scorecard for one that did (the pinned engine describes such a target itself); every not-assessed topic also leaves its fail-safe entry in `unexpected_divergence` (review M5), and the signed scorecards are kept for the old-reader check |
 //! | `fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt` | FX-8's broker-default arm: a topic with no override, backed up under a dynamic broker default of `LogAppendTime`, is recorded only by the receipt; a point-in-time restore bound to that receipt is refused (`PointInTimeByProducerTime`, no target topic), runs labelled `producer_time` with `restore.time_basis: producerTime`, and unbound runs labelled `not_recorded` |
@@ -1110,8 +1110,11 @@ fn topic_exists(topic: &str) -> bool {
 /// OWN answer (zero entries, no per-resource error: T13), what this build's
 /// readers return for it, and — for the broker — the restore readiness row
 /// `target.timestampBound` computed by the SHIPPED check kind over the pre-FX-4
-/// flattening of that live answer (READY) and over the live `KafkaInventory`
-/// (UNKNOWN). The ANONYMOUS super user's answers are the controls.
+/// flattening of that live answer and over the live `KafkaInventory`. Both are
+/// UNKNOWN. The second is FX-4 (the reader returns the refusal). The first was
+/// READY ("declares no bound") until PROD-01.2: an answer without the bound
+/// key is "not reported", so the false green is now closed at the consumer as
+/// well as at the reader. The ANONYMOUS super user's answers are the controls.
 #[test]
 #[ignore = "needs the stack's `acl` profile; see the module doc"]
 fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
@@ -1247,11 +1250,28 @@ fn a_denied_describe_configs_is_a_refusal_at_every_reader() {
         inventory_broker["err"], "ClusterAuthorizationFailed",
         "{inventory_broker}"
     );
-    // Consumer 1: the false green, before and after.
-    assert_eq!(before_row["code"], "TimestampWithinBound", "{before_row}");
-    assert_eq!(before_row["state"], "ready", "{before_row}");
+    // Consumer 1, closed twice. Over the pre-FX-4 flattening (an EMPTY
+    // answer) the shipped kind read "no bound declared" and said READY; since
+    // PROD-01.2 an answer without the bound key is unknown, under the code an
+    // older controller reads because this plan lists no capability row.
+    assert_eq!(before_row["state"], "unknown", "{before_row}");
+    assert_eq!(
+        before_row["code"], "BrokerConfigsNotReadable",
+        "{before_row}"
+    );
+    assert!(
+        before_row["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("answered 0 key(s)")),
+        "the row says the answer carried no key, not that the read was refused: {before_row}"
+    );
+    // Over the live inventory the READ is refused (FX-4), and says so.
     assert_eq!(after_row["code"], "BrokerConfigsNotReadable", "{after_row}");
     assert_eq!(after_row["state"], "unknown", "{after_row}");
+    assert_ne!(
+        before_row["message"], after_row["message"],
+        "the two unknowns are told apart by their messages"
+    );
 }
 
 /// The SHIPPED restore check kind (`logweir::check::kinds::run_kind_with`),
@@ -1425,6 +1445,7 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
             manifest_key: "fx4/manifest.json".into(),
             checks: Vec::new(),
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         })),
     };
     let bytes = serde_json::to_vec(&plan).expect("serialises");
