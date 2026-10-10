@@ -191,6 +191,8 @@ container with `timeout` or `gtimeout` when present (this host's
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
 | `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d (PROD-04.1, 04.2, 06.1, 06.x) |
 | `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `super.users=User:ANONYMOUS`, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. PROD-04.0 §3.9's visibility state is opt-in: `e2e/compose/groups.sh visibility apply` / `remove` (below). Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-04.1's `position_evidence.rs`, 04.2, PROD-05.1's `topic_configuration.rs`, run on `--kafka 3.9` and `--kafka 4.3`; PROD-05.3; PROD-01.4a's `topic_ids.rs`, a DescribeTopics refused by name) |
+| `redpanda` | `redpanda` (+ setup) | One Redpanda v26.2.4 node, pinned by digest: a Kafka-compatible endpoint that is not Apache Kafka. PLAINTEXT on 9124; SASL_PLAINTEXT on 9125, where user `logweir` authenticates with SCRAM-SHA-256 and `logweir512` with SCRAM-SHA-512 (Redpanda holds one mechanism per user), both with the fixture password. Authorization is off. `orders` (3 partitions) and the marker topic exist; topic auto-creation is off. Its cluster id is `redpanda.<uuid>`, new at every first start. Redpanda is under the Business Source License 1.1; the image is pulled, never redistributed. | 9124, 9125 | PROD-01.2 (`tests/compat_contract.rs`) |
+| `confluent` | `kafka-cp` (+ setup) | One Confluent Platform 8.3.2 broker from the community image `cp-kafka`, pinned by digest (Confluent's build of Apache Kafka, `8.3.2-ccs`; not `cp-server`). PLAINTEXT on 9126. Its own cluster id per stack, `orders` (3 partitions) and the marker topic. | 9126 | PROD-01.2 (`tests/compat_contract.rs`) |
 | `txn` | reserved | The transactional producer PROD-01.1 builds | — | PROD-01.1 |
 
 The **owner** changes a profile's services without asking; anyone else extends
@@ -208,7 +210,9 @@ Alpine-based `apache/kafka` image lacks; `objectstore` does not replace MinIO
 inside `kafka-acl` as the super user and removes what it added, and the
 restricted principal's `kafka-topics.sh --describe` needs DescribeConfigs
 too, because it reads the topic's configuration (measured on 3.7.1); every
-behaviour above was measured with Docker Compose v5.0.2.
+behaviour above was measured with Docker Compose v5.0.2. Neither `redpanda`
+nor `confluent` is ever part of the default set: CI's e2e job does not start
+them, and `tests/stack_params.rs` fails if a workflow's profile set names one.
 
 ## The groups fixture: one group of each type, and groups a principal cannot see
 

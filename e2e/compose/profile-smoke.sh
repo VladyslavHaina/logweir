@@ -477,6 +477,50 @@ EOF
   if printf '%s' "$out" | grep -q 'Processed a total of 0 messages'; then pass groups.share-latest-reads-nothing "a share group without the earliest config: 0 messages"; else fail groups.share-latest-reads-nothing "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
 }
 
+# Profile `redpanda` (PROD-01.2): the node answers the Kafka protocol on both
+# published ports, names its own cluster id, authenticates each user with its
+# one mechanism, and keeps topic auto-creation off.
+smoke_redpanda() {
+  local p s out cfg
+  p=$(lw_e2e_port LOGWEIR_E2E_REDPANDA_PORT)
+  s=$(lw_e2e_port LOGWEIR_E2E_REDPANDA_SASL_PORT)
+  out=$(hostside "$T/kafka-topics.sh --bootstrap-server localhost:$p --list")
+  if printf '%s' "$out" | grep -qx 'orders' && printf '%s' "$out" | grep -qx 'logweir.scratch'; then pass redpanda.plaintext "localhost:$p lists orders and logweir.scratch"; else fail redpanda.plaintext "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(hostside "$T/kafka-cluster.sh cluster-id --bootstrap-server localhost:$p")
+  if printf '%s' "$out" | grep -q '^Cluster ID: redpanda\.'; then pass redpanda.cluster-id "$(printf '%s' "$out" | grep -m1 '^Cluster ID')"; else fail redpanda.cluster-id "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # Negative control: a topic nobody created is NOT created by asking for it.
+  out=$(hostside "$T/kafka-topics.sh --bootstrap-server localhost:$p --describe --topic $RUN-absent; $T/kafka-topics.sh --bootstrap-server localhost:$p --list")
+  if printf '%s' "$out" | grep -qx "$RUN-absent"; then fail redpanda.no-auto-create "describing $RUN-absent created it"; else pass redpanda.no-auto-create "$RUN-absent was not created by a describe"; fi
+  jaas() { printf 'security.protocol=SASL_PLAINTEXT\\nsasl.mechanism=%s\\n%s\\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\\"%s\\" password=\\"%s\\";\\n' "$1" "$FAST" "$2" "$3"; }
+  out=$(hostside "printf '$(jaas SCRAM-SHA-256 logweir "$PASSWORD")' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -qx 'orders'; then pass redpanda.scram256 "logweir lists topics on localhost:$s with SCRAM-SHA-256"; else fail redpanda.scram256 "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(hostside "printf '$(jaas SCRAM-SHA-512 logweir512 "$PASSWORD")' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -qx 'orders'; then pass redpanda.scram512 "logweir512 lists topics on localhost:$s with SCRAM-SHA-512"; else fail redpanda.scram512 "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # Negative controls: a wrong password, and a user asked for the mechanism it
+  # does not hold.
+  out=$(hostside "printf '$(jaas SCRAM-SHA-256 logweir wrong-password)' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -q -i 'authentication failed\|SaslAuthenticationException'; then pass redpanda.scram.wrong-password-refused "refused"; else fail redpanda.scram.wrong-password-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(hostside "printf '$(jaas SCRAM-SHA-512 logweir "$PASSWORD")' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -q -i 'authentication failed\|SaslAuthenticationException'; then pass redpanda.scram.other-mechanism-refused "logweir (SCRAM-SHA-256) is refused under SCRAM-SHA-512"; else fail redpanda.scram.other-mechanism-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+}
+
+# Profile `confluent` (PROD-01.2): the broker answers on its published port
+# with its own cluster id for this stack.
+smoke_confluent() {
+  local p out want
+  p=$(lw_e2e_port LOGWEIR_E2E_CP_PORT)
+  out=$(hostside "$T/kafka-topics.sh --bootstrap-server localhost:$p --list")
+  if printf '%s' "$out" | grep -qx 'orders' && printf '%s' "$out" | grep -qx 'logweir.scratch'; then pass confluent.plaintext "localhost:$p lists orders and logweir.scratch"; else fail confluent.plaintext "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  want=$(sed -n 's/^CLUSTER_ID=//p' "e2e/compose/slots/$LW_E2E_PROJECT/kafka-cp.env")
+  out=$(hostside "$T/kafka-cluster.sh cluster-id --bootstrap-server localhost:$p")
+  if printf '%s' "$out" | grep -qx "Cluster ID: $want"; then pass confluent.cluster-id "$want, this stack's own"; else fail confluent.cluster-id "wanted $want: $(printf '%s' "$out" | tail -1)"; fi
+  out=$(bounded 60 $DC exec -T kafka-cp kafka-topics --version 2>&1 | tail -1)
+  if printf '%s' "$out" | grep -q -- '-ccs'; then pass confluent.build "the broker is Confluent's build: $out"; else fail confluent.build "$out"; fi
+  # Negative control: a topic nobody created is not created by asking for it.
+  out=$(hostside "$T/kafka-topics.sh --bootstrap-server localhost:$p --describe --topic $RUN-absent; $T/kafka-topics.sh --bootstrap-server localhost:$p --list")
+  if printf '%s' "$out" | grep -qx "$RUN-absent"; then fail confluent.no-auto-create "describing $RUN-absent created it"; else pass confluent.no-auto-create "$RUN-absent was not created by a describe"; fi
+}
+
 profiles=${*:-$(printf '%s' "${COMPOSE_PROFILES:-}" | tr ',' ' ')}
 [ -n "$profiles" ] || { echo "profile-smoke: no profile named and COMPOSE_PROFILES is empty" >&2; exit 2; }
 echo "# profile smoke: project $LW_E2E_PROJECT, broker image $IMG, profiles: $profiles ($(date -u +%FT%TZ))"
@@ -490,6 +534,8 @@ for p in $profiles; do
     registry) smoke_registry ;;
     acl) smoke_acl; smoke_acl_visibility ;;
     streams-protocol) smoke_streams_protocol ;;
+    redpanda) smoke_redpanda ;;
+    confluent) smoke_confluent ;;
     groups) smoke_groups ;;
     *) fail "$p" "no smoke defined for profile $p" ;;
   esac

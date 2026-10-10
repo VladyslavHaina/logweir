@@ -266,6 +266,17 @@ other engine those rows record an outcome and assert nothing.
 Not run: either suite with authentication or on more than one broker, and the
 4.0 and 4.2 lines.
 
+## Other Kafka-compatible endpoints
+
+Two endpoints that are not the `apache/kafka` image run as opt-in compose
+profiles (`redpanda`, `confluent`; [`e2e/README.md`](../e2e/README.md)), pinned
+by digest and never part of the default set:
+
+| Endpoint | Image |
+|---|---|
+| Redpanda v26.2.4 | `redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89` |
+| Confluent Platform 8.3.2 (`cp-kafka`, the community image) | `confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48` |
+
 ## Object stores: conditional create is required
 
 Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a

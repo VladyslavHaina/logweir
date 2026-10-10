@@ -54,6 +54,8 @@ streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (gro
 streams-protocol  streams-protocol-wordcount: WordCountProcessorDemo on kafka-broker-1 with group.protocol=streams (a Streams group, logweir-e2e-streams-protocol); 4.x lines only
 objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
 registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1; registry-rest: its REST proxy :9142 (Avro, JSON Schema and Protobuf producers)
+redpanda  redpanda: one Redpanda v26.2.4 node (not Apache Kafka); PLAINTEXT :9124, SASL_PLAINTEXT :9125 (SCRAM-SHA-256 as logweir, SCRAM-SHA-512 as logweir512)
+confluent kafka-cp: one Confluent Platform 8.3.2 broker (cp-kafka, the community image), PLAINTEXT :9126
 acl       kafka-acl: StandardAuthorizer; PLAINTEXT :9150 as ANONYMOUS (super user), SASL_PLAINTEXT/SCRAM-SHA-512 :9151 as logweir (restricted by the row's ACLs)
 "
 
