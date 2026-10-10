@@ -454,7 +454,10 @@ test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", 
     spec: { planBytes: text("plan-original-name.golden.yaml"),
       pointInTime: "2026-09-07T14:05:00Z", backupSetRef: "b",
       target: { mode: "newTopic", topicNaming: { prefix: "", originalName: true } } },
-    status: Object.assign({ phase: "Failed", exitCode: 1, exitReason: "TargetTopicAppeared" },
+    // `newTopics` is the PLAN's mapped names, as the controller derives it on
+    // every terminal Restore -- the name someone else created included.
+    status: Object.assign({ phase: "Failed", exitCode: 1, exitReason: "TargetTopicAppeared",
+      newTopics: ["orders", "payments", "audit"] },
       targetTopicsAppeared === undefined ? {} : { targetTopicsAppeared }),
   });
   const html = renderRestoreDetail(restore({ appeared: ["payments"], left: ["orders", "audit"] }));
@@ -475,6 +478,15 @@ test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", 
       "writes to it");
   // The block comes before every other fact of the run.
   assert.ok(html.indexOf("restore-creation-stopped") < html.indexOf("last phase completed"));
+  // The "new topics" row lists what THIS restore created (what it left), never
+  // the name someone else created. KILLS: the plan's mapped names shown as
+  // this restore's topics after a lost race.
+  const facts = visible(html.slice(html.indexOf("<h3>Topics</h3>")));
+  assert.match(facts, /new topics\s*orders, audit/, facts.slice(0, 200));
+  assert.doesNotMatch(facts.slice(0, facts.indexOf("old topics")), /payments/);
+  // CONTROL: without a stopped creation step the row is the status's list.
+  const passed = visible(renderRestoreDetail(restore(undefined)));
+  assert.match(passed, /new topics\s*orders, payments, audit/);
 
   // A race lost before anything was created says so.
   const none = visible(creationStoppedWarning({ appeared: ["payments"], left: [] }));

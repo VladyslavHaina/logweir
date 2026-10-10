@@ -479,6 +479,10 @@ export function renderRestoreDetail(object, operation) {
   const preflight = status.topicPreflight || {};
   const newTopics = Array.isArray(status.newTopics) ? status.newTopics : [];
   const oldTopics = Array.isArray(status.oldTopics) ? status.oldTopics : [];
+  const stopped = status.targetTopicsAppeared;
+  const createdTopics = stopped !== null && stopped !== undefined && typeof stopped === "object"
+    ? (Array.isArray(stopped.left) ? stopped.left.filter((n) => typeof n === "string") : [])
+    : newTopics;
   // THE SCORECARD'S FACTS ARE ITS CLAIM UNTIL IT VERIFIED -- by the same rule
   // the verdict badge uses (`validVerification`).
   const verified = validVerification(status) !== null;
@@ -575,7 +579,11 @@ export function renderRestoreDetail(object, operation) {
     ]) +
     "<h3>Topics</h3>" +
     facts([
-      ["new topics", newTopics.length === 0 ? cell(null) : esc(newTopics.join(", "))],
+      // PROD-15.1: `status.newTopics` is the PLAN's mapped names, derived and
+      // never observed. For a run whose creation step stopped, the row says
+      // what the restore actually created -- the topics it left -- so a name
+      // someone else created is never listed as this restore's.
+      ["new topics", createdTopics.length === 0 ? cell(null) : esc(createdTopics.join(", "))],
       ["old topics -- written to by nothing, in any tag",
         oldTopics.length === 0 ? cell(null) : esc(oldTopics.join(", "))],
     ]) +

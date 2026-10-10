@@ -853,12 +853,14 @@ reports `run_id`. Both refuse; this is not an acceptance disagreement.
 A verifier older than `1.25.0`, and a `logweir` built before PROD-15.1, accept a
 1.8.0 scorecard — the major is unchanged — ignore `target.original_name`, check
 none of ON-1 to ON-13 and print no `original name:` line. What they print is
-true of the restore: measured on three live 1.8.0 scorecards (a second
-cluster, the same cluster under a complete verification, and the owner path),
+true of the restore: measured on four live 1.8.0 scorecards (a second
+cluster, the same cluster and the owner path, each a pass, and a
+`fail-integrity` whose restored name another producer wrote into; every one
+under the complete verification such a restore requires),
 `verify_scorecard.py` 1.23.0 and 1.24.0 and a `logweir drill verify` built
-before PROD-15.1 print `VALID` and the restored topics' own `integrity
-coverage:` and `sample coverage:` lines, and that build's `drill show` prints
-`mode=newTopic` with the mapping's entry count. They do not say the restore
+from the commit before PROD-15.1 print `VALID` and the restored topics' own
+`integrity coverage:` lines (complete, with the exact counts), and that
+build's `drill show` prints `mode=newTopic` with the mapping's entry count. They do not say the restore
 wrote under the original names, nor which condition admitted it; the document
 does, and this release's readers print it (`drill show` in its footer).
 

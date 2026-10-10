@@ -1209,7 +1209,10 @@ names someone else created, which the restore wrote nothing into, and each
 topic the restore created and left, with `LEFT_TOPIC_SENTENCE` -- "created by
 this restore and left empty; remove it yourself once you have checked nothing
 writes to it" -- the same words the runner, the Restore's status and the API
-(`leftInstruction`) use. Rows: `ui/tests/original-name.spec.js`.
+(`leftInstruction`) use. On such a Restore the "new topics" fact lists only
+what the restore left: `status.newTopics` is the approved plan's mapped names,
+derived on every terminal Restore and never observed, so it would list a name
+someone else created as this restore's. Rows: `ui/tests/original-name.spec.js`.
 
 ## The replication factor: a default with its basis, an input, and a refusal before Create
 

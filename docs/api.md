@@ -1016,7 +1016,11 @@ created before it stopped and left in place, empty: Logweir never deletes a
 topic under a name it may not own, so the operator removes each one, and
 `leftInstruction` is the one sentence that says so (the runner, the Restore's
 status and the console say the same words). Each list holds at most 100 topic
-names. Additive; absent on every other Restore.
+names. Additive; absent on every other Restore. Beside it, `newTopics` is
+still the approved plan's mapped target names (it is derived from the plan on
+every terminal Restore, never observed on the cluster): for a stopped
+creation step, `left` is what this restore created and `appeared` is what it
+did not.
 
 ### The restore's signed time basis (FX-8)
 
