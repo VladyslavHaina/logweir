@@ -6334,7 +6334,7 @@ fn chart_lint_every_approval_policy_refusal_is_the_binarys() {
         .iter()
         .filter(|f| f.ends_with(".values.yaml"))
         .collect();
-    assert!(cases.len() >= 17, "the refusal list shrank: {cases:?}");
+    assert!(cases.len() >= 19, "the refusal list shrank: {cases:?}");
     for case in cases {
         let text = read(case);
         assert!(
@@ -6863,6 +6863,113 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
     // check-chart.sh renders them (a #[test] may not shell out to helm).
     let gate = read("scripts/check-chart.sh");
     assert!(gate.contains("operator mode names render as the internal ones"));
+}
+
+/// **PROD-16.2: a `two-person` policy renders as `Governed` with
+/// `approverSignature: Console`, only with the shared console, and the binary
+/// reads the rendered document as two-person.**
+///
+/// - The checked-in render of `examples/console-two-person.values.yaml`
+///   carries the document in the internal words, the binary parses it, the
+///   bound namespace resolves to `two-person`, and the strict policy beside
+///   it carries no `approverSignature` key and stays strict.
+/// - The same document written in the operator's words (the example's own
+///   values) is the SAME set to the binary: one policy, one digest.
+/// - The template refuses the setting unless `api.console.enabled` and
+///   `api.console.mode` is `shared`, and `scripts/check-chart.sh` runs that
+///   refusal through `helm` (no console, the principal alone, the
+///   administrator console; both spellings), with the shared console as the
+///   control.
+/// - NO OTHER checked-in render carries the key, so an older binary still
+///   reads every document that does not ask for two-person.
+///
+/// MUTANTS: the shared-mode `fail` removed or its condition loosened to
+/// "a console runs"; the key rendered for every Governed policy; `two-person`
+/// rendered as the operator's word.
+#[test]
+fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared_console() {
+    use logweir_core::approval_policy::{ApprovalPolicySet, ApproverSignature, OperatorMode};
+    let docs = rendered("console-two-person");
+    let map = docs
+        .iter()
+        .find(|d| {
+            d.kind == "ConfigMap"
+                && d.value["metadata"]["labels"]["app.kubernetes.io/component"].as_str()
+                    == Some("approval-policy")
+        })
+        .expect("the two-person example renders its approval-policy ConfigMap");
+    let document = map.value["data"]["approval-policy.yaml"]
+        .as_str()
+        .expect("the document");
+    assert!(document.contains("approverSignature: Console"), "{document}");
+    assert!(
+        !document.contains("mode: two-person") && document.contains("mode: Governed"),
+        "the internal words: {document}"
+    );
+    assert_eq!(
+        document.matches("approverSignature").count(),
+        1,
+        "only the two-person policy carries the key:\n{document}"
+    );
+    let parsed = ApprovalPolicySet::parse(document)
+        .unwrap_or_else(|e| panic!("the rendered two-person document is refused: {e}"));
+    let pair = parsed.resolve("team-a");
+    assert_eq!(OperatorMode::of(&pair), OperatorMode::TwoPerson);
+    assert_eq!(
+        pair.bound().map(|p| p.approver_signature),
+        Some(ApproverSignature::Console)
+    );
+    let strict = parsed.resolve("team-b");
+    assert_eq!(OperatorMode::of(&strict), OperatorMode::Strict);
+    assert_eq!(
+        strict.bound().map(|p| p.approver_signature),
+        Some(ApproverSignature::PersonalKey)
+    );
+    // The operator's words are the same set.
+    let example: Value =
+        serde_yaml::from_str(&read("charts/logweir/examples/console-two-person.values.yaml"))
+            .expect("the example");
+    assert_eq!(
+        ApprovalPolicySet::parse(&approval_policy_document(&example))
+            .expect("the example's own document"),
+        parsed
+    );
+    assert_eq!(example["api"]["console"]["mode"].as_str(), Some("shared"));
+
+    // The console of that render is the shared one.
+    let (_, config) = console_config("console-two-person");
+    assert_eq!(config["mode"].as_str(), Some("shared"), "{config:?}");
+
+    // No other render carries the key.
+    for file in files_under("charts/logweir/rendered") {
+        if file.ends_with("console-two-person.yaml") {
+            continue;
+        }
+        assert!(
+            !read(&file).contains("approverSignature"),
+            "{file} carries approverSignature"
+        );
+    }
+
+    // The template's refusal, and the gate that runs it.
+    let template = read("charts/logweir/templates/approval-policy.yaml");
+    assert!(
+        template.contains(
+            "{{- if not (and $.Values.api.enabled $.Values.api.console.enabled (eq \
+             ($.Values.api.console.mode | default \"\") \"shared\")) -}}"
+        ),
+        "the two-person refusal is tied to the shared console"
+    );
+    assert!(template.contains("else if eq $m \"two-person\" -}}Governed"));
+    let gate = read("scripts/check-chart.sh");
+    for row in [
+        "a two-person policy with no console at all",
+        "a two-person policy with the in-cluster administrator console",
+        "approverSignature: Console with the in-cluster administrator console",
+        "a strict policy renders no approverSignature key",
+    ] {
+        assert!(gate.contains(row), "check-chart.sh runs: {row}");
+    }
 }
 
 /// **A shared console the chart publishes names the proxy in front of it, or

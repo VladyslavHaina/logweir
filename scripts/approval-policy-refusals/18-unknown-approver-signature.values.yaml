@@ -1,0 +1,6 @@
+# expect: approverSignature
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - {name: pair, mode: Governed, approverSignature: PersonalKey}
+  namespaces: {}
