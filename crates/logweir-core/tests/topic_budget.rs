@@ -42,8 +42,7 @@ fn the_budget_is_held_by_rows_that_exist() {
                 "a_backup_of_many_topics_is_verified_by_the_controller",
                 "the_largest_receipt_fits_the_relay",
                 "the_controller_builds_no_tree_of_a_receipt_on_any_path",
-                "a_receipt_read_and_a_receipt_relay_stay_inside_what_they_reserve",
-                "simultaneous_large_receipts_stay_inside_the_read_budget",
+                "a_receipt_read_and_a_receipt_relay_stay_bounded",
             ][..],
         ),
     ] {

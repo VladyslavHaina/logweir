@@ -1464,7 +1464,6 @@ async fn observe(
         events: &events,
         log: log.as_deref(),
         expect: &expect,
-        stream_caps: &[],
         now,
     });
 

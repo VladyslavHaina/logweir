@@ -772,30 +772,6 @@ pub fn verify_evidence(
     sidecar_key: &str,
     payload_type: &str,
 ) -> VerificationResult {
-    verify_evidence_within(
-        crate::read_budget::ReadBudget::controller(),
-        store,
-        trust,
-        payload_key,
-        payload_sha256,
-        sidecar_key,
-        payload_type,
-    )
-}
-
-/// [`verify_evidence`] reserving from `budget`. The controller has one
-/// budget; `tests/topic_budget.rs` passes another to show what the
-/// controller's bounds.
-#[must_use]
-pub fn verify_evidence_within(
-    budget: &crate::read_budget::ReadBudget,
-    store: Option<&Store>,
-    trust: &ResolvedTrust,
-    payload_key: &str,
-    payload_sha256: &str,
-    sidecar_key: &str,
-    payload_type: &str,
-) -> VerificationResult {
     // STEP 1. No credential is not a bad document.
     let Some(store) = store else {
         return VerificationResult::not_attempted(payload_type, NO_CREDENTIAL_DETAIL);
@@ -818,7 +794,8 @@ pub fn verify_evidence_within(
     // AND OUT OF ONE BUDGET (review F2): the document's worst case is reserved
     // before it is read and held until the verdict is built, so concurrent
     // verifications cannot together exceed `read_budget`'s bound.
-    let _reservation = budget.reserve(crate::read_budget::document_cost_for(payload_type));
+    let _reservation = crate::read_budget::ReadBudget::controller()
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     let payload = match store.get_capped(payload_key, controller_cap_for(payload_type)) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
@@ -2846,7 +2823,7 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
     // FX-31: under the same cap as `verify_evidence`'s read of the document
     // (FX-33: its payload type's), and out of the same budget (review F2).
     let _reservation = crate::read_budget::ReadBudget::controller()
-        .reserve(crate::read_budget::document_cost_for(&need.payload_type));
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     match store.get_capped(&need.payload_key, controller_cap_for(&need.payload_type)) {
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
         // Over the cap: settled, not retried (review F8).

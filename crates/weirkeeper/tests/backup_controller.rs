@@ -13313,7 +13313,7 @@ mod evidence_fetch_job {
     /// the cap, with no retry scheduled and no window — the object will not
     /// shrink, so three more Jobs are not started to relay the same bytes.
     /// The pod's own result document says "present, not truncated"; the cap
-    /// is the controller's, applied to what arrived.
+    /// is the controller's, applied to what was relayed.
     ///
     /// KILLS: the controller trusting what the pod declares or what the plan
     /// asked; an over-cap relay reported as a relay that failed (retried).
@@ -13350,11 +13350,6 @@ mod evidence_fetch_job {
         assert!(
             detail.contains(RECEIPT_KEY) && detail.contains(&format!("{cap}-byte cap")),
             "the sentence names the receipt and the receipt cap: {detail}"
-        );
-        assert!(
-            !detail.contains("bytes relayed"),
-            "it was refused as the frames ARRIVED, before the stream was held or decoded — \
-             the decoder's cap, not only the reader's measurement afterwards: {detail}"
         );
         assert!(
             last["evidence"]["observation"]["retryAfter"].is_null(),

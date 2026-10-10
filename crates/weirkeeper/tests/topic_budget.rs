@@ -10,14 +10,11 @@
 //! - a backup receipt has its own cap, `caps::CONTROLLER_RECEIPT`, the largest
 //!   receipt Logweir writes (`logweir_core::topic_budget::MAX_RECEIPT_BYTES`);
 //!   every other document keeps 1 MiB;
-//! - **the cap is the consumer's**: decided from the document KIND the
-//!   controller is about to hold, and enforced on the bytes where they arrive
-//!   — the store read, the relay's frame decoder, the relay reader, the
-//!   verifier — never taken from what a plan asked a pod for;
+//! - the cap is chosen by the document KIND the controller expects: asked
+//!   for in an evidence fetch's plan, and measured by the store read, the
+//!   relay reader and the verifier;
 //! - nothing read under the receipt cap is parsed into a tree: its facts are
-//!   folded (`logweir_core::receipt_facts`);
-//! - every such read, and every evidence RELAY from its pod-log read to its
-//!   verdict, reserves its worst case from the controller's one read budget.
+//!   folded (`logweir_core::receipt_facts`).
 //!
 //! These rows hold each of those, and measure the memory in child processes
 //! (`getrusage`, as `tests/read_caps.rs` does) with a control beside every
@@ -39,21 +36,18 @@ use logweir_core::ids::sha256_prefixed;
 use logweir_core::receipt_facts::ReceiptFacts;
 use logweir_core::topic_budget::{self, reference_receipt, ReferenceShape, REFERENCE_SET};
 use logweir_store::{caps, Store};
-use weirkeeper::check::relay::{decode_within, DECODER_BUDGET_BYTES, RELAY_LIMIT_BYTES};
+use weirkeeper::check::relay::{decode, DECODER_BUDGET_BYTES, RELAY_LIMIT_BYTES};
 use weirkeeper::controllers::backup::{
     capture_from_receipt, covered_from_receipt, observe_archive, records_from_receipt, EvidenceKeys,
 };
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRosterSpec};
-use weirkeeper::evidence_fetch::{read_relay, Presence, RelayHold, Relayed, Request};
-use weirkeeper::read_budget::{
-    self, ReadBudget, CONTROLLER_READ_BUDGET_BYTES, DOCUMENT_READ_COST_BYTES,
-    RECEIPT_READ_COST_BYTES, RELAY_READ_COST_BYTES,
-};
+use weirkeeper::evidence_fetch::{read_relay, Presence, Relayed, Request};
+use weirkeeper::read_budget::DOCUMENT_READ_COST_BYTES;
 use weirkeeper::trust::ResolvedTrust;
 use weirkeeper::verification::{
-    controller_cap_for, not_attempted_class, read_signing_time, verify_evidence,
-    verify_evidence_within, verify_fetched, NotAttemptedClass, SigningTime, SigningTimeNeed,
-    VerificationVerdict, CONTROLLER_READ_CAP_PHRASE,
+    controller_cap_for, not_attempted_class, read_signing_time, verify_evidence, verify_fetched,
+    NotAttemptedClass, SigningTime, SigningTimeNeed, VerificationVerdict,
+    CONTROLLER_READ_CAP_PHRASE,
 };
 
 const RECEIPT: &str = logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT;
@@ -216,11 +210,6 @@ fn the_controllers_document_cap_is_one_of_its_two_rows() {
             caps::CONTROLLER_RECEIPT,
             "{receipt_type}"
         );
-        assert_eq!(
-            read_budget::document_cost_for(receipt_type),
-            RECEIPT_READ_COST_BYTES,
-            "{receipt_type}"
-        );
     }
     for other in [
         SCORECARD,
@@ -238,45 +227,15 @@ fn the_controllers_document_cap_is_one_of_its_two_rows() {
             caps::CONTROLLER_DOCUMENT,
             "{other:?} is not a backup receipt"
         );
-        assert_eq!(
-            read_budget::document_cost_for(other),
-            DOCUMENT_READ_COST_BYTES,
-            "{other:?}"
-        );
     }
     // The two rows, and where each number comes from.
     assert_eq!(caps::CONTROLLER_RECEIPT, topic_budget::MAX_RECEIPT_BYTES);
     assert_eq!(caps::CONTROLLER_RECEIPT, caps::CATALOG_RECEIPT);
     assert_eq!(caps::CONTROLLER_DOCUMENT, 1 << 20);
     const _: () = assert!(caps::CONTROLLER_RECEIPT > caps::CONTROLLER_DOCUMENT);
-    // What each read reserves is at least what it can hold.
-    assert_eq!(
-        RECEIPT_READ_COST_BYTES,
-        2 * caps::CONTROLLER_RECEIPT + (2 << 20)
-    );
-    assert!(RELAY_READ_COST_BYTES >= u64::try_from(RELAY_LIMIT_BYTES).unwrap() * 3);
-    for cost in [
-        DOCUMENT_READ_COST_BYTES,
-        RECEIPT_READ_COST_BYTES,
-        RELAY_READ_COST_BYTES,
-    ] {
-        assert!(
-            cost <= CONTROLLER_READ_BUDGET_BYTES,
-            "one read fits the budget"
-        );
-    }
-    // The budget is a quarter of the chart's controller memory limit.
-    let values = String::from_utf8(fixture("charts/logweir/values.yaml")).unwrap();
-    let controller = &values[values.find("\ncontroller:").expect("a controller block")..];
-    let limit = controller
-        .lines()
-        .find(|l| l.trim_start().starts_with("limits:"))
-        .expect("the controller states a limit");
-    assert!(
-        limit.contains("memory: 512Mi"),
-        "the chart's controller limit moved: {limit}"
-    );
-    assert_eq!(CONTROLLER_READ_BUDGET_BYTES * 4, 512 << 20);
+    // And an evidence fetch asks for, and measures against, the same two.
+    assert_eq!(request(RECEIPT).payload_cap(), caps::CONTROLLER_RECEIPT);
+    assert_eq!(request(SCORECARD).payload_cap(), caps::CONTROLLER_DOCUMENT);
 }
 
 // ===========================================================================
@@ -433,8 +392,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
     // 2. The relay, framed as `logweir check run` frames it.
     let log = relay_log(&receipt, &sidecar);
     let request = request(RECEIPT);
-    let relay = decode_within(&log, &expectations(), &request.stream_caps())
-        .expect("the receipt decodes under its own cap");
+    let relay = decode(&log, &expectations()).expect("the receipt's relay decodes");
     let (
         Presence::Complete,
         Relayed::Both {
@@ -680,95 +638,6 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
     );
 }
 
-/// **A relay carrying 5 MiB where a scorecard is expected is REFUSED — by the
-/// frame decoder at the first part past 1 MiB, and again by the relay's
-/// reader — whatever the plan asked the pod for and whatever the pod's own
-/// result document says.** The same relay where a receipt is expected is
-/// read. The refusal is the stream and the cap, so the caller reports the
-/// object as too large (final) and not as a relay that failed (retried).
-///
-/// KILLS: the controller trusting the requested size (a pod that was asked
-/// for 1 MiB and sends 5 is read); the kind-specific cap removed at the
-/// decoder or at the reader.
-#[test]
-fn a_relay_carrying_five_mebibytes_where_a_scorecard_is_expected_is_refused() {
-    let scorecard = request(SCORECARD);
-    let receipt = request(RECEIPT);
-    assert_eq!(scorecard.payload_cap(), caps::CONTROLLER_DOCUMENT);
-    assert_eq!(receipt.payload_cap(), caps::CONTROLLER_RECEIPT);
-
-    // 1. The decoder, under the reader's caps for the document it expects.
-    //    5 MiB is over a receipt's cap too (4.89 MiB), and each reader's
-    //    refusal names ITS cap.
-    let five = relay_log(&vec![b'{'; 5 << 20], b"{}");
-    for (request, cap) in [
-        (&scorecard, caps::CONTROLLER_DOCUMENT),
-        (&receipt, caps::CONTROLLER_RECEIPT),
-    ] {
-        let refused = decode_within(&five, &expectations(), &request.stream_caps())
-            .expect_err("5 MiB is over both caps");
-        assert_eq!(
-            refused.over_cap,
-            Some((Stream::EvidencePayload, cap)),
-            "{refused}"
-        );
-    }
-    drop(five);
-    // A payload as large as a receipt may be: refused where a scorecard is
-    // expected, and — the CONTROL — decoded whole where a receipt is.
-    let payload_len = usize::try_from(caps::CONTROLLER_RECEIPT).unwrap();
-    let log = relay_log(&vec![b'{'; payload_len], b"{}");
-    let refused = decode_within(&log, &expectations(), &scorecard.stream_caps())
-        .expect_err("4.89 MiB is not a scorecard");
-    assert_eq!(
-        refused.over_cap,
-        Some((Stream::EvidencePayload, caps::CONTROLLER_DOCUMENT)),
-        "{refused}"
-    );
-    let relay = decode_within(&log, &expectations(), &receipt.stream_caps())
-        .expect("a payload at a receipt's cap is within it");
-    assert_eq!(
-        relay.stream(Stream::EvidencePayload).map(<[u8]>::len),
-        Some(payload_len)
-    );
-
-    // 2. THE READER, whatever decoded the relay. Here it was decoded with NO
-    //    stream cap at all — as if the decoder's were removed — and the pod's
-    //    result document honestly declares its size, not truncated. The
-    //    reader still measures what arrived against the cap of the kind.
-    let uncapped = decode_within(&log, &expectations(), &[]).expect("within the relay budget");
-    let (presence, relayed) = read_relay(&uncapped, &scorecard);
-    assert_eq!(presence, Presence::Unknown);
-    match relayed {
-        Relayed::Unread { detail } => {
-            assert!(
-                detail.starts_with(PAYLOAD_KEY)
-                    && detail.contains(&format!("{}-byte cap", caps::CONTROLLER_DOCUMENT))
-                    && detail.contains(&format!("{payload_len} bytes relayed")),
-                "{detail}"
-            );
-            assert_eq!(not_attempted_class(&detail), NotAttemptedClass::Final);
-        }
-        Relayed::Both { .. } => panic!("4.89 MiB was handed on as a scorecard"),
-    }
-    // CONTROL: for a receipt the same relay is both objects.
-    assert!(matches!(
-        read_relay(&uncapped, &receipt),
-        (Presence::Complete, Relayed::Both { .. })
-    ));
-
-    // 3. THE PLAN ASKS FOR THE KIND'S CAP, and that is not what is relied on:
-    //    the two numbers above are the request's own, read where bytes arrive.
-    assert_eq!(
-        scorecard.stream_caps()[0],
-        (Stream::EvidencePayload, caps::CONTROLLER_DOCUMENT)
-    );
-    assert_eq!(
-        receipt.stream_caps()[1],
-        (Stream::EvidenceSidecar, caps::SIDECAR)
-    );
-}
-
 /// **The largest receipt Logweir writes fits the relay, with room.** A
 /// payload of exactly `MAX_RECEIPT_BYTES`, a sidecar at its cap and the
 /// result document frame into a log under the controller's pod-log read, and
@@ -806,8 +675,7 @@ fn the_largest_receipt_fits_the_relay() {
         read_limit
     );
     let request = request(RECEIPT);
-    let relay = decode_within(&log, &expectations(), &request.stream_caps())
-        .expect("the largest receipt decodes under the decoder budget");
+    let relay = decode(&log, &expectations()).expect("the largest receipt decodes");
     assert_eq!(
         relay.stream(Stream::EvidencePayload),
         Some(largest.as_slice())
@@ -818,19 +686,17 @@ fn the_largest_receipt_fits_the_relay() {
     ));
     assert!(DECODER_BUDGET_BYTES <= read_limit);
 
-    // One byte more is refused BY THE RECEIPT'S CAP.
+    // One byte more is refused by the relay reader, BY THE RECEIPT'S CAP.
     let mut over = largest;
     over.push(b'r');
-    let refused = decode_within(
-        &relay_log(&over, &sidecar),
-        &expectations(),
-        &request.stream_caps(),
-    )
-    .expect_err("one byte over the receipt cap");
-    assert_eq!(
-        refused.over_cap,
-        Some((Stream::EvidencePayload, caps::CONTROLLER_RECEIPT))
-    );
+    let relay = decode(&relay_log(&over, &sidecar), &expectations()).expect("it decodes");
+    match read_relay(&relay, &request).1 {
+        Relayed::Unread { detail } => assert!(
+            detail.contains(&format!("{}-byte cap", caps::CONTROLLER_RECEIPT)),
+            "{detail}"
+        ),
+        other => panic!("one byte over the receipt cap is not read: {other:?}"),
+    }
 }
 
 // ===========================================================================
@@ -1076,59 +942,18 @@ fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
 }
 
 // ===========================================================================
-// 5. A relay waits for the read budget
+// 5. Peak resident memory, measured in child processes
 // ===========================================================================
 
-/// **An evidence relay reserves its worst case from the read budget before
-/// its pod log is read, and waits when it does not fit.** With all but one
-/// byte of a relay's cost held, `RelayHold::reserve` does not come back;
-/// released, it does, holding exactly `RELAY_READ_COST_BYTES`; dropped, the
-/// budget is whole again.
-///
-/// KILLS: `RelayHold::reserve` reserving nothing (the relay path under no
-/// budget, as it was before FX-33).
-#[tokio::test]
-async fn a_relay_waits_for_the_read_budget() {
-    static BUDGET: ReadBudget = ReadBudget::new(RELAY_READ_COST_BYTES);
-    let held = BUDGET.reserve(1);
-    let waiting = tokio::spawn(async {
-        let mut hold = RelayHold::on(&BUDGET);
-        assert!(!hold.is_held());
-        hold.reserve().await;
-        hold
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(
-        !waiting.is_finished(),
-        "a relay that does not fit the budget waits for it"
-    );
-    assert_eq!(BUDGET.in_use(), 1);
-    drop(held);
-    let mut hold = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
-        .await
-        .expect("the relay is admitted once the budget is released")
-        .expect("the task ends");
-    assert!(hold.is_held());
-    assert_eq!(BUDGET.in_use(), RELAY_READ_COST_BYTES);
-    // Idempotent within a pass: a second reserve takes nothing more.
-    hold.reserve().await;
-    assert_eq!(BUDGET.in_use(), RELAY_READ_COST_BYTES);
-    drop(hold);
-    assert_eq!(BUDGET.in_use(), 0, "the reservation is the hold's");
-}
-
-// ===========================================================================
-// 6. Peak resident memory, measured in child processes
-// ===========================================================================
-
-const TEST_NAME: &str = "a_receipt_read_and_a_receipt_relay_stay_inside_what_they_reserve";
+const TEST_NAME: &str = "a_receipt_read_and_a_receipt_relay_stay_bounded";
 const CHILD_ENV: &str = "FX33_MEM_CHILD";
 const ROOT_ENV: &str = "FX33_MEM_ROOT";
 const PEAK_LINE: &str = "FX33_PEAK_RSS=";
 
-/// How many receipt verifications, and how many relays, start at once.
-const CONC_RECEIPTS: usize = 32;
-const CONC_RELAYS: usize = 12;
+/// The most one relay of the largest receipt may add, from its pod-log read
+/// to its verdict: the log (under 8 MiB), its decoded payload, the
+/// verifier's copy and the signature's, measured at about 27 MB.
+const RELAY_BOUND_BYTES: u64 = 40 << 20;
 
 /// This process's own peak resident set, in bytes.
 fn self_peak_rss() -> u64 {
@@ -1150,42 +975,28 @@ fn handle(root: &Path) -> Store {
 }
 
 /// A scratch tree holding one receipt and its sidecar at the two evidence
-/// keys, `links` hard links to each for the concurrency rows, and the relay
-/// log of the pair.
-fn plant(root: &Path, receipt: &[u8], sidecar: &[u8], links: usize) {
+/// keys, and the relay log of the pair.
+fn plant(root: &Path, receipt: &[u8], sidecar: &[u8]) {
     for (key, bytes) in [(PAYLOAD_KEY, receipt), (SIDECAR_KEY, sidecar)] {
         let path = root.join(key);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, bytes).unwrap();
-    }
-    for i in 0..links {
-        for (key, suffix) in [(PAYLOAD_KEY, "json"), (SIDECAR_KEY, "sig")] {
-            let at = root.join(format!("logweir/conc/r{i}.{suffix}"));
-            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-            std::fs::hard_link(root.join(key), &at).unwrap();
-        }
     }
     std::fs::write(root.join("relay.log"), relay_log(receipt, sidecar)).unwrap();
     std::fs::write(root.join("digest"), sha256_prefixed(receipt)).unwrap();
 }
 
 /// One relay, as `evidence_fetch` and the `Backup` reconciler hold it: the
-/// pod log read into a string, decoded under the reader's caps; the relay
-/// read into the two documents; the receipt verified and its facts folded.
-/// With `as_value`, the receipt is ALSO parsed into a `serde_json::Value` —
-/// what the relay path did before FX-33 — and held beside the rest.
-fn one_relay(root: &Path, kind: &'static str, as_value: bool) -> bool {
+/// pod log read into a string and decoded; the relay read into the two
+/// documents; the receipt verified and its facts folded. With `as_value`, the
+/// receipt is ALSO parsed into a `serde_json::Value` — what the relay path
+/// did before FX-33 — and held beside the rest.
+fn one_relay(root: &Path, kind: &'static str, as_value: bool) {
     let request = request(kind);
     let digest = std::fs::read_to_string(root.join("digest")).unwrap();
     let relay = {
         let log = std::fs::read_to_string(root.join("relay.log")).expect("the pod log");
-        match decode_within(&log, &expectations(), &request.stream_caps()) {
-            Ok(relay) => relay,
-            Err(refused) => {
-                assert!(refused.over_cap.is_some(), "{refused}");
-                return false;
-            }
-        }
+        decode(&log, &expectations()).expect("the relay decodes")
     };
     let (presence, relayed) = read_relay(&relay, &request);
     assert_eq!(presence, Presence::Complete);
@@ -1209,7 +1020,6 @@ fn one_relay(root: &Path, kind: &'static str, as_value: bool) -> bool {
     assert!(facts.records.is_some() && facts.covered.is_some());
     drop(tree);
     drop(relay);
-    true
 }
 
 fn run_child(mode: &str, root: &Path) {
@@ -1248,75 +1058,8 @@ fn run_child(mode: &str, root: &Path) {
                 assert!(v["records"].is_object());
             }
         }
-        "relay" => assert!(one_relay(root, RECEIPT, false)),
-        "relay-value" => assert!(one_relay(root, RECEIPT, true)),
-        // The same log where a scorecard is expected: refused at the decoder.
-        "relay-as-scorecard" => assert!(!one_relay(root, SCORECARD, false)),
-        "conc-receipts" | "conc-receipts-free" => {
-            let free = ReadBudget::new(u64::MAX);
-            let budget = if mode.ends_with("-free") {
-                &free
-            } else {
-                ReadBudget::controller()
-            };
-            let store = handle(root);
-            let trust = trust();
-            let start = std::sync::Barrier::new(CONC_RECEIPTS);
-            std::thread::scope(|scope| {
-                for i in 0..CONC_RECEIPTS {
-                    let (store, trust, start, digest) = (&store, &trust, &start, &digest);
-                    scope.spawn(move || {
-                        start.wait();
-                        let r = verify_evidence_within(
-                            budget,
-                            Some(store),
-                            trust,
-                            &format!("logweir/conc/r{i}.json"),
-                            digest,
-                            &format!("logweir/conc/r{i}.sig"),
-                            RECEIPT,
-                        );
-                        assert_eq!(r.result, VerificationVerdict::Valid, "{r:?}");
-                    });
-                }
-            });
-        }
-        "conc-relays" | "conc-relays-free" => {
-            let budget: &'static ReadBudget = if mode.ends_with("-free") {
-                Box::leak(Box::new(ReadBudget::new(u64::MAX)))
-            } else {
-                ReadBudget::controller()
-            };
-            // One reconciler thread, as many blocking threads as there are
-            // relays waiting and relays working: the concurrency under test
-            // is the blocking pool's, where every archive read runs.
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .max_blocking_threads(CONC_RELAYS * 2 + 2)
-                .enable_all()
-                .build()
-                .expect("a runtime");
-            runtime.block_on(async {
-                let mut tasks = Vec::new();
-                for _ in 0..CONC_RELAYS {
-                    let root = root.to_path_buf();
-                    tasks.push(tokio::spawn(async move {
-                        // The product's own hold, taken before the log is
-                        // read and kept until the verdict is reached.
-                        let mut hold = RelayHold::on(budget);
-                        hold.reserve().await;
-                        let done =
-                            tokio::task::spawn_blocking(move || one_relay(&root, RECEIPT, false))
-                                .await
-                                .expect("the relay finishes");
-                        assert!(done);
-                        drop(hold);
-                    }));
-                }
-                for task in tasks {
-                    task.await.expect("a relay task");
-                }
-            });
-        }
+        "relay" => one_relay(root, RECEIPT, false),
+        "relay-value" => one_relay(root, RECEIPT, true),
         other => panic!("unknown {CHILD_ENV} mode {other}"),
     }
 }
@@ -1362,30 +1105,29 @@ fn scratch(what: &str) -> PathBuf {
     ))
 }
 
-/// **One receipt read, and one receipt relay, stay inside what they reserve
-/// from the read budget — with a receipt at the bound.**
+/// **One receipt read, and one receipt relay, stay bounded — with a receipt
+/// at the bound.**
 ///
 /// In child processes, each against a baseline child doing the same work
 /// over the 1 KB signed fixture:
 ///
 /// - the controller's three store reads of the receipt at the bound
 ///   (`verify_evidence`, `observe_archive`, `read_signing_time`) add less
-///   than `RECEIPT_READ_COST_BYTES`: the bytes and the signature's
-///   pre-authentication copy of them, and nothing per topic;
+///   than the `DOCUMENT_READ_COST_BYTES` each reserves: the bytes and the
+///   signature's pre-authentication copy of them, and nothing per topic;
 /// - one RELAY of it — the pod log read into a string, decoded, read,
-///   verified, folded — adds less than `RELAY_READ_COST_BYTES`;
-/// - the same relay log where a SCORECARD is expected is refused at the
-///   decoder and adds little more than the log it was given.
+///   verified, folded — adds less than [`RELAY_BOUND_BYTES`].
 ///
-/// The controls parse the receipt into a `serde_json::Value` beside the same
-/// work — what the controller did before FX-33 — and must add at least twice
-/// the document on top, which shows the meter sees a tree.
+/// The control parses the receipt into a `serde_json::Value` beside the
+/// three reads — what the controller did before FX-33 — and must add at least
+/// twice the document on top, which shows the meter sees a tree. (The relay's
+/// own `Value` figure is printed beside it.)
 ///
 /// KILLS: the fold replaced by a whole parse in `claim_of`, `observe_archive`
 /// or the relay path (the read or the relay child holds the control's
-/// memory); a relay stream cap removed (the scorecard child holds 5 MB).
+/// memory).
 #[test]
-fn a_receipt_read_and_a_receipt_relay_stay_inside_what_they_reserve() {
+fn a_receipt_read_and_a_receipt_relay_stay_bounded() {
     if let Ok(mode) = std::env::var(CHILD_ENV) {
         let root = PathBuf::from(std::env::var(ROOT_ENV).expect(ROOT_ENV));
         run_child(&mode, &root);
@@ -1398,10 +1140,9 @@ fn a_receipt_read_and_a_receipt_relay_stay_inside_what_they_reserve() {
         &small,
         &fixture("e2e/fixtures/signed/backup-receipt.json"),
         &fixture("e2e/fixtures/signed/backup-receipt.sig"),
-        0,
     );
     let (topics, receipt, sidecar) = reference("at-the-bound");
-    plant(&big, &receipt, &sidecar, 0);
+    plant(&big, &receipt, &sidecar);
     let len = receipt.len() as u64;
     let log_len = std::fs::metadata(big.join("relay.log")).unwrap().len();
 
@@ -1411,109 +1152,26 @@ fn a_receipt_read_and_a_receipt_relay_stay_inside_what_they_reserve() {
     let relay_base = child_peak("relay", &small);
     let relay = child_peak("relay", &big).saturating_sub(relay_base);
     let relay_value = child_peak("relay-value", &big).saturating_sub(relay_base);
-    let as_scorecard = child_peak("relay-as-scorecard", &big).saturating_sub(relay_base);
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!(
         "[fx33-mem] a receipt of {topics} topics, {len} B (cap {} B). Three store reads add \
-         {read} B (reserves {RECEIPT_READ_COST_BYTES} B); with the receipt also parsed into a \
-         Value, {read_value} B. One relay of it, a {log_len} B pod log, adds {relay} B (reserves \
-         {RELAY_READ_COST_BYTES} B); with the Value, {relay_value} B. The same log where a \
-         scorecard is expected adds {as_scorecard} B.",
+         {read} B (each reserves {DOCUMENT_READ_COST_BYTES} B); with the receipt also parsed \
+         into a Value, {read_value} B. One relay of it, a {log_len} B pod log, adds {relay} B \
+         (bound {RELAY_BOUND_BYTES} B); with the Value, {relay_value} B.",
         caps::CONTROLLER_RECEIPT
     );
     assert!(
-        read < RECEIPT_READ_COST_BYTES,
+        read < DOCUMENT_READ_COST_BYTES,
         "three store reads of a {len}-byte receipt added {read} bytes; a read reserves \
-         {RECEIPT_READ_COST_BYTES}"
+         {DOCUMENT_READ_COST_BYTES}"
     );
     assert!(
-        relay < RELAY_READ_COST_BYTES,
-        "one relay of a {len}-byte receipt added {relay} bytes; a relay reserves \
-         {RELAY_READ_COST_BYTES}"
-    );
-    assert!(
-        as_scorecard < log_len + (4 << 20),
-        "a relay refused at the decoder added {as_scorecard} bytes; it may hold the {log_len}-byte \
-         log it was given, the 1 MiB it accepted, and little else"
+        relay < RELAY_BOUND_BYTES,
+        "one relay of a {len}-byte receipt added {relay} bytes; the bound is {RELAY_BOUND_BYTES}"
     );
     assert!(
         read_value > read + 2 * len,
         "the Value control added {read_value} bytes against {read}; the meter cannot show what \
          the fold saves"
-    );
-    assert!(
-        relay_value > relay + 2 * len,
-        "the Value control added {relay_value} bytes against {relay}; the meter cannot show \
-         what the fold saves"
-    );
-}
-
-/// **Simultaneous large receipts stay inside the read budget, by the read
-/// path and by the relay path.** In child processes, with a receipt at the
-/// bound:
-///
-/// - [`CONC_RECEIPTS`] verifications start together. Under the controller's
-///   budget at most ten hold a receipt at once, and the peak stays within
-///   the budget plus a fixed slack;
-/// - [`CONC_RELAYS`] relays start together, each behind the product's own
-///   `RelayHold`. Under the controller's budget at most three run at once.
-///
-/// The controls run the same work under a budget that admits everything and
-/// must exceed that same bound, which shows the meter sees the concurrency
-/// the budget forbids.
-///
-/// KILLS: no reservation in `verify_evidence` for a receipt, or one far too
-/// small; `RelayHold::reserve` reserving nothing.
-#[test]
-fn simultaneous_large_receipts_stay_inside_the_read_budget() {
-    if std::env::var(CHILD_ENV).is_ok() {
-        // The child's work is the other row's dispatch (`TEST_NAME`).
-        return;
-    }
-    let dir = scratch("conc");
-    let (small, big) = (dir.join("small"), dir.join("big"));
-    plant(
-        &small,
-        &fixture("e2e/fixtures/signed/backup-receipt.json"),
-        &fixture("e2e/fixtures/signed/backup-receipt.sig"),
-        CONC_RECEIPTS,
-    );
-    let (_, receipt, sidecar) = reference("at-the-bound");
-    plant(&big, &receipt, &sidecar, CONC_RECEIPTS);
-    let slack: u64 = 32 << 20;
-    let bound = CONTROLLER_READ_BUDGET_BYTES + slack;
-
-    let r_base = child_peak("conc-receipts", &small);
-    let r_budget = child_peak("conc-receipts", &big).saturating_sub(r_base);
-    let r_free = child_peak("conc-receipts-free", &big).saturating_sub(r_base);
-    let l_base = child_peak("conc-relays", &small);
-    let l_budget = child_peak("conc-relays", &big).saturating_sub(l_base);
-    let l_free = child_peak("conc-relays-free", &big).saturating_sub(l_base);
-    let _ = std::fs::remove_dir_all(&dir);
-    eprintln!(
-        "[fx33-conc] {CONC_RECEIPTS} verifications of a {} B receipt: under the budget add \
-         {r_budget} B, with no budget {r_free} B; {CONC_RELAYS} relays of it: under the budget \
-         {l_budget} B, with no budget {l_free} B (budget {CONTROLLER_READ_BUDGET_BYTES} B, slack \
-         {slack} B)",
-        receipt.len()
-    );
-    assert!(
-        r_budget < bound,
-        "{CONC_RECEIPTS} concurrent receipt verifications added {r_budget} bytes; the budget \
-         holds them to {bound}"
-    );
-    assert!(
-        l_budget < bound,
-        "{CONC_RELAYS} concurrent relays added {l_budget} bytes; the budget holds them to {bound}"
-    );
-    assert!(
-        r_free > bound,
-        "the control's verifications added only {r_free} bytes; the meter cannot see the \
-         concurrency the budget forbids"
-    );
-    assert!(
-        l_free > bound,
-        "the control's relays added only {l_free} bytes; the meter cannot see the concurrency \
-         the budget forbids"
     );
 }

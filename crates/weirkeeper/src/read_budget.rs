@@ -21,13 +21,11 @@
 //!
 //! | read | reserves | why |
 //! |---|---|---|
-//! | a scorecard, or any document that is not a backup receipt (`verify_evidence`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check. A document of tiny values parses into about 37× its size, measured by `tests/read_caps.rs`. |
-//! | a backup receipt (`verify_evidence`, `observe_archive`, `read_signing_time`) | [`RECEIPT_READ_COST_BYTES`] (12 MiB) | **FX-33.** The 5,131,072-byte cap, twice: the bytes, and the signature's pre-authentication copy of them. Nothing else scales with the document: its facts are folded from the bytes (`logweir_core::receipt_facts`), and the keys that fold holds are part of the bytes it read. |
-//! | one evidence relay of a receipt, from its pod-log read to its verdict (`evidence_fetch::advance`) | [`RELAY_READ_COST_BYTES`] (40 MiB) | **FX-33.** The 8 MiB log, the decoder's parts and their joined base64 (8 MiB each at worst), the decoded payload, its copy for the verifier and the pre-authentication copy (5 MiB each). Before FX-33 this path was under no budget at all. |
+//! | a receipt or scorecard (`verify_evidence`, `observe_archive`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | a scorecard: the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check (a document of tiny values parses into about 37× its size, `tests/read_caps.rs`). A backup receipt (FX-33): its 5,131,072-byte cap, folded and never parsed into a tree, so the bytes and the signature's copy of them, about 10 MiB (`tests/topic_budget.rs`). |
 //! | one manifest in a retention report | [`MANIFEST_READ_COST_BYTES`] (64 MiB) | the cap's bytes are buffered. The fold over them keeps nothing per value. |
 //!
-//! With a 128 MiB budget, at most three scorecards or three relays, or ten
-//! receipts, or two manifests, are read at once. A read takes milliseconds
+//! With a 128 MiB budget, at most three documents, or two manifests, or one
+//! manifest and one document, are read at once. A read takes milliseconds
 //! against a healthy store. A degraded store makes the controller's evidence
 //! reads wait on one another for every namespace. That is the same trade the
 //! four-permit `evidence_fetch::controller_read_permits` pool already makes,
@@ -53,32 +51,6 @@ pub const CONTROLLER_READ_BUDGET_BYTES: u64 = 128 << 20;
 /// `serde_json::Value` it may be parsed into before any digest check (about
 /// 37× its size at worst, measured).
 pub const DOCUMENT_READ_COST_BYTES: u64 = 40 << 20;
-
-/// **FX-33.** What one backup-receipt read reserves: twice the receipt cap
-/// (the bytes, and the DSSE pre-authentication encoding's copy of them while
-/// a signature is checked), plus 2 MiB for the sidecar, the folded facts and
-/// the reader's own buffers. `tests/read_caps.rs` measures a verification at
-/// the cap inside it.
-pub const RECEIPT_READ_COST_BYTES: u64 = 2 * logweir_store::caps::CONTROLLER_RECEIPT + (2 << 20);
-
-/// **FX-33.** What one evidence RELAY reserves, from the pod-log read to the
-/// verdict: the log (`check::relay::RELAY_LIMIT_BYTES`, 8 MiB), the frame
-/// decoder's parts and their joined base64 (its 8 MiB budget, twice at the
-/// moment of decoding), the decoded payload, the copy handed to the verifier
-/// and the verifier's pre-authentication copy (the receipt cap each).
-/// `tests/read_caps.rs` measures a relay at the cap inside it.
-pub const RELAY_READ_COST_BYTES: u64 = 40 << 20;
-
-/// What one read of `payload_type` reserves: [`RECEIPT_READ_COST_BYTES`] for
-/// a backup receipt, [`DOCUMENT_READ_COST_BYTES`] for everything else.
-#[must_use]
-pub fn document_cost_for(payload_type: &str) -> u64 {
-    if crate::verification::is_backup_receipt(payload_type) {
-        RECEIPT_READ_COST_BYTES
-    } else {
-        DOCUMENT_READ_COST_BYTES
-    }
-}
 
 /// What one manifest read reserves: the controller's manifest cap, whose bytes
 /// are held while the window is folded.

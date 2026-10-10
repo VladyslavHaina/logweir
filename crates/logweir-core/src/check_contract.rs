@@ -67,20 +67,10 @@ pub const MAX_EVIDENCE_OBJECTS: usize = 3;
 /// not arrive. `weirkeeper`'s `the_largest_receipt_fits_the_relay` holds the
 /// two together.
 ///
-/// # This is what a plan may ASK, and it bounds nothing a reader holds
-///
-/// A relay's bytes arrive in a pod log from the subject's own namespace, so
-/// the size a plan asked for says nothing about what arrives. **The reader
-/// that holds the bytes applies its own cap for the document it expects,
-/// from its own context, before it accumulates or decodes them**: the frame
-/// decoder takes a cap per stream ([`frames::Decoder::with_stream_cap`]) and
-/// refuses a stream at the first part past it ([`FrameError::StreamOverCap`]).
-/// `weirkeeper` gives it the cap of the document kind the verification in
-/// hand is about (`verification::controller_cap_for`): this number for a
-/// backup receipt, which it never parses into a tree, and
-/// [`MAX_EVIDENCE_SCORECARD_BYTES`] for a scorecard, which it does. A relay
-/// that sends a receipt's worth of bytes where a scorecard is expected is
-/// refused at one megabyte, whatever its plan said.
+/// `weirkeeper` asks for, and measures the relayed document against, the cap
+/// of the document kind it expects (`verification::controller_cap_for`):
+/// this number for a backup receipt, which it never parses into a tree, and
+/// [`MAX_EVIDENCE_SCORECARD_BYTES`] for a scorecard, which it does.
 pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = crate::topic_budget::MAX_RECEIPT_BYTES;
 /// The cap of a relayed document that is NOT a backup receipt — a drill
 /// scorecard: 1 MiB, the cap every evidence fetch had before FX-33. The
@@ -2112,11 +2102,6 @@ pub enum FrameError {
     SubjectUidMismatch,
     #[error("the relay exceeded its {0}-byte budget")]
     BudgetExceeded(usize),
-    /// **FX-33.** One stream carried more than the cap its READER set for it
-    /// ([`frames::Decoder::with_stream_cap`]). Refused at the first part past
-    /// the cap, before that part is kept and before anything is decoded.
-    #[error("the `{stream}` stream is larger than the {cap}-byte cap its reader holds it under")]
-    StreamOverCap { stream: &'static str, cap: u64 },
     #[error("a part frame does not decode as base64")]
     Base64,
     #[error("the relayed result document is unusable: {0}")]
@@ -2253,10 +2238,6 @@ pub mod frames {
         end: Option<EndFrame>,
         used: usize,
         budget: usize,
-        /// FX-33: the most base64 characters each capped stream may carry,
-        /// and how many it has carried.
-        stream_caps: BTreeMap<Stream, (u64, usize)>,
-        stream_used: BTreeMap<Stream, usize>,
     }
 
     impl Default for Decoder {
@@ -2283,35 +2264,7 @@ pub mod frames {
                 end: None,
                 used: 0,
                 budget,
-                stream_caps: BTreeMap::new(),
-                stream_used: BTreeMap::new(),
             }
-        }
-
-        /// **FX-33.** Refuse `stream` past `max_bytes` of DECODED content.
-        ///
-        /// The whole-relay budget bounds what a runner can make a reader hold
-        /// in total; this bounds one stream by what the READER expects that
-        /// stream to be — a scorecard, a receipt, a sidecar — which only the
-        /// reader knows. It is enforced as the parts arrive: a part that would
-        /// take the stream's base64 past the length `max_bytes` encodes to is
-        /// refused ([`FrameError::StreamOverCap`]) and not kept, so the stream
-        /// is never accumulated past its cap and never decoded. Base64 pads
-        /// to a multiple of three bytes, so that check alone would admit up
-        /// to two bytes over; [`Self::finish`] holds the decoded length to
-        /// `max_bytes` exactly.
-        ///
-        /// A stream with no cap is bounded by the budget alone, as before.
-        #[must_use]
-        pub fn with_stream_cap(mut self, stream: Stream, max_bytes: u64) -> Self {
-            // Base64 with padding: four characters for every three bytes,
-            // rounded up.
-            let chars = max_bytes.div_ceil(3).saturating_mul(4);
-            self.stream_caps.insert(
-                stream,
-                (max_bytes, usize::try_from(chars).unwrap_or(usize::MAX)),
-            );
-            self
         }
 
         /// Feeds one line, WITHOUT its newline.
@@ -2380,17 +2333,6 @@ pub mod frames {
                     self.totals.insert(stream, total);
                 }
             }
-            // FX-33: THE READER'S CAP FOR THIS STREAM, BEFORE THE PART IS KEPT.
-            if let Some((cap, max_chars)) = self.stream_caps.get(&stream).copied() {
-                let used = self.stream_used.entry(stream).or_insert(0);
-                *used = used.saturating_add(payload.len());
-                if *used > max_chars {
-                    return Err(FrameError::StreamOverCap {
-                        stream: stream.as_str(),
-                        cap,
-                    });
-                }
-            }
             let slot = self.parts.entry(stream).or_default();
             if slot.insert(seq, payload.to_string()).is_some() {
                 return Err(FrameError::DuplicatePart {
@@ -2444,16 +2386,6 @@ pub mod frames {
                 let bytes = b64()
                     .decode(encoded.as_bytes())
                     .map_err(|_| FrameError::Base64)?;
-                // FX-33: the reader's cap, EXACTLY, on what was decoded (the
-                // per-part check is in base64 characters and admits padding).
-                if let Some((cap, _)) = self.stream_caps.get(&stream) {
-                    if bytes.len() as u64 > *cap {
-                        return Err(FrameError::StreamOverCap {
-                            stream: stream.as_str(),
-                            cap: *cap,
-                        });
-                    }
-                }
                 if crate::ids::sha256_prefixed(&bytes) != summary.sha256 {
                     return Err(FrameError::StreamDigestMismatch {
                         stream: stream.as_str(),

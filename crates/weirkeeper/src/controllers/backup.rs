@@ -1760,25 +1760,19 @@ async fn evidence_fetch_pass(
         .and_then(|d| crate::evidence_fetch::grant_mode(&d.grant))
         .map(str::to_string)
         .or(stored_mode);
-    // FX-33: the relay's reservation out of the controller's read budget,
-    // held until this function has written its verdict and returns.
-    let mut relay_hold = crate::evidence_fetch::RelayHold::new();
-    let step = crate::evidence_fetch::advance(
-        &crate::evidence_fetch::Inputs {
-            client,
-            namespace,
-            owner: &owner,
-            attempt,
-            request: &request,
-            destination,
-            unresolved: unresolved.as_deref(),
-            checks: &checks,
-            policy_digest,
-            image: runner,
-            now,
-        },
-        &mut relay_hold,
-    )
+    let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
+        client,
+        namespace,
+        owner: &owner,
+        attempt,
+        request: &request,
+        destination,
+        unresolved: unresolved.as_deref(),
+        checks: &checks,
+        policy_digest,
+        image: runner,
+        now,
+    })
     .await
     .map_err(BackupError::Api)?;
 
@@ -2606,7 +2600,7 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     // is held under this reservation while its facts are folded from it.
     let _reservation = keys.receipt.as_ref().map(|_| {
         crate::read_budget::ReadBudget::controller()
-            .reserve(crate::read_budget::RECEIPT_READ_COST_BYTES)
+            .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
     });
     let (receipt, payload) = match keys.receipt.as_deref() {
         None => (None, false),

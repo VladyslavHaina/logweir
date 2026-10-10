@@ -28,8 +28,7 @@
 use kube::api::LogParams;
 
 use logweir_core::check_contract::{
-    frames::Decoder, redact, CheckCode, CheckRelay, FrameError, FrameExpectations, Stream,
-    DEFAULT_RELAY_BUDGET_BYTES,
+    frames::Decoder, redact, CheckCode, CheckRelay, FrameExpectations, DEFAULT_RELAY_BUDGET_BYTES,
 };
 
 use crate::controllers::backup::{tail_lines, REFUSAL_REASON_PREFIX};
@@ -60,43 +59,14 @@ pub fn log_params() -> LogParams {
     }
 }
 
-/// The cap a READER sets for one relay stream, in bytes of decoded content —
-/// **FX-33**.
-///
-/// A relay's bytes come out of a pod log in the subject's namespace, so what
-/// the plan asked the pod for bounds nothing here. A controller that knows
-/// what a stream must be — a scorecard, a receipt, a sidecar — says so with
-/// one of these, and [`decode_within`] refuses the stream at the first part
-/// past it, before that part is kept and before anything is base64-decoded.
-pub type StreamCap = (Stream, u64);
-
-/// Decode a pod log into a verified relay — **pure**. No per-stream cap: the
-/// whole relay is bounded by [`DECODER_BUDGET_BYTES`] and nothing else.
+/// Decode a pod log into a verified relay — **pure**.
 ///
 /// # Errors
 ///
 /// Always [`CheckCode::ResultUnreadable`], with a reason that names the decode
 /// failure's KIND and never any log content.
 pub fn decode(log: &str, expect: &FrameExpectations) -> Result<CheckRelay, RelayRefusal> {
-    decode_within(log, expect, &[])
-}
-
-/// [`decode`], with the reader's own cap for each stream it names.
-///
-/// # Errors
-///
-/// As [`decode`]; a stream past its cap is
-/// [`RelayRefusal::over_cap`], so a caller can report it as a fact about the
-/// object (final) rather than as a relay that did not verify (retried).
-pub fn decode_within(
-    log: &str,
-    expect: &FrameExpectations,
-    stream_caps: &[StreamCap],
-) -> Result<CheckRelay, RelayRefusal> {
     let mut decoder = Decoder::with_budget(DECODER_BUDGET_BYTES);
-    for (stream, max_bytes) in stream_caps {
-        decoder = decoder.with_stream_cap(*stream, *max_bytes);
-    }
     for line in log.lines() {
         // Non-frame lines are ignored by the decoder itself, which is what lets
         // the `KafkaCluster` probe's I14 lines pass through it (D2 §4.5).
@@ -119,20 +89,11 @@ pub struct RelayRefusal {
     pub code: CheckCode,
     /// The decode failure, named. Never log content.
     pub reason: String,
-    /// **FX-33.** The stream that was past its reader's cap, and the cap,
-    /// when that is why the relay was refused.
-    pub over_cap: Option<StreamCap>,
 }
 
 impl RelayRefusal {
-    fn new(error: &FrameError) -> Self {
+    fn new(error: &logweir_core::check_contract::FrameError) -> Self {
         Self {
-            over_cap: match error {
-                FrameError::StreamOverCap { stream, cap } => {
-                    Stream::parse(stream).map(|stream| (stream, *cap))
-                }
-                _ => None,
-            },
             code: error.code(),
             // REDACTED AND CAPPED, even though no `FrameError` variant reachable
             // from `decode` carries runner bytes today. `FrameError::
