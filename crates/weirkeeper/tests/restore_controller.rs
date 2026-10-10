@@ -10705,3 +10705,952 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
         Some(i64::try_from(weirkeeper::crds::restore::SELECTION_TOPICS_MAX + 1).unwrap())
     );
 }
+
+// ===========================================================================
+// FX-34 — a guard-refused Restore says WHY, and a pod log is untrusted text
+// ===========================================================================
+//
+// PoC batch 5, finding F-1: a `Restore` whose runner exited 3 said only "the
+// runner exited 3 (guard-refused)". The runner's sentence was in the pod log,
+// which goes with the pod. The runner now prints it as ONE `refusal-detail=`
+// line (`crates/logweir/tests/refusal_detail.rs` runs the binary) and the
+// reconciler carries it into the terminal condition's message.
+//
+// Every row drives `reconcile_restore` through the recording double, so what
+// is asserted is the bytes of the `/status` PATCH and the requests the pass
+// made. The log read is bounded and happens on the ONE pass that writes the
+// terminal status; `tests/refusal_read.rs` holds the rows about what that
+// read logs.
+
+use logweir_core::refusal_detail::{
+    refusal_detail_line, REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
+    TRUNCATION_MARKER,
+};
+use weirkeeper::controllers::restore::finished_status_patch_with_reason;
+use weirkeeper::refusal::{
+    runner_reason, RunnerReason, REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES,
+};
+
+/// What a refused `Restore`'s terminal condition said before FX-34, and still
+/// says for a runner that prints no detail line. It is the message PoC batch 5
+/// recorded (`claude/artifacts/poc-batch-5/prod111/k3-rst-….json`).
+const FX34_OLD_MESSAGE: &str = "the runner exited 3 (guard-refused); the code was read from \
+     status.containerStatuses[name=runner].state.terminated.exitCode";
+
+/// What every stated reason follows in the message.
+const FX34_STATED: &str = "; the runner's own reason, cleaned and bounded: ";
+
+fn fx34_fixture(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fx-34")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The guard's sentence, off the human line of the log PoC batch 5 captured
+/// (`prod111/k3-runner.log`; the fixture is that file without `kubectl logs
+/// --timestamps`' prefix, which is what `pods/log` returns).
+fn fx34_k3_sentence() -> String {
+    fx34_fixture("k3-runner.log")
+        .lines()
+        .find_map(|l| l.strip_prefix("guard: plan refused by the admission guard: "))
+        .expect("the fixture carries the runner's human line")
+        .to_string()
+}
+
+/// That log as a runner carrying FX-34 prints it: the detail line the runner's
+/// own formatter writes for that sentence, immediately before
+/// `refusal-reason=`.
+fn fx34_k3_log_with_detail() -> String {
+    let detail = refusal_detail_line(&fx34_k3_sentence()).expect("a sentence prints a line");
+    let old = fx34_fixture("k3-runner.log");
+    assert!(old.ends_with("refusal-reason=GuardRefused\n"));
+    old.replace(
+        "refusal-reason=GuardRefused\n",
+        &format!("{detail}\nrefusal-reason=GuardRefused\n"),
+    )
+}
+
+/// One `refusal-detail=` line, built by hand so a row can put anything in it.
+fn fx34_detail(code: &str, message: &str) -> String {
+    format!(
+        "{REFUSAL_DETAIL_PREFIX}{}",
+        serde_json::json!({ "code": code, "message": message })
+    )
+}
+
+/// The API server's `Status` for a refused or failed `pods/log` read.
+fn fx34_log_failure(code: u16, reason: &str) -> String {
+    format!(
+        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
+  "message":"pods \"{POD}\" log: {reason}","reason":"{reason}","code":{code}}}"#
+    )
+}
+
+/// The finished-Job route table with the `pods/log` answer as a parameter.
+fn fx34_routes(exit_code: i32, log_status: u16, log: String) -> Vec<Route> {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let mut routes = finished_routes(pod_list_terminated(exit_code), log, condition);
+    for route in &mut routes {
+        if route.path_suffix == "/log" {
+            route.status = log_status;
+        }
+    }
+    routes
+}
+
+/// One pass over a finished Job: the reconcile's answer and every request the
+/// double saw, bodies included, in order.
+async fn fx34_pass(
+    restore: &Restore,
+    exit_code: i32,
+    log_status: u16,
+    log: String,
+) -> (
+    Result<weirkeeper::controllers::restore::RestoreOutcome, String>,
+    Vec<SeenBody>,
+) {
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(fx34_routes(exit_code, log_status, log));
+    let outcome = reconcile_restore(
+        restore,
+        &client,
+        &scorecard_with_outcome("pass"),
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .map_err(|e| e.to_string());
+    let seen = bodies.lock().expect("readable").clone();
+    (outcome, seen)
+}
+
+/// The terminal status of an exit-3 pass over `log`, and the requests.
+async fn fx34_refused(log: String) -> (Value, Vec<SeenBody>) {
+    let (outcome, seen) = fx34_pass(&restore(), 3, 200, log).await;
+    let outcome = outcome.expect("an exit 3 never fails the pass");
+    assert_eq!(outcome.exit_code, Some(3));
+    let mut statuses = patched_statuses(&seen);
+    assert_eq!(
+        statuses.len(),
+        1,
+        "one status write: a refusal has no evidence"
+    );
+    (statuses.remove(0), seen)
+}
+
+fn fx34_message(status: &Value) -> &str {
+    status["conditions"][0]["message"]
+        .as_str()
+        .expect("the terminal condition has a message")
+}
+
+/// The `pods/log` requests of a pass.
+fn fx34_log_reads(seen: &[SeenBody]) -> Vec<&SeenBody> {
+    seen.iter()
+        .filter(|r| r.method == "GET" && path(&r.uri).ends_with("/log"))
+        .collect()
+}
+
+/// Every string anywhere in `value`.
+fn fx34_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Array(items) => items.iter().for_each(|v| fx34_strings(v, out)),
+        Value::Object(map) => map.values().for_each(|v| fx34_strings(v, out)),
+        _ => {}
+    }
+}
+
+/// No string a pass WROTE carries a control character, a bidi or zero-width
+/// code point, or a line break: the property "never stored raw" is asserted
+/// over the whole request body, not over the one field a row looks at.
+fn fx34_assert_nothing_raw(seen: &[SeenBody], label: &str) {
+    for request in seen.iter().filter(|r| r.method != "GET") {
+        let body: Value = serde_json::from_str(&request.body).expect("a write carries JSON");
+        let mut strings = Vec::new();
+        fx34_strings(&body, &mut strings);
+        for s in strings {
+            for c in s.chars() {
+                let bad = c.is_control()
+                    || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}');
+                assert!(
+                    !bad,
+                    "[{label}] U+{:04X} reached {} {}: {s:?}",
+                    c as u32, request.method, request.uri
+                );
+            }
+        }
+    }
+}
+
+/// **The row.** The same refused run, read off the log an older runner wrote
+/// and off the log a current runner writes.
+///
+/// The CONTROL is the first half and it can fail: the real log PoC batch 5
+/// captured carries no detail line, and its status must be exactly what that
+/// batch recorded. The second half adds the one line and the message gains the
+/// runner's reason code and sentence, the remedy at its end included; nothing
+/// else in the status moves.
+///
+/// KILLS: dropping the reason from the builder; reading the reason from the
+/// human line; reading the log unbounded (the query is asserted).
+#[tokio::test]
+async fn a_refused_restore_says_why_in_its_terminal_condition() {
+    let (old, _) = fx34_refused(fx34_fixture("k3-runner.log")).await;
+    assert_eq!(fx34_message(&old), FX34_OLD_MESSAGE);
+    assert_eq!(old["progress"]["message"], FX34_OLD_MESSAGE);
+    assert_eq!(old["exitReason"], "GuardRefused");
+    assert_eq!(old["reason"], CONDITION_REASON_GUARD_REFUSED);
+
+    let (status, seen) = fx34_refused(fx34_k3_log_with_detail()).await;
+    let sentence = fx34_k3_sentence();
+    let expected = format!("{FX34_OLD_MESSAGE}{FX34_STATED}{sentence}");
+    assert_eq!(fx34_message(&status), expected);
+    assert!(
+        sentence.starts_with(
+            "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset"
+        ) && sentence.ends_with(
+            "Remove restore.partitions to restore every partition (a window start, \
+             restore.point_in_time: \"<start>/<end>\", is accepted)"
+        ),
+        "the code, the sentence and the remedy at its end: {sentence}"
+    );
+    assert_eq!(
+        status["progress"]["message"], expected,
+        "the console's operation page reads the progress block, which copies the condition"
+    );
+    assert_eq!(
+        conditions_of(&status),
+        vec![(
+            "Failed".to_string(),
+            "True".to_string(),
+            CONDITION_REASON_GUARD_REFUSED.to_string()
+        )],
+        "still ONE condition, and its reason is still the closed one"
+    );
+
+    // NOTHING ELSE MOVED: with the two messages put back, the two statuses
+    // are the same bytes.
+    let mut same = status.clone();
+    same["conditions"][0]["message"] = old["conditions"][0]["message"].clone();
+    same["progress"]["message"] = old["progress"]["message"].clone();
+    assert_eq!(same, old);
+
+    // ONE READ, BOUNDED IN LINES AND IN BYTES, OF THE `runner` CONTAINER.
+    let reads = fx34_log_reads(&seen);
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
+    for want in [
+        "container=runner".to_string(),
+        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+    ] {
+        assert!(
+            query.split('&').any(|p| p == want),
+            "the exit-3 read carries `{want}`: {query}"
+        );
+    }
+    assert_eq!(
+        (REFUSAL_LOG_TAIL_LINES, REFUSAL_LOG_LIMIT_BYTES),
+        (32, 524_288)
+    );
+    fx34_assert_nothing_raw(&seen, "k3");
+}
+
+/// The log tails of the passes FX-34 must not change, each carrying a VALID
+/// detail line: only an exit 3 may lift one.
+fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
+    let detail = refusal_detail_line("StorageRegionInvalid: a sentence only an exit 3 may carry")
+        .expect("a line");
+    vec![
+        ("exit-0-with-keys", 0, format!("{detail}\n{}", i8_tail())),
+        ("exit-0-without-keys", 0, format!("{detail}\n")),
+        (
+            "exit-1",
+            1,
+            format!("operational: boom\n{detail}\nrefusal-reason=GuardRefused\n"),
+        ),
+        ("exit-2-with-keys", 2, format!("{detail}\n{}", i8_tail())),
+        ("exit-2-without-keys", 2, format!("{detail}\n")),
+        (
+            "exit-4",
+            4,
+            format!("signing or lock proof failed: x\n{detail}\n"),
+        ),
+        ("exit-137", 137, format!("{detail}\n")),
+        // Exit 3 from a runner that prints NO detail line: the status is the
+        // one it always was. Only the log request's query differs.
+        ("exit-3-old-runner-k3", 3, fx34_fixture("k3-runner.log")),
+        (
+            "exit-3-old-runner-named-state",
+            3,
+            "refusal-reason=TargetTopicConfigRefused\n".to_string(),
+        ),
+        (
+            "exit-3-old-runner-no-line",
+            3,
+            "the pod said nothing about why\n".to_string(),
+        ),
+    ]
+}
+
+/// What one pass did, as the golden stores it: every request in order, and
+/// every write with its body.
+async fn fx34_observe(exit_code: i32, tail: &str) -> Value {
+    let (outcome, seen) = fx34_pass(&restore(), exit_code, 200, log_body(tail)).await;
+    let outcome = outcome.expect("the pass completes");
+    serde_json::json!({
+        "exitCode": outcome.exit_code,
+        "terminalState": outcome.terminal_state,
+        "requests": seen
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.uri))
+            .collect::<Vec<_>>(),
+        "writes": seen
+            .iter()
+            .filter(|r| r.method != "GET")
+            .map(|r| serde_json::json!({
+                "method": r.method,
+                "uri": r.uri,
+                "body": serde_json::from_str::<Value>(&r.body).expect("a write carries JSON"),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Where the goldens were captured. A golden regenerated from the build it is
+/// supposed to constrain proves nothing, so the provenance is asserted.
+const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
+
+/// **A successful run, an exit 1, an exit 2 (and 4, and 137) are unchanged,
+/// byte for byte**, and so is an exit 3 from a runner that prints no detail
+/// line.
+///
+/// The golden holds every request and every write body the SAME cases produced
+/// at the base commit, before any of FX-34 existed. Each case's log carries a
+/// valid `refusal-detail=` line, so this is also the row that fails when any
+/// exit code but 3 starts to carry a reason.
+///
+/// For exit 3 the writes are compared whole and the requests with the log
+/// read's query set aside: that read is now bounded, on purpose.
+///
+/// KILLS: the gate widened to exit 1 (the `exit-1` case's condition message
+/// gains a suffix); the bounded read used for every exit code (the request
+/// line differs); a suffix added for `NotStated` (the three old-runner cases).
+#[tokio::test]
+async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
+    let golden: Value =
+        serde_json::from_str(&fx34_fixture("unchanged-restore.json")).expect("the golden is JSON");
+    assert_eq!(golden["capturedFrom"], FX34_CAPTURED_FROM);
+    let cases = fx34_unchanged_cases();
+    assert_eq!(
+        golden["cases"].as_object().map(serde_json::Map::len),
+        Some(cases.len()),
+        "every case has a golden and every golden a case"
+    );
+    for (name, exit_code, tail) in cases {
+        let got = fx34_observe(exit_code, &tail).await;
+        let want = &golden["cases"][name];
+        assert!(want.is_object(), "[{name}] no golden");
+        assert_eq!(got["writes"], want["writes"], "[{name}] the writes");
+        assert_eq!(got["exitCode"], want["exitCode"], "[{name}]");
+        assert_eq!(got["terminalState"], want["terminalState"], "[{name}]");
+        if exit_code == 3 {
+            let without_log_query = |v: &Value| -> Vec<String> {
+                v["requests"]
+                    .as_array()
+                    .expect("requests")
+                    .iter()
+                    .map(|r| r.as_str().expect("a request line").to_string())
+                    .map(|r| match r.split_once("/log?") {
+                        Some((head, _)) => format!("{head}/log?"),
+                        None => r,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                without_log_query(&got),
+                without_log_query(want),
+                "[{name}] the same requests, the log read's query aside"
+            );
+        } else {
+            assert_eq!(got["requests"], want["requests"], "[{name}] the requests");
+        }
+    }
+}
+
+/// **Hostile lines: refused or cleaned as designed, never stored raw.**
+///
+/// Each arm puts one hostile shape in the tail of an exit-3 log and states the
+/// exact message the status must carry. `fx34_assert_nothing_raw` then walks
+/// every string the pass wrote.
+///
+/// TWO DETAIL LINES: THE LAST ONE COUNTS. The runner prints its own line
+/// last, immediately before `refusal-reason=`, after everything the run could
+/// have printed, so a look-alike from a library or from text the run echoed
+/// is superseded by it. A first-wins reader would show the look-alike.
+#[tokio::test]
+async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
+    let unreadable = format!(
+        "{FX34_OLD_MESSAGE}; the runner gave no readable reason: its `refusal-detail=` line did \
+         not validate, so nothing from it is shown"
+    );
+    let stated = |text: &str| format!("{FX34_OLD_MESSAGE}{FX34_STATED}{text}");
+    let r = REPLACEMENT;
+    let words = |bytes: usize| -> String {
+        let mut text = "lorem ".repeat(bytes / 6 + 1);
+        text.truncate(bytes);
+        text
+    };
+    let over_bound = words(600);
+    let cut = {
+        let mut kept = over_bound[..REASON_MESSAGE_MAX_BYTES - 3]
+            .trim_end()
+            .to_string();
+        kept.push(TRUNCATION_MARKER);
+        kept
+    };
+
+    let arms: Vec<(&str, String, String)> = vec![
+        (
+            "a detail line of 100 KiB",
+            format!("{}\n", fx34_detail("GuardRefused", &words(100 * 1024))),
+            unreadable.clone(),
+        ),
+        (
+            "a sentence over the bound is cut on a character boundary with a marker",
+            format!("{}\n", fx34_detail("GuardRefused", &over_bound)),
+            stated(&format!("GuardRefused: {cut}")),
+        ),
+        (
+            "two detail lines: the last one counts",
+            format!(
+                "{}\n{}\n",
+                fx34_detail("First", "the first line"),
+                fx34_detail("Last", "the last line")
+            ),
+            stated("Last: the last line"),
+        ),
+        (
+            "a look-alike printed by a library before the runner's own line",
+            format!(
+                "{}\nguard: plan refused by the admission guard: the real reason\n{}\n\
+                 refusal-reason=GuardRefused\n",
+                fx34_detail("Forged", "printed by something the run echoed"),
+                fx34_detail("GuardRefused", "the real reason"),
+            ),
+            stated("GuardRefused: the real reason"),
+        ),
+        (
+            "an invalid last line is not rescued by a valid earlier one",
+            format!(
+                "{}\n{REFUSAL_DETAIL_PREFIX}{{\"code\":\"Bad Code\",\"message\":\"m\"}}\n",
+                fx34_detail("Earlier", "a valid earlier line")
+            ),
+            unreadable.clone(),
+        ),
+        (
+            "a reason code that is not a code",
+            format!("{}\n", fx34_detail("<script>alert(1)</script>", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a reason code over 64 bytes",
+            format!("{}\n", fx34_detail(&"A".repeat(65), "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "control characters, an ANSI escape, a line break and a bidi override",
+            format!(
+                "{}\n",
+                fx34_detail(
+                    "GuardRefused",
+                    "topic\u{0000} `a\u{001B}[2Jb`\nsecond line\r\n\tthird \u{202E}reversed\u{202C} \
+                     zero\u{200B}width"
+                )
+            ),
+            stated(&format!(
+                "GuardRefused: topic `a [2Jb` second line third {r}reversed{r} zero{r}width"
+            )),
+        ),
+        (
+            "markup is kept as the text it is",
+            format!(
+                "{}\n",
+                fx34_detail("GuardRefused", "<script>alert(1)</script> &lt;b&gt; <img src=x onerror=y>")
+            ),
+            stated("GuardRefused: <script>alert(1)</script> &lt;b&gt; <img src=x onerror=y>"),
+        ),
+        (
+            "a credential shape is removed",
+            format!(
+                "{}\n",
+                fx34_detail(
+                    "GuardRefused",
+                    "http://user:hunter2@minio:9000/b?X-Amz-Signature=abc sasl.password=hunter2"
+                )
+            ),
+            stated("GuardRefused: http://minio:9000/b sasl.password=[redacted]"),
+        ),
+        (
+            "the key inside another line is not the line",
+            "{\"level\":\"ERROR\",\"message\":\"refusal-detail={\\\"code\\\":\\\"A\\\",\\\"message\\\":\\\"m\\\"}\"}\n \
+             refusal-detail={\"code\":\"A\",\"message\":\"indented\"}\n"
+                .to_string(),
+            FX34_OLD_MESSAGE.to_string(),
+        ),
+        (
+            "not JSON",
+            format!("{REFUSAL_DETAIL_PREFIX}GuardRefused: a sentence\n"),
+            unreadable.clone(),
+        ),
+        (
+            "a JSON array",
+            format!("{REFUSAL_DETAIL_PREFIX}[\"GuardRefused\",\"a sentence\"]\n"),
+            unreadable.clone(),
+        ),
+        (
+            "a third member",
+            format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"A\",\"message\":\"m\",\"html\":\"<b>\"}}\n"),
+            unreadable.clone(),
+        ),
+        (
+            "a repeated member",
+            format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"A\",\"message\":\"m\",\"message\":\"n\"}}\n"),
+            unreadable.clone(),
+        ),
+        (
+            "a sentence with nothing printable in it",
+            format!("{}\n", fx34_detail("GuardRefused", "\u{0007}\n\t ")),
+            unreadable.clone(),
+        ),
+    ];
+    for (label, tail, expected) in arms {
+        let (status, seen) = fx34_refused(log_body(&tail)).await;
+        assert_eq!(fx34_message(&status), expected, "[{label}]");
+        assert_eq!(status["progress"]["message"], expected, "[{label}]");
+        assert!(fx34_message(&status).len() <= 1024, "[{label}]");
+        assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
+        fx34_assert_nothing_raw(&seen, label);
+    }
+
+    // ONE MEBIBYTE ON ONE LINE. The double sends all of it, as a server that
+    // ignored `limitBytes` would; the read stops at its own cap, and a body at
+    // the bound was cut somewhere before the runner's last lines, so nothing
+    // is taken from it: not a detail line, not a state.
+    for (label, tail) in [
+        (
+            "1 MiB of detail line",
+            format!(
+                "{}\nrefusal-reason=TargetTopicConfigRefused\n",
+                fx34_detail("GuardRefused", &words(1024 * 1024))
+            ),
+        ),
+        (
+            "1 MiB of noise, then a valid detail line",
+            format!(
+                "{}\n{}\nrefusal-reason=TargetTopicConfigRefused\n",
+                words(1024 * 1024),
+                fx34_detail("GuardRefused", "a sentence")
+            ),
+        ),
+    ] {
+        let (status, seen) = fx34_refused(log_body(&tail)).await;
+        assert_eq!(
+            fx34_message(&status),
+            format!(
+                "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of \
+                 the pod log are over the 512 KiB this controller reads"
+            ),
+            "[{label}]"
+        );
+        assert_eq!(
+            status["exitReason"], TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+            "[{label}] and no state is taken from a cut log"
+        );
+        assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
+        fx34_assert_nothing_raw(&seen, label);
+    }
+}
+
+/// Invalid UTF-8 is a body `Route` cannot hold, so this row answers the log
+/// read with raw bytes: a stray byte elsewhere in the tail does not cost the
+/// reason, and one inside the sentence becomes a replacement character.
+#[tokio::test]
+async fn invalid_utf8_in_the_log_is_decoded_lossily_and_cleaned() {
+    let routes = Arc::new(fx34_routes(3, 200, String::new()));
+    let recorder = weirkeeper::testing::recorder();
+    let writes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let service = {
+        let recorder = Arc::clone(&recorder);
+        let writes = Arc::clone(&writes);
+        service_fn(move |request: Request<Body>| {
+            let routes = Arc::clone(&routes);
+            let recorder = Arc::clone(&recorder);
+            let writes = Arc::clone(&writes);
+            async move {
+                let method = request.method().as_str().to_string();
+                let uri = request.uri().to_string();
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                if method != "GET" {
+                    writes
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).into_owned());
+                }
+                let response = if method == "GET" && uri.contains("/log?") {
+                    let mut log = b"engine said \xFF\xFE\xC0 before it stopped\n".to_vec();
+                    log.extend_from_slice(REFUSAL_DETAIL_PREFIX.as_bytes());
+                    log.extend_from_slice(
+                        b"{\"code\":\"GuardRefused\",\"message\":\"bad \xFF\xFE bytes\"}\n",
+                    );
+                    log.extend_from_slice(b"refusal-reason=GuardRefused\n");
+                    Response::builder()
+                        .status(200)
+                        .body(Body::from(log))
+                        .unwrap()
+                } else {
+                    weirkeeper::testing::answer(&routes, &recorder, &method, &uri)
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        })
+    };
+    let client = kube::Client::new(service, "default");
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("invalid UTF-8 in a refused run's log never fails the pass");
+    assert_eq!(outcome.exit_code, Some(3));
+    let written = writes.lock().unwrap().clone();
+    let status: Value = serde_json::from_str(&written[0]).expect("the status patch is JSON");
+    assert_eq!(
+        status["status"]["conditions"][0]["message"],
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: bad {REPLACEMENT} bytes")
+    );
+    assert_eq!(status["status"]["exitReason"], "GuardRefused");
+}
+
+/// **The pod gone; the log unreadable.** An honest message, the exit code
+/// recorded, the TTL armed, and the pass does not fail, so nothing is retried.
+///
+/// The CONTROL is exit 0 over the same 404: that pass still fails, as it
+/// always did, because a successful run's log carries the evidence keys and
+/// "the keys are unknown" is not something to publish from one failed read.
+/// FX-34 changed the exit-3 read and no other.
+///
+/// KILLS: propagating the read's error for exit 3 (the pass fails); treating
+/// a 404 as any other failure (the message says HTTP 404, not "the pod is
+/// gone"); reading again after a failure (two log requests).
+#[tokio::test]
+async fn a_refusal_whose_pod_or_log_is_gone_is_recorded_once_and_says_so() {
+    for (label, code, reason, suffix) in [
+        (
+            "the pod is gone",
+            404,
+            "NotFound",
+            "; the runner's reason could not be read because the pod is gone",
+        ),
+        (
+            "the read is forbidden",
+            403,
+            "Forbidden",
+            "; the runner's reason could not be read: the pod log read answered HTTP 403",
+        ),
+        (
+            "the API server failed",
+            500,
+            "InternalError",
+            "; the runner's reason could not be read: the pod log read answered HTTP 500",
+        ),
+    ] {
+        let (outcome, seen) = fx34_pass(&restore(), 3, code, fx34_log_failure(code, reason)).await;
+        let outcome = outcome.unwrap_or_else(|e| panic!("[{label}] the pass must not fail: {e}"));
+        assert_eq!(outcome.exit_code, Some(3), "[{label}]");
+        assert_eq!(
+            outcome.requeue,
+            Requeue::AwaitChange,
+            "[{label}] nothing is retried"
+        );
+        assert!(outcome.ttl_patched, "[{label}] the Job is still collected");
+        let status = patched_statuses(&seen).remove(0);
+        assert_eq!(
+            fx34_message(&status),
+            format!("{FX34_OLD_MESSAGE}{suffix}"),
+            "[{label}]"
+        );
+        assert_eq!(status["phase"], "Failed", "[{label}]");
+        assert_eq!(
+            status["exitCode"], 3,
+            "[{label}] the code the pod reported is recorded"
+        );
+        assert_eq!(
+            status["reason"], CONDITION_REASON_GUARD_REFUSED,
+            "[{label}]"
+        );
+        assert_eq!(
+            status["exitReason"], TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+            "[{label}]"
+        );
+        assert_eq!(
+            fx34_log_reads(&seen).len(),
+            1,
+            "[{label}] one read, not a retry loop"
+        );
+        assert!(
+            !fx34_message(&status).contains(reason),
+            "[{label}] the API server's own text is not copied"
+        );
+    }
+
+    let (outcome, seen) = fx34_pass(&restore(), 0, 404, fx34_log_failure(404, "NotFound")).await;
+    assert!(
+        outcome.is_err(),
+        "exit 0 is unchanged: its log read failing still fails the pass"
+    );
+    assert!(patched_statuses(&seen).is_empty());
+}
+
+/// A refused `Restore` as the API server holds it after its terminal pass:
+/// built by RUNNING the pass and applying its patch, never written by hand.
+async fn fx34_settled_refusal(log: String) -> Restore {
+    let (status, _) = fx34_refused(log).await;
+    let mut settled: Value =
+        serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME)).expect("the fixture");
+    let mut stored = Value::Object(serde_json::Map::new());
+    apply_merge_patch(&mut stored, &status);
+    settled["status"] = stored;
+    serde_json::from_value(settled).expect("the settled object is a Restore")
+}
+
+/// **A second reconcile of the same finished Job: no log read, no status
+/// write.**
+///
+/// Every route is PRESENT, so "it did not read the log" and "it did not write
+/// the status" are assertions over the request log and not an inability.
+///
+/// The one write a later pass may make is the Job's own TTL repair (D3 §2.7):
+/// this fixture's Job carries no `ttlSecondsAfterFinished`, and the
+/// already-terminal branch repairs that from the Job's spec alone, reading no
+/// pod and writing no status.
+///
+/// KILLS: reading the log before the already-terminal guard, or removing the
+/// guard (a `pods/log` request appears on the second pass).
+#[tokio::test]
+async fn a_second_pass_over_a_refused_restore_reads_and_writes_nothing() {
+    let settled = fx34_settled_refusal(fx34_k3_log_with_detail()).await;
+    let before = serde_json::to_value(settled.status.as_ref().expect("a status")).unwrap();
+    assert!(before["conditions"][0]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("PartitionSubsetsAwaitOwnerDecision")));
+
+    for pass in 2..=4 {
+        let (outcome, seen) = fx34_pass(&settled, 3, 200, fx34_k3_log_with_detail()).await;
+        let outcome = outcome.expect("the pass completes");
+        assert_eq!(
+            outcome.exit_code,
+            Some(3),
+            "pass {pass}: the code on the object"
+        );
+        assert_eq!(outcome.requeue, Requeue::AwaitChange, "pass {pass}");
+        let requests: Vec<(String, String)> = seen
+            .iter()
+            .map(|r| (r.method.clone(), path(&r.uri).to_string()))
+            .collect();
+        assert!(
+            fx34_log_reads(&seen).is_empty() && !requests.iter().any(|(_, p)| p.ends_with("/pods")),
+            "pass {pass}: the pod and its log are not read again: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|(m, p)| m == "PATCH" && p.ends_with("/status")),
+            "pass {pass}: no status write: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, p)| p.ends_with(&format!("/jobs/{NAME}"))),
+            "pass {pass}: the Job is the only object touched: {requests:?}"
+        );
+    }
+}
+
+/// **The status is written only when its content changes** (FX-29), and the
+/// reason is content that does not change: no clock and no counter is in it.
+///
+/// The terminal patch is recomputed an hour later over the object the first
+/// pass stored. It is the same bytes, `status_unchanged` says so, and the one
+/// function every `/status` write goes through then sends nothing. The PATCH
+/// route is present, so "no write" is an assertion.
+///
+/// The CONTROL is a changed reason: the same call with a different sentence
+/// does write.
+///
+/// KILLS: a write made although nothing changed (`patch_status_preconditioned`
+/// without its `status_unchanged` return); a suffix that carries a time.
+#[tokio::test]
+async fn a_refusal_recomputed_later_is_the_same_bytes_and_is_not_written_again() {
+    let log = fx34_k3_log_with_detail();
+    let settled = fx34_settled_refusal(log.clone()).await;
+    let stored = serde_json::to_value(settled.status.as_ref().expect("a status")).unwrap();
+    let later = now() + chrono::Duration::hours(1);
+    let recompute = |reason: &RunnerReason| {
+        weirkeeper::diagnostics::apply_finished(
+            finished_status_patch_with_reason(
+                &settled,
+                3,
+                &RestoreEvidenceKeys::default(),
+                Some("GuardRefused"),
+                Some(reason),
+                None,
+                topic_mapping(&settled).as_ref(),
+                None,
+                later,
+            ),
+            settled.status.as_ref().and_then(|s| s.progress.as_ref()),
+            later,
+        )
+    };
+    let same = recompute(&runner_reason(&log));
+    assert!(
+        weirkeeper::conditions::status_unchanged(Some(&stored), &same),
+        "an hour later the recomputed status is what is stored: {same}"
+    );
+
+    let routes = || fx34_routes(3, 200, String::new());
+    let at = weirkeeper::conditions::StatusVersion::observed(&settled.metadata);
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes());
+    let api: kube::Api<Restore> = kube::Api::namespaced(client, NS);
+    weirkeeper::conditions::patch_status_preconditioned(
+        &api,
+        "Restore",
+        NAME,
+        &at,
+        Some(&stored),
+        same,
+    )
+    .await
+    .expect("an unchanged status is not an error");
+    assert!(
+        bodies.lock().unwrap().is_empty(),
+        "nothing changed, so nothing was sent"
+    );
+
+    let changed = recompute(&RunnerReason::PodGone);
+    assert!(!weirkeeper::conditions::status_unchanged(
+        Some(&stored),
+        &changed
+    ));
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes());
+    let api: kube::Api<Restore> = kube::Api::namespaced(client, NS);
+    weirkeeper::conditions::patch_status_preconditioned(
+        &api,
+        "Restore",
+        NAME,
+        &at,
+        Some(&stored),
+        changed,
+    )
+    .await
+    .expect("the write is accepted");
+    assert_eq!(
+        patched_statuses(&bodies.lock().unwrap()).len(),
+        1,
+        "the control: a status whose content changed IS written"
+    );
+}
+
+/// `refusal-reason=` lands on `status.exitReason`, so its value is a state
+/// NAME or it is nothing: the pod log is untrusted on that line too.
+///
+/// The CONTROLS are a known state and a well-formed state this build has
+/// never heard of, which a newer runner may print: both still arrive.
+#[tokio::test]
+async fn a_refusal_state_that_is_not_a_state_name_never_reaches_exit_reason() {
+    for (label, value, expect) in [
+        (
+            "a known state",
+            "TargetTopicConfigRefused",
+            "TargetTopicConfigRefused",
+        ),
+        (
+            "a state a newer runner prints",
+            "SomeNewerState9",
+            "SomeNewerState9",
+        ),
+        (
+            "markup",
+            "<script>alert(1)</script>",
+            TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        ),
+        (
+            "two words",
+            "Guard Refused",
+            TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        ),
+        (
+            "a trailing space",
+            "GuardRefused ",
+            TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        ),
+        (
+            "a bidi override",
+            "Guard\u{202E}Refused",
+            TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        ),
+        (
+            "an ANSI escape",
+            "\u{001B}[31mGuardRefused",
+            TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        ),
+        ("empty", "", TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON),
+    ] {
+        let (status, seen) = fx34_refused(log_body(&format!("refusal-reason={value}\n"))).await;
+        assert_eq!(status["exitReason"], expect, "[{label}]");
+        fx34_assert_nothing_raw(&seen, label);
+    }
+    let long = "A".repeat(100 * 1024);
+    let (status, _) = fx34_refused(log_body(&format!("refusal-reason={long}\n"))).await;
+    assert_eq!(
+        status["exitReason"], TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+        "100 KiB of letters is not a state name"
+    );
+    // The LAST line decides, and a bad last line is not rescued by a good
+    // earlier one.
+    let (status, _) = fx34_refused(log_body(
+        "refusal-reason=TargetTopicConfigRefused\nrefusal-reason=<b>\n",
+    ))
+    .await;
+    assert_eq!(
+        status["exitReason"],
+        TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON
+    );
+}
+
+/// The longest message a refusal can produce still fits
+/// `status.progress.message` (1024 bytes), so the two fields never disagree
+/// because one of them was cut.
+#[tokio::test]
+async fn the_longest_refusal_message_fits_the_progress_field() {
+    let code = "A".repeat(64);
+    // 1200 bytes: under the line bound, over the sentence bound.
+    let sentence = "wörd ".repeat(200);
+    let (status, _) = fx34_refused(log_body(&format!("{}\n", fx34_detail(&code, &sentence)))).await;
+    let message = fx34_message(&status);
+    assert!(message.starts_with(&format!("{FX34_OLD_MESSAGE}{FX34_STATED}{code}: w")));
+    assert!(message.ends_with(TRUNCATION_MARKER), "{message}");
+    assert!(message.len() <= 1024, "{} bytes", message.len());
+    assert_eq!(
+        message.len(),
+        FX34_OLD_MESSAGE.len() + FX34_STATED.len() + 64 + 2 + REASON_MESSAGE_MAX_BYTES,
+        "the old text, the label, a 64-byte code, `: ` and a 512-byte sentence"
+    );
+    assert_eq!(status["progress"]["message"], message);
+}

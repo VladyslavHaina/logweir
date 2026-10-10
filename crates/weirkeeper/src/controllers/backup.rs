@@ -2714,15 +2714,29 @@ pub fn evidence_keys(log: &str) -> EvidenceKeys {
 /// discriminator has to be on stdout. An exit 3 whose log carries no such line
 /// is [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] — a named observation,
 /// not a shrug and not a guess at which guard fired.
+///
+/// # The value is a state NAME or it is nothing (FX-34)
+///
+/// The value lands on `status.exitReason`, a field the console and a
+/// `kubectl get` column print, and a pod log is untrusted text. So the LAST
+/// `refusal-reason=` line is taken, as before, and its value is kept only
+/// when it is a reason code: ASCII letters and digits, a letter first, at
+/// most 64 bytes (`logweir_core::refusal_detail::is_reason_code`). Every
+/// state a runner prints is one. A line that carries anything else names no
+/// state, which is `GuardRefusedUnknownReason` like an absent line; an
+/// earlier, well-formed line is not fallen back to. The list of states is
+/// deliberately NOT closed here, so a newer runner's state still arrives.
 #[must_use]
 pub fn refusal_state(log: &str) -> Option<String> {
     let mut found = None;
     for line in tail_lines(log) {
         if let Some(v) = line.strip_prefix(REFUSAL_REASON_PREFIX) {
-            found = Some(v.to_string());
+            found = Some(v);
         }
     }
     found
+        .filter(|v| logweir_core::refusal_detail::is_reason_code(v))
+        .map(str::to_string)
 }
 
 /// The final [`KEY_SCAN_TAIL_LINES`] non-empty lines, trimmed of `\r`.
@@ -3692,6 +3706,7 @@ pub fn finished_status_patch(
         exit_code,
         keys,
         refusal,
+        None,
         orphan,
         None,
         covered,
@@ -3708,6 +3723,12 @@ pub fn finished_status_patch(
 /// rather than a bare `operational` / `signing-or-lock` that reads like a
 /// broker or a signing-key problem. The condition's `reason` keeps GC11's
 /// CamelCase code, as it does for exit 3.
+///
+/// **FX-34: `runner_reason`.** What an exit-3 run's pod log said about why
+/// ([`crate::refusal::RunnerReason`]), appended to the terminal condition's
+/// message after the text it always carried. `None` for every other exit code
+/// and for a caller that read no reason, and then the message is byte for
+/// byte what it was; so is `Some(NotStated)`, an older runner's log.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn finished_status_patch_with_failure(
@@ -3715,6 +3736,7 @@ pub fn finished_status_patch_with_failure(
     exit_code: i32,
     keys: &EvidenceKeys,
     refusal: Option<&str>,
+    runner_reason: Option<&crate::refusal::RunnerReason>,
     orphan: Option<&str>,
     failure: Option<&str>,
     covered: Option<(i64, i64)>,
@@ -3749,7 +3771,8 @@ pub fn finished_status_patch_with_failure(
             ),
             None => format!(
                 "the runner exited {exit_code} ({wire_reason}); the code was read from \
-                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode"
+                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode{}",
+                runner_reason.map_or_else(String::new, |r| r.message_suffix())
             ),
         },
         now,
@@ -5377,10 +5400,22 @@ async fn reconcile_backup_inner(
     // that grants it is Task 21's (interface I28, a declared late binding).
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    let log = pods
-        .logs(&pod_name, &LogParams::default())
-        .await
-        .map_err(BackupError::Api)?;
+    // FX-34: A REFUSED RUN'S LOG IS READ BOUNDED, AND ITS FAILURE IS AN ANSWER.
+    // Exit 3 wrote no artifact (GC11), so all its log owes is the two refusal
+    // lines at its end: `crate::refusal::read` asks for a bounded tail, never
+    // fails the pass, and says why when there is nothing to read. THIS `if` IS
+    // THE ONLY GATE: every other exit code takes the read it always took and
+    // carries no runner reason at all.
+    let (log, runner_reason) = if exit_code == 3 {
+        let read = crate::refusal::read(&pods, &namespace, &pod_name).await;
+        (read.body, Some(read.reason))
+    } else {
+        let log = pods
+            .logs(&pod_name, &LogParams::default())
+            .await
+            .map_err(BackupError::Api)?;
+        (log, None)
+    };
     let keys = evidence_keys(&log);
     let refusal = if exit_code == 3 {
         Some(
@@ -5509,6 +5544,7 @@ async fn reconcile_backup_inner(
             exit_code,
             &keys,
             refusal.as_deref(),
+            runner_reason.as_ref(),
             orphan,
             failure,
             covered,

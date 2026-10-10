@@ -116,11 +116,13 @@ pub fn is_reason_code(code: &str) -> bool {
 ///    `U+FFFD` an invalid byte decodes to) becomes ONE [`REPLACEMENT`]. An
 ///    allow-list, so a code point nobody thought of is replaced and never
 ///    passed through.
-/// 2. **Credential shapes.** [`crate::check_contract::redaction_rules`]:
-///    URL userinfo, secret key/value forms, PEM blocks, AWS access key ids,
-///    S3 error bodies and unkeyed base64 or hex runs of 40 characters or
-///    more. BEFORE the cut, so a secret is never left half-shown at the
-///    boundary, where the rules would no longer recognise it.
+/// 2. **Credential shapes.** A URL loses its query string and its fragment
+///    ([`without_url_queries`]: a presigned URL's signature is in its query),
+///    and then [`crate::check_contract::redaction_rules`] apply: URL
+///    userinfo, secret key/value forms, PEM blocks, AWS access key ids, S3
+///    error bodies and unkeyed base64 or hex runs of 40 characters or more.
+///    BEFORE the cut, so a secret is never left half-shown at the boundary,
+///    where the rules would no longer recognise it.
 /// 3. **Length.** At most [`REASON_MESSAGE_MAX_BYTES`] bytes, cut on a
 ///    character boundary; a cut sentence ends with [`TRUNCATION_MARKER`].
 ///
@@ -130,12 +132,33 @@ pub fn is_reason_code(code: &str) -> bool {
 #[must_use]
 pub fn clean_message(raw: &str) -> String {
     let redacted = crate::check_contract::apply_rules(
-        &printable(raw),
+        &without_url_queries(&printable(raw)),
         crate::check_contract::redaction_rules(),
     );
     // The rules write ASCII only, so the second character pass does one
     // thing: it folds a double space a removed value left behind.
     truncate(&printable(&redacted))
+}
+
+/// `text` with the query string and the fragment removed from every
+/// space-delimited word that holds a URL.
+///
+/// The redaction rules remove a URL's userinfo and leave its query alone,
+/// and a presigned URL carries its signature there. Everything from the
+/// first `?` or `#` after the scheme goes, as the controller's own
+/// diagnostics already do for a kubelet's or a webhook's prose.
+fn without_url_queries(text: &str) -> String {
+    text.split(' ')
+        .map(|word| match word.find("://") {
+            Some(at) => {
+                let (scheme, rest) = word.split_at(at + 3);
+                let kept = rest.split(['?', '#']).next().unwrap_or_default();
+                format!("{scheme}{kept}")
+            }
+            None => word.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Pass 1 of [`clean_message`]: the allow-list, with runs folded and the
@@ -670,6 +693,22 @@ mod tests {
         assert_eq!(url, "the endpoint http://minio:9000/bucket refused");
         let kv = clean_message("sasl.password=hunter2 was sent");
         assert!(!kv.contains("hunter2"), "{kv}");
+        // A presigned URL: the signature is in the query, and the query goes.
+        // So does a fragment; the path and the words around it stay.
+        let presigned = clean_message(
+            "GET https://bucket.s3.amazonaws.com/logweir/x.json?X-Amz-Signature=0123abcd&\
+             X-Amz-Credential=a%2F20261009 failed (see http://docs.example/page#section) twice",
+        );
+        assert_eq!(
+            presigned,
+            "GET https://bucket.s3.amazonaws.com/logweir/x.json failed (see \
+             http://docs.example/page twice"
+        );
+        // A word that only NAMES a scheme is left as it is.
+        assert_eq!(
+            clean_message("a plain http:// endpoint, or an https:// one?"),
+            "a plain http:// endpoint, or an https:// one?"
+        );
         // 40 characters of the base64 alphabet, assembled so that no source
         // line carries a secret-shaped literal.
         let key = format!("{}{}", "wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY");

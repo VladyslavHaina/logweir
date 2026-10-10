@@ -5765,6 +5765,37 @@ pub fn finished_status_patch(
     preflight: Option<&Value>,
     now: DateTime<Utc>,
 ) -> Value {
+    finished_status_patch_with_reason(
+        restore, exit_code, keys, refusal, None, observed, topics, preflight, now,
+    )
+}
+
+/// [`finished_status_patch`] with what an exit-3 run's pod log said about why
+/// ([`crate::refusal::RunnerReason`]) — **FX-34**.
+///
+/// The reason is appended to the terminal condition's message, after the
+/// "the runner exited 3 (guard-refused); …" text it always carried, so
+/// `kubectl get restore -o yaml` and the console say why the plan was refused
+/// once the pod and its log are gone. `status.progress.message` follows,
+/// because [`diagnostics::apply_finished`] copies the terminal condition.
+///
+/// `None` for every other exit code and for a caller that read no reason, and
+/// then the message is byte for byte what it was; so is `Some(NotStated)`, an
+/// older runner's log. `exitReason` is not touched: it stays the closed
+/// terminal state off `refusal-reason=`.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn finished_status_patch_with_reason(
+    restore: &Restore,
+    exit_code: i32,
+    keys: &RestoreEvidenceKeys,
+    refusal: Option<&str>,
+    runner_reason: Option<&crate::refusal::RunnerReason>,
+    observed: Option<&ScorecardObservation>,
+    topics: Option<&(Vec<String>, Vec<String>)>,
+    preflight: Option<&Value>,
+    now: DateTime<Utc>,
+) -> Value {
     // TWO VOCABULARIES, TWO FIELDS (errata E5b). The CONDITION's `reason` is
     // CamelCase, because that is what a `metav1.Condition`'s own validation
     // pattern permits; `exitReason` keeps GC11's wire string, which is what the
@@ -5784,7 +5815,8 @@ pub fn finished_status_patch(
         cond_reason,
         &format!(
             "the runner exited {exit_code} ({wire_reason}); the code was read from \
-             status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode"
+             status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode{}",
+            runner_reason.map_or_else(String::new, |r| r.message_suffix())
         ),
         now,
     )];
@@ -7693,10 +7725,20 @@ async fn reconcile_restore_inner(
     // that grants it is Task 21's (interface I28, a declared late binding).
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    let log = pods
-        .logs(&pod_name, &LogParams::default())
-        .await
-        .map_err(RestoreError::Api)?;
+    // FX-34: A REFUSED RUN'S LOG IS READ BOUNDED, AND ITS FAILURE IS AN ANSWER
+    // — the `Backup` twin carries the reasoning. THIS `if` IS THE ONLY GATE:
+    // every other exit code takes the read it always took and carries no
+    // runner reason at all.
+    let (log, runner_reason) = if exit_code == 3 {
+        let read = crate::refusal::read(&pods, &namespace, &pod_name).await;
+        (read.body, Some(read.reason))
+    } else {
+        let log = pods
+            .logs(&pod_name, &LogParams::default())
+            .await
+            .map_err(RestoreError::Api)?;
+        (log, None)
+    };
     let keys = restore_evidence_keys(&log);
     let refusal = if exit_code == 3 {
         Some(
@@ -7798,11 +7840,12 @@ async fn reconcile_restore_inner(
     // PATCH returns the in-memory `restore` is stale and no longer says what
     // the object says. See `verification::second_patch`.
     let terminal = diagnostics::apply_finished(
-        finished_status_patch(
+        finished_status_patch_with_reason(
             restore,
             exit_code,
             &keys,
             refusal.as_deref(),
+            runner_reason.as_ref(),
             observed.as_ref(),
             topics.as_ref(),
             preflight.as_ref(),
