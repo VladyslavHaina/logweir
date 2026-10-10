@@ -888,3 +888,167 @@ pub fn mock_client_with_store(
 pub fn mock_client(routes: Vec<Route>) -> kube::Client {
     mock_client_recording(routes).0
 }
+
+// ---------------------------------------------------------------------------
+// FX-19 — what a pass LOGGED, by level
+// ---------------------------------------------------------------------------
+
+/// Every `tracing` event emitted on THIS thread while it lives, as the JSON
+/// lines the controller binary's own subscriber writes (`main.rs` formats
+/// with `.json()`), so a row can assert "and logged no WARN" — FX-19's
+/// property — over the reconciler's real log calls rather than over a
+/// promise in a comment.
+///
+/// THREAD-SCOPED, AND THAT IS WHAT MAKES IT SAFE IN A PARALLEL SUITE. It is
+/// installed with `tracing::subscriber::set_default`, which binds the
+/// subscriber to the calling thread until the guard drops. A `#[tokio::test]`
+/// runs a current-thread runtime, so the reconcile under test — and the
+/// double's `tower::buffer` worker task, spawned onto the same runtime — log
+/// here, and no other test's events can.
+///
+/// Debug and above are kept: a debug line is how a row proves that a race
+/// was NOTICED rather than merely not shouted about.
+pub struct CapturedLog {
+    lines: Arc<Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+/// The writer [`CapturedLog`] hands the formatter: every write appends to
+/// one shared buffer.
+#[derive(Clone)]
+struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedLogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the log buffer mutex is never held across a panic")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A dispatcher that is never dropped and enables nothing, held so that a
+/// capture is never the ONLY live dispatcher — see [`CapturedLog::start`].
+static INTEREST_KEEPER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+
+/// [`INTEREST_KEEPER`]'s subscriber: every callsite is `sometimes`, so the
+/// decision is made per event by the thread's own dispatcher; it enables and
+/// records nothing itself.
+struct InterestKeeper;
+
+impl tracing::Subscriber for InterestKeeper {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::OFF)
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+impl CapturedLog {
+    /// Start capturing on this thread. Capture ends when the value drops.
+    ///
+    /// # Why a second, permanent dispatcher exists
+    ///
+    /// `tracing-core` 0.1.36 caches each callsite's interest the first time
+    /// the callsite is hit, and while exactly ONE dispatcher is registered it
+    /// computes that interest from the registering THREAD's default
+    /// (`callsite.rs`, `has_just_one`). In a parallel suite that is another
+    /// test's thread, with no subscriber at all: the callsite is cached
+    /// `never`, and this capture then misses a WARN its own reconcile emits —
+    /// measured as a row that passed alone and failed in the full suite. With
+    /// [`INTEREST_KEEPER`] alive there are always two, so a callsite first hit
+    /// anywhere while a capture lives is `sometimes`, and one first hit while
+    /// none lives is recomputed when the next capture registers.
+    #[must_use]
+    pub fn start() -> Self {
+        INTEREST_KEEPER.get_or_init(|| tracing::Dispatch::new(InterestKeeper));
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = SharedLogBuffer(Arc::clone(&lines));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || sink.clone())
+            .finish();
+        Self {
+            lines,
+            _guard: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    /// Every event captured so far, one JSON object per line, in order.
+    ///
+    /// # Panics
+    ///
+    /// When a captured line is not JSON, which the formatter never writes.
+    #[must_use]
+    pub fn events(&self) -> Vec<serde_json::Value> {
+        let bytes = self
+            .lines
+            .lock()
+            .expect("the log buffer mutex is never held across a panic")
+            .clone();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("the json formatter writes one object a line"))
+            .collect()
+    }
+
+    /// The events at exactly `level` (`"WARN"`, `"DEBUG"`, …) whose target is
+    /// in this crate — the client library's own lines are not the
+    /// reconciler's.
+    #[must_use]
+    pub fn at(&self, level: &str) -> Vec<serde_json::Value> {
+        self.events()
+            .into_iter()
+            .filter(|e| e["level"] == level)
+            .filter(|e| {
+                e["target"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("weirkeeper"))
+            })
+            .collect()
+    }
+
+    /// The `message` field of every event [`Self::at`] returns.
+    #[must_use]
+    pub fn messages_at(&self, level: &str) -> Vec<String> {
+        self.at(level)
+            .iter()
+            .map(|e| {
+                e["fields"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+}

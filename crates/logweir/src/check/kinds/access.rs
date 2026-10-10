@@ -59,6 +59,7 @@ use logweir_core::check_contract::{
     DestinationPlan, Gating, GrantRef,
 };
 use logweir_core::destination::DestinationRole;
+use logweir_engine_oso::storage::{caps, StoreError};
 
 use super::{execution_only, from_store_failure, ready, remedy_for, Wiring};
 use crate::check::store::{self, StoreFailure, LIST_PROBE_KEYS};
@@ -238,7 +239,9 @@ pub fn destination_checks(
                     Err(f) => about(&f),
                     Ok(access) => {
                         let key = store::absent_probe_key(&dest.uid);
-                        match access.get(&key) {
+                        // FX-31: `caps::PROBE` (0 bytes). The answer is the
+                        // GET's status; a body is never read.
+                        match access.get(&key, caps::PROBE) {
                             // A key nobody wrote: reading it is a SUCCESS.
                             Err(e) if store::classify(&e) == CheckCode::ObjectNotFound => ready(
                                 CheckId::DestinationEvidenceReadable,
@@ -252,8 +255,10 @@ pub fn destination_checks(
                                 read_principal_clause(grant)
                             )),
                             // It should not exist; if it does, the read still
-                            // proves the grant.
-                            Ok(_) => ready(
+                            // proves the grant — and an object over the
+                            // probe's cap (any non-empty one) was ANSWERED,
+                            // which proves it just as well, unread.
+                            Ok(_) | Err(StoreError::TooLarge { .. }) => ready(
                                 CheckId::DestinationEvidenceReadable,
                                 CheckCode::EvidenceReadable,
                                 now,

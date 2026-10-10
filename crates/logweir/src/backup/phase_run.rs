@@ -278,8 +278,12 @@ pub fn refuse_an_existing_set(
         Some(segment) => Some(segment),
         None => {
             let manifest = format!("{directory}manifest.json");
-            match archive.get(&manifest) {
-                Ok(_) => Some(manifest),
+            // FX-31: an EXISTENCE test, so no byte of the manifest is read:
+            // `caps::PROBE` refuses any body unread, and that refusal is the
+            // store answering "it is there". A GET and not a HEAD, so a denial
+            // keeps the error text `unproven` classifies.
+            match archive.get(&manifest, logweir_engine_oso::storage::caps::PROBE) {
+                Ok(_) | Err(StoreError::TooLarge { .. }) => Some(manifest),
                 Err(StoreError::NotFound(_)) => None,
                 Err(e) => return Err(unproven(&manifest, &e)),
             }
@@ -440,7 +444,10 @@ pub fn run(
     // put, several times in one run; what is pinned is the version this run
     // read back AFTER the engine exited, i.e. the one the receipt attests.
     let (manifest_bytes, answered_version) = store
-        .get(&set.manifest_key)
+        .get_capped(
+            &set.manifest_key,
+            logweir_engine_oso::storage::caps::MANIFEST,
+        )
         .map_err(|e| BackupError::Operational(e.to_string()))?;
     let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest_bytes);
     let manifest_version_id =

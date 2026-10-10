@@ -5180,6 +5180,56 @@ fn a_fruitless_re_read_settles_the_object_for_good() {
     );
 }
 
+/// **FX-31 review F8.** A document over the controller's read cap is not
+/// re-read every quarter hour for ever: the re-read SETTLES with
+/// `trust.signingTimeRead: overCap` and no `retryAfter`, the stored verdict is
+/// kept on an unverified basis with a sentence that says why, and the object
+/// never asks the archive again.
+///
+/// KILLS: "an over-cap read is `Unreadable`" (a `retryAfter` is written and
+/// the next quarter hour reads again); "`overCap` does not settle" (the plan
+/// asks for another read).
+#[test]
+fn an_over_cap_re_read_settles_and_says_why() {
+    let over = weirkeeper::verification::SigningTime::OverCap(
+        "logweir/drills/r1.json is larger than the 1048576-byte cap weirkeeper reads (the \
+         store reports 5368709120 bytes); nothing was verified"
+            .to_string(),
+    );
+    let first = weirkeeper::verification::retrust_with(
+        &lab_backup_status(),
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-19T09:00:00Z"),
+        &over,
+    )
+    .expect("the stored block changes on the first over-cap read");
+    let trust = &first.verification["trust"];
+    assert_eq!(
+        trust["signingTimeRead"],
+        json!(weirkeeper::verification::SIGNING_TIME_OVER_CAP),
+        "{trust}"
+    );
+    assert!(trust["retryAfter"].is_null(), "no backoff: {trust}");
+    let detail = first.verification["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("was not re-read") && detail.contains("1048576-byte cap"),
+        "{detail}"
+    );
+    let mut settled = lab_backup_status();
+    settled["evidence"]["verification"] = first.verification.clone();
+    assert!(
+        weirkeeper::verification::signing_time_owed(Some(&settled)).is_none(),
+        "settled: the archive is not asked again"
+    );
+    assert_eq!(
+        weirkeeper::verification::signing_time_need(Some(&settled), at("2027-01-01T00:00:00Z")),
+        weirkeeper::verification::ReadPlan::None
+    );
+}
+
 /// **Review finding G2, the guard.** Three reconciles with an unreachable
 /// archive issue **exactly one** `Store::get`.
 ///

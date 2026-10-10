@@ -524,6 +524,11 @@
               "type": "array",
               "items": { "type": "string", "minLength": 1 }
             },
+            "trustedProxy": {
+              "type": "string",
+              "enum": ["", "none"],
+              "description": "FX-24c, shared mode: the deliberate opt-out. With api.console.ingress.enabled the chart refuses to render unless trustedProxyService or trustedProxyCidrs names the proxy in front of the console, or this is `none`. `none` says the console trusts no proxy, so the per-peer connection cap is off, every sign-in through the ingress shares one rate-limit budget, and no X-Forwarded-For is recorded. Refused beside a named proxy, and in localAdmin mode."
+            },
             "trustedProxyService": {
               "type": "object",
               "additionalProperties": false,

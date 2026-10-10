@@ -39,6 +39,7 @@ use logweir_core::check_contract::{
 use logweir_core::destination::DestinationRole;
 use logweir_core::replay_selection::{ReplaySelection, SelectionRefusal};
 use logweir_core::spec::{target_topic_prefix, DrillSpec, TargetMode};
+use logweir_engine_oso::storage::{caps, StoreError};
 use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
 use logweir_kafka::reader::{NewTopicSpec, TARGET_TOPIC_CONFIGS};
 
@@ -305,10 +306,32 @@ fn archive_checks(
     // — so `expected` and `listed` were being compared in two different key
     // spaces as well.
     let manifest_key = access.qualify(&req.manifest_key);
-    let bytes = match access.get(&manifest_key) {
+    // FX-31: under the manifest cap; an object over it is refused unread, and
+    // the message below names the cap.
+    let bytes = match access.get(&manifest_key, caps::MANIFEST) {
         Ok(b) => b,
         Err(e) => {
             let class = store::classify(&e);
+            // `TooLarge` is Logweir's own sentence about the object (its key
+            // and the cap), never the backend's text, so it may be named.
+            let why = match &e {
+                StoreError::TooLarge { cap, .. } => {
+                    format!("{class}: it is larger than the {cap}-byte read cap for a manifest")
+                }
+                _ => class.to_string(),
+            };
+            // NOTHING REFUSED, so the store's remedy would send an operator
+            // to a bucket policy that is fine (review F7): the object is too
+            // big for this build to read.
+            let remedy = if matches!(e, StoreError::TooLarge { .. }) {
+                OVER_CAP_MANIFEST_REMEDY
+            } else {
+                remedy_for(if class == CheckCode::ObjectNotFound {
+                    CheckCode::BackupSetNotFound
+                } else {
+                    class
+                })
+            };
             // A manifest that is NOT THERE is the backup set not being there,
             // which is the fact an operator acts on; every other refusal keeps
             // its store code so the remedy points at the bucket policy rather
@@ -323,10 +346,10 @@ fn archive_checks(
                     catalogue::outcome(CheckId::ArchiveBackupSet, state_for(code), code, now)
                         .with_message(&format!(
                             "the backup manifest `{manifest_key}` on destination `{}` could not \
-                             be read: {class}",
+                             be read: {why}",
                             dest.name
                         ))
-                        .with_remedy(remedy_for(code))
+                        .with_remedy(remedy)
                         .with_scope(scope),
                 );
             }
@@ -1145,3 +1168,11 @@ pub fn details_stream(lines: &[String]) -> Vec<u8> {
     }
     out.into_bytes()
 }
+
+/// The remedy for a backup manifest over the read cap (FX-31 review F7): the
+/// store answered, the object is larger than this build reads, and no grant,
+/// bucket policy or network change makes it smaller.
+pub const OVER_CAP_MANIFEST_REMEDY: &str =
+    "The backup set's manifest is larger than this build reads (docs/kubernetes.md §7b.4). \
+     No grant or policy change helps: restore from a smaller set, or a build whose manifest \
+     cap holds this one.";

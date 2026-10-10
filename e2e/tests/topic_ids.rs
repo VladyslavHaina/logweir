@@ -378,14 +378,14 @@ fn storage(prefix: &str) -> logweir_core::engine::StorageUrl {
     .expect("a storage url")
 }
 
-fn archive_get(prefix: &str, key: &str) -> Vec<u8> {
+fn archive_get(prefix: &str, key: &str, max_bytes: u64) -> Vec<u8> {
     std::env::set_var("AWS_ACCESS_KEY_ID", s3_user());
     std::env::set_var("AWS_SECRET_ACCESS_KEY", s3_user());
     std::env::set_var("AWS_REGION", "us-east-1");
     let store = logweir_engine_oso::storage::Store::read_only_from_url(&storage(prefix))
         .expect("the archive store");
     store
-        .get(key)
+        .get_capped(key, max_bytes)
         .unwrap_or_else(|e| panic!("read {key}: {e}"))
         .0
 }
@@ -453,10 +453,18 @@ fn backup(backup_id: &str, prefix: &str, topics: &[&str]) -> Backup {
     };
     let receipt_key = line("receipt-key=").expect("backup run prints receipt-key=");
     let catalog_key = line("catalog-key=").expect("backup run prints catalog-key=");
-    let receipt_bytes = archive_get(prefix, &receipt_key);
+    let receipt_bytes = archive_get(
+        prefix,
+        &receipt_key,
+        logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+    );
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
-    let catalog: Value =
-        serde_json::from_slice(&archive_get(prefix, &catalog_key)).expect("a catalog record");
+    let catalog: Value = serde_json::from_slice(&archive_get(
+        prefix,
+        &catalog_key,
+        logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+    ))
+    .expect("a catalog record");
     Backup {
         receipt_key,
         receipt_bytes,
@@ -479,6 +487,7 @@ fn both_readers(b: &Backup, label: &str) -> Value {
         archive_get(
             &b.prefix,
             &b.receipt_key.replace(".receipt.json", ".receipt.sig"),
+            logweir_engine_oso::storage::caps::SIDECAR,
         ),
     )
     .expect("written");

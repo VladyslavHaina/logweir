@@ -159,6 +159,7 @@ pub mod protection;
 /// — the template digest a standing authorization binds, the qualifying-point
 /// filter chain, the rendered plan and the scope the controller proves it falls
 /// inside. `controllers::rehearsal_schedule` is the thin half.
+pub mod read_budget;
 pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;

@@ -11,12 +11,15 @@
 //! | `a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it` | marks after the engine below the group-capture marks (TI-04.1-3): the group is `GenerationChangedDuringCapture` | stable marks capture it |
 //! | `a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name` | 85 ids of 255 `"` are refused at phase −1 by name, exit 3, nothing written (review N1) | 84 fit (core and builder rows) |
 //! | `a_capture_that_asked_no_position_reads_no_marks_after_the_engine` | every selected group excluded: no mark is read after the engine (review L8) | one captured group: the marks are read once |
+//! | `a_positions_document_over_the_read_cap_is_refused_naming_the_cap_and_nothing_is_read` | FX-31 over this row's document: read under `caps::SIGNED_DOCUMENT`, and one the store reports a byte over it is `TooLarge` naming the key and the cap, with no body byte taken and nothing held against the receipt | the same bytes in an honest store are read whole and hold against the signed receipt |
 #[path = "backup_seam/mod.rs"]
 mod backup_seam;
 
 use backup_seam::{Fixture, StubReader};
 use logweir::exit::ExitCode;
-use logweir_engine_oso::storage::Store;
+use logweir_core::backup_receipt::BackupReceipt;
+use logweir_core::consumer_positions::PositionsDocument;
+use logweir_engine_oso::storage::{caps, OverCap, Store, StoreError};
 use logweir_kafka::access::ClusterAccess;
 use logweir_kafka::capture::{GroupsObservation, Marks, ObservedGroup, TopicMarks};
 use logweir_kafka::groups::{
@@ -167,6 +170,31 @@ fn evidence() -> Store {
     Store::in_memory("logweir/")
 }
 
+/// The positions document `receipt` binds, read back from `store` and held
+/// against the signed receipt.
+///
+/// **FX-31.** It is read under `caps::SIGNED_DOCUMENT`, the cap a runner or
+/// CLI reads a signed evidence document with: the document is not signed
+/// itself, the receipt's signature covers its digest and length. Over the cap
+/// the read is `TooLarge` and this returns before anything is parsed or held
+/// against the receipt: there are no bytes to hand either.
+fn positions_document(
+    store: &Store,
+    receipt: &BackupReceipt,
+) -> Result<(Vec<u8>, PositionsDocument), StoreError> {
+    let block = receipt
+        .consumer_positions
+        .as_ref()
+        .expect("the receipt binds a positions document");
+    let (bytes, _) = store.get_capped(&block.document.key, caps::SIGNED_DOCUMENT)?;
+    let doc: PositionsDocument = serde_json::from_slice(&bytes).expect("a positions document");
+    assert_eq!(
+        receipt.validate_consumer_positions_document(&bytes, &doc),
+        Ok(())
+    );
+    Ok((bytes, doc))
+}
+
 /// The minor of a `1.x.y` version.
 fn minor_of(version: &str) -> u64 {
     version
@@ -218,10 +246,9 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
 
     // The SIGNED receipt carries it, as 1.7.0, and satisfies every arm.
     let (bytes, _) = store
-        .get(&outcome.receipt_key)
+        .get_capped(&outcome.receipt_key, caps::SIGNED_DOCUMENT)
         .expect("the receipt was put");
-    let receipt: logweir_core::backup_receipt::BackupReceipt =
-        serde_json::from_slice(&bytes).unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
     // AT LEAST the minor that defines the block: a later minor that also
     // defines it (a renumber at integration) is the same claim.
     assert!(
@@ -241,18 +268,11 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         block.document.key,
         "logweir/backups/nightly-20260915/01J9X2QK7C4V0R8YB3ZP6MTS5A.consumer-positions.json"
     );
-    let (doc_bytes, _) = store
-        .get(&block.document.key)
-        .expect("the positions document was put");
+    let (doc_bytes, doc) =
+        positions_document(&store, &receipt).expect("the positions document was put");
     assert_eq!(
         outcome.consumer_positions_document.as_deref(),
         Some(doc_bytes.as_slice())
-    );
-    let doc: logweir_core::consumer_positions::PositionsDocument =
-        serde_json::from_slice(&doc_bytes).unwrap();
-    assert_eq!(
-        receipt.validate_consumer_positions_document(&doc_bytes, &doc),
-        Ok(())
     );
     let p = &doc.groups["billing"].positions[0];
     assert_eq!(
@@ -271,7 +291,7 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         .catalog_key
         .as_ref()
         .expect("the catalog point was written");
-    let (record, _) = store.get(key).unwrap();
+    let (record, _) = store.get_capped(key, caps::SIGNED_DOCUMENT).unwrap();
     let point: logweir::catalog::record::CatalogPoint = serde_json::from_slice(&record).unwrap();
     let summary = point.consumer_positions.expect("the summary travels");
     assert_eq!(summary.sha256, block.digest().unwrap());
@@ -293,12 +313,14 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         .expect("the backup succeeds");
     assert!(outcome.consumer_positions.is_none());
     assert!(outcome.consumer_positions_document.is_none());
-    let (bytes, _) = store.get(&outcome.receipt_key).unwrap();
+    let (bytes, _) = store
+        .get_capped(&outcome.receipt_key, caps::SIGNED_DOCUMENT)
+        .unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(!text.contains("consumer_positions"), "{text}");
     // No block and no document; the version is whatever this build writes
     // without a selection (its other blocks decide it), never pinned here.
-    let plain: logweir_core::backup_receipt::BackupReceipt = serde_json::from_str(&text).unwrap();
+    let plain: BackupReceipt = serde_json::from_str(&text).unwrap();
     assert!(plain.consumer_positions.is_none());
     assert_eq!(plain.validate_invariants(), Ok(()));
     let keys = store.list_page("logweir/backups/", None, 10).unwrap().0;
@@ -306,6 +328,92 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         keys.iter()
             .all(|k| !k.ends_with(".consumer-positions.json")),
         "no document without a selection: {keys:?}"
+    );
+}
+
+/// **FX-31 over PROD-04.1's document (integrate-6).** The positions document
+/// is read under `caps::SIGNED_DOCUMENT`, and one the store reports over that
+/// cap is refused `TooLarge`, naming the key and the cap, before a body byte
+/// is taken: nothing is parsed and nothing is held against the receipt.
+///
+/// The object IS the run's own valid document, the very bytes the control
+/// reads and verifies, so the refusal is the cap's and not the document's.
+///
+/// KILLS: the read moved to a cap far too large (`u64::MAX` hands the bytes
+/// back as `Ok`, and the document then holds against the receipt); a refusal
+/// that still read the body.
+#[test]
+fn a_positions_document_over_the_read_cap_is_refused_naming_the_cap_and_nothing_is_read() {
+    let f = Fixture::new();
+    f.select_in_plan(&["billing"]);
+    let reader = GroupsReader {
+        captured: vec!["billing"],
+        share: Vec::new(),
+        position: 1000,
+        marks: (0, 1234),
+        after: (0, 1240),
+    };
+    let store = evidence();
+    let outcome = f
+        .execute_reading(&store, &reader, Vec::new())
+        .expect("the backup succeeds");
+    let (bytes, _) = store
+        .get_capped(&outcome.receipt_key, caps::SIGNED_DOCUMENT)
+        .expect("the receipt was put");
+    let receipt: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    let key = receipt
+        .consumer_positions
+        .as_ref()
+        .expect("a selecting run binds a document")
+        .document
+        .key
+        .clone();
+
+    // CONTROL: the document as the run put it is read whole under the cap and
+    // holds against the signed receipt.
+    let (document, _) =
+        positions_document(&store, &receipt).expect("within the cap the document is read");
+    assert_eq!(
+        outcome.consumer_positions_document.as_deref(),
+        Some(document.as_slice())
+    );
+
+    // The same bytes at the same key, in a store that reports the object one
+    // byte over the cap.
+    let over = caps::SIGNED_DOCUMENT + 1;
+    let (reporting_over, meter) = Store::in_memory_misreporting_size("logweir/", over);
+    reporting_over
+        .put_create_only(&key, &document)
+        .expect("the same document is planted");
+    match positions_document(&reporting_over, &receipt) {
+        Err(StoreError::TooLarge {
+            key: refused,
+            cap,
+            observed,
+        }) => {
+            assert_eq!(refused, key);
+            assert_eq!(cap, caps::SIGNED_DOCUMENT);
+            assert_eq!(observed, OverCap::Reported(over));
+        }
+        Ok(_) => panic!("a positions document over the read cap was read and verified"),
+        Err(other) => panic!("over the cap is TooLarge, got {other:?}"),
+    }
+    let message = positions_document(&reporting_over, &receipt)
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains(&format!(
+            "is larger than the {}-byte read cap",
+            caps::SIGNED_DOCUMENT
+        )) && message.contains(&format!("the store reports {over} bytes"))
+            && message.contains(&key),
+        "the refusal names the key, the cap and the reported size: {message}"
+    );
+    assert_eq!(
+        meter.streamed(),
+        0,
+        "not one body byte was taken, so nothing reached the receipt's check"
     );
 }
 

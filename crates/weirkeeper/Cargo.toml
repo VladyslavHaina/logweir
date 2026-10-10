@@ -257,6 +257,15 @@ tracing-subscriber.workspace = true
 # the `printcolumn` attributes builds `serde_json::json!` literals in library
 # code. Nothing is lost: a normal dependency is visible to `tests/` too, and
 # the package was already in `Cargo.lock` either way.
+#
+# FX-31 — `tests/read_caps.rs` measures the controller's read paths' peak
+# resident set in a CHILD process through `getrusage`, a safe API, because a
+# counting global allocator needs `unsafe` (forbidden by the workspace lint).
+# The same declaration as `crates/logweir-engine-oso`'s dev-dependency for
+# `tests/offset_report_memory.rs`: the package is already in `Cargo.lock`, and
+# a dev-dependency is outside `tests/linkage.rs::claimed_already_resolved`'s
+# `[dependencies]` set.
+nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 [features]
 default = []

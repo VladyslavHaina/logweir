@@ -1751,6 +1751,9 @@ pub struct SharedOptions {
     pub require_trusted_proxy: bool,
     /// PLAT-19.2: the approval policies and the console key.
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
+    /// FX-13a: the bound on the redeemed-state record, when a test needs to
+    /// reach it.
+    pub used_state_capacity: Option<usize>,
 }
 
 impl Default for SharedOptions {
@@ -1766,6 +1769,7 @@ impl Default for SharedOptions {
             login_limiter: None,
             require_trusted_proxy: false,
             approval: Arc::default(),
+            used_state_capacity: None,
         }
     }
 }
@@ -1885,6 +1889,10 @@ impl SharedApp {
                 ))
             }),
             require_trusted_proxy: options.require_trusted_proxy,
+            used_states: options.used_state_capacity.map_or_else(
+                logweir_api::auth::login::UsedStates::new,
+                logweir_api::auth::login::UsedStates::with_capacity,
+            ),
         });
         let app = TestApp::with_clock(
             fake,

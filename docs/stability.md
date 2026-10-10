@@ -2746,6 +2746,10 @@ something on the object to be bounded by:
 * a read that **completes and finds none** writes
   `trust.signingTimeRead: absent` — the absence is the document's, and asking
   again can only get the same answer;
+* a read the store answers with a document **over the controller's read cap**
+  (FX-31, `docs/kubernetes.md` §7b.4) writes `trust.signingTimeRead: overCap`:
+  the document was not read, the stored verdict stays on an unverified basis,
+  and asking again would get the same size back;
 * a read that **learns nothing** (the archive did not answer, or there was no
   reader) writes `trust.retryAfter`, fifteen minutes ahead. Reconciles inside
   that window resolve no destination, issue no `get` and write nothing.

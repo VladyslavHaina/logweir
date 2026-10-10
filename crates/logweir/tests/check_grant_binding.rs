@@ -74,7 +74,7 @@ struct Empty {
 }
 
 impl ObjectAccess for Empty {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
+    fn get(&self, key: &str, _max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         self.calls.lock().unwrap().push(format!("get {key}"));
         Err(StoreError::NotFound(key.to_string()))
     }
