@@ -8684,10 +8684,46 @@ fn fx22_the_accounting_is_none_unless_it_closes() {
         "CONTROL: the same block with the zero WRITTEN is an accounting"
     );
 
-    // Never a negative count dressed as a total.
+    // Never a negative count dressed as a total. THE SIGN IS THE ONLY THING
+    // THAT REFUSES THESE: each sum closes over the block's one skipped point,
+    // and `keptCount` is its list's length, so neither the sum nor the list
+    // comparison (review M2) can be what answers `None`.
+    //
+    // MUTANT R4b (the review's): drop the sign check from `accounting()`. The
+    // first version of the M2 fix let it survive: the one negative case here
+    // carried `keptCount: 322` beside ten ids, and the list comparison
+    // refused it before the sign was ever read.
+    for (label, candidates, held_back, total) in [
+        ("a negative held-back count", 60, -15, 56),
+        ("a negative plan", -5, 0, 6),
+        (
+            "a negative plan and a held-back count that cancel",
+            -50,
+            50,
+            11,
+        ),
+    ] {
+        let mut negative = closing.clone();
+        negative["candidateCount"] = json!(candidates);
+        negative["truncatedByCap"] = json!(held_back);
+        negative["pointsEvaluated"] = json!(total);
+        assert_eq!(
+            10 + candidates + held_back + 1,
+            total,
+            "PREMISE, {label}: the sum closes"
+        );
+        assert_eq!(
+            negative["kept"].as_array().expect("kept").len(),
+            10,
+            "PREMISE, {label}: the list is `keptCount` long"
+        );
+        assert_eq!(block(negative).accounting(), None, "{label}");
+    }
+    // A negative `keptCount` can never be its list's length, so it is refused
+    // twice over; said here so that the case is not thought missing.
     let mut negative = closing.clone();
-    negative["truncatedByCap"] = json!(-1);
-    negative["keptCount"] = json!(322);
+    negative["keptCount"] = json!(-1);
+    negative["truncatedByCap"] = json!(322);
     assert_eq!(block(negative).accounting(), None);
 
     // ---- review M2: a `kept` list that is not the recorded count ----------
