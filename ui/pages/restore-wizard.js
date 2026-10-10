@@ -4400,8 +4400,8 @@ export function renderPlanStep(prepared, state) {
       // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
       // FX-35: WHERE THE RUN READS EACH TOPIC'S TIMESTAMP TYPE AND CONFIGURATION.
-      ["recorded by the point", "<span id=\"review-recorded\">" + esc(recordedFactsText(s)) +
-        "</span>"],
+      ["recorded by the point", "<span id=\"review-recorded\">" +
+        messageText(recordedFactsText(s)) + "</span>"],
       // PROD-08.1a: HOW MUCH THE RUN WILL VERIFY, beside the plan that says so.
       ["coverage", "<span id=\"review-coverage\">" + esc(coverageText(s)) + "</span>"],
       // PROD-03.0: WHAT THE RESTORED RECORDS NEED FROM A REGISTRY.
@@ -6475,13 +6475,15 @@ export async function bindBackupToPoint(api, ns, backup, backups, readers, lifec
       return unbound("recovery catalog `" + name + "` lists point `" + pointId +
         "` and does not offer it: " + choice.reason);
     }
-    notListed.push("`" + name + "`: " + choice.reason);
+    if (choice.reason !== "the catalog's view does not list this point") {
+      notListed.push("`" + name + "`: " + choice.reason);
+    }
   }
   return unbound(ours.length === 0
     ? "no recovery catalog in this namespace reads " + where
-    : "no recovery catalog over " + where + " lists point `" + pointId + "` yet (" +
-      notListed.join("; ") + "): the catalog has not synced this run; sync it and reload " +
-      "this page to bind the plan to the point");
+    : "no recovery catalog over " + where + " lists point `" + pointId + "` yet" +
+      (notListed.length > 0 ? " (" + notListed.join("; ") + ")" : "") +
+      ": the catalog has not synced this run; sync it, then reload this page");
 }
 
 /** The wizard over one catalog point: resolve it, refuse by name, or build the

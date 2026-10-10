@@ -259,7 +259,7 @@ test("fx35_r3_a_backup_with_no_catalog_point_says_so_and_offers_no_bound_restore
   assert.match(note, /This plan is NOT bound to a recovery point/,
     "NEGATIVE CONTROL: a page that says nothing fails this");
   assert.match(note, new RegExp("no recovery catalog over destination primary lists point " +
-    OLD.pointId + " yet .*the catalog has not synced this run"));
+    OLD.pointId + " yet: the catalog has not synced this run; sync it, then reload this page"));
   assert.ok(unsynced.bytes !== null, "the unbound plan is still the Backup's plan");
   assert.equal(bindingOf(unsynced.bytes).point, undefined,
     "no binding, and nothing that looks like one -- never the newer run's point");
