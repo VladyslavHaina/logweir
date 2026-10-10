@@ -2333,11 +2333,7 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
          take it out of the grant tables and out of this test"
     );
 
-    let callers: BTreeSet<&str> = sources
-        .iter()
-        .filter(|(path, code)| !IMPLEMENTATION.contains(&path.as_str()) && uses_get_version(code))
-        .map(|(path, _)| path.as_str())
-        .collect();
+    let callers = version_readers(&sources, &IMPLEMENTATION);
     let named: BTreeSet<&str> = READERS.iter().map(|(path, ..)| *path).collect();
     assert_eq!(
         callers, named,
@@ -2426,6 +2422,19 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
     }
 }
 
+/// The files among `sources` that read an object BY VERSION, other than the
+/// ones in `implementation`, where the read is defined and delegated.
+fn version_readers<'a>(
+    sources: &'a [(String, String)],
+    implementation: &[&str],
+) -> BTreeSet<&'a str> {
+    sources
+        .iter()
+        .filter(|(path, code)| !implementation.contains(&path.as_str()) && uses_get_version(code))
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
 /// Whether `code` USES the store's read by version, however the use is
 /// spelled: a method call (`access.get_version(…)`, with or without the
 /// receiver on the same line), a path call (`Store::get_version(&store, …)`,
@@ -2475,4 +2484,28 @@ fn a_read_by_version_is_seen_however_the_call_is_spelled() {
     ] {
         assert!(!uses_get_version(not_a_use), "taken for a use: {not_a_use}");
     }
+
+    // And the lint's own walk finds a path-form reader, leaves out a file
+    // that only defines the read, and leaves out the implementation.
+    let source = |path: &str, code: &str| (path.to_string(), code.to_string());
+    let sources = [
+        source(
+            "crates/a/src/path_form.rs",
+            "let b = Store::get_version(&store, key, v)?;",
+        ),
+        source(
+            "crates/a/src/method_form.rs",
+            "let b = access.get_version(key, v)?;",
+        ),
+        source(
+            "crates/a/src/defines.rs",
+            "fn get_version(&self, key: &str, v: &str);",
+        ),
+        source("crates/a/src/reads_current.rs", "let b = store.get(key)?;"),
+        source("crates/a/src/store.rs", "Store::get_version(self, key, v)"),
+    ];
+    assert_eq!(
+        version_readers(&sources, &["crates/a/src/store.rs"]),
+        BTreeSet::from(["crates/a/src/method_form.rs", "crates/a/src/path_form.rs"])
+    );
 }
