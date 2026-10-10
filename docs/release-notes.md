@@ -52,8 +52,9 @@ restored under its own name, behind its own approval subject), 57 (FX-14, a cata
 the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
 ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
-the capability rows a readiness check asks of the endpoint itself) and 61 (FX-34, a
-guard-refused Restore or Backup says why in its status) so far. Items continue the next entry's
+the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
+guard-refused Restore or Backup says why in its status) and 62 (FX-27 and FX-42, the engine's metrics port stays
+closed and a failed RetentionPolicy read says so) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -214,6 +215,10 @@ and `Backup` Job gains that argument) and the console's text, and the PoC
 upgrade that carries it moves the controller and the runner image in one
 `helm upgrade`, submits a `Restore` the runner refuses and reads the reason
 on its status and in the console after the pod is gone.
+Item 62 is fix-now rows FX-27 and FX-42 (its first item), proven by render
+rows, the real-engine backup row on the compose stack and a console row
+through the page's own decoder; it changes the runner's engine documents and
+the console.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2840,6 +2845,28 @@ always wrote, over this runner or an older one. The runner image first leaves
 THIS controller over an older runner, which does not start (above). Statuses
 already written keep the text they have.
 
+#### 62. The engine's metrics port stays closed; a failed RetentionPolicy read says so (FX-27, FX-42)
+
+**Changed.** Every backup and restore document Logweir renders ends with
+`metrics: {enabled: false}`, so the engine's unauthenticated Prometheus server
+no longer listens on `0.0.0.0:8080` in a runner pod or on the operator's host
+for a CLI run (nothing scraped it). A schedule's retention panel read a failed
+read of the namespace's RetentionPolicies (a refusal, a 5xx, an answer the
+console's decoder rejects) as "no policy" and printed "Logweir never deletes
+from your archive"; it now says the read failed and why, and prints that
+sentence only after a read that succeeded.
+The native engine's race with the target topics phase 0 creates (FX-25) did
+not recur in 30 native restores into freshly created topics on the compose
+stack, after item 39's wait; nothing else changed for it.
+**Do:** nothing.
+**Scope:** a render row per renderer and the ten backup and restore goldens;
+the real-engine backup row on the compose stack, which holds port 8080 for its
+run and fails on any metrics-server line from the engine (native route); the
+panel through the console's own reader and decoder for a 403, a 500 and a
+malformed answer, with a successful empty read as the control.
+**Rollback:** an older runner opens the engine's port 8080 again during a run;
+an older console prints the no-deletion sentence after a failed read.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2939,7 +2966,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60 and 61, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 and 62, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3005,7 +3032,8 @@ controller and the console's text, and needs `controllerImage` and
 `runnerImage` moved in one upgrade: this controller passes `--line-token` to
 every `Restore` and `Backup` Job, and every runner image published before the
 change exits 1 on it (for a tagged release's runner item 35 already required
-the roll). To roll back to
+the roll); item 62 changes the
+runner's engine documents and the console, and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

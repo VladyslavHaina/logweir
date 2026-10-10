@@ -48,6 +48,9 @@ import {
   COMPLETION_INSTANT_NOT_PUBLISHED,
   REPORT_TRUNCATED_SENTENCE,
   RETENTION_COVERAGE_UNKNOWN_SENTENCE,
+  RETENTION_POLICIES_UNREAD_SENTENCE,
+  policyForSchedule,
+  readRetentionPolicies,
   renderRetentionPanel,
   renderScheduleFacts,
 } from "../pages/schedules.js";
@@ -667,6 +670,49 @@ test("sweep_no_deletion_is_never_claimed_beside_a_policy_that_deletes", async ()
     assert.ok(decode(renderRetentionPanel(schedule, null, list)).indexOf(RETENTION_SENTENCE) !== -1,
       what + " keeps the no-deletion sentence");
   }
+});
+
+test("fx42_a_failed_retention_policy_read_says_so_and_never_claims_no_deletion", async () => {
+  // FX-42: `readRetentionPolicies` turned ANY failed read into an empty list,
+  // and under an empty list the panel printed "Logweir never deletes from your
+  // archive" beside a namespace whose policy may delete nightly. Each answer
+  // goes through the page's own reader, `listD3` and the contract decoder.
+  await sharedConsole();
+  const schedule = await consoleSchedule();
+  const problem = (status, code, detail) => ({ status: status, body: {
+    type: "https://logweir.dev/problems/" + code, title: code, status: status, code: code,
+    detail: detail, requestId: "01FX42", retryable: status >= 500 } });
+  const panelFor = async (reply) => {
+    const wire = transport((u) =>
+      u.indexOf("/api/v1/namespaces/team-a/retention-policies") === 0 ? reply : undefined);
+    let policies;
+    try {
+      policies = await readRetentionPolicies("team-a");
+    } finally {
+      wire.restore();
+    }
+    return decode(renderRetentionPanel(schedule, policyForSchedule(schedule, policies), policies));
+  };
+  for (const [what, reply, why] of [
+    ["403", problem(403, "forbidden", "no grant on retention-policies"),
+      "no grant on retention-policies"],
+    ["500", problem(500, "internal_error", "The error could not be rendered."),
+      "The error could not be rendered."],
+    ["malformed", { status: 200, body: { items: "not a list", requestId: "01FX42" } },
+      "the response does not match the contract at RetentionPolicyList.items"],
+  ]) {
+    const panel = await panelFor(reply);
+    assert.equal(panel.indexOf(RETENTION_SENTENCE), -1,
+      what + ": THE DEFECT: the no-deletion sentence after a failed read");
+    assert.ok(panel.indexOf(RETENTION_POLICIES_UNREAD_SENTENCE) !== -1,
+      what + ": the panel says the read failed");
+    assert.ok(panel.indexOf("The read failed: " + why) !== -1, what + ": and why");
+  }
+
+  // CONTROL: a successful, empty read keeps the sentence and says no failure.
+  const empty = await panelFor({ status: 200, body: listOf([]) });
+  assert.ok(empty.indexOf(RETENTION_SENTENCE) !== -1, "an empty list keeps the sentence");
+  assert.equal(empty.indexOf(RETENTION_POLICIES_UNREAD_SENTENCE), -1);
 });
 
 test("sweep_the_latest_point_s_completion_instant_says_when_it_is_the_creation_instant",

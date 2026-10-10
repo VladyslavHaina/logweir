@@ -3090,7 +3090,10 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination
   that policy governs, lists the policies, and prints neither the no-deletion
-  sentence nor "this schedule's own recommendation and nothing else".
+  sentence nor "this schedule's own recommendation and nothing else". **A
+  failed read of the namespace's RetentionPolicies is not an empty list**
+  (FX-42): a refusal, a 5xx or an answer the decoder rejects makes the panel
+  say the read failed and why, and print neither line either.
 
 **The four D3 kinds are not in the legacy in-cluster UI's ClusterRole.** The
 chart's role is unchanged by this change, so under the Helm UI the three D3 tabs
