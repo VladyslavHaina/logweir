@@ -423,7 +423,7 @@ Merged as the merge commit after `8a853d0c` (PR #12, CI check and e2e green on L
 **Filed from its sweep:** FX-31 (P1, unbounded object-store reads) and FX-32 (P3, the cookie clear).
 
 **PoC batch 5 (2026-10-09): FX-29, PROD-11.1 and PROD-08.1a Done.** Worker `poc-batch-5` upgraded the PoC to main `739f17c5` (Helm rev 23) by README steps 1–3. The pinned `cosign verify` passed on the runner index, and the Kafka pods were untouched. Result: 38 PASS, 0 FAIL, 6 notRun (`claude/poc-batch-5.result.md`).
-- **FX-29:** both schedules resumed at 19:44Z. Each wrote its status once, then nothing for 6 minutes apart from the hourly inventory write. The hot loop did not recur, and the schedules stay resumed. The orchestrator checks that the 2026-10-10T02:00Z slot decides once.
+- **FX-29:** both schedules resumed at 19:44Z. Each wrote its status once, then nothing for 6 minutes apart from the hourly inventory write. The hot loop did not recur, and the schedules stay resumed. **Confirmed on the 2026-10-10T02:00Z slot:** both schedules decided it once (`decidedAt` 02:00:25Z), both scheduled Backups `Succeeded`, each schedule's `resourceVersion` was unchanged over the next 60 s, and the controller logged 20 lines in a minute (`claude/artifacts/fx-29/slot-20261010T0200Z.txt`).
 - **PROD-11.1 (K1/K2/K3/K5):** the window-start replay works on Kubernetes, and a subset plan is refused by name.
 - **PROD-08.1a (K1–K6, K8(b), K9, K10):** CRDs, controller, API, console (complete vs sampled, screenshots) and the controller-rollback row.
 - **Also passed:** FX-21 (a multi-topic backup and restore on build `+logweir.2`), FX-24 and FX-24b (silent, slow-reader and ceiling probes), the backup and restore smoke, and FX-13.
