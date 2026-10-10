@@ -6659,7 +6659,7 @@ nothing created, nothing deleted):
 | the plan asks for complete verification, `sample.coverage: complete` (see "Complete verification is required" below) | `OriginalNameNeedsCompleteCoverage`, before any broker is asked anything |
 | the plan restores whole topics: it states no `restore.partitions` (see "Whole topics are required" below) | `OriginalNameNeedsWholeTopics`, before any broker is asked anything |
 | every restored name is absent on the target | "already exists" (the refusal every restore gets) |
-| the target is not the source cluster — every known source cluster id (the bound recovery point's verified receipt, measured at backup; else the allowlist file's `source_cluster_id`) differs from the target's — OR every broker reports `auto.create.topics.enable=false` (read from every broker with DescribeConfigs) | `OriginalNameAutoCreateEnabled`; `OriginalNameAutoCreateUnknown` when a broker does not report it (a refused read is exit 1). The source id counted is the bound point's VERIFIED receipt only: the allowlist file's `source_cluster_id` is unsigned runner input and never makes the target "another cluster". Brokers are the ones the cluster metadata lists at phase 0; one offline then is not read (the exclusive create below still refuses a name it creates) |
+| the target is not the source cluster — the source cluster id the bound recovery point's verified receipt measured at backup differs from the target's — OR every broker reports `auto.create.topics.enable=false` (read from every broker with DescribeConfigs) | `OriginalNameAutoCreateEnabled`; `OriginalNameAutoCreateUnknown` when a broker does not report it (a refused read is exit 1). The source id counted is the bound point's VERIFIED receipt only: the allowlist file's `source_cluster_id` is unsigned runner input and never makes the target "another cluster". Brokers are the ones the cluster metadata lists at phase 0; one offline then is not read (the exclusive create below still refuses a name it creates) |
 | somewhere was looked for a declarative owner (a Strimzi `KafkaTopic`, GitOps, Terraform) of a restored name, and none was found unless the plan chose the owner path; nothing the `KafkaTopic` resources file holds is dropped | `OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`, `OriginalNameOwnersInvalid`, `OriginalNameOwnerUnreadable` (a `KafkaTopic` whose topic cannot be read, one whose `namespace/name` is longer than the 256 characters an owner is recorded with, or a file holding no `KafkaTopic` at all unless it is the explicit empty `List`) |
 | the `LogAppendTime` probe (the one write phase 0 makes, only on a `LogAppendTime` broker) is created as `<topic_mapping_prefix>logweir-probe-<plan hash>`, never under an original name, and that name is free | `OriginalNameProbeUnusable` |
 
@@ -6699,26 +6699,84 @@ topic this run did not create (both modes). A `CreateTopics` answer that does
 not name exactly the topics asked is refused too (exit 1). **The Restore says
 so:** the runner's last line is `failure-reason=TargetTopicAppeared`, which
 the controller lifts onto `status.exitReason`, and the line before it names
-the topics, which it copies to `status.targetTopicsAppeared {appeared, left}`
-and into the `Failed` condition's message.
+the topics, which it copies to `status.targetTopicsAppeared` and into the
+`Failed` condition's message.
+
+**What a stopped creation step may have left: three lists.** Every stop of
+the step names what it knows, in the list that says exactly that much, on
+`status.targetTopicsAppeared`:
+
+| list | what the run knows | what every surface says |
+|---|---|---|
+| `appeared` | a mapped name someone ELSE created after phase 0: the look before the create showed it, or `CreateTopics` answered `TOPIC_ALREADY_EXISTS` for it | created by someone else; the restore wrote nothing into it |
+| `left` | a topic THIS run created: its own `CreateTopics` call answered success for that name | "created by this restore and left empty; remove it yourself once you have checked nothing writes to it" |
+| `unconfirmed` | a name this run ASKED for and got NO DEFINITE ANSWER about (the whole `CreateTopics` call failed, the name got no answer, or it got an error that is not "already exists"), which the cluster LISTED when the run looked again | "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it" |
+
+- **`unconfirmed` is never `left` and never `appeared`.** A client that gives
+  up before the broker's answer arrives has no answer, and the broker may
+  have applied the request; Kafka also goes on creating a topic whose request
+  it answered `REQUEST_TIMED_OUT`. The run cannot say whose such a topic is,
+  so it claims nothing: it lists the cluster once more (a read) and names
+  each asked name that is there. When it cannot list the cluster either,
+  `unconfirmedSeen` is `false`, EVERY name without a definite answer is
+  listed, and the sentence says "may exist now … look for it".
+- **A count beside each list** (`appearedCount`, `leftCount`,
+  `unconfirmedCount`): a list carries at most 100 names, and the condition's
+  message, the product API and the console say "and N more" when the bound
+  cut it. Each further name is one of the restore's mapped target topics, and
+  the runner's log names every one.
+- **The broker's own bound is below the client's.** The runner asks
+  `CreateTopics` with an operation timeout of 15 s inside its 20 s request
+  timeout (librdkafka's default would be 60 s), so a reachable broker answers
+  per name before the client gives up. That does not guarantee an answer (a
+  lost connection still fails the whole call), and a name answered
+  `REQUEST_TIMED_OUT` may still be created afterwards: both are what
+  `unconfirmed` is for. **One residual:** the look is one read at one moment,
+  so a topic the broker finishes creating AFTER it is not named. After any
+  `Failed` Restore whose creation step did not answer, list the plan's target
+  names on the cluster yourself.
+- **`status.newTopics` is exactly `left`** after a stopped creation step: what
+  the run's own answers say it created, never a name someone else created or
+  one it cannot account for. It is absent when the lists could not be read.
+
+**Where the names come from, and what that is worth.** The controller reads
+them from the runner's pod log, and only (a) from its LAST TWO lines, in the
+order the runner prints them (`target-topics-appeared=`, then
+`failure-reason=`, each a restore's own closed state beside exit 1), (b) from
+a line no longer than a genuine one (76 KB; a longer line is refused before
+it is parsed, and the read itself asks for the last 256 lines), and (c)
+keeping only names this Restore's own plan maps, with each count held to the
+number of names the plan maps. A block with no such name is dropped, and the
+condition then says the list could not be read. This build's runner prints
+every error text on one line, so no string of a plan, a broker or an object
+store can start a line of its log. **The names are shown only as the
+runner's log gives them: during an upgrade with an older runner image, check
+the list against the cluster before acting on it.** A runner built before
+that escape prints an error's text raw, and an error that ends with a plan's
+own string can end the log with a pair of lines the runner did not mean; the
+controller cannot tell those from the runner's own, so it shows them, held to
+the plan's names as above. Logweir itself never deletes a topic on the
+strength of the list.
 
 **Logweir never deletes a topic under an original name. Not one it created,
 and not after a lost race.** When the creation step stops after this run has
 created a topic — another name lost the race, the broker refused another name,
-or a created topic was not served in time — every topic the run created is
-LEFT on the cluster, empty, and NAMED: on the runner's
-`target-topics-appeared=` line, in `status.targetTopicsAppeared.left`, in the
-`Failed` condition's message, in the product API's Restore view
-(`targetTopicsAppeared`, with `leftInstruction`) and at the top of the
-Restore's page in the console, each with the same sentence: "created by this
-restore and left empty; remove it yourself once you have checked nothing
-writes to it". `status.exitReason` is `TargetTopicAppeared` when a name lost
-the race and `CreatedTopicsLeft` when creation stopped for another reason.
+or a created topic was not served in time — every topic the run KNOWS it
+created is LEFT on the cluster, empty, and NAMED (`left`), and every topic it
+asked for and cannot account for is left and named too (`unconfirmed`): on
+the runner's `target-topics-appeared=` line, in
+`status.targetTopicsAppeared`, in the `Failed` condition's message, in the
+product API's Restore view (`targetTopicsAppeared`, with `leftInstruction`
+and `unconfirmedInstruction`) and at the top of the Restore's page in the
+console, each list with its own sentence. `status.exitReason` is
+`TargetTopicAppeared` when a name lost the race and `CreatedTopicsLeft` when
+creation stopped for another reason and left a topic of either kind.
 The reason nothing is cleaned up: Kafka has no conditional delete, so a record
 a producer wrote between any "it is empty" read and the delete would be lost
 with the topic, under a production name. An empty topic left behind is
 recoverable; that is not. A name that appeared is never touched either. To
-retry, check that nothing writes to each left topic, delete it
+retry, check that nothing writes to each `left` topic and what each
+`unconfirmed` topic holds and who writes to it, delete it yourself
 (`kafka-topics.sh --delete --topic <name>`), and create a new `Restore`.
 Teardown runs in scratch mode only, phase 9 never hands an identity mapping to
 the deleter, and the runner's deleter refuses every source topic's own name

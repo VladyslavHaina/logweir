@@ -567,11 +567,20 @@ exists; either way the run stops before the engine starts, exit 1,
 `failure-reason=TargetTopicAppeared`. A topic this run had already created
 when the creation step stopped — for that race, or for any other reason
 (`failure-reason=CreatedTopicsLeft`) — is LEFT in place, empty, and named on
-the line before it, `target-topics-appeared={"appeared":[…],"left":[…]}`:
+the line before it,
+`target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],…}`:
 "created by this restore and left empty; remove it yourself once you have
-checked nothing writes to it". No code path deletes a topic under an original
-name: Kafka has no conditional delete, so a record a producer wrote between
-any check and the delete would be lost with it.
+checked nothing writes to it". A name the run asked for and got no definite
+answer about (the whole call failed, or an error that is not "already
+exists") is never called its own: if the cluster lists it when the run looks
+once more, it is named as `unconfirmed` ("exists now … check what it holds
+and who writes to it before you remove it"). Each list carries at most 100
+names and its full count, and the error message names every one. No code path
+deletes a topic under an original name: Kafka has no conditional delete, so a
+record a producer wrote between any check and the delete would be lost with
+it. Those two lines are the last two the runner prints, and every error text
+it prints is on one line, so nothing a plan or a broker says can start a line
+of its output.
 
 **It is inside `plan_hash`.** A plan without the block serialises exactly as
 before.

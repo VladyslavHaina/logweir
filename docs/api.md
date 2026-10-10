@@ -1006,21 +1006,49 @@ other document stays 2.0.0, byte for byte
 `CreatedTopicsLeft`):
 
 ```json
-{"targetTopicsAppeared": {"appeared": ["payments"], "left": ["orders"],
-  "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it"}}
+{"targetTopicsAppeared": {
+  "appeared": ["payments"], "left": ["orders"], "unconfirmed": ["ledger"],
+  "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 1, "unconfirmedSeen": true,
+  "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it",
+  "unconfirmedInstruction": "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it"}}
 ```
 
-`appeared` are mapped target names someone else created after the restore was
-admitted; the restore wrote nothing into them. `left` are topics THIS restore
-created before it stopped and left in place, empty: Logweir never deletes a
-topic under a name it may not own, so the operator removes each one, and
-`leftInstruction` is the one sentence that says so (the runner, the Restore's
-status and the console say the same words). Each list holds at most 100 topic
-names. Additive; absent on every other Restore. Beside it, `newTopics` is
-still the approved plan's mapped target names (it is derived from the plan on
-every terminal Restore, never observed on the cluster): for a stopped
-creation step, `left` is what this restore created and `appeared` is what it
-did not.
+- `appeared` are mapped target names someone else created after the restore
+  was admitted; the restore wrote nothing into them.
+- `left` are topics THIS restore created before it stopped and left in place,
+  empty: Logweir never deletes a topic under a name it may not own, so the
+  operator removes each one, and `leftInstruction` is the one sentence that
+  says so (the runner, the Restore's status and the console say the same
+  words).
+- `unconfirmed` are names the restore ASKED the cluster to create and cannot
+  account for: it got no definite answer (the whole request failed, or the
+  name was answered with an error that is not "already exists"). They are
+  never in `left`, which claims ownership, nor in `appeared`.
+  `unconfirmedSeen: true` says the runner listed the cluster after the stop
+  and saw each one; `false` says it could not list the cluster, and
+  `unconfirmedInstruction` then reads "may exist now … look for it". Both are
+  present only beside an `unconfirmed` name.
+- `appearedCount`, `leftCount` and `unconfirmedCount` say how many names each
+  list has in all. A list holds at most 100 topic names; a count above its
+  length means the bound cut it, and every further name is one of the
+  restore's mapped target topics.
+
+The names are what the runner's log gave the controller, held to the
+restore's own mapped target names
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)
+says what that is worth with an older runner image). Additive; absent on
+every other Restore. Beside it, **`newTopics`** is exactly `left` for such a
+Restore: what the run's own answers say it created, never a name someone else
+created or one it cannot account for (and empty when the lists could not be
+read). On a run that reached its restore `newTopics` is the topics it
+created; on one refused or failed before the creation step it is the names
+its plan maps, none of which it created.
+
+**The approvals view reads an authorization document v2 through the typed
+parser.** `approvalSubject` on an `Approval` is `originalName` or `ordinary`
+only for a document every enforcing reader accepts; a v2 document they refuse
+— `approvalSubject` under `formatVersion` 2.0.0, an unknown subject, an
+unknown field — is shown as `unknown`.
 
 ### The restore's signed time basis (FX-8)
 

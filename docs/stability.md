@@ -900,17 +900,57 @@ into topics that do not exist, created by the run itself, exclusively
 - **A stopped creation step is named on exit 1, and nothing is deleted.** The
   runner's last stdout line is `failure-reason=TargetTopicAppeared` (a mapped
   name appeared after phase 0) or `failure-reason=CreatedTopicsLeft` (creation
-  stopped for another reason after this run had created a topic) — both on the
-  closed `logweir_core::guard::FAILURE_REASONS` list, paired with exit 1 — and
-  the line before it is `target-topics-appeared={"appeared":[…],"left":[…]}`
-  (legal topic names only, at most 100 per list). A controller lifts both
-  onto `status.exitReason` and `status.targetTopicsAppeared`; an older one
-  ignores them and reports a plain exit 1. **No code path deletes a topic
-  under an original name**: a topic this run created before it stopped is
-  left in place, empty, and named with what to do ("created by this restore
-  and left empty; remove it yourself once you have checked nothing writes to
-  it"). Kafka has no conditional delete, so any cleanup could lose a record a
-  producer wrote between the check and the delete.
+  stopped for another reason and left a topic this run created, or one it
+  asked for and cannot account for), and the line before it is
+  `target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],
+  "appearedCount":n,"leftCount":n,"unconfirmedCount":n}` (plus
+  `"unconfirmedSeen"` beside an unconfirmed name): legal topic names only, at
+  most 100 per list with the list's full count beside it, and the first two
+  keys the ones every earlier runner wrote. One definition serves the writer
+  and the reader, `logweir_core::creation_stop`.
+  - **The closed set of `failure-reason=` states is per kind**
+    (`logweir_core::guard::RESTORE_FAILURE_REASONS`: the two above, beside
+    exit 1; `BACKUP_FAILURE_REASONS`: RECEIPT-DUP's two). A Backup's log can
+    no longer lift a restore-only state onto a `Backup`, nor a Restore's a
+    backup-only one.
+  - **A controller lifts the pair only from the log's last two non-empty
+    lines**, in that order, keeps only names its own Restore's plan maps
+    (counts held to the plan's size), refuses a `target-topics-appeared=`
+    value longer than 76 KB before parsing it, and reads the last 256 lines
+    of the log. An older controller reads `appeared` and `left` from the same
+    line and ignores the rest; one older still reports a plain exit 1.
+  - **The runner prints every error text on one line**
+    (`logweir::exit::one_line`: every line-breaking code point becomes a
+    visible escape), so no plan-chosen or broker-chosen string can start a
+    line a controller reads by key. **What is NOT guaranteed:** the place
+    rule cannot tell the runner's own last lines from text an OLDER runner
+    image was made to print last, since stdout and stderr reach the pod log
+    as one stream. With such an image the names are shown as its log gives
+    them, held to the plan's own names; an operator checks them against the
+    cluster before acting ([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+    The Kafka client's own stderr logging and the other lines a controller
+    reads by key (`refusal-reason=`, the evidence keys) are not covered by
+    this row.
+  - **Every stop of the step names what it may have left.** `left` is exactly
+    what the run's own `CreateTopics` answers say it created. A name it asked
+    for without a definite answer (the whole call failed, no answer for the
+    name, or an error other than "already exists") that the cluster lists
+    when the run looks again is `unconfirmed`: "exists now; this restore
+    asked the cluster to create it and got no definite answer, so it may be
+    this restore's or someone else's: check what it holds and who writes to
+    it before you remove it" — never `left`, never `appeared`. When the run
+    cannot list the cluster either, every such name is listed and the
+    sentence says "may exist now". The look is one read: a topic the broker
+    finishes creating after it is not named.
+  - **No code path deletes a topic under an original name**: a topic this run
+    created before it stopped is left in place, empty, and named with what to
+    do ("created by this restore and left empty; remove it yourself once you
+    have checked nothing writes to it"). Kafka has no conditional delete, so
+    any cleanup could lose a record a producer wrote between the check and
+    the delete. An inventory row over every source file of the workspace
+    (`crates/logweir/tests/no_topic_delete_inventory.rs`) pins that the one
+    broker delete call is the scratch-scoped deleter's and that the real
+    creator names none.
 - **An older runner refuses an original-name plan**: it ignores the
   `original_name` block and sees an empty prefix, which maps every topic onto
   itself, so its guard refuses the plan at phase 0 (exit 3) before anything is
@@ -918,7 +958,8 @@ into topics that do not exist, created by the run itself, exclusively
   runner refuses the plan the same way.
 - **The `Restore` CRD** gains `spec.target.topicNaming.originalName`, allowed
   only in `newTopic` mode with an empty prefix and only with `spec.coverage:
-  complete` (two CEL rules), and `status.targetTopicsAppeared`; rolling the
+  complete` (two CEL rules), and `status.targetTopicsAppeared` (three lists,
+  a count beside each, `unconfirmedSeen`; every field additive); rolling the
   CRDs back prunes them from stored objects, whose plans are unchanged and are
   then refused as above.
 - **What stays refused**: a name that exists, in any mode; an identity mapping

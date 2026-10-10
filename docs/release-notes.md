@@ -1768,6 +1768,15 @@ by the product API (`original_name_requires_complete`), and by the console,
 which selects complete coverage for such a restore, locks the choice and says
 why. A sampled check can pass a record another producer wrote into the
 restored name; the complete check names it.
+**It restores whole topics.** A plan that carries the block and
+`restore.partitions` (item 51) is refused by name,
+`OriginalNameNeedsWholeTopics`: by the runner before it dials anything (exit
+3), by `drill approve`, by both readiness checks and by the controller before
+any Job (there is no CEL rule for it: a `Restore` declares no partitions).
+The run would create each topic under its own name with every partition and
+fill only the selected ones, and the rest could never be restored under that
+name afterwards. A stated window, a start or an end, stays allowed; restore a
+subset under a prefix.
 **What the runner proves first** (exit 3, nothing written): every restored name
 is absent; the target is another cluster than the archive's source (the bound
 point's VERIFIED receipt only; the allowlist file's `source_cluster_id` never
@@ -1790,28 +1799,49 @@ created when its creation step stopped is left in place, empty, and named
 ("created by this restore and left empty; remove it yourself once you have
 checked nothing writes to it") on the runner's `target-topics-appeared=`
 line, on the Restore (`status.exitReason` `TargetTopicAppeared` or
-`CreatedTopicsLeft`, `status.targetTopicsAppeared {appeared, left}`, the
-`Failed` message), in the product API's Restore view (`targetTopicsAppeared`)
-and first on the Restore's page in the console. Nothing is written into a
-topic the run did not create. A producer still writing while the restore runs
+`CreatedTopicsLeft`, `status.targetTopicsAppeared`, the `Failed` message), in
+the product API's Restore view (`targetTopicsAppeared`) and first on the
+Restore's page in the console. **Three lists, each saying only what the run
+knows:** `appeared` (someone else created the name), `left` (this run's own
+`CreateTopics` answer says it created the topic) and `unconfirmed` (the run
+asked for the name and got no definite answer — the whole call failed, or an
+error that is not "already exists" — and the cluster lists it when the run
+looks once more: "exists now … it may be this restore's or someone else's:
+check what it holds and who writes to it before you remove it"; when the
+cluster cannot be listed, every such name is listed as "may exist now"). A
+list carries at most 100 names with its full count beside it, and every
+surface says "and N more" when the bound cuts. The names are read from the
+runner's last two log lines only and held to the Restore's own mapped target
+names, and the runner prints every error text on one line, so no string of a
+plan or a broker can start a line of its log; with a runner image OLDER than
+the controller, check the list against the cluster before acting on it
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+`status.newTopics` is exactly `left` after such a stop. Nothing is written
+into a topic the run did not create. A producer still writing while the restore runs
 is detected and named, not prevented: the complete verification counts each of
 its records as unexpected, names it by its target offset, and the run signs
 `fail-integrity`. The scorecard is format
 **1.8.0** with `target.original_name` (the approval subject and mode, the
 typed confirmation, the cluster condition, the owners, the resources file's
-digest). Both readers check it (arms ON-1 to ON-13, `verify_scorecard.py`
-1.28.0; ON-13 refuses the block beside a sampled verification) and print two
+digest). Both readers check it (arms ON-1 to ON-14, `verify_scorecard.py`
+1.28.0; ON-13 refuses the block beside a sampled verification, ON-14 beside
+a partition subset, so no 2.x scorecard carries it) and print two
 `original name:` lines, and `logweir drill show` names
-it in its footer. The readiness check no longer refuses such a plan as an
+it in its footer. Its schema is `schemas/logweir-drill-scorecard-1.8.0.json`,
+format 1's newest minor; the 2.0.0 file is unchanged. The readiness check no longer refuses such a plan as an
 accidental identity map.
 **Do:** nothing for any other restore. Apply the `Restore` CRD before the
 controller rolls, and roll the controller, the runner, the product API and the
 console together. Stop every producer of a restored name before such a
 restore, and repoint consumers after it (consumer positions are not copied).
-Write such a plan with `sample.coverage: complete`. If a Restore ends
-`TargetTopicAppeared` or `CreatedTopicsLeft`, read
-`status.targetTopicsAppeared.left`, check that nothing writes to each topic it
-names, delete it yourself, and create a new Restore. The controller does not
+Write such a plan with `sample.coverage: complete` and without
+`restore.partitions`. If a Restore ends `TargetTopicAppeared` or
+`CreatedTopicsLeft`, read `status.targetTopicsAppeared`: check that nothing
+writes to each `left` topic, and what each `unconfirmed` topic holds and who
+writes to it, delete it yourself, and create a new Restore. After any
+`Failed` original-name Restore whose creation step did not answer, list the
+plan's target names on the cluster yourself: a topic the broker finished
+creating after the run looked again is not named. The controller does not
 list `KafkaTopic` resources (PROD-05.1a), so a `Restore` relies on the plan's
 owner statement or the receipt.
 **Scope:** runner rows over fakes for every condition and its refusal, the
@@ -1820,16 +1850,27 @@ already-exists answer), the teardown rail and the subject check; controller
 rows for admission step 4b, the declaration, the sampled refusal, the document
 version and the standing refusal; API rows for the create, the identity
 mapping, the signed subject and its 2.1.0 document, the legacy route, the
-typed confirmation, the strict namespace, the sampled refusal and the
-left-topics view; both verifiers over nineteen corpus cases and the parity
-script; the console's golden plan, parsed by the runner, its typed-names
-rows, the locked coverage choice and the left-topics block. Each of the runner's three
+typed confirmation, the strict namespace, the sampled refusal, the
+left-topics view with its third list and counts, and the approvals view read
+through the typed parser; both verifiers over twenty-one corpus cases and the
+parity script; the console's golden plan, parsed by the runner, its
+typed-names rows, the locked coverage choice and the left-topics block (a
+hostile name in each list). The whole-topics refusal has a row at every
+boundary beside its controls (the same plan without the subset, from a
+window start, and the subset under a prefix). Each of the runner's three
 approval-subject call sites has a CI-run row that fails without it (the
 binary at startup, the orchestrator fixture before phase 0 and after phase 1),
 and so does `drill approve`'s refusal; a stopped creation step has rows for
 the topic it leaves (still listed by the broker double, named, nothing
-deleted) and a source-text row that fails if any delete enters the creation
-step; the lost race is named on the Restore by a controller row. Compose rows on slot 1
+deleted), for a call that fails after the broker applied it, a name answered
+with an error and created anyway, a cluster that cannot be listed afterwards
+and a list of more than 100; a source-text row that fails if any delete
+enters the creation step, and an inventory row over every source file of the
+workspace (the one broker delete call is the scratch-scoped deleter's, and
+the real creator names none); the lost race is named on the Restore by a
+controller row, and controller rows hold the names to the plan, to the log's
+last two lines and to a per-kind set of states. A plan string carrying line
+breaks is run through the real binary and starts no line of its output. Compose rows on slot 1
 (`COMPOSE_PROFILES=auth,cluster2,autocreate`; the new `autocreate` profile is
 a one-broker cluster that auto-creates topics), each against the brokers: a
 deleted topic recovered under its name on a second cluster (30 of 30
@@ -1850,8 +1891,9 @@ the complete verification named all six by target offset and the run signed
 restore of two topics whose second name the broker refused printed
 `failure-reason=CreatedTopicsLeft`, named the first as left, and the broker
 still listed it, empty. Each condition, the exclusive create, the subject
-check, the typed confirmation, the required coverage, the document version,
-the race's naming and the no-delete rule has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
+check, the typed confirmation, the required coverage, the whole-topics rule,
+the document version, the race's naming, the three lists and the no-delete
+rule has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
 `logweir` built before this item) accept the live 1.8.0 scorecards and print
 nothing about the original name. Not proven live: a
 real Strimzi operator, and the PoC upgrade.
@@ -1861,7 +1903,11 @@ controller ignores `topicNaming.originalName` and its runner refuses the same
 way; a reader of an authorization document v2 built before this item refuses
 every 2.1.0 document, which carries `approvalSubject` or
 `originalNameConfirmation` (measured with a runner built from main); an older
-controller reads a stopped creation step as a plain exit 1. Rolling the CRD back prunes
+controller reads a stopped creation step as a plain exit 1, or (one built
+during this item's review) its two lists without the third or the counts. An
+older RUNNER under this controller prints error text raw: its stopped
+creation step is still named, and the names shown are what its log gives, so
+check them against the cluster. Rolling the CRD back prunes
 `topicNaming.originalName` and `status.targetTopicsAppeared` from stored
 objects, whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
 under older readers, which ignore the block.
