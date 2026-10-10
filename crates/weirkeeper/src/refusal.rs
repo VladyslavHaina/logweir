@@ -48,6 +48,7 @@
 //! the result to their patch builders as `Some`. Every other exit code takes
 //! the read it always took and builds the message it always built.
 
+use futures::io::AsyncRead;
 use futures::AsyncReadExt as _;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
@@ -229,6 +230,23 @@ pub fn interpret(bytes: &[u8]) -> RefusalLog {
     RefusalLog { body, reason }
 }
 
+/// At most [`READ_CAP_BYTES`] bytes off `reader`, and not one more is asked
+/// of it.
+///
+/// THE SECOND BOUND, AND THE ONE THIS PROCESS ENFORCES ITSELF. `limitBytes` is
+/// a request; this is what stops a server that ignored it, or a stream that
+/// never ends, from growing a buffer in a controller that serves every
+/// namespace. The rest of the stream is dropped unread.
+///
+/// # Errors
+///
+/// The reader's own error.
+pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(READ_CAP_BYTES).read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
 /// Read a finished exit-3 run's bounded log tail and say what it means.
 ///
 /// # Errors
@@ -282,21 +300,19 @@ pub async fn read(pods: &Api<Pod>, namespace: &str, pod_name: &str) -> RefusalLo
             return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
         }
     };
-    let mut bytes = Vec::new();
-    if let Err(error) = Box::pin(stream)
-        .take(READ_CAP_BYTES)
-        .read_to_end(&mut bytes)
-        .await
-    {
-        warn!(
-            namespace,
-            pod = pod_name,
-            %error,
-            "the refused run's pod log stream broke; the exit code is recorded and the condition \
-             says the reason could not be read. It is not read again"
-        );
-        return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
-    }
+    let bytes = match read_capped(Box::pin(stream)).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn!(
+                namespace,
+                pod = pod_name,
+                %error,
+                "the refused run's pod log stream broke; the exit code is recorded and the \
+                 condition says the reason could not be read. It is not read again"
+            );
+            return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
+        }
+    };
     let log = interpret(&bytes);
     match &log.reason {
         RunnerReason::Unreadable => debug!(
@@ -388,6 +404,30 @@ mod tests {
         let cut = interpret(body.as_bytes());
         assert_eq!(cut.reason, RunnerReason::TailOverBound);
         assert!(cut.body.is_empty());
+    }
+
+    /// The reader is asked for the bound plus one byte and for nothing after
+    /// it: a source eight times that size is left with seven eighths unread.
+    ///
+    /// KILLS: reading the stream to its end (the source is drained, and the
+    /// buffer is eight times the bound).
+    #[tokio::test]
+    async fn the_stream_is_read_to_the_bound_and_no_further() {
+        let cap = REFUSAL_LOG_LIMIT_BYTES as u64 + 1;
+        let mut source = futures::io::repeat(b'x').take(8 * cap);
+        let bytes = read_capped(&mut source)
+            .await
+            .expect("a repeat never fails");
+        assert_eq!(bytes.len() as u64, cap);
+        assert_eq!(source.limit(), 7 * cap, "the rest was never pulled");
+        assert_eq!(
+            interpret(&bytes).reason,
+            RunnerReason::TailOverBound,
+            "and what was read is a cut body, from which nothing is taken"
+        );
+        // A source under the bound is read whole.
+        let mut small = futures::io::repeat(b'x').take(1000);
+        assert_eq!(read_capped(&mut small).await.expect("reads").len(), 1000);
     }
 
     #[test]
