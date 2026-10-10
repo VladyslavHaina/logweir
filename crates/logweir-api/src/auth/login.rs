@@ -93,7 +93,8 @@ fn redirect(location: &str, cookies: &[String]) -> Response {
 }
 
 /// The most redeemed sign-in states one console process remembers (FX-13a):
-/// 65,536 entries of a 128-bit digest and an expiry, about 3 MiB at most.
+/// 65,536 entries of a 128-bit digest and an expiry, about 4 MiB at most
+/// (a hash set of 131,072 buckets and a deque of 65,536 32-byte slots).
 ///
 /// A BOUND THAT NEVER REFUSES. When the record is full, the OLDEST entry is
 /// forgotten to make room ([`Redemption::First`] says so), never the new
@@ -137,10 +138,20 @@ struct Record {
 /// lives until its login state could no longer open (`iat` plus
 /// [`session::LOGIN_STATE_SECONDS`]); after that the cookie is refused before
 /// this record is asked, so forgetting it loses nothing.
-#[derive(Debug)]
 pub struct UsedStates {
     capacity: usize,
     record: Mutex<Record>,
+}
+
+// `Debug` is HAND-WRITTEN: the bound and the count, never the up to 65,536
+// digests a derived one would print into any `{:?}` that reached it.
+impl std::fmt::Debug for UsedStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UsedStates")
+            .field("capacity", &self.capacity)
+            .field("len", &self.len())
+            .finish()
+    }
 }
 
 impl Default for UsedStates {
@@ -627,6 +638,7 @@ mod tests {
         let state = "a-state-of-forty-three-characters-xxxxxxxxx";
         used.redeem(state, T0 + 600, T0);
         let shown = format!("{used:?}");
+        assert_eq!(shown, "UsedStates { capacity: 4, len: 1 }");
         assert!(!shown.contains(state), "{shown}");
         assert_ne!(UsedStates::digest(state), UsedStates::digest("another"));
     }

@@ -1861,7 +1861,7 @@ exchange then fails (a stalled or refusing provider, a session too large):
 starting again at `/auth/login` is the retry.
 
 **The record is bounded and never refuses a sign-in.** It holds at most
-65,536 states per process (a 128-bit digest and an expiry each, about 3 MiB),
+65,536 states per process (a 128-bit digest and an expiry each, about 4 MiB),
 and each is forgotten once its login state could no longer open (`iat` plus
 600 s). When it is full of live entries, the **oldest is forgotten** to make
 room — never is a new sign-in refused, because a full record that refused
