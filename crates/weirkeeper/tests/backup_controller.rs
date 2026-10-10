@@ -13240,6 +13240,127 @@ mod evidence_fetch_job {
         assert!(last["windowCovered"].is_null());
     }
 
+    /// **FX-33's acceptance, through the relay: the receipt of a backup of
+    /// 500 topics with full recorded configuration, read by an evidence-fetch
+    /// Job, is VERIFIED `Valid`** — and the window, the record count and the
+    /// capture it carries land in the status. Before FX-33 a relay carried at
+    /// most 1 MiB, this receipt is 1.6 MB, and the verdict was `NotAttempted`
+    /// for ever.
+    ///
+    /// The receipt is `logweir_core::topic_budget`'s reference, and the
+    /// sidecar is the committed one `crates/logweir/tests/topic_budget.rs`
+    /// holds to the signer.
+    ///
+    /// KILLS: the receipt relayed under the 1 MiB cap again; the relayed
+    /// receipt's facts taken from something other than its own bytes.
+    #[tokio::test]
+    async fn fx33_a_relayed_receipt_of_500_topics_is_valid_with_its_window() {
+        use logweir_core::topic_budget::{reference_receipt, ReferenceShape};
+        let document = reference_receipt(500, &ReferenceShape::FULL);
+        let r = logweir_core::det_json::to_deterministic_json(&document).expect("serialises");
+        let s = read("crates/weirkeeper/tests/fixtures/topic-budget/reference-500.sig");
+        assert!(
+            r.len() > 1 << 20,
+            "CONTROL: this receipt is over the 1 MiB a relay carried before"
+        );
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let mut backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
+        backup.status.as_mut().expect("status").backup_id = Some(document.backup_id.clone());
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                Some(&r),
+                Some(&s),
+            ),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("Valid"), "{last}");
+        assert_eq!(verification["matchedKeyId"], json!(FIXTURE_KEY_ID));
+        assert_eq!(
+            last["windowCovered"],
+            json!({"fromMs": document.covered.from_ms, "toMs": document.covered.to_ms})
+        );
+        assert_eq!(last["records"], json!(500_i64 * 123_456));
+        assert_eq!(
+            last["capture"]["startedAt"],
+            json!(document
+                .started_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        );
+        assert_eq!(
+            last["evidence"]["observation"]["presence"],
+            json!("Complete")
+        );
+        let (state, _, _) = condition_named(&last, "Verified").expect("Verified");
+        assert_eq!(state, "True");
+    }
+
+    /// **A relay carrying more than a receipt may be is FINAL**: one byte
+    /// over the receipt cap is `NotAttempted` naming the receipt's key and
+    /// the cap, with no retry scheduled and no window — the object will not
+    /// shrink, so three more Jobs are not started to relay the same bytes.
+    /// The pod's own result document says "present, not truncated"; the cap
+    /// is the controller's, applied to what arrived.
+    ///
+    /// KILLS: the controller trusting what the pod declares or what the plan
+    /// asked; an over-cap relay reported as a relay that failed (retried).
+    #[tokio::test]
+    async fn fx33_a_relay_over_the_receipt_cap_is_final_and_is_never_verified() {
+        let cap = usize::try_from(logweir_core::topic_budget::MAX_RECEIPT_BYTES).expect("fits");
+        let r = vec![b' '; cap + 1];
+        let s = sidecar();
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                Some(&r),
+                Some(&s),
+            ),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("NotAttempted"), "{last}");
+        let detail = verification["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(RECEIPT_KEY) && detail.contains(&format!("{cap}-byte cap")),
+            "the sentence names the receipt and the receipt cap: {detail}"
+        );
+        assert!(
+            last["evidence"]["observation"]["retryAfter"].is_null(),
+            "the object will not shrink: no retry is scheduled: {last}"
+        );
+        assert!(posts(&bodies, "/jobs").is_empty(), "and no other Job");
+        for field in ["windowCovered", "records", "capture"] {
+            assert!(last[field].is_null(), "{field} from bytes nobody read");
+        }
+    }
+
     /// **A JOB THAT ENDS WITHOUT A RELAY IS `NotAttempted` NAMING WHY**, is
     /// retried at +1 m, and is never `Valid`; the last attempt says none
     /// remain.
@@ -15029,4 +15150,82 @@ async fn fx19_a_terminal_backup_whose_job_is_being_collected_is_not_rejudged() {
         written.iter().any(|b| b.contains("NoExitCode")),
         "without the terminal guard the same Job IS judged a crash: {written:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FX-33: a backup names at most `topic_budget::MAX_BACKUP_TOPICS` topics
+// ---------------------------------------------------------------------------
+
+mod fx_33 {
+    use super::*;
+    use logweir_core::topic_budget::{MAX_BACKUP_TOPICS, SELECTION_TOO_LARGE};
+    use weirkeeper::controllers::backup::{desired_execution_inputs, BackupError};
+    use weirkeeper::crds::kafka_cluster::KafkaCluster;
+
+    fn naming(topics: usize) -> Backup {
+        let mut b = backup();
+        b.spec.topics = (0..topics).map(|i| format!("topic-{i:05}")).collect();
+        b
+    }
+
+    /// **A `Backup` naming more topics than one backup may is refused before
+    /// any Job, by name — and one naming exactly the maximum freezes.** The
+    /// freeze refuses `SelectionTooLarge` with the runner's own sentence
+    /// (both numbers, the reason, the remedy) and says that nothing is left
+    /// out; the run policy refuses `spec.topics`, which is what makes a
+    /// `BackupSchedule` `Ready=False` and the product API answer 422.
+    ///
+    /// This is what an object created BEFORE the upgrade does: it was
+    /// admitted when the controller's own bound was 5,000, and its next run
+    /// is refused here instead of writing a receipt nothing can read.
+    ///
+    /// KILLS: the count refusal removed at the freeze boundary (a plan is
+    /// frozen for 1,001 topics); removed from the run policy (a schedule
+    /// admits a policy every run of which is refused); the selection
+    /// truncated to fit.
+    #[test]
+    fn a_backup_naming_more_than_the_maximum_is_refused_before_any_job() {
+        let cluster: KafkaCluster =
+            serde_json::from_str(&kafka_cluster_json()).expect("the fixture is a KafkaCluster");
+        let at = naming(MAX_BACKUP_TOPICS);
+        let frozen = desired_execution_inputs(&at, &cluster).expect("the maximum freezes");
+        assert_eq!(
+            frozen
+                .inputs
+                .selection
+                .as_ref()
+                .map(|s| s.resolved_topic_count),
+            Some(i64::try_from(MAX_BACKUP_TOPICS).unwrap()),
+            "every one of them is frozen"
+        );
+        assert!(weirkeeper::policy::validate_run_policy(&at.spec).is_ok());
+
+        let over = naming(MAX_BACKUP_TOPICS + 1);
+        match desired_execution_inputs(&over, &cluster) {
+            Err(BackupError::Refused(state, message)) => {
+                assert_eq!(state, "SelectionTooLarge", "{message}");
+                for part in [
+                    SELECTION_TOO_LARGE,
+                    &format!("names {} topics", MAX_BACKUP_TOPICS + 1),
+                    &format!("at most {MAX_BACKUP_TOPICS} may be named"),
+                    "Split the topics across backups",
+                    "No runner Job is created",
+                    "no topic is left out",
+                ] {
+                    assert!(message.contains(part), "`{part}` is not in: {message}");
+                }
+            }
+            other => panic!(
+                "{} topics must be refused: {:?}",
+                MAX_BACKUP_TOPICS + 1,
+                other.map(|f| f.sha256)
+            ),
+        }
+        let errs = weirkeeper::policy::validate_run_policy(&over.spec).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "spec.topics" && e.message.starts_with(SELECTION_TOO_LARGE)),
+            "{errs:?}"
+        );
+    }
 }

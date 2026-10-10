@@ -1751,25 +1751,34 @@ async fn evidence_fetch_pass(
     let request = crate::evidence_fetch::Request {
         payload_key: payload_key.clone(),
         sidecar_key: sidecar_key.clone(),
+        // FX-33: what this fetch is FOR, which decides how much of it the
+        // controller will hold (`Request::payload_cap`).
+        payload_type,
     };
     let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
     let mode = destination
         .and_then(|d| crate::evidence_fetch::grant_mode(&d.grant))
         .map(str::to_string)
         .or(stored_mode);
-    let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
-        client,
-        namespace,
-        owner: &owner,
-        attempt,
-        request: &request,
-        destination,
-        unresolved: unresolved.as_deref(),
-        checks: &checks,
-        policy_digest,
-        image: runner,
-        now,
-    })
+    // FX-33: the relay's reservation out of the controller's read budget,
+    // held until this function has written its verdict and returns.
+    let mut relay_hold = crate::evidence_fetch::RelayHold::new();
+    let step = crate::evidence_fetch::advance(
+        &crate::evidence_fetch::Inputs {
+            client,
+            namespace,
+            owner: &owner,
+            attempt,
+            request: &request,
+            destination,
+            unresolved: unresolved.as_deref(),
+            checks: &checks,
+            policy_digest,
+            image: runner,
+            now,
+        },
+        &mut relay_hold,
+    )
     .await
     .map_err(BackupError::Api)?;
 
@@ -1878,11 +1887,15 @@ async fn evidence_fetch_pass(
                 }
                 Relayed::Both { payload, sidecar } => {
                     let fetched = sha256_prefixed(&payload);
-                    let document = serde_json::from_slice::<Value>(&payload).ok();
-                    let claimed_id = document
-                        .as_ref()
-                        .and_then(|d| d.get("backup_id"))
-                        .and_then(Value::as_str);
+                    // FX-33: FOLDED, never parsed into a tree. A relayed
+                    // receipt may be as large as the relay carries
+                    // (`MAX_EVIDENCE_PAYLOAD_BYTES`), and a `Value` of it
+                    // would be up to 37 times that, in this shared process,
+                    // in async code under no budget. The five facts read
+                    // below are folded from the bytes by the rules the
+                    // `Value` readers had (`logweir_core::receipt_facts`).
+                    let document = logweir_core::receipt_facts::ReceiptFacts::fold(&payload);
+                    let claimed_id = document.as_ref().and_then(|d| d.backup_id.as_str());
                     let run_id = status
                         .and_then(|s| s.backup_id.clone())
                         .unwrap_or_else(|| plan_backup_id(backup));
@@ -1925,17 +1938,17 @@ async fn evidence_fetch_pass(
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
-                                if let Some((from_ms, to_ms)) = covered_from_receipt(doc) {
+                                if let Some((from_ms, to_ms)) = doc.covered {
                                     facts.insert(
                                         "windowCovered".to_string(),
                                         window_covered(from_ms, to_ms),
                                     );
                                 }
                                 if result.is_pass() {
-                                    if let Some(records) = records_from_receipt(doc) {
+                                    if let Some(records) = doc.records {
                                         facts.insert("records".to_string(), json!(records));
                                     }
-                                    if let Some((started, finished)) = capture_from_receipt(doc) {
+                                    if let Some((started, finished)) = doc.capture() {
                                         facts.insert(
                                             "capture".to_string(),
                                             json!({ "startedAt": started, "finishedAt": finished }),
@@ -2561,7 +2574,13 @@ pub fn unobserved_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<Arch
 /// that are decided together, rather than two hops on and off the runtime.
 ///
 /// **FX-31: the sidecar's presence is a `HEAD`, and the receipt is read
-/// under `caps::CONTROLLER_DOCUMENT`.** Presence needs no byte of the
+/// under the controller's receipt cap** (`caps::CONTROLLER_RECEIPT` since
+/// FX-33: the largest receipt Logweir writes, and the cap `verify_evidence`
+/// reads the same document under). **FX-33: and it is FOLDED, not parsed
+/// into a `serde_json::Value`** — the window, the record sum and the two
+/// instants are read from the bytes as they stream past
+/// (`logweir_core::receipt_facts`), by the rules [`covered_from_receipt`],
+/// [`records_from_receipt`] and [`capture_from_receipt`] state. Presence needs no byte of the
 /// sidecar, and reading a whole object to discard it is exactly the unbounded
 /// read FX-31 ends: a tenant's multi-gigabyte object at the sidecar key cost
 /// this shared process its whole size, on every pass and every restart. The
@@ -2584,14 +2603,14 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         return None;
     }
     // Out of the controller's one read budget (FX-31 review F2): the receipt
-    // and the `Value` parsed from it below are held under this reservation.
+    // is held under this reservation while its facts are folded from it.
     let _reservation = keys.receipt.as_ref().map(|_| {
         crate::read_budget::ReadBudget::controller()
-            .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
+            .reserve(crate::read_budget::RECEIPT_READ_COST_BYTES)
     });
     let (receipt, payload) = match keys.receipt.as_deref() {
         None => (None, false),
-        Some(key) => match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {
+        Some(key) => match store.get_capped(key, caps::CONTROLLER_RECEIPT) {
             Ok((bytes, _version)) => (Some(bytes), true),
             // There, and over the cap: present, and not read.
             Err(logweir_store::StoreError::TooLarge { .. }) => (None, true),
@@ -2604,10 +2623,12 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         .is_some_and(|key| store.head(key).is_ok());
     let document = receipt
         .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
-    let covered = document.as_ref().and_then(covered_from_receipt);
-    let records = document.as_ref().and_then(records_from_receipt);
-    let capture = document.as_ref().and_then(capture_from_receipt);
+        .and_then(logweir_core::receipt_facts::ReceiptFacts::fold);
+    let covered = document.as_ref().and_then(|d| d.covered);
+    let records = document.as_ref().and_then(|d| d.records);
+    let capture = document
+        .as_ref()
+        .and_then(logweir_core::receipt_facts::ReceiptFacts::capture);
     // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
     // uses (`sha256:<lowercase hex>`), so it can be compared directly with the
     // runner's immutable capture claim during this completion pass. This
@@ -2639,6 +2660,15 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
 ///
 /// `None` rather than `0` when the block is absent or a value does not fit:
 /// a blank column is honest and a zero is a claim.
+///
+/// **FX-33: THE RULE, over a parsed document.** The controller no longer
+/// parses a receipt into a `Value`: `observe_archive` and the evidence relay
+/// read this sum, [`covered_from_receipt`]'s window and
+/// [`capture_from_receipt`]'s instants through
+/// `logweir_core::receipt_facts::ReceiptFacts::fold`, which keeps nothing per
+/// topic. These three functions remain as the statement of what the fold
+/// must answer; `the_receipt_fold_answers_what_these_functions_answer` holds
+/// it to them.
 #[must_use]
 pub fn records_from_receipt(receipt: &Value) -> Option<i64> {
     let records = receipt.get("records")?.as_object()?;

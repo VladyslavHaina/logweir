@@ -225,6 +225,45 @@ impl ReferenceShape {
     };
 }
 
+impl ReferenceShape {
+    /// Kafka's longest topic names (249 bytes), five recorded overrides and
+    /// the largest consumer position summary: with [`REFERENCE_AT_THE_BOUND`]
+    /// topics, a valid receipt within one percent of [`MAX_RECEIPT_BYTES`].
+    /// It is what a reader's memory is measured over.
+    pub const LONGEST_NAMES: Self = Self {
+        name_bytes: 249,
+        overrides: 5,
+        consumer_groups: crate::consumer_positions::MAX_SELECTED_GROUPS,
+    };
+}
+
+/// How many [`ReferenceShape::LONGEST_NAMES`] topics the receipt at the bound
+/// names.
+pub const REFERENCE_AT_THE_BOUND: usize = 1_000;
+
+/// **The reference receipts other crates hold signatures over**: a label, a
+/// topic count and a shape each. FX-33's acceptance sizes in the
+/// [`ReferenceShape::FULL`] shape, and the receipt at the bound.
+///
+/// `weirkeeper` cannot link the signer, so its tests verify committed
+/// sidecars over these receipts (`crates/weirkeeper/tests/fixtures/
+/// topic-budget/reference-<label>.sig`), and `crates/logweir/tests/
+/// topic_budget.rs` holds each sidecar to what the signer writes over the
+/// same bytes today.
+pub const REFERENCE_SET: [(&str, usize, ReferenceShape); 7] = [
+    ("70", 70, ReferenceShape::FULL),
+    ("105", 105, ReferenceShape::FULL),
+    ("113", 113, ReferenceShape::FULL),
+    ("300", 300, ReferenceShape::FULL),
+    ("500", 500, ReferenceShape::FULL),
+    ("1000", 1_000, ReferenceShape::FULL),
+    (
+        "at-the-bound",
+        REFERENCE_AT_THE_BOUND,
+        ReferenceShape::LONGEST_NAMES,
+    ),
+];
+
 /// The name of reference topic `index` under `shape`: `topic-<5 digits>`,
 /// padded with `x` to the shape's length.
 #[must_use]

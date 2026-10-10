@@ -146,7 +146,15 @@ pub const COMPONENT_RUN_DISCOVERY: &str = "run-discovery";
 pub const SOURCE_SHA256_ANNOTATION: &str = "logweir.dev/discovery-source-sha256";
 
 /// D1 §7.2 R8: the most names one run may freeze.
-pub const MAX_RESOLVED_TOPICS: usize = 5_000;
+///
+/// **FX-33: the topic budget's maximum** (`logweir_core::topic_budget`), 1,000
+/// — it was 5,000. The old number bounded what one plan `ConfigMap` could
+/// carry and nothing else: a backup of 5,000 topics signs a receipt of about
+/// 15 MB, which the recovery catalog dropped without a line and this
+/// controller never verified. A dynamic selection that resolves to more is
+/// refused `SelectionTooLarge` before any runner Job exists, naming both
+/// numbers; nothing is truncated to fit.
+pub const MAX_RESOLVED_TOPICS: usize = logweir_core::topic_budget::MAX_BACKUP_TOPICS;
 
 /// D1 §7.2 R8: the most bytes those names may take.
 ///
@@ -159,7 +167,7 @@ pub const MAX_DISCOVERY_SECONDS: i64 = 300;
 
 /// The `maxTopics` a run's discovery plan asks for.
 ///
-/// **FOUR TIMES [`MAX_RESOLVED_TOPICS`], AND THAT GAP IS THE POINT.** A
+/// **MANY TIMES [`MAX_RESOLVED_TOPICS`], AND THAT GAP IS THE POINT.** A
 /// truncated listing is refused ([`SelectionTooLarge`]), because a dynamic run
 /// that froze the first N names of a cut-off listing would claim coverage over
 /// a set nobody chose. Asking for far more than a run may freeze means the
@@ -770,11 +778,16 @@ pub fn resolved_selection(
         return Err((
             TERMINAL_STATE_SELECTION_TOO_LARGE,
             format!(
-                "the discovery for {backup_name} resolved {} topics taking {bytes} bytes of \
-                 names, over the {MAX_RESOLVED_TOPICS} / {MAX_RESOLVED_TOPIC_BYTES} bytes one \
-                 run may freeze; the plan ConfigMap a run mounts is bounded at one MiB. Exclude \
+                "{}: the discovery for {backup_name} resolved {} topics taking {bytes} bytes \
+                 of names, over the {MAX_RESOLVED_TOPICS} topics / {MAX_RESOLVED_TOPIC_BYTES} \
+                 bytes one backup may name. A backup signs a receipt of up to {} bytes a topic, \
+                 and one over {} bytes could not be listed by the recovery catalog or verified \
+                 by the controller; no topic is left out to make the selection fit. Exclude \
                  more, or split the cluster across schedules",
-                topics.len()
+                logweir_core::topic_budget::SELECTION_TOO_LARGE,
+                topics.len(),
+                logweir_core::topic_budget::RECEIPT_TOPIC_BUDGET_BYTES,
+                logweir_core::topic_budget::MAX_RECEIPT_BYTES
             ),
         ));
     }
@@ -1451,6 +1464,7 @@ async fn observe(
         events: &events,
         log: log.as_deref(),
         expect: &expect,
+        stream_caps: &[],
         now,
     });
 

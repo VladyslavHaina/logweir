@@ -1115,3 +1115,97 @@ fn the_manual_run_name_fixture_is_this_routes_own_rule() {
         "two recorded scopes produced the same name: the scope document is ambiguous"
     );
 }
+
+/// **FX-33 — "Back up now" on a schedule naming more topics than one backup
+/// may is refused `422`, by name, and creates nothing.**
+///
+/// The product API's own forms never accept such a list (a named allowlist
+/// is at most 256 there, `routes::schedules::MAX_TOPICS`); a
+/// `BackupSchedule` applied with `kubectl` has no such bound, and one stored
+/// before the upgrade may name up to the 5,000 the controller used to
+/// accept. Copying that schedule's policy into a run is refused by the
+/// controller's own run-policy rule
+/// (`weirkeeper::policy::validate_run_policy`), so the API, the scheduler
+/// and the freeze cannot disagree about the number — and the answer names the
+/// schedule's `spec.topics`, the maximum and the remedy. A schedule naming
+/// exactly the maximum is a run.
+///
+/// KILLS: the count refusal removed from the run policy (a `Backup` of 1,001
+/// topics is created and refused only at the freeze).
+#[tokio::test]
+async fn fx33_a_schedule_naming_more_than_the_maximum_cannot_be_run_now() {
+    use logweir_core::topic_budget::{MAX_BACKUP_TOPICS, SELECTION_TOO_LARGE};
+    let spec = |topics: usize| {
+        json!({
+            "schedule": "0 2 * * *",
+            "sourceRef": {"name": "source"},
+            "topics": (0..topics).map(|i| format!("topic-{i:05}")).collect::<Vec<_>>(),
+            "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+            "suspend": false
+        })
+    };
+    let seed = |app: &TestApp, name: &str, topics: usize| {
+        let typed: weirkeeper::crds::backup_schedule::BackupScheduleSpec =
+            serde_json::from_value(spec(topics)).expect("the seed is a BackupScheduleSpec");
+        app.fake.seed(
+            "backupschedules",
+            NS_A,
+            json!({
+                "metadata": {"name": name, "generation": 1},
+                "spec": spec(topics),
+                "status": {
+                    "observedGeneration": 1,
+                    "policy": {
+                        "generation": 1,
+                        "runPolicySha256":
+                            weirkeeper::controllers::backup_schedule::run_policy_digest(&typed),
+                        "timeZone": "UTC",
+                        "tzdb": weirkeeper::cadence::TZDB_SOURCE,
+                        "effectiveSince": "2026-09-15T10:00:00Z",
+                        "evaluatedAt": "2026-09-15T10:00:00Z"
+                    }
+                }
+            }),
+        );
+    };
+    let app = TestApp::new();
+    seed(&app, "wide", MAX_BACKUP_TOPICS + 1);
+    let over = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some("back-up-now-fx33-over"),
+            &json!({"scheduleRef": {"name": "wide"}}).to_string(),
+        )
+        .await;
+    over.assert_problem(422, "validation_failed");
+    let error = &over.json()["errors"][0];
+    assert_eq!(error["field"], "scheduleRef.name");
+    assert_eq!(error["code"], "selection_invalid");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("spec.topics")
+            && message.contains(SELECTION_TOO_LARGE)
+            && message.contains(&format!("names {} topics", MAX_BACKUP_TOPICS + 1))
+            && message.contains(&format!("at most {MAX_BACKUP_TOPICS} may be named"))
+            && message.contains("Split the topics across backups"),
+        "the whole refusal fits the message: {message}"
+    );
+    assert_eq!(app.fake.count("backups", NS_A), 0, "nothing was created");
+
+    // CONTROL: a schedule naming exactly the maximum is a run.
+    seed(&app, "full", MAX_BACKUP_TOPICS);
+    let at = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some("back-up-now-fx33-full"),
+            &json!({"scheduleRef": {"name": "full"}}).to_string(),
+        )
+        .await;
+    assert!(
+        at.status.is_success(),
+        "the maximum is accepted: {} {}",
+        at.status,
+        at.text()
+    );
+    assert_eq!(app.fake.count("backups", NS_A), 1);
+}

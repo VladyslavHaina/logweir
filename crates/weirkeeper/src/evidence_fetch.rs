@@ -51,8 +51,7 @@ use kube::ResourceExt;
 use logweir_core::check_contract::{
     CheckCode, CheckPlan, CheckPlanKind, CheckRelay, CheckRequest, CredentialMode, DestinationPlan,
     EvidenceFetchRequest, EvidenceObjectRequest, EvidenceObjectResult, FrameExpectations, Stream,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, MAX_EVIDENCE_PAYLOAD_BYTES,
-    MAX_EVIDENCE_SIDECAR_BYTES,
+    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, MAX_EVIDENCE_SIDECAR_BYTES,
 };
 use logweir_core::destination::DestinationRole;
 use serde_json::{json, Value};
@@ -106,13 +105,75 @@ pub fn retry_after(attempt: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         .map(|secs| now + Duration::seconds(*secs))
 }
 
-/// The two objects one fetch relays.
+/// The two objects one fetch relays, and WHAT the first one is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     /// The signed document's key, verbatim as the runner printed it.
     pub payload_key: String,
     /// Its detached DSSE sidecar's key.
     pub sidecar_key: String,
+    /// **FX-33.** The document's media type, from the reconciler that asked:
+    /// a `Backup`'s fetch is for a backup receipt, a `Restore`'s for a drill
+    /// scorecard. It is the controller's own knowledge of what it is about to
+    /// hold, and [`Self::payload_cap`] is derived from it and from nothing
+    /// the pod says.
+    pub payload_type: &'static str,
+}
+
+impl Request {
+    /// **The most bytes of the signed document this controller will hold**,
+    /// from the document's KIND (`verification::controller_cap_for`): the
+    /// receipt cap for a backup receipt, which the controller folds and never
+    /// parses into a tree, and 1 MiB for a scorecard, which it parses whole.
+    ///
+    /// It is asked for in the plan, and it is ENFORCED HERE, three times, on
+    /// the bytes that arrive — never taken from what the plan asked or from
+    /// what the relay declares:
+    ///
+    /// 1. the frame decoder refuses the payload stream at the first part past
+    ///    it ([`stream_caps`]), before the part is kept or anything decoded;
+    /// 2. [`read_relay`] refuses a decoded payload longer than it;
+    /// 3. the verifier parses a document that is not a receipt only inside
+    ///    its own cap (`verification::claim_of`, `scorecard_observation`).
+    #[must_use]
+    pub fn payload_cap(&self) -> u64 {
+        crate::verification::controller_cap_for(self.payload_type)
+    }
+
+    /// The reader's cap for each of the two streams this fetch relays.
+    #[must_use]
+    pub fn stream_caps(&self) -> [check::relay::StreamCap; 2] {
+        [
+            (Stream::EvidencePayload, self.payload_cap()),
+            (Stream::EvidenceSidecar, MAX_EVIDENCE_SIDECAR_BYTES),
+        ]
+    }
+
+    /// The key the relay's `stream` carries.
+    fn key_of(&self, stream: Stream) -> &str {
+        match stream {
+            Stream::EvidenceSidecar => &self.sidecar_key,
+            _ => &self.payload_key,
+        }
+    }
+}
+
+/// [`Relayed::Unread`]'s sentence for an object over the cap an evidence
+/// fetch relays it under — FX-31's, and FINAL: it begins with the key, so no
+/// transient prefix of `verification::not_attempted_class` matches, and the
+/// object is not fetched again.
+#[must_use]
+pub fn over_relay_cap_detail(key: &str, cap: u64, relayed: Option<u64>) -> String {
+    match relayed {
+        Some(len) => format!(
+            "{key} is larger than the {cap}-byte cap an evidence fetch relays ({len} bytes \
+             relayed); nothing was verified"
+        ),
+        None => format!(
+            "{key} is larger than the {cap}-byte cap an evidence fetch relays; nothing was \
+             verified"
+        ),
+    }
 }
 
 /// The plan document for one fetch — **pure**.
@@ -158,14 +219,17 @@ pub fn plan_documents(
                 credentials,
                 grant_bindings: Vec::new(),
             },
-            // EXACTLY TWO OBJECTS, AT THE CONTRACT'S CAPS, WITH THE ONE ROLE
-            // THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any other
-            // role on the runner's side too.
+            // EXACTLY TWO OBJECTS, EACH AT THE CAP OF WHAT IT IS, WITH THE ONE
+            // ROLE THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any
+            // other role, and a cap over the contract's ceiling, on the
+            // runner's side too. The pod is ASKED for at most the document's
+            // own cap (FX-33: a receipt's, or a scorecard's); what it sends
+            // is bounded by `Request::payload_cap` where it is read.
             objects: vec![
                 EvidenceObjectRequest {
                     role: DestinationRole::EvidenceRead,
                     key: request.payload_key.clone(),
-                    max_bytes: MAX_EVIDENCE_PAYLOAD_BYTES,
+                    max_bytes: request.payload_cap(),
                     stream: Stream::EvidencePayload,
                 },
                 EvidenceObjectRequest {
@@ -371,10 +435,7 @@ fn answer<'a>(
         // digest is its prefix's, so verifying it would report a bad document
         // for what is only a big one.
         if entry.truncated {
-            return Answer::Unreadable(format!(
-                "{key} is larger than the {cap}-byte cap an evidence fetch relays; nothing was \
-                 verified"
-            ));
+            return Answer::Unreadable(over_relay_cap_detail(key, cap, None));
         }
         let Some(bytes) = relay.stream(stream) else {
             return Answer::Unreadable(format!(
@@ -398,10 +459,7 @@ fn answer<'a>(
         // length the relay declared for it.
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len > cap {
-            return Answer::Unreadable(format!(
-                "{key} is larger than the {cap}-byte cap an evidence fetch relays ({len} bytes \
-                 relayed); nothing was verified"
-            ));
+            return Answer::Unreadable(over_relay_cap_detail(key, cap, Some(len)));
         }
         if entry.bytes != Some(len) {
             return Answer::Unreadable(format!(
@@ -455,12 +513,15 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
             )
         }
     };
+    // FX-33: THE CAP OF THE DOCUMENT KIND THIS FETCH IS FOR, from the
+    // controller's own request — not the contract's ceiling, not the plan's
+    // `maxBytes`, not the length the relay declares.
     let payload = answer(
         relay,
         &results,
         &request.payload_key,
         Stream::EvidencePayload,
-        MAX_EVIDENCE_PAYLOAD_BYTES,
+        request.payload_cap(),
     );
     let sidecar = answer(
         relay,
@@ -547,6 +608,69 @@ pub enum Step {
         /// Why.
         detail: String,
     },
+}
+
+/// **FX-33 — what keeps one evidence relay inside the controller's read
+/// budget**, from its pod-log read until its verdict is written.
+///
+/// The caller of [`advance`] creates one before the call and keeps it until
+/// it has written the verdict and dropped the [`Step`]: the reservation
+/// [`advance`] takes for a finished Job's relay
+/// ([`crate::read_budget::RELAY_READ_COST_BYTES`]) lives exactly as long as
+/// the relayed bytes do. A pass that reads no log (no Job yet, a Job still
+/// running) holds nothing.
+///
+/// A VALUE THE CALLER OWNS, and not a field of [`Step`], because the step is
+/// a plain comparable value the tests assert on and a reservation is neither
+/// cloneable nor comparable; and not a semaphore beside the budget, so that
+/// "the sum of in-flight worst cases never exceeds the budget" stays ONE
+/// number for every archive read this process makes.
+#[derive(Debug, Default)]
+pub struct RelayHold {
+    reservation: Option<crate::read_budget::Reservation<'static>>,
+    budget: Option<&'static crate::read_budget::ReadBudget>,
+}
+
+impl RelayHold {
+    /// A hold on the controller's own budget — what the reconcilers use.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A hold on `budget`, for a test that compares against the controller's.
+    #[must_use]
+    pub fn on(budget: &'static crate::read_budget::ReadBudget) -> Self {
+        Self {
+            reservation: None,
+            budget: Some(budget),
+        }
+    }
+
+    /// Whether a relay's reservation is held.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        self.reservation.is_some()
+    }
+
+    /// Reserve one relay's worst case, waiting OFF the reconciler's task (a
+    /// blocking-pool thread waits on the budget's condition variable, as every
+    /// other reservation does) until it fits. Idempotent within one pass.
+    pub async fn reserve(&mut self) {
+        if self.reservation.is_some() {
+            return;
+        }
+        let budget = self
+            .budget
+            .unwrap_or_else(crate::read_budget::ReadBudget::controller);
+        let reserved = tokio::task::spawn_blocking(move || {
+            budget.reserve(crate::read_budget::RELAY_READ_COST_BYTES)
+        })
+        .await;
+        // A blocking task that did not come back reserved nothing; the read
+        // is then unthrottled for this pass, never skipped.
+        self.reservation = reserved.ok();
+    }
 }
 
 /// Everything [`advance`] reads.
@@ -638,13 +762,13 @@ fn foreign_detail(namespace: &str, job_name: &str, owner: &RunnerOwner) -> Strin
 ///
 /// [`kube::Error`] for an API failure. Every answer about the fetch itself is
 /// a [`Step`].
-pub async fn advance(inputs: &Inputs<'_>) -> Result<Step, kube::Error> {
+pub async fn advance(inputs: &Inputs<'_>, held: &mut RelayHold) -> Result<Step, kube::Error> {
     let namespace = inputs.namespace;
     let name = cjob::evidence_fetch_job_name(&inputs.owner.uid, inputs.attempt);
     let jobs: Api<Job> = Api::namespaced(inputs.client.clone(), namespace);
 
     if let Some(job) = jobs.get_opt(&name).await? {
-        return observe(inputs, &job).await;
+        return observe(inputs, &job, held).await;
     }
 
     let Some(destination) = inputs.destination else {
@@ -753,7 +877,11 @@ pub async fn advance(inputs: &Inputs<'_>) -> Result<Step, kube::Error> {
     })
 }
 
-async fn observe(inputs: &Inputs<'_>, job: &Job) -> Result<Step, kube::Error> {
+async fn observe(
+    inputs: &Inputs<'_>,
+    job: &Job,
+    held: &mut RelayHold,
+) -> Result<Step, kube::Error> {
     let namespace = inputs.namespace;
     let name = job.name_any();
     if !is_owned(job, inputs.owner) {
@@ -775,8 +903,40 @@ async fn observe(inputs: &Inputs<'_>, job: &Job) -> Result<Step, kube::Error> {
         plan_sha256: mounted_plan_digest(job).unwrap_or_default(),
         subject_uid: inputs.owner.uid.clone(),
     };
-    let observation =
-        check::observe(inputs.client, namespace, job, &events, &expect, inputs.now).await?;
+    // FX-33: A FINISHED JOB'S RELAY IS READ UNDER THE CONTROLLER'S READ BUDGET.
+    // The pod log (up to 8 MiB), the decoder's parts, the decoded payload and
+    // the verifier's copies are held from here until the caller has written
+    // its verdict and dropped the step; `held` carries the reservation that
+    // long. A Job still running reads no log and reserves nothing.
+    if crate::controllers::backup::job_finished(job) {
+        held.reserve().await;
+    }
+    // AND UNDER THE READER'S CAP FOR EACH STREAM: the payload stream is
+    // refused at the first part past the cap of the document kind this fetch
+    // is for, before the part is kept or anything is decoded.
+    let observation = check::observe_within(
+        inputs.client,
+        namespace,
+        job,
+        &events,
+        &expect,
+        &inputs.request.stream_caps(),
+        inputs.now,
+    )
+    .await?;
+    // A STREAM PAST ITS CAP IS A FACT ABOUT THE OBJECT, AND FINAL: the same
+    // sentence a runner's honest `truncated` gets, not a relay that failed to
+    // verify (which would start three more Jobs to relay the same bytes).
+    if let Some((stream, cap)) = observation.relay_over_cap {
+        return Ok(Step::Relayed {
+            job_name: name,
+            job_uid: job.uid(),
+            presence: Presence::Unknown,
+            relayed: Relayed::Unread {
+                detail: over_relay_cap_detail(inputs.request.key_of(stream), cap, None),
+            },
+        });
+    }
     if observation.cancel_now {
         check::cancel(inputs.client, namespace, job, &inputs.owner.uid).await?;
     }

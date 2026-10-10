@@ -715,6 +715,7 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
         events: &[],
         log: Some(log),
         expect: &expectations(),
+        stream_caps: &[],
         now: now(),
     });
     assert_eq!(observation.phase, CheckPhase::Failed);
@@ -743,6 +744,7 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
         events: &[],
         log: Some(with_field),
         expect: &expectations(),
+        stream_caps: &[],
         now: now(),
     });
     assert!(
@@ -933,6 +935,7 @@ fn a_jobs_own_deadline_is_a_code_and_not_an_unreadable_relay() {
         events: &[],
         log: Some("no frames here at all\n"),
         expect: &expectations(),
+        stream_caps: &[],
         now: now(),
     });
     assert_eq!(observation.phase, CheckPhase::Failed);
@@ -954,6 +957,7 @@ fn a_terminal_waiting_state_asks_for_an_immediate_cancel() {
         events: &[],
         log: None,
         expect: &expectations(),
+        stream_caps: &[],
         now: now(),
     });
     assert_eq!(observation.phase, CheckPhase::Failed);
@@ -975,6 +979,7 @@ fn a_terminal_waiting_state_asks_for_an_immediate_cancel() {
         events: &[],
         log: None,
         expect: &expectations(),
+        stream_caps: &[],
         now: now(),
     });
     assert_eq!(observation.reason, CheckCode::PodUnschedulable);

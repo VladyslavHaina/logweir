@@ -116,6 +116,12 @@ pub struct Observation {
     /// Whether this state can only be left by cancelling the Job — D2 §4.3's
     /// "early cancel".
     pub cancel_now: bool,
+    /// **FX-33.** The relay stream that was past the cap its reader set for
+    /// it ([`Input::stream_caps`]), and that cap, when that is why there is
+    /// no relay. A fact about the OBJECT the stream carried — it is larger
+    /// than this controller holds it under — and not a relay that failed to
+    /// verify, so its caller reports it once and does not retry it.
+    pub relay_over_cap: Option<relay::StreamCap>,
 }
 
 /// Everything [`classify`] is allowed to look at.
@@ -135,6 +141,10 @@ pub struct Input<'a> {
     pub log: Option<&'a str>,
     /// The plan digest and subject UID the relay must carry.
     pub expect: &'a FrameExpectations,
+    /// **FX-33.** The reader's own cap for each relay stream it knows the
+    /// kind of ([`relay::StreamCap`]). Empty for a check whose streams are
+    /// bounded by the relay's budget alone.
+    pub stream_caps: &'a [relay::StreamCap],
     /// This pass's instant. An argument, never a clock read.
     pub now: DateTime<Utc>,
 }
@@ -180,6 +190,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             // spinner for a Secret that does not exist is the experience this
             // whole framework is meant to replace.
             cancel_now: true,
+            relay_over_cap: None,
         };
     }
 
@@ -198,6 +209,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting,
             exit_code: None,
             cancel_now: false,
+            relay_over_cap: None,
         };
     }
 
@@ -226,6 +238,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting: Some(w.clone()),
             exit_code,
             cancel_now: false,
+            relay_over_cap: None,
         };
     }
 
@@ -245,6 +258,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting,
             exit_code,
             cancel_now: false,
+            relay_over_cap: None,
         };
     };
 
@@ -277,11 +291,12 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting,
             exit_code,
             cancel_now: false,
+            relay_over_cap: None,
         };
     }
 
     // 5. The frames.
-    match relay::decode(log, input.expect) {
+    match relay::decode_within(log, input.expect, input.stream_caps) {
         Ok(relay) => Observation {
             phase: CheckPhase::Succeeded,
             reason: CheckCode::Succeeded,
@@ -293,6 +308,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting,
             exit_code,
             cancel_now: false,
+            relay_over_cap: None,
         },
         Err(refusal) => Observation {
             phase: CheckPhase::Failed,
@@ -308,6 +324,7 @@ pub fn classify(input: &Input<'_>) -> Observation {
             waiting,
             exit_code,
             cancel_now: false,
+            relay_over_cap: refusal.over_cap,
         },
     }
 }
@@ -585,8 +602,36 @@ pub async fn observe(
     expect: &FrameExpectations,
     now: DateTime<Utc>,
 ) -> Result<Observation, kube::Error> {
+    observe_within(client, namespace, job, events, expect, &[], now).await
+}
+
+/// [`observe`], with the reader's own cap for each relay stream it knows the
+/// kind of — **FX-33**. The evidence fetch passes the cap of the document
+/// its verification is about; see [`relay::StreamCap`].
+///
+/// # Errors
+/// As [`observe`].
+pub async fn observe_within(
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    events: &[EventFact],
+    expect: &FrameExpectations,
+    stream_caps: &[relay::StreamCap],
+    now: DateTime<Utc>,
+) -> Result<Observation, kube::Error> {
     let owned = pod::find_owned_pod(client, namespace, job).await?;
-    observe_found(client, namespace, job, owned.as_ref(), events, expect, now).await
+    observe_found(
+        client,
+        namespace,
+        job,
+        owned.as_ref(),
+        events,
+        expect,
+        stream_caps,
+        now,
+    )
+    .await
 }
 
 /// [`observe`], reading the Job's Events itself — through [`job_events`], so
@@ -609,7 +654,17 @@ pub async fn observe_reading_events(
 ) -> Result<Observation, kube::Error> {
     let owned = pod::find_owned_pod(client, namespace, job).await?;
     let events = job_events(client, namespace, job, owned.as_ref(), now).await;
-    observe_found(client, namespace, job, owned.as_ref(), &events, expect, now).await
+    observe_found(
+        client,
+        namespace,
+        job,
+        owned.as_ref(),
+        &events,
+        expect,
+        &[],
+        now,
+    )
+    .await
 }
 
 /// The Events that explain why one Job's pod has not started — **the one read
@@ -696,6 +751,7 @@ pub async fn finished_without_pod(
 }
 
 /// [`observe`]'s body, once the owned pod is known.
+#[allow(clippy::too_many_arguments)]
 async fn observe_found(
     client: &kube::Client,
     namespace: &str,
@@ -703,6 +759,7 @@ async fn observe_found(
     owned: Option<&Pod>,
     events: &[EventFact],
     expect: &FrameExpectations,
+    stream_caps: &[relay::StreamCap],
     now: DateTime<Utc>,
 ) -> Result<Observation, kube::Error> {
     use kube::ResourceExt as _;
@@ -747,6 +804,7 @@ async fn observe_found(
         events,
         log: log.as_deref(),
         expect,
+        stream_caps,
         now,
     }))
 }

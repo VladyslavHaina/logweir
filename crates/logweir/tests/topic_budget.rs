@@ -1202,6 +1202,88 @@ fn the_refusals_change_no_byte_of_what_a_small_backup_signs() {
 }
 
 // ---------------------------------------------------------------------------
+// The signatures the controller's tests verify
+// ---------------------------------------------------------------------------
+
+/// Where the controller's tests keep the sidecars they verify.
+const SIDECAR_FIXTURES: &str = "crates/weirkeeper/tests/fixtures/topic-budget";
+/// Set to `1` to write the sidecars instead of comparing them.
+const WRITE_FIXTURES_ENV: &str = "LOGWEIR_FX33_WRITE_FIXTURES";
+
+/// **The sidecars the controller's tests verify are what the signer writes
+/// today**, over the reference receipts' bytes, under the checked-in
+/// throwaway key (`e2e/fixtures/signed/signing.pem`; ECDSA P-256 with RFC
+/// 6979 nonces, so a signature is a function of the key and the bytes).
+///
+/// `weirkeeper` cannot link the signer, so `crates/weirkeeper/tests/
+/// topic_budget.rs` verifies COMMITTED sidecars over receipts it builds from
+/// `logweir_core::topic_budget::REFERENCE_SET`. This row is the other half:
+/// a receipt format change, a reference change or a signer change that moves
+/// one byte fails here, with the command that regenerates the files —
+/// `LOGWEIR_FX33_WRITE_FIXTURES=1 cargo test -p logweir --test topic_budget
+/// the_controllers_reference_sidecars`.
+///
+/// It also holds the receipt at the bound to within one percent UNDER
+/// `MAX_RECEIPT_BYTES`, so the controller's memory rows measure a document at
+/// its cap and not a small one.
+#[test]
+fn the_controllers_reference_sidecars_are_what_the_signer_writes() {
+    let key = SigningKey::from_pem_file(&root().join("e2e/fixtures/signed/signing.pem"))
+        .expect("the checked-in throwaway fixture signing key");
+    let write = std::env::var(WRITE_FIXTURES_ENV).is_ok_and(|v| v == "1");
+    let dir = root().join(SIDECAR_FIXTURES);
+    for (label, topics, shape) in topic_budget::REFERENCE_SET {
+        let receipt = reference_receipt(topics, &shape);
+        assert_eq!(receipt.validate_invariants(), Ok(()), "{label}");
+        let bytes = det(&receipt);
+        let sign = || {
+            let sidecar = logweir_evidence::sign::sign_detached(
+                &key,
+                logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                &bytes,
+            )
+            .expect("the sidecar signs");
+            let mut out = serde_json::to_vec(&sidecar).expect("a sidecar serialises");
+            out.push(b'\n');
+            out
+        };
+        let sidecar = sign();
+        assert_eq!(sidecar, sign(), "{label}: the signature is deterministic");
+        eprintln!(
+            "[fx-33] reference {label}: {topics} topics, receipt {} bytes, sidecar {} bytes",
+            bytes.len(),
+            sidecar.len()
+        );
+        if label == "at-the-bound" {
+            let len = bytes.len() as u64;
+            assert!(
+                len <= MAX_RECEIPT_BYTES && len * 100 >= MAX_RECEIPT_BYTES * 99,
+                "the receipt at the bound is {len} bytes; the bound is {MAX_RECEIPT_BYTES}"
+            );
+        }
+        let path = dir.join(format!("reference-{label}.sig"));
+        if write {
+            std::fs::create_dir_all(&dir).expect("the fixture directory");
+            std::fs::write(&path, &sidecar).expect("the fixture is written");
+            continue;
+        }
+        let committed = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "{} is missing ({e}); write it with {WRITE_FIXTURES_ENV}=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            committed,
+            sidecar,
+            "{} is not what the signer writes over the reference receipt today. If the receipt \
+             or the reference changed on purpose, regenerate with {WRITE_FIXTURES_ENV}=1",
+            path.display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The documentation quotes the test
 // ---------------------------------------------------------------------------
 
