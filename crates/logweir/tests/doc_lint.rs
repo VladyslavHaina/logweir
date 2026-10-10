@@ -2164,6 +2164,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a restore under the original topic names",
             "--approval-subject original-name",
         ),
+        // FX-14 (2026-10-09, item 57): a restore preflight of a catalog point
+        // makes the runner's own comparisons, reads only that point's own
+        // receipt, and names the refusal an operator will meet.
+        (
+            "a catalog restore's preflight judges the archive as the runner will",
+            "ManifestSuperseded",
+        ),
     ];
     assert_eq!(
         items.len(),
@@ -2261,5 +2268,367 @@ fn trademarks_states_the_clearance_act_and_the_announcement_gate() {
         "TRADEMARKS.md must record that the registry namespace is fixed as a literal \
          (`{runner_repository}`), so clearing the question changes one string and not \
          the install path"
+    );
+}
+
+// ------------------------------------- the grant tables and the version read
+
+/// Every `*.rs` under `crates/*/src`, as `(repository-relative path, the
+/// file's non-comment lines above its first `#[cfg(test)]`)`.
+fn production_sources() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut files = Vec::new();
+    let mut stack = vec![root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{} is readable: {e}", dir.display()))
+        {
+            let path = entry.expect("a directory entry is readable").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "target" && name != "tests" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(&root)
+                .expect("under the repository")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !relative.contains("/src/") {
+                return None;
+            }
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+            let production = body.split("#[cfg(test)]").next().unwrap_or_default();
+            let code = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((relative, code))
+        })
+        .collect()
+}
+
+/// The row of the Markdown table under `header` whose first cell is `role`.
+fn table_row<'a>(document: &'a str, file: &str, header: &str, role: &str) -> &'a str {
+    let start = document
+        .find(header)
+        .unwrap_or_else(|| panic!("{file} has no table headed `{header}`"));
+    document[start..]
+        .lines()
+        .take_while(|line| line.starts_with('|'))
+        .find(|line| {
+            line.split('|')
+                .nth(1)
+                .is_some_and(|cell| cell.trim() == role)
+        })
+        .unwrap_or_else(|| panic!("{file}: the table headed `{header}` has no `{role}` row"))
+}
+
+/// **FX-14 item 2: the documented grants and the code's reads cannot drift.**
+///
+/// FX-7 taught three readers to read a manifest BY VERSION (`GET
+/// ?versionId=`), which AWS S3 authorises as `s3:GetObjectVersion`, a
+/// different action from `s3:GetObject`. The measured minimal-grant tables
+/// predated it and went on saying a role needed less than its code asked for,
+/// until a review noticed.
+///
+/// So: every source file that asks a store for one version of an object is
+/// named here with the ROLE whose grant it reads with, and that role's row in
+/// both tables must name the action. The check fails in each direction a
+/// drift can take:
+///
+/// * a NEW reader of a version (a file that USES the read, under either of
+///   its names and however the use is spelled — [`uses_get_version`] — and is
+///   not in [`READERS`]) — say which role's grant it uses, and put the action
+///   in that role's rows;
+/// * a row that LOSES the action while its reader still makes the read;
+/// * a reader that no longer makes the read (a stale entry here, and a grant
+///   the docs may then stop asking for);
+/// * the store no longer reading by version at all.
+///
+/// **And the receipt a point-bound restore reads (FX-14 review L5).** The
+/// same two `archiveRead` readers fetch the plan's bound receipt, at a key
+/// under [`logweir::catalog::record::RECEIPTS_PREFIX`], with the archive
+/// grant, which the measured minimum (`<prefix>/*` alone) does not cover. So
+/// the `archiveRead` row of both tables must also name `s3:GetObject` on that
+/// namespace, spelled from the constant the code derives the key with: a row
+/// that loses it fails here, and so does a namespace the code moved.
+#[test]
+fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
+    /// `(reader, its row in docs/kubernetes.md, its row in docs/install.md)`.
+    const READERS: [(&str, &str, &str); 3] = [
+        (
+            "crates/logweir/src/check/kinds/catalog_sync.rs",
+            "`catalogSync` reader",
+            "`RecoveryCatalog` sync",
+        ),
+        (
+            "crates/logweir/src/check/kinds/restore.rs",
+            "`archiveRead`",
+            "`archiveRead`",
+        ),
+        (
+            "crates/logweir/src/drill/binding.rs",
+            "`archiveRead`",
+            "`archiveRead`",
+        ),
+    ];
+    /// Where the read is IMPLEMENTED and delegated; neither is a role.
+    const IMPLEMENTATION: [&str; 2] = [
+        "crates/logweir-store/src/lib.rs",
+        "crates/logweir/src/check/store.rs",
+    ];
+    const ACTION: &str = "s3:GetObjectVersion";
+
+    let sources = production_sources();
+    assert!(
+        sources.len() > 100,
+        "the walk found {} source files; a scan that read nothing proves nothing",
+        sources.len()
+    );
+    let store = sources
+        .iter()
+        .find(|(path, _)| path == IMPLEMENTATION[0])
+        .map(|(_, code)| code.as_str())
+        .expect("the store crate is scanned");
+    // FX-31 gave every read a cap and the store's read its name:
+    // `Store::get_version_capped`.
+    assert!(
+        store.contains("pub fn get_version_capped(")
+            && store.contains("version: Some(version.to_string())"),
+        "the store no longer reads an object by version; if no reader needs {ACTION} any more, \
+         take it out of the grant tables and out of this test"
+    );
+
+    let callers = version_readers(&sources, &IMPLEMENTATION);
+    let named: BTreeSet<&str> = READERS.iter().map(|(path, ..)| *path).collect();
+    assert_eq!(
+        callers, named,
+        "the files that read an object BY VERSION are not the ones this test maps to a role. A \
+         new reader needs {ACTION} on its role's grant: add it to READERS with the role, and \
+         name the action in that role's rows of docs/kubernetes.md §7a and docs/install.md. A \
+         reader that stopped making the read leaves a grant the docs may stop asking for."
+    );
+
+    let kubernetes = read("docs/kubernetes.md");
+    let install = read("docs/install.md");
+    for (reader, kubernetes_role, install_role) in READERS {
+        for (file, document, header, role) in [
+            (
+                "docs/kubernetes.md",
+                &kubernetes,
+                "| Role | Minimal actions, each at the resource scope shown |",
+                kubernetes_role,
+            ),
+            (
+                "docs/install.md",
+                &install,
+                "| Role | Actions | Resources |",
+                install_role,
+            ),
+        ] {
+            let row = table_row(document, file, header, role);
+            assert!(
+                row.contains(ACTION),
+                "{file}: the {role} row does not name {ACTION}, and {reader} reads a manifest by \
+                 version with that role's grant (a 403 there is `Unreadable`, exit 1, or \
+                 `archive.backupSet AccessDenied`): {row}"
+            );
+        }
+    }
+    // What the tables rest on is said beside them: measured where it was
+    // measured, and labelled where it was not.
+    assert!(
+        kubernetes.contains("**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`"),
+        "docs/kubernetes.md §7a must keep the paragraph that says which store was measured"
+    );
+
+    // The bound receipt's read: the `archiveRead` readers still read the
+    // plan's receipt key, and the role's row grants the namespace it is in.
+    let receipt_namespace = format!("<bucket>/{}*", logweir::catalog::record::RECEIPTS_PREFIX);
+    assert_eq!(
+        receipt_namespace, "<bucket>/logweir/backups/*",
+        "the receipt namespace moved: both grant tables name it and must move with it"
+    );
+    for (reader, kubernetes_role, install_role) in READERS {
+        if kubernetes_role != "`archiveRead`" {
+            continue;
+        }
+        let code = sources
+            .iter()
+            .find(|(path, _)| path == reader)
+            .map(|(_, code)| code.as_str())
+            .unwrap_or_else(|| panic!("{reader} is scanned"));
+        assert!(
+            code.contains("receipt_key"),
+            "{reader} no longer reads a plan's bound receipt; if no `archiveRead` reader does, \
+             take the grant on {receipt_namespace} out of the rows and out of this test"
+        );
+        for (file, document, header, role) in [
+            (
+                "docs/kubernetes.md",
+                &kubernetes,
+                "| Role | Minimal actions, each at the resource scope shown |",
+                kubernetes_role,
+            ),
+            (
+                "docs/install.md",
+                &install,
+                "| Role | Actions | Resources |",
+                install_role,
+            ),
+        ] {
+            let row = table_row(document, file, header, role);
+            assert!(
+                row.contains(&receipt_namespace),
+                "{file}: the {role} row does not grant `s3:GetObject` on {receipt_namespace}, and \
+                 {reader} reads a point-bound plan's receipt there with that role's grant (a 403 \
+                 is `archive.backupSet AccessDenied`, or exit 1 at the runner): {row}"
+            );
+        }
+    }
+}
+
+/// The files among `sources` that read an object BY VERSION, other than the
+/// ones in `implementation`, where the read is defined and delegated.
+fn version_readers<'a>(
+    sources: &'a [(String, String)],
+    implementation: &[&str],
+) -> BTreeSet<&'a str> {
+    sources
+        .iter()
+        .filter(|(path, code)| !implementation.contains(&path.as_str()) && uses_get_version(code))
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
+/// The two names the read by version has since FX-31 gave every read a cap:
+/// the store's own method, `Store::get_version_capped`, which the runner's
+/// binding calls, and the check Jobs' seam over it,
+/// `ObjectAccess::get_version`, which takes the same cap. Neither is part of
+/// the other as a whole word, so each is looked for by itself.
+const VERSION_READS: [&str; 2] = ["get_version_capped", "get_version"];
+
+/// Whether `code` USES the store's read by version, under either of
+/// [`VERSION_READS`] and however the use is spelled: a method call
+/// (`access.get_version(…)`, `archive.get_version_capped(…)`, with or without
+/// the receiver on the same line), a path call
+/// (`Store::get_version_capped(&store, …)`,
+/// `ObjectAccess::get_version(access, …)`, `<dyn ObjectAccess>::get_version`)
+/// or the function taken as a value (`.map(Store::get_version_capped)`). The
+/// name as a whole word is a use; only its own definition
+/// (`fn get_version_capped`, `fn get_version`) and a longer identifier that
+/// merely contains it are not.
+fn uses_get_version(code: &str) -> bool {
+    let part_of_a_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    VERSION_READS.iter().any(|name| {
+        code.match_indices(name).any(|(at, _)| {
+            let before = &code[..at];
+            let after = &code[at + name.len()..];
+            !before.chars().next_back().is_some_and(part_of_a_name)
+                && !after.chars().next().is_some_and(part_of_a_name)
+                && !before.trim_end().ends_with("fn")
+        })
+    })
+}
+
+/// [`uses_get_version`] sees every spelling of a use and no definition, so
+/// the lint above cannot be passed by writing the same read another way
+/// (FX-14 review L5: it matched the text `.get_version(` alone, and a call
+/// spelled `Store::get_version(&store, …)` went unseen), **and it sees the
+/// read under both names it has since FX-31**: the store's
+/// `get_version_capped`, which the runner's binding calls, and the check
+/// Jobs' `ObjectAccess::get_version`. A lint that knew only the older name
+/// would not see the binding's read at all.
+#[test]
+fn a_read_by_version_is_seen_however_the_call_is_spelled() {
+    for used in [
+        // The check Jobs' seam, `ObjectAccess::get_version`.
+        "let bytes = access.get_version(key, version, caps::MANIFEST)?;",
+        "access\n    .get_version(&manifest_key, version, caps::MANIFEST)",
+        "ObjectAccess::get_version(access, key, version, caps::MANIFEST)",
+        "<dyn ObjectAccess>::get_version(access.as_ref(), key, version, caps::MANIFEST)",
+        "pin::judge(pinned, current, digest, |v| access.get_version(key, v, caps::MANIFEST))",
+        "versions.iter().map(|v| access.get_version (key, v, cap))",
+        // The store's own read, `Store::get_version_capped`.
+        "let (bytes, _) = archive.get_version_capped(key, version, caps::MANIFEST)?;",
+        "archive\n    .get_version_capped(&manifest_key, version, caps::MANIFEST)",
+        "Store::get_version_capped(&store, key, version, caps::MANIFEST)",
+        "logweir_store::Store::get_version_capped(self, key, version, max_bytes).map(|(b, _)| b)",
+        "let read = Store::get_version_capped;",
+        "versions.iter().map(|v| store.get_version_capped (key, v, cap))",
+    ] {
+        assert!(uses_get_version(used), "a use went unseen: {used}");
+    }
+    for not_a_use in [
+        "pub fn get_version_capped(\n        &self,\n        key: &str,\n        version: &str,",
+        "    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError>;",
+        "fn   get_version(",
+        "fn   get_version_capped(",
+        "let v = get_versioned(key);",
+        "let v = try_get_version_id(key);",
+        "let v = get_version_capped_twice(key);",
+        "let v = forget_version_capped(key);",
+        // The reads of the CURRENT version are not reads by version.
+        "store.get_capped(key, caps::MANIFEST)",
+        "access.get_with_version(key, caps::MANIFEST)",
+        "access.get(key, caps::SIGNED_DOCUMENT)",
+        "",
+    ] {
+        assert!(!uses_get_version(not_a_use), "taken for a use: {not_a_use}");
+    }
+
+    // And the lint's own walk finds a path-form reader, leaves out a file
+    // that only defines the read, and leaves out the implementation.
+    let source = |path: &str, code: &str| (path.to_string(), code.to_string());
+    let sources = [
+        source(
+            "crates/a/src/path_form.rs",
+            "let b = Store::get_version_capped(&store, key, v, caps::MANIFEST)?;",
+        ),
+        source(
+            "crates/a/src/trait_path_form.rs",
+            "let b = ObjectAccess::get_version(access, key, v, caps::MANIFEST)?;",
+        ),
+        source(
+            "crates/a/src/method_form.rs",
+            "let b = access.get_version(key, v, caps::MANIFEST)?;",
+        ),
+        source(
+            "crates/a/src/store_method_form.rs",
+            "let (b, _) = archive.get_version_capped(key, v, caps::MANIFEST)?;",
+        ),
+        source(
+            "crates/a/src/defines.rs",
+            "fn get_version(&self, key: &str, v: &str, max_bytes: u64);",
+        ),
+        source(
+            "crates/a/src/reads_current.rs",
+            "let b = store.get_capped(key, caps::MANIFEST)?;",
+        ),
+        source(
+            "crates/a/src/store.rs",
+            "Store::get_version_capped(self, key, v, max_bytes)",
+        ),
+    ];
+    assert_eq!(
+        version_readers(&sources, &["crates/a/src/store.rs"]),
+        BTreeSet::from([
+            "crates/a/src/method_form.rs",
+            "crates/a/src/path_form.rs",
+            "crates/a/src/store_method_form.rs",
+            "crates/a/src/trait_path_form.rs",
+        ])
     );
 }

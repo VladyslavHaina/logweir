@@ -1821,6 +1821,7 @@ dependencies = [
  "logweir-evidence",
  "logweir-kafka",
  "nix",
+ "object_store",
  "p256",
  "rustls",
  "schemars",
