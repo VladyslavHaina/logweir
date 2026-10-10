@@ -2113,6 +2113,16 @@ each request it does not. `connection.topicConfigsReadable` and
 `connection.groupTypes` are **advisory**: the backup runs, and the row says
 what it will record as not captured. The controller lists the rows in the
 check plan (`capabilityChecks`); a runner answers exactly the rows listed.
+**The rows that read ApiVersions answer for a cluster only when every broker
+of it answered.** The check reads the cluster's broker list, connects to
+every broker on it and to every bootstrap address, and waits for each
+answer inside one budget of at most 10 s. A broker that did not answer makes
+the row `unknown` ("2 of 3 broker(s) the cluster lists answered …; no answer
+from broker 3 (host:port)"), never `ready`; so does a bootstrap address
+nobody answered at. When the brokers' answers differ the row is judged on
+what every one of them serves. The fact `brokersAnswered` counts distinct
+brokers. During the observation the check holds one connection to each
+bootstrap address and to each listed broker.
 **The compatibility contract** is published in
 [support-matrix.md](support-matrix.md#the-compatibility-contract): brokers,
 authentication modes, schema registries, archive backends and managed
@@ -2135,7 +2145,16 @@ identity may not Describe is refused as before, with a message that names the
 grant. `connection.authenticated` says when the bootstrap address answered
 and the advertised brokers did not. An object store's `404
 XAdminUserNotFound` (versitygw's answer to an unknown access key) is a refused
-credential and no longer a missing object.
+credential and no longer a missing object. **An object store's answer is now
+read from its own HTTP status and the `<Code>` of its error document, never
+from a word found in the error's text**, which echoes the bucket, the prefix
+and the key: an archive whose bucket, prefix or backup id happens to spell an
+S3 code (`expiredtoken-archive`, `timeout-logs`) no longer moves a
+classification. Two classes change for failures the object-store client
+retried: a transport failure reads `EndpointUnreachable` where the retry
+clause's own `retry_timeout:` made it `Timeout`, and a 5xx it retried reads
+unclassified where it read `Timeout`; a backup's "retry under a new execution
+id" hint is unchanged for both.
 **On Apache Kafka 3.7** every `Backup` check now carries one advisory warning,
 `connection.groupTypes`: that line's group listing names no group type, so a
 backup that selects consumer groups records each as excluded (item 50). The
@@ -2143,23 +2162,42 @@ verdict is unchanged.
 **Do:** roll the runner image with the controller. A controller from this
 build lists `capabilityChecks` in every `Backup` and `Restore` check plan, and
 an older runner refuses such a plan: the `Preflight` is `Failed`,
-`CheckContractMismatch`, naming the field. Give the restore identity `Read` on
+`CheckContractMismatch`, naming the field. The chart has two image values:
+move **`runnerImage`** with `controllerImage` (a release that pins
+`runnerImage` keeps the old runner through `helm upgrade --reuse-values`); an
+install from `logweir.yaml` sets **`LOGWEIR_RUNNER_IMAGE`** on the controller's
+Deployment in the same change. A `Preflight` that failed this way stays
+`Failed`, and one that was in flight across the upgrade reads `unknown`:
+create a new one after both images have moved
+([kubernetes.md](kubernetes.md) §21.9). Give the restore identity `Read` on
 the target topics and `Describe` on the scratch marker topic if a managed
 cluster's ACLs were written from the chart README's earlier list, which named
-neither; and `Delete` on the scratch prefix, without which a scratch restore
-signs `pass` and leaves its topics behind
-([support-matrix.md](support-matrix.md#minimum-permissions)).
+neither; and `Delete` on the scratch prefix. Without `Delete` a scratch
+restore signs `pass` and leaves its topics behind; it says so (a warning that
+names the topic, the same clause on its summary line, and the signed teardown
+attestation), and does not name the grant
+([support-matrix.md](support-matrix.md#minimum-permissions)). Take a
+decommissioned address out of a `KafkaCluster`'s `bootstrapServers`: a
+bootstrap address that does not answer now leaves the engine-protocol rows
+`unknown`.
 **Scope:** unit rows for every new row and code, each with the capability
 present, absent, not observed and not listed; librdkafka's in-process mock
-cluster for the ApiVersions reader; a guard that holds the published tables to
+cluster for the ApiVersions reader, one broker and three (all answering, one
+silent, one stopped); the store's classifier against the real object-store
+client on a loopback responder; a guard that holds the published tables to
 their evidence, with a mutant per rule; and compose rows
 (`e2e/tests/compat_contract.rs`, engine `0.23.3+logweir.2`): the generic row
-on each of the four Apache Kafka lines and on Confluent Platform 8.3.2; the
-Redpanda row (a backup, the refused restore and the restore that then fails);
-both SCRAM mechanisms on Redpanda; SeaweedFS through a backup, a restore and a
-refused second claim; the ACL profile with each grant removed in turn; and a
-listener that advertises an unreachable address. No managed provider, no cloud
-object store, one version of each other endpoint, single-node brokers.
+on each of the four Apache Kafka lines and on Confluent Platform 8.3.2, with
+a `Restore` Preflight in the shape the controller renders; the Redpanda row
+(a backup, the refused restore and the restore that then fails); both SCRAM
+mechanisms on Redpanda; SeaweedFS through a backup, a restore and a refused
+second claim; the ACL profile with each grant removed in turn; a listener
+that advertises an unreachable address; a three-broker cluster with one
+broker frozen; and backups whose ids spell S3 credential codes. Every compose
+row but one is run by hand: CI runs the capability row on Apache Kafka 3.7.1.
+No managed provider, no cloud object store, one version of each other
+endpoint; every whole-path row is one node.
+[UNVERIFIED — no controller has rendered a capability plan to a check Job on a cluster yet; the PoC upgrade that carries this item runs a Backup and a Restore Preflight.]
 **Rollback:** roll the controller and the runner back together. An older
 controller's plan lists no capability row, and this runner then answers none
 and reports an unreported bound under `BrokerConfigsNotReadable`, a code the

@@ -1392,7 +1392,10 @@ nothing. A key that silently did something would be worse than no key.
 ## Amazon MSK
 
 [`examples/msk.values.yaml`](examples/msk.values.yaml) is the shape; these are
-the facts it does not have room for, measured 2026-09-12:
+the facts it does not have room for, written down on 2026-09-12. **None of
+them was measured on an MSK cluster: MSK has not been run against.** Read the
+port, the mechanism and the Secrets Manager arrangement as what AWS documents,
+and the ACL list as what a compose broker required:
 
 * SASL/SCRAM on MSK is port **9096** (not 9092), `SASL_SSL` +
   `SCRAM-SHA-512`: `auth.mode: scramSha512` with `tls: true`. **MSK itself has
@@ -1436,7 +1439,12 @@ the facts it does not have room for, measured 2026-09-12:
     topic there and deletes it again. A topic outside that prefix is never
     deleted: the reader's `TopicDeleter` refuses every other name. **Without
     Delete a scratch restore still exits 0 with a signed `pass`, and leaves
-    its topics behind** (measured, PROD-01.2).
+    its topics behind** (measured, PROD-01.2). The run says so: a warning
+    names the topic (`teardown left 1 scratch topic behind on the target
+    cluster: …`), the summary line repeats it beside `outcome pass`, and the
+    signed teardown attestation records it. It does not name the missing
+    grant, and a restore that FAILS leaves its topic without a line about it
+    (tracker row FX-44).
 * **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
   refusal in the operator, not an oversight — SASL/SCRAM is the path.
 

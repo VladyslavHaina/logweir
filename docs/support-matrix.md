@@ -30,9 +30,11 @@ reasoning are in the
 
 Nothing is called supported on reasoning, and a managed provider is untested
 until somebody runs against it (OD-4): a local container is not a hosted
-service. `crates/logweir/tests/support_matrix.rs` holds the tables between the
-two markers below to this: one status per row, a named test behind every
-supported and limited row, and every test and check id named here exists.
+service. `crates/logweir/tests/support_matrix.rs` holds this page to it: one
+status per row between the two markers below; a named test behind every
+supported and limited row, wherever on the page it stands; every reference of
+that shape is to a function with `#[test]` above it; and every check id named
+here exists.
 
 **A passing connection test is none of these.** `logweir cluster-probe` and the
 console's Test connection reach the bootstrap address and read the cluster id.
@@ -41,9 +43,13 @@ They do not show that the engine can read or write there
 below).
 
 Every row ran the engine the images ship, `kafka-backup` `0.23.3+logweir.2`,
-on a compose stack; the rows this page names as run by hand were run on
-2026-10-10 (UTC) on compose slot 2 with that engine from the published
-linux/arm64 runner image.
+on a compose stack. **A cell says who runs its row.** "CI" is the e2e job of
+every pull request, on Apache Kafka 3.7.1. "By hand" is a row that is
+`#[ignore]`d because it needs a profile or a broker line CI's job does not
+start: somebody ran it on the date given, on compose slot 2, with that engine
+from the published linux/arm64 runner image, and **nothing runs it again
+until somebody does** (tracker row PROD-01.2a asks for a weekly job). A
+supported cell that rests on a hand-run row is true of the day it was run.
 
 <!-- compatibility:begin -->
 
@@ -51,16 +57,17 @@ linux/arm64 runner image.
 
 The status is for the whole path: the probe, the capability checks, a backup,
 a restore into new topics, and both verifiers on the receipt and the scorecard.
-Plaintext, one node, KRaft, MinIO.
+Plaintext, one node, KRaft, MinIO. A cluster of several brokers has one row
+of its own, under [Capability checks](#capability-checks).
 
 | Endpoint | Status | What the row shows | Evidence |
 |---|---|---|---|
-| Apache Kafka 3.7.1, the default fixture and the line CI runs on every pull request | **supported** | The whole path. Its group listing does not type groups: see the next table. Apache no longer maintains this line (legacy, under [Broker versions](#broker-versions-apache-kafka)); supported here means Logweir's rows pass on it. | CI: `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers`, `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. By hand on this line: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` |
-| Apache Kafka 3.9.2 | **supported** | The whole path, and every capability check `ready`. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 3.9`: by hand, and weekly in the `broker-lines` job |
-| Apache Kafka 4.1.2 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.1`: by hand, and weekly in the `broker-lines` job |
-| Apache Kafka 4.3.1 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.3`: by hand, and weekly in the `broker-lines` job |
-| Confluent Platform 8.3.2 (`cp-kafka`, the community image) | **supported** | The whole path, with no difference from Apache Kafka 4.3.1: the same request ranges, the same capability answers, a classic group captured. | `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` |
-| Redpanda v26.2.4 | **limited** | **A backup source only.** The probe, a backup and both verifiers pass, with topic IDs and the topic's configuration recorded. **A restore into it cannot run:** the engine sends Produce v8 and never negotiates, and Redpanda serves Produce v0–v7. `target.engineProtocol` is `notReady` and says so before a restore starts; a restore started anyway fails in the engine and signs nothing. Restore its archive into a cluster that serves Produce v8. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` |
+| Apache Kafka 3.7.1, the default fixture and the line CI runs on every pull request | **supported** | The whole path. Its group listing does not type groups: see the next table. Apache no longer maintains this line (legacy, under [Broker versions](#broker-versions-apache-kafka)); supported here means Logweir's rows pass on it. | CI: `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers`, `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. The generic row on this line, `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`: by hand, 2026-10-10; no workflow runs it |
+| Apache Kafka 3.9.2 | **supported** | The whole path, and every capability check `ready`. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 3.9`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Apache Kafka 4.1.2 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.1`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Apache Kafka 4.3.1 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.3`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Confluent Platform 8.3.2 (the `confluentinc/cp-kafka` image, which reports `8.3.2-ccs`) | **supported** | The whole path, with no difference from Apache Kafka 4.3.1: the same request ranges, the same capability answers, a classic group captured. | `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it) |
+| Redpanda v26.2.4 | **limited** | **A backup source only.** The probe, a backup and both verifiers pass, with topic IDs and the topic's configuration recorded. **A restore into it cannot run:** the engine sends Produce v8 and never negotiates, and Redpanda serves Produce v0–v7. `target.engineProtocol` is `notReady` and says so before a restore starts; a restore started anyway fails in the engine and signs nothing. Restore its archive into a cluster that serves Produce v8. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it) |
 | Apache Kafka 4.0.x and 4.2.x | **untested** | No pinned image and no row. | |
 | Apache Kafka on ZooKeeper (any 3.x) | **untested** | Every fixture is KRaft. | |
 | Any other Kafka-compatible endpoint | **untested** | `connection.engineProtocol` and `target.engineProtocol` answer, before anything is read or written, whether it serves the request versions the engine sends. | |
@@ -72,12 +79,12 @@ reason**. It is never recorded as an empty answer.
 
 | What | Endpoints | Status | What the receipt says | Evidence |
 |---|---|---|---|---|
-| Consumer-group positions (`--consumer-group`) | Apache Kafka 3.9.2, 4.1.2, 4.3.1; Confluent Platform 8.3.2 | **supported** | A classic or consumer group is `captured` with its positions. | `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt`, `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` |
-| Consumer-group positions | Apache Kafka 3.7.1; Redpanda v26.2.4 | **unsupported** | The endpoint serves ListGroups v0–v4, which names no group type, so Logweir cannot tell a classic consumer group from any other. Every selected group is `excluded: GroupTypeNotCaptured`: never captured, never offset 0. `connection.groupTypes` is `notReady` (advisory) before the backup. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`, `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt` |
-| Topic IDs (which generation of a topic the backup read) | All six endpoints above | **supported** | `topic_id` before and after the engine, source `describeTopics`. | `e2e/tests/topic_ids.rs::a_recreated_topic_is_a_new_generation_and_the_same_topic_continues`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` |
-| Topic configuration | All six endpoints above | **supported** | Coverage `captured`, with the entries the endpoint reports. A principal without DescribeConfigs on the topic gets `captureDenied` and no entries, and `connection.topicConfigsReadable` is `notReady` (advisory) before the backup. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore` |
-| The broker's timestamp type and record-timestamp bound | Apache Kafka (all four lines); Confluent Platform 8.3.2 | **supported** | The receipt records the topic's timestamp type with its source. On a restore, phase 0 reads the target's type and `target.timestampBound` compares the plan's window with the target's bound. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` |
-| The broker's timestamp type and record-timestamp bound | Redpanda v26.2.4 | **unsupported** | Its broker resource reports neither (it keeps them per topic). Nothing is recorded as `CreateTime` and nothing as "no bound": the type is absent, and `target.timestampBound` is `unknown` (`TimestampBoundNotReported`). | Live, the nine keys and phase 0's own account: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`. Over those nine keys, in process: `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`, `crates/logweir/tests/topic_preflight.rs::a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time` |
+| Consumer-group positions (`--consumer-group`) | Apache Kafka 3.9.2, 4.1.2, 4.3.1; Confluent Platform 8.3.2 | **supported** | A classic or consumer group is `captured` with its positions. | The generic row on each endpoint, which requires its group: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly, as above). Every outcome a group can have, on a broker that types groups: `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt` (CI runs it on 3.7.1, where every group is excluded; its `captured` arms need a line that types groups) |
+| Consumer-group positions | Apache Kafka 3.7.1; Redpanda v26.2.4 | **unsupported** | The endpoint serves ListGroups v0–v4, which names no group type, so Logweir cannot tell a classic consumer group from any other. Every selected group is `excluded: GroupTypeNotCaptured`: never captured, never offset 0. `connection.groupTypes` is `notReady` (advisory) before the backup. | Apache Kafka 3.7.1, CI: `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it) |
+| Topic IDs (which generation of a topic the backup read) | All six endpoints above | **supported** | `topic_id` before and after the engine, source `describeTopics`. | On every endpoint, the generic row, which requires the ID and that it did not change during the capture: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly). A recreated topic is a new generation, CI on 3.7.1: `e2e/tests/topic_ids.rs::a_recreated_topic_is_a_new_generation_and_the_same_topic_continues` |
+| Topic configuration | All six endpoints above | **supported** | Coverage `captured`, with the entries the endpoint reports. A principal without DescribeConfigs on the topic gets `captureDenied` and no entries, and `connection.topicConfigsReadable` is `notReady` (advisory) before the backup. | On every endpoint, the generic row, which requires coverage `captured`: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`. The denied read, on Apache Kafka 4.3.1: `e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`. All four: by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly |
+| The broker's timestamp type and record-timestamp bound | Apache Kafka (all four lines); Confluent Platform 8.3.2 | **supported** | The receipt records the topic's timestamp type with its source. Before a restore, a `Restore` Preflight in the shape the controller renders (`restorePreflight`) answers `target.timestampBound` `ready` and quotes the bound the broker's own tool reports; during it, phase 0 records the target's timestamp type as that tool reports it (the run's `topic-preflight=` line). The rows restore a recent window, so they show the bound read and compared, and not a window the bound refuses: that arm is in process, `crates/logweir/tests/check_cli.rs` | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly) |
+| The broker's timestamp type and record-timestamp bound | Redpanda v26.2.4 | **unsupported** | Its broker resource reports neither (it keeps them per topic). Nothing is recorded as `CreateTime` and nothing as "no bound": the type is absent, and `target.timestampBound` is `unknown` (`TimestampBoundNotReported`). | Live, the nine keys, a `Restore` Preflight's `target.timestampBound` and phase 0's own account: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it). Over those nine keys, in process, on every `cargo test`: `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`, `crates/logweir/tests/topic_preflight.rs::a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time` |
 
 ### Authentication modes
 
@@ -89,9 +96,9 @@ Backup, restore and verify on the `auth` profile's listeners, which CI starts
 | `plaintext` | **supported** | Every broker row above. | `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers` |
 | `plain` with `tls: true` (SASL/PLAIN over TLS) | **supported** | A private CA; a wrong password and a wrong CA are refused. | `e2e/tests/auth_modes.rs::plain_over_tls_backs_up_restores_and_verifies` |
 | `plain` without TLS | **unsupported** | Refused by name before a socket opens (`PlainWithoutTls`, exit 3): SASL/PLAIN sends the password itself. | `e2e/tests/auth_modes.rs::plain_without_tls_is_refused_by_name_before_dialling` |
-| `scramSha256` | **supported** | A wrong password is refused. Against Redpanda's own SCRAM too (a backup; a restore is the broker row's limit). | `e2e/tests/auth_modes.rs::scram_sha_256_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_authenticates_both_scram_mechanisms` |
+| `scramSha256` | **supported** | A wrong password is refused. Against Redpanda's own SCRAM too (a backup; a restore is the broker row's limit). | CI: `e2e/tests/auth_modes.rs::scram_sha_256_backs_up_restores_and_verifies`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_authenticates_both_scram_mechanisms` (by hand, 2026-10-10; no workflow runs it) |
 | `scramSha256` with `tls: true` | **supported** | A private CA; a wrong CA is refused. | `e2e/tests/auth_modes.rs::scram_sha_256_over_tls_backs_up_restores_and_verifies` |
-| `scramSha512` | **supported** | Both clients, a drill, and the capability checks over SASL (the engine's SaslHandshake v1 and SaslAuthenticate v2 are checked only on a SASL connection). Against Redpanda too. | `e2e/tests/scram.rs::a_drill_passes_over_scram`, `e2e/tests/scram.rs::scram_authenticates_through_the_engines_own_client`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` |
+| `scramSha512` | **supported** | Both clients, a drill, and the capability checks over SASL (the engine's SaslHandshake v1 and SaslAuthenticate v2 are checked only on a SASL connection). Against Redpanda too. | CI: `e2e/tests/scram.rs::a_drill_passes_over_scram`, `e2e/tests/scram.rs::scram_authenticates_through_the_engines_own_client`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_authenticates_both_scram_mechanisms` (by hand, 2026-10-10; no workflow runs it) |
 | `scramSha512` with `tls: true` | **untested** | No compose listener serves SCRAM-SHA-512 over TLS. Run once by hand (PLAT-07.1, 2026-09-16, a broker with a private CA on docker-desktop). This is the mode Amazon MSK's SCRAM endpoint needs. | |
 | `mtls` | **supported** | A CA-signed client certificate; a wrong CA and an untrusted client certificate are refused. | `e2e/tests/auth_modes.rs::mtls_backs_up_restores_and_verifies` |
 | OAUTHBEARER, in any form (MSK IAM, an OIDC token, Entra ID) | **unsupported** | No `auth.mode` names it, and the engine's command line has no token plugin. Deferred (OD-3). | |
@@ -104,7 +111,7 @@ Logweir contacts no schema registry. What it does is read the archived bytes.
 | Registry | Status | What the row shows | Evidence |
 |---|---|---|---|
 | Records in Confluent's wire format (a zero byte and a schema id), whoever wrote them | **supported** | Detection only: the receipt flags the topic `schemaDependent` with the schema ids seen, from the archived bytes. | `e2e/tests/schema_dependency.rs::a_backup_flags_raw_framed_records_with_their_ids` |
-| Karapace 6.2.3 (the `registry` profile) | **supported** | Detection only: Avro, JSON Schema and Protobuf records produced through its REST proxy are flagged with the registry's ids, with the registry stopped during the backup. | `e2e/tests/schema_dependency.rs::a_backup_flags_the_schema_dependent_topics_from_their_bytes` |
+| Karapace 6.2.3 (the `registry` profile) | **supported** | Detection only: Avro, JSON Schema and Protobuf records produced through its REST proxy are flagged with the registry's ids, with the registry stopped during the backup. | `e2e/tests/schema_dependency.rs::a_backup_flags_the_schema_dependent_topics_from_their_bytes` (by hand, 2026-10-10; no workflow runs it) |
 | Confluent Schema Registry, Apicurio Registry, AWS Glue Schema Registry | **untested** | No fixture. A framing that is not Confluent's reads `notDetected`, which means "no Confluent framing seen" and never "no registry needed". | |
 | A registry's contents (subjects, schemas, compatibility settings), on any registry | **unsupported** | Never contacted and never captured ([stability.md](stability.md), Never #2). A restore brings back the bytes; `schemaDependent` on the receipt is the warning that the schemas are not in the archive. | |
 
@@ -112,10 +119,10 @@ Logweir contacts no schema registry. What it does is read the archived bytes.
 
 | Backend | Status | What the row shows | Evidence |
 |---|---|---|---|
-| MinIO `RELEASE.2025-09-07T16-13-09Z` (the project's rebuild, `third_party/minio-mirror/`) | **supported** | Every e2e row archives to it. Conditional create holds: a second run of one execution is refused before the engine starts. Its fixture buckets are unversioned, so no manifest version is pinned. | `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/backup_argv.rs::a_backup_over_a_set_an_earlier_engine_run_wrote_is_refused_before_the_engine` |
-| SeaweedFS 4.48 (the `objectstore` profile), the maintained choice | **supported** | A backup, a restore and both verifiers with every object on it; a second claim of one execution is refused (`ExecutionAlreadyClaimed`); on a versioned bucket the receipt pins the manifest's version id, and on an unversioned one it carries no pin. | `e2e/tests/compat_contract.rs::seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` (the project's rebuild, `third_party/minio-mirror/`) | **supported** | Every e2e row archives to it. Conditional create holds: a second run of one execution is refused before the engine starts. Its fixture buckets are unversioned, so no manifest version is pinned. A backup whose id, and so every archive key, spells an S3 credential code (`expiredtoken-…`) is a backup like any other: MinIO's `404 NoSuchKey` echoes the key, and Logweir reads the answer's own code (`e2e/tests/compat_contract.rs::a_backup_whose_id_spells_a_credential_code_is_a_backup`, by hand, 2026-10-10; on every `cargo test`, `crates/logweir-store/tests/options.rs::a_real_404_about_an_object_named_like_a_credential_code_is_not_found`). | `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/backup_argv.rs::a_backup_over_a_set_an_earlier_engine_run_wrote_is_refused_before_the_engine` |
+| SeaweedFS 4.48 (the `objectstore` profile), the maintained choice | **supported** | A backup, a restore and both verifiers with every object on it; a second claim of one execution is refused (`ExecutionAlreadyClaimed`); on a versioned bucket the receipt pins the manifest's version id, and on an unversioned one it carries no pin. | `e2e/tests/compat_contract.rs::seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` (by hand, 2026-10-10; no workflow runs it) |
 | RustFS 1.0.0 | **untested** | No fixture here. Run once by hand (PROD-01.5, 2026-09-29, a private container): 19 of 19 protocol checks, Logweir's store layer 6 of 6, the receipt path `pass`. | |
-| versitygw v1.8.0 | **untested** | No fixture here. Run once by hand, the same way: 19 of 19, the receipt path `pass`, the store layer 5 of 6. The sixth: it answers an unknown access key `404 XAdminUserNotFound`, which Logweir read as a missing object. Since PROD-01.2 Logweir reads it as a refused credential, and the store layer is 6 of 6 against the same image (by hand, 2026-10-10). | |
+| versitygw v1.8.0 | **untested** | No fixture here. Run once by hand, the same way: 19 of 19, the receipt path `pass`, the store layer 5 of 6. The sixth: it answers an unknown access key `404 XAdminUserNotFound`, which Logweir read as a missing object. Since PROD-01.2 Logweir reads it as a refused credential, by the answer's own `<Code>` and never by a word found in its text, and the store layer is 6 of 6 against the same image (by hand, 2026-10-10). | |
 | AWS S3 | **untested** | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` | |
 | Google Cloud Storage, Azure Blob Storage | **untested** | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` | |
 | A local directory (`backend: filesystem`, the standalone CLI) | **untested** | In-process tests claim an execution on a temporary directory. No row runs the engine against a directory archive. | |
@@ -155,23 +162,65 @@ ones listed. Each names what is missing and what to do instead.
 | `connection.groupTypes` | backup | Does the endpoint's group listing name each group's type (ListGroups v5)? | `notReady`, advisory, `GroupTypesNotListed`. The backup runs. | Back up from an endpoint that serves ListGroups v5, or select no group and export positions with the endpoint's own tooling. |
 
 An answer that could not be read is `unknown` (`ApiVersionsNotObserved`), never
-`ready`. The served ranges are read from the endpoint's own ApiVersions answer
+`ready`. The served ranges are read from each broker's own ApiVersions answer
 on a real connection; the engine's versions come from a table held to the
 pinned engine source by `cargo xtask check-drift`. Operator reference:
 [kubernetes.md §21](kubernetes.md).
+
+**The three rows that read ApiVersions answer for a cluster only when every
+broker of it answered.** The engine may be sent to any broker, so the check
+reads the cluster's broker list, connects to every broker on it and to every
+bootstrap address the connection names, and waits for each one's answer
+inside its budget (at most 10 s).
+
+| The cluster | The row |
+|---|---|
+| Every listed broker and every bootstrap address answered | Its own verdict, with the fact `brokersAnswered: N of N` (distinct brokers, never connections). Its message says "all N brokers of this endpoint serve …". |
+| The brokers' answers differ (a rolling upgrade) | Judged on what every one of them serves, and the message says they differ. One broker that does not serve Produce v8 makes `target.engineProtocol` `notReady`. |
+| A broker the cluster lists did not answer in time | `unknown`, `ApiVersionsNotObserved`, never `ready`: "2 of 3 broker(s) the cluster lists answered …; no answer from broker 3 (host:port)". Re-run when the broker is back. |
+| A bootstrap address did not answer | `unknown` the same way, naming the address, even when every listed broker answered: a stopped broker the cluster has dropped from its list is still a broker the connection names. |
+
+Measured on the `cluster3` profile (three Apache Kafka 3.7.1 brokers) with one
+broker's process frozen, and required to be `3 of 3` from three bootstrap
+addresses and from one, five rounds each:
+`e2e/tests/compat_contract.rs::a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` (by
+hand, 2026-10-10; no workflow runs it). On every `cargo test`, against
+librdkafka's in-process cluster of three:
+`crates/logweir-kafka/tests/api_versions.rs::a_silent_broker_makes_the_view_partial_and_never_an_answer`
+and
+`crates/logweir-kafka/tests/api_versions.rs::every_broker_of_a_three_broker_cluster_answers_from_one_address_or_three`.
+
+Two limits. **A broker the cluster no longer lists is not asked:** through
+bootstrap addresses that all answer, a cluster that has dropped a stopped
+broker lists two, both answer, and the row says `2 of 2`. And **the row is
+about request versions, not about a restore into several brokers**: every
+whole-path row above is one node.
 
 ### Minimum permissions
 
 Measured on the `acl` profile (Apache Kafka 4.3.1, `StandardAuthorizer`, a
 SCRAM-SHA-512 principal that is not a super user) by granting exactly the list
 and then removing one grant at a time:
-`e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`.
+`e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`
+(by hand, 2026-10-10; no workflow runs it).
 
 | Operation | The ACLs it needs | With one removed |
 |---|---|---|
 | Probe (`cluster-probe`, Test connection) | None beyond authenticating. | Nothing to remove: with no ACL at all for the principal, the probe reads the cluster id. |
 | Backup | `Read` on each source topic (it implies `Describe`), and `DescribeConfigs` on each source topic. | Without `Read`: exit 1, the engine fails, no receipt. Without `DescribeConfigs`: exit 0, and the receipt says `captureDenied` with no timestamp type. |
-| Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, and the created topic is left behind. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a `pass`, and the scratch topic is left behind.** |
+| Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, the created topic is left behind, **and the run says nothing about it**. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so**: a warning names the topic, the summary line repeats it beside `outcome pass`, and the signed teardown attestation records it. It does not say why: nothing names the missing grant. |
+
+**Give the restore identity `Delete`, and read the summary line of a restore
+that passed.** A leftover scratch topic blocks the next rehearsal that would
+use its name. Two things are open (tracker row FX-44): a restore that FAILS
+leaves its topic without a word, and the teardown warning of one that passes
+does not name the grant. The row above requires both as measured, so this
+paragraph is held to the product.
+
+| Restore without | What the run prints about the topic it leaves |
+|---|---|
+| `Delete` (exit 0, `pass`) | `teardown left 1 scratch topic behind on the target cluster: <topic>` (WARN); `… — outcome pass — … — teardown left 1 scratch topic behind (<topic>)` (the summary line); `teardown-key=logweir/drills/<run>.teardown.json` (the signed attestation) |
+| `Write` or `Read` (exit 1) | Nothing |
 
 The restore row is a scratch drill of a topic whose backup recorded no
 configuration overrides, into a broker on `CreateTime`. Three cases need

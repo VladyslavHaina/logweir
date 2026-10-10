@@ -3,16 +3,22 @@
 //! `docs/support-matrix.md` carries the compatibility contract between its two
 //! `compatibility:` markers: one table row per broker, authentication mode,
 //! registry, archive backend and managed provider, each with exactly one of
-//! four statuses. This file holds that section to three rules.
+//! four statuses. This file holds the page to three rules.
 //!
-//! 1. **Every row has a status from the closed set** — `supported`,
-//!    `limited`, `untested`, `unsupported`, bold, in a cell of its own. A row
-//!    without one, or with a word outside the set, fails.
-//! 2. **`supported` and `limited` cite a row.** Such a row names at least one
-//!    test of this repository as `` `path/to/file.rs::test_name` ``, and every
-//!    test ANY row names exists: the file is there and declares
-//!    `fn test_name(`. "Supported" on reasoning alone, on an artifact nobody
-//!    can re-run, or on a test that was renamed away, fails.
+//! 1. **Every row of the contract has a status from the closed set** —
+//!    `supported`, `limited`, `untested`, `unsupported`, bold, in a cell of
+//!    its own. A row between the markers without one, or with a word outside
+//!    the set, fails.
+//! 2. **`supported` and `limited` cite a TEST, wherever on the page they
+//!    stand.** Such a row names at least one test of this repository as
+//!    `` `path/to/file.rs::test_name` ``, and every reference of that shape
+//!    ANYWHERE on the page is to a test: the file is there, and it declares
+//!    `fn test_name(` under a `#[test]` attribute. "Supported" on reasoning
+//!    alone, on an artifact nobody can re-run, on a test that was renamed
+//!    away, or on a helper function that asserts nothing, fails. So does a
+//!    status row written after the end marker (PROD-01.2 review, L5: the
+//!    first version read only between the markers and accepted any
+//!    `fn name(`).
 //! 3. **Every check id the page names is in the vocabulary.** A backticked
 //!    `category.name` whose category is one of the check categories must be a
 //!    `CheckId`, anywhere on the page, so a renamed or invented id cannot sit
@@ -137,10 +143,52 @@ fn test_references(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Whether `path` (relative to the repository root) declares `fn name(`.
-fn test_exists(path: &str, name: &str) -> bool {
-    std::fs::read_to_string(repo_root().join(path))
-        .is_ok_and(|src| src.contains(&format!("fn {name}(")))
+/// Why `path::name` is not a test of this repository, or `None` when it is
+/// one: `path` (relative to the repository root) declares `fn name(` as an
+/// item, and a `#[test]` attribute stands above it.
+///
+/// "Declares" is a line that IS the declaration, so a name in a comment or a
+/// string is not one. "A test" is `#[test]` (or an async runtime's
+/// `#[…::test]`) among the attribute lines directly above: a helper such as
+/// `fn capability_plan(` asserts nothing and is not evidence (review L5,
+/// mutants D4 and D7).
+fn not_a_test(path: &str, name: &str) -> Option<String> {
+    let Ok(src) = std::fs::read_to_string(repo_root().join(path)) else {
+        return Some(format!(
+            "{path} declares no `fn {name}(`: the file is not there"
+        ));
+    };
+    not_a_test_in(&src, path, name)
+}
+
+fn not_a_test_in(src: &str, path: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let declares = |line: &str| {
+        let line = line.trim_start();
+        ["fn ", "pub fn ", "async fn ", "pub async fn "]
+            .iter()
+            .filter_map(|lead| line.strip_prefix(lead))
+            .any(|rest| rest.starts_with(&format!("{name}(")))
+    };
+    let declared: Vec<usize> = (0..lines.len()).filter(|i| declares(lines[*i])).collect();
+    if declared.is_empty() {
+        return Some(format!("{path} declares no `fn {name}(`"));
+    }
+    let is_a_test = |at: &usize| {
+        lines[..*at]
+            .iter()
+            .rev()
+            .map(|l| l.trim())
+            .take_while(|l| l.starts_with("#[") || l.starts_with("#!["))
+            .any(|l| l == "#[test]" || (l.starts_with("#[") && l.contains("::test")))
+    };
+    if declared.iter().any(is_a_test) {
+        None
+    } else {
+        Some(format!(
+            "{path} declares `fn {name}(` with no `#[test]` above it: a helper is not a row"
+        ))
+    }
 }
 
 /// The categories a check id can have, read off the vocabulary itself.
@@ -178,28 +226,34 @@ fn offences(text: &str) -> Vec<String> {
             rows.len()
         ));
     }
+    // Rule 1, between the markers: every row has exactly one status.
     for (n, line, cells) in &rows {
-        let status = match status_of(cells) {
-            Ok(s) => s,
-            Err(why) => {
-                bad.push(format!("contract line {n}: {why}: {line}"));
-                continue;
-            }
+        if let Err(why) = status_of(cells) {
+            bad.push(format!("contract line {n}: {why}: {line}"));
+        }
+    }
+    // Rule 2, over the WHOLE page: a row that carries a status that claims
+    // something works cites a test, whichever side of a marker it is on.
+    for (n, line, cells) in body_rows(text) {
+        let Ok(status) = status_of(&cells) else {
+            continue;
         };
-        let references = test_references(line);
-        if NEEDS_EVIDENCE.contains(&status) && references.is_empty() {
+        if NEEDS_EVIDENCE.contains(&status) && test_references(line).is_empty() {
             bad.push(format!(
-                "contract line {n}: `{status}` with no evidence reference (a \
+                "page line {n}: `{status}` with no evidence reference (a \
                  `path.rs::test_name` of this repository): {line}"
             ));
         }
-        for (path, name) in references {
-            if !test_exists(&path, &name) {
-                bad.push(format!(
-                    "contract line {n}: cites `{path}::{name}`, and {path} declares no \
-                     `fn {name}(`"
-                ));
-            }
+    }
+    // ...and every reference on the page, in a table or in prose, is to a
+    // test that exists.
+    let mut seen = BTreeSet::new();
+    for (path, name) in test_references(text) {
+        if !seen.insert((path.clone(), name.clone())) {
+            continue;
+        }
+        if let Some(why) = not_a_test(&path, &name) {
+            bad.push(format!("the page cites `{path}::{name}`, and {why}"));
         }
     }
     for claim in check_id_claims(text) {
@@ -281,6 +335,57 @@ fn every_rule_of_the_matrix_lint_has_a_mutant_that_fails_it() {
     assert!(
         d.contains("e2e/tests/no_such_file.rs declares no"),
         "a reference into a missing file was not caught:\n{d}"
+    );
+
+    // Rule 2c (review L5, mutants D4 and D7): a HELPER cited as the row. It
+    // is declared in the file the real row is in, and asserts nothing.
+    for helper in ["capability_plan", "dial"] {
+        assert!(
+            not_a_test("e2e/tests/compat_contract.rs", helper)
+                .is_some_and(|why| why.contains("no `#[test]` above it")),
+            "`{helper}` is still a helper of the compat rows, declared without `#[test]`"
+        );
+        let cited = supported.replace(
+            &reference,
+            &format!("`e2e/tests/compat_contract.rs::{helper}`"),
+        );
+        let d = offences(&text.replacen(supported, &cited, 1)).join("\n");
+        assert!(
+            d.contains(&format!(
+                "declares `fn {helper}(` with no `#[test]` above it"
+            )),
+            "the helper `{helper}` passed as evidence:\n{d}"
+        );
+    }
+    // A name that appears only in a comment or a string is not declared.
+    let src = "// fn a_row() {}\nlet s = \"fn a_row() {}\";\n#[test]\nfn another_row() {}\n";
+    assert!(not_a_test_in(src, "x.rs", "a_row")
+        .is_some_and(|why| why.contains("declares no `fn a_row(`")));
+    assert_eq!(not_a_test_in(src, "x.rs", "another_row"), None);
+    // An ignored test, and an async one, are tests.
+    let src = "#[test]\n#[ignore = \"needs a profile\"]\nfn ignored_row() {}\n\
+               #[tokio::test]\nasync fn async_row() {}\n\
+               #[allow(dead_code)]\nfn helper() {}\n";
+    assert_eq!(not_a_test_in(src, "x.rs", "ignored_row"), None);
+    assert_eq!(not_a_test_in(src, "x.rs", "async_row"), None);
+    assert!(not_a_test_in(src, "x.rs", "helper").is_some());
+
+    // Rule 2d (review L5, mutant D6): a status row written AFTER the end
+    // marker is held to the same rule, and so is a reference in prose.
+    let after = format!(
+        "{text}\n| Endpoint | Status | What | Evidence |\n|---|---|---|---|\n\
+         | Somewhere new | **supported** | It was read about. | |\n"
+    );
+    let d = offences(&after).join("\n");
+    assert!(
+        d.contains("`supported` with no evidence reference"),
+        "a `supported` row outside the markers passed:\n{d}"
+    );
+    let prose = format!("{text}\nSee `e2e/tests/compat_contract.rs::a_row_nobody_wrote`.\n");
+    let d = offences(&prose).join("\n");
+    assert!(
+        d.contains("declares no `fn a_row_nobody_wrote(`"),
+        "a reference in prose to a missing test passed:\n{d}"
     );
 
     // Rule 1: a status outside the closed set, and a row with two.

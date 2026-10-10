@@ -8647,7 +8647,12 @@ without `tls: true` is refused — never dialled — with the named reason
 Job exists, by every runner entry point (`refusal-reason=PlainWithoutTls`,
 exit 3) before any client exists, and by both clients' builders as a backstop.
 Confluent Cloud API keys and Azure Event Hubs connection strings
-(`username: $ConnectionString`) use this mode.
+(`username: $ConnectionString`) are presented in this mode. **Neither provider
+has been run against**: both are `untested` in
+[the compatibility contract](support-matrix.md#managed-kafka-providers), and
+whether either serves the request versions the engine sends is not known. A
+`Backup` `Preflight` answers that on first contact (§21.6c,
+`connection.engineProtocol`).
 
 **mTLS** presents the client certificate in the TLS handshake. Create the
 Secret with `kubectl create secret tls <name> --cert=client.pem --key=client.key`
@@ -8668,7 +8673,10 @@ record that name `scramSha256`, `plain` or `mtls` are format **1.4.0**, a
 scorecard **1.5.0**; every `plaintext`/`scramSha512` run writes exactly the
 document it always did ([stability.md](stability.md)).
 
-Example (SASL/PLAIN to Confluent Cloud, public CA):
+Example (SASL/PLAIN in the shape Confluent Cloud documents, public CA). It
+shows the mode, and it is not a tested row: no Confluent Cloud cluster has
+been dialled
+([the compatibility contract](support-matrix.md#managed-kafka-providers)).
 
 ```yaml
 apiVersion: logweir.dev/v1alpha1
@@ -9211,7 +9219,7 @@ server refusal.
 | `Queued` | a concurrency ceiling is holding it back (`ConcurrencyLimited`) |
 | `Running` | the Job exists and has not finished |
 | `Completed` | **a result exists.** The verdict is `status.result.state` |
-| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`, `Stalled` |
+| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `CheckContractMismatch`, `DeadlineExceeded`, `Stalled`. Terminal for this object: it is not run again. Fix the cause and create a new `Preflight` |
 | `Cancelled` | `spec.cancelRequested` was set and the Job's deadline was collapsed |
 
 `status.result.state` is `ready`, `notReady` or `unknown`, aggregated exactly
@@ -9619,6 +9627,34 @@ read's own timeout code), never `ready`. When the connection did not
 authenticate, or a selected topic is not describable, the rows are `unknown`
 with `BlockedByPrerequisite`.
 
+**The three ApiVersions rows answer for the cluster only when EVERY broker
+answered.** The engine may be sent to any broker, so the check reads the
+cluster's broker list from metadata and waits for an ApiVersions answer from
+every broker on it, and from every bootstrap address the `KafkaCluster`
+names, inside one budget of at most 10 s (less when little of
+`timeoutSeconds` is left; with under 2 s left it does not dial and says so).
+
+- `ready` or `notReady` carries the fact `brokersAnswered: 3 of 3`: distinct
+  brokers of how many the cluster lists, never a count of connections. When
+  the brokers' answers differ (a rolling upgrade), the row is judged on the
+  versions every one of them serves, and its message says they differ.
+- A broker that did not answer in time makes the row `unknown`
+  (`ApiVersionsNotObserved`), with a message such as "2 of 3 broker(s) the
+  cluster lists answered ApiVersions within the check's budget; no answer from
+  broker 3 (kafka-3.example:9092)". So does a bootstrap address nobody
+  answered at. Bring the broker back, or take a decommissioned address out of
+  `spec.bootstrapServers`, and create a new `Preflight`.
+- **A broker the cluster no longer lists is not asked.** A cluster that has
+  dropped a stopped broker lists the others, and through bootstrap addresses
+  that all answer the row says `2 of 2`. The row is about the brokers the
+  cluster says it has.
+- **What it opens.** For the length of the observation, one connection to each
+  bootstrap address and one to each listed broker: six on a three-broker
+  cluster with three bootstrap addresses. A cluster that caps connections per
+  principal below that answers `unknown`. Builds before the fix round of
+  PROD-01.2 read whichever one to three brokers a sparse client had dialled
+  and called the result the endpoint's.
+
 **An advisory row never changes the verdict.** On Apache Kafka 3.7 every
 `Backup` check carries `connection.groupTypes` as a warning beside a `ready`
 verdict. It matters only to a backup that selects consumer groups.
@@ -9856,7 +9892,27 @@ capability rows of §21.6c in every `Backup` and `Restore` check plan
 runner** refuses such a plan at startup (exit 3): the `Preflight` lands
 `phase: Failed`, `CheckContractMismatch`, naming `capabilityChecks`. **Upgrade
 the runner image with the controller**; unlike the conditional fields above,
-this one is in every `Backup` and `Restore` check. A **newer runner** handed a
+this one is in every `Backup` and `Restore` check.
+
+- **Which setting moves.** The chart has two image values, `controllerImage`
+  and `runnerImage`. Its defaults move together, but a release installed with
+  `runnerImage` pinned (a private registry, the ECR example of
+  [install.md](install.md)) keeps the old runner through
+  `helm upgrade --reuse-values` unless `--set runnerImage=…` moves it. An
+  install from `logweir.yaml` has no chart value: the controller reads
+  `LOGWEIR_RUNNER_IMAGE` from its own Deployment, so set it to the new runner
+  image in the same change that rolls the controller.
+- **A `Preflight` that failed this way stays `Failed`.** The phase is terminal
+  (§21.2): the object is not run again when the runner image is corrected.
+  Create a new `Preflight`.
+- **A `Preflight` in flight across the upgrade.** By reading the controller,
+  not by a run: the rows a result must hold are derived from the request as
+  THIS controller renders it, so a check Job the old controller created and
+  the new one sees finish is missing the capability rows, which are then
+  reported `unknown`. That one object's verdict is `unknown`, never a `ready`
+  it did not earn. Create a new `Preflight` after the upgrade.
+
+A **newer runner** handed a
 plan from an older controller (no field) emits no capability row, and the
 older controller reads its result as before. The new answer of
 `target.timestampBound` follows the same rule: a plan from this build's

@@ -6195,8 +6195,11 @@ fn chart_lint_the_readme_opens_with_copy_this_directory() {
         readme[..installs].contains("helm upgrade --install logweir . -n"),
         "the copy-and-use section must show the whole command"
     );
-    // The MSK facts, measured 2026-09-12, that an adopter on MSK needs and a
-    // short values file cannot hold.
+    // The MSK facts an adopter on MSK needs and a short values file cannot
+    // hold. WRITTEN DOWN on 2026-09-12 and never measured on an MSK cluster
+    // (PROD-01.2 review L8: this comment and the README's lead both said
+    // "measured"): the README now says so, and this pins that the facts stay
+    // on the page, not that anyone ran against MSK.
     for fact in [
         "9096",
         "Secrets Manager",
