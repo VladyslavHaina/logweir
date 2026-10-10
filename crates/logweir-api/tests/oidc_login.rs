@@ -173,10 +173,11 @@ async fn a_complete_sign_in_issues_a_session_and_leaks_no_provider_token() {
     assert!(!raw.to_ascii_lowercase().contains("domain="));
     assert!(!raw.contains(&started.state) && !raw.contains(&started.nonce));
 
+    let id_token = key.mint(&claims(&started.nonce));
     idp.grant(
         "code-1",
         Grant {
-            id_token: key.mint(&claims(&started.nonce)),
+            id_token: id_token.clone(),
             code_challenge: Some(started.challenge.clone()),
             redirect_uri: Some(support::REDIRECT_URI.to_string()),
         },
@@ -216,11 +217,20 @@ async fn a_complete_sign_in_issues_a_session_and_leaks_no_provider_token() {
         "an-access-token-the-api-must-never-keep",
         "a-refresh-token-the-api-must-never-keep",
         "a-client-secret",
-        "eyJ",
         "u-ada",
         "Ada Lovelace",
     ] {
         assert!(!whole.contains(forbidden), "{forbidden} leaked: {whole}");
+    }
+    // The ID token the provider issued, whole and part by part. Not the bare
+    // `eyJ` prefix: the sealed session cookie is random base64url, which
+    // contains those three characters by chance (main 0fd681ff's CI run).
+    assert!(!whole.contains(&id_token), "the ID token leaked: {whole}");
+    for part in id_token.split('.') {
+        assert!(
+            !whole.contains(part),
+            "a part of the ID token leaked: {whole}"
+        );
     }
 
     // And the session works: it names the actor, its roles and its CSRF token.

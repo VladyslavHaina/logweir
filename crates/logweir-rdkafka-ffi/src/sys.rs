@@ -42,6 +42,11 @@ extern "C" {
         errstr_size: usize,
     ) -> c_int;
 
+    /// `rd_kafka_resp_err_t rd_kafka_set_log_queue(rd_kafka_t *rk, rd_kafka_queue_t *rkqu)`.
+    /// A NULL `rkqu` forwards the logs to the main queue (`rdkafka_queue.c:964-977`).
+    #[link_name = "rd_kafka_set_log_queue"]
+    pub(crate) fn set_log_queue(rk: *mut rd::rd_kafka_t, rkqu: *mut rd::rd_kafka_queue_t) -> c_int;
+
     /// `rd_kafka_resp_err_t rd_kafka_list_groups(rk, group, grplistp, timeout_ms)`.
     #[link_name = "rd_kafka_list_groups"]
     pub(crate) fn list_groups(

@@ -45,6 +45,18 @@ pub const ACL_SASL_PORT: &str = "LOGWEIR_E2E_ACL_SASL_PORT";
 pub const CLUSTER2_PORT: &str = "LOGWEIR_E2E_CLUSTER2_PORT";
 /// Profile `autocreate` (PROD-15.1): kafka-autocreate's host port.
 pub const AUTOCREATE_PORT: &str = "LOGWEIR_E2E_AUTOCREATE_PORT";
+/// Profile `redpanda` (PROD-01.2): the Redpanda node's host-side PLAINTEXT
+/// and SASL_PLAINTEXT (SCRAM-SHA-256 and SCRAM-SHA-512) ports.
+pub const REDPANDA_PORT: &str = "LOGWEIR_E2E_REDPANDA_PORT";
+pub const REDPANDA_SASL_PORT: &str = "LOGWEIR_E2E_REDPANDA_SASL_PORT";
+/// Profile `confluent` (PROD-01.2): the Confluent Platform broker's
+/// host-side PLAINTEXT port.
+pub const CP_PORT: &str = "LOGWEIR_E2E_CP_PORT";
+/// Its OFFNET listener: published, and advertised as `127.0.0.1:1`.
+pub const CP_OFFNET_PORT: &str = "LOGWEIR_E2E_CP_OFFNET_PORT";
+/// Profile `objectstore` (PROD-01.5; PROD-01.2 is its first Rust reader):
+/// SeaweedFS's S3 port.
+pub const OBJSTORE_PORT: &str = "LOGWEIR_E2E_OBJSTORE_PORT";
 /// Profile `cluster3` (FX-3 is its first Rust reader): the three nodes'
 /// host-side PLAINTEXT ports, each advertised as `localhost:<port>`.
 pub const C3_PORTS: [&str; 3] = [
@@ -306,6 +318,37 @@ pub fn bootstrap_acl() -> String {
 /// bootstrap, where `logweir` is the RESTRICTED principal a row's ACLs name.
 pub fn bootstrap_acl_sasl() -> String {
     format!("localhost:{}", port(ACL_SASL_PORT))
+}
+
+/// Profile `redpanda` (PROD-01.2): the Redpanda node's host-side PLAINTEXT
+/// bootstrap, as it advertises it.
+pub fn bootstrap_redpanda() -> String {
+    format!("localhost:{}", port(REDPANDA_PORT))
+}
+
+/// Profile `redpanda`: its host-side SASL_PLAINTEXT bootstrap (SCRAM-SHA-256
+/// as `logweir`, SCRAM-SHA-512 as `logweir512`).
+pub fn bootstrap_redpanda_sasl() -> String {
+    format!("localhost:{}", port(REDPANDA_SASL_PORT))
+}
+
+/// Profile `confluent` (PROD-01.2): the Confluent Platform broker's host-side
+/// PLAINTEXT bootstrap.
+pub fn bootstrap_confluent() -> String {
+    format!("localhost:{}", port(CP_PORT))
+}
+
+/// Profile `confluent`: the broker's OFFNET listener, which answers a
+/// bootstrap here and then advertises `127.0.0.1:1`, where nothing listens:
+/// the advertised-address failure (PROD-01.2).
+pub fn bootstrap_confluent_offnet() -> String {
+    format!("localhost:{}", port(CP_OFFNET_PORT))
+}
+
+/// Profile `objectstore`: SeaweedFS's S3 endpoint as a host-side client
+/// reaches it.
+pub fn objectstore_endpoint() -> String {
+    format!("http://localhost:{}", port(OBJSTORE_PORT))
 }
 
 /// Profile `autocreate`: kafka-autocreate's host-side PLAINTEXT bootstrap, a

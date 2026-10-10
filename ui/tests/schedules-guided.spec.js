@@ -17,6 +17,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded, wireItem } from "./console-fixture.js";
 
 import { CONSOLE, resetMode, selectMode } from "../client.js";
 import { dropDraft, formKey, keepDraft, mutationFor, readDraft } from "../lifecycle.js";
@@ -402,7 +403,7 @@ test("readiness_checks_what_the_form_describes_and_renders_only_what_it_recorded
 
   // A FAILED CHECK IS THE CHECK'S OWN WORDS. The verdict, the reason and the
   // remedy all come off the `CheckOperationResponse`; nothing here decides.
-  const notReady = fixture("console/preflight-not-ready.json").item;
+  const notReady = decoded("preflight-not-ready.json").item;
   const failed = renderScheduleForm({
     draft: draft(), clusters: CLUSTERS, mayOperate: true, readiness: notReady,
   });
@@ -412,7 +413,7 @@ test("readiness_checks_what_the_form_describes_and_renders_only_what_it_recorded
 
   // NEGATIVE CONTROL: the same render with a READY verdict does not say not
   // ready, so the row above is reading the object and not a fixed string.
-  const ready = fixture("console/preflight-ready.json").item;
+  const ready = decoded("preflight-ready.json").item;
   const green = renderScheduleForm({
     draft: draft(), clusters: CLUSTERS, mayOperate: true, readiness: ready,
   });
@@ -510,7 +511,7 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
       status: 201,
       text: () => Promise.resolve(JSON.stringify({
         requestId: "r", replayed: false,
-        item: fixture("console/schedule.json").item,
+        item: wireItem("schedule.json"),
       })),
     });
   };
@@ -559,7 +560,7 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
 test("a_readiness_verdict_goes_stale_when_the_form_no_longer_describes_its_request", () => {
   // REVIEW MEDIUM-3: check source A with `orders`, get `ready`, switch to
   // source B -- the form used to keep showing A's `ready` beside B's inputs.
-  const ready = fixture("console/preflight-ready.json").item;
+  const ready = decoded("preflight-ready.json").item;
   const checked = readinessKey(readinessRequestFor(draft()));
   const current = renderReadinessVerdict({ readiness: ready, readinessRequest: checked,
     draft: draft() });
@@ -846,7 +847,7 @@ test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async 
   dropDraft(key);
   keepDraft(key, draft({ source: "uid-A" }), SCHEDULE_DRAFT_FIELDS);
   const view = fakeView();
-  const ready = fixture("console/preflight-ready.json").item;
+  const ready = decoded("preflight-ready.json").item;
   const api = {
     list(namespace, plural) {
       return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });

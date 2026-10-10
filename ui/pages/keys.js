@@ -64,6 +64,7 @@ import {
   copyBlock,
   errorBox,
   esc,
+  inert,
   evaluationWord,
   facts,
   listFooter,
@@ -383,7 +384,7 @@ export function renderCompromiseGuard(status) {
   const reason = String(guard.reason || "");
   const kind = reason === "CompromiseRecorded" ? "note" : "complaint";
   return "<p class=\"" + kind + "\" data-compromise-guard=\"" + esc(reason) + "\">" +
-    esc("Compromise guard (" + reason + "): " + String(guard.message || "")) + "</p>";
+    esc(inert("Compromise guard (" + reason + "): " + String(guard.message || ""))) + "</p>";
 }
 
 /** What a contested namespace means. It resolves to NOTHING -- not to one of

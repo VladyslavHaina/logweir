@@ -135,6 +135,8 @@ const RDKAFKA_READER: &str = "logweir-kafka/src/rdkafka_reader.rs";
 const PHASE0: &str = "logweir/src/drill/phase0_admit.rs";
 const PHASE9: &str = "logweir/src/drill/phase9_teardown.rs";
 const ORCHESTRATOR: &str = "logweir/src/drill/mod.rs";
+/// PROD-01.2's vendored copy of the pinned engine's request-version table.
+const ENGINE_VERSION_TABLE: &str = "logweir-engine-oso/src/vendored/request_versions.rs";
 
 fn source(path: &str) -> String {
     sources()
@@ -176,7 +178,6 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
     // broker protocol's own names, librdkafka's, or a UFCS spelling.
     for needle in [
         "DeleteTopics",
-        "DeleteRecords",
         "delete_records",
         "DeleteGroups",
         "delete_groups",
@@ -184,6 +185,24 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
     ] {
         assert_eq!(inventory(needle), BTreeMap::new(), "`{needle}` is named");
     }
+    // `DeleteRecords` IS NAMED ONCE, AS DATA, and nowhere as a call. PROD-01.2
+    // vendors the pinned engine's request-version table
+    // (`ENGINE_REQUEST_VERSIONS`, held to the engine's source by
+    // `cargo xtask check-drift`), and the engine declares a version for
+    // DeleteRecords in it. The row is a string in that table: nothing in
+    // Logweir sends the request (`delete_records` above is named nowhere),
+    // and the capability rows read only the Metadata, ListOffsets, Fetch,
+    // DescribeConfigs, Produce and SASL rows of it. Met at the merge of the
+    // two rows; a second mention, or this one becoming a call, still fails.
+    assert_eq!(
+        inventory("DeleteRecords"),
+        expect(&[(ENGINE_VERSION_TABLE, 1)]),
+        "`DeleteRecords` is named somewhere but the vendored engine version table"
+    );
+    assert!(
+        source(ENGINE_VERSION_TABLE).contains("\n    (\"DeleteRecords\", 1),\n"),
+        "the one mention is a row of the table, not a call"
+    );
 }
 
 /// **The broker's delete call is inside `impl TopicDeleter for

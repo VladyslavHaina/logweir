@@ -22,6 +22,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { handedPage } from "./console-fixture.js";
 
 import {
   CATALOG_WINDOW_SENTENCE,
@@ -83,7 +84,8 @@ test("o2_the_catalog_pages_two_sentences_show_the_command_as_code", () => {
   const pages = {
     list: renderCatalogList({ items: [catalog] }, "team-a"),
     status: renderCatalogStatus(catalog),
-    points: renderPoints({ items: [], page: { nextCursor: "c-2" } }, "team-a", "primary", "d-1"),
+    points: renderPoints(handedPage([], { page: { limit: 200, nextCursor: "c-2" } }),
+      "team-a", "primary", "d-1"),
   };
   for (const [name, html] of Object.entries(pages)) {
     assert.ok(html.includes("<code>logweir catalog list</code>"),

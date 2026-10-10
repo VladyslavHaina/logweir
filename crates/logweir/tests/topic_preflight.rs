@@ -388,7 +388,10 @@ fn phase0_calls_broker_configs_and_never_topic_configs_before_creation() {
         &deleter,
     )
     .expect("a CreateTime broker admits the plan");
-    assert_eq!(admitted.topic_preflight.timestamp_type, "CreateTime");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_type.as_deref(),
+        Some("CreateTime")
+    );
     assert_eq!(admitted.topic_preflight.retention_ms, "604800000");
     assert_eq!(admitted.topic_preflight.timestamp_bound_ms, None);
     // Phase 0 creates NOTHING on this path: the probe is only for a
@@ -568,7 +571,10 @@ fn a_logappendtime_broker_that_honours_the_override_is_admitted() {
     .expect("an honoured override admits the plan");
     // The observation is recorded verbatim — the BROKER is on LogAppendTime,
     // and that is what `Restore.status.topicPreflight` will say.
-    assert_eq!(admitted.topic_preflight.timestamp_type, "LogAppendTime");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_type.as_deref(),
+        Some("LogAppendTime")
+    );
     assert_eq!(
         *deleter.calls.lock().unwrap(),
         vec!["drill-orders".to_string()],
@@ -604,7 +610,10 @@ fn the_probe_readback_waits_for_the_topic_phase_0_just_created() {
         &deleter,
     )
     .expect("the override is honoured once the topic is readable");
-    assert_eq!(admitted.topic_preflight.timestamp_type, "LogAppendTime");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_type.as_deref(),
+        Some("LogAppendTime")
+    );
     assert_eq!(
         *reader.served.lock().unwrap(),
         vec![("drill-orders".to_string(), 1)],
@@ -1015,9 +1024,10 @@ fn a_refused_probe_readback_is_operational_never_an_override_verdict() {
 /// `a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`
 /// fixture is handed to `logweir_core::guard::refusal_reason_line` and the
 /// result is byte-equal to `refusal-reason=TargetTopicConfigRefused`; then
-/// `logweir::exit::print_refusal_reason_to` is asserted to write exactly that
-/// line, with its newline, to the writer `print_refusal_reason` prints stdout
-/// through.
+/// `logweir::exit::print_refusal_to`, the writer `print_refusal` prints stdout
+/// through, is asserted to END its output with exactly that line and its
+/// newline, after the one `refusal-detail=` line FX-34 put before it. (The
+/// printer of the state line alone is gone: FX-34's review, L5.)
 ///
 /// **In process, never the binary** — a binary-level arm would need both a
 /// broker and a `LogAppendTime` broker, so the only binary assertion of this
@@ -1054,12 +1064,25 @@ fn a_target_topic_refusal_prints_its_terminal_state() {
         "refusal-reason=TargetTopicConfigRefused"
     );
 
-    // …and the runner actually WRITES it, to stdout, through this seam.
+    // …and the runner actually WRITES it, to stdout, through this seam: the
+    // detail line, then the state line LAST.
     let mut captured: Vec<u8> = Vec::new();
-    logweir::exit::print_refusal_reason_to(&mut captured, &msg).expect("write");
+    logweir::exit::print_refusal_to(
+        &mut captured,
+        logweir_core::refusal_detail::RefusingRun::Restore,
+        None,
+        &msg,
+    )
+    .expect("write");
+    let written = String::from_utf8(captured).expect("utf8");
+    let lines: Vec<&str> = written.split_inclusive('\n').collect();
+    assert_eq!(lines.len(), 2, "two lines, nothing after them: {written}");
+    assert!(
+        lines[0].starts_with("refusal-detail={\"code\":\"TargetTopicConfigRefused\","),
+        "{written}"
+    );
     assert_eq!(
-        String::from_utf8(captured).expect("utf8"),
-        "refusal-reason=TargetTopicConfigRefused\n",
+        lines[1], "refusal-reason=TargetTopicConfigRefused\n",
         "the line, and its newline — a controller tailing pods/log reads the final line, and the \
          pod log API has no stream selector, so stderr would not be distinguishable at all"
     );
@@ -1123,6 +1146,70 @@ fn execute_with_still_returns_the_scorecard_alone() {
     assert_eq!(sc.outcome, logweir_core::outcome::Outcome::Pass);
 }
 
+/// **PROD-01.2: a broker that does not REPORT its timestamp type is not
+/// recorded as `CreateTime`.** Redpanda v26.2.4's broker resource answers nine
+/// configuration keys and `log.message.timestamp.type` is not one of them
+/// (measured). Phase 0 used to fill in the Apache default and publish it
+/// (`Restore.status.topicPreflight.timestampType: CreateTime`): unsupported
+/// metadata recorded as a fact. Now the type is `None`, the status line omits
+/// the key, the plan is still admitted (an absent key refuses nothing), and no
+/// probe topic is created.
+///
+/// CONTROL, in the same test: the same broker answer plus the key records it.
+///
+/// Negative control (mutant): restore `.unwrap_or_else(|| CREATE_TIME…)` and
+/// the first assertion fails with `Some("CreateTime")`.
+#[test]
+fn a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time() {
+    let spec = a_recent_spec();
+    // Redpanda's broker keys that phase 0 reads at all: the retention only.
+    let silent = [("log.retention.ms", "604800000"), ("num.partitions", "1")];
+    let reader = BrokerDouble::new(&silent);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("an unreported timestamp type refuses nothing");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_type, None,
+        "not reported is NOT RECORDED, never the Apache default"
+    );
+    let line: serde_json::Value =
+        serde_json::from_str(&admitted.topic_preflight.status_line_value()).expect("JSON");
+    assert_eq!(
+        line,
+        serde_json::json!({"retentionMs": 604_800_000_i64}),
+        "the status line carries what the broker reported and nothing else"
+    );
+    assert!(
+        creator.calls.lock().unwrap().is_empty(),
+        "no probe topic: the LogAppendTime probe runs only for a broker that REPORTS it"
+    );
+
+    // CONTROL: the same answer with the key.
+    let mut with_key = silent.to_vec();
+    with_key.push(("log.message.timestamp.type", "CreateTime"));
+    let admitted = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &BrokerDouble::new(&with_key),
+        &RecordingCreator::default(),
+        &RecordingDeleter::default(),
+    )
+    .expect("admitted");
+    assert_eq!(
+        admitted.topic_preflight.timestamp_type.as_deref(),
+        Some("CreateTime")
+    );
+}
+
 /// The `TopicPreflight` a run reports is the one phase 0 built: same broker
 /// observations, with `topics_created` filled in by the creation step. Nothing
 /// re-derives it.
@@ -1158,7 +1245,7 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
     assert_eq!(
         preflight,
         TopicPreflight {
-            timestamp_type: "CreateTime".into(),
+            timestamp_type: Some("CreateTime".into()),
             retention_ms: "604800000".into(),
             timestamp_bound_ms: Some(9_223_372_036_854_775_807),
             configs_set: pinned(),
@@ -1508,7 +1595,7 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
 /// `drill::exiting` is a private function that writes with `println!` to the
 /// process's real stdout, and the branch that prints this line is reached only
 /// at `ExitCode::Ok` — a full drill that dialled a broker, restored into it and
-/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_reason_to`
+/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_to`
 /// is the precedent for one, and it covers interface I9's line, not this one),
 /// and libtest gives a test no way to read back its own captured stdout. So
 /// the print itself is not observable in process without a broker, and this row
@@ -1570,14 +1657,35 @@ fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
     let object = parsed
         .as_object()
         .unwrap_or_else(|| panic!("…and it is an OBJECT: {line}"));
+    // PROD-01.2: THE FIXTURE'S BROKER REPORTS NO CONFIGURATION KEY AT ALL, so
+    // the line carries no `timestampType`. Until PROD-01.2 it carried
+    // `CreateTime`: the Apache default, written down for a broker that never
+    // said so.
     assert_eq!(
-        object
-            .get("timestampType")
-            .and_then(serde_json::Value::as_str),
-        Some("CreateTime"),
-        "the three keys are `Restore.status.topicPreflight`'s own camelCase fields, byte for \
-         byte — the controller copies them across without renaming anything, so a fourth or a \
-         differently-spelled field is DROPPED rather than misfiled: {line}"
+        object.get("timestampType"),
+        None,
+        "a timestamp type the broker did not report is NOT RECORDED, never assumed: {line}"
+    );
+    // A broker that DID report its three values gets the three keys, which
+    // are `Restore.status.topicPreflight`'s own camelCase fields, byte for
+    // byte: the controller copies them across without renaming anything, so a
+    // fourth or a differently-spelled field is DROPPED rather than misfiled.
+    let reported = TopicPreflight {
+        timestamp_type: Some("CreateTime".into()),
+        retention_ms: "604800000".into(),
+        timestamp_bound_ms: Some(86_400_000),
+        configs_set: pinned(),
+        topics_created: Vec::new(),
+    };
+    let reported: serde_json::Value =
+        serde_json::from_str(&reported.status_line_value()).expect("JSON");
+    assert_eq!(
+        reported,
+        serde_json::json!({
+            "timestampType": "CreateTime",
+            "retentionMs": 604_800_000_i64,
+            "timestampBound": 86_400_000_i64
+        })
     );
     for k in object.keys() {
         assert!(

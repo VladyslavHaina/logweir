@@ -306,17 +306,19 @@ pub fn refuse_an_existing_set(
 /// [`refuse_an_existing_set`] is one a retry under a new execution id can
 /// change: a transport failure (`EndpointUnreachable`), a `Timeout`, or a 5xx
 /// or 429 the object-store client has already retried — which the classifier
-/// leaves unclassified, so the status line `object_store` prints decides. A
-/// closed match with no wildcard: a class added to the vocabulary must be
+/// leaves unclassified, so the status the store ANSWERED with decides
+/// (`answered_status`: read off `object_store`'s status line, never searched
+/// for in a text that also carries the archive's key; PROD-01.2 review, M1).
+/// A closed match with no wildcard: a class added to the vocabulary must be
 /// placed here on purpose, and "could not classify" stays a decision.
 fn a_retry_can_change(e: &logweir_engine_oso::storage::StoreError) -> bool {
     use logweir_engine_oso::storage::StoreErrorClass as Class;
     match Class::classify(e) {
         Class::EndpointUnreachable | Class::Timeout => true,
-        Class::StoreErrorUnclassified => {
-            let text = e.to_string().to_ascii_lowercase();
-            text.contains("non-2xx status code: 5") || text.contains("429 too many requests")
-        }
+        Class::StoreErrorUnclassified => matches!(
+            logweir_engine_oso::storage::answered_status(e),
+            Some(429 | 500..=599)
+        ),
         Class::AccessDenied
         | Class::InvalidCredentials
         | Class::BucketNotFound

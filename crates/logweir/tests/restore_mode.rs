@@ -341,6 +341,13 @@ fn a_scratch_restore_still_requires_them() {
         m.contains("its existence is the v0.1 segregation proof"),
         "got: {m}"
     );
+    // PROD-01.2: a marker missing from the listing is absent OR not
+    // describable, and the refusal says both (measured on the `acl` profile:
+    // a principal without Describe on an existing marker gets this arm).
+    assert!(
+        m.contains("or this principal may not Describe it") && m.contains("grant Describe on it"),
+        "got: {m}"
+    );
     // Nothing was created or deleted on any of the three refusals: exit 3 is
     // "refused before anything ran".
     assert!(creator.calls.lock().unwrap().is_empty());

@@ -459,6 +459,24 @@ pub const MESSAGE_MAX_BYTES: usize = 512;
 /// nobody can act on.
 #[must_use]
 pub fn sanitize(message: &str) -> String {
+    sanitize_within(message, MESSAGE_MAX_BYTES)
+}
+
+/// The byte bound on `status.progress.message`, which is the CRD's own
+/// `maxLength` for that field.
+pub const PROGRESS_MESSAGE_MAX_BYTES: usize = 1024;
+
+/// [`sanitize`] with the byte bound as a parameter.
+///
+/// **FX-34.** [`apply_finished`] copies the terminal condition's message
+/// into `status.progress.message`, whose bound is
+/// [`PROGRESS_MESSAGE_MAX_BYTES`], and it used to do so through [`sanitize`],
+/// whose bound is a DIAGNOSTIC's 512. No terminal message was that long, so
+/// nothing showed. A refused run's message now carries the runner's reason
+/// and can reach about 770 bytes, and the copy would have ended mid-sentence
+/// with no marker while the condition beside it was whole.
+#[must_use]
+pub fn sanitize_within(message: &str, max_bytes: usize) -> String {
     // 1. Anything after a PEM header is key material or a certificate, and in
     //    either case it is not an explanation.
     let cut = match message.find("-----BEGIN") {
@@ -473,7 +491,7 @@ pub fn sanitize(message: &str) -> String {
         .map(scrub_token)
         .collect::<Vec<_>>()
         .join(" ");
-    truncate_on_char_boundary(scrubbed.trim(), MESSAGE_MAX_BYTES)
+    truncate_on_char_boundary(scrubbed.trim(), max_bytes)
 }
 
 /// One whitespace-delimited token with its URL secrets removed.
@@ -2039,7 +2057,7 @@ pub fn apply_finished(base: Value, stored: Option<&RunProgress>, now: DateTime<U
         .get("status")
         .and_then(|s| s.pointer("/conditions/0/message"))
         .and_then(|m| m.as_str())
-        .map(|m| truncate_on_char_boundary(&sanitize(m), 1024));
+        .map(|m| sanitize_within(m, PROGRESS_MESSAGE_MAX_BYTES));
     let Some(Value::Object(status)) = root.get_mut("status") else {
         return Value::Object(root);
     };

@@ -88,6 +88,7 @@ import {
   facts,
   fieldErrorLine,
   heldBackSentence,
+  inert,
   invalidAttributes,
   listFooter,
   messageText,
@@ -762,7 +763,7 @@ export function renderEnforcement(report, policy) {
         (enforced === null
           ? ""
           : "<p class=\"note\">Enforced=" + esc(String(enforced.status)) + " " +
-            esc(String(enforced.reason || "")) + ": " + esc(String(enforced.message || "")) +
+            esc(String(enforced.reason || "")) + ": " + esc(inert(enforced.message)) +
             "</p>") +
         "<p class=\"irreversible\">" + esc(IRREVERSIBLE_SENTENCE) + "</p>"
       : "") +
@@ -776,11 +777,11 @@ export function renderEnforcement(report, policy) {
       String(enforced.status) === "False"
       ? "<p class=\"complaint\" data-enforced-refusal=\"" + esc(String(enforced.reason || "")) +
         "\">Not enforcing: Enforced=False " + esc(String(enforced.reason || "")) + ": " +
-        esc(String(enforced.message || "")) + "</p>"
+        esc(inert(enforced.message)) + "</p>"
       : "") +
     (degraded !== null && String(degraded.status) === "True"
       ? "<p class=\"complaint\" data-enforcement-degraded=\"true\">" +
-        esc(ENFORCEMENT_DEGRADED_SENTENCE) + " " + esc(String(degraded.message || "")) + "</p>"
+        esc(ENFORCEMENT_DEGRADED_SENTENCE) + " " + esc(inert(degraded.message)) + "</p>"
       : "") +
     "</div>"
   );
@@ -960,7 +961,7 @@ export function renderDiscoveryFailure(object) {
     "<p class=\"coverage\" data-topics-resolved=\"False\">" +
     badge("unverified", "topics not resolved") + " " + cell(failure.reason) +
     (typeof failure.message === "string" && failure.message.length > 0
-      ? " -- " + esc(failure.message)
+      ? " -- " + esc(inert(failure.message))
       : "") +
     "</p>"
   );

@@ -1050,12 +1050,27 @@ fn target_checks(
 ) {
     let scope = catalogue::scope("RestoreTarget", &req.target.principal, None);
     let budget = deadline.slice(2);
+    // PROD-01.2: the capability rows the plan lists (`capabilityChecks`), and
+    // only those: `checks` being empty never includes one. A skipped one is
+    // refused by the plan validation, so the list is taken as written.
+    let capabilities = &req.capability_checks;
     let probe = match wiring.broker(&req.target, budget) {
         Ok(p) => p,
         Err(f) => {
             if want(CheckId::TargetAuthenticated) {
                 checks.push(
-                    from_broker_failure(CheckId::TargetAuthenticated, &f, now).with_scope(scope),
+                    from_broker_failure(CheckId::TargetAuthenticated, &f, now)
+                        .with_scope(scope.clone()),
+                );
+            }
+            for id in capabilities {
+                checks.push(
+                    super::capability::blocked(
+                        *id,
+                        "the target did not authenticate, so this check did not run",
+                        now,
+                    )
+                    .with_scope(scope.clone()),
                 );
             }
             block_rest(
@@ -1082,6 +1097,20 @@ fn target_checks(
     let authenticated_ok = row.state == CheckState::Ready;
     if want(CheckId::TargetAuthenticated) {
         checks.push(row);
+    }
+    // PROD-01.2: `target.engineProtocol`, right after the row it depends on
+    // and before any row about topics: an endpoint the engine cannot write to
+    // is not a restore target whatever its topics look like.
+    for row in super::readiness::capability_rows(
+        capabilities,
+        &req.target,
+        probe.as_ref(),
+        &[],
+        (authenticated_ok, authenticated_ok),
+        deadline,
+        now,
+    ) {
+        checks.push(row.with_scope(scope.clone()));
     }
     if !authenticated_ok {
         block_rest(
@@ -1124,7 +1153,13 @@ fn target_checks(
         checks.push(topic_create_row(probe.as_ref(), spec, &mapped, now).with_scope(scope.clone()));
     }
     if want(CheckId::TargetTimestampBound) {
-        checks.push(timestamp_bound_row(probe.as_ref(), spec, now).with_scope(scope.clone()));
+        // A plan that lists capability rows was rendered by a controller of
+        // this build, which knows this build's codes (`timestamp_bound_row`).
+        let controller_knows_the_code = !capabilities.is_empty();
+        checks.push(
+            timestamp_bound_row(probe.as_ref(), spec, controller_knows_the_code, now)
+                .with_scope(scope.clone()),
+        );
     }
     if want(CheckId::TargetLogAppendTime) {
         checks.push(
@@ -1329,9 +1364,19 @@ fn topic_create_row(
 
 /// `target.timestampBound` — the same arithmetic the execution guard runs
 /// (`phase0_admit.rs`'s `target_topic_preflight`, step 2).
+///
+/// `controller_knows_the_code`: whether the plan's controller can read
+/// `TimestampBoundNotReported` (PROD-01.2). The code vocabulary is closed on
+/// the READING side, so a controller from before that row refuses a whole
+/// result that carries it (`ResultUnreadable`). The row is one this runner
+/// answers for every restore plan, so the code cannot be volunteered: a plan
+/// from an older controller gets the same state, message and remedy under
+/// `BrokerConfigsNotReadable`, the `unknown` code that controller already
+/// has for this row.
 fn timestamp_bound_row(
     probe: &dyn InventoryProbe,
     spec: &DrillSpec,
+    controller_knows_the_code: bool,
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let broker = match probe.broker_configs() {
@@ -1354,12 +1399,35 @@ fn timestamp_bound_row(
         .or_else(|| broker.get(BROKER_TIMESTAMP_DIFFERENCE_MAX_MS))
         .and_then(|v| v.trim().parse::<i64>().ok());
     let Some(bound) = bound else {
-        return ready(
+        // PROD-01.2: NEITHER KEY IN THE ANSWER IS "NOT REPORTED", NOT "NO
+        // BOUND". Every Apache Kafka broker reports at least one of the two
+        // keys (unbounded is the value 9223372036854775807), so an answer
+        // without either comes from an endpoint that keeps the setting
+        // elsewhere. Measured on Redpanda v26.2.4: nine broker keys, neither
+        // of these, while each topic reports
+        // `message.timestamp.before.max.ms`. This row used to answer `ready`,
+        // "the target declares no record-timestamp bound": an empty answer
+        // recorded as a fact.
+        let code = if controller_knows_the_code {
+            CheckCode::TimestampBoundNotReported
+        } else {
+            CheckCode::BrokerConfigsNotReadable
+        };
+        return catalogue::outcome(
             CheckId::TargetTimestampBound,
-            CheckCode::TimestampWithinBound,
+            CheckState::Unknown,
+            code,
             now,
         )
-        .with_message("the target declares no record-timestamp bound");
+        .with_message(&format!(
+            "the target's broker configuration answered {} key(s) and neither \
+                 {BROKER_TIMESTAMP_BEFORE_MAX_MS} nor {BROKER_TIMESTAMP_DIFFERENCE_MAX_MS}, so \
+                 the record-timestamp bound was not checked",
+            broker.len()
+        ))
+        // The remedy is this finding's under either code:
+        // `BrokerConfigsNotReadable`'s own is about a missing grant.
+        .with_remedy(remedy_for(CheckCode::TimestampBoundNotReported));
     };
     let end_ms = recovery_point(spec).timestamp_millis();
     // `saturating_sub` is load-bearing: the Apache default for both keys is

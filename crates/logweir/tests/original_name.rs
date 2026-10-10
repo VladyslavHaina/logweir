@@ -1067,7 +1067,9 @@ fn create(
 ) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
     let facts = two_topic_facts();
     let mut preflight = phase0_admit::TopicPreflight {
-        timestamp_type: "CreateTime".into(),
+        // PROD-01.2: the target's timestamp type is what its broker REPORTED,
+        // `None` when it reported none; this fixture's broker reports it.
+        timestamp_type: Some("CreateTime".into()),
         retention_ms: "-1".into(),
         timestamp_bound_ms: None,
         configs_set: Vec::new(),
@@ -1522,7 +1524,9 @@ fn a_short_answer_naming_a_refused_topic_never_calls_it_left() {
     let broker = Broker::disabled();
     let facts_broker = Arc::clone(&broker.created);
     let mut preflight = phase0_admit::TopicPreflight {
-        timestamp_type: "CreateTime".into(),
+        // PROD-01.2: the target's timestamp type is what its broker REPORTED,
+        // `None` when it reported none; this fixture's broker reports it.
+        timestamp_type: Some("CreateTime".into()),
         retention_ms: "-1".into(),
         timestamp_bound_ms: None,
         configs_set: Vec::new(),

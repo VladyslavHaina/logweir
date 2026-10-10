@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 pub mod access;
 pub mod acls;
+pub mod api_versions;
 pub mod capture;
 pub mod fingerprint;
 pub mod groups;

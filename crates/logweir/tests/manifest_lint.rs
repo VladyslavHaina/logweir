@@ -1159,7 +1159,12 @@ fn every_call_site_has_a_grant() {
             "get_status" => vec![(status, "get")],
             "patch_status" => vec![(status, "patch")],
             "replace_status" => vec![(status, "update")],
-            "logs" => vec![(format!("{resource}/log"), "get")],
+            // FX-34: `log_stream` is `logs` read as a stream, so the caller can
+            // stop at its own byte bound. It is the same request (`GET
+            // …/pods/<name>/log`) and the API server authorises it against the
+            // same pair, which the role already grants for `logs`: no grant is
+            // added for it.
+            "logs" | "log_stream" => vec![(format!("{resource}/log"), "get")],
             // A watcher LISTs once and then WATCHes, and needs both.
             WATCH => vec![
                 (resource.to_string(), "list"), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine

@@ -548,6 +548,12 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             if r.signer_path.is_some() {
                 push(CheckId::SignerPrivateKeyUsable);
             }
+            // PROD-01.2: the capability rows the plan LISTS, and no other:
+            // `readiness.rs` emits exactly `capabilityChecks`, through the
+            // same skip filter.
+            for id in request.capability_checks() {
+                push(*id);
+            }
         }
         CheckRequest::DestinationAccess(r) => {
             out.insert(CheckId::RunnerContract);
@@ -601,6 +607,13 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             if request.compares_grant_bindings() && want(CheckId::DestinationCredentialBound) {
                 out.insert(CheckId::DestinationCredentialBound);
             }
+            // PROD-01.2: `restore.rs` emits every capability row the plan
+            // lists, whatever `checks` says: an empty `checks` ("every row
+            // this kind owns") never includes one, and the plan validation
+            // refuses one that is also skipped.
+            for id in request.capability_checks() {
+                out.insert(*id);
+            }
         }
         // None of these three is ever rendered by this controller: a topic
         // inventory belongs to `TopicDiscovery`, an evidence fetch to the
@@ -612,6 +625,26 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
         | CheckRequest::CatalogSync(_) => {}
     }
     out
+}
+
+/// **PROD-01.2: the capability rows a plan for `operation` asks its runner
+/// for** — every one the pure layer defines for the operation
+/// (`logweir_core::check_contract::capability_checks_for`), minus the ones
+/// the request skips.
+///
+/// A capability row is emitted only when the plan lists it, so this list is
+/// what makes a `Preflight` name a missing capability at all. A SKIPPED one
+/// is left out here and reported `skipped` by [`assemble`], like any other
+/// skipped row: the plan validation refuses an id that is both listed and
+/// skipped, because "answer it" and "do not answer it" in one plan has no
+/// reading.
+#[must_use]
+pub fn capability_checks(operation: CheckOperation, skip: &[CheckId]) -> Vec<CheckId> {
+    logweir_core::check_contract::capability_checks_for(operation)
+        .iter()
+        .copied()
+        .filter(|id| !skip.contains(id))
+        .collect()
 }
 
 /// The one row a destination role produces — `access.rs`'s `match`, mirrored.
@@ -5328,6 +5361,7 @@ pub fn build_job_shape(
                 evidence_write: evidence_write_grant.clone(),
                 evidence_read: evidence_read_grant.clone(),
                 skip_checks: skip.clone(),
+                capability_checks: capability_checks(CheckOperation::Backup, &skip),
             }))
         }
         PreflightOperation::SourceConnection => {
@@ -5377,6 +5411,7 @@ pub fn build_job_shape(
                 // drift from.
                 checks: Vec::new(),
                 skip_checks: skip.clone(),
+                capability_checks: capability_checks(CheckOperation::Restore, &skip),
             }))
         }
     };
