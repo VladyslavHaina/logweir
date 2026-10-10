@@ -53,8 +53,9 @@ the runner will, and reads only that point's own receipt), 58 (FX-22, a `Retenti
 ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
 the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
-guard-refused Restore or Backup says why in its status) and 62 (FX-27 and FX-42, the engine's metrics port stays
-closed and a failed RetentionPolicy read says so) so far. Items continue the next entry's
+guard-refused Restore or Backup says why in its status), 62 (FX-27 and FX-42, the engine's metrics port stays
+closed and a failed RetentionPolicy read says so) and 63 (FX-35, a restore started from a Backup is bound to
+its recovery point) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -2867,6 +2868,36 @@ malformed answer, with a successful empty read as the control.
 **Rollback:** an older runner opens the engine's port 8080 again during a run;
 an older console prints the no-deletion sentence after a failed read.
 
+#### 63. A restore started from a Backup is bound to its recovery point (FX-35)
+
+**Changed.** The console's restore wizard opened on a `Backup` (the *Restore
+this point* link of the History, Backups and Schedules pages) built a plan
+naming `source.backup` only, so the runner read no backup receipt: a 1.3.0
+point restored that way signed each topic's timestamp type NOT RECORDED and
+its configuration `(unknown)`, where the same point restored from the catalog
+recorded both (PoC batch 5, F-3). The wizard now names the run's point by its
+receipt digest, finds it in a catalog over the run's own destination, and
+builds the catalog flow's plan for it: the same `source.point`, with the
+Backup's topics filled in. When no catalog lists the point yet, the plan names
+the set only, as before, and step 2 and the review say it is not bound and
+why. The review's new *recorded by the point* row says where the run reads
+each topic's timestamp type and configuration
+([kubernetes.md](kubernetes.md), *A restore started from a Backup is bound the
+same way*).
+**Do:** nothing. To have a Backup's restore bound, keep a `RecoveryCatalog`
+over its destination synced since the run.
+**Scope:** console rows over the product API's own documents, through the
+console's client and contract decoders (`ui/tests/backups-page-binding.spec.js`):
+the PoC's 1.3.0 point restored from its Backup carries the catalog flow's
+binding byte for byte, with a newer run's point listed first as the wrong
+answer; a run whose point no catalog lists says so and carries no binding.
+Ten mutants, all killed (the binding dropped, the newer run bound, a contract
+declaration removed, the unbound note or the review row wrong). Not proven
+live in this branch: the next PoC upgrade restores a 1.3.0 point from the
+Backups page and reads its review and its scorecard's time basis.
+**Rollback:** the console image; an older console builds the set-only plan
+again. Nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2966,7 +2997,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 and 62, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62 and 63, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3033,7 +3064,8 @@ controller and the console's text, and needs `controllerImage` and
 every `Restore` and `Backup` Job, and every runner image published before the
 change exits 1 on it (for a tagged release's runner item 35 already required
 the roll); item 62 changes the
-runner's engine documents and the console, and needs nothing. To roll back to
+runner's engine documents and the console, and needs nothing; item 63 changes the
+console only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

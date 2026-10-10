@@ -2205,6 +2205,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine's metrics port stays closed",
             "metrics: {enabled: false}",
         ),
+        // FX-35 (2026-10-10, item 63): a restore started from a Backup is
+        // bound to its point; the review row that says what the run reads.
+        (
+            "a restore started from a Backup is bound to its point",
+            "recorded by the point",
+        ),
     ];
     assert_eq!(
         items.len(),

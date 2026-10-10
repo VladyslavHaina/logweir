@@ -2298,7 +2298,7 @@ semantics (a retired key keeps what it signed before `retired_at`; a key revoked
 verifies nothing).
 
 **Migration.** A `Restore` or rehearsal whose plan carries `source.point` gets the keyring from a
-controller at this version; one without `source.point` (every Backup-bound restore) renders
+controller at this version; one without `source.point` (a plan that names its backup set only) renders
 byte-for-byte the bundle it rendered before and is unaffected. Upgrade the controller and the
 runner image together: a runner at this version handed a point-bound plan by an older controller
 refuses it `PointUntrusted` ("no evidence-signing keyring"), and a runner older than this version

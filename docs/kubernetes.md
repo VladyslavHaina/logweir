@@ -1787,6 +1787,13 @@ it), by the schedule detail and again by the wizard; a read that fails leaves
 the run un-offered. The link opens the wizard on the catalog point, so the plan
 is bound to that receipt.
 
+**A restore started from a Backup is bound the same way (FX-35).** The wizard
+opened on a `Backup` that has its own window (from the Backups, History or
+Schedules page) looks up that run's point by its receipt digest in a catalog over
+the run's own destination and builds the plan above for it. A run whose point no
+catalog lists yet keeps a plan with `source.backup` only; the wizard says it is
+not bound, and its scorecard reports each topic's timestamp type NOT RECORDED.
+
 **Upgrade and rollback.** Everything here is additive. A plan without
 `source.point` is byte-identical to before and restores as before;
 `catalogPointRef` is one optional field and one CEL rule on the `Preflight`
