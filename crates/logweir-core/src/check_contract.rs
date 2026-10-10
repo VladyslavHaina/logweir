@@ -306,6 +306,19 @@ closed_vocabulary! {
         CatalogPointSignerUntrusted => "CatalogPointSignerUntrusted",
         BackupSetNotFound => "BackupSetNotFound",
         ManifestUnreadable => "ManifestUnreadable",
+        // FX-14: a restore preflight over a plan bound to a recovery point
+        // (`source.point`) judges the manifest it read the way the runner's
+        // point binding will (`drill::binding::verify_point_binding`). The
+        // bound point's receipt pins a manifest version the bucket still holds
+        // and that is no longer the current one: the set was written again
+        // after the point was signed (FX-7's superseded pin).
+        ManifestSuperseded => "ManifestSuperseded",
+        // FX-14: the archive does not hold the point the plan is bound to as
+        // it was approved — a malformed binding, a receipt or manifest whose
+        // digest is not the bound one, a point id the receipt does not derive,
+        // or a receipt that describes another set than the one this restore
+        // reads. The runner refuses each of these with exit 3.
+        PointBindingMismatch => "PointBindingMismatch",
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
         PointInTimeAfterCoverage => "PointInTimeAfterCoverage",
         TopicNotInBackupSet => "TopicNotInBackupSet",

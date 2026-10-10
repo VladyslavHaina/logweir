@@ -47,9 +47,16 @@ use super::{
     execution_only, from_broker_failure, from_store_failure, ready, remedy_for, runner_contract,
     state_for, Wiring,
 };
+use crate::catalog::pin::{self, PinVerdict};
 use crate::check::archive::{self, ManifestError};
 use crate::check::store::{self, ObjectAccess};
 use crate::check::{catalogue, Deadline, Emission};
+use crate::drill::binding::{
+    self, POINT_BINDING_MISMATCH, POINT_BINDING_SET_MISMATCH, POINT_PIN_UNCHECKED,
+};
+use logweir_core::backup_receipt::BackupReceipt;
+use logweir_core::execution_contract::PointBinding;
+use logweir_engine_oso::storage::StoreError;
 
 /// `log.message.timestamp.type` — the broker key `target.logAppendTime` is
 /// about.
@@ -246,6 +253,199 @@ pub fn recovery_point(spec: &DrillSpec) -> DateTime<Utc> {
     spec.restore.point_in_time.unwrap_or(spec.sample.window_end)
 }
 
+/// Why `archive.backupSet` refuses a plan bound to a recovery point: a code,
+/// a message this module composed, and the remedy.
+#[derive(Debug)]
+struct PointRefusal {
+    code: CheckCode,
+    message: String,
+    remedy: &'static str,
+}
+
+impl PointRefusal {
+    /// A refusal of the PLAN's point: the runner refuses the same with exit 3
+    /// and the token the message opens with.
+    fn mismatch(message: String) -> Self {
+        Self {
+            code: CheckCode::PointBindingMismatch,
+            message,
+            remedy: remedy_for(CheckCode::PointBindingMismatch),
+        }
+    }
+
+    /// A store failure, classified; never the backend's own text.
+    fn store(error: &StoreError, message: String, remedy: Option<&'static str>) -> Self {
+        let code = store::classify(error);
+        Self {
+            code,
+            message: format!("{message}: {code}"),
+            remedy: remedy.unwrap_or_else(|| remedy_for(code)),
+        }
+    }
+}
+
+/// Whether two object keys name one object: the comparison
+/// `Store::engine_manifest_key` makes, without empty path segments (an
+/// `object_store` path drops them, so `a//b/` and `a/b` are read as one key).
+fn same_object_key(a: &str, b: &str) -> bool {
+    a.split('/')
+        .filter(|s| !s.is_empty())
+        .eq(b.split('/').filter(|s| !s.is_empty()))
+}
+
+/// **FX-14 — the manifest this preflight read, judged by the point the plan
+/// is bound to, exactly as the runner's binding will judge it**
+/// (`drill::binding::verify_point_binding`). `Ok(Some(note))` when the receipt's
+/// pin could not be checked in this bucket and the digest decided; `Ok(None)`
+/// when nothing needs saying.
+///
+/// The same steps, in the same order, with the same verdicts:
+///
+/// 1. the binding's shape ([`binding::point_shape_faults`]);
+/// 2. the receipt, read at its BUCKET-ABSOLUTE key (never qualified, as the
+///    binding reads it), and its digest against the plan's before a byte of
+///    it is parsed; the point id it derives; the manifest digest it attests;
+/// 3. the manifest it names is the one this preflight read — the set the
+///    restore will read (FX-16; the binding's `PointBindingSetMismatch`);
+/// 4. FX-7's pin, through the one shared [`pin::judge`]: `Superseded` refuses
+///    (`ManifestSuperseded`), `Unreadable` is "could not tell" with the remedy
+///    that names `s3:GetObjectVersion`, `Unchecked` is the note;
+/// 5. the current bytes' digest against the bound one.
+///
+/// What it does NOT repeat is the receipt's SIGNATURE: a check Job is given
+/// no evidence keyring, and the controller's `recoveryPoint.state` judges the
+/// catalog row's signer against the namespace's current trust. The runner
+/// verifies the signature before any data moves.
+fn judge_bound_point(
+    point: &PointBinding,
+    manifest_key: &str,
+    manifest: &[u8],
+    answered_version: Option<&str>,
+    access: &dyn ObjectAccess,
+) -> Result<Option<String>, PointRefusal> {
+    let id = &point.point_id;
+    let faults = binding::point_shape_faults(point);
+    if !faults.is_empty() {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. The plan's recovery point binding is malformed: {}",
+            faults.join("; ")
+        )));
+    }
+
+    let receipt_key = &point.receipt_key;
+    let receipt_bytes = match access.get(receipt_key) {
+        Ok(bytes) => bytes,
+        Err(StoreError::NotFound(_)) => {
+            return Err(PointRefusal {
+                code: CheckCode::RecoveryPointNotFound,
+                message: format!(
+                    "the plan is bound to recovery point {id}, whose receipt `{receipt_key}` is \
+                     not in this archive"
+                ),
+                remedy: remedy_for(CheckCode::RecoveryPointNotFound),
+            })
+        }
+        Err(error) => {
+            return Err(PointRefusal::store(
+                &error,
+                format!("the receipt `{receipt_key}` of recovery point {id} could not be read"),
+                None,
+            ))
+        }
+    };
+    let actual = logweir_core::ids::sha256_prefixed(&receipt_bytes);
+    if actual != point.receipt_sha256 {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. Recovery point {id}'s receipt `{receipt_key}` hashes to \
+             {actual}, not the bound {}",
+            point.receipt_sha256
+        )));
+    }
+    let derived = crate::catalog::record::point_id(&receipt_bytes);
+    if derived != *id {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. The receipt `{receipt_key}` derives recovery point id \
+             {derived}, but the plan is bound to {id}"
+        )));
+    }
+    let Ok(receipt) = serde_json::from_slice::<BackupReceipt>(&receipt_bytes) else {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. The bytes bound as recovery point {id} are not a backup \
+             receipt"
+        )));
+    };
+    if receipt.archive.manifest_sha256 != point.manifest_sha256 {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. Recovery point {id}'s receipt attests manifest digest {}, \
+             but the plan is bound to {}",
+            receipt.archive.manifest_sha256, point.manifest_sha256
+        )));
+    }
+    if !same_object_key(&receipt.archive.manifest_key, manifest_key) {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_SET_MISMATCH}. Recovery point {id} describes set `{}` at `{}`, but \
+             this restore reads `{manifest_key}`",
+            receipt.backup_id, receipt.archive.manifest_key
+        )));
+    }
+
+    let mut note = None;
+    match pin::judge(
+        receipt.archive.manifest_version_id.as_deref(),
+        answered_version,
+        &point.manifest_sha256,
+        |version| access.get_version(manifest_key, version),
+    ) {
+        PinVerdict::Unpinned | PinVerdict::Current => {}
+        PinVerdict::Superseded {
+            pinned, current, ..
+        } => {
+            return Err(PointRefusal {
+                code: CheckCode::ManifestSuperseded,
+                message: format!(
+                    "{POINT_BINDING_MISMATCH}. Recovery point {id}'s manifest `{manifest_key}` \
+                     was written again after the point was signed: the bucket holds the pinned \
+                     version {pinned}, and {}",
+                    current.as_deref().map_or_else(
+                        || "the current read answered no version id".to_string(),
+                        |v| format!("the current version is {v}")
+                    )
+                ),
+                remedy: pin::SUPERSEDED_REMEDY,
+            })
+        }
+        PinVerdict::Unchecked { pinned } => {
+            note = Some(format!(
+                "{POINT_PIN_UNCHECKED}: the receipt pins version {pinned}, which this bucket does \
+                 not hold, so the manifest was checked by its digest alone"
+            ));
+        }
+        PinVerdict::Unreadable { pinned, error } => {
+            return Err(PointRefusal::store(
+                &error,
+                format!(
+                    "recovery point {id}'s manifest `{manifest_key}` could not be read at the \
+                     version its receipt pins ({pinned}), so whether the set was written again \
+                     cannot be told"
+                ),
+                Some(pin::UNREADABLE_REMEDY),
+            ))
+        }
+    }
+    let digest = logweir_core::ids::sha256_prefixed(manifest);
+    if digest != point.manifest_sha256 {
+        return Err(PointRefusal::mismatch(format!(
+            "{POINT_BINDING_MISMATCH}. Recovery point {id}'s manifest `{manifest_key}` hashes to \
+             {digest}, not the bound {}{}",
+            point.manifest_sha256,
+            note.as_deref()
+                .map(|n| format!("; {n}"))
+                .unwrap_or_default()
+        )));
+    }
+    Ok(note)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn archive_checks(
     req: &RestorePreflightRequest,
@@ -293,8 +493,12 @@ fn archive_checks(
     // — so `expected` and `listed` were being compared in two different key
     // spaces as well.
     let manifest_key = access.qualify(&req.manifest_key);
-    let bytes = match access.get(&manifest_key) {
-        Ok(b) => b,
+    // WITH THE VERSION THE STORE ANSWERED (FX-14): a plan bound to a recovery
+    // point is judged below against the point's pinned version, exactly as the
+    // runner's binding judges it. For a plan bound to nothing the version is
+    // read and never used.
+    let (bytes, answered_version) = match access.get_with_version(&manifest_key) {
+        Ok(read) => read,
         Err(e) => {
             let class = store::classify(&e);
             // A manifest that is NOT THERE is the backup set not being there,
@@ -328,6 +532,52 @@ fn archive_checks(
         }
     };
 
+    // **FX-14 — THE BOUND POINT'S WORD ON THESE BYTES, BEFORE THEY ARE
+    // BELIEVED.** A plan bound to a recovery point (`source.point`) is
+    // restored only if the runner's binding proves, against this archive, that
+    // the manifest is the one the point's signed receipt attests, at the
+    // version it pins. A preview that read the current manifest alone would
+    // be green over a set that was written again after the point was signed
+    // (FX-7: engine 0.21.0 can rewrite a set's segments under a byte-identical
+    // manifest, which only the version shows), and the run would then be
+    // refused. So the preview applies the binding's own pin and digest
+    // judgement here, and every later row describes a manifest the run will
+    // accept.
+    let pin_note = match spec.source.point.as_ref() {
+        None => None,
+        Some(point) => match judge_bound_point(
+            point,
+            &manifest_key,
+            &bytes,
+            answered_version.as_deref(),
+            access.as_ref(),
+        ) {
+            Ok(note) => note,
+            Err(refusal) => {
+                if want(CheckId::ArchiveBackupSet) {
+                    checks.push(
+                        catalogue::outcome(
+                            CheckId::ArchiveBackupSet,
+                            state_for(refusal.code),
+                            refusal.code,
+                            now,
+                        )
+                        .with_message(&refusal.message)
+                        .with_remedy(refusal.remedy)
+                        .with_scope(scope),
+                    );
+                }
+                block_rest(
+                    &[CheckId::ArchiveCoverage, CheckId::ArchiveSegments],
+                    want,
+                    now,
+                    checks,
+                );
+                return;
+            }
+        },
+    };
+
     let manifest = match archive::parse(&bytes) {
         Ok(v) => v,
         Err(ManifestError::NotAManifest | ManifestError::NoSegments) => {
@@ -357,14 +607,27 @@ fn archive_checks(
     };
 
     if want(CheckId::ArchiveBackupSet) {
-        checks.push(
-            ready(CheckId::ArchiveBackupSet, CheckCode::ManifestReadable, now)
-                .with_message(&format!(
-                    "the backup manifest for set `{}` is readable",
-                    req.backup_id
-                ))
-                .with_scope(scope.clone()),
+        // The binding's note travels with the row it qualifies: the pin could
+        // not be checked in this bucket, so the digest decided — said, never
+        // refused, as the runner logs it.
+        let mut message = format!(
+            "the backup manifest for set `{}` is readable",
+            req.backup_id
         );
+        if let Some(point) = spec.source.point.as_ref() {
+            message.push_str(&format!(
+                " and is the manifest recovery point {} attests",
+                point.point_id
+            ));
+        }
+        let mut row = ready(CheckId::ArchiveBackupSet, CheckCode::ManifestReadable, now);
+        if let Some(note) = pin_note.as_deref() {
+            message.push_str(&format!("; {note}"));
+            // The whole note, as the catalog's deep check gives it beside an
+            // `Available` point: what the digest alone cannot see.
+            row = row.with_remedy(pin::UNCHECKED_NOTE);
+        }
+        checks.push(row.with_message(&message).with_scope(scope.clone()));
     }
 
     // ---- coverage ------------------------------------------------------
