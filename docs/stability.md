@@ -611,9 +611,10 @@ PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
 `partitions` (non-empty) and `engine_runs` required in it; `window_start_ms`
 is optional there (absent: the window started at the archive's floor). The
 schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
-which pins `format_version` to `2.x.y`; every 1.x schema is frozen beside it,
-and `schemas/logweir-drill-scorecard-1.7.0.json` still describes every other
-document this build writes. The media type keeps `version=1.0.0`, so an older
+which pins `format_version` to `2.x.y`; every 1.x schema up to 1.7.0 is frozen
+beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest
+minor ([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)),
+describes every other document this build writes. The media type keeps `version=1.0.0`, so an older
 reader reaches its major refusal rather than a payload-type mismatch
 ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
@@ -805,6 +806,168 @@ each judged against the partition's marks and the archive's offsets
   for documents: the 1.7.0 receipts, their positions documents and the records
   already written stay valid. An older controller refuses a frozen run that
   carries `consumerGroups` (`PlanConfigMapConflict`).
+
+### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
+
+The owner's decision OD-2 (2026-10-05) narrowed Never #1 (below) to a LIVE
+topic and allowed one path: a restore under the source's ORIGINAL topic names
+into topics that do not exist, created by the run itself, exclusively
+([the plan field](formats/drill-spec.md#targettopic_namingoriginal_name-prod-151),
+[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+
+- **The signed block.** Such a restore carries `target.original_name` and is
+  format **1.8.0** (MINOR): arms ON-1 to ON-14 read only the block or judge an
+  existing field against it (`target`; for ON-13 `integrity.verification` and
+  the outcome; for ON-14 `source.selection`), and can only refuse (OD-7 (a)).
+  Every other document is the one it was; each version step keeps the newer
+  version.
+- **1.8.0 is a minor of format 1, and the block never appears in a 2.x
+  document.** Format 2.0.0 (above) is a partition-subset restore's document
+  and nothing else, and a restore under the original topic names restores
+  WHOLE topics (next bullet). So the two never meet: 2.0.0 stays "1.7.0's
+  fields with the subset meaning", `schemas/logweir-drill-scorecard-2.0.0.json`
+  is byte for byte the file PROD-11.1b published and does not describe the
+  block, and `schemas/logweir-drill-scorecard-1.8.0.json` (the frozen 1.7.0
+  file plus the block) is format 1's newest minor. Both are generated and
+  diffed by `just schema-check`. Arm ON-1 reads major 1 on purpose, where
+  format 1's older optional blocks are also defined under major 2, and arm
+  ON-14 refuses the block beside `source.selection.partitions` in either
+  reader. A later 1.x minor that IS meant for subset restores too says so, and
+  moves 2.x with it.
+- **An original-name restore restores whole topics.** A plan that carries the
+  `original_name` block and `restore.partitions` is refused,
+  `OriginalNameNeedsWholeTopics`, by the same rule as the coverage refusal
+  below and at the same boundaries: the runner before it dials anything (exit
+  3) and again at phase 0, `logweir drill approve`, both readiness checks, and
+  the controller before any Job (`ExecutionSpecInvalid`). There is no CEL rule
+  for it: the `Restore` CRD declares no partitions, so the plan bytes are the
+  only place a subset is written and the controller's plan check is the
+  Kubernetes boundary. The product API passes plan bytes through and does not
+  read them for this. Without the rule the run would create each topic under
+  its production name with every partition, fill only the selected ones, and
+  sign that as covered; the partitions left out could never be restored under
+  that name afterwards, because a restore into an existing topic is refused.
+  **A stated window stays allowed**, a start (`"<start>/<end>"`) or an end:
+  whole partitions, bounded in time, signed as 1.8.0 with a start-only
+  `source.selection`. A partition subset under a PREFIX is PROD-11.1b's and is
+  unchanged.
+  A verifier older than `1.28.0` and a `logweir` built before PROD-15.1 accept
+  the document, ignore the block and print no `original name:` line
+  ([verify-a-scorecard.md](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
+- **A separate approval subject, inside the signed bytes.** A per-run approval
+  document v1 gains the optional `approval_subject`; an authorization document
+  v2 gains the optional `approvalSubject`. Only `originalName` is written;
+  absent is an ordinary approval, read exactly as before. An original-name
+  plan needs the subject and the subject authorises nothing else, in the
+  runner (both directions, exit 3) and in the controller's admission
+  (`ApprovalSubjectMismatch`, terminal). **OD-10:** an authorization document
+  v2 under an `Ordinary` policy (a one-person confirmation) of an
+  original-name restore also carries `originalNameConfirmation.typedTopics`,
+  the original topic names the requester re-typed, held to the plan's topics
+  at every boundary; it is absent on every other document and refused there.
+- **Authorization document v2 format 2.1.0.** A v2 document that carries
+  `approvalSubject` or `originalNameConfirmation` is written with
+  `formatVersion: "2.1.0"`; every document without them is written as
+  `"2.0.0"` and is byte for byte what it was (the standing authorization's
+  1.1.0 is the same pattern, PROD-08.1a). The DSSE payload type is unchanged
+  (`application/vnd.logweir.restore-authorization+json;version=2.0.0` names
+  the v2 family). **This build's readers** (the controller and the runner,
+  through one function) accept 2.1.0 and REFUSE either field under a version
+  that predates it — `AuthorizationDocumentInvalid`, "defined from
+  formatVersion 2.1.0" — so a 2.0.0 document can never name the original-name
+  subject. A minor adds optional fields only, so a 2.1.0 document without the
+  fields is read as a 2.0.0 one. **A reader built before the fields** reads
+  major 2 and refuses a document that carries either as an unknown field
+  (`AuthorizationDocumentInvalid`, exit 3 in a runner; the safer verdict,
+  OD-7's third case): it never reads one as an ordinary authorization.
+  Every 2.1.0 document this build writes carries at least one of the two, so
+  every one of them is refused there. The v1 approval document has no version
+  field: its `approval_subject` is an optional key an older v1 reader ignores,
+  and the ORIGINAL-NAME PLAN is what that older runner refuses (below), so an
+  ignored subject authorises nothing.
+- **An original-name restore requires complete verification.** A plan that
+  carries the `original_name` block without `sample.coverage: complete` is
+  refused, `OriginalNameNeedsCompleteCoverage`: by the runner before it dials
+  anything (exit 3), by `logweir drill approve --approval-subject
+  original-name`, by the controller before any Job (`ExecutionSpecInvalid`,
+  and a CEL rule on `Restore.spec`), by the product API
+  (`original_name_requires_complete`) and by the console, which selects
+  complete coverage for such a restore and locks the choice. A sampled check
+  can pass a record another producer wrote into the restored name; the
+  complete check names it. Arm ON-13 holds the signed document to the same
+  rule: the block beside a sampled verification, or beside a pass that records
+  none, is refused by both readers.
+- **A stopped creation step is named on exit 1, and nothing is deleted.** The
+  runner's last stdout line is `failure-reason=TargetTopicAppeared` (a mapped
+  name appeared after phase 0) or `failure-reason=CreatedTopicsLeft` (creation
+  stopped for another reason and left a topic this run created, or one it
+  asked for and cannot account for), and the line before it is
+  `target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],
+  "appearedCount":n,"leftCount":n,"unconfirmedCount":n}` (plus
+  `"unconfirmedSeen"` beside an unconfirmed name): legal topic names only, at
+  most 100 per list with the list's full count beside it, and the first two
+  keys the ones every earlier runner wrote. One definition serves the writer
+  and the reader, `logweir_core::creation_stop`.
+  - **The closed set of `failure-reason=` states is per kind**
+    (`logweir_core::guard::RESTORE_FAILURE_REASONS`: the two above, beside
+    exit 1; `BACKUP_FAILURE_REASONS`: RECEIPT-DUP's two). A Backup's log can
+    no longer lift a restore-only state onto a `Backup`, nor a Restore's a
+    backup-only one.
+  - **A controller lifts the pair only from the log's last two non-empty
+    lines**, in that order, keeps only names its own Restore's plan maps
+    (counts held to the plan's size), refuses a `target-topics-appeared=`
+    value longer than 76 KB before parsing it, and reads the last 256 lines
+    of the log. An older controller reads `appeared` and `left` from the same
+    line and ignores the rest; one older still reports a plain exit 1.
+  - **The runner prints every error text on one line**
+    (`logweir::exit::one_line`: every line-breaking code point becomes a
+    visible escape), so no plan-chosen or broker-chosen string can start a
+    line a controller reads by key. **What is NOT guaranteed:** the place
+    rule cannot tell the runner's own last lines from text an OLDER runner
+    image was made to print last, since stdout and stderr reach the pod log
+    as one stream. With such an image the names are shown as its log gives
+    them, held to the plan's own names; an operator checks them against the
+    cluster before acting ([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+    The Kafka client's own stderr logging and the other lines a controller
+    reads by key (`refusal-reason=`, the evidence keys) are not covered by
+    this row.
+  - **Every stop of the step names what it may have left.** `left` is exactly
+    what the run's own `CreateTopics` answers say it created. A name it asked
+    for without a definite answer (the whole call failed, no answer for the
+    name, or an error other than "already exists") that the cluster lists
+    when the run looks again is `unconfirmed`: "exists now; this restore
+    asked the cluster to create it and got no definite answer, so it may be
+    this restore's or someone else's: check what it holds and who writes to
+    it before you remove it" — never `left`, never `appeared`. When the run
+    cannot list the cluster either, every such name is listed and the
+    sentence says "may exist now". The look is one read: a topic the broker
+    finishes creating after it is not named.
+  - **No code path deletes a topic under an original name**: a topic this run
+    created before it stopped is left in place, empty, and named with what to
+    do ("created by this restore and left empty; remove it yourself once you
+    have checked nothing writes to it"). Kafka has no conditional delete, so
+    any cleanup could lose a record a producer wrote between the check and
+    the delete. An inventory row over every source file of the workspace
+    (`crates/logweir/tests/no_topic_delete_inventory.rs`) pins that the one
+    broker delete call is the scratch-scoped deleter's and that the real
+    creator names none.
+- **An older runner refuses an original-name plan**: it ignores the
+  `original_name` block and sees an empty prefix, which maps every topic onto
+  itself, so its guard refuses the plan at phase 0 (exit 3) before anything is
+  written. An older controller ignores `topicNaming.originalName` and its
+  runner refuses the plan the same way.
+- **The `Restore` CRD** gains `spec.target.topicNaming.originalName`, allowed
+  only in `newTopic` mode with an empty prefix and only with `spec.coverage:
+  complete` (two CEL rules), and `status.targetTopicsAppeared` (three lists,
+  a count beside each, `unconfirmedSeen`; every field additive); rolling the
+  CRDs back prunes them from stored objects, whose plans are unchanged and are
+  then refused as above.
+- **What stays refused**: a name that exists, in any mode; an identity mapping
+  in a scratch drill; a target that may be the source cluster unless every
+  broker reports `auto.create.topics.enable=false`; a declarative owner found
+  unless the plan chose the owner path, and an owner looked for nowhere; a
+  sampled verification; a partition subset. Nothing — teardown, a lost race, a
+  stopped creation step — deletes a topic under its original name.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -2977,7 +3140,7 @@ These are not scheduled. They are refused.
 
 | # | Entry | Why it is a never, not a later |
 |---|---|---|
-| 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. |
+| 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. **Narrowed by the owner's decision [OD-2](to-do/product-expansion.md#owner-decisions) (2026-10-05) to exactly that: a LIVE topic.** A restore under the source's ORIGINAL topic name into a topic that does NOT exist is not this entry: it is PROD-15.1's one original-name path, behind its own approval subject (`originalName`), and it still only writes a topic it created itself, exclusively, after proving the name absent, the target another cluster or auto-creation disabled, and no declarative owner unless the owner path is chosen ([kubernetes.md](kubernetes.md) §12, "Restoring under the original topic names (PROD-15.1)"). A name that exists, in any mode, and an identity mapping in a scratch drill stay refused. |
 | 2 | **Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE** | Each is a separate product surface with its own trust model. Logweir moves records and reconciles bytes; it does not resolve schemas, evaluate a registry's RBAC, or hold field-level encryption keys. |
 | 3 | **MSK ZK-to-KRaft migration, and the word "migration"** | Logweir is not a migration tool and the word is avoided on every surface, because a document that says "migration" is a document somebody will act on as though it were one. |
 | 4 | **Multi-cluster or fleet views, and the words** | One controller per cluster. There is no fleet object, no cross-cluster list and no aggregated view, and the vocabulary is kept out of the UI and the docs for the same reason as the previous row. |

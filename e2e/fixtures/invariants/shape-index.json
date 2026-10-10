@@ -718,5 +718,14 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid value: integer `-1`, expected u32",
   "python_reason": "source.selection is not an object of the shape the writer gives it: a window end and an optional window start, both integers, an optional array of topic partition lists and an optional engine-run count"
+ },
+ {
+  "id": "original_name_not_an_object",
+  "file": "original_name_not_an_object.json",
+  "check": "message:target.original_name is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected struct OriginalNameInfo",
+  "python_reason": "target.original_name is not an object of the shape the writer gives it: three strings, an optional source cluster id, the places looked in, the owners found and a bool owner_path"
  }
 ]

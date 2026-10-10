@@ -1,0 +1,61 @@
+{
+  "item": {
+    "name": "orders-drill-a",
+    "namespace": "logweir-t26",
+    "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c1d",
+    "resourceVersion": "40311",
+    "createdAt": "2026-09-11T12:41:00Z",
+    "planHash": "sha256:f8584333e6bea8c693dbaa97f7adfeb843abf393d86669bb9baf9c2d5d7999d1",
+    "planBytesLength": 1542,
+    "planBytes": "# The restore plan document. Its grammar is the runner's restore document:\n# logweir_core::spec::RestoreSpec, stated once in docs/mvp/03-spec.md section 6.1,\n# \"The restore plan document has ONE grammar, and it is the runner's\n# restore.yaml (amendment 4)\". These bytes are what Restore.spec.planBytes\n# carries, what the controller writes into the runner's plan ConfigMap verbatim,\n# and what logweir restore run --spec parses. Rendered by the Logweir UI; the\n# sha256 of exactly these bytes is the plan hash an approval binds.\nname: \"orders-pitr-4471\"\nsource:\n  storage:\n    backend: \"s3\"\n    bucket: \"kafka-backups\"\n    prefix: \"drill-demo\"\n    region: \"us-east-1\"\n    endpoint: \"http://localhost:9000\"\n    path_style: true\n    allow_http: true\n  backup: \"01JB7Z0000000000000000000B\"\n  topics:\n    - \"orders\"\n    - \"payments\"\ntarget:\n  bootstrap_servers:\n    - \"localhost:9092\"\n  mode: \"newTopic\"\n  topic_naming:\n    prefix: \"restore-20260907T140500Z-\"\n  topic_mapping_prefix: \"restore-20260907T140500Z-\"\n  marker_topic: \"logweir.scratch\"\n  default_replication_factor: 1\n  teardown: \"delete\"\nrestore:\n  point_in_time: \"2026-09-07T14:05:00Z\"\nsample:\n  window_start: \"2026-09-07T12:00:00Z\"\n  window_end: \"2026-09-07T15:00:00Z\"\n  records_per_partition: 25\n  anchor: \"head\"\nobjectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\nevidence:\n  backend: \"s3\"\n  bucket: \"logweir-evidence\"\n  prefix: \"logweir/\"\n  region: \"us-east-1\"\n  endpoint: \"http://localhost:9000\"\n  path_style: true\n  allow_http: true\nnotifications:\n  webhooks: []\n",
+    "approvalRef": {
+      "name": "orders-drill-approval"
+    },
+    "sourceArchive": {
+      "url": "s3://logweir-evidence/orders",
+      "credentialRef": {
+        "name": "archive-credentials"
+      }
+    },
+    "backupSetRef": "01JB7Z0000000000000000000B",
+    "pointInTime": "2026-09-11T12:00:00Z",
+    "target": {
+      "clusterRef": {
+        "name": "orders-scratch"
+      },
+      "mode": "newTopic",
+      "topicPrefix": "",
+      "originalName": true
+    },
+    "approvalSubject": "originalName",
+    "deadlineSeconds": 3600,
+    "newTopics": [
+      "orders"
+    ],
+    "targetTopicsAppeared": {
+      "appeared": [
+        "payments"
+      ],
+      "left": [
+        "orders"
+      ],
+      "unconfirmed": [],
+      "appearedCount": 1,
+      "leftCount": 1,
+      "unconfirmedCount": 0,
+      "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it"
+    },
+    "coverage": {
+      "requested": "complete"
+    },
+    "operation": {
+      "state": "failed",
+      "stateReason": "Operational",
+      "terminal": true,
+      "verificationState": "noEvidence",
+      "verifiedSuccess": false,
+      "exitCode": 1
+    }
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8X"
+}

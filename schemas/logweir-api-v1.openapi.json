@@ -4944,6 +4944,7 @@
         "type": "object",
         "required": [
           "approvalBytesLength",
+          "approvalSubject",
           "conditions",
           "name",
           "namespace",
@@ -4959,6 +4960,10 @@
             "type": "integer",
             "format": "uint",
             "minimum": 0.0
+          },
+          "approvalSubject": {
+            "description": "**PROD-15.1.** The approval subject the SIGNED document carries: `originalName` authorises only a restore under the original topic names, `ordinary` only any other restore.",
+            "$ref": "#/components/schemas/ApprovalSubjectView"
           },
           "approver": {
             "description": "The approver subject from the roster.",
@@ -5291,6 +5296,32 @@
             "type": "string"
           }
         }
+      },
+      "ApprovalSubjectView": {
+        "description": "**PROD-15.1.** The approval subject a restore needs, or an approval document carries: `ordinary`, or `originalName` for a restore under the original topic names, which only an approval signed for that subject authorises. `unknown` is an approval document whose subject this service could not read (the controller refuses it).",
+        "oneOf": [
+          {
+            "description": "Every restore that is not an original-name restore.",
+            "type": "string",
+            "enum": [
+              "ordinary"
+            ]
+          },
+          {
+            "description": "A restore under the original topic names.",
+            "type": "string",
+            "enum": [
+              "originalName"
+            ]
+          },
+          {
+            "description": "An approval document whose subject could not be read.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
       },
       "ApprovedPlanState": {
         "description": "Where the approved-plan gate stands.",
@@ -7667,6 +7698,11 @@
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
+          "originalNameConfirmation": {
+            "description": "**OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged.",
+            "$ref": "#/components/schemas/OriginalNameConfirmationRequest",
+            "nullable": true
+          },
           "planBytes": {
             "description": "The exact plan document bytes the approval will bind, at most 256 KiB.",
             "type": "string"
@@ -7851,6 +7887,71 @@
             "description": "Its partition count.",
             "type": "integer",
             "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "CreationStopView": {
+        "description": "`Restore.targetTopicsAppeared`: what a stopped creation step left behind, as the controller copied it from the runner's last two log lines onto `status.targetTopicsAppeared`, held to the restore's own mapped target names. Three lists, each at most 100 topic names, and how many names each has in all; a name is in at most one list. Logweir deletes none of them.",
+        "type": "object",
+        "required": [
+          "appeared",
+          "appearedCount",
+          "left",
+          "leftCount",
+          "leftInstruction",
+          "unconfirmed",
+          "unconfirmedCount"
+        ],
+        "properties": {
+          "appeared": {
+            "description": "Mapped target names someone else created after the restore was admitted. The restore wrote nothing into them.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "appearedCount": {
+            "description": "How many names `appeared` has in all: more than the list holds when the 100-name bound cut it.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "left": {
+            "description": "Topics this restore created and LEFT, empty. Never deleted by Logweir: the operator removes each one.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leftCount": {
+            "description": "How many names `left` has in all.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "leftInstruction": {
+            "description": "What to do with each topic in `left`, in words: the one sentence the runner, the Restore's status and the console all say.",
+            "type": "string"
+          },
+          "unconfirmed": {
+            "description": "Names this restore ASKED the cluster to create and CANNOT ACCOUNT FOR: it got no definite answer (the whole request failed, or the name was answered with an error that is not \"already exists\"). Each may be this restore's or someone else's. Never listed in `left`, which claims ownership, nor in `appeared`. Empty on a stop made of definite answers.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unconfirmedCount": {
+            "description": "How many names `unconfirmed` has in all.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "unconfirmedInstruction": {
+            "description": "What to do with each topic in `unconfirmed`, in words: \"exists now … check … before you remove it\", or \"may exist now … look for it\" when `unconfirmedSeen` is `false`. Present only beside an `unconfirmed` name.",
+            "type": "string",
+            "nullable": true
+          },
+          "unconfirmedSeen": {
+            "description": "Whether the runner listed the cluster after the stop and SAW every `unconfirmed` name. `false`: it could not list the cluster, so each name MAY exist. Present only beside an `unconfirmed` name.",
+            "type": "boolean",
             "nullable": true
           }
         }
@@ -10025,6 +10126,27 @@
           }
         ]
       },
+      "OriginalNameConfirmationRequest": {
+        "description": "**OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation namespace.",
+        "type": "object",
+        "required": [
+          "typedTopics"
+        ],
+        "properties": {
+          "typedTopics": {
+            "description": "Every original topic name, as the requester re-typed it: exactly the plan's `source.topics`, each once, nothing else, byte for byte.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 249,
+              "minLength": 1
+            },
+            "maxItems": 1000,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
       "Page": {
         "description": "One page of a list.",
         "type": "object",
@@ -12064,6 +12186,7 @@
         "type": "object",
         "required": [
           "approvalRef",
+          "approvalSubject",
           "backupSetRef",
           "coverage",
           "deadlineSeconds",
@@ -12083,6 +12206,10 @@
           "approvalRef": {
             "description": "The Approval name this restore waits for.",
             "$ref": "#/components/schemas/NameRef"
+          },
+          "approvalSubject": {
+            "description": "**PROD-15.1.** The approval subject this restore needs: `originalName` for a restore under the original topic names, else `ordinary`.",
+            "$ref": "#/components/schemas/ApprovalSubjectView"
           },
           "backupSetRef": {
             "description": "The backup set ID.",
@@ -12117,7 +12244,7 @@
             "type": "string"
           },
           "newTopics": {
-            "description": "The topics this run created.",
+            "description": "The target topic names of this run (`status.newTopics`). For a run that reached its restore, the topics it created. After a stopped creation step (`targetTopicsAppeared`), exactly `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for (empty when its lists could not be read). For a run that was refused or failed before the creation step, the names its plan maps, none of which it created.",
             "type": "array",
             "items": {
               "type": "string"
@@ -12173,6 +12300,11 @@
           "target": {
             "description": "Where it writes.",
             "$ref": "#/components/schemas/RestoreTargetView"
+          },
+          "targetTopicsAppeared": {
+            "description": "Present only when the run's creation step stopped (its operation's `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`): the mapped target names someone else created while the run was admitted, every topic THIS run created and left in place, empty, and the names it asked for and cannot account for. Logweir never deletes any of them.",
+            "$ref": "#/components/schemas/CreationStopView",
+            "nullable": true
           },
           "timeBasis": {
             "description": "FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never \"every selection used the topics' own clocks\".",
@@ -12506,6 +12638,7 @@
         "required": [
           "clusterRef",
           "mode",
+          "originalName",
           "topicPrefix"
         ],
         "properties": {
@@ -12517,8 +12650,12 @@
             "description": "`scratch` or `newTopic`.",
             "$ref": "#/components/schemas/RestoreMode"
           },
+          "originalName": {
+            "description": "**PROD-15.1.** Whether this restore writes under the ORIGINAL topic names (`spec.target.topicNaming.originalName`), into absent topics.",
+            "type": "boolean"
+          },
           "topicPrefix": {
-            "description": "The topic prefix.",
+            "description": "The topic prefix. Empty for a restore under the original names.",
             "type": "string"
           }
         }
@@ -14345,8 +14482,13 @@
           "prefix"
         ],
         "properties": {
+          "originalName": {
+            "description": "**PROD-15.1.** `true`: restore under the ORIGINAL topic names, into topics that do not exist — `newTopic` mode and `prefix: \"\"` only. It is stored as `Restore.spec.target.topicNaming.originalName`, the plan must say the same (`target.topic_naming.original_name`, held by the controller), and the restore needs its own approval subject, `originalName`, which the console signs into the authorization document only for such a Restore. Absent means `false`, is stored as absent, and keeps the idempotency hash unchanged.",
+            "type": "boolean",
+            "nullable": true
+          },
           "prefix": {
-            "description": "Prepended to each source topic name.",
+            "description": "Prepended to each source topic name. Empty exactly for a restore under the original topic names (`originalName: true`).",
             "type": "string"
           }
         },

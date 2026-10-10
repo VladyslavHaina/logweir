@@ -68,6 +68,7 @@ fn fixture_with_plan(plan: Vec<u8>) -> Fixture {
         plan_hash: sha256_prefixed(&plan),
         approved_at: Utc::now(),
         subject_kind: "Restore".to_string(),
+        approval_subject: None,
     };
     let approval = serde_json::to_vec(&doc).unwrap();
     let sidecar =

@@ -147,19 +147,33 @@ golden:
 # 1.7.0 exactly when its backup selected consumer groups. Its positions
 # document has its own schema, `logweir-consumer-positions-1.0.0.json`.
 #
+# PROD-15.1 added scorecard 1.8.0 (`target.original_name`), the newest MINOR
+# of format 1, and PROD-11.1's `-1.7.0.json` is frozen beside the new file
+# (`the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name`);
+# this build writes 1.8.0 only for a restore under the original topic names.
+# The block never appears in a 2.x document (an original-name restore restores
+# whole topics), so `-2.0.0.json` is byte for byte PROD-11.1b's and the scorecard
+# has TWO generated files: `-2.0.0.json` from the type, and `-1.8.0.json`, which
+# is the frozen `-1.7.0.json` plus the block as the type derives it
+# (`logweir_core::schema::scorecard_format_1_schema`,
+# `the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`).
+#
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
 # (`scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
-# file frozen beside the new.
+# file frozen beside the new. The scorecard's format-1 file is named by
+# `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` the same way.
 scorecard_schema_version := "2.0.0"
+scorecard_format_1_schema_version := "1.8.0"
 receipt_schema_version := "1.7.0"
 catalog_schema_version := "1.7.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
+    cargo run -p logweir-core --example emit_scorecard_format_1_schema > schemas/logweir-drill-scorecard-{{scorecard_format_1_schema_version}}.json
     cargo run -p logweir-core --example emit_backup_receipt_schema > schemas/logweir-backup-receipt-{{receipt_schema_version}}.json
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
     cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
@@ -173,11 +187,13 @@ schema-check:
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     cargo run --locked -p logweir-core --example emit_schema > "$tmp/scorecard.json"
+    cargo run --locked -p logweir-core --example emit_scorecard_format_1_schema > "$tmp/scorecard-format-1.json"
     cargo run --locked -p logweir-core --example emit_backup_receipt_schema > "$tmp/receipt.json"
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
     cargo run --locked -p logweir-core --example emit_consumer_positions_schema > "$tmp/consumer-positions.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
+    diff -u schemas/logweir-drill-scorecard-{{scorecard_format_1_schema_version}}.json "$tmp/scorecard-format-1.json"
     diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
     diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
@@ -287,7 +303,7 @@ e2e-up:
 # stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
-    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl down -v --remove-orphans
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile autocreate --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
 # in the environment, `AmazonS3Builder::from_env()` falls through to the EC2

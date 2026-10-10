@@ -1004,6 +1004,67 @@ fn the_mapped_names_walk_phase_zeros_four_refusals() {
         CheckCode::TopicMappingIdentity
     );
 
+    // PROD-15.1 (review L6): a plan that opts in to the original topic names
+    // maps onto itself on purpose and is not refused for it; the block in a
+    // shape phase 0 refuses is, in the runner's words — a SAMPLED plan
+    // included, since such a restore requires complete verification. KILLS:
+    // every original-name restore read as an accidental identity map (the
+    // console's readiness would block it); the block accepted in scratch
+    // mode; readiness saying ready for a sampled plan the runner refuses.
+    let sampled_original = plan_yaml("drill-", "s3-bucket")
+        .replace("  mode: scratch\n  marker_topic: logweir-marker\n", "  mode: newTopic\n")
+        .replace(
+            "  topic_mapping_prefix: 'drill-'\n",
+            "  topic_mapping_prefix: 'drill-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+        );
+    let row = plan_names_row(&PlanFacts::of(sampled_original.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::TopicMappingIdentity, "{}", row.message);
+    assert!(
+        row.message.contains("OriginalNameNeedsCompleteCoverage"),
+        "{}",
+        row.message
+    );
+    let original = sampled_original.replace(
+        "  window_end: 2026-09-15T00:00:00Z\n",
+        "  window_end: 2026-09-15T00:00:00Z\n  coverage: complete\n",
+    );
+    assert_ne!(original, sampled_original);
+    let row = plan_names_row(&PlanFacts::of(original.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::MappedNamesLegal, "{}", row.message);
+    // PROD-15.1 after PROD-11.1b: such a restore restores WHOLE topics. The
+    // complete plan with a partition subset is refused in the runner's words;
+    // the same subset under a prefix is legal, as on main. KILLS: readiness
+    // saying legal for a subset plan the runner refuses at phase 0.
+    let subset =
+        "restore:\n  point_in_time: \"../2026-09-14T00:00:00Z\"\n  partitions:\n    orders: [0]\n";
+    let subset_original = format!("{original}{subset}");
+    let row = plan_names_row(&PlanFacts::of(subset_original.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::TopicMappingIdentity, "{}", row.message);
+    assert!(
+        row.message.contains("OriginalNameNeedsWholeTopics"),
+        "{}",
+        row.message
+    );
+    let subset_prefixed = format!("{}{subset}", plan_yaml("restore-", "s3-bucket"));
+    let row = plan_names_row(&PlanFacts::of(subset_prefixed.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::MappedNamesLegal, "{}", row.message);
+    let in_scratch = PlanFacts::of(
+        plan_yaml("drill-", "s3-bucket")
+            .replace(
+                "  topic_mapping_prefix: 'drill-'\n",
+                "  topic_mapping_prefix: 'drill-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+            )
+            .as_bytes(),
+        None,
+    );
+    let row = plan_names_row(&in_scratch, now());
+    assert_eq!(row.code, CheckCode::TopicMappingIdentity);
+    assert!(
+        row.message.contains("OriginalNameNotNewTopic"),
+        "{}",
+        row.message
+    );
+
     let long = "x".repeat(250);
     let illegal = PlanFacts::of(plan_yaml(&long, "s3-bucket").as_bytes(), None);
     assert_eq!(

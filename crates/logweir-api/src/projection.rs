@@ -505,6 +505,13 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 TargetMode::NewTopic => RestoreMode::NewTopic,
             },
             topic_prefix: object.spec.target.topic_naming.prefix.clone(),
+            original_name: object.spec.target.topic_naming.is_original_name(),
+        },
+        // PROD-15.1: the subject this restore's approval must carry.
+        approval_subject: if object.spec.target.topic_naming.is_original_name() {
+            crate::contract::ApprovalSubjectView::OriginalName
+        } else {
+            crate::contract::ApprovalSubjectView::Ordinary
         },
         deadline_seconds: object.spec.deadline_seconds,
         new_topics: status
@@ -513,6 +520,13 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .into_iter()
             .take(MAX_LIST_ENTRIES)
             .collect(),
+        // PROD-15.1: a stopped creation step's three lists, verbatim (the
+        // CRD bounds each at this view's bound), with a count beside each and
+        // the one instruction for each list that needs one. Logweir deletes
+        // none of them.
+        target_topics_appeared: status
+            .and_then(|s| s.target_topics_appeared.as_ref())
+            .map(creation_stop_view),
         queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
         // FX-8 (review M-2): the signed time basis, ALL OF IT OR NOTHING. A
         // list past this view's bound is not truncated: a partial list would
@@ -564,6 +578,73 @@ fn subject_ref(object: &ApprovalCr) -> SubjectRefView {
     }
 }
 
+/// `Restore.targetTopicsAppeared` from `status.targetTopicsAppeared`.
+///
+/// A count is the status' own when it is at least the list beside it, and the
+/// list's length otherwise (an older controller wrote none): never a number
+/// smaller than what is shown.
+#[must_use]
+pub fn creation_stop_view(
+    stop: &weirkeeper::crds::restore::TargetTopicsAppeared,
+) -> crate::contract::CreationStopView {
+    let bounded = |names: &[String]| -> Vec<String> {
+        names.iter().take(MAX_LIST_ENTRIES).cloned().collect()
+    };
+    let counted = |names: &[String], count: Option<i64>| -> i64 {
+        let listed = i64::try_from(names.len()).unwrap_or(i64::MAX);
+        count.filter(|c| *c >= listed).unwrap_or(listed)
+    };
+    let seen = (!stop.unconfirmed.is_empty()).then(|| stop.unconfirmed_seen == Some(true));
+    crate::contract::CreationStopView {
+        appeared: bounded(&stop.appeared),
+        left: bounded(&stop.left),
+        unconfirmed: bounded(&stop.unconfirmed),
+        appeared_count: counted(&stop.appeared, stop.appeared_count),
+        left_count: counted(&stop.left, stop.left_count),
+        unconfirmed_count: counted(&stop.unconfirmed, stop.unconfirmed_count),
+        unconfirmed_seen: seen,
+        left_instruction: logweir_core::guard::LEFT_TOPIC_SENTENCE.to_string(),
+        // "exists now" only when the status says the runner saw the names:
+        // anything else, an absent flag included, is the weaker sentence.
+        unconfirmed_instruction: seen.map(|seen| {
+            if seen {
+                logweir_core::guard::UNCONFIRMED_TOPIC_SENTENCE
+            } else {
+                logweir_core::guard::UNCONFIRMED_UNLISTED_TOPIC_SENTENCE
+            }
+            .to_string()
+        }),
+    }
+}
+
+/// **PROD-15.1 review 2, L9.** The approval subject an `Approval`'s document
+/// is SHOWN with: for an authorization document v2, read through the typed
+/// parser every enforcing reader uses
+/// (`logweir_core::approval_policy::RestoreAuthorization::from_bytes`, with
+/// the version rule), so a document those readers refuse — a 2.0.0 document
+/// carrying `approvalSubject`, an unknown subject, an unknown field — is
+/// `unknown` here and never listed as `originalName`. A v1 document is read
+/// as the controller reads it.
+#[must_use]
+pub fn approval_subject_view(object: &ApprovalCr) -> crate::contract::ApprovalSubjectView {
+    use crate::contract::ApprovalSubjectView;
+    use logweir_core::original_name::ApprovalSubject;
+    let subject = if weirkeeper::controllers::restore::is_authorization_v2(object) {
+        logweir_core::approval_policy::RestoreAuthorization::from_bytes(
+            object.spec.approval_bytes.as_bytes(),
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|doc| ApprovalSubject::from_wire(doc.approval_subject.as_deref()))
+    } else {
+        weirkeeper::controllers::restore::approval_subject_of(object)
+    };
+    match subject {
+        Ok(ApprovalSubject::OriginalName) => ApprovalSubjectView::OriginalName,
+        Ok(ApprovalSubject::Ordinary) => ApprovalSubjectView::Ordinary,
+        Err(_) => ApprovalSubjectView::Unknown,
+    }
+}
+
 /// An `Approval`'s public metadata. No document bytes.
 #[must_use]
 pub fn approval(object: &ApprovalCr) -> Approval {
@@ -576,6 +657,9 @@ pub fn approval(object: &ApprovalCr) -> Approval {
         created_at: created_at(object),
         subject_ref: subject_ref(object),
         plan_hash: object.spec.plan_hash.clone(),
+        // PROD-15.1: what the SIGNED document authorises, read the way
+        // every enforcing reader reads it (review 2, L9).
+        approval_subject: approval_subject_view(object),
         approval_bytes_length: object.spec.approval_bytes.len(),
         sidecar_bytes_length: object.spec.sidecar_bytes.len(),
         verified: status.and_then(|s| s.verified),

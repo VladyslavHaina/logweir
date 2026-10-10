@@ -330,6 +330,34 @@ pub const OFFSET_REPORT_KEY_PREFIX: &str = "offset-report-key=";
 /// none.
 pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 
+/// **PROD-15.1 review M4.** The runner's one line about a creation step that
+/// stopped (`logweir::drill::phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX`),
+/// printed with `failure-reason=TargetTopicAppeared` or `CreatedTopicsLeft` on
+/// exit 1. ONE definition for the writer and this reader:
+/// `logweir_core::creation_stop`.
+pub use logweir_core::creation_stop::LINE_PREFIX as TARGET_TOPICS_APPEARED_KEY_PREFIX;
+
+/// The most names one list of `status.targetTopicsAppeared` carries.
+pub use logweir_core::creation_stop::MAX_NAMES as TARGET_TOPICS_APPEARED_MAX_NAMES;
+
+/// **PROD-15.1 review 2, L7: how much of the pod log the terminal read asks
+/// for.** `tailLines` on the `pods/log` request: every key this reconciler
+/// reads is in the last [`backup::KEY_SCAN_TAIL_LINES`] NON-EMPTY lines, and
+/// this many raw lines leave room for blank ones between them.
+///
+/// WHAT IT BOUNDS: the number of lines read. WHAT IT DOES NOT: the length of
+/// one line, which the API cannot bound without cutting the END of the log
+/// (`limitBytes` keeps the first bytes of the tail, and the keys are last).
+/// The one line this reconciler parses as JSON is therefore refused over
+/// `logweir_core::creation_stop::MAX_VALUE_BYTES` BEFORE it is parsed.
+pub const TERMINAL_LOG_TAIL_LINES: i64 = 256;
+
+const _: () = assert!(TERMINAL_LOG_TAIL_LINES as usize >= 16 * backup::KEY_SCAN_TAIL_LINES);
+
+/// What every surface says about a topic a stopped creation step created and
+/// left — the runner's own sentence, from the one place both read.
+pub use logweir_core::guard::LEFT_TOPIC_SENTENCE;
+
 /// How long before an unfinished Job is looked at again. Fifteen seconds, as
 /// on the `Backup` path: a Job's own events wake this controller, so the
 /// requeue exists for the one transition no watch delivers.
@@ -412,6 +440,21 @@ pub enum RestoreAdmission {
         /// Which non-secret identity component failed.
         detail: String,
     },
+    /// **PROD-15.1.** The Approval binds this Restore, but its SIGNED
+    /// approval subject is not the one the plan needs: an ordinary approval
+    /// for a restore under the original topic names (which needs its own,
+    /// `originalName`), the reverse, or a subject this build does not know.
+    ///
+    /// TERMINAL, under the same reason as [`Self::ApprovalSubjectMismatch`]
+    /// (`ApprovalSubjectMismatch`) and with its own message: both specs are
+    /// sealed, so only a new Approval signed for the right subject — and a new
+    /// Restore — can proceed.
+    ApprovalSubjectNotThePlans {
+        /// The referenced Approval name.
+        approval: String,
+        /// Both subjects, from `logweir_core::original_name::check_approval_subject`.
+        detail: String,
+    },
     /// `sha256_prefixed(spec.planBytes)` is not the `plan_hash` inside
     /// `Approval.spec.approvalBytes`.
     ///
@@ -474,7 +517,9 @@ impl RestoreAdmission {
             Self::Ok => REASON_ADMITTED,
             Self::ApprovalNotVerified { .. } => REASON_APPROVAL_NOT_VERIFIED,
             Self::ApprovalNotReceived { .. } => TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
-            Self::ApprovalSubjectMismatch { .. } => TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
+            Self::ApprovalSubjectMismatch { .. } | Self::ApprovalSubjectNotThePlans { .. } => {
+                TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH
+            }
             Self::PlanHashMismatch { .. } => TERMINAL_STATE_PLAN_HASH_MISMATCH,
             Self::ClusterNotReachable { .. } => TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
             Self::StandingAuthorizationRefused { .. } => {
@@ -509,6 +554,7 @@ impl RestoreAdmission {
             Self::Ok | Self::ApprovalNotVerified { .. } => false,
             Self::ApprovalNotReceived { .. }
             | Self::ApprovalSubjectMismatch { .. }
+            | Self::ApprovalSubjectNotThePlans { .. }
             | Self::PlanHashMismatch { .. }
             | Self::ClusterNotReachable { .. }
             | Self::StandingAuthorizationRefused { .. }
@@ -543,6 +589,12 @@ impl fmt::Display for RestoreAdmission {
                 "spec.approvalRef names Approval `{approval}`, but its verified subject binding \
                  does not identify this Restore ({detail}); create a new Approval for this exact \
                  Restore name, namespace, and UID"
+            ),
+            Self::ApprovalSubjectNotThePlans { approval, detail } => write!(
+                f,
+                "spec.approvalRef names Approval `{approval}`, whose signed approval subject is \
+                 not the one this Restore's plan needs ({detail}); no Job was created. spec is \
+                 immutable: create a new Restore and an Approval signed for its subject"
             ),
             Self::PlanHashMismatch {
                 recomputed,
@@ -612,6 +664,92 @@ pub fn approval_plan_hash(approval: &Approval) -> Option<String> {
         .get(field)?
         .as_str()
         .map(str::to_string)
+}
+
+/// **PROD-15.1.** The approval subject the SIGNED document carries — v1's
+/// `approval_subject`, v2's `approvalSubject`, the spelling decided by the
+/// sidecar's payload type exactly as [`approval_plan_hash`] decides its own.
+///
+/// An absent key is an ordinary approval (every document before PROD-15.1).
+///
+/// # Errors
+///
+/// A document that does not parse as JSON, or a subject this build does not
+/// know ([`ApprovalSubject::from_wire`]).
+pub fn approval_subject_of(
+    approval: &Approval,
+) -> Result<logweir_core::original_name::ApprovalSubject, String> {
+    let field = if is_authorization_v2(approval) {
+        "approvalSubject"
+    } else {
+        "approval_subject"
+    };
+    let doc = serde_json::from_str::<Value>(&approval.spec.approval_bytes)
+        .map_err(|e| format!("the approval document is not JSON: {e}"))?;
+    match doc.get(field) {
+        None | Some(Value::Null) => Ok(logweir_core::original_name::ApprovalSubject::Ordinary),
+        Some(Value::String(s)) => {
+            logweir_core::original_name::ApprovalSubject::from_wire(Some(s.as_str()))
+        }
+        Some(other) => Err(format!(
+            "the approval document's {field} is {other}, not a string"
+        )),
+    }
+}
+
+/// **OD-10 (PROD-15.1 review M1).** Whether an Approval is a ONE-PERSON
+/// confirmation — an authorization document v2 signed under an `Ordinary`
+/// policy — and the typed topic names its signed bytes carry. A v1 approval
+/// and a `Governed` document have a second person and carry none.
+///
+/// # Errors
+///
+/// A v2 document that does not parse (the admission's signature and binding
+/// checks refuse it too).
+pub fn typed_confirmation_of(
+    approval: &Approval,
+) -> Result<
+    (
+        bool,
+        Option<logweir_core::original_name::OriginalNameConfirmation>,
+    ),
+    String,
+> {
+    if !is_authorization_v2(approval) {
+        return Ok((false, None));
+    }
+    let doc = logweir_core::approval_policy::RestoreAuthorization::from_bytes(
+        approval.spec.approval_bytes.as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((
+        doc.authorization_mode == logweir_core::approval_policy::ApprovalMode::Ordinary,
+        doc.original_name_confirmation,
+    ))
+}
+
+/// **OD-10.** The plan's source topics, the names a typed confirmation is
+/// held to; empty for a plan that does not parse (the runner refuses it).
+#[must_use]
+pub fn plan_source_topics(restore: &Restore) -> Vec<String> {
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+        .map(|plan| plan.source.topics)
+        .unwrap_or_default()
+}
+
+/// **PROD-15.1.** The approval subject a `Restore` needs: `originalName` when
+/// its plan carries `target.topic_naming.original_name`, else ordinary.
+///
+/// FROM THE PLAN, the bytes the approver signs and the runner executes —
+/// [`original_name_agrees`] has already held the object's declaration to it
+/// before admission reads this. A plan that does not parse is ordinary here;
+/// the runner refuses it.
+#[must_use]
+pub fn plan_approval_subject(restore: &Restore) -> logweir_core::original_name::ApprovalSubject {
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes).map_or(
+        logweir_core::original_name::ApprovalSubject::Ordinary,
+        |plan| logweir_core::original_name::ApprovalSubject::of_plan(&plan),
+    )
 }
 
 /// Whether this Approval carries an authorization document v2 — its sidecar's
@@ -943,6 +1081,37 @@ pub fn admit_with_policy(
         };
     }
 
+    // ---- 4b. the approval SUBJECT, from inside the signed bytes -----------
+    //
+    // PROD-15.1: a restore under the original topic names needs its own
+    // approval subject, `originalName`, which an ordinary approval cannot
+    // satisfy — and an `originalName` approval authorises nothing else. AFTER
+    // the plan hash, so the subject compared is inside bytes that bind this
+    // plan; BEFORE the target, because it is a fact about the two sealed
+    // documents and never changes. The runner checks it again (Global
+    // Constraint 6's "checked twice").
+    let subject_refusal = approval_subject_of(approval).and_then(|approved| {
+        logweir_core::original_name::check_approval_subject(
+            plan_approval_subject(restore),
+            approved,
+        )?;
+        // OD-10: a one-person confirmation of an original-name plan carries
+        // every original topic name re-typed, exactly, in its signed bytes.
+        let (one_person, confirmation) = typed_confirmation_of(approval)?;
+        logweir_core::original_name::check_typed_confirmation(
+            &plan_source_topics(restore),
+            approved,
+            one_person,
+            confirmation.as_ref(),
+        )
+    });
+    if let Err(detail) = subject_refusal {
+        return RestoreAdmission::ApprovalSubjectNotThePlans {
+            approval: referent,
+            detail,
+        };
+    }
+
     // ---- 5. the target must report reachable -----------------------------
     let cluster_name = restore.spec.target.cluster_ref.name.clone();
     let reachable = cluster
@@ -1234,6 +1403,20 @@ fn admit_standing(
             ))
         }
     };
+    // PROD-15.1: a standing scope signs a rehearsal, and a rehearsal is never
+    // a restore under the original topic names: that path needs its own
+    // per-run approval subject (OD-2), which no standing document carries.
+    if logweir_core::original_name::ApprovalSubject::of_plan(&plan)
+        == logweir_core::original_name::ApprovalSubject::OriginalName
+    {
+        return refused(
+            "the plan restores under the original topic names \
+             (target.topic_naming.original_name), which only a per-run approval signed for the \
+             approval subject originalName authorises; a standing rehearsal authorization never \
+             does"
+                .to_string(),
+        );
+    }
     let allowed = logweir_core::spec::AllowedClusters {
         allowed_cluster_ids: vec![doc.scope.target_cluster_id.clone()],
         source_cluster_id: None,
@@ -3160,6 +3343,8 @@ pub fn runner_job_spec_with_policy(
     let resources = runner_resources_of(restore)?;
     // PROD-08.1a, by the same one function as the early refusal.
     coverage_agrees(restore)?;
+    // PROD-15.1, likewise.
+    original_name_agrees(restore)?;
 
     // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
     // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
@@ -3523,6 +3708,91 @@ pub fn coverage_agrees(restore: &Restore) -> Result<(), RestoreError> {
             declared.as_str(),
             bound(declared_bound)
         )));
+    }
+    Ok(())
+}
+
+/// **PROD-15.1: the original-name DECLARATION holds to the plan**, in both
+/// directions — the same rule and the same reason as [`coverage_agrees`].
+///
+/// `spec.target.topicNaming.originalName` declares what the plan's
+/// `target.topic_naming.original_name` says, so a list, the API and the
+/// console can show a restore under the original topic names — and its
+/// separate approval subject — without parsing the plan. A declaration that
+/// disagrees with the bytes the approver signs is a `Restore` that would show
+/// one subject and need another: an approver shown "ordinary" could sign the
+/// one approval that authorises a write under the production names.
+///
+/// A plan that does not parse is left to the runner when nothing is declared,
+/// and refused when something is.
+///
+/// # Errors
+///
+/// [`RestoreError::Refused`] with
+/// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`], naming both.
+pub fn original_name_agrees(restore: &Restore) -> Result<(), RestoreError> {
+    let declared = restore.spec.target.topic_naming.is_original_name();
+    let refused = |detail: String| {
+        RestoreError::Refused(
+            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+            format!(
+                "{detail}. spec.target.topicNaming.originalName states what the plan's \
+                 target.topic_naming.original_name says, so the console and a list show the \
+                 approval subject the restore needs; no Job was created. spec is immutable and the \
+                 approval binds the plan bytes — create a new Restore whose declaration matches \
+                 its plan"
+            ),
+        )
+    };
+    let plan = match serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+    {
+        Ok(plan) => plan,
+        Err(_) if !declared => return Ok(()),
+        Err(error) => {
+            return Err(refused(format!(
+                "spec.target.topicNaming.originalName is declared and spec.planBytes does not \
+                 parse as a restore plan, so the two cannot be compared: {error}"
+            )))
+        }
+    };
+    let in_plan = logweir_core::original_name::ApprovalSubject::of_plan(&plan)
+        == logweir_core::original_name::ApprovalSubject::OriginalName;
+    if in_plan != declared {
+        return Err(refused(format!(
+            "the plan {} under the original topic names and spec.target.topicNaming.originalName \
+             is {}",
+            if in_plan {
+                "restores"
+            } else {
+                "does not restore"
+            },
+            if declared { "true" } else { "absent or false" }
+        )));
+    }
+    // An original-name plan in a shape the runner refuses at phase 0 is
+    // refused HERE, in the runner's own words, before an approval is waited
+    // for and before any Job — a SAMPLED plan included: a restore under the
+    // original topic names requires complete verification
+    // (`OriginalNameNeedsCompleteCoverage`). The CEL rule
+    // (`crds::restore::ORIGINAL_NAME_COVERAGE_RULE`) refuses the same object
+    // at the API server; this is the check for a cluster whose CRD predates
+    // that rule, and for the plan bytes themselves.
+    //
+    // A PARTITION SUBSET is refused the same way
+    // (`OriginalNameNeedsWholeTopics`): such a restore restores whole
+    // topics. That half has NO CEL rule, because the `Restore` CRD declares
+    // no partitions: the plan bytes are the only place a subset is written,
+    // so this check IS the Kubernetes boundary for it.
+    if in_plan {
+        if let Some(why) = logweir_core::original_name::refuse_shape(&plan) {
+            return Err(RestoreError::Refused(
+                crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+                format!(
+                    "{why}; no Job was created. spec is immutable and the approval binds the \
+                     plan bytes — create a new Restore with a plan the runner accepts"
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -5993,6 +6263,247 @@ pub fn finished_status_patch(
     json!({ "status": Value::Object(status) })
 }
 
+/// The terminal read's `pods/log` parameters: the last
+/// [`TERMINAL_LOG_TAIL_LINES`] lines, and nothing else changed.
+#[must_use]
+pub fn terminal_log_params() -> LogParams {
+    LogParams {
+        tail_lines: Some(TERMINAL_LOG_TAIL_LINES),
+        ..LogParams::default()
+    }
+}
+
+/// **PROD-15.1: the closed state of a stopped creation step**, read off a
+/// Restore runner's log: `TargetTopicAppeared` or `CreatedTopicsLeft`, beside
+/// exit 1.
+///
+/// THREE RULES, each to the safer side (review 2, M1):
+///
+/// - **per kind**: only a RESTORE's two states
+///   (`logweir_core::guard::RESTORE_FAILURE_REASONS`), so a line carrying a
+///   backup-only state is nothing here;
+/// - **paired with the code**: exit 1 only;
+/// - **held to its place**: `failure-reason=` must be the LAST non-empty line
+///   of the log, which is where `logweir::drill::print_creation_stop_to`
+///   prints it. A line of the same shape earlier in the log is text something
+///   else produced, and is not read.
+///
+/// **What the place rule does and does not prove.** It refuses a key line
+/// that sits anywhere but last. It CANNOT tell the runner's own last line from
+/// text the runner was made to print last: stdout and stderr reach the pod
+/// log as one stream whose order is not guaranteed, and a runner built before
+/// `logweir::exit::one_line` prints an error's text raw. With such a runner
+/// an exit-1 error that ENDS with a plan's string can end the log with a
+/// forged pair. This build's runner escapes every line break in what it
+/// prints, which is the fix that carries the weight; for an older runner
+/// image the names are shown as its log gives them (`docs/kubernetes.md`).
+#[must_use]
+pub fn creation_stop_state(exit_code: i32, log: &str) -> Option<&'static str> {
+    let tail = backup::tail_lines(log);
+    let value = tail
+        .last()?
+        .strip_prefix(logweir_core::guard::FAILURE_REASON_PREFIX)?;
+    logweir_core::guard::failure_reason_for_exit(
+        logweir_core::guard::FailureReasonKind::Restore,
+        exit_code,
+        value.trim(),
+    )
+}
+
+/// **PROD-15.1: the three lists of a stopped creation step**, as THIS
+/// Restore may show them. `None` unless every one of these holds (review 2,
+/// M1, M2, L3, L7):
+///
+/// - the run's last non-empty log line is its closed state
+///   ([`creation_stop_state`]) and the line BEFORE it is
+///   `target-topics-appeared=`: the pair, in the order and the place the
+///   runner prints it, and nowhere else in the log;
+/// - the line's value is no longer than a genuine one and is a JSON object
+///   (`logweir_core::creation_stop::CreationStopLists::parse_value`, which
+///   refuses a longer value before parsing it and keeps only the three
+///   lists, only names a broker accepts, at most 100 each, with counts);
+/// - **each name is a mapped target of THIS Restore's plan** (`mapped`,
+///   [`topic_mapping`]'s new names). A restore can only have created, lost a
+///   race over, or asked for a name its plan maps, so any other name is not
+///   this run's to speak of and is dropped; a count is held to the number of
+///   names the plan maps;
+/// - something remains. A block with no name left is dropped whole.
+#[must_use]
+pub fn creation_stop_lists(
+    exit_code: i32,
+    log: &str,
+    mapped: &[String],
+) -> Option<logweir_core::creation_stop::CreationStopLists> {
+    use logweir_core::creation_stop::CreationStopLists;
+    creation_stop_state(exit_code, log)?;
+    let tail = backup::tail_lines(log);
+    let line = tail.len().checked_sub(2).and_then(|i| tail.get(i))?;
+    let lists =
+        CreationStopLists::parse_value(line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX)?)?;
+    let keep = |name: &str| mapped.iter().any(|m| m == name);
+    let held = CreationStopLists {
+        appeared: lists.appeared.held_to(keep, mapped.len()),
+        left: lists.left.held_to(keep, mapped.len()),
+        unconfirmed: lists.unconfirmed.held_to(keep, mapped.len()),
+        unconfirmed_seen: lists.unconfirmed_seen,
+    };
+    (!held.is_empty()).then_some(held)
+}
+
+/// `status.targetTopicsAppeared` for `lists`: the three lists, a count beside
+/// each, and `unconfirmedSeen` only beside an unconfirmed name.
+#[must_use]
+pub fn creation_stop_status(lists: &logweir_core::creation_stop::CreationStopLists) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("appeared".into(), json!(lists.appeared.names));
+    out.insert("left".into(), json!(lists.left.names));
+    out.insert("unconfirmed".into(), json!(lists.unconfirmed.names));
+    out.insert("appearedCount".into(), json!(lists.appeared.count));
+    out.insert("leftCount".into(), json!(lists.left.count));
+    out.insert("unconfirmedCount".into(), json!(lists.unconfirmed.count));
+    if !lists.unconfirmed.is_empty() {
+        out.insert("unconfirmedSeen".into(), json!(lists.unconfirmed_seen));
+    }
+    Value::Object(out)
+}
+
+/// **PROD-15.1 review M4.** The terminal patch of a run whose creation step
+/// stopped: `status.targetTopicsAppeared` carries the three lists with their
+/// counts, and the `Failed` condition's message says, in words, which names
+/// appeared, which topics this run created and LEFT, and which it asked for
+/// and cannot account for — so the operator reads it on the object and not
+/// in a pod log that is garbage-collected with the Job. Nothing was deleted,
+/// and the message says what to do with each.
+///
+/// `status.newTopics` becomes exactly `left` (review 2, L6): "the topics this
+/// run created" is what its own `CreateTopics` answers say, never a mapped
+/// name someone else created or one it cannot account for.
+#[must_use]
+pub fn with_target_topics_appeared(
+    mut patch: Value,
+    lists: &logweir_core::creation_stop::CreationStopLists,
+) -> Value {
+    use logweir_core::creation_stop::{and_more, NameList};
+    let named = |list: &NameList| -> String {
+        let names = list
+            .names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{names}{}", and_more(list.more()))
+    };
+    // The closed state the runner named, as `status.exitReason` already
+    // carries it: the words open with it so a reader of the condition alone
+    // can look it up.
+    let state = patch
+        .pointer("/status/exitReason")
+        .and_then(Value::as_str)
+        .unwrap_or(logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT)
+        .to_string();
+    let mut words = format!("; the creation step stopped ({state})");
+    if !lists.appeared.is_empty() {
+        words.push_str(&format!(
+            ": mapped target topic(s) {} were created by someone else after phase 0 proved \
+             them absent, and nothing was written into them",
+            named(&lists.appeared)
+        ));
+    }
+    if !lists.left.is_empty() {
+        words.push_str(&format!(
+            "; {}: {LEFT_TOPIC_SENTENCE} (Logweir never deletes a topic under a name it may \
+             not own)",
+            named(&lists.left)
+        ));
+    } else if lists.unconfirmed.is_empty() {
+        words.push_str("; this restore created no topic");
+    } else {
+        words.push_str("; no CreateTopics answer says this restore created a topic");
+    }
+    if !lists.unconfirmed.is_empty() {
+        words.push_str(&format!(
+            "; {}: {} (Logweir deletes none of them)",
+            named(&lists.unconfirmed),
+            lists.unconfirmed_sentence()
+        ));
+    }
+    if lists.appeared.more() + lists.left.more() + lists.unconfirmed.more() > 0 {
+        words.push_str(&format!(
+            "; a list shows its first {TARGET_TOPICS_APPEARED_MAX_NAMES} names, each name is one \
+             of this restore's mapped target topics, and the runner's log names every one"
+        ));
+    }
+    if let Some(status) = patch.get_mut("status").and_then(Value::as_object_mut) {
+        status.insert(
+            "targetTopicsAppeared".to_string(),
+            creation_stop_status(lists),
+        );
+        // L6: what this run CREATED is `left`, not every mapped name.
+        status.insert("newTopics".to_string(), json!(lists.left.names));
+        // The scalar the REASON column reads stays the terminal condition's
+        // (review finding M2): this only adds words to its message.
+        let reason = status
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!(reason_for_exit(1)));
+        status.insert("reason".to_string(), reason);
+        if let Some(message) = status
+            .get_mut("conditions")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.first_mut())
+            .and_then(|c| c.get_mut("message"))
+        {
+            if let Some(text) = message.as_str() {
+                *message = json!(format!("{text}{words}"));
+            }
+        }
+    }
+    patch
+}
+
+/// The terminal patch of a run that NAMED a stopped creation step
+/// (`status.exitReason`) and whose lists this Restore cannot show: the line
+/// before the reason was absent, longer than a genuine one, not an object,
+/// or named nothing this Restore's plan maps. The condition says so and says
+/// what to do, and `status.newTopics` is OMITTED: with no list, which of the
+/// mapped names the run created is not known, and the plan's names are not
+/// an answer (review 2, L6).
+#[must_use]
+pub fn with_unread_creation_stop(mut patch: Value) -> Value {
+    let state = patch
+        .pointer("/status/exitReason")
+        .and_then(Value::as_str)
+        .unwrap_or(logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT)
+        .to_string();
+    let words = format!(
+        "; the creation step stopped ({state}) and the runner's list of topics could not be \
+         read, so this restore may have left empty topics under its mapped target names: list \
+         the target cluster for them, and check what each holds and who writes to it before \
+         you remove it (Logweir never deletes a topic under a name it may not own)"
+    );
+    if let Some(status) = patch.get_mut("status").and_then(Value::as_object_mut) {
+        status.remove("newTopics");
+        // The scalar the REASON column reads stays the terminal condition's
+        // (review finding M2): this only adds words to its message.
+        let reason = status
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!(reason_for_exit(1)));
+        status.insert("reason".to_string(), reason);
+        if let Some(message) = status
+            .get_mut("conditions")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.first_mut())
+            .and_then(|c| c.get_mut("message"))
+        {
+            if let Some(text) = message.as_str() {
+                *message = json!(format!("{text}{words}"));
+            }
+        }
+    }
+    patch
+}
+
 /// `status.objectives` — interface **I34**, first half.
 ///
 /// The scorecard's four values, camelCased field names, **verbatim values**;
@@ -7228,6 +7739,9 @@ async fn reconcile_restore_inner(
         // PROD-08.1a: the declared coverage against the plan's own, for the
         // same reason and at the same point — a fact about the sealed spec.
         coverage_agrees(restore)?;
+        // PROD-15.1: the original-name declaration against the plan, for the
+        // same reason — before an approver is shown the wrong subject.
+        original_name_agrees(restore)?;
 
         // THE ADMISSION, BEFORE THE FIRST `POST`. Two `GET`s and a pure
         // function; Global Constraint 6's operator half is that an unapproved
@@ -7756,17 +8270,21 @@ async fn reconcile_restore_inner(
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     let log = pods
-        .logs(&pod_name, &LogParams::default())
+        .logs(&pod_name, &terminal_log_params())
         .await
         .map_err(RestoreError::Api)?;
     let keys = restore_evidence_keys(&log);
+    // PROD-15.1 review M4: an exit-1 run whose LAST line names a state on the
+    // Restore's closed `failure-reason=` list (a stopped creation step) says
+    // so on `status.exitReason`; every other exit 1 keeps the wire reason.
+    let creation_stop = creation_stop_state(exit_code, &log);
     let refusal = if exit_code == 3 {
         Some(
             backup::refusal_state(&log)
                 .unwrap_or_else(|| TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON.to_string()),
         )
     } else {
-        None
+        creation_stop.map(str::to_string)
     };
     // THE SCORECARD, THROUGH THE READ-ONLY ARCHIVE HANDLE. AWAITED: the real
     // oracle's `Store` read happens inside one `spawn_blocking` (interface
@@ -7833,6 +8351,16 @@ async fn reconcile_restore_inner(
     // below, and its sentence is the verdict (see `verdict`).
     let (observed, refused) = split_refused(observed);
     let topics = topic_mapping(restore);
+    // The stopped creation step's lists, held to THIS Restore's mapped
+    // target names (`topics`' new names): a name the plan does not map is
+    // not this run's to speak of.
+    let race = creation_stop.and_then(|_| {
+        creation_stop_lists(
+            exit_code,
+            &log,
+            topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
+        )
+    });
     // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
     // out of the same bounded tail as the evidence keys.
     let preflight = topic_preflight(&log);
@@ -7862,17 +8390,25 @@ async fn reconcile_restore_inner(
     // this one carries: a JSON merge patch REPLACES arrays, and after this
     // PATCH returns the in-memory `restore` is stale and no longer says what
     // the object says. See `verification::second_patch`.
+    let finished = finished_status_patch(
+        restore,
+        exit_code,
+        &keys,
+        refusal.as_deref(),
+        observed.as_ref(),
+        topics.as_ref(),
+        preflight.as_ref(),
+        now,
+    );
+    let finished = match (creation_stop, race.as_ref()) {
+        (_, Some(lists)) => with_target_topics_appeared(finished, lists),
+        // The state is named and no list can be shown: say so, and do not
+        // call the plan's names "created".
+        (Some(_), None) => with_unread_creation_stop(finished),
+        (None, None) => finished,
+    };
     let terminal = diagnostics::apply_finished(
-        finished_status_patch(
-            restore,
-            exit_code,
-            &keys,
-            refusal.as_deref(),
-            observed.as_ref(),
-            topics.as_ref(),
-            preflight.as_ref(),
-            now,
-        ),
+        finished,
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
