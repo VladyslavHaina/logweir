@@ -921,7 +921,7 @@ after an approver has signed.
 | `topicMapping` | `too_many` | more than 1000 rows. |
 | `topicMapping[i].source` | `invalid_topic` | the source is not a name a broker accepts (`^[a-zA-Z0-9._-]{1,249}$`). |
 | `topicMapping[i].target` | `mapped_name_illegal` | the mapped name is not one a broker accepts. The message names the source. |
-| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from. |
+| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from — and the request does not set `target.topicNaming.originalName` (below). |
 | `topicMapping[i].target` | `mapping_mismatch` | the target is not `prefix + source`. The message names the target that prefix produces. |
 | `topicMapping[i].target` | `duplicate_mapping` | two rows map to one target name. With an injective prefix map that is a repeated SOURCE, so the message names **both** rows and the target they share. |
 
@@ -932,6 +932,123 @@ could produce, and would send the operator to the wrong field.
 **Absent is exactly the behaviour this route had before the field existed**, and
 an absent declaration is left out of the idempotency request hash, so a client
 that predates it replays onto the same object it always did.
+
+### A restore under the original topic names (PROD-15.1)
+
+`POST .../restores` takes an optional `target.topicNaming.originalName`:
+
+```json
+{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
+ "coverage": "complete"}
+```
+
+`true` asks for a restore under the source's ORIGINAL topic names, into
+topics that do not exist (the owner's decision OD-2;
+[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
+It is stored as `Restore.spec.target.topicNaming.originalName`; the plan must
+say the same (`target.topic_naming.original_name`), which the controller
+holds before any Job. Absent means `false`, is stored as absent, and leaves
+the idempotency request hash unchanged. A declared `topicMapping` maps every
+row onto itself. **It requires `coverage: complete`**
+([below](#the-restores-coverage-prod-081a)): a restore under the original
+topic names is verified completely, never by sample, and the controller and
+the runner refuse a plan that does not ask for it.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `target.topicNaming.originalName` | `requires_new_topic` | `target.mode` is `scratch`: a scratch drill never restores under the original names. |
+| `target.topicNaming.prefix` | `prefix_with_original_name` | `originalName` is `true` and the prefix is not empty. |
+| `coverage` | `original_name_requires_complete` | `originalName` is `true` and `coverage` is absent or `sampled`: an original-name restore is verified completely, every restored record compared with the archive. |
+| `target.topicNaming.prefix` | `invalid_prefix` | without `originalName`, the prefix is empty, longer than 128 characters or not a legal topic name: every other restore writes NEW topics. |
+| `approvalBytes` | `approval_subject_mismatch` | the legacy approval route (`legacy-governed-v1`): the signed document's `approval_subject` is not the one the Restore needs — `originalName` for a Restore that declares it, absent for every other. |
+| `originalNameConfirmation.typedTopics` | `typed_topics_required` | OD-10: a Restore declaring `originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`) without the typed topic names. |
+| `originalNameConfirmation.typedTopics` | `typed_topics_mismatch` | the typed names are not exactly the plan's `source.topics` — each once, nothing else, byte for byte; the message names what is missing, extra or repeated. |
+| `originalNameConfirmation` | `not_accepted` | typed names on any other request: an ordinary restore, a `strict` (Governed) namespace, whose second person they never replace, or an unbound one, which signs nothing. |
+
+**One person confirms only with the names typed (OD-10).** In a namespace
+confirmed by one person, the request carries the original topic names the
+requester re-typed:
+
+```json
+{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
+ "coverage": "complete",
+ "originalNameConfirmation": {"typedTopics": ["orders", "payments"]}}
+```
+
+The console signs them into the authorization document beside the subject
+(`originalNameConfirmation`). The controller and the runner hold them to the
+plan again. Holding them to the plan is the one read this route makes of the
+plan bytes, and it reads only `source.topics`; a plan that does not parse is
+refused (`planBytes` / `invalid`). Absent, the field leaves the idempotency hash unchanged. In a
+`strict` namespace the requester's submission is only the console's
+confirmation (`awaitingApproval`), and the Restore runs once an approver
+countersigns it.
+
+**Its own approval subject.** Both restore reads carry `approvalSubject`
+(`ordinary` or `originalName`), the subject the Restore needs, and
+`target.originalName`. The approvals list carries `approvalSubject` read from
+the SIGNED approval document (`approval_subject` in v1, `approvalSubject` in
+an authorization document v2): `ordinary`, `originalName`, or `unknown` when
+this service cannot read the document (the controller refuses such an
+approval). The console signs `approvalSubject: originalName` into the
+authorization document only for a Restore that declares it, and shows the
+subject on the review step and the approvals page. The controller refuses an
+approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
+terminal), and a standing rehearsal authorization never authorises one. An
+authorization document that carries `approvalSubject` or
+`originalNameConfirmation` is written as `formatVersion` **2.1.0**; every
+other document stays 2.0.0, byte for byte
+([stability.md](stability.md#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)).
+
+**Topics a stopped creation step left.** Both restore reads carry an optional
+**`targetTopicsAppeared`**, present only when the run's creation step stopped
+(the operation's `result.exitReason` is `TargetTopicAppeared` or
+`CreatedTopicsLeft`):
+
+```json
+{"targetTopicsAppeared": {
+  "appeared": ["payments"], "left": ["orders"], "unconfirmed": ["ledger"],
+  "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 1, "unconfirmedSeen": true,
+  "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it",
+  "unconfirmedInstruction": "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it"}}
+```
+
+- `appeared` are mapped target names someone else created after the restore
+  was admitted; the restore wrote nothing into them.
+- `left` are topics THIS restore created before it stopped and left in place,
+  empty: Logweir never deletes a topic under a name it may not own, so the
+  operator removes each one, and `leftInstruction` is the one sentence that
+  says so (the runner, the Restore's status and the console say the same
+  words).
+- `unconfirmed` are names the restore ASKED the cluster to create and cannot
+  account for: it got no definite answer (the whole request failed, or the
+  name was answered with an error that is not "already exists"). They are
+  never in `left`, which claims ownership, nor in `appeared`.
+  `unconfirmedSeen: true` says the runner listed the cluster after the stop
+  and saw each one; `false` says it could not list the cluster, and
+  `unconfirmedInstruction` then reads "may exist now … look for it". Both are
+  present only beside an `unconfirmed` name.
+- `appearedCount`, `leftCount` and `unconfirmedCount` say how many names each
+  list has in all. A list holds at most 100 topic names; a count above its
+  length means the bound cut it, and every further name is one of the
+  restore's mapped target topics.
+
+The names are what the runner's log gave the controller, held to the
+restore's own mapped target names
+([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)
+says what that is worth with an older runner image). Additive; absent on
+every other Restore. Beside it, **`newTopics`** is exactly `left` for such a
+Restore: what the run's own answers say it created, never a name someone else
+created or one it cannot account for (and empty when the lists could not be
+read). On a run that reached its restore `newTopics` is the topics it
+created; on one refused or failed before the creation step it is the names
+its plan maps, none of which it created.
+
+**The approvals view reads an authorization document v2 through the typed
+parser.** `approvalSubject` on an `Approval` is `originalName` or `ordinary`
+only for a document every enforcing reader accepts; a v2 document they refuse
+— `approvalSubject` under `formatVersion` 2.0.0, an unknown subject, an
+unknown field — is shown as `unknown`.
 
 ### The restore's signed time basis (FX-8)
 

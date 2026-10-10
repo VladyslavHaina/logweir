@@ -1242,12 +1242,34 @@ pub enum RestoreCoverage {
     Complete,
 }
 
+/// **OD-10.** The typed confirmation of a restore under the original topic
+/// names on a one-person-confirmation namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OriginalNameConfirmationRequest {
+    /// Every original topic name, as the requester re-typed it: exactly the
+    /// plan's `source.topics`, each once, nothing else, byte for byte.
+    #[schemars(length(min = 1, max = 1000), inner(length(min = 1, max = 249)))]
+    pub typed_topics: Vec<String>,
+}
+
 /// How restored topics are named.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TopicNamingRequest {
-    /// Prepended to each source topic name.
+    /// Prepended to each source topic name. Empty exactly for a restore under
+    /// the original topic names (`originalName: true`).
     pub prefix: String,
+    /// **PROD-15.1.** `true`: restore under the ORIGINAL topic names, into
+    /// topics that do not exist — `newTopic` mode and `prefix: ""` only. It is
+    /// stored as `Restore.spec.target.topicNaming.originalName`, the plan must
+    /// say the same (`target.topic_naming.original_name`, held by the
+    /// controller), and the restore needs its own approval subject,
+    /// `originalName`, which the console signs into the authorization document
+    /// only for such a Restore. Absent means `false`, is stored as absent, and
+    /// keeps the idempotency hash unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<bool>,
 }
 
 /// Where a restore writes.
@@ -1348,6 +1370,17 @@ pub struct CreateRestoreRequest {
     /// `coverage: complete`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complete_max_records: Option<i64>,
+    /// **OD-10 (PROD-15.1 review M1).** The original topic names the
+    /// requester RE-TYPED to confirm a restore under the ORIGINAL topic names
+    /// alone. REQUIRED for a request declaring `target.topicNaming.originalName`
+    /// in a namespace confirmed by one person (`confirm`, internal
+    /// `Ordinary`), where it must be exactly the plan's `source.topics`
+    /// (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere
+    /// else (`not_accepted`). The console signs it into the authorization
+    /// document, and the controller and the runner hold it to the plan again.
+    /// Absent keeps the idempotency hash unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name_confirmation: Option<OriginalNameConfirmationRequest>,
 }
 
 /// A restore target, as stored.
@@ -1358,8 +1391,27 @@ pub struct RestoreTargetView {
     pub cluster_ref: NameRef,
     /// `scratch` or `newTopic`.
     pub mode: RestoreMode,
-    /// The topic prefix.
+    /// The topic prefix. Empty for a restore under the original names.
     pub topic_prefix: String,
+    /// **PROD-15.1.** Whether this restore writes under the ORIGINAL topic
+    /// names (`spec.target.topicNaming.originalName`), into absent topics.
+    pub original_name: bool,
+}
+
+/// **PROD-15.1.** The approval subject a restore needs, or an approval
+/// document carries: `ordinary`, or `originalName` for a restore under the
+/// original topic names, which only an approval signed for that subject
+/// authorises. `unknown` is an approval document whose subject this service
+/// could not read (the controller refuses it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalSubjectView {
+    /// Every restore that is not an original-name restore.
+    Ordinary,
+    /// A restore under the original topic names.
+    OriginalName,
+    /// An approval document whose subject could not be read.
+    Unknown,
 }
 
 /// A restore run.
@@ -1403,10 +1455,28 @@ pub struct Restore {
     pub point_in_time: DateTime<Utc>,
     /// Where it writes.
     pub target: RestoreTargetView,
+    /// **PROD-15.1.** The approval subject this restore needs: `originalName`
+    /// for a restore under the original topic names, else `ordinary`.
+    pub approval_subject: ApprovalSubjectView,
     /// The Job deadline.
     pub deadline_seconds: i64,
-    /// The topics this run created.
+    /// The target topic names of this run (`status.newTopics`). For a run
+    /// that reached its restore, the topics it created. After a stopped
+    /// creation step (`targetTopicsAppeared`), exactly
+    /// `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers
+    /// say it created, never a name someone else created or one it cannot
+    /// account for (empty when its lists could not be read). For a run that
+    /// was refused or failed before the creation step, the names its plan
+    /// maps, none of which it created.
     pub new_topics: Vec<String>,
+    /// Present only when the run's creation step stopped (its operation's
+    /// `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`):
+    /// the mapped target names someone else created while the run was
+    /// admitted, every topic THIS run created and left in place, empty, and
+    /// the names it asked for and cannot account for. Logweir never deletes
+    /// any of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_topics_appeared: Option<CreationStopView>,
     /// P10: present while this admitted MANUAL restore waits for a slot in its
     /// namespace's manual-restore pool (`operation.state: queued`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1459,6 +1529,50 @@ pub struct RestoreCoverageView {
     /// Why `covered` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_reason: Option<String>,
+}
+
+/// `Restore.targetTopicsAppeared`: what a stopped creation step left behind,
+/// as the controller copied it from the runner's last two log lines onto
+/// `status.targetTopicsAppeared`, held to the restore's own mapped target
+/// names. Three lists, each at most 100 topic names, and how many names each
+/// has in all; a name is in at most one list. Logweir deletes none of them.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreationStopView {
+    /// Mapped target names someone else created after the restore was
+    /// admitted. The restore wrote nothing into them.
+    pub appeared: Vec<String>,
+    /// Topics this restore created and LEFT, empty. Never deleted by
+    /// Logweir: the operator removes each one.
+    pub left: Vec<String>,
+    /// Names this restore ASKED the cluster to create and CANNOT ACCOUNT
+    /// FOR: it got no definite answer (the whole request failed, or the name
+    /// was answered with an error that is not "already exists"). Each may be
+    /// this restore's or someone else's. Never listed in `left`, which claims
+    /// ownership, nor in `appeared`. Empty on a stop made of definite
+    /// answers.
+    pub unconfirmed: Vec<String>,
+    /// How many names `appeared` has in all: more than the list holds when
+    /// the 100-name bound cut it.
+    pub appeared_count: i64,
+    /// How many names `left` has in all.
+    pub left_count: i64,
+    /// How many names `unconfirmed` has in all.
+    pub unconfirmed_count: i64,
+    /// Whether the runner listed the cluster after the stop and SAW every
+    /// `unconfirmed` name. `false`: it could not list the cluster, so each
+    /// name MAY exist. Present only beside an `unconfirmed` name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_seen: Option<bool>,
+    /// What to do with each topic in `left`, in words: the one sentence the
+    /// runner, the Restore's status and the console all say.
+    pub left_instruction: String,
+    /// What to do with each topic in `unconfirmed`, in words: "exists now …
+    /// check … before you remove it", or "may exist now … look for it" when
+    /// `unconfirmedSeen` is `false`. Present only beside an `unconfirmed`
+    /// name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_instruction: Option<String>,
 }
 
 /// **PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the
@@ -1567,6 +1681,10 @@ pub struct Approval {
     pub subject_ref: SubjectRefView,
     /// The plan hash the create form supplied.
     pub plan_hash: String,
+    /// **PROD-15.1.** The approval subject the SIGNED document carries:
+    /// `originalName` authorises only a restore under the original topic
+    /// names, `ordinary` only any other restore.
+    pub approval_subject: ApprovalSubjectView,
     /// The approval document's length in bytes.
     pub approval_bytes_length: usize,
     /// The sidecar's length in bytes.

@@ -709,6 +709,48 @@ One `shape-index.json` case, `subsets_engine_runs_negative` (`engine_runs:
 -1`), is a `message:` case: `drill verify` refuses it at deserialisation (a
 `u32`).
 
+## PROD-15.1: `target.original_name` (scorecard format 1.8.0)
+
+Fourteen arms, ON-1 to ON-14, which both readers state in the same position
+(after `source.selection`, before `redactions`), ON-14 first. Every case is
+`e2e/fixtures/scorecard-pass.json` turned into a `newTopic` document with an
+empty `target.topic_mapping_prefix`, no `marker_topic`, `format_version`
+`1.8.0`, a COMPLETE `integrity.verification` (covered and exact over two
+partitions, which an original-name restore requires) and the block (approval
+subject `originalName`, mode `governed`, `targetIsNotSource` with a source id
+other than the target's, owners looked for in `plan`, none found), with the
+one field each case names changed.
+
+| case | what it pins |
+|---|---|
+| `original_name_1_8_accepted` | ACCEPT: the block as described |
+| `original_name_1_8_owner_path` | ACCEPT: `autoCreateDisabled` with no source id, a Strimzi owner found in `kafkaTopicResources` (the file named by its digest), on the owner path |
+| `original_name_under_format_1_7_0` | ON-1: the block under `1.7.0` |
+| `original_name_in_scratch_mode` | ON-2: a scratch document carrying it |
+| `original_name_with_a_prefix` | ON-3: a non-empty `topic_mapping_prefix` |
+| `original_name_ordinary_subject` | ON-4: the approval subject `ordinary` |
+| `original_name_standing_approval` | ON-5: the approval mode `standing` |
+| `original_name_unknown_cluster_condition` | ON-6: the condition `sameCluster` |
+| `original_name_target_is_its_own_source` | ON-7: `targetIsNotSource` with the target's own id as the source |
+| `original_name_looked_nowhere` | ON-8: an empty `owner_detection` |
+| `original_name_owner_from_a_place_not_looked` | ON-9: an owner `found_in` a place not listed |
+| `original_name_owned_off_the_owner_path` | ON-10: an owner found with `owner_path: false` |
+| `original_name_1_8_typed_confirmation` | ACCEPT: a one-person confirmation (`ordinary`) signed with `confirmation: typedTopicNames` (OD-10) |
+| `original_name_ordinary_without_typed_names` | ON-11: `ordinary` with no `confirmation` |
+| `original_name_resources_without_digest` | ON-12: `kafkaTopicResources` looked in, with no `kafka_topic_resources_sha256` |
+| `original_name_over_a_sampled_verification` | ON-13: the block beside `integrity.verification.coverage: sampled` |
+| `original_name_pass_without_a_verification` | ON-13: a pass that records no `integrity.verification` |
+| `original_name_1_8_stopped_before_verification` | ACCEPT: no `integrity.verification` on a document that is not a pass (`fail-integrity`, a run that stopped before phase 7) |
+| `original_name_1_8_from_a_window_start` | ACCEPT: the block beside a start-only `source.selection` (whole partitions from a stated window start, the complete block's `window.start_ms` set to it) |
+| `original_name_beside_a_partition_subset` | ON-14: the accepted document as a 2.0.0 partition-subset restore of `orders` [0, 1], exactly the partitions its complete block compared. It is valid as either document and refused as both: an original-name restore restores whole topics |
+
+ON-1's message interpolates the document's `format_version`, so its `arm` is
+the literal text before the placeholder; every other `arm` is the text of the
+arm's first source line. One `shape-index.json` case,
+`original_name_not_an_object` (`"orders"`), is a `message:` case: `drill
+verify` refuses it at deserialisation. The other bad shapes are pinned by
+`docs/test_verify_scorecard.py::test_a_malformed_original_name_block_is_refused_at_the_shape_layer`.
+
 ---
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

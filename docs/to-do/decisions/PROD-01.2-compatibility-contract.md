@@ -383,7 +383,7 @@ The review (ACCEPT-WITH-FIXES: four MEDIUM, twelve LOW) found one regression and
 | M2 | "Nothing on the output says the teardown failed" (§3), "the teardown failure is not surfaced" (§1), "a silent `pass`" (P5). The run prints it three times; the row's reader had dropped the lines | §3 and §1 corrected; the row keeps and requires what a run says of its teardown; P5 restated (FX-44) |
 | M3 | The engine-protocol rows said `ready` from whichever brokers the observing client had dialled: 1, 2 or 3 of 3 | §5.2: a whole view or `unknown`; `brokersAnswered` counts distinct brokers; §4.6 |
 | M4 | The "timestamp type and bound" cell cited rows that never emitted `target.timestampBound` and asserted no phase 0 type | The generic row runs a controller-shaped `restorePreflight` plan and holds both to the broker's own tool |
-| L1 | The release note said "roll the runner image with the controller" and named no setting | §5.3, kubernetes.md §21.9, release-notes item 56: `runnerImage`, `LOGWEIR_RUNNER_IMAGE`, a terminal `Failed`, an in-flight `Preflight` |
+| L1 | The release note said "roll the runner image with the controller" and named no setting | §5.3, kubernetes.md §21.9, release-notes item 57: `runnerImage`, `LOGWEIR_RUNNER_IMAGE`, a terminal `Failed`, an in-flight `Preflight` |
 | L2 | Hand-run cells did not say so | Each cell: "by hand, 2026-10-10; no workflow runs it" |
 | L3 | The generic row passed without its consumer group | Required |
 | L4 | No row showed that a read cut short is no answer through the observation itself | The pure row over `full_view(…, complete = false)`, and the silent-broker mock row, whose last read ends at the budget |

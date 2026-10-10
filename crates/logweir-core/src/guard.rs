@@ -197,7 +197,9 @@ pub const MAX_TOPIC_NAME_CHARS: usize = 249;
 /// Whether `name` is a name a Kafka broker would accept —
 /// `^[a-zA-Z0-9._-]{1,249}$`, the pattern
 /// `weirkeeper::crds::selection::TOPIC_NAME_PATTERN` puts on every CRD field
-/// that holds one.
+/// that holds one — and not `.` or `..`, which that pattern admits and Kafka
+/// refuses (`Topic.validate`: "Topic name cannot be \".\" or \"..\""; PROD-15.1
+/// review 2, L12).
 ///
 /// # Why this is a second rail beside [`reject_glob_metacharacters`]
 ///
@@ -222,6 +224,8 @@ pub fn topic_name_is_kafka_legal(name: &str) -> bool {
     // broker's own limit applies either way.
     !name.is_empty()
         && name.len() <= MAX_TOPIC_NAME_CHARS
+        && name != "."
+        && name != ".."
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
@@ -449,31 +453,114 @@ pub const TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClai
 /// ignored): exit 4, no engine run, nothing signed. Not retryable.
 pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
 
+/// **PROD-15.1 review M4.** A restore whose creation step lost a race: a
+/// mapped target name phase 0 proved absent existed when the run came to
+/// create it. Exit 1 (phases 0–5 ran); the runner names what appeared and
+/// what it created and LEFT on its `target-topics-appeared=` line. Nothing is
+/// deleted.
+pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TARGET_TOPIC_APPEARED;
+
+/// **PROD-15.1.** A restore whose creation step stopped for a reason other
+/// than a race and LEFT topics on the cluster: ones this execution created
+/// (a broker refused another name, answered short, or did not serve a created
+/// topic in time), or ones it asked for, got no definite answer about, and
+/// cannot account for (review 2, M2). Exit 1; each is named on
+/// `target-topics-appeared=` (`left`, `unconfirmed`) and left in place.
+pub const TERMINAL_STATE_CREATED_TOPICS_LEFT: &str = "CreatedTopicsLeft";
+
+/// What EVERY surface says about a topic a stopped creation step created and
+/// left — the runner's message, the Restore's status, the product API and the
+/// console. One sentence, in one place: it is the whole instruction the
+/// operator gets, because Logweir itself never deletes such a topic (Kafka
+/// has no conditional delete, so a record a producer wrote between an "it is
+/// empty" read and the delete would be lost under a production name).
+pub const LEFT_TOPIC_SENTENCE: &str =
+    "created by this restore and left empty; remove it yourself once you have checked nothing \
+     writes to it";
+
+/// What EVERY surface says about a topic in the THIRD list of a stopped
+/// creation step, `unconfirmed` (PROD-15.1 review 2, M2): a name this restore
+/// asked the cluster to create, for which it got NO DEFINITE ANSWER (the whole
+/// `CreateTopics` call failed, the name got no answer, or it got an error
+/// that is not "already exists"), and which the cluster LISTED when the run
+/// looked again. The run cannot say whose it is: its own request may have
+/// been applied, or someone else may have created it. So this sentence never
+/// claims ownership ([`LEFT_TOPIC_SENTENCE`] does) and never says someone
+/// else made it (the `appeared` list's sentence does).
+pub const UNCONFIRMED_TOPIC_SENTENCE: &str =
+    "exists now; this restore asked the cluster to create it and got no definite answer, so it \
+     may be this restore's or someone else's: check what it holds and who writes to it before \
+     you remove it";
+
+/// [`UNCONFIRMED_TOPIC_SENTENCE`]'s twin for a run that COULD NOT LIST the
+/// cluster after the stop: every name it asked for without a definite answer
+/// is named, and the sentence says it may exist, never that it does.
+pub const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE: &str =
+    "may exist now; this restore asked the cluster to create it, got no definite answer, and \
+     could not list the cluster afterwards: look for it, and check what it holds and who writes \
+     to it before you remove it";
+
 /// The stdout line a runner prints, LAST, when a non-refusal failure (exit 1
 /// or 4) has a state more specific than its code — the exit-1/4 twin of I9's
 /// `refusal-reason=`, and read by the controller the same way: by prefix, off
 /// the log's bounded tail.
 pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 
-/// Every state `failure-reason=` may carry, WITH the one exit code it may
-/// accompany. A CLOSED list in both directions: a controller lifts a value
-/// into `status.exitReason` only when the pair is on this list, so a noisy or
-/// newer runner cannot put an arbitrary string on the object, and a claimed
-/// execution can never be reported under the exit code of an unproven one.
-pub const FAILURE_REASONS: [(&str, i32); 2] = [
+/// Which runner's log a `failure-reason=` line is read from. **The closed
+/// set is PER KIND** (PROD-15.1 review 2, M1's class note): one list for both
+/// reconcilers let a Backup's log lift a restore-only state onto a `Backup`,
+/// and a Restore's log a backup-only one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureReasonKind {
+    /// `logweir backup run`: RECEIPT-DUP's two execution-claim states.
+    Backup,
+    /// `logweir restore run`: the stopped creation step's two states.
+    Restore,
+}
+
+/// Every state a BACKUP's `failure-reason=` may carry, WITH the one exit code
+/// it may accompany. A CLOSED list in both directions: a controller lifts a
+/// value into `status.exitReason` only when the pair is on its kind's list,
+/// so a noisy or newer runner cannot put an arbitrary string on the object,
+/// and a claimed execution can never be reported under the exit code of an
+/// unproven one.
+pub const BACKUP_FAILURE_REASONS: [(&str, i32); 2] = [
     (TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, 1),
     (TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN, 4),
 ];
+
+/// Every state a RESTORE's `failure-reason=` may carry, each beside exit 1:
+/// the stopped creation step's two (PROD-15.1). Closed the same way.
+pub const RESTORE_FAILURE_REASONS: [(&str, i32); 2] = [
+    (TERMINAL_STATE_TARGET_TOPIC_APPEARED, 1),
+    (TERMINAL_STATE_CREATED_TOPICS_LEFT, 1),
+];
+
+impl FailureReasonKind {
+    /// This kind's closed list of `(state, exit code)` pairs.
+    #[must_use]
+    pub fn reasons(self) -> &'static [(&'static str, i32)] {
+        match self {
+            FailureReasonKind::Backup => &BACKUP_FAILURE_REASONS,
+            FailureReasonKind::Restore => &RESTORE_FAILURE_REASONS,
+        }
+    }
+}
 
 /// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.
 pub fn failure_reason_line(state: &str) -> String {
     format!("{FAILURE_REASON_PREFIX}{state}")
 }
 
-/// The state a `failure-reason=` VALUE names, if the value is on
-/// [`FAILURE_REASONS`] for THIS exit code; `None` otherwise.
-pub fn failure_reason_for_exit(exit_code: i32, value: &str) -> Option<&'static str> {
-    FAILURE_REASONS
+/// The state a `failure-reason=` VALUE names, if the value is on `kind`'s
+/// closed list for THIS exit code; `None` otherwise — a state of the other
+/// kind included.
+pub fn failure_reason_for_exit(
+    kind: FailureReasonKind,
+    exit_code: i32,
+    value: &str,
+) -> Option<&'static str> {
+    kind.reasons()
         .iter()
         .find(|(state, code)| *code == exit_code && *state == value)
         .map(|(state, _)| *state)
@@ -481,9 +568,33 @@ pub fn failure_reason_for_exit(exit_code: i32, value: &str) -> Option<&'static s
 
 /// Every selected topic must have a mapping entry whose target DIFFERS from
 /// its source, or the restore would write over the topic it came from.
+///
+/// The ordinary rule — [`check_topic_mapping`] with no original-name opt-in.
 pub fn check_topic_mapping_coverage(
     topics: &[String],
     mapping: &BTreeMap<String, String>,
+) -> Result<(), GuardRefusal> {
+    check_topic_mapping(topics, mapping, false)
+}
+
+/// Every selected topic must have a mapping entry, and:
+///
+/// * `original_name: false` (every restore but one) — the target DIFFERS from
+///   its source, or the restore would write over the topic it came from;
+/// * `original_name: true` (PROD-15.1, a plan that passed
+///   [`crate::original_name::refuse_shape`]) — the target IS its source, for
+///   EVERY topic. An original-name restore maps nothing partway: a mapping
+///   that renames one topic and keeps another's name is two plans, and the
+///   conditions the runner proves next (absence, the cluster, the owners) are
+///   proved for the original names.
+///
+/// The identity mapping is never allowed by this function alone: the caller
+/// passes `true` only for a plan whose shape opted in, and the absence and
+/// cluster conditions are proved after it, before anything is written.
+pub fn check_topic_mapping(
+    topics: &[String],
+    mapping: &BTreeMap<String, String>,
+    original_name: bool,
 ) -> Result<(), GuardRefusal> {
     for t in topics {
         match mapping.get(t) {
@@ -492,9 +603,17 @@ pub fn check_topic_mapping_coverage(
                     "selected topic `{t}` has no topic_mapping entry"
                 )))
             }
-            Some(dst) if dst == t => {
+            Some(dst) if dst == t && !original_name => {
                 return Err(GuardRefusal(format!(
-                    "topic_mapping maps `{t}` onto itself; the target must differ from the source"
+                    "topic_mapping maps `{t}` onto itself; the target must differ from the source \
+                     (a restore under the original topic names states \
+                     target.topic_naming.original_name in newTopic mode)"
+                )))
+            }
+            Some(dst) if dst != t && original_name => {
+                return Err(GuardRefusal(format!(
+                    "topic_mapping maps `{t}` to `{dst}` in an original-name restore; every \
+                     topic of an original-name restore keeps its own name"
                 )))
             }
             Some(_) => {}
@@ -561,7 +680,10 @@ target:
             "A1",
             "_",
             "-",
-            ".",
+            // Dots are legal; only the two directory names are not.
+            "...",
+            ".a",
+            "a..",
             &"x".repeat(MAX_TOPIC_NAME_CHARS),
         ] {
             assert!(
@@ -571,6 +693,10 @@ target:
         }
         for bad in [
             "",
+            // PROD-15.1 review 2, L12: Kafka refuses exactly these two, which
+            // the character grammar alone admits.
+            ".",
+            "..",
             "orders eu",
             "orders/eu",
             "orders:eu",

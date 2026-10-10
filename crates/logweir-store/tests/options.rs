@@ -1013,7 +1013,7 @@ fn the_classifier_table() {
         // `retry_timeout:` the first classifier read as a timeout. The clause
         // is part of the request line and is not read: a retried transport
         // failure is unreachable, and a retried 503 is an answer the tables do
-        // not name (release-notes item 56 says both classes moved).
+        // not name (release-notes item 57 says both classes moved).
         (
             "k: Generic S3 error: Error performing GET http://minio:9000/b/k in 6.2s, after 2 retries, max_retries: 2, retry_timeout: 5s  - HTTP error: error sending request".into(),
             C::EndpointUnreachable,

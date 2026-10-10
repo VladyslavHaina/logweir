@@ -1901,7 +1901,20 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
             ))
             .with_remedy("Remove the `$` from the topic name or the mapping prefix.");
     }
-    if prefix.is_empty() {
+    // PROD-15.1 (review L6, and its class sweep): a plan that restores under
+    // the ORIGINAL topic names maps every topic onto itself ON PURPOSE — into
+    // absent topics, behind its own approval subject — so the identity map is
+    // refused here only when the plan did not opt in, or opted in in a shape
+    // phase 0 refuses (`refuse_shape`, the runner's own words).
+    if let Some(why) = logweir_core::original_name::refuse_shape(spec) {
+        return mk(CheckState::NotReady, CheckCode::TopicMappingIdentity)
+            .with_message(&why)
+            .with_remedy(
+                "A restore under the original topic names is `newTopic` with `prefix: \"\"`; \
+                 every other restore sets a target topic prefix nothing has used.",
+            );
+    }
+    if prefix.is_empty() && !logweir_core::original_name::is_original_name_restore(spec) {
         return mk(CheckState::NotReady, CheckCode::TopicMappingIdentity)
             .with_message(
                 "the plan's target prefix is empty, so every source topic maps onto itself and \

@@ -27,12 +27,19 @@ use crate::scorecard::Scorecard;
 /// 1.7.0's fields, with `source.selection` REQUIRED and its `partitions` (a
 /// non-empty list of non-empty lists) and `engine_runs` (at least one)
 /// required in it, and `format_version` pinned to `2.x.y`. The 1.7.0 file is
-/// FROZEN beside it and still describes every other document this build
-/// writes (every 1.x one). The generator emits the 2.0.0 file: the Rust type
+/// FROZEN beside it. The generator emits the 2.0.0 file: the Rust type
 /// reads both majors, so the requirements that make a document 2.0.0's are
 /// added here, on top of what the type derives. The `$id` is built from
 /// [`crate::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`], the newest
 /// version.
+///
+/// **PROD-15.1's `target.original_name` is NOT in this file, on purpose.** An
+/// original-name restore restores whole topics (`crate::original_name`,
+/// `OriginalNameNeedsWholeTopics`; arm ON-14), so the block never appears in a
+/// 2.x document, and the file stays byte for byte the one PROD-11.1b
+/// published. The block is format 1's, from 1.8.0:
+/// [`scorecard_format_1_schema`] writes that file, which describes every 1.x
+/// document this build writes.
 pub fn scorecard_schema() -> String {
     use schemars::schema::{Schema, SchemaObject};
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
@@ -61,6 +68,23 @@ pub fn scorecard_schema() -> String {
             _ => panic!("the scorecard schema's object has a {name} property"),
         }
     }
+    // PROD-15.1: `target.original_name` is format 1's (1.8.0) and never a
+    // 2.x document's, so this file does not describe it (see the note above).
+    let target = def(&mut root.definitions, "TargetInfo");
+    assert!(
+        target
+            .object()
+            .properties
+            .remove(ORIGINAL_NAME_PROPERTY)
+            .is_some(),
+        "the scorecard type derives target.original_name"
+    );
+    for name in ORIGINAL_NAME_DEFINITIONS {
+        assert!(
+            root.definitions.remove(name).is_some(),
+            "the scorecard type derives {name}"
+        );
+    }
     // A 2.0.0 document is a partition-subset restore's: it carries the
     // selection block (arm PS-1), with its subsets and its engine runs.
     let source = def(&mut root.definitions, "SourceInfo");
@@ -86,6 +110,81 @@ pub fn scorecard_schema() -> String {
             Schema::Bool(_) => panic!("TopicPartitions.partitions' items are a schema object"),
         },
         _ => panic!("TopicPartitions.partitions has one item schema"),
+    }
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}
+
+/// `TargetInfo`'s property for PROD-15.1's block.
+const ORIGINAL_NAME_PROPERTY: &str = "original_name";
+
+/// The two definitions PROD-15.1's block brings with it.
+const ORIGINAL_NAME_DEFINITIONS: [&str; 2] = ["OriginalNameInfo", "OriginalNameOwner"];
+
+/// Pretty-printed JSON Schema of the NEWEST MINOR OF SCORECARD FORMAT 1:
+/// **1.8.0 since PROD-15.1** (`target.original_name`), written only for a
+/// restore under the original topic names. It describes every 1.x document
+/// this build writes; the 1.7.0 file is frozen beside it.
+///
+/// The Rust type reads both majors, so what it derives on its own is no longer
+/// format 1's selection block (a start and an end; [`scorecard_schema`] turns
+/// it into 2.0.0's). A MINOR adds optional fields only, so this file is BUILT
+/// AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.7.0 file),
+/// plus the optional `target.original_name` property and its two definitions
+/// exactly as the type derives them today, under the `$id` built from
+/// [`crate::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME`]. So a change to
+/// [`crate::scorecard::OriginalNameInfo`] is a diff of this file
+/// (`just schema-check`), and nothing else of format 1 can move.
+///
+/// # Panics
+///
+/// When `frozen_predecessor` is not a JSON Schema that defines `TargetInfo`,
+/// or already describes the block: the caller handed the wrong file.
+pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
+    use schemars::schema::{RootSchema, Schema};
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut derived = settings
+        .into_generator()
+        .into_root_schema_for::<Scorecard>();
+    let mut root: RootSchema =
+        serde_json::from_str(frozen_predecessor).expect("the frozen scorecard schema parses");
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
+        crate::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+    ));
+    let property = match derived.definitions.get_mut("TargetInfo") {
+        Some(Schema::Object(o)) => o
+            .object()
+            .properties
+            .remove(ORIGINAL_NAME_PROPERTY)
+            .expect("the scorecard type derives target.original_name"),
+        _ => panic!("the scorecard type derives TargetInfo"),
+    };
+    match root.definitions.get_mut("TargetInfo") {
+        Some(Schema::Object(o)) => {
+            assert!(
+                o.object()
+                    .properties
+                    .insert(ORIGINAL_NAME_PROPERTY.into(), property)
+                    .is_none(),
+                "the frozen predecessor must not describe target.original_name"
+            );
+        }
+        _ => panic!("the frozen scorecard schema defines TargetInfo"),
+    }
+    for name in ORIGINAL_NAME_DEFINITIONS {
+        let definition = derived
+            .definitions
+            .remove(name)
+            .unwrap_or_else(|| panic!("the scorecard type derives {name}"));
+        assert!(
+            root.definitions.insert(name.into(), definition).is_none(),
+            "the frozen predecessor must not define {name}"
+        );
     }
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

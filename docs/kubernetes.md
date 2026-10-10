@@ -4852,7 +4852,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line, or `TargetTopicAppeared` / `CreatedTopicsLeft` off a restore runner's (a stopped creation step: §12, "Restoring under the original topic names") | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
 | **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create, or (FX-7) the archive could not be read to prove the backup set is new for a reason no retry changes (a 401/403, a wrong bucket, region or CA); the engine never started. |
@@ -6746,6 +6746,293 @@ runner reads the plan — but it does not refuse a disagreeing declaration and
 does not copy `status.integrity.coverage`/`complete`; the console then reads
 "not recorded". Rolling the CRDs back prunes both spec fields from stored
 objects; their plans are untouched.
+
+### Restoring under the original topic names (PROD-15.1)
+
+**What it is.** Every other restore writes a NEW topic beside the old one
+(`restore-<instant>-orders`), so applications must move to a prefixed name. A
+restore under the ORIGINAL topic names writes `orders` itself — the recovery
+of a deleted topic, or of a lost cluster onto a replacement, without renaming
+anything. The owner's decision OD-2 (2026-10-05) allows exactly one such path
+and keeps the rest of `docs/stability.md`'s Never #1: Logweir never writes into
+a LIVE topic. It writes only a topic that does not exist, which it creates
+itself, exclusively, and the restored topic is a NEW generation of the name
+(Kafka assigns a new topic id; none can be preserved), never the original
+topic.
+
+**The plan** (the approver signs it, the runner executes it):
+
+```yaml
+target:
+  mode: newTopic                 # required: the identity ban stays in scratch mode
+  topic_naming:
+    prefix: ""                   # the identity mapping; an older runner refuses it
+    original_name:               # the explicit opt-in; an empty prefix without it is refused
+      owners: []                 # the approver's statement: no declarative owner of any restored name
+      # owner_path: true         # restore although an owner is found (see below)
+  topic_mapping_prefix: drill-   # still required: the LogAppendTime probe is created under it
+sample:
+  coverage: complete             # required: an original-name restore is never verified by sample
+```
+
+**The `Restore`** declares it: `spec.target.topicNaming: {prefix: "",
+originalName: true}` in `newTopic` mode, with `spec.coverage: complete` (two
+CEL rules refuse the declaration anywhere else, and without complete
+coverage). The console and the product API show such a restore — and the
+approval it needs — distinctly, and the controller refuses, before any Job,
+an object whose declaration and plan disagree (`ExecutionSpecInvalid`, the
+rule `spec.coverage` follows above).
+
+**Its own approval subject.** The approval document carries a separate,
+signed approval subject, `originalName` (v1: `approval_subject`, minted by
+`logweir drill approve --approval-subject original-name`, which reads the plan
+and refuses a subject that is not the plan's; v2: `approvalSubject`, which the
+console signs only for a `Restore` that declares `originalName`). An ordinary
+approval never authorises an original-name restore, and an `originalName`
+approval authorises nothing else: the controller refuses the pair terminally
+before any Job (`ApprovalSubjectMismatch`, "whose signed approval subject is
+not the one this Restore's plan needs"), and the runner refuses it again
+before it reads the archive or dials the target (exit 3). A standing rehearsal
+authorization never authorises one.
+
+**One person confirms only with the names typed — the owner's decision OD-10
+(2026-10-09).** In a namespace confirmed by one person (`confirm`, internal
+`Ordinary`; the fresh-install default), the requester may confirm an
+original-name restore alone, but the console first asks them to RE-TYPE every
+original topic name, exactly (one per line; case and spelling as the plan
+names them), and signs what was typed into the authorization document
+(`originalNameConfirmation.typedTopics`, beside `approvalSubject`). The
+product API refuses the request before anything is created when the names
+are missing (`typed_topics_required`) or are not exactly the plan's
+(`typed_topics_mismatch`, naming what is missing, extra or repeated), and
+typed names anywhere else (`not_accepted`). The controller refuses the
+Approval at admission (`ApprovalSubjectMismatch`, the message naming
+`OriginalNameConfirmationMissing` or `…Mismatch`) and the runner refuses it
+again (exit 3). The signed scorecard records `confirmation: typedTopicNames`,
+and the approvals page lists the typed names. **A `strict` namespace still
+needs the second person:** the requester's submission stores only the
+console's confirmation (`<approvalRef>-confirmation`), which authorises
+nothing until an approver countersigns it; typed names are refused there and
+replace nobody. A v1 approval (`logweir drill approve --approval-subject
+original-name`) is an approver's personal key, a second person too.
+
+**What the runner proves before anything is written** (exit 3,
+`refusal-reason=GuardRefused`, the message opening with the condition's name;
+nothing created, nothing deleted):
+
+| condition | refused as |
+|---|---|
+| `newTopic` mode and `prefix: ""` beside the block | `OriginalNameNotNewTopic`, `OriginalNamePrefixNotEmpty` |
+| the plan asks for complete verification, `sample.coverage: complete` (see "Complete verification is required" below) | `OriginalNameNeedsCompleteCoverage`, before any broker is asked anything |
+| the plan restores whole topics: it states no `restore.partitions` (see "Whole topics are required" below) | `OriginalNameNeedsWholeTopics`, before any broker is asked anything |
+| every restored name is absent on the target | "already exists" (the refusal every restore gets) |
+| the target is not the source cluster — the source cluster id the bound recovery point's verified receipt measured at backup differs from the target's — OR every broker reports `auto.create.topics.enable=false` (read from every broker with DescribeConfigs) | `OriginalNameAutoCreateEnabled`; `OriginalNameAutoCreateUnknown` when a broker does not report it (a refused read is exit 1). The source id counted is the bound point's VERIFIED receipt only: the allowlist file's `source_cluster_id` is unsigned runner input and never makes the target "another cluster". Brokers are the ones the cluster metadata lists at phase 0; one offline then is not read (the exclusive create below still refuses a name it creates) |
+| somewhere was looked for a declarative owner (a Strimzi `KafkaTopic`, GitOps, Terraform) of a restored name, and none was found unless the plan chose the owner path; nothing the `KafkaTopic` resources file holds is dropped | `OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`, `OriginalNameOwnersInvalid`, `OriginalNameOwnerUnreadable` (a `KafkaTopic` whose topic cannot be read, one whose `namespace/name` is longer than the 256 characters an owner is recorded with, or a file holding no `KafkaTopic` at all unless it is the explicit empty `List`) |
+| the `LogAppendTime` probe (the one write phase 0 makes, only on a `LogAppendTime` broker) is created as `<topic_mapping_prefix>logweir-probe-<plan hash>`, never under an original name, and that name is free | `OriginalNameProbeUnusable` |
+
+**Declarative owners: where the runner looks, and why it never assumes none.**
+An owner recreates a deleted name on its own and reverts the restored topic's
+settings — the pinned `retention.ms=-1` included — which can delete the
+restored records. The runner cannot read Kubernetes or a repository, so it
+looks in three places and REFUSES when it looked in neither of the first
+two: the approved plan's
+`original_name.owners` (an empty list is the approver's signed statement that
+no owner exists; `{topic, kind: strimzi|external, reference}` names one); the
+target's `KafkaTopic` resources given to `logweir restore run
+--kafka-topic-resources <file>` (`kubectl get kafkatopics -A -o yaml`; CLI
+only); and, for a target that may be the source cluster, the owners the bound
+point's verified receipt recorded at backup time (PROD-05.1). **The receipt
+adds owners and never stands in for looking:** an owner it names blocks, but
+"the receipt found none" is not enough on its own, because a backup records a
+`KafkaTopic` whose reference it cannot record as no owner. **The controller
+does not list `KafkaTopic` resources** (child row PROD-05.1a, which needs a
+`kafka.strimzi.io` grant), so a `Restore` relies on the plan's statement,
+with the receipt's owners beside it. **The owner path** (`owner_path: true`) restores although an
+owner is found: the approver states that the owner's reconciliation is paused
+for the restore (`strimzi.io/pause-reconciliation: "true"` on the
+`KafkaTopic`, and any GitOps sync that would revert that annotation
+suspended), so it neither creates the name first nor reverts the topic during
+the restore, and that it adopts the topic afterwards. Logweir still creates
+the topic itself, exclusively; before unpausing, make the owner's desired
+state keep the restored data (its `retention.ms`).
+
+**Creation is exclusive, and a race loses by name.** The topics are created
+after phase 5, with `CreateTopics`, which fails on a name that exists. A name
+that appears after phase 0 — a producer on a cluster that auto-creates, an
+operator, an owner — is looked for once more right before the create, and a
+`TOPIC_ALREADY_EXISTS` answer is the same refusal: exit 1 (phases 0–5 have
+run), the message opening `TargetTopicAppeared`, and nothing is written into a
+topic this run did not create (both modes). A `CreateTopics` answer that does
+not name exactly the topics asked is refused too (exit 1). **The Restore says
+so:** the runner's last line is `failure-reason=TargetTopicAppeared`, which
+the controller lifts onto `status.exitReason`, and the line before it names
+the topics, which it copies to `status.targetTopicsAppeared` and into the
+`Failed` condition's message.
+
+**What a stopped creation step may have left: three lists.** Every stop of
+the step names what it knows, in the list that says exactly that much, on
+`status.targetTopicsAppeared`:
+
+| list | what the run knows | what every surface says |
+|---|---|---|
+| `appeared` | a mapped name someone ELSE created after phase 0: the look before the create showed it, or `CreateTopics` answered `TOPIC_ALREADY_EXISTS` for it | created by someone else; the restore wrote nothing into it |
+| `left` | a topic THIS run created: its own `CreateTopics` call answered success for that name | "created by this restore and left empty; remove it yourself once you have checked nothing writes to it" |
+| `unconfirmed` | a name this run ASKED for and got NO DEFINITE ANSWER about (the whole `CreateTopics` call failed, the name got no answer, or it got an error that is not "already exists"), which the cluster LISTED when the run looked again | "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it" |
+
+- **`unconfirmed` is never `left` and never `appeared`.** A client that gives
+  up before the broker's answer arrives has no answer, and the broker may
+  have applied the request; Kafka also goes on creating a topic whose request
+  it answered `REQUEST_TIMED_OUT`. The run cannot say whose such a topic is,
+  so it claims nothing: it lists the cluster once more (a read) and names
+  each asked name that is there. When it cannot list the cluster either,
+  `unconfirmedSeen` is `false`, EVERY name without a definite answer is
+  listed, and the sentence says "may exist now … look for it".
+- **A count beside each list** (`appearedCount`, `leftCount`,
+  `unconfirmedCount`): a list carries at most 100 names, and the condition's
+  message, the product API and the console say "and N more" when the bound
+  cut it. Each further name is one of the restore's mapped target topics, and
+  the runner's log names every one.
+- **The broker's own bound is below the client's.** The runner asks
+  `CreateTopics` with an operation timeout of 15 s inside its 20 s request
+  timeout (librdkafka's default would be 60 s), so a reachable broker answers
+  per name before the client gives up. That does not guarantee an answer (a
+  lost connection still fails the whole call), and a name answered
+  `REQUEST_TIMED_OUT` may still be created afterwards: both are what
+  `unconfirmed` is for. **One residual:** the look is one read at one moment,
+  so a topic the broker finishes creating AFTER it is not named. After any
+  `Failed` Restore whose creation step did not answer, list the plan's target
+  names on the cluster yourself.
+- **`status.newTopics` is exactly `left`** after a stopped creation step: what
+  the run's own answers say it created, never a name someone else created or
+  one it cannot account for. It is absent when the lists could not be read.
+
+**Where the names come from, and what that is worth.** The controller reads
+them from the runner's pod log, and only (a) from its LAST TWO lines, in the
+order the runner prints them (`target-topics-appeared=`, then
+`failure-reason=`, each a restore's own closed state beside exit 1), (b) from
+a line no longer than a genuine one (76 KB; a longer line is refused before
+it is parsed, and the read itself asks for the last 256 lines), and (c)
+keeping only names this Restore's own plan maps, with each count held to the
+number of names the plan maps. A block with no such name is dropped, and the
+condition then says the list could not be read. This build's runner prints
+every error text on one line, so no string of a plan, a broker or an object
+store can start a line of its log. **The names are shown only as the
+runner's log gives them: during an upgrade with an older runner image, check
+the list against the cluster before acting on it.** A runner built before
+that escape prints an error's text raw, and an error that ends with a plan's
+own string can end the log with a pair of lines the runner did not mean; the
+controller cannot tell those from the runner's own, so it shows them, held to
+the plan's names as above. Logweir itself never deletes a topic on the
+strength of the list.
+
+**Logweir never deletes a topic under an original name. Not one it created,
+and not after a lost race.** When the creation step stops after this run has
+created a topic — another name lost the race, the broker refused another name,
+or a created topic was not served in time — every topic the run KNOWS it
+created is LEFT on the cluster, empty, and NAMED (`left`), and every topic it
+asked for and cannot account for is left and named too (`unconfirmed`): on
+the runner's `target-topics-appeared=` line, in
+`status.targetTopicsAppeared`, in the `Failed` condition's message, in the
+product API's Restore view (`targetTopicsAppeared`, with `leftInstruction`
+and `unconfirmedInstruction`) and at the top of the Restore's page in the
+console, each list with its own sentence. `status.exitReason` is
+`TargetTopicAppeared` when a name lost the race and `CreatedTopicsLeft` when
+creation stopped for another reason and left a topic of either kind.
+The reason nothing is cleaned up: Kafka has no conditional delete, so a record
+a producer wrote between any "it is empty" read and the delete would be lost
+with the topic, under a production name. An empty topic left behind is
+recoverable; that is not. A name that appeared is never touched either. To
+retry, check that nothing writes to each `left` topic and what each
+`unconfirmed` topic holds and who writes to it, delete it yourself
+(`kafka-topics.sh --delete --topic <name>`), and create a new `Restore`.
+Teardown runs in scratch mode only, phase 9 never hands an identity mapping to
+the deleter, and the runner's deleter refuses every source topic's own name
+whatever the scratch prefix.
+
+**Complete verification is required.** An original-name restore runs only
+with `sample.coverage: complete` (`spec.coverage: complete` on the `Restore`):
+phase 7 reads every record of every restored partition back and compares it
+with the archive by its `x-original-offset`. A sampled plan with the identity
+mapping is refused by name, `OriginalNameNeedsCompleteCoverage`, at every
+boundary: the console selects complete coverage when the original names are
+chosen, locks the box and says why; the product API refuses the request
+(`coverage`, `original_name_requires_complete`); a CEL rule refuses the
+object; the controller refuses a plan that does not ask for it before any Job
+(`ExecutionSpecInvalid`); `logweir drill approve --approval-subject
+original-name` refuses to sign it; and the runner refuses it before it dials
+anything (exit 3). The reason: under a production name another producer may
+still be writing. A sampled check reads the first records of each partition
+and holds the count to a bound that is loose whenever the window cuts a
+segment, so a foreign record inside that bound can pass. The complete check
+reports a record the archive does not hold as unexpected, by its target
+offset. `sample.complete_max_records` may still bound the work; a run it stops
+signs `covered: false`, which is never a pass.
+
+**Whole topics are required.** An original-name restore never restores a
+partition subset. A plan that carries the block and `restore.partitions` is
+refused by name, `OriginalNameNeedsWholeTopics`: the controller refuses it
+before any Job (`ExecutionSpecInvalid`, the condition opening with the token),
+both readiness checks say so, `logweir drill approve` refuses to sign it, and
+the runner refuses it before it dials anything (exit 3). There is no CEL rule
+for this one: a `Restore` declares no partitions, so the plan bytes are the
+only place a subset is written and the controller's plan check is the
+Kubernetes boundary. The reason: the run creates each topic under its own
+name with EVERY partition the archive lists and would fill only the selected
+ones, and the partitions left out could never be restored under that name
+afterwards (the name exists, and a restore into an existing topic is
+refused). A window is allowed, a start or an end: it restores every
+partition, bounded in time. Restore a partition subset under a prefix.
+
+**What does NOT change.** The restore does not fence producers: stop every
+producer of a restored name before the restore and repoint consumers after it
+(consumer positions are not copied; PROD-04.2). **A producer still writing
+while the restore runs is detected and named, not prevented:** its records
+land in the topic beside the restored ones, the complete verification counts
+each as `unexpected` and names it ("target offset N carries no
+x-original-offset" in `integrity.verification.complete.partitions[].findings`),
+and the run signs `fail-integrity` (exit 2). The topic then holds both writers'
+records and is not deleted, so stop the producers first. `strip_offset_headers`
+stays `false`, so the next capture of the name starts a new generation
+(PROD-01.4).
+
+**Evidence.** The signed scorecard is format 1.8.0 and carries
+`target.original_name`: the approval subject and the approval document it was
+verified in (`v1Approval`, `governed`, `ordinary` — the last with
+`confirmation: typedTopicNames`), the cluster condition (`targetIsNotSource`
+with the source cluster id, or `autoCreateDisabled`), where owners were looked
+for and what was found (the `KafkaTopic` resources file by its sha256), and
+whether the owner path was chosen. Both verifiers check it (arms ON-1 to
+ON-14; ON-14 refuses the block beside a partition subset; ON-13 refuses the
+block beside a sampled verification, and beside a
+pass that records none) and print two `original name:` lines
+([verify-a-scorecard.md](verify-a-scorecard.md)). The decisions and the review's
+findings are recorded in
+[PROD-15.1-original-name.md](to-do/decisions/PROD-15.1-original-name.md).
+
+**Readiness.** The `Preflight` for such a `Restore` does not refuse the
+identity mapping it asked for (`plan.names`), and refuses the block in a
+shape phase 0 refuses, a sampled plan and a partition subset included
+(`TopicMappingIdentity`, in the runner's words). It
+does not evaluate the cluster and owner conditions, which need the verified
+receipt and the target's brokers. The run's phase 0 does that, before
+anything is written.
+
+**Upgrade and rollback.** Additive. An older runner refuses an original-name
+plan (it maps every topic onto itself, which its guard refuses, exit 3); an
+older controller ignores `topicNaming.originalName` and its runner refuses the
+plan. **The authorization document v2 that carries `approvalSubject` or
+`originalNameConfirmation` is format 2.1.0**; every document without them
+stays 2.0.0, byte for byte what it was. This build's controller and runner
+accept 2.1.0 and refuse either field under 2.0.0
+(`AuthorizationDocumentInvalid`, "defined from formatVersion 2.1.0"); a
+controller or runner built before the fields refuses every document that
+carries them (an unknown field) rather than read it as ordinary, so roll the
+controller and the console forward together before anyone confirms an
+original-name restore. An older controller reads a stopped creation step as a
+plain exit 1, and ignores the `failure-reason=` line and
+`status.targetTopicsAppeared`. Rolling the CRDs back prunes
+`topicNaming.originalName` and `status.targetTopicsAppeared` from stored
+objects. Their plans are untouched, and the next runner refuses them as above.
 
 ### The credential is validated by the RUNNER, and the controller checks nothing
 

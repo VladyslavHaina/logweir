@@ -101,7 +101,24 @@ pub fn run(
     // double: `calls` empty after a `newTopic` run, non-empty after a
     // `scratch` one.
     if mode == TargetMode::Scratch && policy == "delete" {
-        let names: Vec<String> = mapping.values().cloned().collect();
+        // **PROD-15.1: NEVER AN ORIGINAL NAME.** A mapped target equal to its
+        // source is a topic under its original name; phase 0 refuses such a
+        // mapping in scratch mode, and this rail keeps teardown from ever
+        // reaching one if that refusal is bypassed. Such a name is attested
+        // as not deleted, and never handed to the deleter.
+        type Pairs<'m> = Vec<(&'m String, &'m String)>;
+        let (original, names): (Pairs<'_>, Pairs<'_>) = mapping
+            .iter()
+            .partition(|(source, target)| source == target);
+        for (_, target) in original {
+            failed.push((
+                target.clone(),
+                "never deleted: a mapped target equal to its source is a topic under its original \
+                 name"
+                    .to_string(),
+            ));
+        }
+        let names: Vec<String> = names.into_iter().map(|(_, t)| t.clone()).collect();
         match deleter.delete_topics(&names) {
             Ok(results) => {
                 for (name, r) in results {
@@ -115,7 +132,7 @@ pub fn run(
             // deleted: every mapped topic is attested as failed rather than
             // the attestation falling silent about them.
             Err(e) => {
-                for n in mapping.values() {
+                for n in &names {
                     failed.push((n.clone(), e.to_string()));
                 }
             }

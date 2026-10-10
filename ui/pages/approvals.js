@@ -297,6 +297,85 @@ function approvalTable(collection, now, policy) {
     noApprovalSentence(policy), undefined, { id: "approvals", label: "approvals" });
 }
 
+/** PROD-15.1: the approval subject a Restore NEEDS -- `originalName` for a
+ *  restore under the ORIGINAL topic names, else `ordinary` -- from the
+ *  product API's view (`approvalSubject`) or the custom resource's
+ *  declaration (`spec.target.topicNaming.originalName`). */
+export function restoreApprovalSubject(restore) {
+  const r = restore || {};
+  if (typeof r.approvalSubject === "string") {
+    return r.approvalSubject;
+  }
+  const naming = (((r.spec || {}).target) || {}).topicNaming || {};
+  return naming.originalName === true ? "originalName" : "ordinary";
+}
+
+/** PROD-15.1: the approval subject an Approval's SIGNED document carries --
+ *  the product API's `approvalSubject`, or the custom resource's own
+ *  `spec.approvalBytes` (v1 `approval_subject`, v2 `approvalSubject`).
+ *  `unknown` for a document this page cannot read; never guessed. */
+export function approvalSubjectOf(approval) {
+  const a = approval || {};
+  if (typeof a.approvalSubject === "string") {
+    return a.approvalSubject;
+  }
+  const bytes = (a.spec || {}).approvalBytes;
+  if (typeof bytes !== "string") {
+    return "unknown";
+  }
+  let doc;
+  try {
+    doc = JSON.parse(bytes);
+  } catch (_unreadable) {
+    return "unknown";
+  }
+  if (doc === null || typeof doc !== "object") {
+    return "unknown";
+  }
+  const subject = doc.approvalSubject !== undefined ? doc.approvalSubject : doc.approval_subject;
+  if (subject === undefined) {
+    return "ordinary";
+  }
+  return subject === "originalName" ? "originalName" : "unknown";
+}
+
+/** OD-10 (PROD-15.1): the topic names a one-person confirmation's SIGNED
+ *  bytes carry (`originalNameConfirmation.typedTopics`), or `null` when the
+ *  document carries none or cannot be read. */
+export function typedTopicsOf(approval) {
+  const bytes = (((approval || {}).spec) || {}).approvalBytes;
+  if (typeof bytes !== "string") {
+    return null;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(bytes);
+  } catch (_unreadable) {
+    return null;
+  }
+  const typed = (((doc || {}).originalNameConfirmation) || {}).typedTopics;
+  return Array.isArray(typed) && typed.every((t) => typeof t === "string") ? typed : null;
+}
+
+/** PROD-15.1: an approval subject in words, the original-name one distinct. */
+export function approvalSubjectWords(subject) {
+  if (subject === "originalName") {
+    return "<strong class=\"subject-original-name\">originalName</strong> -- a restore under " +
+      "the ORIGINAL topic names";
+  }
+  return esc(subject === "ordinary" ? "ordinary" : "unknown (not readable on this page)");
+}
+
+/** PROD-15.1: what an approver of a restore under the original names is
+ *  told, beside the subject. */
+export const ORIGINAL_NAME_APPROVAL_SENTENCE =
+  "This Restore writes under the ORIGINAL topic names, into topics that do not exist. Only an " +
+  "approval signed for the approval subject originalName authorises it -- an ordinary approval " +
+  "is refused before any Job exists. On the command line: logweir drill approve " +
+  "--approval-subject original-name. The runner refuses again if a name exists, if the target " +
+  "may be the source cluster and any broker auto-creates topics, or if a declarative owner " +
+  "manages a name.";
+
 /** One approval's recorded status, with `selfAttestedRisk` rendered as a
  *  SENTENCE and never as a bare boolean.
  *
@@ -321,7 +400,15 @@ export function renderApprovalStatus(object) {
       ["matched key id", cell(status.matchedKeyId)],
       ["approver", cell(status.approver)],
       ["ticket", cell(status.ticket)],
-    ]) +
+      // PROD-15.1: what the signed document authorises.
+      ["approval subject", "<span class=\"approval-subject-value\">" +
+        approvalSubjectWords(approvalSubjectOf(object)) + "</span>"],
+    ].concat(typedTopicsOf(object) === null ? [] : [
+      // OD-10: how a one-person confirmation was made, from the signed bytes.
+      ["confirmation", "<span class=\"approval-typed-value\">confirmed by one person with " +
+        "every original topic name re-typed: " +
+        typedTopicsOf(object).map((t) => "<code>" + esc(t) + "</code>").join(", ") + "</span>"],
+    ])) +
     "<p class=\"self-attested\">" + selfAttestedSentence(status) + "</p>" +
     "</section>"
   );
@@ -768,9 +855,16 @@ export function renderApprovalSubject(view, now) {
       ["namespace", esc(ns)],
       ["plan hash", "<code>" + esc(s.planHash) + "</code>"],
       ["Approval metadata.name", "<code>" + esc(s.approvalName) + "</code>"],
+      // PROD-15.1: the subject the approval must be signed for.
+      ["approval subject needed", "<span id=\"needed-approval-subject\">" +
+        approvalSubjectWords(restoreApprovalSubject(v.restore)) + "</span>"],
       ["Restore phase", phaseBadge(((v.restore.status || {}).phase))],
       ["progress", restoreProgressSentence(v.restore)],
     ]) +
+    (restoreApprovalSubject(v.restore) === "originalName"
+      ? "<p class=\"caveat\" id=\"original-name-approval\">" +
+        esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
+      : "") +
     stateBlockOrWarning +
     "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name)) + "\">Open the " +
     "Restore's operation view</a></p>" +

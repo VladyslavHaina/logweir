@@ -40,6 +40,11 @@ pub const S3_PORT: &str = "LOGWEIR_E2E_S3_PORT";
 /// (restricted) host ports.
 pub const ACL_PORT: &str = "LOGWEIR_E2E_ACL_PORT";
 pub const ACL_SASL_PORT: &str = "LOGWEIR_E2E_ACL_SASL_PORT";
+/// Profile `cluster2`: kafka-cluster2's host port (PROD-15.1 is its first Rust
+/// reader).
+pub const CLUSTER2_PORT: &str = "LOGWEIR_E2E_CLUSTER2_PORT";
+/// Profile `autocreate` (PROD-15.1): kafka-autocreate's host port.
+pub const AUTOCREATE_PORT: &str = "LOGWEIR_E2E_AUTOCREATE_PORT";
 /// Profile `redpanda` (PROD-01.2): the Redpanda node's host-side PLAINTEXT
 /// and SASL_PLAINTEXT (SCRAM-SHA-256 and SCRAM-SHA-512) ports.
 pub const REDPANDA_PORT: &str = "LOGWEIR_E2E_REDPANDA_PORT";
@@ -344,6 +349,18 @@ pub fn bootstrap_confluent_offnet() -> String {
 /// reaches it.
 pub fn objectstore_endpoint() -> String {
     format!("http://localhost:{}", port(OBJSTORE_PORT))
+}
+
+/// Profile `autocreate`: kafka-autocreate's host-side PLAINTEXT bootstrap, a
+/// cluster whose brokers AUTO-CREATE topics (PROD-15.1).
+pub fn bootstrap_autocreate() -> String {
+    format!("localhost:{}", port(AUTOCREATE_PORT))
+}
+
+/// Profile `cluster2`: kafka-cluster2's host-side PLAINTEXT bootstrap, a
+/// second independent cluster with auto-creation off.
+pub fn bootstrap_cluster2() -> String {
+    format!("localhost:{}", port(CLUSTER2_PORT))
 }
 
 /// Profile `cluster3`: the three-node cluster's host-side PLAINTEXT

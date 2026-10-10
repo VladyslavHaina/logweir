@@ -1464,10 +1464,18 @@ fn topics_created_names_only_the_topics_this_run_created() {
         ExitCode::Operational,
         "by here phases 0-5 have run, so Global Constraint 11 does not allow exit 3: {e:?}"
     );
-    let DrillError::Operational(m) = e else {
-        panic!("expected an operational failure")
+    // The stop is NAMED (exit 1, `CreatedTopicsLeft`): the topic this run
+    // created before the broker refused the other is left in place and named,
+    // never deleted (no code path deletes a restored-into name).
+    let DrillError::CreationStopped(stop) = e else {
+        panic!("expected the named creation stop")
     };
+    let m = &stop.message;
     assert!(m.contains("drill-payments"), "{m:?}");
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty(), "{:?}", stop.appeared);
+    assert_eq!(stop.left, preflight.topics_created);
+    assert!(!stop.left.is_empty());
     assert!(
         !preflight
             .topics_created

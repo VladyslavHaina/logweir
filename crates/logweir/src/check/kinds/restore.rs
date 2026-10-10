@@ -112,8 +112,16 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
         // later runs. The same shape refusals as execution's phase 0
         // (`ReplaySelection::from_spec`, the shared function).
         match ReplaySelection::from_spec(&spec) {
-            Ok(_) => Ok(spec),
-            Err(refusal) => Err((CheckCode::SelectionInvalid, refusal.to_string())),
+            Ok(_) => {}
+            Err(refusal) => return Err((CheckCode::SelectionInvalid, refusal.to_string())),
+        }
+        // PROD-15.1 review L6: an original-name block in a shape phase 0
+        // refuses (scratch mode, beside a prefix, or in a plan that does not
+        // ask for complete verification) is a fact about these bytes too, in
+        // the runner's own words.
+        match logweir_core::original_name::refuse_shape(&spec) {
+            None => Ok(spec),
+            Some(why) => Err((CheckCode::TopicMappingIdentity, why)),
         }
     }) {
         Ok(spec) => {

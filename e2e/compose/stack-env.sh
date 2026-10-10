@@ -50,12 +50,13 @@ PROFILES_LIST="
 auth      kafka-auth: SASL_SSL/PLAIN :9102, SASL_PLAINTEXT/SCRAM-SHA-256 :9103, SSL+client-cert :9104 (certs in .e2e/auth/<project>/)
 cluster3  kafka-c3-1..3: a three-node KRaft cluster, RF 3 / min ISR 2 by default, :9112-:9114
 cluster2  kafka-cluster2: a second single-node cluster with its own cluster id and the marker topic, :9122
+autocreate  kafka-autocreate: a single-node cluster that AUTO-CREATES topics (Kafka's default; every other broker here turns it off), its own cluster id, :9126
 streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (group logweir-e2e-wordcount)
 streams-protocol  streams-protocol-wordcount: WordCountProcessorDemo on kafka-broker-1 with group.protocol=streams (a Streams group, logweir-e2e-streams-protocol); 4.x lines only
 objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
 registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1; registry-rest: its REST proxy :9142 (Avro, JSON Schema and Protobuf producers)
 redpanda  redpanda: one Redpanda v26.2.4 node (not Apache Kafka); PLAINTEXT :9124, SASL_PLAINTEXT :9125 (SCRAM-SHA-256 as logweir, SCRAM-SHA-512 as logweir512)
-confluent kafka-cp: one Confluent Platform 8.3.2 broker (cp-kafka, the community image), PLAINTEXT :9126; OFFNET :9127 answers a bootstrap and advertises 127.0.0.1:1 (the advertised-address failure)
+confluent kafka-cp: one Confluent Platform 8.3.2 broker (cp-kafka, the community image), PLAINTEXT :9128; OFFNET :9129 answers a bootstrap and advertises 127.0.0.1:1 (the advertised-address failure)
 acl       kafka-acl: StandardAuthorizer; PLAINTEXT :9150 as ANONYMOUS (super user), SASL_PLAINTEXT/SCRAM-SHA-512 :9151 as logweir (restricted by the row's ACLs)
 "
 

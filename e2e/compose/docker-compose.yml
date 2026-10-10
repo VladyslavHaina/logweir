@@ -32,7 +32,8 @@
 #   slots/<project>/<cluster>.env  each Kafka cluster's CLUSTER_ID on that
 #                  stack, so no two stacks share one: kafka-broker-1's on slots
 #                  1..4 only (the default broker keeps the image's id), and the
-#                  auth, cluster3 and cluster2 profiles' on every stack
+#                  auth, cluster3, cluster2 and autocreate profiles' on every
+#                  stack
 #                  (slots/logweir-e2e/ holds the ids they always had)
 # The guide is `e2e/README.md`.
 name: logweir-e2e
@@ -570,6 +571,52 @@ services:
       retries: 12
       start_period: 20s
 
+  # --- profile `autocreate`: a cluster that AUTO-CREATES topics ---------------
+  # Kafka's own default, `auto.create.topics.enable=true`, which every other
+  # broker of this stack turns off: a producer that sends to a name the cluster
+  # does not have creates it. PROD-15.1's original-name rows need it twice --
+  # a restore into the source cluster refused while a broker auto-creates
+  # topics, and a producer that creates a restored name between phase 0's
+  # absence check and the creation step (the race, lost by name). Its own
+  # CLUSTER_ID per stack, like kafka-cluster2's; no marker topic.
+  kafka-autocreate:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    hostname: kafka-autocreate
+    profiles: [autocreate]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_AUTOCREATE_PORT:-9126}:9092"
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-autocreate.env
+        required: true
+    environment:
+      KAFKA_NODE_ID: 3101
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 3101@kafka-autocreate:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-autocreate:9094,CONTROLLER://kafka-autocreate:9093,EXTERNAL://kafka-autocreate:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-autocreate:9094,EXTERNAL://localhost:${LOGWEIR_E2E_AUTOCREATE_PORT:-9126}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # THE POINT OF THE PROFILE, stated rather than left to the default so a
+      # reader of this file sees it and a default change cannot move it.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-autocreate:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
   kafka-cluster2-setup:
     image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     profiles: [cluster2]
@@ -987,8 +1034,8 @@ services:
     profiles: [confluent]
     networks: [kafka-net]
     ports:
-      - "${LOGWEIR_E2E_CP_PORT:-9126}:9092"
-      - "${LOGWEIR_E2E_CP_OFFNET_PORT:-9127}:9095"
+      - "${LOGWEIR_E2E_CP_PORT:-9128}:9092"
+      - "${LOGWEIR_E2E_CP_OFFNET_PORT:-9129}:9095"
     env_file:
       - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-cp.env
         required: true
@@ -999,7 +1046,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_LISTENERS: PLAINTEXT://kafka-cp:9094,CONTROLLER://kafka-cp:9093,EXTERNAL://kafka-cp:9092,OFFNET://kafka-cp:9095
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cp:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CP_PORT:-9126},OFFNET://127.0.0.1:1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cp:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CP_PORT:-9128},OFFNET://127.0.0.1:1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,OFFNET:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
