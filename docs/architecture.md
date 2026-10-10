@@ -213,7 +213,9 @@ standard-alphabet text helper; the backup receipt records it), and the
 client's own log lines read as events off a private queue
 (`rd_kafka_set_log_queue`, `rd_kafka_event_log`; PROD-01.2: the request
 versions a broker serves are in its ApiVersions answer, which librdkafka logs
-and returns through no call, and the capability checks read them there). It
+and returns through no call, and the capability checks read them there, from
+a handle that connects to every broker of the cluster and answers only when
+each one has). It
 wraps ListConsumerGroupOffsets, AlterConsumerGroupOffsets and CreateAcls only
 once a row needs them. It reads error codes and C enums as integers, and
 reports every value librdkafka clamps to Unknown as not representable.

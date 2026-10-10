@@ -128,8 +128,9 @@ invoked by the current adapter, so `engine_subreport` remains null.
 [support matrix](docs/support-matrix.md#the-compatibility-contract) says which
 brokers, authentication modes, schema registries and archive backends are
 supported, limited, untested or unsupported, and every supported row names the
-test behind it. Apache Kafka 3.7, 3.9, 4.1 and 4.3 and Confluent Platform 8.3
-are supported. Redpanda v26.2 is a backup source only: the engine cannot write
+test behind it and says who runs it. Apache Kafka 3.7.1, 3.9.2, 4.1.2 and
+4.3.1 and Confluent Platform 8.3.2 are supported, each as that one pinned
+version. Redpanda v26.2.4 is a backup source only: the engine cannot write
 to it, and the restore check says so before a restore starts. No managed
 provider has been run against. A Kafka-compatible endpoint is not always
 Apache Kafka, and a passing connection test does not show that a restore

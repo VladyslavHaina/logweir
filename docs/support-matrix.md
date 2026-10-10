@@ -507,7 +507,7 @@ by digest and never part of the default set. Their statuses are in the
 | Endpoint | Image | Licence of what the row runs |
 |---|---|---|
 | Redpanda v26.2.4 | `redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89` | Business Source License 1.1 (read at the `v26.2.2` tag; the `v26.2.4` tag is not published on GitHub). Its use grant excludes only offering Redpanda to third parties as a streaming service, so a local test fixture is permitted. The row enables no enterprise feature. |
-| Confluent Platform 8.3.2 (`cp-kafka`, the community image) | `confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48` | The broker reports `8.3.2-ccs`, Confluent's build of Apache Kafka, Apache-2.0 by the licence files the image carries. |
+| Confluent Platform 8.3.2 (the `confluentinc/cp-kafka` image) | `confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48` | The broker reports `8.3.2-ccs`, Confluent's build of Apache Kafka. The Kafka jars in the image carry the Apache License 2.0 text (`LICENSE-kafka_2.13-8.3.2-ccs.txt` and one file per module). The image's own `/licenses/license.txt` is one copyright line and names no licence, and its base is Red Hat's `ubi9-micro`: **the terms of the image as a whole are not stated in it and were not verified.** The row pulls it by digest, runs it locally and redistributes nothing. |
 
 What each serves, by its own answer to `kafka-broker-api-versions.sh`, beside
 what the engine sends (the engine's column is the one under

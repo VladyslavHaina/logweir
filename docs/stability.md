@@ -1991,10 +1991,13 @@ What changes for an operator:
   `connection.topicConfigsReadable` and `connection.groupTypes`
   ([kubernetes.md §21.6c](kubernetes.md), and
   [the compatibility contract](support-matrix.md#capability-checks)). The two
-  engine rows read the endpoint's own ApiVersions answer, because the engine
-  sends fixed request versions and never negotiates. A controller from this
-  build lists them in every `Backup` and `Restore` check plan; an older runner
-  refuses such a plan, so the runner image moves with the controller.
+  engine rows read each broker's own ApiVersions answer, because the engine
+  sends fixed request versions and never negotiates, and they answer for a
+  cluster only when every broker of it answered: a broker that did not, or a
+  bootstrap address nobody answered at, leaves the row `unknown`, never
+  `ready`. A controller from this build lists them in every `Backup` and
+  `Restore` check plan; an older runner refuses such a plan, so the runner
+  image moves with the controller (`runnerImage` in the chart).
 - **A marker topic the restore identity may not Describe** is refused as
   before (exit 3), and the message now says it does not exist or is not
   describable, and names the grant. Kafka lists only the topics a principal
@@ -2005,7 +2008,10 @@ What changes for an operator:
   and answers `reachable=true` for such a cluster.
 - **versitygw's `404 XAdminUserNotFound`** (an unknown access key) is a
   refused credential (`InvalidCredentials`) and no longer a missing object
-  (PROD-01.5 C6). A genuine `NoSuchKey` is still not-found.
+  (PROD-01.5 C6). A genuine `NoSuchKey` is still not-found, whatever its
+  bucket, prefix or key spell: an object store's answer is read from its own
+  HTTP status and the `<Code>` of its error document, never from a word found
+  in the error's text, which echoes all three names.
 
 No signed document changes. The rule every capture path is held to: when the
 endpoint cannot answer, the receipt, the catalog and the status say "not

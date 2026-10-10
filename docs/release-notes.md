@@ -2264,10 +2264,15 @@ In addition to the next entry's six, in its order:
 - **Roll the runner image with the controller, never the controller alone**
   (item 56): every `Backup` and `Restore` readiness check from this
   controller lists capability rows, and an older runner refuses the plan
-  (`CheckContractMismatch`). Check a restore identity's Kafka ACLs against
+  (`CheckContractMismatch`). Move the chart's **`runnerImage`** with
+  `controllerImage` (a pinned `runnerImage` survives `--reuse-values`), or
+  **`LOGWEIR_RUNNER_IMAGE`** on the controller's Deployment for an install
+  without the chart; a `Preflight` that failed this way stays `Failed`, so
+  create a new one. Check a restore identity's Kafka ACLs against
   [the measured minimum](support-matrix.md#minimum-permissions): `Read` on the
-  target topics, `Describe` on the scratch marker topic and `Delete` on the
-  scratch prefix were each missing from an earlier list or silently needed.
+  target topics and `Describe` on the scratch marker topic were missing from
+  an earlier list, and without `Delete` on the scratch prefix a restore passes
+  and leaves its topics, saying so only on its own output.
 
 ### Verification scope after `v0.2.0-rc.1`
 
