@@ -7013,7 +7013,7 @@
             "nullable": true
           },
           "recordsRestored": {
-            "description": "How many records were restored in the sampled window.",
+            "description": "How many records the check read back from the restored topics (`sample.records_restored`): the sample, not every record the restore wrote.",
             "type": "integer",
             "format": "int64",
             "nullable": true
