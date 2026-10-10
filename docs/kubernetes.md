@@ -5242,7 +5242,7 @@ receipt's size depends on the number of groups, never on partitions**, so the
 catalog reads a point that selects 100 groups over many partitions as
 `Available`. A partition with no committed offset is counted, **never offset
 0**, and nothing is ever dropped
-([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150)).
+([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170)).
 
 - **What it costs the source.** Read-only: the group listings, one
   DescribeConsumerGroups, one RequireStable OffsetFetch per captured group (each
@@ -8933,8 +8933,8 @@ exactly one block to it.
 
 | `operation` | Block | What it needs | What it runs |
 |---|---|---|---|
-| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
-| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows |
+| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue, and the three capability rows of the source (§21.6c) |
+| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows, and the target's capability row (§21.6c) |
 | `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles, and `destination.credentialBound` over every `SecretKeys` grant the destination declares (§20.10) |
 | `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
@@ -9422,6 +9422,56 @@ schema ids in record headers, Apicurio's 8-byte ids and other registries'
 framing read `notDetected`
 ([the stated limits](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
+### 21.6c Capability rows: what the endpoint itself can do (PROD-01.2)
+
+The rows above ask what this **principal** may do. Four more ask what this
+**endpoint** can do. A Kafka-compatible endpoint is not always Apache Kafka,
+and a connection test passing says nothing about a restore
+([the compatibility contract](support-matrix.md#the-compatibility-contract)).
+
+| Row | Operation | Gating | `notReady` means | What to do |
+|---|---|---|---|---|
+| `connection.engineProtocol` | `Backup` | blocking | `EngineProtocolUnsupported`: the source does not serve a request version the engine sends to read from it. The message names each request and the range the endpoint serves. | Back up from an endpoint that serves them. Every supported Apache Kafka line does. |
+| `target.engineProtocol` | `Restore` | blocking | `EngineProtocolUnsupported`: the target does not serve a request version the engine sends to write to it. Redpanda v26.2.4 answers this way: the engine sends Produce v8 and it serves Produce v0–v7. | Restore the archive into a cluster that serves them. An endpoint that cannot be a target can still be a source. |
+| `connection.topicConfigsReadable` | `Backup` | advisory | `TopicConfigsNotReadable`: this principal may not read the configuration of the topics the detail names. The backup still runs. | Grant DescribeConfigs on the topic, or accept a point whose configuration is `captureDenied` and whose timestamp type is not recorded (§21.6b). |
+| `connection.groupTypes` | `Backup` | advisory | `GroupTypesNotListed`: the endpoint's group listing names no group type (it serves ListGroups below v5; Apache Kafka 3.7 and Redpanda v26.2.4 do). The backup of the topics is unaffected. | A backup that selects consumer groups records each as excluded (`GroupTypeNotCaptured`), never as captured. Back up from an endpoint that serves ListGroups v5, or select no group. |
+
+**The engine sends fixed versions and never negotiates**, so an endpoint that
+does not serve one closes the connection, and the run fails with only
+`kafka-backup backup exited 1` or `restore exited 1`. The two blocking rows
+say which request it would be, before the run. The SASL pair (SaslHandshake
+v1, SaslAuthenticate v2) is asked for only on a SASL connection.
+
+**Each row reads the endpoint's own answer**: the ApiVersions response on a
+real connection made with the operation's credential, and for the
+configuration row one DescribeConfigs per selected topic. When the answer
+could not be read the row is `unknown` (`ApiVersionsNotObserved`, or the
+read's own timeout code), never `ready`. When the connection did not
+authenticate, or a selected topic is not describable, the rows are `unknown`
+with `BlockedByPrerequisite`.
+
+**An advisory row never changes the verdict.** On Apache Kafka 3.7 every
+`Backup` check carries `connection.groupTypes` as a warning beside a `ready`
+verdict. It matters only to a backup that selects consumer groups.
+
+**The target's record-timestamp bound.** `target.timestampBound` is `unknown`
+with `TimestampBoundNotReported` when the target's broker configuration
+answers without either bound key (Redpanda keeps the bound per topic); under
+an older controller the code is `BrokerConfigsNotReadable` (§21.9). Builds
+before PROD-01.2 answered `ready`, "declares no record-timestamp bound", for
+an endpoint that had declared nothing. The same builds published
+`status.topicPreflight.timestampType: CreateTime` on a `Restore` whose target
+had not reported its timestamp type; the field is now absent in that case.
+
+**An unreachable advertised address.** When the bootstrap address answers and
+the brokers the cluster advertises do not, `connection.authenticated` (or
+`target.authenticated`) is `notReady` with `BrokerUnreachable`, and its
+message says exactly that: the bootstrap answered and named the cluster, and
+the advertised listeners are not reachable from the runner. Check
+`advertised.listeners` for the listener the bootstrap address belongs to. A
+`SourceConnection` check, and `logweir cluster-probe`, read only the cluster
+id and pass against such a cluster.
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -9630,6 +9680,21 @@ answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
 older one answered `ready` (§21.6b). No code, field or plan shape is new, so
 the controller and runner may be upgraded in either order. Rolling back the
 runner brings back the old `ready` answer.
+
+**Capability rows (PROD-01.2).** A controller from this build lists the
+capability rows of §21.6c in every `Backup` and `Restore` check plan
+(`request.{operationReadiness,restorePreflight}.capabilityChecks`). An **older
+runner** refuses such a plan at startup (exit 3): the `Preflight` lands
+`phase: Failed`, `CheckContractMismatch`, naming `capabilityChecks`. **Upgrade
+the runner image with the controller**; unlike the conditional fields above,
+this one is in every `Backup` and `Restore` check. A **newer runner** handed a
+plan from an older controller (no field) emits no capability row, and the
+older controller reads its result as before. The new answer of
+`target.timestampBound` follows the same rule: a plan from this build's
+controller gets the code `TimestampBoundNotReported`, and a plan from an older
+controller gets the same `unknown`, message and remedy under
+`BrokerConfigsNotReadable`, a code that controller already reads. Rolling the
+runner back brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

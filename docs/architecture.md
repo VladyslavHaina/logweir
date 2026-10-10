@@ -209,7 +209,11 @@ DescribeCluster and DescribeAcls, the legacy group listing
 0.36.2's wrapper builds a member slice from a NULL pointer for a group without
 members and hides each group's error), and DescribeTopics (PROD-01.4a: each
 topic's ID as its two 64-bit halves, never through librdkafka's
-standard-alphabet text helper; the backup receipt records it). It
+standard-alphabet text helper; the backup receipt records it), and the
+client's own log lines read as events off a private queue
+(`rd_kafka_set_log_queue`, `rd_kafka_event_log`; PROD-01.2: the request
+versions a broker serves are in its ApiVersions answer, which librdkafka logs
+and returns through no call, and the capability checks read them there). It
 wraps ListConsumerGroupOffsets, AlterConsumerGroupOffsets and CreateAcls only
 once a row needs them. It reads error codes and C enums as integers, and
 reports every value librdkafka clamps to Unknown as not representable.

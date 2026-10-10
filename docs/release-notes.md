@@ -40,9 +40,11 @@ controller no longer rewrites a status whose content has not changed), 46
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
 deadline), 48 (FX-20c, a destination's Test access compares every grant's
 binding), 49 (PROD-01.4a, each topic's ID in the receipt and the catalog
-point), 50 (PROD-04.1, consumer position evidence for selected groups) and 51
+point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
-format 2.0.0 and named on every surface) so far. Items continue the next entry's
+format 2.0.0 and named on every surface) and 52 (PROD-01.2, the compatibility
+contract, and the capability rows a readiness check asks of the endpoint
+itself) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -143,6 +145,12 @@ preview, both verifiers, the controller's `Restore` status, the product API,
 the console and the runner's notification, and the PoC upgrade that carries
 it runs a subset `Restore`, reads its scorecard with both readers, and reads
 the selection on its status, the API, the console and the notification.
+Item 52 is row PROD-01.2, proven by unit and mock-cluster rows and on the
+compose stack (the four Apache Kafka lines, Confluent Platform 8.3.2, Redpanda
+v26.2.4, SeaweedFS and the ACL broker); it changes the controller's check plan
+and the runner's check rows together, one `Restore` status field and no signed
+document, and the PoC upgrade that carries it runs a `Backup` and a `Restore`
+`Preflight` and reads their capability rows.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1722,6 +1730,73 @@ console do not carry `integrity.selection`, so after a rollback they show a
 subset restore without its selection again: read the subset restores' signed
 scorecards (2.0.0) with this release's verifiers.
 
+#### 52. A readiness check asks the endpoint what it can do; compatibility is a tested contract (PROD-01.2)
+
+**Added.** A `Backup` or `Restore` `Preflight`, and `logweir check run` on the
+same plan, carry capability rows: what the endpoint itself can do, read from
+its own answers before the operation starts
+([kubernetes.md](kubernetes.md) §21.6c). `connection.engineProtocol` (backup)
+and `target.engineProtocol` (restore) are **blocking**: the engine sends each
+request at one fixed version and never negotiates, and these rows compare
+those versions with the ranges the endpoint's ApiVersions answer serves, naming
+each request it does not. `connection.topicConfigsReadable` and
+`connection.groupTypes` are **advisory**: the backup runs, and the row says
+what it will record as not captured. The controller lists the rows in the
+check plan (`capabilityChecks`); a runner answers exactly the rows listed.
+**The compatibility contract** is published in
+[support-matrix.md](support-matrix.md#the-compatibility-contract): brokers,
+authentication modes, schema registries, archive backends and managed
+providers, each `supported`, `limited`, `untested` or `unsupported`, with the
+test behind every supported row, the minimum Kafka ACLs for a probe, a backup
+and a restore, and what a connection test does not show. Apache Kafka 3.7.1,
+3.9.2, 4.1.2 and 4.3.1 and Confluent Platform 8.3.2 are supported. **Redpanda
+v26.2.4 is a backup source only**: it serves Produce v0–v7 and the engine sends
+v8, so a restore into it cannot run, and `target.engineProtocol` says so
+first. No managed provider has been run against.
+**Changed, to the safer side.** A value an endpoint did not report is no
+longer recorded as the Apache default
+([stability.md](stability.md#an-endpoints-capability-is-read-from-the-endpoint-and-a-value-it-did-not-report-is-not-recorded-prod-012)):
+`target.timestampBound` is `unknown` (`TimestampBoundNotReported`) for a
+target whose broker configuration carries no bound key, where it was `ready`;
+`Restore.status.topicPreflight.timestampType` is absent for a target that did
+not report its timestamp type, where it said `CreateTime`. Neither changes
+against Apache Kafka, which reports both. A scratch marker topic the restore
+identity may not Describe is refused as before, with a message that names the
+grant. `connection.authenticated` says when the bootstrap address answered
+and the advertised brokers did not. An object store's `404
+XAdminUserNotFound` (versitygw's answer to an unknown access key) is a refused
+credential and no longer a missing object.
+**On Apache Kafka 3.7** every `Backup` check now carries one advisory warning,
+`connection.groupTypes`: that line's group listing names no group type, so a
+backup that selects consumer groups records each as excluded (item 50). The
+verdict is unchanged.
+**Do:** roll the runner image with the controller. A controller from this
+build lists `capabilityChecks` in every `Backup` and `Restore` check plan, and
+an older runner refuses such a plan: the `Preflight` is `Failed`,
+`CheckContractMismatch`, naming the field. Give the restore identity `Read` on
+the target topics and `Describe` on the scratch marker topic if a managed
+cluster's ACLs were written from the chart README's earlier list, which named
+neither; and `Delete` on the scratch prefix, without which a scratch restore
+signs `pass` and leaves its topics behind
+([support-matrix.md](support-matrix.md#minimum-permissions)).
+**Scope:** unit rows for every new row and code, each with the capability
+present, absent, not observed and not listed; librdkafka's in-process mock
+cluster for the ApiVersions reader; a guard that holds the published tables to
+their evidence, with a mutant per rule; and compose rows
+(`e2e/tests/compat_contract.rs`, engine `0.23.3+logweir.2`): the generic row
+on each of the four Apache Kafka lines and on Confluent Platform 8.3.2; the
+Redpanda row (a backup, the refused restore and the restore that then fails);
+both SCRAM mechanisms on Redpanda; SeaweedFS through a backup, a restore and a
+refused second claim; the ACL profile with each grant removed in turn; and a
+listener that advertises an unreachable address. No managed provider, no cloud
+object store, one version of each other endpoint, single-node brokers.
+**Rollback:** roll the controller and the runner back together. An older
+controller's plan lists no capability row, and this runner then answers none
+and reports an unreported bound under `BrokerConfigsNotReadable`, a code the
+older controller reads; an older runner answers `ready` for an unreported
+bound again and writes `timestampType: CreateTime` again. No signed document
+and no CRD schema changed, so nothing already written needs attention.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1772,6 +1847,13 @@ In addition to the next entry's six, in its order:
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
+- **Roll the runner image with the controller, never the controller alone**
+  (item 52): every `Backup` and `Restore` readiness check from this
+  controller lists capability rows, and an older runner refuses the plan
+  (`CheckContractMismatch`). Check a restore identity's Kafka ACLs against
+  [the measured minimum](support-matrix.md#minimum-permissions): `Read` on the
+  target topics, `Describe` on the scratch marker topic and `Delete` on the
+  scratch prefix were each missing from an earlier list or silently needed.
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -1787,7 +1869,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50 and 51, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 and 52, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1828,7 +1910,9 @@ item 51 changes the runner, the restore preview, both verifiers, the
 controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
-older verifier a subset scorecard). To roll back to
+older verifier a subset scorecard); item 52 changes the controller's check
+plan and the runner's check rows together and one `Restore` status field, and
+needs the runner image rolled with the controller. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -1862,6 +1946,9 @@ older verifier a subset scorecard). To roll back to
    its schedule: an older controller refuses such a frozen plan
    (`PlanConfigMapConflict`). The 1.7.0 receipts, their positions documents
    and the records already written stay valid.
+7. Item 52 needs no step of its own beyond rolling the controller and the
+   runner back together: with an older runner the capability rows are gone,
+   and a target that reports no record-timestamp bound reads `ready` again.
 
 ---
 
