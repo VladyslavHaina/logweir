@@ -16,14 +16,18 @@
 //! controller reads the logs of every namespace into statuses the console
 //! shows. So:
 //!
-//! * **One line, and only where the runner prints it** ([`runner_reason`]).
-//!   A plan can start a line of its own in this log: the runner prints an
-//!   error's text raw on stderr, an error may repeat a plan value, and a YAML
-//!   scalar may hold a line break (PROD-15.1's review). So a well-formed
-//!   `refusal-detail=` line is not thereby the runner's. The runner prints its
-//!   own as the last two lines it writes, the detail line and then
-//!   `refusal-reason=`; the line is honoured at that position and a marker
-//!   line anywhere else in the log is ignored.
+//! * **One line, and only when it carries this Job's token**
+//!   ([`runner_reason`]). A plan can start a line of its own in this log: the
+//!   runner prints an error's text raw on stderr, an error may repeat a plan
+//!   value, and a YAML scalar may hold a line break (PROD-15.1's review).
+//!   Both streams reach this controller as one log, so nothing about where a
+//!   line stands, or how well-formed it is, tells the runner's line from text
+//!   the runner was made to print. What tells them apart is a value the
+//!   plan's author could not have had: the line token this controller made
+//!   when it built the Job ([`crate::job::new_line_token`]), gave the runner
+//!   as an argument, and reads back off the Job's own pod template
+//!   ([`crate::job::line_token`]). A `refusal-detail=` line that does not
+//!   carry it is not read at all.
 //! * **Validated and cleaned before it is stored.**
 //!   [`RefusalDetail`](logweir_core::refusal_detail::RefusalDetail) cannot be
 //!   built any other way: a reason code that is a member of the CLOSED set of
@@ -31,6 +35,9 @@
 //!   restore-only code on a `Backup`), a sentence reduced to printable
 //!   characters, passed through the credential rules and cut to 760 bytes.
 //!   And the two refusal lines must agree with each other.
+//! * **The token is never shown.** It is in the Job's pod template and in the
+//!   runner's own line and nowhere else: not in a status, a condition, an
+//!   event or a log line of this controller.
 //! * **A bounded read, once** ([`read`]). [`REFUSAL_LOG_TAIL_LINES`] lines and
 //!   [`REFUSAL_LOG_LIMIT_BYTES`] bytes, asked of the API server and enforced
 //!   again on the stream. It is made on the one pass that writes the terminal
@@ -56,9 +63,11 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 use tracing::{debug, warn};
 
-use logweir_core::refusal_detail::{RefusalDetail, RefusingRun, REFUSAL_DETAIL_PREFIX};
+use logweir_core::refusal_detail::{
+    LineRead, LineToken, RefusalDetail, RefusingRun, REFUSAL_DETAIL_PREFIX,
+};
 
-use crate::controllers::backup::{KEY_SCAN_TAIL_LINES, REFUSAL_REASON_PREFIX};
+use crate::controllers::backup::REFUSAL_REASON_PREFIX;
 
 /// How many trailing log lines the exit-3 read asks for.
 ///
@@ -107,16 +116,16 @@ pub fn log_params() -> LogParams {
 pub enum RunnerReason {
     /// The runner's own reason code and sentence, validated and cleaned.
     Stated(RefusalDetail),
-    /// The log was read and carries no `refusal-detail=` line: a runner that
-    /// predates the line. The condition is exactly what it was before.
+    /// Nothing in the log is this Job's runner's reason: the Job has no line
+    /// token (an older controller built it), or no line carries the Job's
+    /// token (an older runner, or lines that are not the runner's). The
+    /// condition is exactly what it was before the line existed.
     NotStated,
-    /// The line at the runner's position did not validate: not the one JSON
-    /// object, a code outside the run's closed set, or a detail that the
-    /// state line beside it contradicts. Nothing from it is shown.
+    /// A line carries the Job's token, so the runner wrote it, and it did not
+    /// validate: a code outside the run's closed set, nothing printable in
+    /// its sentence, or a state line after it that contradicts it. Nothing
+    /// from it is shown.
     Unreadable,
-    /// The log carries a `refusal-detail=` line, and none is where the runner
-    /// prints it. Nothing from any of them is shown.
-    Misplaced,
     /// The end of the log is longer than [`REFUSAL_LOG_LIMIT_BYTES`], so the
     /// lines that would carry the reason were not read.
     TailOverBound,
@@ -150,12 +159,6 @@ impl RunnerReason {
                 "; the runner gave no readable reason: its `{REFUSAL_DETAIL_PREFIX}` line did \
                  not validate, so nothing from it is shown"
             ),
-            Self::Misplaced => format!(
-                "; the runner gave no readable reason: the pod log has a \
-                 `{REFUSAL_DETAIL_PREFIX}` line that is not where the runner prints it, \
-                 directly before the final `{REFUSAL_REASON_PREFIX}` line, so nothing from it \
-                 is shown"
-            ),
             Self::TailOverBound => format!(
                 "; the runner's reason could not be read: the last {REFUSAL_LOG_TAIL_LINES} \
                  lines of the pod log are over the {} KiB this controller reads",
@@ -179,92 +182,67 @@ impl RunnerReason {
     }
 }
 
-/// How many non-marker lines may follow the runner's two refusal lines.
-///
-/// The pair has to stay inside the tail the state reader scans
-/// ([`KEY_SCAN_TAIL_LINES`]), so that this function and
-/// [`crate::controllers::backup::refusal_state`] read the same
-/// `refusal-reason=` line.
-const TRAILING_LINES_TOLERATED: usize = KEY_SCAN_TAIL_LINES - 2;
-
 /// The runner's reason, from a log body that WAS read whole, of a run of kind
-/// `run`.
+/// `run` whose Job carries `token`.
 ///
-/// # The rule: the line is honoured where the runner prints it, and nowhere else
+/// # The rule: the Job's token decides whose line it is
 ///
-/// The runner's last two lines at exit 3 are `refusal-detail=…` and then
-/// `refusal-reason=…`, written in one write
-/// (`logweir::exit::print_refusal_to`). Call a line that opens with either
-/// key a MARKER line. Over the non-empty lines of the log:
+/// 1. **The Job has no token** (`None`): [`RunnerReason::NotStated`]. Nothing
+///    in the log is read as a reason, whatever it holds, because nothing in
+///    it could be told from text the plan's author wrote.
+/// 2. Otherwise the LAST line of the log that is a `refusal-detail=` line
+///    carrying `token` is the runner's
+///    ([`RefusalDetail::read_line`]; the comparison is constant-time). Every
+///    other `refusal-detail=` line (no token, another Job's token, not the
+///    JSON object) is not read at all, wherever it stands and however
+///    well-formed it is: before the runner's line, after it, alone at the
+///    end of the log.
+/// 3. **No such line**: [`RunnerReason::NotStated`] (an older runner, which
+///    prints none; or a runner that was never given the argument).
+/// 4. The runner's line is then held to what a line always was: a code of
+///    `run`'s closed set and a cleaned, bounded sentence, and the
+///    `refusal-reason=` line the runner wrote WITH it (the next one after it
+///    in the log; the runner writes the two in one write) must agree with it
+///    ([`RefusalDetail::agrees_with_state`]). Failing any of that is
+///    [`RunnerReason::Unreadable`].
 ///
-/// 1. **No `refusal-detail=` line at all**: [`RunnerReason::NotStated`], and
-///    the condition is what it was before the line existed.
-/// 2. The detail line must be the line DIRECTLY BEFORE the LAST
-///    `refusal-reason=` line. Any other marker line is not the runner's and
-///    is ignored.
-/// 3. **That pair ends the log**: it is the runner's. Marker lines before it
-///    (text a plan put in an error message, a line a library printed, an
-///    earlier draft) are ignored, however well-formed.
-/// 4. **Or other lines follow it.** A pod log is stdout and stderr merged in
-///    no promised order, and the runner's human line is on stderr, so it can
-///    be copied AFTER the pair. That is tolerated only when it cannot be
-///    confused with anything: at most [`TRAILING_LINES_TOLERATED`] lines
-///    follow, none of them a marker, and the pair is the ONLY marker line of
-///    each key in everything that was read. One more marker line anywhere
-///    and nothing is shown.
-/// 5. Otherwise [`RunnerReason::Misplaced`].
+/// Position decides nothing. A forged line cannot carry the token, because
+/// the token was made when the Job was built and the plan is older than its
+/// Job; and a line that carries it needs no particular place.
 ///
-/// Then the line is validated ([`RefusalDetail::from_line`]: the one JSON
-/// object, a code in `run`'s closed set, a cleaned and bounded sentence) and
-/// must agree with the state line beside it
-/// ([`RefusalDetail::agrees_with_state`]); failing either is
-/// [`RunnerReason::Unreadable`]. An invalid line at the position is never
-/// rescued by a valid one elsewhere.
+/// # What a token does not cover
 ///
-/// # What this does not decide
-///
-/// A line is "the runner's" here by POSITION. With a runner image that still
-/// prints error text raw, text a plan chose is copied into the log from
-/// stderr, and nothing promises it lands before the pair: if it lands after
-/// it and itself ends with a well-formed pair, that pair is the end of the
-/// log and is honoured. What it can then say is bounded by everything above
-/// (a code of the closed set, a cleaned sentence of 760 bytes, on the
-/// writer's own object). Closing it is the runner's part: an error text that
-/// cannot start a line (PROD-15.1).
+/// It separates the runner's line from text written BEFORE the Job existed.
+/// Anyone who can read the Job can read its token, so an input that can
+/// still change after the Job is built, and that a refusal repeats raw (a
+/// value a broker reports, the text of a mounted file's parse error), could
+/// in principle carry it. No plan can.
 #[must_use]
-pub fn runner_reason(run: RefusingRun, log: &str) -> RunnerReason {
+pub fn runner_reason(run: RefusingRun, token: Option<&LineToken>, log: &str) -> RunnerReason {
+    let Some(token) = token else {
+        return RunnerReason::NotStated;
+    };
     let lines: Vec<&str> = log
         .lines()
         .map(|l| l.trim_end_matches('\r'))
         .filter(|l| !l.trim().is_empty())
         .collect();
-    let is_detail = |line: &str| line.starts_with(REFUSAL_DETAIL_PREFIX);
-    let is_state = |line: &str| line.starts_with(REFUSAL_REASON_PREFIX);
-    let details = lines.iter().filter(|line| is_detail(line)).count();
-    if details == 0 {
-        return RunnerReason::NotStated;
+    for (at, line) in lines.iter().enumerate().rev() {
+        match RefusalDetail::read_line(run, token, line) {
+            LineRead::NotThisJobs => {}
+            LineRead::Invalid => return RunnerReason::Unreadable,
+            LineRead::Valid(detail) => {
+                let state = lines[at + 1..]
+                    .iter()
+                    .find_map(|l| l.strip_prefix(REFUSAL_REASON_PREFIX));
+                return match state {
+                    Some(state) if detail.agrees_with_state(state) => RunnerReason::Stated(detail),
+                    _ => RunnerReason::Unreadable,
+                };
+            }
+        }
     }
-    let Some(state_at) = lines.iter().rposition(|line| is_state(line)) else {
-        return RunnerReason::Misplaced;
-    };
-    if state_at == 0 || !is_detail(lines[state_at - 1]) {
-        return RunnerReason::Misplaced;
-    }
-    let following = lines.len() - state_at - 1;
-    let ends_the_log = following == 0;
-    let the_only_markers = details == 1 && lines.iter().filter(|line| is_state(line)).count() == 1;
-    let alone_before_other_text = the_only_markers && following <= TRAILING_LINES_TOLERATED;
-    if !(ends_the_log || alone_before_other_text) {
-        return RunnerReason::Misplaced;
-    }
-    let Some(detail) = RefusalDetail::from_line(run, lines[state_at - 1]) else {
-        return RunnerReason::Unreadable;
-    };
-    let state = &lines[state_at][REFUSAL_REASON_PREFIX.len()..];
-    if !detail.agrees_with_state(state) {
-        return RunnerReason::Unreadable;
-    }
-    RunnerReason::Stated(detail)
+    RunnerReason::NotStated
 }
 
 /// What [`read`] returns: the log body the other tail scanners read, and the
@@ -298,12 +276,12 @@ impl RefusalLog {
 /// lines are. Bytes that are not UTF-8 decode to `U+FFFD` and the read goes
 /// on, so one stray byte elsewhere in the tail does not cost the reason.
 #[must_use]
-pub fn interpret(run: RefusingRun, bytes: &[u8]) -> RefusalLog {
+pub fn interpret(run: RefusingRun, token: Option<&LineToken>, bytes: &[u8]) -> RefusalLog {
     if bytes.len() as u64 >= REFUSAL_LOG_LIMIT_BYTES as u64 {
         return RefusalLog::without_body(RunnerReason::TailOverBound);
     }
     let body = String::from_utf8_lossy(bytes).into_owned();
-    let reason = runner_reason(run, &body);
+    let reason = runner_reason(run, token, &body);
     RefusalLog { body, reason }
 }
 
@@ -326,7 +304,9 @@ pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec
 
 /// Read a finished exit-3 run's bounded log tail and say what it means. `run`
 /// is the kind of run the pod belongs to: it selects the closed set of reason
-/// codes the line may carry.
+/// codes the line may carry. `token` is the line token of the Job the pod
+/// belongs to, read off that Job ([`crate::job::line_token`]); with `None`
+/// no line is read as a reason.
 ///
 /// # Errors
 ///
@@ -338,7 +318,8 @@ pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec
 ///
 /// # What is logged
 ///
-/// The pod's name and the HTTP status, never a byte of the log. A pod that is
+/// The pod's name and the HTTP status, never a byte of the log and never the
+/// token. A pod that is
 /// gone is `debug`: Kubernetes collecting a finished pod is not news (FX-19).
 /// A refused or failed read is ONE `warn`, because an operator has something
 /// to fix; the pass that logs it writes the terminal status, so it is not
@@ -348,6 +329,7 @@ pub async fn read(
     namespace: &str,
     pod_name: &str,
     run: RefusingRun,
+    token: Option<&LineToken>,
 ) -> RefusalLog {
     let stream = match pods.log_stream(pod_name, &log_params()).await {
         Ok(stream) => stream,
@@ -397,19 +379,14 @@ pub async fn read(
             return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
         }
     };
-    let log = interpret(run, &bytes);
+    let log = interpret(run, token, &bytes);
     match &log.reason {
         RunnerReason::Unreadable => debug!(
             namespace,
             pod = pod_name,
             "the refused run's `refusal-detail=` line did not validate; nothing from it is stored"
         ),
-        RunnerReason::Misplaced => debug!(
-            namespace,
-            pod = pod_name,
-            "the refused run's pod log has a `refusal-detail=` line that is not where the runner \
-             prints it; nothing from it is stored"
-        ),
+
         RunnerReason::TailOverBound => debug!(
             namespace,
             pod = pod_name,
@@ -420,31 +397,43 @@ pub async fn read(
     }
     log
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use RefusingRun::{Backup, Restore};
 
-    fn detail_line(code: &str, message: &str) -> String {
-        format!(
-            "{REFUSAL_DETAIL_PREFIX}{}",
-            serde_json::json!({ "code": code, "message": message })
-        )
+    /// This Job's token and another Job's, assembled so that no source line
+    /// holds a secret-shaped literal.
+    fn own() -> LineToken {
+        LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+    }
+    fn another_jobs() -> LineToken {
+        LineToken::parse(&"3c".repeat(20)).expect("forty hex digits")
     }
 
-    /// The two lines a runner prints last for `message`, as its own printer
-    /// builds them.
-    fn pair(run: RefusingRun, message: &str) -> String {
+    /// A detail line built by hand, carrying `token` when there is one.
+    fn detail_line(token: Option<&LineToken>, code: &str, message: &str) -> String {
+        let value = match token {
+            Some(t) => {
+                serde_json::json!({ "token": t.expose_token(), "code": code, "message": message })
+            }
+            None => serde_json::json!({ "code": code, "message": message }),
+        };
+        format!("{REFUSAL_DETAIL_PREFIX}{value}")
+    }
+
+    /// The two lines a runner given `token` prints last for `message`, as its
+    /// own printer builds them.
+    fn pair(run: RefusingRun, token: Option<&LineToken>, message: &str) -> String {
         format!(
             "{}\n{}\n",
-            logweir_core::refusal_detail::refusal_detail_line(run, message),
+            logweir_core::refusal_detail::refusal_detail_line(run, token, message),
             logweir_core::guard::refusal_reason_line(message)
         )
     }
 
     fn stated(run: RefusingRun, log: &str) -> String {
-        match runner_reason(run, log) {
+        match runner_reason(run, Some(&own()), log) {
             RunnerReason::Stated(d) => d.to_string(),
             other => panic!("expected a stated reason, got {other:?} for:\n{log}"),
         }
@@ -453,187 +442,162 @@ mod tests {
     const GENUINE: &str = "restore.partitions.orders names partition 99";
     const FORGED: &str = "Contact the address in this message to release your data";
 
-    /// **The runner's pair at the end of the log is the one that counts**, and
-    /// a marker line anywhere before it is ignored: the reviewer's shape (a
-    /// plan value that starts lines inside the error text), a marker a
-    /// library printed, an earlier draft, two detail lines.
+    /// **The security review's two logs, and their neighbours.** Every forged
+    /// line here is VALID in every respect but one: it does not carry this
+    /// Job's token. Nothing forged is shown, wherever it stands.
     ///
-    /// KILLS: "the first detail line counts"; "any valid detail line counts";
-    /// "a valid earlier line rescues an invalid one at the position".
+    /// KILLS: the token comparison removed; a token taken from the log's own
+    /// line; any rule that trusts a line for where it stands.
     #[test]
-    fn the_runners_pair_at_the_end_of_the_log_is_the_one_that_counts() {
-        let genuine = pair(Restore, GENUINE);
+    fn a_line_without_this_jobs_token_is_never_the_runners() {
+        let own = own();
+        let genuine = pair(Restore, Some(&own), GENUINE);
         let want = format!("GuardRefused: {GENUINE}");
-        // NEGATIVE CONTROL: the genuine pair alone.
+        // NEGATIVE CONTROL: the genuine pair alone is shown.
         assert_eq!(stated(Restore, &genuine), want);
 
-        let forged_detail = detail_line("TargetTopicConfigRefused", FORGED);
-        // (a) The reviewer's shape: the human line repeats a plan value that
-        // holds line breaks, so the forged markers are lines of their own,
-        // followed by the runner's tracing line and its pair.
-        let reviewers = format!(
-            "guard: plan refused by the admission guard: source.backup `x\n{forged_detail}\n\
-             refusal-reason=TargetTopicConfigRefused\n` is not a backup set id\n\
-             {{\"level\":\"INFO\",\"message\":\"drill finished\"}}\n{genuine}"
+        let forged_untokened = pair(
+            Restore,
+            None,
+            &format!("TargetTopicConfigRefused: {FORGED}"),
         );
-        assert_eq!(stated(Restore, &reviewers), want);
-        // (c) A forged marker earlier in the tail, a genuine DIFFERENT pair last.
-        let earlier = format!("{forged_detail}\nsome line\n{genuine}");
-        assert_eq!(stated(Restore, &earlier), want);
-        // (d) Two detail lines back to back: the one directly before the
-        // final state line is the runner's.
-        let two = format!("{forged_detail}\n{genuine}");
-        assert_eq!(stated(Restore, &two), want);
-        // A complete forged pair first, the genuine pair last.
-        let two_pairs =
-            format!("{forged_detail}\nrefusal-reason=TargetTopicConfigRefused\n{genuine}");
-        assert_eq!(stated(Restore, &two_pairs), want);
-        // An INVALID line at the position is not rescued by a valid one
-        // elsewhere.
-        let valid = detail_line("GuardRefused", "valid, and not at the position");
-        let bad_at_the_position =
-            format!("{valid}\n{REFUSAL_DETAIL_PREFIX}not json\nrefusal-reason=GuardRefused\n");
-        assert_eq!(
-            runner_reason(Restore, &bad_at_the_position),
-            RunnerReason::Unreadable
+        let forged_stale = pair(
+            Restore,
+            Some(&another_jobs()),
+            &format!("TargetTopicConfigRefused: {FORGED}"),
         );
-    }
-
-    /// **A marker line that is not where the runner prints it is ignored**:
-    /// nothing from it is shown, whatever it holds.
-    ///
-    /// KILLS: "the last detail line in the tail counts" (every arm here has a
-    /// valid one).
-    #[test]
-    fn a_marker_that_is_not_where_the_runner_prints_it_is_not_shown() {
-        let d = detail_line("GuardRefused", FORGED);
-        let s = "refusal-reason=GuardRefused";
-        for (label, log) in [
-            ("no state line at all", format!("{d}\n")),
-            ("the detail line is the last line", format!("{s}\n{d}\n")),
-            (
-                "another line between the two",
-                format!("{d}\nthe human line\n{s}\n"),
-            ),
-            ("a detail line after the pair", format!("{d}\n{s}\n{d}\n")),
-            (
-                "text after the pair, and a second detail line before it",
-                format!("{d}\n{d}\n{s}\nthe human line\n"),
-            ),
-            (
-                "text after the pair, and a second state line before it",
-                format!("{s}\n{d}\n{s}\nthe human line\n"),
-            ),
-            (
-                "the state line first in the log, the detail elsewhere",
-                format!("{s}\nx\n{d}\ny\n"),
-            ),
-        ] {
+        let human = format!("guard: plan refused by the admission guard: {GENUINE}\n");
+        for forged in [&forged_untokened, &forged_stale] {
+            // LOG 1: the genuine pair, then the human text whose plan-chosen
+            // tail is a forged pair that ENDS THE LOG.
+            let log_1 = format!("{genuine}guard: … source.backup `x\n{forged}");
+            assert_eq!(stated(Restore, &log_1), want, "log 1");
+            // The forged pair first, in the middle, and around the genuine one.
+            assert_eq!(stated(Restore, &format!("{forged}{human}{genuine}")), want);
+            assert_eq!(stated(Restore, &format!("{forged}{genuine}{forged}")), want);
+            // LOG 2: an older runner prints the human text and then only its
+            // state line; the plan put a forged detail line directly before
+            // it, alone, ending the log. Nothing is shown.
+            let forged_detail = forged.lines().next().expect("the detail line");
+            let log_2 = format!(
+                "guard: … source.backup `x\n{forged_detail}\nrefusal-reason=GuardRefused\n"
+            );
             assert_eq!(
-                runner_reason(Restore, &log),
-                RunnerReason::Misplaced,
-                "{label}"
+                runner_reason(Restore, Some(&own), &log_2),
+                RunnerReason::NotStated,
+                "log 2"
+            );
+            // The forged pair alone, where a runner would print it.
+            assert_eq!(
+                runner_reason(Restore, Some(&own), forged),
+                RunnerReason::NotStated
             );
         }
-        // NEGATIVE CONTROL: the same two lines where the runner prints them.
-        assert_eq!(
-            stated(Restore, &format!("{d}\n{s}\n")),
-            format!("GuardRefused: {FORGED}")
-        );
+        // NEGATIVE CONTROL for "nothing forged is shown": the same forged
+        // lines ARE what the reader of the OTHER Job shows, so they are
+        // well-formed and it is the token that refuses them here.
+        match runner_reason(Restore, Some(&another_jobs()), &forged_stale) {
+            RunnerReason::Stated(d) => {
+                assert_eq!(d.to_string(), format!("TargetTopicConfigRefused: {FORGED}"))
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
-    /// **The human line copied after the pair does not cost the reason.** A
-    /// pod log is stdout and stderr merged in no promised order and the human
-    /// line is on stderr, so the pair is not always the end of the log. That
-    /// is tolerated only when the pair is the only marker of each key in what
-    /// was read.
+    /// **A Job with no token has no line this controller reads as a reason**,
+    /// whatever its log holds: an older controller built it.
     ///
-    /// KILLS: "the pair must be the last two lines, always" (the first arm);
-    /// "text may follow the pair whatever else the log holds" (the last
-    /// three).
+    /// KILLS: a missing token treated as "any line will do".
     #[test]
-    fn the_human_line_copied_after_the_pair_does_not_cost_the_reason() {
-        let genuine = pair(Restore, GENUINE);
-        let want = format!("GuardRefused: {GENUINE}");
-        let human = format!("guard: plan refused by the admission guard: {GENUINE}\n");
-        assert_eq!(stated(Restore, &format!("tracing\n{genuine}{human}")), want);
-        // Up to the tail the state reader scans, and not one line further.
-        let most = "a stderr line\n".repeat(TRAILING_LINES_TOLERATED);
-        assert_eq!(stated(Restore, &format!("{genuine}{most}")), want);
+    fn a_job_with_no_token_shows_nothing_whatever_its_log_holds() {
+        for log in [
+            pair(Restore, None, GENUINE),
+            pair(Restore, Some(&own()), GENUINE),
+            String::new(),
+            "refusal-reason=GuardRefused\n".to_string(),
+        ] {
+            assert_eq!(
+                runner_reason(Restore, None, &log),
+                RunnerReason::NotStated,
+                "{log}"
+            );
+        }
+        // NEGATIVE CONTROL: with the token the second log is shown.
         assert_eq!(
-            runner_reason(Restore, &format!("{genuine}{most}one more\n")),
-            RunnerReason::Misplaced
-        );
-        // THE FORGED BLOCK COPIED LAST, WITH TEXT AFTER ITS MARKERS: two
-        // details, so neither is shown. The same block WITHOUT the genuine
-        // pair before it would be the only pair, which is why the runner
-        // prints its own at every exit 3.
-        let forged = pair(Restore, &format!("TargetTopicConfigRefused: {FORGED}"));
-        let block = format!("guard: … source.backup `x\n{forged}` is not a backup set id\n");
-        assert_eq!(
-            runner_reason(Restore, &format!("{genuine}{block}")),
-            RunnerReason::Misplaced
-        );
-        // One stray marker of either key anywhere, and text after the pair:
-        // not shown.
-        let stray_detail = detail_line("GuardRefused", "stray");
-        assert_eq!(
-            runner_reason(Restore, &format!("{stray_detail}\nx\n{genuine}{human}")),
-            RunnerReason::Misplaced
-        );
-        assert_eq!(
-            runner_reason(
-                Restore,
-                &format!("refusal-reason=GuardRefused\nx\n{genuine}{human}")
-            ),
-            RunnerReason::Misplaced
+            stated(Restore, &pair(Restore, Some(&own()), GENUINE)),
+            format!("GuardRefused: {GENUINE}")
         );
     }
 
+    /// **The runner's line needs no particular place**: with other lines of
+    /// either key before it, after it and around it, and with the human line
+    /// copied after it, it is shown.
+    ///
+    /// KILLS: any requirement about where the line stands.
     #[test]
-    fn only_a_line_that_opens_with_the_key_is_a_marker() {
-        let inside = format!(
-            "{{\"level\":\"INFO\",\"message\":\"{}\"}}",
-            "refusal-detail={\\\"code\\\":\\\"GuardRefused\\\",\\\"message\\\":\\\"m\\\"}"
-        );
-        let indented = format!(" {}", detail_line("GuardRefused", "m"));
+    fn the_runners_line_is_shown_wherever_it_stands() {
+        let own = own();
+        let genuine = pair(Restore, Some(&own), GENUINE);
+        let want = format!("GuardRefused: {GENUINE}");
+        let noise = "refusal-reason=TargetTopicConfigRefused\n";
+        let untokened = detail_line(None, "PointUntrusted", FORGED);
+        let human = format!("guard: plan refused by the admission guard: {GENUINE}\n");
         for log in [
-            inside.clone(),
-            indented.clone(),
+            format!("{genuine}{human}"),
+            format!("{genuine}{}", "a stderr line\n".repeat(25)),
+            format!("{noise}{untokened}\n{genuine}{untokened}\n{human}"),
+            format!("{untokened}\n{untokened}\n{genuine}"),
+            genuine.replace('\n', "\r\n\r\n   \n"),
+        ] {
+            assert_eq!(stated(Restore, &log), want, "{log}");
+        }
+    }
+
+    /// A line that only MENTIONS the key, or is indented, is not a line of
+    /// that key, token or no token.
+    #[test]
+    fn only_a_line_that_opens_with_the_key_is_read() {
+        let own = own();
+        let genuine_detail = detail_line(Some(&own), "GuardRefused", "m");
+        let inside = format!(
+            "{{\"level\":\"INFO\",\"message\":{}}}",
+            serde_json::Value::String(genuine_detail.clone())
+        );
+        let indented = format!(" {genuine_detail}");
+        for log in [
             format!("{inside}\nrefusal-reason=GuardRefused\n"),
             format!("{indented}\nrefusal-reason=GuardRefused\n"),
             "refusal-reason=GuardRefused\n".to_string(),
             String::new(),
         ] {
             assert_eq!(
-                runner_reason(Restore, &log),
+                runner_reason(Restore, Some(&own), &log),
                 RunnerReason::NotStated,
                 "{log}"
             );
         }
-        // And such a line is not a marker when it FOLLOWS the pair either: it
-        // is other text, like the human line.
-        let genuine = pair(Restore, GENUINE);
-        assert!(matches!(
-            runner_reason(Restore, &format!("{genuine}{indented}\n{inside}\n")),
-            RunnerReason::Stated(_)
-        ));
-        // Blank lines and a `\r` are not lines of their own.
-        let spaced = genuine.replace('\n', "\r\n\r\n   \n");
-        assert_eq!(stated(Restore, &spaced), format!("GuardRefused: {GENUINE}"));
+        // NEGATIVE CONTROL: the same line at the start of a line is read.
+        assert_eq!(
+            stated(
+                Restore,
+                &format!("{genuine_detail}\nrefusal-reason=GuardRefused\n")
+            ),
+            "GuardRefused: m"
+        );
     }
 
-    /// **The code is a member of THAT KIND's closed set or the line is not
-    /// shown.** A well-formed word is not a code, and a `Backup`'s log cannot
-    /// carry a restore-only code.
+    /// **The code is a member of THAT KIND's closed set or the runner's line
+    /// is not shown.** These lines carry the Job's token, so the runner wrote
+    /// them: the answer is "no readable reason", not silence.
     ///
     /// KILLS: the set check removed (pattern only); one set for both kinds.
     #[test]
     fn a_code_outside_the_runs_closed_set_is_not_shown() {
-        let at_the_position = |code: &str| {
+        let own = own();
+        let with_state = |code: &str| {
             format!(
                 "{}\nrefusal-reason=GuardRefused\n",
-                detail_line(code, "a sentence")
+                detail_line(Some(&own), code, "a sentence")
             )
         };
         for unknown in [
@@ -644,7 +608,7 @@ mod tests {
         ] {
             for run in [Restore, Backup] {
                 assert_eq!(
-                    runner_reason(run, &at_the_position(unknown)),
+                    runner_reason(run, Some(&own), &with_state(unknown)),
                     RunnerReason::Unreadable,
                     "{run:?} {unknown}"
                 );
@@ -652,40 +616,40 @@ mod tests {
         }
         // Per kind.
         assert_eq!(
-            stated(Restore, &at_the_position("PointUntrusted")),
+            stated(Restore, &with_state("PointUntrusted")),
             "PointUntrusted: a sentence"
         );
         assert_eq!(
-            runner_reason(Backup, &at_the_position("PointUntrusted")),
+            runner_reason(Backup, Some(&own), &with_state("PointUntrusted")),
             RunnerReason::Unreadable
         );
         assert_eq!(
-            stated(Backup, &at_the_position("ConsumerGroupIdInvalid")),
-            "ConsumerGroupIdInvalid: a sentence"
-        );
-        assert_eq!(
-            runner_reason(Restore, &at_the_position("ConsumerGroupIdInvalid")),
+            runner_reason(Restore, Some(&own), &with_state("ConsumerGroupIdInvalid")),
             RunnerReason::Unreadable
         );
-        // NEGATIVE CONTROL: every member, for its own kind, at the position.
+        // NEGATIVE CONTROL: every member, for its own kind.
         for run in [Restore, Backup] {
             for code in run.reason_codes() {
-                assert_eq!(
-                    stated(run, &at_the_position(code)),
-                    format!("{code}: a sentence")
-                );
+                match runner_reason(run, Some(&own), &with_state(code)) {
+                    RunnerReason::Stated(d) => {
+                        assert_eq!(d.to_string(), format!("{code}: a sentence"))
+                    }
+                    other => panic!("{run:?} {code}: {other:?}"),
+                }
             }
         }
     }
 
-    /// **The two lines agree or the pair is not the runner's.** The runner
-    /// derives both from one refusal, so the state is the detail's code or
-    /// the default.
+    /// **The two lines agree or the runner's line is not shown.** The state
+    /// line is the one the runner wrote WITH the detail: the next one after
+    /// it.
     ///
-    /// KILLS: the agreement check removed.
+    /// KILLS: the agreement check removed; the check made against a state
+    /// line BEFORE the detail.
     #[test]
-    fn a_detail_beside_a_state_it_was_not_printed_with_is_not_shown() {
-        let d = detail_line("PointUntrusted", "a sentence");
+    fn a_detail_and_the_state_line_after_it_must_agree() {
+        let own = own();
+        let d = detail_line(Some(&own), "PointUntrusted", "a sentence");
         for (state, agrees) in [
             ("GuardRefused", true),
             ("PointUntrusted", true),
@@ -693,7 +657,11 @@ mod tests {
             ("Succeeded", false),
             ("", false),
         ] {
-            let got = runner_reason(Restore, &format!("{d}\nrefusal-reason={state}\n"));
+            let got = runner_reason(
+                Restore,
+                Some(&own),
+                &format!("{d}\nrefusal-reason={state}\n"),
+            );
             assert_eq!(
                 matches!(got, RunnerReason::Stated(_)),
                 agrees,
@@ -703,6 +671,29 @@ mod tests {
                 assert_eq!(got, RunnerReason::Unreadable, "{state:?}");
             }
         }
+        // No state line after it at all: the runner writes both in one write.
+        assert_eq!(
+            runner_reason(Restore, Some(&own), &format!("{d}\n")),
+            RunnerReason::Unreadable
+        );
+        // A state line BEFORE the detail is not the one written with it.
+        assert_eq!(
+            runner_reason(
+                Restore,
+                Some(&own),
+                &format!("refusal-reason=GuardRefused\n{d}\n")
+            ),
+            RunnerReason::Unreadable
+        );
+        // An agreeing state line directly after it decides, whatever a later
+        // line of that key says.
+        assert_eq!(
+            stated(
+                Restore,
+                &format!("{d}\nrefusal-reason=GuardRefused\nrefusal-reason=Succeeded\n")
+            ),
+            "PointUntrusted: a sentence"
+        );
         // Every pair the runner's own printer builds agrees with itself.
         for message in [
             "TargetTopicConfigRefused: cleanup.policy is `compact`",
@@ -712,7 +703,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    runner_reason(Restore, &pair(Restore, message)),
+                    runner_reason(Restore, Some(&own), &pair(Restore, Some(&own), message)),
                     RunnerReason::Stated(_)
                 ),
                 "{message:?}"
@@ -720,31 +711,43 @@ mod tests {
         }
     }
 
+    /// The LAST line carrying the token decides, and an invalid one is not
+    /// rescued by a valid one before it.
     #[test]
-    fn a_pair_outside_the_scanned_tail_is_not_read() {
-        let genuine = pair(Restore, GENUINE);
-        let filler = "a later line\n".repeat(KEY_SCAN_TAIL_LINES);
+    fn the_last_line_with_the_token_decides() {
+        let own = own();
+        let first = pair(Restore, Some(&own), "the first sentence");
+        let last = pair(Restore, Some(&own), "the last sentence");
         assert_eq!(
-            runner_reason(Restore, &format!("{genuine}{filler}")),
-            RunnerReason::Misplaced
+            stated(Restore, &format!("{first}{last}")),
+            "GuardRefused: the last sentence"
+        );
+        let invalid = format!(
+            "{}\nrefusal-reason=GuardRefused\n",
+            detail_line(Some(&own), "Succeeded", "a sentence")
+        );
+        assert_eq!(
+            runner_reason(Restore, Some(&own), &format!("{first}{invalid}")),
+            RunnerReason::Unreadable
         );
     }
 
     #[test]
     fn a_body_at_the_byte_bound_is_not_scanned() {
-        let genuine = pair(Restore, "a sentence");
+        let own = own();
+        let genuine = pair(Restore, Some(&own), "a sentence");
         let mut body = "x".repeat(REFUSAL_LOG_LIMIT_BYTES as usize - genuine.len() - 1);
         body.push('\n');
         body.push_str(genuine.trim_end_matches('\n'));
         // One byte under the bound: read.
         assert_eq!(body.len() as i64, REFUSAL_LOG_LIMIT_BYTES - 1);
         assert!(matches!(
-            interpret(Restore, body.as_bytes()).reason,
+            interpret(Restore, Some(&own), body.as_bytes()).reason,
             RunnerReason::Stated(_)
         ));
         // At the bound: cut, so nothing is taken from it, the body included.
         body.push('\n');
-        let cut = interpret(Restore, body.as_bytes());
+        let cut = interpret(Restore, Some(&own), body.as_bytes());
         assert_eq!(cut.reason, RunnerReason::TailOverBound);
         assert!(cut.body.is_empty());
     }
@@ -764,7 +767,7 @@ mod tests {
         assert_eq!(bytes.len() as u64, cap);
         assert_eq!(source.limit(), 7 * cap, "the rest was never pulled");
         assert_eq!(
-            interpret(Restore, &bytes).reason,
+            interpret(Restore, Some(&own()), &bytes).reason,
             RunnerReason::TailOverBound,
             "and what was read is a cut body, from which nothing is taken"
         );
@@ -775,26 +778,39 @@ mod tests {
 
     #[test]
     fn invalid_utf8_does_not_cost_the_reason_and_is_never_stored_raw() {
+        let own = own();
         // A stray byte elsewhere in the tail.
         let mut bytes = b"engine said \xFF\xFE\n".to_vec();
-        bytes.extend_from_slice(pair(Restore, "a sentence").as_bytes());
+        bytes.extend_from_slice(pair(Restore, Some(&own), "a sentence").as_bytes());
         assert!(matches!(
-            interpret(Restore, &bytes).reason,
+            interpret(Restore, Some(&own), &bytes).reason,
             RunnerReason::Stated(_)
         ));
         // Inside the sentence itself: one replacement character.
-        let mut bytes =
-            format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\"bad ")
-                .into_bytes();
+        let mut bytes = format!(
+            "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{}\",\"code\":\"GuardRefused\",\"message\":\"bad ",
+            own.expose_token()
+        )
+        .into_bytes();
         bytes.extend_from_slice(b"\xFF\xC0 bytes\"}\nrefusal-reason=GuardRefused\n");
-        match interpret(Restore, &bytes).reason {
+        match interpret(Restore, Some(&own), &bytes).reason {
             RunnerReason::Stated(d) => assert_eq!(d.message(), "bad \u{FFFD} bytes"),
             other => panic!("{other:?}"),
         }
-        // Inside the code: the line does not validate.
-        let mut bytes = format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused").into_bytes();
-        bytes.extend_from_slice(b"\xFF\",\"message\":\"m\"}\nrefusal-reason=GuardRefused\n");
-        assert_eq!(interpret(Restore, &bytes).reason, RunnerReason::Unreadable);
+        // Inside the TOKEN: it is no longer this Job's token, so the line is
+        // not read at all.
+        let mut bytes = format!(
+            "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{}",
+            &own.expose_token()[..38]
+        )
+        .into_bytes();
+        bytes.extend_from_slice(
+            b"\xFF\",\"code\":\"GuardRefused\",\"message\":\"m\"}\nrefusal-reason=GuardRefused\n",
+        );
+        assert_eq!(
+            interpret(Restore, Some(&own), &bytes).reason,
+            RunnerReason::NotStated
+        );
     }
 
     #[test]
@@ -810,7 +826,6 @@ mod tests {
         assert_eq!(RunnerReason::NotStated.message_suffix(), "");
         for reason in [
             RunnerReason::Unreadable,
-            RunnerReason::Misplaced,
             RunnerReason::TailOverBound,
             RunnerReason::PodGone,
             RunnerReason::LogUnreadable { status: Some(403) },
@@ -821,16 +836,50 @@ mod tests {
             assert!(suffix.starts_with("; the runner"), "{suffix}");
             assert!(!suffix.contains('\n') && suffix.len() < 200, "{suffix}");
         }
-        for unreadable in [RunnerReason::Unreadable, RunnerReason::Misplaced] {
-            assert!(unreadable
-                .message_suffix()
-                .starts_with("; the runner gave no readable reason: "));
-        }
         assert!(RunnerReason::PodGone
             .message_suffix()
             .ends_with("because the pod is gone"));
         assert!(RunnerReason::LogUnreadable { status: Some(403) }
             .message_suffix()
             .ends_with("HTTP 403"));
+    }
+
+    /// **Nothing a reason is built from, and nothing this module can say,
+    /// holds the token.**
+    ///
+    /// KILLS: the token carried into the detail, and so into the condition.
+    #[test]
+    fn no_reason_and_no_suffix_holds_the_token() {
+        let own = own();
+        for log in [
+            pair(Restore, Some(&own), GENUINE),
+            // A sentence that REPEATS the token: the credential rules read 40
+            // hex digits as a key and remove them.
+            pair(
+                Restore,
+                Some(&own),
+                &format!("the token is {} and more", own.expose_token()),
+            ),
+            format!(
+                "{}\nrefusal-reason=GuardRefused\n",
+                detail_line(Some(&own), "Succeeded", "a sentence")
+            ),
+        ] {
+            let reason = runner_reason(Restore, Some(&own), &log);
+            let shown = format!("{} {reason:?}", reason.message_suffix());
+            assert!(!shown.contains(own.expose_token()), "{shown}");
+        }
+        match runner_reason(
+            Restore,
+            Some(&own),
+            &pair(
+                Restore,
+                Some(&own),
+                &format!("the token is {} and more", own.expose_token()),
+            ),
+        ) {
+            RunnerReason::Stated(d) => assert_eq!(d.message(), "the token is [redacted] and more"),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -7540,10 +7540,20 @@ async fn reconcile_restore_inner(
         )
         .await?;
 
-        let created = match jobs
-            .create(&PostParams::default(), &job::build(&spec))
-            .await
-        {
+        let mut desired_job = job::build(&spec);
+        // FX-34: THE JOB'S LINE TOKEN, MADE NOW AND KEPT NOWHERE BUT IN THE
+        // JOB. Not part of `runner_argv`: a re-created Job gets another.
+        // Never logged; `crate::job::new_line_token` says what it is for.
+        if !job::add_fresh_line_token(&mut desired_job) {
+            warn!(
+                restore = %name,
+                namespace = %namespace,
+                job = %job_name,
+                "the operating system's random source gave no line token; the Job is created \
+                 without one, and if its runner refuses the plan the Restore will not say why"
+            );
+        }
+        let created = match jobs.create(&PostParams::default(), &desired_job).await {
             Ok(created) if compatible_restore_job(&created, restore) => true,
             Ok(_) => {
                 return Err(RestoreError::Refused(
@@ -7793,11 +7803,16 @@ async fn reconcile_restore_inner(
     // every other exit code takes the read it always took and carries no
     // runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
+        // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
+        // is the runner's only when it carries it; a Job with none (an older
+        // controller built it) has no line this pass will read as a reason.
+        let line_token = job::line_token(&job);
         let read = crate::refusal::read(
             &pods,
             &namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Restore,
+            line_token.as_ref(),
         )
         .await;
         (read.body, Some(read.reason))

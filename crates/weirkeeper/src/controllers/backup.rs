@@ -5209,7 +5209,19 @@ async fn reconcile_backup_inner(
 
         // A refusal from here on is written by the caller over THIS object.
         *written = Some(stored.clone());
-        let desired_job = runner_job(backup, &cluster, &frozen, runner)?;
+        let mut desired_job = runner_job(backup, &cluster, &frozen, runner)?;
+        // FX-34: THE JOB'S LINE TOKEN, MADE NOW AND KEPT NOWHERE BUT IN THE
+        // JOB. Not part of the frozen argv: a re-created Job gets another.
+        // Never logged; `crate::job::new_line_token` says what it is for.
+        if !job::add_fresh_line_token(&mut desired_job) {
+            warn!(
+                backup = %name,
+                namespace = %namespace,
+                job = %job_name,
+                "the operating system's random source gave no line token; the Job is created \
+                 without one, and if its runner refuses the plan the Backup will not say why"
+            );
+        }
         let created = create_runner_job(&jobs, backup, &desired_job).await?;
         info!(
             backup = %name,
@@ -5444,11 +5456,16 @@ async fn reconcile_backup_inner(
     // THE ONLY GATE: every other exit code takes the read it always took and
     // carries no runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
+        // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
+        // is the runner's only when it carries it; a Job with none (an older
+        // controller built it) has no line this pass will read as a reason.
+        let line_token = job::line_token(&job);
         let read = crate::refusal::read(
             &pods,
             &namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Backup,
+            line_token.as_ref(),
         )
         .await;
         (read.body, Some(read.reason))

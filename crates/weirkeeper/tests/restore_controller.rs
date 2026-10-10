@@ -2343,6 +2343,32 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
                 )
             });
     }
+    // FX-34: AND EXCEPT FOR EACH JOB'S OWN LINE TOKEN, the last two arguments
+    // of the runner. It is made when the Job is built, from the operating
+    // system's random source, so two Jobs never share one: the pair is taken
+    // off each Job here, checked, and the rest compared.
+    let tokens: Vec<String> = jobs
+        .iter_mut()
+        .map(|job| {
+            let args = job["spec"]["template"]["spec"]["containers"][0]["args"]
+                .as_array_mut()
+                .expect("runner args");
+            let token = args.pop().expect("the token");
+            let flag = args.pop().expect("its flag");
+            assert_eq!(flag, logweir_core::refusal_detail::LINE_TOKEN_ARG);
+            token.as_str().expect("a string").to_string()
+        })
+        .collect();
+    for token in &tokens {
+        assert!(
+            token.len() == 40
+                && token
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "160 bits as lower-case hex"
+        );
+    }
+    assert_ne!(tokens[0], tokens[1], "two Jobs, two tokens");
     assert_eq!(
         jobs[0], jobs[1],
         "…and the Jobs are identical except for the mandatory exact plan/approval digests. \
@@ -10723,8 +10749,8 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
 // read logs.
 
 use logweir_core::refusal_detail::{
-    refusal_detail_line, RefusingRun, REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
-    RESTORE_REASON_CODES, TRUNCATION_MARKER,
+    refusal_detail_line, LineToken, RefusingRun, LINE_TOKEN_ARG, REASON_MESSAGE_MAX_BYTES,
+    REFUSAL_DETAIL_PREFIX, REPLACEMENT, RESTORE_REASON_CODES, TRUNCATION_MARKER,
 };
 use weirkeeper::controllers::restore::finished_status_patch_with_reason;
 use weirkeeper::refusal::{
@@ -10762,7 +10788,11 @@ fn fx34_k3_sentence() -> String {
 /// own formatter writes for that sentence, immediately before
 /// `refusal-reason=`.
 fn fx34_k3_log_with_detail() -> String {
-    let detail = refusal_detail_line(RefusingRun::Restore, &fx34_k3_sentence());
+    let detail = refusal_detail_line(
+        RefusingRun::Restore,
+        Some(&fx34_token()),
+        &fx34_k3_sentence(),
+    );
     let old = fx34_fixture("k3-runner.log");
     assert!(old.ends_with("refusal-reason=GuardRefused\n"));
     old.replace(
@@ -10771,29 +10801,71 @@ fn fx34_k3_log_with_detail() -> String {
     )
 }
 
-/// One `refusal-detail=` line, built by hand so a row can put anything in it.
-fn fx34_detail(code: &str, message: &str) -> String {
-    format!(
-        "{REFUSAL_DETAIL_PREFIX}{}",
-        serde_json::json!({ "code": code, "message": message })
-    )
+/// The line token of the Job these rows' passes read, and another Job's.
+/// Assembled at run time, so no source line holds a secret-shaped literal.
+fn fx34_token() -> LineToken {
+    LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+fn fx34_another_jobs_token() -> LineToken {
+    LineToken::parse(&"3c".repeat(20)).expect("forty hex digits")
 }
 
-/// A log tail whose last two lines are `detail` and a plain state line: the
-/// position the runner prints its detail line at, and the only one it is
-/// honoured at.
-fn fx34_at_the_position(detail: &str) -> String {
+/// One `refusal-detail=` line carrying THIS Job's token, built by hand so a
+/// row can put anything in its other two members.
+fn fx34_detail(code: &str, message: &str) -> String {
+    fx34_detail_with(Some(&fx34_token()), code, message)
+}
+
+/// [`fx34_detail`] with the token as a parameter: `None` is a line with no
+/// token member at all.
+fn fx34_detail_with(token: Option<&LineToken>, code: &str, message: &str) -> String {
+    let value = match token {
+        Some(t) => {
+            serde_json::json!({ "token": t.expose_token(), "code": code, "message": message })
+        }
+        None => serde_json::json!({ "code": code, "message": message }),
+    };
+    format!("{REFUSAL_DETAIL_PREFIX}{value}")
+}
+
+/// `detail` and the plain state line a runner writes after it.
+fn fx34_with_state(detail: &str) -> String {
     format!("{detail}\nrefusal-reason=GuardRefused\n")
 }
 
-/// The two lines a runner carrying FX-34 prints last for `message`, built by
-/// its own formatters.
+/// The two lines a runner given THIS Job's token prints last for `message`,
+/// built by its own formatters.
 fn fx34_runner_pair(message: &str) -> String {
+    fx34_runner_pair_with(Some(&fx34_token()), message)
+}
+
+/// [`fx34_runner_pair`] for a runner given `token`, or none.
+fn fx34_runner_pair_with(token: Option<&LineToken>, message: &str) -> String {
     format!(
         "{}\n{}\n",
-        refusal_detail_line(RefusingRun::Restore, message),
+        refusal_detail_line(RefusingRun::Restore, token, message),
         logweir_core::guard::refusal_reason_line(message)
     )
+}
+
+/// [`job_body`] as the Job this controller creates: with a `runner`
+/// container whose last two arguments are the line token, or with a runner
+/// container and no token (a Job an older controller built).
+fn fx34_job_body(condition: &str, token: Option<&LineToken>) -> String {
+    let mut job: Value = serde_json::from_str(&job_body(condition)).expect("the fixture is JSON");
+    let mut args = vec![
+        "restore".to_string(),
+        "run".to_string(),
+        "--spec".to_string(),
+        "/plan/restore.yaml".to_string(),
+    ];
+    if let Some(token) = token {
+        args.push(LINE_TOKEN_ARG.to_string());
+        args.push(token.expose_token().to_string());
+    }
+    job["spec"]["template"]["spec"]["containers"] =
+        serde_json::json!([{ "name": "runner", "image": "x", "args": args }]);
+    job.to_string()
 }
 
 /// The API server's `Status` for a refused or failed `pods/log` read.
@@ -10804,13 +10876,28 @@ fn fx34_log_failure(code: u16, reason: &str) -> String {
     )
 }
 
-/// The finished-Job route table with the `pods/log` answer as a parameter.
+/// The finished-Job route table with the `pods/log` answer as a parameter,
+/// over a Job that carries THIS Job's line token.
 fn fx34_routes(exit_code: i32, log_status: u16, log: String) -> Vec<Route> {
+    fx34_routes_for(exit_code, log_status, log, Some(&fx34_token()))
+}
+
+/// [`fx34_routes`] with the Job's token as a parameter: `None` is a Job that
+/// carries none.
+fn fx34_routes_for(
+    exit_code: i32,
+    log_status: u16,
+    log: String,
+    token: Option<&LineToken>,
+) -> Vec<Route> {
     let condition = if exit_code == 0 { "Complete" } else { "Failed" };
     let mut routes = finished_routes(pod_list_terminated(exit_code), log, condition);
     for route in &mut routes {
         if route.path_suffix == "/log" {
             route.status = log_status;
+        }
+        if route.path_suffix.ends_with(&format!("/jobs/{NAME}")) {
+            route.body = fx34_job_body(condition, token);
         }
     }
     routes
@@ -10827,8 +10914,18 @@ async fn fx34_pass(
     Result<weirkeeper::controllers::restore::RestoreOutcome, String>,
     Vec<SeenBody>,
 ) {
-    let (client, _rec, bodies) =
-        mock_client_recording_bodies(fx34_routes(exit_code, log_status, log));
+    fx34_pass_over(restore, fx34_routes(exit_code, log_status, log)).await
+}
+
+/// [`fx34_pass`] over a route table the row built.
+async fn fx34_pass_over(
+    restore: &Restore,
+    routes: Vec<Route>,
+) -> (
+    Result<weirkeeper::controllers::restore::RestoreOutcome, String>,
+    Vec<SeenBody>,
+) {
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
     let outcome = reconcile_restore(
         restore,
         &client,
@@ -10842,9 +10939,15 @@ async fn fx34_pass(
     (outcome, seen)
 }
 
-/// The terminal status of an exit-3 pass over `log`, and the requests.
+/// The terminal status of an exit-3 pass over `log`, and the requests. The
+/// Job carries THIS Job's line token.
 async fn fx34_refused(log: String) -> (Value, Vec<SeenBody>) {
-    let (outcome, seen) = fx34_pass(&restore(), 3, 200, log).await;
+    fx34_refused_for(log, Some(&fx34_token())).await
+}
+
+/// [`fx34_refused`] with the Job's token as a parameter.
+async fn fx34_refused_for(log: String, token: Option<&LineToken>) -> (Value, Vec<SeenBody>) {
+    let (outcome, seen) = fx34_pass_over(&restore(), fx34_routes_for(3, 200, log, token)).await;
     let outcome = outcome.expect("an exit 3 never fails the pass");
     assert_eq!(outcome.exit_code, Some(3));
     let mut statuses = patched_statuses(&seen);
@@ -10994,8 +11097,10 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
 /// The log tails of the passes FX-34 must not change, each carrying a VALID
 /// detail line: only an exit 3 may lift one.
 fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
+    // A line with THIS Job's token: at exit 3 it would be shown.
     let detail = refusal_detail_line(
         RefusingRun::Restore,
+        Some(&fx34_token()),
         "StorageRegionInvalid: a sentence only an exit 3 may carry",
     );
     vec![
@@ -11121,10 +11226,16 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
 /// exact message the status must carry. `fx34_assert_nothing_raw` then walks
 /// every string the pass wrote.
 ///
-/// THE LINE IS HONOURED WHERE THE RUNNER PRINTS IT AND NOWHERE ELSE: directly
-/// before the final `refusal-reason=` line. Every arm about what a line HOLDS
-/// therefore puts it there (`fx34_at_the_position`), so what refuses it is
-/// what the arm names and not its place.
+/// EVERY LINE HERE CARRIES THE JOB'S TOKEN, unless the arm says otherwise: so
+/// what refuses or cleans it is what the arm names, and not whose line it is.
+/// The rows about whose line it is come after this one.
+///
+/// Two outcomes for a line that is not shown, and they differ on purpose. A
+/// line that carries the token and fails a rule the RUNNER's line is held to
+/// (its code, its sentence, the state line after it) says "no readable
+/// reason". A line that is not the one JSON object, or is over the length
+/// bound, cannot be said to carry the token at all: it is not read, and the
+/// message is the old one.
 #[tokio::test]
 async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     let unreadable = format!(
@@ -11146,13 +11257,15 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         kept.push(TRUNCATION_MARKER);
         kept
     };
-    let here = fx34_at_the_position;
+    let here = fx34_with_state;
+    let own_token = fx34_token();
+    let token = own_token.expose_token();
 
     let arms: Vec<(&str, String, String)> = vec![
         (
-            "a detail line of 100 KiB",
+            "a detail line of 100 KiB: over the line bound, so not read at all",
             here(&fx34_detail("GuardRefused", &words(100 * 1024))),
-            unreadable.clone(),
+            FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "a sentence over the bound is cut on a character boundary with a marker",
@@ -11160,13 +11273,11 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
             stated(&format!("GuardRefused: {cut}")),
         ),
         (
-            "an invalid line at the position is not rescued by a valid earlier one",
+            "the last line with the token decides, and is not rescued by a valid earlier one",
             format!(
-                "{}\n{}",
-                fx34_detail("PointUntrusted", "a valid earlier line"),
-                here(&format!(
-                    "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"Bad Code\",\"message\":\"m\"}}"
-                ))
+                "{}{}",
+                here(&fx34_detail("PointUntrusted", "a valid earlier line")),
+                here(&fx34_detail("Bad Code", "m"))
             ),
             unreadable.clone(),
         ),
@@ -11196,11 +11307,16 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
             unreadable.clone(),
         ),
         (
-            "a detail beside a state it was not printed with",
+            "a detail whose state line names a state it was not printed with",
             format!(
                 "{}\nrefusal-reason=TargetTopicConfigRefused\n",
                 fx34_detail("PointUntrusted", "a sentence")
             ),
+            unreadable.clone(),
+        ),
+        (
+            "a detail with no state line after it",
+            format!("{}\n", fx34_detail("GuardRefused", "a sentence")),
             unreadable.clone(),
         ),
         (
@@ -11232,34 +11348,38 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         ),
         (
             "the key inside another line is not the line",
-            "{\"level\":\"ERROR\",\"message\":\"refusal-detail={\\\"code\\\":\\\"GuardRefused\\\",\\\"message\\\":\\\"m\\\"}\"}\n \
-             refusal-detail={\"code\":\"GuardRefused\",\"message\":\"indented\"}\nrefusal-reason=GuardRefused\n"
-                .to_string(),
+            format!(
+                "{{\"level\":\"ERROR\",\"message\":{}}}\n {}\nrefusal-reason=GuardRefused\n",
+                Value::String(fx34_detail("GuardRefused", "m")),
+                fx34_detail("GuardRefused", "indented")
+            ),
             FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "not JSON",
             here(&format!("{REFUSAL_DETAIL_PREFIX}GuardRefused: a sentence")),
-            unreadable.clone(),
+            FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "a JSON array",
-            here(&format!("{REFUSAL_DETAIL_PREFIX}[\"GuardRefused\",\"a sentence\"]")),
-            unreadable.clone(),
+            here(&format!(
+                "{REFUSAL_DETAIL_PREFIX}[\"{token}\",\"GuardRefused\",\"a sentence\"]"
+            )),
+            FX34_OLD_MESSAGE.to_string(),
         ),
         (
-            "a third member",
+            "another member beside the three",
             here(&format!(
-                "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\"m\",\"html\":\"<b>\"}}"
+                "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{token}\",\"code\":\"GuardRefused\",\"message\":\"m\",\"html\":\"<b>\"}}"
             )),
-            unreadable.clone(),
+            FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "a repeated member",
             here(&format!(
-                "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\"m\",\"message\":\"n\"}}"
+                "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{token}\",\"code\":\"GuardRefused\",\"message\":\"m\",\"message\":\"n\"}}"
             )),
-            unreadable.clone(),
+            FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "a sentence with nothing printable in it",
@@ -11267,8 +11387,8 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
             unreadable.clone(),
         ),
     ];
-    // NEGATIVE CONTROL for every `unreadable` arm: the same position holds a
-    // line that IS shown.
+    // NEGATIVE CONTROL for every arm that shows nothing: the same shape with a
+    // valid line IS shown.
     let (control, _) =
         fx34_refused(log_body(&here(&fx34_detail("GuardRefused", "a sentence")))).await;
     assert_eq!(fx34_message(&control), stated("GuardRefused: a sentence"));
@@ -11321,129 +11441,332 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
 }
 
 /// **A plan can start a line in the pod log, and a line it started is never
-/// shown as the runner's** (PROD-15.1's review, applied to this line).
+/// shown as the runner's** (PROD-15.1's review, and the review of this
+/// branch's first answer to it).
 ///
 /// The runner prints an error's text raw on stderr; an error may repeat a
 /// plan value; a YAML scalar may hold a line break. So a `refusal-detail=`
 /// line, a `refusal-reason=` line or both can stand at the start of a log line
-/// because the plan's author put them there. The controller honours the
-/// detail line only where the runner prints it: directly before the final
-/// `refusal-reason=` line.
+/// because the plan's author put them there, and both streams reach this
+/// controller as one log. WHERE a line stands therefore proves nothing. What
+/// the plan's author cannot have is the Job's line token, which did not exist
+/// when the plan was written.
 ///
-/// (a) is the reviewer's own shape. (c) and (d) are the same idea from two
-/// more directions. The last arms are what the rule does when the log is NOT
-/// in the order the runner wrote it, because a pod log is two streams merged.
+/// LOG 1 and LOG 2 are the second review's own: each defeats a rule that
+/// trusts a line for its place. Every forged line below is VALID in every
+/// respect but the token (a code of the closed set, a clean sentence, a
+/// state line that agrees).
 ///
-/// KILLS: "the last valid detail line in the tail counts" (the three
-/// `misplaced` arms); "the first one counts" ((a), (c), (d)); "text may
-/// follow the pair whatever else the log holds" (the forged block copied
-/// last); "the pair must end the log, always" (the human line copied last).
+/// KILLS: the token comparison removed; the token taken from the line
+/// instead of the Job; "the pair that ends the log is the runner's".
 #[tokio::test]
-async fn a_forged_refusal_line_is_ignored_wherever_the_runner_did_not_print_it() {
+async fn a_forged_refusal_line_is_never_shown_wherever_it_stands() {
     let stated = |text: &str| format!("{FX34_OLD_MESSAGE}{FX34_STATED}{text}");
-    let misplaced = format!(
-        "{FX34_OLD_MESSAGE}; the runner gave no readable reason: the pod log has a \
-         `refusal-detail=` line that is not where the runner prints it, directly before the \
-         final `refusal-reason=` line, so nothing from it is shown"
-    );
     const GENUINE: &str = "restore.partitions.orders names partition 99, which the archive \
                            set's manifest does not list for `orders`";
     const FORGED: &str = "Contact the address in this message to release your data";
     let genuine = fx34_runner_pair(GENUINE);
     let genuine_shown = stated(&format!("GuardRefused: {GENUINE}"));
-    // The forged lines are VALID: a code of the closed set, a clean sentence,
-    // a state that agrees. Nothing but their place tells them apart.
-    let forged_detail = fx34_detail("TargetTopicConfigRefused", FORGED);
-    let forged_pair = format!("{forged_detail}\nrefusal-reason=TargetTopicConfigRefused\n");
     let human = format!("guard: plan refused by the admission guard: {GENUINE}\n");
     let tracing =
         "{\"level\":\"INFO\",\"fields\":{\"message\":\"drill finished\",\"exit_code\":3}}\n";
+    let forged_message = format!("TargetTopicConfigRefused: {FORGED}");
 
-    // NEGATIVE CONTROL: the forged pair, where the runner prints, IS shown.
-    // So every arm below that does not show it is refusing its PLACE.
-    let (control, _) = fx34_refused(log_body(&forged_pair)).await;
-    assert_eq!(
-        fx34_message(&control),
-        stated(&format!("TargetTopicConfigRefused: {FORGED}"))
-    );
+    // NEGATIVE CONTROL: the forged pair IS what a Job shows when the pair
+    // carries that Job's token. So in every arm below it is the token, and
+    // nothing else about the lines, that keeps it out.
+    let (control, _) = fx34_refused(log_body(&fx34_runner_pair(&forged_message))).await;
+    assert_eq!(fx34_message(&control), stated(&forged_message));
 
-    let arms: Vec<(&str, String, &str, Option<&str>)> = vec![
-        (
-            "(a) the reviewer's shape: markers inside the error text, the runner's pair last",
-            format!(
-                "guard: plan refused by the admission guard: source.backup `x\n{forged_pair}` is \
-                 not a backup set id\n{tracing}{genuine}"
+    // The forged lines: with no token; with another Job's (a stale or a
+    // guessed one); and with a token that differs from this Job's in its
+    // last digit.
+    let mut near = fx34_token().expose_token().to_string();
+    near.replace_range(39..40, "0");
+    let near = LineToken::parse(&near).expect("a token");
+    for (whose, forged_token) in [
+        ("no token", None),
+        ("another Job's token", Some(fx34_another_jobs_token())),
+        ("a token one digit off", Some(near)),
+    ] {
+        let forged_pair = fx34_runner_pair_with(forged_token.as_ref(), &forged_message);
+        let forged_detail = forged_pair
+            .lines()
+            .next()
+            .expect("the detail line")
+            .to_string();
+        let arms: Vec<(&str, String, &str)> = vec![
+            (
+                "LOG 1: the runner's pair, then the human text whose tail is a forged pair \
+                 that ENDS THE LOG",
+                format!(
+                    "{tracing}{genuine}guard: plan refused by the admission guard: \
+                     source.backup `x\n{forged_pair}"
+                ),
+                genuine_shown.as_str(),
             ),
-            genuine_shown.as_str(),
-            Some("GuardRefused"),
-        ),
-        (
-            "(c) a forged marker earlier in the tail, a genuine different pair last",
-            format!("{forged_detail}\n{human}{tracing}{genuine}"),
-            genuine_shown.as_str(),
-            Some("GuardRefused"),
-        ),
-        (
-            "(d) two detail lines back to back: the one directly before the state line",
-            format!("{forged_detail}\n{genuine}"),
-            genuine_shown.as_str(),
-            Some("GuardRefused"),
-        ),
-        (
-            "(d) two complete pairs: the one that ends the log",
-            format!("{forged_pair}{genuine}"),
-            genuine_shown.as_str(),
-            Some("GuardRefused"),
-        ),
-        (
-            "the human line copied AFTER the runner's pair (two streams, no promised order)",
-            format!("{tracing}{genuine}{human}"),
-            genuine_shown.as_str(),
-            Some("GuardRefused"),
-        ),
-        (
-            "the forged block copied after the runner's pair, text after its markers",
-            format!(
-                "{tracing}{genuine}guard: plan refused by the admission guard: source.backup \
-                 `x\n{forged_pair}` is not a backup set id\n"
+            (
+                "LOG 2: an older runner (no detail line of its own), a forged detail line \
+                 directly before its state line, alone, ending the log",
+                format!(
+                    "guard: plan refused by the admission guard: source.backup `x\n\
+                     {forged_detail}\nrefusal-reason=GuardRefused\n"
+                ),
+                FX34_OLD_MESSAGE,
             ),
-            misplaced.as_str(),
-            None,
-        ),
-        (
-            "a detail line and no state line",
-            format!("{human}{forged_detail}\n"),
-            misplaced.as_str(),
-            None,
-        ),
-        (
-            "a detail line that is not directly before the state line",
-            format!("{forged_detail}\n{human}refusal-reason=GuardRefused\n"),
-            misplaced.as_str(),
-            None,
-        ),
-        (
-            "a detail line after the state line",
-            format!("{human}refusal-reason=GuardRefused\n{forged_detail}\n"),
-            misplaced.as_str(),
-            None,
-        ),
-    ];
-    for (label, tail, expected, exit_reason) in arms {
-        let (status, seen) = fx34_refused(log_body(&tail)).await;
-        assert_eq!(fx34_message(&status), expected, "[{label}]");
-        assert_eq!(status["progress"]["message"], expected, "[{label}]");
-        if let Some(exit_reason) = exit_reason {
-            assert_eq!(status["exitReason"], exit_reason, "[{label}]");
+            (
+                "the reviewer's first shape: forged markers inside the error text, the \
+                 runner's pair last",
+                format!(
+                    "guard: plan refused by the admission guard: source.backup `x\n\
+                     {forged_pair}` is not a backup set id\n{tracing}{genuine}"
+                ),
+                genuine_shown.as_str(),
+            ),
+            (
+                "the runner's pair in the middle, forged lines of both keys around it",
+                format!("{forged_pair}{forged_detail}\n{genuine}{human}{forged_pair}"),
+                genuine_shown.as_str(),
+            ),
+            (
+                "the forged pair alone, where a runner would print its own",
+                forged_pair.clone(),
+                FX34_OLD_MESSAGE,
+            ),
+            (
+                "two forged detail lines and no runner's line",
+                format!("{forged_detail}\n{forged_detail}\nrefusal-reason=GuardRefused\n"),
+                FX34_OLD_MESSAGE,
+            ),
+        ];
+        for (label, tail, expected) in arms {
+            let (status, seen) = fx34_refused(log_body(&tail)).await;
+            assert_eq!(fx34_message(&status), expected, "[{whose}: {label}]");
+            assert_eq!(
+                status["progress"]["message"], expected,
+                "[{whose}: {label}]"
+            );
+            let mut strings = Vec::new();
+            fx34_strings(&status, &mut strings);
+            assert!(
+                !strings.iter().any(|s| s.contains(FORGED)),
+                "[{whose}: {label}] the forged sentence is nowhere in the status"
+            );
+            assert_eq!(fx34_log_reads(&seen).len(), 1, "[{whose}: {label}]");
+            fx34_assert_nothing_raw(&seen, label);
         }
-        let mut strings = Vec::new();
-        fx34_strings(&status, &mut strings);
+    }
+
+    // THE RUNNER'S LINE NEEDS NO PARTICULAR PLACE: with the human line copied
+    // after its pair (two streams, no promised order) it is shown.
+    let (status, _) = fx34_refused(log_body(&format!("{tracing}{genuine}{human}"))).await;
+    assert_eq!(fx34_message(&status), genuine_shown);
+}
+
+/// **A created Job carries a fresh line token as the runner's last two
+/// arguments, and nothing else of the pass holds it.** Two create passes of
+/// the same `Restore` give two tokens. The token is an ARGUMENT: it is not in
+/// the container's environment, not in the Job's metadata, not in the plan or
+/// approval ConfigMaps, and not in any status write.
+///
+/// That the Job is otherwise unchanged is `scratch_mode_and_new_topic_mode_
+/// produce_the_same_job_shape`'s: it takes the token off two created Jobs
+/// and compares the rest whole.
+///
+/// KILLS: a constant token; a token derived from the run's identity; the
+/// token put in the environment, an annotation or a status.
+#[tokio::test]
+async fn a_created_job_carries_a_fresh_line_token_and_nothing_else_does() {
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let object = restore();
+        let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(
+                true,
+                &sha256_prefixed(object.spec.plan_bytes.as_bytes()),
+                &plan_hash(),
+            ),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the Restore is admitted and its Job created");
+        let seen = bodies.lock().expect("readable").clone();
+        let mut job = posted_job(&seen);
+        // The controller reads back exactly what it wrote, off the Job.
+        let typed: k8s_openapi::api::batch::v1::Job =
+            serde_json::from_value(job.clone()).expect("a Job");
+        let token = weirkeeper::job::line_token(&typed)
+            .expect("the created Job carries a line token")
+            .expose_token()
+            .to_string();
         assert!(
-            !strings.iter().any(|s| s.contains(FORGED)),
-            "[{label}] the forged sentence is nowhere in the status"
+            token.len() == 40
+                && token
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "160 bits as lower-case hex"
         );
+        let args = job["spec"]["template"]["spec"]["containers"][0]["args"]
+            .as_array_mut()
+            .expect("runner args");
+        assert_eq!(args.pop().expect("the token"), token.as_str());
+        assert_eq!(args.pop().expect("its flag"), LINE_TOKEN_ARG);
+        assert!(
+            !args.iter().any(|a| a == LINE_TOKEN_ARG),
+            "the flag is given once"
+        );
+        // With the two arguments off, the Job holds it nowhere: not the
+        // environment, not an annotation, not a label.
+        assert!(!job.to_string().contains(&token), "{job}");
+        // And no other request of the pass holds it.
+        for request in seen
+            .iter()
+            .filter(|b| !(b.method == "POST" && path(&b.uri).ends_with("/jobs")))
+        {
+            assert!(
+                !request.body.contains(&token),
+                "the token reached {} {}",
+                request.method,
+                request.uri
+            );
+        }
+        assert!(
+            post_count(&seen, "/configmaps") >= 1,
+            "the control: the pass did write other objects"
+        );
+        tokens.push(token);
+    }
+    assert_ne!(tokens[0], tokens[1], "two Jobs, two tokens");
+    for token in &tokens {
+        for known in [UID, NAME, NS] {
+            assert!(!token.contains(&known.replace('-', "")) && !known.contains(token.as_str()));
+        }
+    }
+}
+
+/// **A Job with no token, and a runner that prints none: the old message,
+/// byte for byte.** A line is read as a reason only when the JOB carries a
+/// token and the LINE carries the same one. Every other pairing writes
+/// exactly the status a log with no detail line at all writes.
+///
+/// * a Job an older controller built (no token) whose runner printed a line
+///   with no token, or with a token;
+/// * a Job with a token whose runner printed a line with none (it was not
+///   given the argument, or predates it).
+///
+/// KILLS: a missing token on the Job read as "any line will do"; a line with
+/// no token accepted.
+#[tokio::test]
+async fn without_a_token_on_the_job_and_on_the_line_the_message_is_the_old_one() {
+    const SENTENCE: &str = "TargetTopicConfigRefused: cleanup.policy is `compact`";
+    let own = fx34_token();
+    let plain = "guard: plan refused by the admission guard: x\nrefusal-reason=GuardRefused\n";
+    for (label, job_token, line_token) in [
+        ("no token on the Job, none on the line", None, None),
+        ("no token on the Job, one on the line", None, Some(&own)),
+        ("a token on the Job, none on the line", Some(&own), None),
+    ] {
+        let with_line = format!(
+            "guard: plan refused by the admission guard: x\n{}\nrefusal-reason=GuardRefused\n",
+            refusal_detail_line(RefusingRun::Restore, line_token, SENTENCE)
+        );
+        let (old, _) = fx34_refused_for(log_body(plain), job_token).await;
+        let (got, seen) = fx34_refused_for(log_body(&with_line), job_token).await;
+        assert_eq!(got, old, "[{label}] the whole status, byte for byte");
+        assert_eq!(fx34_message(&got), FX34_OLD_MESSAGE, "[{label}]");
         assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
-        fx34_assert_nothing_raw(&seen, label);
+    }
+    // NEGATIVE CONTROL: the Job's token on both is shown.
+    let (shown, _) = fx34_refused(log_body(&fx34_runner_pair(SENTENCE))).await;
+    assert_eq!(
+        fx34_message(&shown),
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}{SENTENCE}")
+    );
+}
+
+/// **The token is in no status this controller writes.** Over every outcome
+/// of a refused run's log (a stated reason, an unreadable one, none, a
+/// sentence that repeats the token, a log that could not be read), every
+/// string of every request body the pass WROTE is searched for it.
+///
+/// The CONTROL is the read: the pass's log request is there, and the route's
+/// Job did carry the token (`fx34_job_body`), so a pass that copied what it
+/// read would be caught.
+///
+/// KILLS: the token carried into the detail, the condition or the progress
+/// block.
+#[tokio::test]
+async fn the_line_token_is_in_no_status_this_controller_writes() {
+    let own = fx34_token();
+    let token = own.expose_token();
+    assert!(fx34_job_body("Failed", Some(&own)).contains(token));
+    let repeats = format!("GuardRefused: the plan names {token} as a topic, and {token} again");
+    for (label, tail, shown) in [
+        (
+            "a stated reason",
+            fx34_runner_pair("PointUntrusted. x"),
+            true,
+        ),
+        (
+            "a sentence that repeats the token",
+            fx34_runner_pair(&repeats),
+            true,
+        ),
+        (
+            "an unreadable reason",
+            fx34_with_state(&fx34_detail("Succeeded", "a sentence")),
+            false,
+        ),
+        (
+            "no detail line",
+            "refusal-reason=GuardRefused\n".to_string(),
+            false,
+        ),
+    ] {
+        let (status, seen) = fx34_refused(log_body(&tail)).await;
+        assert_eq!(
+            fx34_message(&status).contains(FX34_STATED),
+            shown,
+            "[{label}] {status}"
+        );
+        for request in seen.iter().filter(|r| r.method != "GET") {
+            assert!(
+                !request.body.contains(token),
+                "[{label}] the token reached {} {}",
+                request.method,
+                request.uri
+            );
+        }
+        assert_eq!(
+            fx34_log_reads(&seen).len(),
+            1,
+            "[{label}] the control: the log was read"
+        );
+    }
+    // The sentence that repeated it reads `[redacted]`: forty hex digits are
+    // a key shape to the rules every relayed sentence passes.
+    let (status, _) = fx34_refused(log_body(&fx34_runner_pair(&repeats))).await;
+    assert_eq!(
+        fx34_message(&status),
+        format!(
+            "{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: the plan names [redacted] as a topic, \
+             and [redacted] again"
+        )
+    );
+    // A log that could not be read.
+    for code in [404, 403, 500] {
+        let (outcome, seen) = fx34_pass(&restore(), 3, code, fx34_log_failure(code, "x")).await;
+        outcome.expect("the pass completes");
+        assert!(seen.iter().all(|r| !r.body.contains(token)), "HTTP {code}");
     }
 }
 
@@ -11519,7 +11842,10 @@ async fn invalid_utf8_in_the_log_is_decoded_lossily_and_cleaned() {
                     let mut log = b"engine said \xFF\xFE\xC0 before it stopped\n".to_vec();
                     log.extend_from_slice(REFUSAL_DETAIL_PREFIX.as_bytes());
                     log.extend_from_slice(
-                        b"{\"code\":\"GuardRefused\",\"message\":\"bad \xFF\xFE bytes\"}\n",
+                        format!("{{\"token\":\"{}\",", fx34_token().expose_token()).as_bytes(),
+                    );
+                    log.extend_from_slice(
+                        b"\"code\":\"GuardRefused\",\"message\":\"bad \xFF\xFE bytes\"}\n",
                     );
                     log.extend_from_slice(b"refusal-reason=GuardRefused\n");
                     Response::builder()
@@ -11734,7 +12060,11 @@ async fn a_refusal_recomputed_later_is_the_same_bytes_and_is_not_written_again()
             later,
         )
     };
-    let same = recompute(&runner_reason(RefusingRun::Restore, &log));
+    let same = recompute(&runner_reason(
+        RefusingRun::Restore,
+        Some(&fx34_token()),
+        &log,
+    ));
     assert!(
         weirkeeper::conditions::status_unchanged(Some(&stored), &same),
         "an hour later the recomputed status is what is stored: {same}"
@@ -11861,10 +12191,7 @@ async fn the_longest_refusal_message_fits_the_progress_field() {
         .expect("the set is not empty");
     // 1200 bytes: under the line bound, over the sentence bound.
     let sentence = "wörd ".repeat(200);
-    let (status, _) = fx34_refused(log_body(&fx34_at_the_position(&fx34_detail(
-        code, &sentence,
-    ))))
-    .await;
+    let (status, _) = fx34_refused(log_body(&fx34_with_state(&fx34_detail(code, &sentence)))).await;
     let message = fx34_message(&status);
     assert!(message.starts_with(&format!("{FX34_OLD_MESSAGE}{FX34_STATED}{code}: w")));
     assert!(message.ends_with(TRUNCATION_MARKER), "{message}");
@@ -11903,7 +12230,20 @@ async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
             .expect("the shared fixture ships"),
     )
     .expect("the fixture is JSON");
-    let line = fixture["detailLine"].as_str().expect("a detail line");
+    // The fixture holds the line as a runner with no token prints it (so the
+    // file carries no token); this Job's runner was given one, and it is
+    // added here as the runner adds it: the first member.
+    let untokened = fixture["detailLine"].as_str().expect("a detail line");
+    let line = untokened.replacen(
+        "refusal-detail={",
+        &format!(
+            "refusal-detail={{\"token\":\"{}\",",
+            fx34_token().expose_token()
+        ),
+        1,
+    );
+    assert_ne!(line, untokened, "the token was added");
+    let line = line.as_str();
     let stored = fixture["storedMessage"].as_str().expect("a stored message");
     let uncleaned = fixture["uncleanedMessage"]
         .as_str()
@@ -11913,6 +12253,13 @@ async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
     assert_eq!(fx34_message(&status), stored);
     assert_eq!(status["progress"]["message"], stored);
     fx34_assert_nothing_raw(&seen, "the console fixture");
+    // Without the token the same line is not the runner's, and nothing of it
+    // is stored.
+    let (ignored, _) = fx34_refused(log_body(&format!(
+        "{untokened}\nrefusal-reason=GuardRefused\n"
+    )))
+    .await;
+    assert_eq!(fx34_message(&ignored), FX34_OLD_MESSAGE);
     // The CONTROL: the line really carries live bidi controls and markup, and
     // the stored message differs from the uncleaned one in those controls only.
     assert!(line.contains("\\u202e") && line.contains("<script>alert(1)</script>"));

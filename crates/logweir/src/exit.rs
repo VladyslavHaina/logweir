@@ -88,42 +88,64 @@ pub fn print_refusal_reason_to<W: std::io::Write>(w: &mut W, message: &str) -> s
 /// and it goes BEFORE the state line so every reader of "the final line",
 /// this build's or an older one's, still finds the state there.
 ///
-/// # The two lines are the LAST two the runner writes, at every exit 3
+/// # The line carries the Job's token, when this process was given one
 ///
 /// A plan can start a line of its own in a pod log: the human line on stderr
 /// prints an error's text raw, and an error may repeat a plan value that
-/// holds a line break. So a controller honours a `refusal-detail=` line only
-/// at the position the runner prints it, directly before the final
-/// `refusal-reason=` line (`weirkeeper::refusal::runner_reason`). Three
-/// things here keep that position the runner's own:
+/// holds a line break. Nothing about where a line stands tells the two apart
+/// in one merged log, so a controller honours a `refusal-detail=` line only
+/// when it carries the token that controller made for this Job and passed as
+/// `--line-token` ([`set_line_token`]). The plan was written before the Job
+/// existed and cannot hold it. A run started by hand has no token and prints
+/// the line without one.
 ///
-/// * the detail line is printed ALWAYS, also for a refusal that says nothing
-///   (`logweir_core::refusal_detail::NO_SENTENCE`), so the position is never
-///   left for another line to occupy;
-/// * both lines go out in ONE write, so nothing this process prints can come
-///   between them;
-/// * the callers (`drill::exiting`, `backup::exiting`) print nothing after
-///   them at exit 3, and the human line and every tracing line come before.
-///
+/// Both lines go out in ONE write, at EVERY exit 3 (a refusal that says
+/// nothing prints `logweir_core::refusal_detail::NO_SENTENCE`), and the
+/// callers (`drill::exiting`, `backup::exiting`) print nothing after them.
 /// The human line on stderr and the tracing lines are unchanged.
 pub fn print_refusal(run: logweir_core::refusal_detail::RefusingRun, message: &str) {
     // `expect`-free for `print_refusal_reason`'s reason: a closed stdout does
     // not change an exit code GC11 has already decided.
-    let _ = print_refusal_to(&mut std::io::stdout().lock(), run, message);
+    let _ = print_refusal_to(&mut std::io::stdout().lock(), run, line_token(), message);
 }
 
 /// The writer seam [`print_refusal`] prints through, so a test asserts the
-/// exact bytes: the detail line, the state line, each with its newline, in
-/// one `write_all`.
+/// exact bytes: the detail line (with `token` in it when there is one), the
+/// state line, each with its newline, in one `write_all`.
 pub fn print_refusal_to<W: std::io::Write>(
     w: &mut W,
     run: logweir_core::refusal_detail::RefusingRun,
+    token: Option<&logweir_core::refusal_detail::LineToken>,
     message: &str,
 ) -> std::io::Result<()> {
     let both = format!(
         "{}\n{}\n",
-        logweir_core::refusal_detail::refusal_detail_line(run, message),
+        logweir_core::refusal_detail::refusal_detail_line(run, token, message),
         logweir_core::guard::refusal_reason_line(message)
     );
     w.write_all(both.as_bytes())
+}
+
+/// The line token this process was started with, if any.
+///
+/// # Why a process-wide value, set once
+///
+/// The token is a fact about the PROCESS (the Job it is the runner of), read
+/// off the command line before anything runs, and used at exactly one place,
+/// the last thing a refused run prints. Carrying it there as a parameter
+/// would thread it through `report_with`, `report` and both `exiting`s for
+/// one use. Set once and never changed: [`set_line_token`] after the first is
+/// ignored.
+static LINE_TOKEN: std::sync::OnceLock<Option<logweir_core::refusal_detail::LineToken>> =
+    std::sync::OnceLock::new();
+
+/// Hold `--line-token`'s value for [`print_refusal`]. `main` calls it once,
+/// before dispatch, for the two commands that take the flag. A later call
+/// changes nothing.
+pub fn set_line_token(token: Option<logweir_core::refusal_detail::LineToken>) {
+    let _ = LINE_TOKEN.set(token);
+}
+
+fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
+    LINE_TOKEN.get().and_then(Option::as_ref)
 }

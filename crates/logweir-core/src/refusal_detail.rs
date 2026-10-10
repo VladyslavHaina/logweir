@@ -12,14 +12,32 @@
 //! # The line
 //!
 //! ```text
-//! refusal-detail={"code":"<ReasonCode>","message":"<sentence>"}
+//! refusal-detail={"token":"<the Job's line token>","code":"<ReasonCode>","message":"<sentence>"}
 //! ```
 //!
-//! One JSON object with exactly those two string members, on one line. The
-//! runner prints it at exit 3 only, ALWAYS, immediately BEFORE
-//! `refusal-reason=`, so I9's "the final stdout line" still holds and the two
-//! lines are the last two the runner writes. A controller honours it at that
-//! position and nowhere else (`weirkeeper::refusal::runner_reason`).
+//! One JSON object on one line: the string members `code` and `message`,
+//! and `token` when the runner was given one (`--line-token`). The runner
+//! prints it at exit 3 only, ALWAYS, immediately BEFORE `refusal-reason=`, so
+//! I9's "the final stdout line" still holds.
+//!
+//! # Who wrote the line: the Job's token, and nothing about where it stands
+//!
+//! A plan can start a line of its own in a pod log: the runner prints an
+//! error's text raw on stderr, an error may repeat a plan value, and a YAML
+//! scalar may hold a line break (PROD-15.1's review). Both streams reach a
+//! controller as ONE log, so no rule about where a line stands, or how
+//! well-formed it is, can tell the runner's line from text the runner was
+//! made to print. What the plan's author cannot have is a value that did not
+//! exist when the plan was written. So the controller makes a fresh random
+//! [`LineToken`] each time it builds a Job, hands it to the runner as a
+//! command-line ARGUMENT, and honours a `refusal-detail=` line only when the
+//! line carries that Job's token ([`RefusalDetail::read_line`]). A line with
+//! no token, or another token, is not the runner's and is not read at all.
+//!
+//! An argument and not an environment variable, for two reasons that are
+//! properties of this codebase: the engine child process inherits the
+//! runner's whole environment, and the engine expands `${NAME}` over its
+//! configuration text before parsing it. Neither reaches an argument.
 //!
 //! # A pod log is untrusted text, on both sides
 //!
@@ -42,21 +60,12 @@
 //!   [`REASON_MESSAGE_MAX_BYTES`] bytes on a character boundary with a
 //!   visible marker;
 //! * a line over [`REFUSAL_DETAIL_LINE_MAX_BYTES`] cannot have come from
-//!   [`RefusalDetail::to_line`], so it is not read at all.
+//!   [`RefusalDetail::to_line`], so it is not read at all;
+//! * the two refusal lines must AGREE ([`RefusalDetail::agrees_with_state`]).
 //!
 //! The runner cleans before it prints and the reader cleans again. The second
 //! pass is what a controller relies on; the first keeps an honest runner's
 //! line inside the bounds the reader enforces.
-//!
-//! # A line in a pod log can be forged by whoever wrote the plan
-//!
-//! The runner prints an error's text raw on stderr, some errors repeat a plan
-//! value, and a YAML scalar may hold a line break: a plan can start a line of
-//! its own choosing in the pod log (PROD-15.1's review). So a well-formed
-//! line is not thereby the runner's. Two things here answer that and the
-//! third is the reader's: the code is one of a CLOSED set per kind, the two
-//! refusal lines must AGREE ([`RefusalDetail::agrees_with_state`]), and the
-//! reader takes the line only from the position the runner prints it at.
 
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +105,8 @@ pub const REASON_MESSAGE_MAX_BYTES: usize = 760;
 /// [`RefusalDetail::to_line`] cannot exceed it: a code of at most 64 bytes
 /// (the longest in a closed set is 30), a 760-byte sentence whose every byte
 /// is a `"` or a `\` and doubles in JSON, and 39 bytes of prefix and
-/// punctuation come to at most 1623. It is well under the 16 KiB
+/// punctuation come to at most 1623; the longest token and its member add
+/// 139, which is 1762. It is well under the 16 KiB
 /// at which CRI splits a container log line, so the line always arrives
 /// whole. A reader ignores a longer line instead of parsing it.
 pub const REFUSAL_DETAIL_LINE_MAX_BYTES: usize = 2048;
@@ -110,9 +120,93 @@ pub const REPLACEMENT: char = '\u{FFFD}';
 /// The code of a refusal whose sentence opens with none: I9's default state.
 pub const DEFAULT_REASON_CODE: &str = crate::guard::TERMINAL_STATE_GUARD_REFUSED;
 
+/// The runner flag the controller passes a Job's [`LineToken`] with.
+pub const LINE_TOKEN_ARG: &str = "--line-token";
+
+/// The fewest hex digits a [`LineToken`] may have: 128 bits.
+pub const LINE_TOKEN_MIN_HEX: usize = 32;
+
+/// The most hex digits a [`LineToken`] may have. A bound, so the line that
+/// carries it stays inside [`REFUSAL_DETAIL_LINE_MAX_BYTES`].
+pub const LINE_TOKEN_MAX_HEX: usize = 128;
+
+/// A Job's line token: the value a `refusal-detail=` line must carry for a
+/// controller to take it as the runner's.
+///
+/// Lower-case hex, [`LINE_TOKEN_MIN_HEX`] to [`LINE_TOKEN_MAX_HEX`] digits.
+/// This crate does not MAKE one (it does no I/O, and a token is only as good
+/// as the random source it came from): `weirkeeper::job::new_line_token`
+/// does, from the operating system's.
+///
+/// It is not a credential: anyone who can read the Job can read it. It is
+/// treated as one in OUTPUT all the same, because its worth is that text
+/// written before the Job existed cannot contain it. So `Debug` never prints
+/// it, there is no `Display`, and equality is constant-time.
+#[derive(Clone)]
+pub struct LineToken(String);
+
+impl LineToken {
+    /// `text` as a token, or `None` when it is not lower-case hex of an
+    /// accepted length.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let shaped = (LINE_TOKEN_MIN_HEX..=LINE_TOKEN_MAX_HEX).contains(&text.len())
+            && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        shaped.then(|| Self(text.to_string()))
+    }
+
+    /// `bytes` as a token: two lower-case hex digits a byte. `None` when that
+    /// is not an accepted length (fewer than 16 bytes, more than 64).
+    #[must_use]
+    pub fn from_random_bytes(bytes: &[u8]) -> Option<Self> {
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        Self::parse(&hex)
+    }
+
+    /// The token's text, for the two places that must write it: the Job's
+    /// argument and the runner's line. Nothing else may.
+    #[must_use]
+    pub fn expose_token(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `candidate` is this token, **in constant time** over the
+    /// token's length: every byte is compared whatever the earlier ones were,
+    /// so how long the comparison takes says nothing about how much of a
+    /// guess was right. A candidate of another length is not it; the length
+    /// of a token is not a secret.
+    #[must_use]
+    pub fn matches(&self, candidate: &str) -> bool {
+        let (own, other) = (self.0.as_bytes(), candidate.as_bytes());
+        if own.len() != other.len() {
+            return false;
+        }
+        let mut difference = 0u8;
+        for (a, b) in own.iter().zip(other) {
+            difference |= a ^ b;
+        }
+        difference == 0
+    }
+}
+
+/// Never the token: a `{:?}` of a struct that holds one is a log line away
+/// from printing it.
+impl std::fmt::Debug for LineToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LineToken(<not shown>)")
+    }
+}
+
+impl PartialEq for LineToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.matches(&other.0)
+    }
+}
+
+impl Eq for LineToken {}
+
 /// What the line carries for a refusal that has nothing printable in it. The
-/// runner prints a detail line at EVERY exit 3, so that the position a reader
-/// trusts is never left for another line to occupy.
+/// runner prints a detail line at EVERY exit 3.
 pub const NO_SENTENCE: &str = "the refusal carried no sentence";
 
 /// Which runner refused. Each kind of run has its OWN closed set of reason
@@ -348,15 +442,35 @@ pub fn split_reason_code(run: RefusingRun, message: &str) -> (&'static str, &str
     (DEFAULT_REASON_CODE, message)
 }
 
-/// The two members of the line's JSON object, and nothing else.
+/// The members of the line's JSON object, and nothing else.
 ///
 /// `deny_unknown_fields`, and serde refuses a repeated member of a struct, so
-/// a line with a third member or with two `message`s is not this document.
+/// a line with another member or with two `message`s is not this document.
+/// `token` is absent when the runner was given none (a run started by a
+/// person), and is written FIRST when present.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Wire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     code: String,
     message: String,
+}
+
+/// What one log line is to the reader of a Job with a [`LineToken`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineRead {
+    /// Not a `refusal-detail=` line carrying this Job's token: another line,
+    /// a line with no token, a line with another token, a line that is not
+    /// the JSON object or is over the length bound. Whoever wrote it, it is
+    /// not this Job's runner speaking, and nothing about it is reported.
+    NotThisJobs,
+    /// It carries this Job's token and does not validate: a code outside the
+    /// run's closed set, or nothing printable in its sentence. The runner
+    /// wrote it; this reader cannot show it.
+    Invalid,
+    /// This Job's runner's line, validated and cleaned.
+    Valid(RefusalDetail),
 }
 
 /// A refusal's reason code and sentence, **validated and cleaned**.
@@ -365,6 +479,8 @@ struct Wire {
 /// so a value of this type has always passed [`is_reason_code`], is a member
 /// of its run's closed set, and has been through [`clean_message`]. What
 /// reaches a status is built from one of these and never from a raw line.
+/// It holds NO token: a token says whose line it was and is not part of what
+/// the line says, so nothing built from this value can show one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusalDetail {
     code: &'static str,
@@ -389,8 +505,7 @@ impl RefusalDetail {
     /// `GuardRefusal`'s text, not an error enum's wrapped `Display`).
     ///
     /// ALWAYS a value. A refusal with nothing printable in it carries
-    /// [`NO_SENTENCE`]: the runner prints a detail line at every exit 3, so
-    /// the one position a reader trusts is always the runner's own line.
+    /// [`NO_SENTENCE`]: the runner prints a detail line at every exit 3.
     #[must_use]
     pub fn from_refusal_message(run: RefusingRun, message: &str) -> Self {
         let (code, rest) = split_reason_code(run, message);
@@ -405,39 +520,56 @@ impl RefusalDetail {
         }
     }
 
-    /// **The reader's side.** From one log line, prefix included, of a run of
-    /// kind `run`.
+    /// **The reader's side.** One log line of a run of kind `run` whose Job
+    /// carries `token`.
     ///
-    /// `None` for a line that does not open with [`REFUSAL_DETAIL_PREFIX`],
-    /// that is longer than [`REFUSAL_DETAIL_LINE_MAX_BYTES`], whose value is
-    /// not a JSON object with exactly the string members `code` and
-    /// `message`, whose code is not a reason code OF THAT KIND OF RUN
-    /// ([`RefusingRun::reason_codes`]: a well-formed word outside the closed
-    /// set is not a code), or whose sentence has nothing printable in it. The
-    /// sentence is cleaned whatever the runner did to it.
+    /// THE TOKEN IS CHECKED FIRST AND DECIDES WHOSE LINE IT IS. A line that
+    /// does not open with [`REFUSAL_DETAIL_PREFIX`], that is longer than
+    /// [`REFUSAL_DETAIL_LINE_MAX_BYTES`], whose value is not the JSON object,
+    /// or whose `token` member is absent or is not `token`
+    /// ([`LineToken::matches`], constant-time) is [`LineRead::NotThisJobs`]:
+    /// it is ignored, whatever else it says. There is deliberately NO reader
+    /// for a line without a token: a controller that could read one could be
+    /// told anything by the plan's author.
+    ///
+    /// A line that carries the token is the runner's. It is then held to
+    /// everything a line always was: a code that is a reason code OF THAT
+    /// KIND OF RUN ([`RefusingRun::reason_codes`]; a well-formed word outside
+    /// the closed set is not a code), and a sentence, cleaned whatever the
+    /// runner did to it, with something printable in it. Failing that it is
+    /// [`LineRead::Invalid`].
     #[must_use]
-    pub fn from_line(run: RefusingRun, line: &str) -> Option<Self> {
+    pub fn read_line(run: RefusingRun, token: &LineToken, line: &str) -> LineRead {
         if line.len() > REFUSAL_DETAIL_LINE_MAX_BYTES {
-            return None;
+            return LineRead::NotThisJobs;
         }
-        let value = line.strip_prefix(REFUSAL_DETAIL_PREFIX)?;
+        let Some(value) = line.strip_prefix(REFUSAL_DETAIL_PREFIX) else {
+            return LineRead::NotThisJobs;
+        };
         // An OBJECT. serde reads a struct from a JSON array too, by position,
-        // and `["A","m"]` is not this document.
+        // and `["t","A","m"]` is not this document.
         if !value.starts_with('{') {
-            return None;
+            return LineRead::NotThisJobs;
         }
-        let wire: Wire = serde_json::from_str(value).ok()?;
+        let Ok(wire) = serde_json::from_str::<Wire>(value) else {
+            return LineRead::NotThisJobs;
+        };
+        if !wire.token.as_deref().is_some_and(|t| token.matches(t)) {
+            return LineRead::NotThisJobs;
+        }
         // The pattern first, then the set: the set implies the pattern, and
         // the pattern is what bounds the comparison's input.
         if !is_reason_code(&wire.code) {
-            return None;
+            return LineRead::Invalid;
         }
-        let code = run.reason_code(&wire.code)?;
+        let Some(code) = run.reason_code(&wire.code) else {
+            return LineRead::Invalid;
+        };
         let message = clean_message(&wire.message);
         if message.is_empty() {
-            return None;
+            return LineRead::Invalid;
         }
-        Some(Self { code, message })
+        LineRead::Valid(Self { code, message })
     }
 
     /// Whether the state a `refusal-reason=` line names is the one THIS
@@ -447,23 +579,23 @@ impl RefusalDetail {
     /// detail's code when that code is one of I9's terminal states and the
     /// sentence named it with `: `, and [`DEFAULT_REASON_CODE`] otherwise. So
     /// a genuine pair's state is the code or the default, never a third
-    /// word, and a detail line beside a state it could not have been printed
-    /// with is not the runner's.
+    /// word.
     #[must_use]
     pub fn agrees_with_state(&self, state: &str) -> bool {
         state == DEFAULT_REASON_CODE || state == self.code
     }
 
-    /// The line, prefix included and with no newline. At most
-    /// [`REFUSAL_DETAIL_LINE_MAX_BYTES`] bytes.
+    /// The line, prefix included and with no newline, carrying `token` when
+    /// there is one. At most [`REFUSAL_DETAIL_LINE_MAX_BYTES`] bytes.
     #[must_use]
-    pub fn to_line(&self) -> String {
+    pub fn to_line(&self, token: Option<&LineToken>) -> String {
         let wire = Wire {
+            token: token.map(|t| t.expose_token().to_string()),
             code: self.code.to_string(),
             message: self.message.clone(),
         };
-        // Two `String` members cannot fail to serialise; the fallback keeps
-        // this function total without an `expect`.
+        // String members cannot fail to serialise; the fallback keeps this
+        // function total without an `expect`.
         let value = serde_json::to_string(&wire).unwrap_or_default();
         format!("{REFUSAL_DETAIL_PREFIX}{value}")
     }
@@ -477,19 +609,40 @@ impl std::fmt::Display for RefusalDetail {
     }
 }
 
-/// The `refusal-detail=` line `run` prints for a guard refusal's message.
-/// Always a line ([`RefusalDetail::from_refusal_message`]). Pure, for the
-/// reason [`crate::guard::refusal_reason_line`] is: this crate does no I/O,
-/// and the binary prints what this returns.
+/// The `refusal-detail=` line `run` prints for a guard refusal's message,
+/// carrying `token` when the runner was given one. Always a line
+/// ([`RefusalDetail::from_refusal_message`]). Pure, for the reason
+/// [`crate::guard::refusal_reason_line`] is: this crate does no I/O, and the
+/// binary prints what this returns.
 #[must_use]
-pub fn refusal_detail_line(run: RefusingRun, message: &str) -> String {
-    RefusalDetail::from_refusal_message(run, message).to_line()
+pub fn refusal_detail_line(run: RefusingRun, token: Option<&LineToken>, message: &str) -> String {
+    RefusalDetail::from_refusal_message(run, message).to_line(token)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use RefusingRun::{Backup, Restore};
+
+    /// A token for these rows, assembled so that no source line holds a
+    /// secret-shaped literal.
+    fn token() -> LineToken {
+        LineToken::parse(&"5a".repeat(20)).expect("forty hex digits")
+    }
+
+    /// The reader, over a line that carries [`token`]: `Some` when it is
+    /// valid.
+    fn valid(run: RefusingRun, line: &str) -> Option<RefusalDetail> {
+        match RefusalDetail::read_line(run, &token(), line) {
+            LineRead::Valid(detail) => Some(detail),
+            LineRead::Invalid | LineRead::NotThisJobs => None,
+        }
+    }
+
+    /// The runner's line for `message`, carrying [`token`].
+    fn printed(run: RefusingRun, message: &str) -> String {
+        refusal_detail_line(run, Some(&token()), message)
+    }
 
     /// The sentence PoC batch 5's K3 runner printed (`k3-runner.log`).
     const K3: &str = "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition \
@@ -537,11 +690,10 @@ mod tests {
         // no closed set today (PROD-11.1b retired the refusal). So it is what
         // any word outside the set is: part of the sentence, kept whole,
         // behind the default code.
-        let line = refusal_detail_line(Restore, K3);
+        let line = printed(Restore, K3);
         assert!(line.starts_with(REFUSAL_DETAIL_PREFIX));
         assert!(!line.contains('\n'), "one line: {line}");
-        let read =
-            RefusalDetail::from_line(Restore, &line).expect("the reader accepts the runner's line");
+        let read = valid(Restore, &line).expect("the reader accepts the runner's line");
         assert_eq!(read.code(), DEFAULT_REASON_CODE);
         assert_eq!(read.message(), K3, "the sentence is the runner's own words");
         assert!(
@@ -559,8 +711,7 @@ mod tests {
         // code, and `<code>: <sentence>` is the runner's own text again.
         let named = "PointInTimeByProducerTime: topic `lat` records LogAppendTime; state \
                      restore.time_basis: producerTime";
-        let read = RefusalDetail::from_line(Restore, &refusal_detail_line(Restore, named))
-            .expect("a line");
+        let read = valid(Restore, &printed(Restore, named)).expect("a line");
         assert_eq!(read.code(), "PointInTimeByProducerTime");
         assert_eq!(read.to_string(), named);
     }
@@ -663,8 +814,8 @@ mod tests {
                 "StorageRegionInvalid",
             ),
         ] {
-            let line = refusal_detail_line(run, message);
-            let read = RefusalDetail::from_line(run, &line).expect("the reader accepts it");
+            let line = printed(run, message);
+            let read = valid(run, &line).expect("the reader accepts it");
             assert_eq!(read.code(), code, "{message:?}");
             assert_eq!(read.message(), NO_SENTENCE, "{message:?}");
         }
@@ -797,10 +948,12 @@ mod tests {
         }
     }
 
+    /// A line carrying [`token`], built by hand so a row can put anything in
+    /// the other two members.
     fn line(code: &str, message: &str) -> String {
         format!(
             "{REFUSAL_DETAIL_PREFIX}{}",
-            serde_json::json!({ "code": code, "message": message })
+            serde_json::json!({ "token": token().expose_token(), "code": code, "message": message })
         )
     }
 
@@ -813,11 +966,7 @@ mod tests {
             "A\u{202E}B",
             &"A".repeat(65),
         ] {
-            assert_eq!(
-                RefusalDetail::from_line(Restore, &line(bad, "a sentence")),
-                None,
-                "{bad:?}"
-            );
+            assert_eq!(valid(Restore, &line(bad, "a sentence")), None, "{bad:?}");
         }
         // PATTERN-SHAPED IS NOT ENOUGH: a well-formed word outside the closed
         // set is not a code, and neither is the other kind's.
@@ -834,7 +983,7 @@ mod tests {
                 "the control: {unknown} IS pattern-shaped"
             );
             assert_eq!(
-                RefusalDetail::from_line(Restore, &line(unknown, "a sentence")),
+                valid(Restore, &line(unknown, "a sentence")),
                 None,
                 "{unknown}"
             );
@@ -845,11 +994,11 @@ mod tests {
             "AuthorizationExpired",
         ] {
             assert_eq!(
-                RefusalDetail::from_line(Backup, &line(restore_only, "a sentence")),
+                valid(Backup, &line(restore_only, "a sentence")),
                 None,
                 "{restore_only}"
             );
-            assert!(RefusalDetail::from_line(Restore, &line(restore_only, "a sentence")).is_some());
+            assert!(valid(Restore, &line(restore_only, "a sentence")).is_some());
         }
         // NEGATIVE CONTROL: every member of each set is read, for its kind.
         for (run, codes) in [
@@ -857,7 +1006,7 @@ mod tests {
             (Backup, &BACKUP_REASON_CODES[..]),
         ] {
             for code in codes {
-                let read = RefusalDetail::from_line(run, &line(code, "a sentence"))
+                let read = valid(run, &line(code, "a sentence"))
                     .unwrap_or_else(|| panic!("{run:?} reads its own code {code}"));
                 assert_eq!(read.code(), *code);
             }
@@ -867,42 +1016,248 @@ mod tests {
     #[test]
     fn only_the_exact_document_is_read() {
         let p = REFUSAL_DETAIL_PREFIX;
+        let token = token();
+        let t = token.expose_token();
         for bad in [
             // not this key, or not at the start of the line
-            r#"refusal-reason={"code":"GuardRefused","message":"m"}"#.to_string(),
-            format!(r#" {p}{{"code":"GuardRefused","message":"m"}}"#),
-            format!(r#"x {p}{{"code":"GuardRefused","message":"m"}}"#),
+            format!(r#"refusal-reason={{"token":"{t}","code":"GuardRefused","message":"m"}}"#),
+            format!(r#" {p}{{"token":"{t}","code":"GuardRefused","message":"m"}}"#),
+            format!(r#"x {p}{{"token":"{t}","code":"GuardRefused","message":"m"}}"#),
             // not an object, a member missing, a member of the wrong type
             format!("{p}GuardRefused: a sentence"),
             format!(r#"{p}"a string""#),
-            format!(r#"{p}["GuardRefused","m"]"#),
-            format!(r#"{p} {{"code":"GuardRefused","message":"m"}}"#),
-            format!(r#"{p}{{"code":"GuardRefused"}}"#),
-            format!(r#"{p}{{"message":"m"}}"#),
-            format!(r#"{p}{{"code":1,"message":"m"}}"#),
-            format!(r#"{p}{{"code":"GuardRefused","message":["m"]}}"#),
-            format!(r#"{p}{{"code":"GuardRefused","message":null}}"#),
-            // a third member, a repeated member, trailing text
-            format!(r#"{p}{{"code":"GuardRefused","message":"m","remedy":"r"}}"#),
-            format!(r#"{p}{{"code":"GuardRefused","message":"m","message":"n"}}"#),
-            format!(r#"{p}{{"code":"GuardRefused","code":"PointUntrusted","message":"m"}}"#),
-            format!(r#"{p}{{"code":"GuardRefused","message":"m"}} and more"#),
+            format!(r#"{p}["{t}","GuardRefused","m"]"#),
+            format!(r#"{p} {{"token":"{t}","code":"GuardRefused","message":"m"}}"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused"}}"#),
+            format!(r#"{p}{{"token":"{t}","message":"m"}}"#),
+            format!(r#"{p}{{"token":"{t}","code":1,"message":"m"}}"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":["m"]}}"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":null}}"#),
+            // another member, a repeated member, trailing text
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m","remedy":"r"}}"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m","message":"n"}}"#),
             format!(
-                r#"{p}{{"code":"GuardRefused","message":"m"}}{{"code":"PointUntrusted","message":"n"}}"#
+                r#"{p}{{"token":"{t}","code":"GuardRefused","code":"PointUntrusted","message":"m"}}"#
+            ),
+            format!(r#"{p}{{"token":"{t}","token":"{t}","code":"GuardRefused","message":"m"}}"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m"}} and more"#),
+            format!(
+                r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m"}}{{"token":"{t}","code":"PointUntrusted","message":"n"}}"#
             ),
             // cut short, or empty
-            format!(r#"{p}{{"code":"GuardRefused","message":"m"#),
+            format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m"#),
             p.to_string(),
         ] {
-            assert_eq!(RefusalDetail::from_line(Restore, &bad), None, "{bad}");
+            assert_eq!(valid(Restore, &bad), None, "{bad}");
         }
-        let good = format!(r#"{p}{{"code":"GuardRefused","message":"m"}}"#);
-        assert!(RefusalDetail::from_line(Restore, &good).is_some());
+        let good = format!(r#"{p}{{"token":"{t}","code":"GuardRefused","message":"m"}}"#);
+        assert!(valid(Restore, &good).is_some());
         // Member order is not part of the document.
-        let swapped = format!(r#"{p}{{"message":"m","code":"GuardRefused"}}"#);
+        let swapped = format!(r#"{p}{{"message":"m","code":"GuardRefused","token":"{t}"}}"#);
+        assert_eq!(valid(Restore, &swapped), valid(Restore, &good));
+    }
+
+    /// **A line is this Job's only when it carries this Job's token.** Every
+    /// line here is otherwise VALID, so what refuses it is the token and
+    /// nothing else.
+    ///
+    /// KILLS: the token comparison removed; a line with no token read as
+    /// anyone's.
+    #[test]
+    fn a_line_is_this_jobs_only_when_it_carries_the_jobs_token() {
+        let p = REFUSAL_DETAIL_PREFIX;
+        let own = token();
+        let other = LineToken::parse(&"c3".repeat(20)).expect("another Job's token");
+        let with = |member: &str| {
+            format!(r#"{p}{{{member}"code":"GuardRefused","message":"a sentence"}}"#)
+        };
+        // NEGATIVE CONTROL: with the Job's token the line is read.
+        let genuine = with(&format!(r#""token":"{}","#, own.expose_token()));
+        assert!(matches!(
+            RefusalDetail::read_line(Restore, &own, &genuine),
+            LineRead::Valid(_)
+        ));
+        let mut near = own.expose_token().to_string();
+        near.replace_range(39..40, "b");
+        let mut first = own.expose_token().to_string();
+        first.replace_range(0..1, "6");
+        for (label, member) in [
+            ("no token member at all", String::new()),
+            (
+                "another Job's token",
+                format!(r#""token":"{}","#, other.expose_token()),
+            ),
+            (
+                "the token with its last digit changed",
+                format!(r#""token":"{near}","#),
+            ),
+            (
+                "the token with its first digit changed",
+                format!(r#""token":"{first}","#),
+            ),
+            (
+                "a prefix of the token",
+                format!(r#""token":"{}","#, &own.expose_token()[..32]),
+            ),
+            (
+                "the token and more",
+                format!(r#""token":"{}00","#, own.expose_token()),
+            ),
+            (
+                "the token in upper case",
+                format!(r#""token":"{}","#, own.expose_token().to_uppercase()),
+            ),
+            ("an empty token", r#""token":"","#.to_string()),
+            ("a token that is not a string", r#""token":5,"#.to_string()),
+            ("a null token", r#""token":null,"#.to_string()),
+            (
+                "a list holding the token",
+                format!(r#""token":["{}"],"#, own.expose_token()),
+            ),
+        ] {
+            assert_eq!(
+                RefusalDetail::read_line(Restore, &own, &with(&member)),
+                LineRead::NotThisJobs,
+                "{label}"
+            );
+        }
+        // The token in the SENTENCE, or anywhere but its member, is not it.
+        let in_the_sentence = format!(
+            r#"{p}{{"code":"GuardRefused","message":"token {} token"}}"#,
+            own.expose_token()
+        );
         assert_eq!(
-            RefusalDetail::from_line(Restore, &swapped),
-            RefusalDetail::from_line(Restore, &good)
+            RefusalDetail::read_line(Restore, &own, &in_the_sentence),
+            LineRead::NotThisJobs
+        );
+        // And the same genuine line is nobody's to the reader of another Job.
+        assert_eq!(
+            RefusalDetail::read_line(Restore, &other, &genuine),
+            LineRead::NotThisJobs
+        );
+    }
+
+    /// A line that carries the Job's token and does not validate is INVALID,
+    /// which is a different answer from "not this Job's": the runner said
+    /// something this reader cannot show.
+    #[test]
+    fn a_line_with_the_jobs_token_that_does_not_validate_is_invalid() {
+        let own = token();
+        for (label, bad) in [
+            ("a code in no closed set", line("Succeeded", "a sentence")),
+            (
+                "a code that is not code-shaped",
+                line("Bad Code", "a sentence"),
+            ),
+            (
+                "a backup's code, read for a restore",
+                line("ConsumerGroupIdInvalid", "a sentence"),
+            ),
+            (
+                "nothing printable in the sentence",
+                line("GuardRefused", "\u{0007}\n"),
+            ),
+        ] {
+            assert_eq!(
+                RefusalDetail::read_line(Restore, &own, &bad),
+                LineRead::Invalid,
+                "{label}"
+            );
+        }
+        // NEGATIVE CONTROL.
+        assert!(matches!(
+            RefusalDetail::read_line(Restore, &own, &line("GuardRefused", "a sentence")),
+            LineRead::Valid(_)
+        ));
+    }
+
+    #[test]
+    fn a_token_is_lower_case_hex_of_a_bounded_length_or_it_is_not_one() {
+        for good in [
+            "0".repeat(32),
+            "ab".repeat(20),
+            "f".repeat(128),
+            "0123456789abcdef".repeat(2),
+        ] {
+            assert!(LineToken::parse(&good).is_some(), "{good}");
+        }
+        for bad in [
+            String::new(),
+            "a".repeat(31),
+            "a".repeat(129),
+            "A".repeat(40),
+            "g".repeat(40),
+            format!("{} ", "a".repeat(39)),
+            format!("{}\n", "a".repeat(40)),
+            format!("-{}", "a".repeat(39)),
+            "é".repeat(20),
+        ] {
+            assert!(LineToken::parse(&bad).is_none(), "{bad:?}");
+        }
+        // Bytes become two digits each, so 16 bytes is the fewest (128 bits).
+        assert_eq!(
+            LineToken::from_random_bytes(&[0x00, 0x0f, 0xa0, 0xff].repeat(5))
+                .expect("twenty bytes")
+                .expose_token(),
+            "000fa0ff".repeat(5)
+        );
+        assert!(LineToken::from_random_bytes(&[7; 16]).is_some());
+        assert!(LineToken::from_random_bytes(&[7; 15]).is_none());
+        assert!(LineToken::from_random_bytes(&[7; 65]).is_none());
+        assert_eq!((LINE_TOKEN_MIN_HEX, LINE_TOKEN_MAX_HEX), (32, 128));
+    }
+
+    /// The comparison looks at every byte, and nothing prints a token.
+    #[test]
+    fn a_token_is_compared_whole_and_is_never_printed() {
+        let own = token();
+        assert!(own.matches(own.expose_token()));
+        assert_eq!(own, own.clone());
+        for at in 0..40 {
+            let mut other = own.expose_token().to_string();
+            other.replace_range(at..=at, "0");
+            assert!(!own.matches(&other), "a difference at digit {at} alone");
+        }
+        assert!(!own.matches(""));
+        assert!(!own.matches(&own.expose_token()[..39]));
+        assert!(!own.matches(&format!("{}5", own.expose_token())));
+        // `Debug` is the only formatter, and it shows nothing of the value.
+        let shown = format!("{own:?} {:?}", Some(&own));
+        assert!(
+            !shown.contains(own.expose_token()) && !shown.contains("5a5a"),
+            "{shown}"
+        );
+        assert_eq!(format!("{own:?}"), "LineToken(<not shown>)");
+        // A detail holds no token, so nothing built from one can show it.
+        let detail = valid(Restore, &line("GuardRefused", "a sentence")).expect("valid");
+        assert!(!format!("{detail} {detail:?}").contains(own.expose_token()));
+    }
+
+    /// The runner prints the token it was given, FIRST, and no token member
+    /// when it was given none: a run started by a person prints the line it
+    /// printed before tokens existed, byte for byte.
+    #[test]
+    fn the_runner_prints_the_token_it_was_given_and_none_otherwise() {
+        let own = token();
+        assert_eq!(
+            refusal_detail_line(Restore, None, "StorageRegionInvalid: a sentence"),
+            r#"refusal-detail={"code":"StorageRegionInvalid","message":"a sentence"}"#
+        );
+        assert_eq!(
+            refusal_detail_line(Restore, Some(&own), "StorageRegionInvalid: a sentence"),
+            format!(
+                r#"refusal-detail={{"token":"{}","code":"StorageRegionInvalid","message":"a sentence"}}"#,
+                own.expose_token()
+            )
+        );
+        // A line printed with no token is nobody's to a controller.
+        assert_eq!(
+            RefusalDetail::read_line(
+                Restore,
+                &own,
+                &refusal_detail_line(Restore, None, "StorageRegionInvalid: a sentence")
+            ),
+            LineRead::NotThisJobs
         );
     }
 
@@ -911,7 +1266,7 @@ mod tests {
         // One mebibyte on one line: not parsed, whatever it holds.
         let huge = line("GuardRefused", &prose(1024 * 1024));
         assert!(huge.len() > 1024 * 1024);
-        assert_eq!(RefusalDetail::from_line(Restore, &huge), None);
+        assert_eq!(valid(Restore, &huge), None);
         // The bound is on the LINE: at it the line is read (and its sentence
         // cut), one byte over it is not.
         let overhead = line("GuardRefused", "").len();
@@ -920,7 +1275,7 @@ mod tests {
             &prose(REFUSAL_DETAIL_LINE_MAX_BYTES - overhead),
         );
         assert_eq!(at.len(), REFUSAL_DETAIL_LINE_MAX_BYTES);
-        let read = RefusalDetail::from_line(Restore, &at).expect("a line at the bound is read");
+        let read = valid(Restore, &at).expect("a line at the bound is read");
         assert!(read.message().ends_with(TRUNCATION_MARKER));
         assert_clean(read.message());
         let over = line(
@@ -928,7 +1283,7 @@ mod tests {
             &prose(REFUSAL_DETAIL_LINE_MAX_BYTES - overhead + 1),
         );
         assert_eq!(over.len(), REFUSAL_DETAIL_LINE_MAX_BYTES + 1);
-        assert_eq!(RefusalDetail::from_line(Restore, &over), None);
+        assert_eq!(valid(Restore, &over), None);
     }
 
     #[test]
@@ -1130,8 +1485,7 @@ mod tests {
     #[test]
     fn a_hostile_sentence_is_read_cleaned_and_never_raw() {
         let hostile = "restore.partitions\u{001B}[2J names\n\u{202E}<script>alert(1)</script>";
-        let read = RefusalDetail::from_line(Restore, &line("GuardRefused", hostile))
-            .expect("cleaned, not refused");
+        let read = valid(Restore, &line("GuardRefused", hostile)).expect("cleaned, not refused");
         assert_eq!(
             read.message(),
             format!("restore.partitions [2J names {REPLACEMENT}<script>alert(1)</script>")
@@ -1139,8 +1493,7 @@ mod tests {
         assert_clean(read.message());
         // Lossily decoded invalid UTF-8 is one replacement, not a failure.
         let lossy = String::from_utf8_lossy(b"bad \xFF\xFE bytes").into_owned();
-        let read =
-            RefusalDetail::from_line(Restore, &line("GuardRefused", &lossy)).expect("a line");
+        let read = valid(Restore, &line("GuardRefused", &lossy)).expect("a line");
         assert_eq!(read.message(), format!("bad {REPLACEMENT} bytes"));
     }
 
@@ -1148,7 +1501,8 @@ mod tests {
     fn the_runners_line_never_exceeds_the_bound_the_reader_enforces() {
         // The worst case for JSON: every byte of the sentence doubles. Under
         // the longest code of each set, and under a 64-byte word that is NOT
-        // a code and so stays in the sentence.
+        // a code and so stays in the sentence; with no token, and with the
+        // longest one a runner accepts.
         let longest = |codes: &[&'static str]| {
             codes
                 .iter()
@@ -1161,19 +1515,30 @@ mod tests {
             (Backup, longest(&BACKUP_REASON_CODES).to_string()),
             (Restore, "A".repeat(64)),
         ];
+        let long_token = LineToken::parse(&"e".repeat(LINE_TOKEN_MAX_HEX)).expect("the longest");
         for (run, opening) in openings {
             for filler in ["\"", "\\", "ab ", "—", "\u{202E}x", "\n"] {
                 let message = format!("{opening}: x{}", filler.repeat(4000));
-                let line = refusal_detail_line(run, &message);
+                let bare = refusal_detail_line(run, None, &message);
+                assert!(bare.len() <= 1623, "the figure the bound's note quotes");
+                let line = refusal_detail_line(run, Some(&long_token), &message);
                 assert!(
                     line.len() <= REFUSAL_DETAIL_LINE_MAX_BYTES,
                     "{filler:?}: {} bytes",
                     line.len()
                 );
-                assert!(line.len() <= 1623, "the figure the bound's note quotes");
+                assert_eq!(line.len(), bare.len() + 139, "the token's member");
+                assert!(line.len() <= 1762, "the figure the bound's note quotes");
                 assert!(!line.contains('\n') && !line.contains('\r'));
-                let read = RefusalDetail::from_line(run, &line).expect("the reader accepts it");
-                assert_eq!(read.to_line(), line, "and reading it changes nothing");
+                let LineRead::Valid(read) = RefusalDetail::read_line(run, &long_token, &line)
+                else {
+                    panic!("the reader accepts the runner's line: {filler:?}");
+                };
+                assert_eq!(
+                    read.to_line(Some(&long_token)),
+                    line,
+                    "and reading it changes nothing"
+                );
                 assert!(run.reason_codes().contains(&read.code()));
             }
         }

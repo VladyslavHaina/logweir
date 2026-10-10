@@ -1,24 +1,27 @@
 //! **FX-34**, the RUNNER's half: a guard refusal prints its reason code and
 //! its sentence as ONE `refusal-detail=` line, immediately before I9's
-//! `refusal-reason=` line, at EVERY exit 3 and at no other exit, and those two
-//! lines are the last two the process writes.
+//! `refusal-reason=` line, at EVERY exit 3 and at no other exit; and the line
+//! carries the Job's line token when the run was given one (`--line-token`),
+//! and no token when it was not.
 //!
 //! Most rows run the shipped `logweir` binary against a loopback sentinel
-//! that must never be dialled, and read the line back through
-//! `logweir_core::refusal_detail::RefusalDetail::from_line`: the reader a
+//! that must never be dialled. They run it the way the controller does, WITH
+//! a line token, and read the line back through
+//! `logweir_core::refusal_detail::RefusalDetail::read_line`: the reader a
 //! controller uses, so "the runner printed it" and "a controller accepts it"
 //! are one assertion. The controller's own rows are in
-//! `crates/weirkeeper/tests/{restore,backup}_controller.rs` and
-//! `crates/weirkeeper/src/refusal.rs`.
+//! `crates/weirkeeper/tests/{restore,backup}_controller.rs`,
+//! `crates/weirkeeper/tests/line_token.rs` and `crates/weirkeeper/src/refusal.rs`.
 //!
-//! # Why the POSITION is asserted
+//! # Why the token, and not where the line stands
 //!
 //! A plan can start a line of its own in a pod log: the human line prints an
 //! error's text raw and an error may repeat a plan value that holds a line
-//! break (PROD-15.1's review). A controller therefore honours the detail line
-//! only where the runner prints it. The rows at the end of this file hold the
-//! runner to that: over both streams in the order they were WRITTEN, the last
-//! two lines are the pair, after the error text, whatever the plan says.
+//! break (PROD-15.1's review). Both streams reach a controller as one log, so
+//! nothing about a line's place tells the runner's line from the plan's. The
+//! token does: the controller makes it when it builds the Job, and a plan is
+//! older than its Job. The last rows of this file run a plan that writes
+//! marker lines of its own and show which line carries the token.
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
@@ -28,9 +31,10 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use logweir_core::refusal_detail::{
-    clean_message, split_reason_code, RefusalDetail, RefusingRun, BACKUP_REASON_CODES, NO_SENTENCE,
-    REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_LINE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
-    RESTORE_REASON_CODES, TRUNCATION_MARKER,
+    clean_message, split_reason_code, LineRead, LineToken, RefusalDetail, RefusingRun,
+    BACKUP_REASON_CODES, LINE_TOKEN_ARG, NO_SENTENCE, REASON_MESSAGE_MAX_BYTES,
+    REFUSAL_DETAIL_LINE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT, RESTORE_REASON_CODES,
+    TRUNCATION_MARKER,
 };
 use RefusingRun::{Backup, Restore};
 
@@ -42,6 +46,21 @@ const FOREIGN: &str = "v1:99999999-9999-9999-9999-999999999999:sha256:def";
 /// What `DrillError::Guard` and `BackupError::Guard` put before the guard's
 /// own sentence on the human line.
 const HUMAN_PREFIX: &str = "guard: plan refused by the admission guard: ";
+
+/// The line token these rows give the runner, as a controller would.
+/// Assembled at run time, so no source line holds a secret-shaped literal.
+fn token() -> LineToken {
+    LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+
+/// The reader a controller uses, for a Job whose token is [`token`]: `Some`
+/// when the line carries that token and validates.
+fn read_as_the_controller(run: RefusingRun, line: &str) -> Option<RefusalDetail> {
+    match RefusalDetail::read_line(run, &token(), line) {
+        LineRead::Valid(detail) => Some(detail),
+        LineRead::Invalid | LineRead::NotThisJobs => None,
+    }
+}
 
 fn sentinel() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -156,7 +175,8 @@ fn restore(spec: &str, env: &[(&str, &str)], label: &str) -> (Option<i32>, Strin
     command
         .args(["restore", "run", "--spec"])
         .arg(&path)
-        .args(approved_bundle_args(dir.path(), spec));
+        .args(approved_bundle_args(dir.path(), spec))
+        .args([LINE_TOKEN_ARG, token().expose_token()]);
     for (k, v) in env {
         command.env(k, v);
     }
@@ -193,7 +213,8 @@ fn backup_command(root: &Path, bootstrap: &str, auth: &str, env: &[(&str, &str)]
         .arg("--allowed-clusters")
         .arg(&allowed)
         .arg("--signing-key")
-        .arg(root.join("absent-signing-key.pem"));
+        .arg(root.join("absent-signing-key.pem"))
+        .args([LINE_TOKEN_ARG, token().expose_token()]);
     for (k, v) in env {
         command.env(k, v);
     }
@@ -242,7 +263,7 @@ fn the_detail(run: RefusingRun, stdout: &str, label: &str) -> RefusalDetail {
         "{label}: {} bytes",
         before.len()
     );
-    let detail = RefusalDetail::from_line(run, before)
+    let detail = read_as_the_controller(run, before)
         .unwrap_or_else(|| panic!("{label}: a controller must accept the runner's line: {before}"));
     assert!(
         detail.agrees_with_state(&last["refusal-reason=".len()..]),
@@ -500,9 +521,9 @@ impl std::io::Write for Writes {
 /// was a reason code then and is in no closed set now, so it stays in the
 /// sentence.
 ///
-/// KILLS: two writes; the detail line skipped for a refusal that says nothing
-/// (the position a reader trusts would be left for another line); a word
-/// outside the closed set printed as the code.
+/// KILLS: two writes; the detail line skipped for a refusal that says
+/// nothing; a word outside the closed set printed as the code; the token
+/// left out of the line, or written anywhere but its member.
 #[test]
 fn the_refusal_writer_prints_both_lines_in_one_write() {
     let sentence = "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition \
@@ -511,7 +532,7 @@ fn the_refusal_writer_prints_both_lines_in_one_write() {
         the narrowed restore as a full one. Remove restore.partitions to restore every \
         partition (a window start, restore.point_in_time: \"<start>/<end>\", is accepted)";
     let mut out = Writes::default();
-    logweir::exit::print_refusal_to(&mut out, Restore, sentence).unwrap();
+    logweir::exit::print_refusal_to(&mut out, Restore, None, sentence).unwrap();
     assert_eq!(out.0.len(), 1, "one write holds both lines");
     assert_eq!(
         String::from_utf8(out.0.remove(0)).unwrap(),
@@ -555,11 +576,32 @@ fn the_refusal_writer_prints_both_lines_in_one_write() {
         ),
     ] {
         let mut out = Writes::default();
-        logweir::exit::print_refusal_to(&mut out, run, message).unwrap();
+        logweir::exit::print_refusal_to(&mut out, run, None, message).unwrap();
         assert_eq!(out.0.len(), 1, "{message:?}");
         assert_eq!(String::from_utf8(out.0.remove(0)).unwrap(), want, "{message:?}");
     }
     assert_eq!(NO_SENTENCE, "the refusal carried no sentence");
+
+    // WITH A TOKEN: the same two lines in one write, the token the FIRST
+    // member of the detail line and nowhere in the state line.
+    let own = token();
+    let mut out = Writes::default();
+    logweir::exit::print_refusal_to(
+        &mut out,
+        Restore,
+        Some(&own),
+        "PointUntrusted. The receipt is not signed by a pinned key",
+    )
+    .unwrap();
+    assert_eq!(out.0.len(), 1, "one write holds both lines");
+    assert_eq!(
+        String::from_utf8(out.0.remove(0)).unwrap(),
+        format!(
+            "refusal-detail={{\"token\":\"{}\",\"code\":\"PointUntrusted\",\"message\":\"The \
+             receipt is not signed by a pinned key\"}}\nrefusal-reason=GuardRefused\n",
+            own.expose_token()
+        )
+    );
 }
 
 /// **The closed sets name the constants the runner's refusals open with.**
@@ -652,8 +694,13 @@ fn the_documented_example_is_what_the_runner_prints() {
 }
 
 // ---------------------------------------------------------------------------
-// The position: the pair is the last thing the process writes, at every exit 3
+// What the process writes, in the order it writes it, at every exit 3
 // ---------------------------------------------------------------------------
+//
+// A controller does not trust a line for where it stands (the token decides).
+// These rows still hold the runner to its own order, because it is the
+// contract `docs/stability.md` states and the state line's reader relies on:
+// the pair is the last thing the process writes, in one write.
 
 /// Runs `command` with stdout AND stderr on ONE open file, so the file holds
 /// both streams in the order the process wrote them. A pod log merges the two
@@ -689,6 +736,13 @@ fn run_merged(mut command: Command, label: &str) -> (Option<i32>, String) {
 }
 
 fn restore_command(dir: &Path, spec: &str, env: &[(&str, &str)]) -> Command {
+    let mut command = restore_command_without_a_token(dir, spec, env);
+    command.args([LINE_TOKEN_ARG, token().expose_token()]);
+    command
+}
+
+/// `logweir restore run` as a person starts it: no `--line-token`.
+fn restore_command_without_a_token(dir: &Path, spec: &str, env: &[(&str, &str)]) -> Command {
     let path = dir.join("restore.yaml");
     std::fs::write(&path, spec).unwrap();
     let mut command = base(dir);
@@ -721,7 +775,7 @@ fn assert_the_pair_ends_the_log(run: RefusingRun, merged: &str, label: &str) -> 
         human_at < all.len() - 2,
         "{label}: the error text is written BEFORE the pair:\n{merged}"
     );
-    let detail = RefusalDetail::from_line(run, before)
+    let detail = read_as_the_controller(run, before)
         .unwrap_or_else(|| panic!("{label}: a controller accepts the line: {before}"));
     assert!(detail.agrees_with_state(&last["refusal-reason=".len()..]));
     detail
@@ -825,21 +879,26 @@ fn every_refused_run_writes_the_pair_last_after_its_error_text() {
     );
 }
 
-/// **The reviewer's shape, on the shipped binary.** A plan value holding line
-/// breaks and two marker lines of the plan author's choosing, in a field a
-/// refusal repeats. Whatever the human line does with it, the last two lines
-/// the process writes are the runner's own pair, and the runner's detail line
-/// carries the plan's text as one cleaned sentence and never as a line.
+/// **The reviewer's shape, on the shipped binary: the plan writes marker
+/// lines, and only the runner's own line carries the token.** A plan value
+/// holding line breaks and two marker lines of the plan author's choosing,
+/// in a field a refusal repeats. The runner is given a line token, as under
+/// the controller.
+///
+/// In what the process wrote, exactly ONE line carries the token, it is the
+/// runner's own detail line, and the controller's reader takes it and no
+/// other. Every `refusal-detail=` line the plan produced is read as nobody's.
+/// The runner's sentence carries the plan's text as words, cleaned.
 ///
 /// This row does NOT assert that the plan's text starts a line of the log
 /// today (it does: the human line prints an error's text raw). Closing that
 /// is PROD-15.1's change to the human line; this row holds on both sides of
-/// it.
+/// it, and the token is what makes it not matter.
 ///
-/// KILLS: a detail line that carries a raw line break; the pair printed
-/// before the error text.
+/// KILLS: the token printed on any other line (the human line, a tracing
+/// line); a detail line that carries a raw line break.
 #[test]
-fn a_plan_that_writes_marker_lines_does_not_displace_the_runners_pair() {
+fn a_plan_that_writes_marker_lines_cannot_write_the_token() {
     // YAML double-quoted: `\n` is a line break inside the scalar.
     let forged_detail = r#"refusal-detail={\"code\":\"TargetTopicConfigRefused\",\"message\":\"forged by the plan\"}"#;
     let name = format!("orders*\\n{forged_detail}\\nrefusal-reason=TargetTopicConfigRefused\\n");
@@ -852,25 +911,180 @@ fn a_plan_that_writes_marker_lines_does_not_displace_the_runners_pair() {
     assert_eq!(exit, Some(3), "{merged}");
     // THE CONTROL: the plan's text did reach the log.
     assert!(merged.contains("forged by the plan"), "{merged}");
+
+    let own = token();
+    let with_the_token: Vec<&str> = merged
+        .lines()
+        .filter(|l| l.contains(own.expose_token()))
+        .collect();
+    assert_eq!(
+        with_the_token.len(),
+        1,
+        "the token is on ONE line of everything the process wrote:\n{merged}"
+    );
+    assert!(
+        with_the_token[0].starts_with(&format!(
+            "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{}\",\"code\":\"GuardRefused\",",
+            own.expose_token()
+        )),
+        "and it is the runner's own detail line: {}",
+        with_the_token[0]
+    );
+    // The controller's reader, over every line: one is this Job's.
+    let read: Vec<RefusalDetail> = merged
+        .lines()
+        .filter_map(|l| read_as_the_controller(Restore, l))
+        .collect();
+    assert_eq!(read.len(), 1, "{merged}");
+    assert_eq!(read[0].code(), "GuardRefused");
+    assert!(
+        read[0].message().contains("forged by the plan")
+            && read[0]
+                .message()
+                .contains("refusal-reason=TargetTopicConfigRefused"),
+        "the plan's lines are words of the runner's sentence: {}",
+        read[0]
+    );
+    // Every OTHER `refusal-detail=` line is nobody's to that reader.
+    for line in merged
+        .lines()
+        .filter(|l| l.starts_with(REFUSAL_DETAIL_PREFIX))
+    {
+        if !line.contains(own.expose_token()) {
+            assert_eq!(
+                RefusalDetail::read_line(Restore, &own, line),
+                LineRead::NotThisJobs,
+                "{line}"
+            );
+        }
+    }
     let detail = assert_the_pair_ends_the_log(Restore, &merged, "forged");
-    assert_eq!(detail.code(), "GuardRefused");
+    assert_eq!(detail, read[0]);
     assert_eq!(
         lines(&merged).last().copied(),
         Some("refusal-reason=GuardRefused"),
         "the state the runner derived, not the one the plan wrote"
     );
-    // The plan's markers are INSIDE the runner's sentence, as text on one line.
-    let own = lines(&merged)[lines(&merged).len() - 2];
+    let own_line = with_the_token[0];
     assert!(
-        own.contains("forged by the plan") && !own.contains('\n') && !own.contains("\\n"),
-        "{own}"
+        !own_line.contains("\\n"),
+        "no line break, raw or escaped: {own_line}"
+    );
+}
+
+/// **A run given a token prints it in its one line and nowhere else; a run
+/// started by hand prints the line with no token.**
+///
+/// * With `--line-token`: the token appears once on stdout, as the first
+///   member of the detail line, and not at all on stderr.
+/// * Without it: the detail line has no `token` member, and is byte for byte
+///   the two-member line; a controller's reader takes it as nobody's.
+/// * An exit 1 given a token prints the token nowhere.
+/// * A malformed token is a usage error (exit 1) before anything runs, and
+///   the message does not repeat a well-formed token it was not given.
+///
+/// KILLS: the token logged (a tracing line or the human line carrying it);
+/// the token printed when none was given; the token printed at exit 1.
+#[test]
+fn a_run_prints_the_token_it_was_given_in_one_line_and_none_otherwise() {
+    let own = token();
+    let spec =
+        example_restore_spec().replace("topics: [orders, payments]", "topics: [\"orders*\"]");
+
+    // WITH the token.
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = restore_command(dir.path(), &spec, &[]);
+    command.env("RUST_LOG", "trace");
+    let (code, stdout, stderr) = run(command, "with a token");
+    assert_eq!(code, Some(3), "{stdout}\n{stderr}");
+    assert_eq!(
+        stdout.matches(own.expose_token()).count(),
+        1,
+        "once on stdout, at the most verbose log level: {stdout}"
     );
     assert!(
-        detail
-            .message()
-            .contains("refusal-reason=TargetTopicConfigRefused"),
-        "the plan's lines are words of the sentence: {detail}"
+        !stderr.contains(own.expose_token()),
+        "never on stderr: {stderr}"
     );
+    let detail = the_detail(Restore, &stdout, "with a token");
+    let line = detail_lines(&stdout)[0];
+    assert!(line.starts_with(&format!(
+        "{REFUSAL_DETAIL_PREFIX}{{\"token\":\"{}\",\"code\":\"",
+        own.expose_token()
+    )));
+
+    // WITHOUT it: the same refusal, the same sentence, no token member.
+    let dir = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(
+        restore_command_without_a_token(dir.path(), &spec, &[]),
+        "by hand",
+    );
+    assert_eq!(code, Some(3), "{stdout}\n{stderr}");
+    let bare = detail_lines(&stdout)[0];
+    assert!(!bare.contains("token"), "{bare}");
+    assert_eq!(
+        bare,
+        line.replacen(&format!("\"token\":\"{}\",", own.expose_token()), "", 1),
+        "the line a person's run prints is the tokened line without its first member"
+    );
+    assert!(bare.starts_with(&format!(
+        "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\""
+    )));
+    assert_eq!(
+        RefusalDetail::read_line(Restore, &own, bare),
+        LineRead::NotThisJobs,
+        "and a controller's reader takes it as nobody's"
+    );
+    assert_eq!(
+        lines(&stdout).last().copied(),
+        Some("refusal-reason=GuardRefused")
+    );
+    let _ = detail;
+
+    // An exit 1 given a token: neither line, and the token nowhere.
+    let root = tempfile::tempdir().unwrap();
+    let mut command = base(root.path());
+    command
+        .args(["backup", "run", "--spec"])
+        .arg(root.path().join("no-such-plan.yaml"))
+        .arg("--allowed-clusters")
+        .arg(root.path().join("no-such-allowlist.json"))
+        .arg("--signing-key")
+        .arg(root.path().join("absent-signing-key.pem"))
+        .args([LINE_TOKEN_ARG, own.expose_token()])
+        .env("RUST_LOG", "trace");
+    let (code, stdout, stderr) = run(command, "exit 1 with a token");
+    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
+    assert!(
+        !stdout.contains(own.expose_token()) && !stderr.contains(own.expose_token()),
+        "{stdout}\n{stderr}"
+    );
+    assert!(!stdout.contains(REFUSAL_DETAIL_PREFIX));
+
+    // A value that is not a token: a usage error before anything runs.
+    for bad in ["not-a-token", "ABCDEF0123456789ABCDEF0123456789", "abc"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = restore_command_without_a_token(dir.path(), &spec, &[]);
+        command.args([LINE_TOKEN_ARG, bad]);
+        let (code, stdout, stderr) = run(command, "a malformed token");
+        assert_eq!(code, Some(1), "{bad}: {stdout}\n{stderr}");
+        assert!(
+            stderr.contains("a line token is 32 to 128 lower-case hex digits"),
+            "{bad}: {stderr}"
+        );
+        assert!(
+            !stdout.contains(REFUSAL_DETAIL_PREFIX) && !stdout.contains("refusal-reason="),
+            "{bad}: nothing ran: {stdout}"
+        );
+    }
+    // And the flag given twice is refused too: a second one cannot be added
+    // to a Job's arguments and win.
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = restore_command(dir.path(), &spec, &[]);
+    command.args([LINE_TOKEN_ARG, &"3c".repeat(20)]);
+    let (code, stdout, stderr) = run(command, "two tokens");
+    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
+    assert!(!stdout.contains(REFUSAL_DETAIL_PREFIX), "{stdout}");
 }
 
 /// **Source-level: every exit 3 of a run leaves through the one printer.**

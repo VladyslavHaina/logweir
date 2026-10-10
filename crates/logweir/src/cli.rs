@@ -794,6 +794,21 @@ pub struct RestoreRunArgs {
     /// point-bound plan without it is refused with exit 3 `PointUntrusted`.
     #[arg(long)]
     pub evidence_keys: Option<PathBuf>,
+    /// **FX-34.** The Job's line token, written by the controller and by
+    /// nobody else: a fresh random value made when the Job is built, which a
+    /// guard refusal's `refusal-detail=` line then carries so the controller
+    /// can tell the runner's line from text a plan made the runner print.
+    ///
+    /// Omit it for every run started by hand: the line is then printed with
+    /// no token, as it always was, and a person reads it.
+    ///
+    /// A FLAG AND NOT AN ENVIRONMENT VARIABLE, deliberately. The engine child
+    /// process inherits this process's environment and expands `${NAME}` over
+    /// its configuration text; an argument reaches neither. It is not a
+    /// credential, and it is still never logged: `LineToken`'s `Debug` prints
+    /// no value, so `{:?}` of this struct does not either.
+    #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+    pub line_token: Option<logweir_core::refusal_detail::LineToken>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -908,7 +923,22 @@ pub enum BackupCmd {
         /// all, is refused before anything runs (exit 3).
         #[arg(long = "consumer-group", value_name = "GROUP_ID")]
         consumer_groups: Vec<String>,
+        /// See `restore run`'s flag of the same name.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
+}
+
+/// `--line-token`'s value: lower-case hex, 32 to 128 digits.
+///
+/// The message names the shape and never repeats the value, as every other
+/// message about this flag must not.
+fn parse_line_token(value: &str) -> Result<logweir_core::refusal_detail::LineToken, String> {
+    logweir_core::refusal_detail::LineToken::parse(value).ok_or_else(|| {
+        "a line token is 32 to 128 lower-case hex digits; the controller writes this flag, and \
+         a run started by hand needs none"
+            .to_string()
+    })
 }
 
 /// `--subject-kind`'s two values, spelled as they are spelled on the wire.

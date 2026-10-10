@@ -147,10 +147,11 @@ the selection on its status, the API, the console and the notification.
 Item 52 is fix-now row FX-34 (PoC batch 5's findings F-1 and F-2), proven by
 unit rows, rows over the shipped runner binary, controller rows over a recording
 API double with goldens captured at the base commit, and console rows; it
-changes the runner (one more stdout line at exit 3), the controller and the
-console's text, and the PoC upgrade that carries it submits a `Restore` the
-runner refuses and reads the reason on its status and in the console after the
-pod is gone.
+changes the runner (one more stdout line at exit 3 and one more flag,
+`--line-token`, which the controller writes), the controller (every `Restore`
+and `Backup` Job gains that argument) and the console's text, and the PoC
+upgrade that carries it submits a `Restore` the runner refuses and reads the
+reason on its status and in the console after the pod is gone.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1746,22 +1747,26 @@ carries the same text and the console's operation page shows it. A rehearsal's
 `Restore` and a scheduled `Backup` are the same two kinds. `status.exitReason`
 and the condition's `reason` are unchanged.
 **How it gets there.** `logweir restore run` and `logweir backup run` print one
-more stdout line at every exit 3, `refusal-detail={"code":"…","message":"…"}`,
-immediately before `refusal-reason=`, which stays the final line; the two are
-the last two lines the runner writes
+more stdout line at every exit 3,
+`refusal-detail={"token":"…","code":"…","message":"…"}`, immediately before
+`refusal-reason=`, which stays the final line
 ([stability.md](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
 The controller treats the log as untrusted text. Whoever writes a plan can
 start a line in the runner's log (an error's text is printed as it is, and it
-may repeat a plan value that holds a line break), so the line is honoured only
-where the runner prints it, directly before the final `refusal-reason=` line,
-and a `refusal-detail=` line anywhere else is ignored. Its code must be one of
-a closed list for that kind of run (a `Backup`'s log cannot carry a
-restore-only code) and must agree with the state line beside it; the sentence
-keeps printable ASCII and `§ – — … →`, a line break or control character
-becomes a space and anything else (a bidi override included) becomes `U+FFFD`;
-URLs lose their query string and userinfo and credential shapes read
-`[redacted]`; and it is cut to 760 bytes with a `…`. A line that does not
-validate is not shown
+may repeat a plan value that holds a line break), and a pod log is one merged
+stream, so neither the shape of a line nor its place says who wrote it. The
+controller therefore makes a fresh random **line token** each time it builds a
+`Restore`'s or a `Backup`'s Job, gives it to the runner as its last two
+arguments (`--line-token <hex>`), and shows a reason only from a line that
+carries that Job's token: a plan is older than its Job and cannot hold it. A
+`refusal-detail=` line with no token or another one is not read. The token is
+in the Job's pod template and in the runner's one line and nowhere else. The
+line's code must also be one of a closed list for that kind of run (a
+`Backup`'s log cannot carry a restore-only code) and agree with the state line
+after it; the sentence keeps printable ASCII and `§ – — … →`, a line break or
+control character becomes a space and anything else (a bidi override included)
+becomes `U+FFFD`; URLs lose their query string and userinfo and credential
+shapes read `[redacted]`; and it is cut to 760 bytes with a `…`
 ([kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34)).
 The sentence is the runner's, and a refusal names what it refused, so it can
 hold words the plan's author chose (a topic name, a field's value), cleaned
@@ -1779,33 +1784,43 @@ standing (rehearsal) `Restore` waiting for or refused over its approval names
 `spec.authorization.approvalRef`, where it named `spec.approvalRef`, a field
 it does not have. The console shows a bidi control character in any message a
 controller wrote as `U+FFFD`.
-**Do:** nothing. An alert or a script that compared a refused run's condition
+**Do:** roll the controller and the runner image in ONE upgrade. The
+controller now passes `--line-token` to every `Restore` and `Backup` Job, and
+a runner image older than this release does not know the flag: it exits 1
+while parsing its arguments, before any work, for every such Job. A chart
+upgrade that moves `image` and `runnerImage` together does this; if you pin
+`runnerImage`, move the pin with it. Jobs created before the upgrade are
+unaffected. Also: an alert or a script that compared a refused run's condition
 message for equality should compare its opening text instead: the message is
 longer when the runner states a reason.
-**Scope:** unit rows over the line's grammar, its closed sets, its cleaning
-and its bounds; rows over the shipped runner binary (both streams in written
-order: the pair is the last two lines of every refused run, after the error
-text, also when the plan itself writes marker lines; none at another exit; no
-credential value in it); controller rows over a recording API double for both
-kinds (the reason carried; forged, misplaced and hostile lines ignored,
-refused or cleaned; the pod gone and the read refused; a second reconcile that
-reads and writes nothing), with every request and every status write of exits
-0, 1, 2, 4 and 137 compared byte for byte against goldens captured before the
-change; console rows over a message holding markup, an HTML entity and a bidi
-override. No cluster ran it: its live row is the next PoC upgrade's.
-**Known limit.** The controller tells the runner's line from a forged one by
-where it stands, and a pod log is two streams merged in no promised order. A
-runner image that prints an error's text with its line breaks puts text a plan
-chose on stderr; if that text is copied after the runner's own two lines and
-itself ends with a well-formed pair, that pair is shown. What it can say is
-bounded as above, on the plan author's own object. A runner that escapes line
-breaks in the error text it prints closes it (PROD-15.1).
+**Scope:** unit rows over the line's grammar, its token, its closed sets, its
+cleaning and its bounds; rows over the shipped runner binary (given a token
+it prints it once, in that line, at the most verbose log level, and never on
+stderr; given none it prints the line without one; a plan that writes marker
+lines of its own cannot write the token; both streams in written order end
+with the pair; no credential value in it); controller rows over a recording
+API double for both kinds (the reason carried; a forged line never shown,
+wherever it stands, with no token, another Job's, or one digit off; hostile
+lines refused or cleaned; a Job or a line without a token giving the old
+status byte for byte; the token in no status and no log line; two created
+Jobs carrying two tokens and being otherwise what they were; the pod gone and
+the read refused; a second reconcile that reads and writes nothing), with
+every request and every status write of exits 0, 1, 2, 4 and 137 compared
+byte for byte against goldens captured before the change; console rows over a
+message holding markup, an HTML entity and a bidi override. No cluster ran
+it: its live row is the next PoC upgrade's.
+**Known limit.** The token separates the runner's line from text written
+before the Job existed, which is every plan. It is readable by anyone who can
+read the Job, so an input that can still change after the Job is built, and
+that a refusal repeats as it is (a value a broker reports, a mounted file's
+parse error), could carry it. A runner that escapes line breaks in the error
+text it prints removes the way in altogether (PROD-15.1).
 **Not changed:** the check, notification and retention Jobs. Their exit 3
 still names a code from a closed list and no sentence.
-**Rollback:** in either order. An older controller ignores the new line and
-writes the message it always wrote; an older runner prints no such line, and
-this controller then writes that same message. Statuses already written keep
-the text they have.
+**Rollback:** roll both back together, or the runner image first. An older
+controller passes no token and ignores the new line, and writes the message it
+always wrote. An older RUNNER under this controller does not start (above).
+Statuses already written keep the text they have.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -1824,7 +1839,11 @@ In addition to the next entry's six, in its order:
   engine, as the next entry's step 6 already orders; a standalone CLI install
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
-  endpoint says `allow_http: true` (item 28).
+  endpoint says `allow_http: true` (item 28). The same roll is what item 52
+  needs: this controller gives every `Restore` and `Backup` Job a
+  `--line-token` argument, and a runner image that predates the flag exits 1
+  on it, so a `runnerImage` pinned to an older release must move with the
+  controller.
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
@@ -1914,7 +1933,10 @@ controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
 older verifier a subset scorecard); item 52 changes the runner, the
-controller and the console's text and needs nothing. To roll back to
+controller and the console's text, and needs the controller and the runner
+image rolled together, which item 28 already orders: this controller passes
+`--line-token` to every `Restore` and `Backup` Job, and a runner image that
+predates the flag exits 1 on it. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

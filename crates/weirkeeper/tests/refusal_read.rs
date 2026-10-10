@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use logweir_core::refusal_detail::{refusal_detail_line, RefusingRun};
+use logweir_core::refusal_detail::{refusal_detail_line, LineToken, RefusingRun};
 use weirkeeper::refusal::{read, RefusalLog, RunnerReason};
 use weirkeeper::testing::{mock_client_recording, Route};
 
@@ -27,6 +27,12 @@ const NS: &str = "logweir-fx34";
 const POD: &str = "rst-refused-abcde";
 /// A sentence no log line of the CONTROLLER may ever carry.
 const SENTENCE: &str = "SeededReason: seeded-refusal-sentence-9d41 names a topic";
+
+/// The line token of the Job these reads are for. Assembled at run time, so
+/// no source line holds a secret-shaped literal.
+fn token() -> LineToken {
+    LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
 
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -59,7 +65,7 @@ async fn capture(status: u16, body: String) -> (RefusalLog, Vec<serde_json::Valu
         body,
     }]);
     let pods: Api<Pod> = Api::namespaced(client, NS);
-    let log = read(&pods, NS, POD, RefusingRun::Restore).await;
+    let log = read(&pods, NS, POD, RefusingRun::Restore, Some(&token())).await;
     let requests = seen.lock().unwrap().len();
     let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
     let events = text
@@ -127,10 +133,16 @@ async fn a_refused_or_failed_read_is_an_answer_and_one_warning() {
 }
 
 /// A log that was read: the reason, the body for the other tail scanners, and
-/// no event at all. Whatever a read logs, it never logs the log.
+/// no event at all. Whatever a read logs, it never logs the log, and it never
+/// logs the Job's line token.
 #[tokio::test]
-async fn a_read_logs_nothing_the_pod_wrote() {
-    let detail = refusal_detail_line(RefusingRun::Restore, SENTENCE);
+async fn a_read_logs_nothing_the_pod_wrote_and_never_the_token() {
+    let own = token();
+    let leaked = |events: &[serde_json::Value]| {
+        let text = format!("{events:?}");
+        text.contains("seeded-refusal-sentence") || text.contains(own.expose_token())
+    };
+    let detail = refusal_detail_line(RefusingRun::Restore, Some(&own), SENTENCE);
     let body = format!("{detail}\nrefusal-reason=GuardRefused\n");
     let (log, events, _) = capture(200, body.clone()).await;
     match &log.reason {
@@ -140,29 +152,62 @@ async fn a_read_logs_nothing_the_pod_wrote() {
     }
     assert_eq!(log.body, body);
     assert!(events.is_empty(), "{events:?}");
+    assert!(
+        !format!("{:?}", log.reason).contains(own.expose_token()),
+        "the reason the read returns does not hold the token"
+    );
 
-    // A line that does not validate, a line that is not where the runner
-    // prints it, and a tail over the bound: each is said at `debug`, and no
-    // event quotes the line.
+    // A line with the token that does not validate, and a tail over the
+    // bound: each is said at `debug`, and no event quotes the line or the
+    // token.
     let bad = format!(
-        "refusal-detail={{\"code\":\"Bad Code\",\"message\":\"{SENTENCE}\"}}\n\
-         refusal-reason=GuardRefused\n"
+        "refusal-detail={{\"token\":\"{}\",\"code\":\"Bad Code\",\"message\":\"{SENTENCE}\"}}\n\
+         refusal-reason=GuardRefused\n",
+        own.expose_token()
     );
     let (log, events, _) = capture(200, bad).await;
     assert_eq!(log.reason, RunnerReason::Unreadable);
     assert_eq!(levels(&events), vec!["DEBUG"]);
-    assert!(!format!("{events:?}").contains("seeded-refusal-sentence"));
-
-    let misplaced = format!("{detail}\nanother line\nrefusal-reason=GuardRefused\n");
-    let (log, events, _) = capture(200, misplaced).await;
-    assert_eq!(log.reason, RunnerReason::Misplaced);
-    assert_eq!(levels(&events), vec!["DEBUG"]);
-    assert!(!format!("{events:?}").contains("seeded-refusal-sentence"));
+    assert!(!leaked(&events), "{events:?}");
 
     let over = format!("{}\n{detail}\n", SENTENCE.repeat(12_000));
     let (log, events, _) = capture(200, over).await;
     assert_eq!(log.reason, RunnerReason::TailOverBound);
     assert!(log.body.is_empty());
     assert_eq!(levels(&events), vec!["DEBUG"]);
-    assert!(!format!("{events:?}").contains("seeded-refusal-sentence"));
+    assert!(!leaked(&events), "{events:?}");
+
+    // A line WITHOUT the token is not this Job's: nothing is said about it at
+    // all, at any level.
+    let forged = format!(
+        "{}\nrefusal-reason=GuardRefused\n",
+        refusal_detail_line(RefusingRun::Restore, None, SENTENCE)
+    );
+    let (log, events, _) = capture(200, forged).await;
+    assert_eq!(log.reason, RunnerReason::NotStated);
+    assert!(events.is_empty(), "{events:?}");
+}
+
+/// **The token is in no line this controller logs**, whatever the read's
+/// outcome: a pod that is gone, a read that is refused, a read that fails.
+/// Each of those DOES log (the control: the event is there, with the pod's
+/// name), and none carries the token.
+#[tokio::test]
+async fn no_log_line_of_a_read_holds_the_line_token() {
+    let own = token();
+    for (code, reason, level) in [
+        (404, "NotFound", "DEBUG"),
+        (403, "Forbidden", "WARN"),
+        (500, "InternalError", "WARN"),
+    ] {
+        let (log, events, _) = capture(code, failure(code, reason)).await;
+        assert!(log.body.is_empty());
+        assert_eq!(levels(&events), vec![level], "HTTP {code}");
+        assert_eq!(
+            events[0]["fields"]["pod"], POD,
+            "the control: the read did log"
+        );
+        let text = format!("{events:?} {:?}", log.reason);
+        assert!(!text.contains(own.expose_token()), "HTTP {code}: {text}");
+    }
 }
