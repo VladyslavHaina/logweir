@@ -279,6 +279,8 @@ jobs:
   # image. They run their default sets, as CI does: the rows that freeze the
   # broker or kill a restore, and topic identity's seven-minute c10, stay
   # ignored. docs/support-matrix.md ("Broker versions") records the runs.
+  # PROD-01.2 added the compatibility contract's generic row, which that page
+  # cites for each line ("The compatibility contract").
   # crates/logweir/tests/engine_matrix.rs holds the job to the supported lines.
   broker-lines:
     timeout-minutes: 60
@@ -340,6 +342,15 @@ jobs:
       - run: cargo build --locked -p logweir
       - name: PROD-01.1's and PROD-01.4's suites on this line
         run: cargo test --locked -p e2e --features e2e --test record_semantics --test topic_identity -- --test-threads=1
+      # PROD-01.2: the compatibility contract's generic row on this line (the
+      # probe, the capability checks, a backup, a restore, both verifiers),
+      # which docs/support-matrix.md cites for it. By NAME, with the ignored
+      # row included: a bare filter that matched nothing would exit 0.
+      - name: PROD-01.2's compatibility rows on this line
+        env:
+          CARGO_TEST_ARGS: --locked -p e2e --features e2e --test compat_contract
+          LIBTEST_ARGS: --test-threads=1 --include-ignored
+        run: ./scripts/run-named-tests.sh the_default_broker_answers_every_capability_check the_default_broker_backs_up_restores_and_verifies
       - if: failure()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > compose.log
       - if: failure()

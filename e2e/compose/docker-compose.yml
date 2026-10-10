@@ -976,6 +976,11 @@ services:
   # not this image and has no row. PLAINTEXT only: in-network :9094 and the
   # published EXTERNAL port. Its CLUSTER_ID is one per stack, loaded like
   # kafka-auth's. Never part of the default profile set.
+  # A third listener, OFFNET, is the ADVERTISED-ADDRESS FAILURE fixture: it is
+  # published and answers a bootstrap, and it advertises `127.0.0.1:1`, where
+  # nothing listens, so every request a client must send to the broker it was
+  # just told about is refused at once (no name lookup, nothing off the
+  # loopback). A connection test over it passes; a backup cannot.
   kafka-cp:
     image: confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48
     hostname: kafka-cp
@@ -983,6 +988,7 @@ services:
     networks: [kafka-net]
     ports:
       - "${LOGWEIR_E2E_CP_PORT:-9126}:9092"
+      - "${LOGWEIR_E2E_CP_OFFNET_PORT:-9127}:9095"
     env_file:
       - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-cp.env
         required: true
@@ -992,9 +998,9 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: 5001@kafka-cp:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_LISTENERS: PLAINTEXT://kafka-cp:9094,CONTROLLER://kafka-cp:9093,EXTERNAL://kafka-cp:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cp:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CP_PORT:-9126}
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-cp:9094,CONTROLLER://kafka-cp:9093,EXTERNAL://kafka-cp:9092,OFFNET://kafka-cp:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cp:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CP_PORT:-9126},OFFNET://127.0.0.1:1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,OFFNET:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1

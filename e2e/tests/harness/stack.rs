@@ -47,6 +47,8 @@ pub const REDPANDA_SASL_PORT: &str = "LOGWEIR_E2E_REDPANDA_SASL_PORT";
 /// Profile `confluent` (PROD-01.2): the Confluent Platform broker's
 /// host-side PLAINTEXT port.
 pub const CP_PORT: &str = "LOGWEIR_E2E_CP_PORT";
+/// Its OFFNET listener: published, and advertised as `127.0.0.1:1`.
+pub const CP_OFFNET_PORT: &str = "LOGWEIR_E2E_CP_OFFNET_PORT";
 /// Profile `objectstore` (PROD-01.5; PROD-01.2 is its first Rust reader):
 /// SeaweedFS's S3 port.
 pub const OBJSTORE_PORT: &str = "LOGWEIR_E2E_OBJSTORE_PORT";
@@ -329,6 +331,13 @@ pub fn bootstrap_redpanda_sasl() -> String {
 /// PLAINTEXT bootstrap.
 pub fn bootstrap_confluent() -> String {
     format!("localhost:{}", port(CP_PORT))
+}
+
+/// Profile `confluent`: the broker's OFFNET listener, which answers a
+/// bootstrap here and then advertises `127.0.0.1:1`, where nothing listens:
+/// the advertised-address failure (PROD-01.2).
+pub fn bootstrap_confluent_offnet() -> String {
+    format!("localhost:{}", port(CP_OFFNET_PORT))
 }
 
 /// Profile `objectstore`: SeaweedFS's S3 endpoint as a host-side client
