@@ -7217,16 +7217,23 @@ fn built_positions(
 /// sizes, through the runner's own builder with every group committed on every
 /// partition: 10 groups over 20 topics of 12 partitions, and 100 groups — the
 /// most a backup may select — over 10 topics of 11. Each receipt is far under
-/// the catalog's 256 KiB read cap (and the evidence fetch's 1 MiB), the catalog
-/// reads the point `Available` with its summary, and the receipt's block alone
-/// is under its enforced cap. NEGATIVE CONTROL: the positions themselves —
-/// the document the receipt binds — are over the 256 KiB cap at both sizes,
-/// which is what the receipt carried inline before the fix, so these sizes
-/// would read `Unreadable` had the positions stayed in it.
+/// the 256 KiB the catalog read a document under when PROD-04.1 landed (and
+/// the evidence fetch's cap), the catalog reads the point `Available` with its
+/// summary, and the receipt's block alone is under its enforced cap. NEGATIVE
+/// CONTROL: the positions themselves — the document the receipt binds — are
+/// over that 256 KiB at both sizes, which is what the receipt carried inline
+/// before the fix.
+///
+/// FX-33 replaced that cap with the topic budget's (`caps::CATALOG_RECEIPT`),
+/// so the number this row holds the receipt under is written down here: the
+/// row's claim is that positions do not grow the receipt, whatever a reader's
+/// cap is.
 #[test]
 fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
-    use logweir::check::kinds::catalog_sync::{MAX_CATALOG_DOCUMENT_BYTES, MAX_ENTRY_GROUPS};
+    use logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS;
     use logweir_core::consumer_positions::{MAX_BLOCK_BYTES, MAX_SELECTED_GROUPS};
+    /// The catalog walk's document cap when this row was written.
+    const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
     for (groups, topics, partitions) in [(10usize, 20usize, 12i32), (MAX_SELECTED_GROUPS, 10, 11)] {
         let names: Vec<String> = (0..topics).map(|t| format!("topic-{t:02}")).collect();
         let layout: Vec<(&str, u32, u32)> = names
@@ -8189,11 +8196,38 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
         counts["total"], 2,
         "the walk still SAW both points — the shard listing is what establishes that"
     );
-    assert!(
-        entries_of(&body).is_empty(),
-        "a point whose record could not be read has no receipt-derived facts to publish, so it \
-         is counted and not listed: {body}"
-    );
+    // FX-33: AND BOTH ARE LISTED. They used to be counted and listed by no
+    // entry. The denial fails every `get`, the index row's too, so what is
+    // known is what each key carries: the point id and the recovery instant.
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2, "both points are listed: {body}");
+    for (entry, f) in entries.iter().zip([&newer, &older]) {
+        assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
+        assert_eq!(entry["availability"], "Unreadable", "{entry}");
+        assert_eq!(entry["factsFrom"], "key", "{entry}");
+        assert_eq!(
+            entry["recoveryPointAtMs"],
+            f.point.capture.started_at.timestamp_millis(),
+            "{entry}"
+        );
+        for absent in [
+            "backupId",
+            "runId",
+            "receiptKey",
+            "receiptSha256",
+            "coveredFromMs",
+        ] {
+            assert!(
+                entry.get(absent).is_none(),
+                "`{absent}` was not read, so it is ABSENT, never empty or zero: {entry}"
+            );
+        }
+        assert_eq!(
+            entry["cause"],
+            serde_json::json!({"document": "record", "reason": "readFailed"}),
+            "{entry}"
+        );
+    }
 }
 
 /// A record that contradicts the receipt it names is a `Conflict`, and so is a
@@ -8253,7 +8287,31 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
         counts["available"], 1,
         "the other point still lists: {body}"
     );
-    assert_eq!(entries_of(&body).len(), 1);
+    // FX-33: and the point this build cannot read is listed too, as what it
+    // is, with the version it declares and the facts its index row carries.
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2, "{body}");
+    let unsupported = &entries[0];
+    assert_eq!(unsupported["pointId"], newer.point.point_id.as_str());
+    assert_eq!(
+        unsupported["availability"], "UnsupportedFormat",
+        "{unsupported}"
+    );
+    assert_eq!(unsupported["formatVersion"], "2.0.0", "{unsupported}");
+    assert_eq!(
+        unsupported["cause"],
+        serde_json::json!({"document": "record", "reason": "unsupportedFormat"}),
+        "{unsupported}"
+    );
+    assert_eq!(unsupported["factsFrom"], "indexRow", "{unsupported}");
+    assert_eq!(unsupported["backupId"], "set-a", "{unsupported}");
+    assert!(
+        unsupported["remedy"]
+            .as_str()
+            .is_some_and(|r| r.contains("newer Logweir")),
+        "{unsupported}"
+    );
+    assert_eq!(entries[1]["availability"], "Available", "{body}");
 }
 
 /// The window is the plan's `viewLimit`; everything beyond it is COUNTED.
@@ -8875,13 +8933,16 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             .to_string(),
     );
 
-    let cases: Vec<(&str, String, Fault, &str, &str)> = vec![
+    // The last column is FX-33's `cause`: the document the examination
+    // stopped at and why, or `None` for a point that is `Available`.
+    let cases: Vec<(&str, String, Fault, &str, &str, Option<(&str, &str)>)> = vec![
         (
             "the record is absent",
             f.record_key.clone(),
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("record", "notFound")),
         ),
         (
             "the record is denied",
@@ -8889,6 +8950,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Unreadable",
             "notAttempted",
+            Some(("record", "readFailed")),
         ),
         (
             "the receipt is absent",
@@ -8896,6 +8958,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("receipt", "notFound")),
         ),
         (
             "the receipt is denied",
@@ -8903,6 +8966,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Unreadable",
             "notAttempted",
+            Some(("receipt", "readFailed")),
         ),
         (
             "the sidecar is absent",
@@ -8910,6 +8974,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Available",
             "noEvidence",
+            None,
         ),
         (
             "the sidecar is denied",
@@ -8917,6 +8982,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Available",
             "notAttempted",
+            None,
         ),
         (
             "the manifest is absent",
@@ -8924,6 +8990,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("manifest", "notFound")),
         ),
         (
             "the manifest is denied",
@@ -8931,9 +8998,10 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied,
             "Unreadable",
             "notAttempted",
+            Some(("manifest", "readFailed")),
         ),
     ];
-    for (what, key, fault, availability, signature) in cases {
+    for (what, key, fault, availability, signature, cause) in cases {
         let objects = place(FakeObjects::new(), &f).failing_key(&key, fault);
         let run = drive_sync(
             sync_request(),
@@ -8942,11 +9010,35 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         let body = body_of(&run);
         let counts = summary_of(&body, "catalog-counts=");
         assert_eq!(counts["total"], 1, "{what}: {body}");
-        // A point whose RECORD could not be read has no receipt-derived facts
-        // to publish, so it is counted and not listed.
-        if let Some(entry) = entries_of(&body).first() {
-            assert_eq!(entry["availability"], availability, "{what}: {entry}");
-            assert_eq!(entry["signature"], signature, "{what}: {entry}");
+        // FX-33: EVERY counted point is listed — a point whose RECORD could
+        // not be read too, which used to be counted and listed by no entry.
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{what}: the point is not listed: {body}");
+        let entry = &entries[0];
+        assert_eq!(
+            entry["pointId"],
+            f.point.point_id.as_str(),
+            "{what}: {entry}"
+        );
+        assert_eq!(entry["availability"], availability, "{what}: {entry}");
+        assert_eq!(entry["signature"], signature, "{what}: {entry}");
+        match cause {
+            Some((document, reason)) => {
+                assert_eq!(entry["cause"]["document"], document, "{what}: {entry}");
+                assert_eq!(entry["cause"]["reason"], reason, "{what}: {entry}");
+                assert!(entry["cause"].get("bytes").is_none(), "{what}: {entry}");
+            }
+            None => assert!(entry.get("cause").is_none(), "{what}: {entry}"),
+        }
+        // A read that did not answer is the ONE cause whose remedy names the
+        // grant, the endpoint and the network.
+        if cause.is_some_and(|(_, reason)| reason == "readFailed") {
+            assert!(
+                entry["remedy"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("archiveRead grant")),
+                "{what}: {entry}"
+            );
         }
         let bucket = match availability {
             "Missing" => "missing",
@@ -8964,10 +9056,18 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
     }
 }
 
-/// **F4, the size half (question F12).** A document larger than a record could
-/// ever be is `Unreadable`, not parsed.
+/// **F4, the size half (question F12), and FX-33's.** A record larger than
+/// the bound a record is read under is `Unreadable`, is not parsed — and is
+/// LISTED, with its size against the bound.
+///
+/// Before FX-33 the outcome was the count alone: the point had no entry.
+///
+/// KILLS: the record read uncapped or under a larger cap; `build_entry`
+/// dropping a point with no parsed record; the size reported with the
+/// grant remedy.
 #[test]
 fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
+    use logweir_engine_oso::storage::caps;
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let f = catalog_fixture(
         &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
@@ -8980,13 +9080,12 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     // document `read_record` accepts — which is what makes the ceiling, and not
     // the parser, the thing under test. A block of spaces would fail to parse
     // either way and the mutant that deletes the ceiling would survive.
+    let cap = usize::try_from(caps::CATALOG_RECORD).expect("fits");
     let mut doc: serde_json::Value =
         serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
-    doc["e2e_padding"] = serde_json::json!(
-        "x".repeat(logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES)
-    );
+    doc["e2e_padding"] = serde_json::json!("x".repeat(cap));
     let huge = serde_json::to_vec(&doc).expect("JSON");
-    assert!(huge.len() > logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES);
+    assert!(huge.len() > cap);
     // The CONTROL: the same document under the ceiling reads normally.
     let control = place(FakeObjects::new(), &f);
     let run = drive_sync(
@@ -9004,23 +9103,48 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
     );
     let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["unreadable"], 1, "{body}");
+    assert_eq!(counts["unreadableOverReadCap"], 1, "{body}");
+    let entries = entries_of(&body);
     assert_eq!(
-        summary_of(&body, "catalog-counts=")["unreadable"],
+        entries.len(),
         1,
-        "{body}"
+        "the oversized point is not listed: {body}"
     );
+    let entry = &entries[0];
+    assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
+    assert_eq!(entry["availability"], "Unreadable", "{entry}");
+    assert_eq!(
+        entry["cause"],
+        serde_json::json!({
+            "document": "record",
+            "reason": "overReadCap",
+            "bytes": huge.len(),
+            "capBytes": caps::CATALOG_RECORD,
+        }),
+        "{entry}"
+    );
+    let remedy = entry["remedy"].as_str().expect("a remedy");
+    assert!(
+        remedy.contains(&format!("{} bytes", huge.len()))
+            && remedy.contains(&format!("{}-byte bound", caps::CATALOG_RECORD)),
+        "the remedy states the size against the bound: {remedy}"
+    );
+    assert!(!remedy.contains("grant"), "a size names no grant: {remedy}");
 }
 
 /// **FX-31: the catalog walk READS under its caps**, not only measures after:
-/// the record and the receipt under `MAX_CATALOG_DOCUMENT_BYTES`, the sidecar
-/// under `caps::SIDECAR`, the manifest under `caps::MANIFEST`. The row above
-/// holds the outcome (`Unreadable`), which the post-read ceiling alone would
-/// also give; this one holds the read.
+/// the record under `caps::CATALOG_RECORD`, the receipt under
+/// `caps::CATALOG_RECEIPT` (FX-33: the topic budget's two bounds, the second
+/// the controller's own), the sidecar under `caps::SIDECAR`, the manifest
+/// under `caps::MANIFEST`. The row above holds the outcome (`Unreadable`);
+/// this one holds the read.
 ///
-/// KILLS: "the walk reads uncapped" (any of the four caps).
+/// KILLS: "the walk reads uncapped" (any of the four caps); a cap read as
+/// `u64::MAX`; the receipt read under a cap other than the controller's.
 #[test]
 fn a_catalog_walk_reads_every_document_under_its_cap() {
-    use logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES;
     use logweir_engine_oso::storage::caps;
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let f = catalog_fixture(
@@ -9039,7 +9163,6 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
         1,
         "the point reads"
     );
-    let document = MAX_CATALOG_DOCUMENT_BYTES as u64;
     let caps_read = objects.read_caps();
     let cap_of = |key: &str| {
         caps_read
@@ -9048,9 +9171,14 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
             .map(|(_, c)| *c)
             .unwrap_or_else(|| panic!("{key} was not read: {caps_read:?}"))
     };
-    assert_eq!(cap_of(&f.record_key), document);
-    assert_eq!(cap_of(&f.receipt_key), document);
+    assert_eq!(cap_of(&f.record_key), caps::CATALOG_RECORD);
+    assert_eq!(cap_of(&f.receipt_key), caps::CATALOG_RECEIPT);
+    assert_eq!(cap_of(&f.receipt_key), caps::CONTROLLER_RECEIPT);
     assert_eq!(cap_of(&f.sidecar_key), caps::SIDECAR);
+    assert!(
+        !caps_read.iter().any(|(key, _)| *key == f.log_key),
+        "a point whose record reads spends no read on its index row: {caps_read:?}"
+    );
     for (key, cap) in &caps_read {
         assert!(
             *cap <= caps::MANIFEST,

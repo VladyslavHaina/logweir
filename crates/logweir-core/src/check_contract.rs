@@ -53,8 +53,27 @@ pub const MAX_TOPICS_CEILING: u32 = 50_000;
 pub const MAX_READINESS_TOPICS: usize = 1_000;
 /// `evidenceFetch` object cap.
 pub const MAX_EVIDENCE_OBJECTS: usize = 3;
-/// `evidenceFetch` payload cap: 1 MiB.
-pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = 1024 * 1024;
+/// `evidenceFetch` payload cap — the most bytes of one signed document a
+/// plan may ask a check Job to relay.
+///
+/// **FX-33: [`crate::topic_budget::MAX_RECEIPT_BYTES`]** (5,131,072), the
+/// largest backup receipt Logweir writes; it was 1 MiB, which a receipt of
+/// about 300 topics passed, and such a run was never verified. The relay
+/// decides the number, not the reverse: base64 in
+/// [`PART_MAX_BASE64_CHARS`]-character frames turns this payload into about
+/// 6.6 MiB of pod log, inside the 8 MiB the controller reads
+/// (`weirkeeper::check::relay::RELAY_LIMIT_BYTES`, itself below the kubelet's
+/// default 10 MiB log rotation); a 6 MiB payload would be 8.1 MiB and would
+/// not arrive. `weirkeeper`'s `the_largest_receipt_fits_the_relay` holds the
+/// two together. A plan asks this much for a RECEIPT only; for every other
+/// document it asks [`MAX_EVIDENCE_SCORECARD_BYTES`].
+pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = crate::topic_budget::MAX_RECEIPT_BYTES;
+/// The payload cap an evidence fetch asks for a document that is NOT a
+/// backup receipt — a drill scorecard: 1 MiB, the cap every evidence fetch
+/// asked before FX-33. The controller parses such a document whole, so it is
+/// not raised with the receipt's.
+pub const MAX_EVIDENCE_SCORECARD_BYTES: u64 = 1024 * 1024;
+const _: () = assert!(MAX_EVIDENCE_SCORECARD_BYTES <= MAX_EVIDENCE_PAYLOAD_BYTES);
 /// `evidenceFetch` sidecar cap: 64 KiB.
 pub const MAX_EVIDENCE_SIDECAR_BYTES: u64 = 64 * 1024;
 /// A result carries at most this many per-check entries (D2 §6.4).

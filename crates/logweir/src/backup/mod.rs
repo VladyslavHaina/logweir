@@ -58,6 +58,7 @@
 //! binary-level argv assertion lives under `e2e/` (`e2e/tests/backup_argv.rs`).
 pub mod config_coverage;
 pub mod consumer_positions;
+pub mod document_budget;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 pub mod schema_dependency;
@@ -760,6 +761,39 @@ fn execute_with_signer(
     // capture cannot answer this.
     let observed = config_coverage::observe(reader, &plan.topics);
     config_coverage::log(&observed);
+    // **FX-33 — THE LAST REFUSAL BEFORE THE ENGINE: the documents this run
+    // would sign must be ones the catalog can list and the controller can
+    // verify.** Phase −1 has already refused a selection over the topic
+    // count; what is measured here is the BYTES, which are the source's to
+    // decide (every override is recorded, and a name is written six times).
+    // The measure is the receipt and record builders themselves, over this
+    // read and with every field the engine has yet to decide at its longest
+    // (`document_budget`), so a run admitted here cannot sign a document over
+    // its bound. Nothing has been written to the archive.
+    let selected = selected_groups(args, &inputs.spec);
+    if let Some(why) = document_budget::refusal(&document_budget::Known {
+        backup_id: &backup_id,
+        run_id,
+        triggered_by: args.triggered_by.as_deref().unwrap_or_default(),
+        source_cluster_id: &admitted.source_cluster_id,
+        bootstrap_servers: &inputs.spec.source.bootstrap_servers,
+        topics: &inputs.spec.source.topics,
+        engine: &engine_id,
+        storage: &inputs.spec.storage,
+        source_auth: &source_auth_render(&inputs.spec.source.auth),
+        observed: &observed,
+        owners: &inputs.owners,
+        owner_detection: &inputs.owner_detection,
+        selected_groups: &selected,
+        signing: crate::catalog::signing_of(&signer.verifying_key()),
+    }) {
+        return Err(logweir_core::guard::GuardRefusal(format!(
+            "{why}. NO backup was taken: this is refused before the engine is spawned and \
+             nothing was written to the archive. The execution id {backup_id} is claimed, so \
+             run the smaller selection under a new backup id"
+        ))
+        .into());
+    }
     // PROD-05.1: each named topic's replication factor, from the same reader's
     // metadata, before the engine — the pinned engine's manifest keeps it for
     // the first topic it saves only (`config_coverage::model`). Never fatal: a
@@ -787,7 +821,6 @@ fn execute_with_signer(
     // so a position is at or below the end the engine then reads from; the
     // positions of an active group are still not atomic with the records
     // (`logweir_core::consumer_positions`'s module doc).
-    let selected = selected_groups(args, &inputs.spec);
     let group_capture = (!selected.is_empty()).then(|| {
         let observed_from = chrono::Utc::now();
         let observation = reader.observe_consumer_groups(&selected, &plan.topics);

@@ -54,6 +54,9 @@ pub mod execution_contract;
 pub mod guard;
 pub mod ids;
 pub mod outcome;
+/// FX-33: the facts a reader takes from a backup receipt without building a
+/// tree of it — the shared controller's bounded read.
+pub mod receipt_facts;
 /// PLAT-19.1 / decision D3 §4.3: the scope a standing rehearsal
 /// authorization signs over. Types only — the `plan ∈ scope` predicate is
 /// W7's, against W5's execution contract v2.
@@ -68,6 +71,9 @@ pub mod spec;
 /// FX-8: which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
+/// FX-33: how many topics one backup may name and what its signed documents
+/// may weigh — the one place every reader's cap and refusal derive from.
+pub mod topic_budget;
 /// PROD-05.1: the topic configuration model's portability table, the capture
 /// rule and the detection of declarative owners.
 pub mod topic_configuration;
