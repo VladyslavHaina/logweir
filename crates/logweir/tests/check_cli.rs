@@ -8184,6 +8184,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         consumer_positions: None,
         schema_dependency: None,
         generations: None,
+        source_watermarks: None,
     }
 }
 
