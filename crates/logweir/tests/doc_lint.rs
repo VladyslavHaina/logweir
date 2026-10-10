@@ -2273,13 +2273,21 @@ fn table_row<'a>(document: &'a str, file: &str, header: &str, role: &str) -> &'a
 /// both tables must name the action. The check fails in each direction a
 /// drift can take:
 ///
-/// * a NEW reader of a version (a file calling `.get_version(` that is not in
-///   [`READERS`]) — say which role's grant it uses, and put the action in that
-///   role's rows;
+/// * a NEW reader of a version (a file that USES `get_version`, however the
+///   use is spelled — [`uses_get_version`] — and is not in [`READERS`]) — say
+///   which role's grant it uses, and put the action in that role's rows;
 /// * a row that LOSES the action while its reader still makes the read;
 /// * a reader that no longer makes the read (a stale entry here, and a grant
 ///   the docs may then stop asking for);
 /// * the store no longer reading by version at all.
+///
+/// **And the receipt a point-bound restore reads (FX-14 review L5).** The
+/// same two `archiveRead` readers fetch the plan's bound receipt, at a key
+/// under [`logweir::catalog::record::RECEIPTS_PREFIX`], with the archive
+/// grant, which the measured minimum (`<prefix>/*` alone) does not cover. So
+/// the `archiveRead` row of both tables must also name `s3:GetObject` on that
+/// namespace, spelled from the constant the code derives the key with: a row
+/// that loses it fails here, and so does a namespace the code moved.
 #[test]
 fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
     /// `(reader, its row in docs/kubernetes.md, its row in docs/install.md)`.
@@ -2327,9 +2335,7 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
 
     let callers: BTreeSet<&str> = sources
         .iter()
-        .filter(|(path, code)| {
-            !IMPLEMENTATION.contains(&path.as_str()) && code.contains(".get_version(")
-        })
+        .filter(|(path, code)| !IMPLEMENTATION.contains(&path.as_str()) && uses_get_version(code))
         .map(|(path, _)| path.as_str())
         .collect();
     let named: BTreeSet<&str> = READERS.iter().map(|(path, ..)| *path).collect();
@@ -2373,4 +2379,100 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
         kubernetes.contains("**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`"),
         "docs/kubernetes.md §7a must keep the paragraph that says which store was measured"
     );
+
+    // The bound receipt's read: the `archiveRead` readers still read the
+    // plan's receipt key, and the role's row grants the namespace it is in.
+    let receipt_namespace = format!("<bucket>/{}*", logweir::catalog::record::RECEIPTS_PREFIX);
+    assert_eq!(
+        receipt_namespace, "<bucket>/logweir/backups/*",
+        "the receipt namespace moved: both grant tables name it and must move with it"
+    );
+    for (reader, kubernetes_role, install_role) in READERS {
+        if kubernetes_role != "`archiveRead`" {
+            continue;
+        }
+        let code = sources
+            .iter()
+            .find(|(path, _)| path == reader)
+            .map(|(_, code)| code.as_str())
+            .unwrap_or_else(|| panic!("{reader} is scanned"));
+        assert!(
+            code.contains("receipt_key"),
+            "{reader} no longer reads a plan's bound receipt; if no `archiveRead` reader does, \
+             take the grant on {receipt_namespace} out of the rows and out of this test"
+        );
+        for (file, document, header, role) in [
+            (
+                "docs/kubernetes.md",
+                &kubernetes,
+                "| Role | Minimal actions, each at the resource scope shown |",
+                kubernetes_role,
+            ),
+            (
+                "docs/install.md",
+                &install,
+                "| Role | Actions | Resources |",
+                install_role,
+            ),
+        ] {
+            let row = table_row(document, file, header, role);
+            assert!(
+                row.contains(&receipt_namespace),
+                "{file}: the {role} row does not grant `s3:GetObject` on {receipt_namespace}, and \
+                 {reader} reads a point-bound plan's receipt there with that role's grant (a 403 \
+                 is `archive.backupSet AccessDenied`, or exit 1 at the runner): {row}"
+            );
+        }
+    }
+}
+
+/// Whether `code` USES the store's read by version, however the use is
+/// spelled: a method call (`access.get_version(…)`, with or without the
+/// receiver on the same line), a path call (`Store::get_version(&store, …)`,
+/// `ObjectAccess::get_version(access, …)`, `<dyn ObjectAccess>::get_version`)
+/// or the function taken as a value (`.map(Store::get_version)`). The name
+/// as a whole word is a use; only its own definition (`fn get_version`) and a
+/// longer identifier that merely contains it are not.
+fn uses_get_version(code: &str) -> bool {
+    const NAME: &str = "get_version";
+    let part_of_a_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    code.match_indices(NAME).any(|(at, _)| {
+        let before = &code[..at];
+        let after = &code[at + NAME.len()..];
+        !before.chars().next_back().is_some_and(part_of_a_name)
+            && !after.chars().next().is_some_and(part_of_a_name)
+            && !before.trim_end().ends_with("fn")
+    })
+}
+
+/// [`uses_get_version`] sees every spelling of a use and no definition, so
+/// the lint above cannot be passed by writing the same read another way
+/// (FX-14 review L5: it matched the text `.get_version(` alone, and a call
+/// spelled `Store::get_version(&store, …)` went unseen).
+#[test]
+fn a_read_by_version_is_seen_however_the_call_is_spelled() {
+    for used in [
+        "let bytes = access.get_version(key, version)?;",
+        "store\n    .get_version(&manifest_key, version)",
+        "Store::get_version(&store, key, version)",
+        "logweir_store::Store::get_version(self, key, version).map(|(b, _)| b)",
+        "ObjectAccess::get_version(access, key, version)",
+        "<dyn ObjectAccess>::get_version(access.as_ref(), key, version)",
+        "let read = Store::get_version;",
+        "pin::judge(pinned, current, digest, |v| access.get_version(key, v))",
+        "versions.iter().map(|v| store.get_version (key, v))",
+    ] {
+        assert!(uses_get_version(used), "a use went unseen: {used}");
+    }
+    for not_a_use in [
+        "pub fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {",
+        "    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError>;",
+        "fn   get_version(",
+        "let v = get_versioned(key);",
+        "let v = try_get_version_id(key);",
+        "store.get(key)",
+        "",
+    ] {
+        assert!(!uses_get_version(not_a_use), "taken for a use: {not_a_use}");
+    }
 }
