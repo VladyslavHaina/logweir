@@ -558,7 +558,7 @@ pub async fn create(
         .map_err(KubeFailure::into_api_error)?;
     let effective = policies.resolve(&ns);
     refuse_typed_confirmation(&effective, &request)?;
-    refuse_before_create(&state, &ns, &effective, &request)?;
+    refuse_before_create(&state, &actor, &ns, &effective, &request)?;
     if effective.mode() == ApprovalMode::Governed
         && !effective.is_legacy()
         && request.approval_ref.name.len() > approval::MAX_GOVERNED_APPROVAL_NAME
@@ -733,12 +733,17 @@ fn typed_confirmation(
 /// * **No `approvalRef.name` ending in `-confirmation` under Governed**
 ///   (review L4): it would collide with another Restore's confirmation
 ///   object.
+/// * **A requester a two-person approval can compare** (PROD-16.2): under a
+///   policy whose approval the console signs, the requester is one of the two
+///   people every reader tells apart
+///   (`logweir_core::approval_policy::console_principal`).
 ///
 /// # Errors
 ///
 /// `policy_mismatch` or `validation_failed`.
 fn refuse_before_create(
     state: &AppState,
+    actor: &Actor,
     ns: &str,
     effective: &EffectivePolicy,
     request: &CreateRestoreRequest,
@@ -786,6 +791,27 @@ fn refuse_before_create(
             ))
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
+    }
+    // PROD-16.2: under a two-person policy the requester is one of the two
+    // people every reader compares. An identity that cannot be compared (or
+    // is a machine's) could never be told apart from an approver's, so no
+    // request is made for it: nothing would ever be able to approve it.
+    if operator_mode == OperatorMode::TwoPerson {
+        if let Err(reason) = logweir_core::approval_policy::console_principal(
+            "requester",
+            &actor.issuer,
+            &actor.subject,
+        ) {
+            actor.audit.set_failure("requester_not_comparable");
+            return Err(ApiError::new(
+                ProblemCode::PolicyMismatch,
+                format!(
+                    "Namespace {ns} is bound to approval policy {} (two-person), and {reason}. \
+                     Nothing was created.",
+                    policy.name
+                ),
+            ));
+        }
     }
     if let Err(reason) =
         logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())
@@ -1186,6 +1212,23 @@ pub async fn submit_approval(
             ),
         ));
     };
+    // PROD-16.2: A TWO-PERSON NAMESPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE.
+    // Its policy snapshot says the console signs the approval, and a request
+    // made under one setting is not approved under the other: accepting a
+    // countersignature here would keep the personal-key roster as a second,
+    // standing way in. The controller and the runner refuse it too.
+    if policy.approver_signature == logweir_core::approval_policy::ApproverSignature::Console {
+        actor.audit.set_failure("countersignature_not_accepted");
+        return Err(ApiError::new(
+            ProblemCode::PolicyMismatch,
+            format!(
+                "Namespace {ns} is bound to {} (two-person): a second person approves in the \
+                 console, and a personal-key countersignature is not accepted here. Nothing was \
+                 stored.",
+                policy.name
+            ),
+        ));
+    }
     let approval_name = restore.spec.approval_ref_name().to_string();
     let confirmation_name = approval::confirmation_name(&approval_name);
     let confirmation = match state.kube().get::<Approval>(&ns, &confirmation_name).await {

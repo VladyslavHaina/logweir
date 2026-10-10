@@ -258,9 +258,9 @@ impl AppState {
 /// The complete router, middleware included.
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
-        approvals, backups, cadence_previews, catalogs, connections, destinations, health,
-        namespaces, operations, preflights, protection, rehearsals, restores, retention, schedules,
-        session, topic_discoveries, trust,
+        approvals, backups, cadence_previews, catalogs, connections, console_approval,
+        destinations, health, namespaces, operations, preflights, protection, rehearsals, restores,
+        retention, schedules, session, topic_discoveries, trust,
     };
 
     let api = Router::new()
@@ -347,6 +347,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{ns}/restores/{name}/approval",
             axum::routing::post(restores::submit_approval),
+        )
+        // PROD-16.2: a two-person request as the approver is shown it (a
+        // read), and the second person's click (POST only: no GET approves).
+        .route(
+            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+            get(console_approval::request),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
+            axum::routing::post(console_approval::approve),
         )
         .route(
             "/api/v1/namespaces/{ns}/approval-policy",

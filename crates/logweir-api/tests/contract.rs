@@ -63,6 +63,8 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/restores",
             "/api/v1/namespaces/{ns}/restores/{name}",
             "/api/v1/namespaces/{ns}/restores/{name}/approval",
+            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
             "/api/v1/namespaces/{ns}/approval-policy",
             "/api/v1/namespaces/{ns}/approvals",
             "/api/v1/namespaces/{ns}/approvals/{name}",
@@ -112,8 +114,9 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    // 56 + PLAT-19.2's two: submitGovernedApproval and getApprovalPolicy.
-    assert_eq!(operation_ids.len(), 58);
+    // 56 + PLAT-19.2's two (submitGovernedApproval, getApprovalPolicy) +
+    // PROD-16.2's two (getApprovalRequest, approveInConsole).
+    assert_eq!(operation_ids.len(), 60);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and

@@ -1699,6 +1699,168 @@
         ]
       }
     },
+    "/api/v1/namespaces/{ns}/restores/{name}/approval-request": {
+      "get": {
+        "operationId": "getApprovalRequest",
+        "summary": "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/restores/{name}/console-approval": {
+      "post": {
+        "operationId": "approveInConsole",
+        "summary": "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsoleApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Approval was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "This approver already approved this request (a replay).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
     "/api/v1/namespaces/{ns}/approval-policy": {
       "get": {
         "operationId": "getApprovalPolicy",
@@ -5173,6 +5335,7 @@
         "type": "object",
         "required": [
           "basis",
+          "consoleApprovalAvailable",
           "installationDigest",
           "legacy",
           "mode",
@@ -5192,6 +5355,10 @@
             "description": "The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on this namespace's `TrustPolicy`.",
             "type": "string",
             "nullable": true
+          },
+          "consoleApprovalAvailable": {
+            "description": "PROD-16.2: whether THIS console will take a second person's approval here: `true` for a `two-person` policy when the console runs in shared mode and holds its confirmation key. `false` under `two-person` means this is the in-cluster administrator console, whose one identity cannot be two people (nothing can be requested or approved through it), or the key is not there yet. Always `false` for `confirm` and `strict`.",
+            "type": "boolean"
           },
           "digest": {
             "description": "The snapshot digest a signed document must name; absent for legacy.",
@@ -5275,6 +5442,178 @@
           }
         }
       },
+      "ApprovalRequestResponse": {
+        "description": "`GET .../restores/{name}/approval-request`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The request.",
+            "$ref": "#/components/schemas/ApprovalRequestView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalRequestState": {
+        "description": "Where a two-person request stands.",
+        "oneOf": [
+          {
+            "description": "The console's own request, verified, bound to this Restore, this plan and the namespace's current policy, inside its window, and not yet approved.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "An Approval already exists under the Restore's `approvalRef`.",
+            "type": "string",
+            "enum": [
+              "approved"
+            ]
+          },
+          {
+            "description": "The request's window has closed; it authorises nothing. Submit the Restore again.",
+            "type": "string",
+            "enum": [
+              "expired"
+            ]
+          },
+          {
+            "description": "There is no request this console confirmed for this Restore, this plan and the current policy: none was stored, the stored one does not carry this console's signature, or it names another Restore, plan or policy. Nothing of such an object is shown, and it is never approved.",
+            "type": "string",
+            "enum": [
+              "notConfirmed"
+            ]
+          }
+        ]
+      },
+      "ApprovalRequestView": {
+        "description": "PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata.",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "approve",
+          "confirmationName",
+          "namespace",
+          "policy",
+          "policyDigest",
+          "restore",
+          "restoreUid",
+          "state",
+          "stateSentence"
+        ],
+        "properties": {
+          "approvalName": {
+            "description": "The Approval the Restore references (`spec.approvalRef.name`), which a click creates.",
+            "type": "string"
+          },
+          "approvalSubject": {
+            "description": "What is being approved: an ordinary restore, or one under the original topic names.",
+            "$ref": "#/components/schemas/ApprovalSubjectView",
+            "nullable": true
+          },
+          "approve": {
+            "description": "Whether this session may approve.",
+            "$ref": "#/components/schemas/ApproveOfferView"
+          },
+          "approvedAt": {
+            "description": "When they approved.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "approver": {
+            "description": "Who approved, `<issuer>#<subject>`, when an approval this console signed exists.",
+            "type": "string",
+            "nullable": true
+          },
+          "confirmationName": {
+            "description": "The stored request, `<approvalName>-confirmation`.",
+            "type": "string"
+          },
+          "confirmationSha256": {
+            "description": "`sha256:<hex>` of the request's signed bytes: what a click must name.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When it stops authorising anything.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "issuedAt": {
+            "description": "When the console signed the request.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "originalTopics": {
+            "description": "For a restore under the original topic names: the names, from the Restore's own plan (at most 100; `originalTopicsCount` says how many there are). Absent for an ordinary restore, and when the plan does not parse.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "originalTopicsCount": {
+            "description": "How many original topic names the plan restores.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "planHash": {
+            "description": "The plan hash the request names — the Restore's own, recomputed.",
+            "type": "string",
+            "nullable": true
+          },
+          "policy": {
+            "description": "The namespace's current policy.",
+            "type": "string"
+          },
+          "policyDigest": {
+            "description": "Its snapshot digest.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "Who asked, `<issuer>#<subject>`, as the console attested them.",
+            "type": "string",
+            "nullable": true
+          },
+          "restore": {
+            "description": "The Restore the request is for.",
+            "type": "string"
+          },
+          "restoreUid": {
+            "description": "That Restore's UID, now.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Where the request stands.",
+            "$ref": "#/components/schemas/ApprovalRequestState"
+          },
+          "stateSentence": {
+            "description": "One sentence saying so.",
+            "type": "string"
+          },
+          "ticket": {
+            "description": "The change ticket the requester gave.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "ApprovalResponse": {
         "type": "object",
         "required": [
@@ -5319,6 +5658,69 @@
             "type": "string",
             "enum": [
               "unknown"
+            ]
+          }
+        ]
+      },
+      "ApproveOfferView": {
+        "description": "Whether this session may approve, decided by the server with the same rules the click is held to. Advisory: the click is checked again.",
+        "type": "object",
+        "required": [
+          "offered",
+          "sentence"
+        ],
+        "properties": {
+          "offered": {
+            "description": "Whether the Approve button is offered to this session.",
+            "type": "boolean"
+          },
+          "refusal": {
+            "description": "Why not, when it is not.",
+            "$ref": "#/components/schemas/ApproveRefusal",
+            "nullable": true
+          },
+          "sentence": {
+            "description": "One sentence for the page: what approving means, or why this session cannot.",
+            "type": "string"
+          }
+        }
+      },
+      "ApproveRefusal": {
+        "description": "Why THIS session is not offered the Approve button.",
+        "oneOf": [
+          {
+            "description": "The request is not pending (see `state`).",
+            "type": "string",
+            "enum": [
+              "notPending"
+            ]
+          },
+          {
+            "description": "This console is the in-cluster administrator console.",
+            "type": "string",
+            "enum": [
+              "localAdmin"
+            ]
+          },
+          {
+            "description": "The session holds no Approver role in this namespace. An Administrator is not an Approver unless separately bound as one.",
+            "type": "string",
+            "enum": [
+              "notApprover"
+            ]
+          },
+          {
+            "description": "The session is the requester.",
+            "type": "string",
+            "enum": [
+              "requester"
+            ]
+          },
+          {
+            "description": "The session's identity, or the requester's, cannot establish a second person: it is not in a form that can be compared, it is a machine identity, or the two come from different issuers.",
+            "type": "string",
+            "enum": [
+              "notSecondPerson"
             ]
           }
         ]
@@ -7470,6 +7872,20 @@
             ]
           }
         ]
+      },
+      "ConsoleApprovalRequest": {
+        "description": "`POST .../restores/{name}/console-approval` (PROD-16.2) — the second person's click. The body names the request the approver was shown and NOTHING the approval is built from: requester, subject, UID, plan hash, policy and expiry come only from the stored request, after the console verified its own signature on it. An unknown field is refused.",
+        "type": "object",
+        "required": [
+          "confirmationSha256"
+        ],
+        "properties": {
+          "confirmationSha256": {
+            "description": "`sha256:` and 64 lowercase hex characters: `confirmationSha256` as `GET .../approval-request` showed it. COMPARED with the stored request's bytes and never copied: a request that changed between the view and the click is refused (409 `state_conflict`).",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "CreateBackupRequest": {
         "description": "`POST /api/v1/namespaces/{ns}/backups` — \"Back up now\" and \"Run first backup now\" (D1 §8.2).\n\nTWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's current revision — selection, archive, deadline — and records `{uid, generation, runPolicySha256}`; a policy field in the body beside it is `422`, because a \"manual run of this schedule\" that quietly ran a different policy would be the wrong thing recorded in the receipt. Without it the body IS the policy, for a cluster with no schedule yet.",
@@ -10111,7 +10527,7 @@
             ]
           },
           {
-            "description": "Two-person approval in the console (PROD-16.2; never served by this build).",
+            "description": "Two-person approval in the console (PROD-16.2: internal `Governed` with `approverSignature: Console`): a second person signs in to the shared console and clicks Approve.",
             "type": "string",
             "enum": [
               "two-person"

@@ -93,6 +93,8 @@ fn document(mode: ApprovalMode) -> RestoreAuthorization {
         ticket: Some("CHG-1".into()),
         approval_subject: None,
         original_name_confirmation: None,
+        approver: None,
+        approved_at: None,
     }
 }
 
@@ -1097,4 +1099,1007 @@ fn an_older_runner_refuses_every_2_1_0_document() {
         "the older runner admits a 2.0.0 document (exit {code}):\n{transcript}"
     );
     assert_ne!(code, 0, "no broker is running");
+}
+
+// ---------------------------------------------------------------------------
+// PROD-16.2: two-person approval in the console (`approverSignature: Console`)
+// ---------------------------------------------------------------------------
+
+const IDP: &str = "https://idp.example";
+
+/// The installation document of the PROD-16.2 rows: `team-a` is bound to a
+/// two-person policy, and `prod` to the SAME policy with a personal key.
+const PAIR_POLICIES: &str = "policies:\n  - name: prod-pair\n    mode: two-person\n    maxAgeSeconds: 3600\n  - name: prod-strict\n    mode: strict\n    maxAgeSeconds: 3600\nnamespaces:\n  team-a: prod-pair\n  prod: prod-strict\n";
+
+fn pair_policy() -> logweir_core::approval_policy::ApprovalPolicy {
+    ApprovalPolicySet::parse(PAIR_POLICIES)
+        .expect("valid")
+        .resolve("team-a")
+        .bound()
+        .cloned()
+        .expect("bound")
+}
+
+fn strict_policy() -> logweir_core::approval_policy::ApprovalPolicy {
+    ApprovalPolicySet::parse(PAIR_POLICIES)
+        .expect("valid")
+        .resolve("prod")
+        .bound()
+        .cloned()
+        .expect("bound")
+}
+
+/// A two-person REQUEST over `plan`: what the console signs for `alice`.
+fn pair_request(plan: &str) -> RestoreAuthorization {
+    let p = pair_policy();
+    let mut doc = document(ApprovalMode::Governed);
+    doc.plan_hash = sha256_prefixed(plan.as_bytes());
+    doc.requester = Requester {
+        issuer: IDP.into(),
+        subject: "alice".into(),
+    };
+    doc.policy = PolicyRef {
+        name: p.name.clone(),
+        digest: p.digest(),
+    };
+    doc
+}
+
+/// The APPROVAL of [`pair_request`]: `bob` clicked thirty seconds after the
+/// request was made. 2.2.0, as the one writer gives it.
+fn pair_approved(plan: &str) -> RestoreAuthorization {
+    let mut doc = pair_request(plan);
+    doc.approver = Some(logweir_core::approval_policy::Approver {
+        issuer: IDP.into(),
+        subject: "bob".into(),
+    });
+    doc.approved_at = Some(doc.issued_at + Duration::seconds(30));
+    doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
+        doc.approval_subject.as_deref(),
+        doc.original_name_confirmation.as_ref(),
+        true,
+    )
+    .into();
+    doc
+}
+
+/// Verify a console-approved bundle as the controller mounts it: the console
+/// key is BOTH the confirmation key and the approver key, and the sidecar
+/// carries the console's signature alone.
+fn verify_console(
+    plan: &str,
+    doc: &RestoreAuthorization,
+    snapshot: &[u8],
+    k: &Keys,
+) -> Result<phase1_approval::Approved, DrillError> {
+    let bytes = doc.to_bytes();
+    verify(
+        plan,
+        &bytes,
+        &sidecar(&bytes, k, false),
+        &pem(&k.console),
+        &pem(&k.console),
+        snapshot,
+        &subject(),
+        k,
+    )
+}
+
+/// **A console-approved bundle verifies at the runner on the console's
+/// signature, and names the approver's principal** — the value the scorecard
+/// signs as `approval.approver`.
+///
+/// NEGATIVE CONTROLS, each refused before any client exists: the REQUEST the
+/// approver was shown (no approver), offered as the approval; and the same
+/// approved document beside the snapshot of the same policy with a personal
+/// key (another digest).
+#[test]
+fn a_console_approved_bundle_verifies_and_names_the_approvers_principal() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let doc = pair_approved(PLAN);
+    assert_eq!(doc.format_version, "2.2.0");
+    let approved = verify_console(PLAN, &doc, &snapshot, &k).expect("a console approval verifies");
+    assert_eq!(approved.approval.approver, "https://idp.example#bob");
+    assert_eq!(approved.approval.key_id, k.console.key_id());
+    assert_eq!(approved.approval.approved_at, doc.approved_at.expect("set"));
+    assert_eq!(approved.approval.ticket, "CHG-1");
+    assert!(!approved.approval.self_attested);
+    assert_eq!(
+        approved.approval_mode,
+        phase1_approval::APPROVAL_MODE_CONSOLE
+    );
+    assert!(approved.original_name_confirmation.is_none());
+
+    // The request is not an approval.
+    let pending = verify_console(PLAN, &pair_request(PLAN), &snapshot, &k);
+    assert!(is_guard(&pending), "{}", message(&pending));
+    assert!(
+        message(&pending).contains("nobody has approved"),
+        "{}",
+        message(&pending)
+    );
+    // A request made under one setting is not approved under the other.
+    let mut personal = pair_policy();
+    personal.approver_signature = logweir_core::approval_policy::ApproverSignature::PersonalKey;
+    let other = verify_console(PLAN, &doc, &personal.snapshot_bytes(), &k);
+    assert!(is_guard(&other), "{}", message(&other));
+    assert!(
+        message(&other).contains(POLICY_MISMATCH),
+        "{}",
+        message(&other)
+    );
+}
+
+/// **THE RELAXATION IS THE SNAPSHOT'S, AND ONLY THE SNAPSHOT'S.** Under a
+/// `Governed` policy the runner refuses a bundle that names the console key as
+/// the approver — unless the snapshot says `approverSignature: Console`.
+///
+/// Three bundles that all name the console key as the approver:
+/// 1. a personal-key policy, its own request, the console's signature alone:
+///    refused, "a governed run needs a separate approver signature";
+/// 2. the same policy, with `approver` and `approvedAt` written into the
+///    document (and its digest named, so the digest cannot be what refuses
+///    it): refused — a document cannot grant itself the relaxation;
+/// 3. the two-person policy: admitted (the control).
+///
+/// And the other direction: under the two-person snapshot a bundle that names
+/// a PERSONAL key as the approver, countersigned by it, is refused.
+#[test]
+fn the_console_key_is_the_approver_only_when_the_snapshot_says_console() {
+    let k = keys();
+    let strict = strict_policy();
+    assert_eq!(
+        strict.approver_signature,
+        logweir_core::approval_policy::ApproverSignature::PersonalKey
+    );
+    // 1. A strict request, the console posing as the approver.
+    let mut request = pair_request(PLAN);
+    request.policy = PolicyRef {
+        name: strict.name.clone(),
+        digest: strict.digest(),
+    };
+    let refused = verify_console(PLAN, &request, &strict.snapshot_bytes(), &k);
+    assert!(is_guard(&refused), "{}", message(&refused));
+    assert!(
+        message(&refused).contains("is Governed")
+            && message(&refused).contains("separate approver"),
+        "{}",
+        message(&refused)
+    );
+    // 2. The same, with a console approver written into the document.
+    let mut forged = pair_approved(PLAN);
+    forged.policy = PolicyRef {
+        name: strict.name.clone(),
+        digest: strict.digest(),
+    };
+    let refused = verify_console(PLAN, &forged, &strict.snapshot_bytes(), &k);
+    assert!(is_guard(&refused), "{}", message(&refused));
+    assert!(
+        message(&refused).contains("approverSignature is Console"),
+        "{}",
+        message(&refused)
+    );
+    // 3. THE CONTROL.
+    assert!(verify_console(
+        PLAN,
+        &pair_approved(PLAN),
+        &pair_policy().snapshot_bytes(),
+        &k
+    )
+    .is_ok());
+
+    // A two-person namespace offered a personal-key document: the request,
+    // countersigned by a personal key the bundle names as the approver.
+    let bytes = pair_request(PLAN).to_bytes();
+    let personal = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, true),
+        &pem(&k.approver),
+        &pem(&k.console),
+        &pair_policy().snapshot_bytes(),
+        &subject(),
+        &k,
+    );
+    assert!(is_guard(&personal), "{}", message(&personal));
+    // ... and an APPROVED document mounted beside a personal approver key.
+    let bytes = pair_approved(PLAN).to_bytes();
+    let wrong_key = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, true),
+        &pem(&k.approver),
+        &pem(&k.console),
+        &pair_policy().snapshot_bytes(),
+        &subject(),
+        &k,
+    );
+    assert!(is_guard(&wrong_key), "{}", message(&wrong_key));
+    assert!(
+        message(&wrong_key).contains("personal-key countersignature is not accepted"),
+        "{}",
+        message(&wrong_key)
+    );
+}
+
+/// **The runner re-checks the second person itself**, from the bytes the
+/// console signed: every way the approver might not be one is refused with
+/// exit-3 routing before any client exists, and the control beside it runs.
+#[test]
+fn the_runner_refuses_an_approver_who_is_not_a_second_person() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let who = |issuer: &str, subject: &str| logweir_core::approval_policy::Approver {
+        issuer: issuer.into(),
+        subject: subject.into(),
+    };
+    let asked = |issuer: &str, subject: &str| Requester {
+        issuer: issuer.into(),
+        subject: subject.into(),
+    };
+    type Case = (
+        &'static str,
+        Requester,
+        logweir_core::approval_policy::Approver,
+        &'static str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "the requester",
+            asked(IDP, "alice"),
+            who(IDP, "alice"),
+            "is the requester",
+        ),
+        (
+            "another case",
+            asked(IDP, "alice"),
+            who(IDP, "ALICE"),
+            "is the requester",
+        ),
+        (
+            "a trailing slash on the issuer",
+            asked(IDP, "alice"),
+            who("https://idp.example/", "alice"),
+            "is the requester",
+        ),
+        (
+            "the same subject from another issuer",
+            asked(IDP, "alice"),
+            who("https://other.example", "alice"),
+            "two issuers",
+        ),
+        (
+            "trailing whitespace",
+            asked(IDP, "alice"),
+            who(IDP, "alice "),
+            "not in a form that can be compared",
+        ),
+        (
+            "a decomposed letter",
+            asked(IDP, "jos\u{e9}"),
+            who(IDP, "jose\u{301}"),
+            "not in a form that can be compared",
+        ),
+        (
+            "the local administrator as the approver",
+            asked(IDP, "alice"),
+            who("urn:logweir:local-admin", "admin"),
+            "administrator console",
+        ),
+        (
+            "the local administrator as the requester",
+            asked("urn:logweir:local-admin", "admin"),
+            who("urn:logweir:local-admin", "bob"),
+            "administrator console",
+        ),
+        (
+            "a service account as the requester",
+            asked(IDP, "system:serviceaccount:team-a:deployer"),
+            who(IDP, "bob"),
+            "Kubernetes system identity",
+        ),
+    ];
+    for (label, requester, approver, needle) in cases {
+        let mut doc = pair_approved(PLAN);
+        doc.requester = requester;
+        doc.approver = Some(approver);
+        let result = verify_console(PLAN, &doc, &snapshot, &k);
+        assert!(is_guard(&result), "{label}: {}", message(&result));
+        assert!(
+            message(&result).contains(needle)
+                && message(&result).contains("no data operation was started"),
+            "{label}: {}",
+            message(&result)
+        );
+    }
+    // THE CONTROL: another subject of the same issuer, also when the issuer
+    // is spelled with a trailing slash.
+    let mut doc = pair_approved(PLAN);
+    doc.approver = Some(who("https://idp.example/", "bob"));
+    assert!(verify_console(PLAN, &doc, &snapshot, &k).is_ok());
+}
+
+/// **`approvedAt` lies inside the request's own window, and the runner reads
+/// no clock.** Before the request, at its expiry and after it: refused. An
+/// instant inside the window is admitted even when it is ahead of this
+/// machine's clock — the controller, which has a clock, judged that.
+#[test]
+fn the_runner_holds_approved_at_to_the_requests_window_without_a_clock() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let base = pair_approved(PLAN);
+    let at = |instant| {
+        let mut doc = base.clone();
+        doc.approved_at = Some(instant);
+        verify_console(PLAN, &doc, &snapshot, &k)
+    };
+    for (label, instant) in [
+        ("before the request", base.issued_at - Duration::seconds(1)),
+        ("at the expiry", base.expires_at),
+        ("after the expiry", base.expires_at + Duration::seconds(1)),
+    ] {
+        let result = at(instant);
+        assert!(is_guard(&result), "{label}: {}", message(&result));
+        assert!(
+            message(&result).contains("outside the request's own window"),
+            "{label}: {}",
+            message(&result)
+        );
+    }
+    assert!(at(base.issued_at).is_ok(), "at issuedAt");
+    // Two minutes ahead of now, still inside the window (it closes in five).
+    assert!(at(Utc::now() + Duration::minutes(2)).is_ok());
+    // One field without the other is not an approval.
+    let mut half = base.clone();
+    half.approved_at = None;
+    let result = verify_console(PLAN, &half, &snapshot, &k);
+    assert!(is_guard(&result), "{}", message(&result));
+    assert!(
+        message(&result).contains("without the other"),
+        "{}",
+        message(&result)
+    );
+}
+
+/// **The fields are format 2.2.0 at the runner too.** The same approved
+/// document declared as 2.1.0 or 2.0.0 is refused by name.
+#[test]
+fn the_runner_refuses_the_approver_fields_under_an_older_version() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    for version in ["2.0.0", "2.1.0"] {
+        let mut doc = pair_approved(PLAN);
+        doc.format_version = version.into();
+        let result = verify_console(PLAN, &doc, &snapshot, &k);
+        assert!(is_guard(&result), "{version}: {}", message(&result));
+        assert!(
+            message(&result).contains("defined from formatVersion 2.2.0"),
+            "{version}: {}",
+            message(&result)
+        );
+    }
+    assert!(verify_console(PLAN, &pair_approved(PLAN), &snapshot, &k).is_ok());
+}
+
+/// **THE COMBINATION WITH PROD-15.1.** An original-name restore approved by a
+/// second person: the bundle carries `approvalSubject: originalName` and the
+/// approver, at 2.2.0; the runner reads the subject, reads no typed names
+/// (they are a one-person confirmation's), and reports the approval mode a
+/// scorecard signs as `consoleApproval`. Typed names beside it are refused.
+#[test]
+fn an_original_name_restore_approved_in_the_console_carries_the_subject_and_no_typed_names() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let mut doc = pair_request(ORIGINAL_PLAN);
+    doc.approval_subject = Some("originalName".into());
+    doc.approver = Some(logweir_core::approval_policy::Approver {
+        issuer: IDP.into(),
+        subject: "bob".into(),
+    });
+    doc.approved_at = Some(doc.issued_at + Duration::seconds(30));
+    doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
+        doc.approval_subject.as_deref(),
+        None,
+        true,
+    )
+    .into();
+    assert_eq!(doc.format_version, "2.2.0");
+    let approved =
+        verify_console(ORIGINAL_PLAN, &doc, &snapshot, &k).expect("the combination verifies");
+    assert_eq!(
+        approved.approval_subject,
+        logweir_core::original_name::ApprovalSubject::OriginalName
+    );
+    assert_eq!(
+        approved.approval_mode,
+        phase1_approval::APPROVAL_MODE_CONSOLE
+    );
+    assert!(approved.original_name_confirmation.is_none());
+    assert_eq!(approved.approval.approver, "https://idp.example#bob");
+    // The subject's own version is not enough for the approver.
+    let mut older = doc.clone();
+    older.format_version = "2.1.0".into();
+    let result = verify_console(ORIGINAL_PLAN, &older, &snapshot, &k);
+    assert!(is_guard(&result), "{}", message(&result));
+    // Typed names belong to a one-person confirmation, never to this.
+    let mut typed = doc.clone();
+    typed.original_name_confirmation =
+        Some(logweir_core::original_name::OriginalNameConfirmation {
+            typed_topics: vec!["orders".into()],
+        });
+    let result = verify_console(ORIGINAL_PLAN, &typed, &snapshot, &k);
+    assert!(is_guard(&result), "{}", message(&result));
+    assert!(
+        message(&result)
+            .contains(logweir_core::original_name::ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED),
+        "{}",
+        message(&result)
+    );
+}
+
+/// Mount a console-approved bundle as the controller mounts it: the console
+/// key as both the approver key and the confirmation key.
+fn mount_console(k: &Keys, plan: &str, doc: &RestoreAuthorization, snapshot: &[u8]) -> Mounted {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bytes = doc.to_bytes();
+    let m = Mounted {
+        plan: dir.path().join("restore.yaml"),
+        approval: dir.path().join("approval.json"),
+        approver_key: dir.path().join("approver.pub.pem"),
+        confirmation_key: dir.path().join("confirmation.pub.pem"),
+        snapshot: dir.path().join("approval-policy.json"),
+        allowed: dir.path().join("allowed-clusters.json"),
+        signing: dir.path().join("signing.pem"),
+        _dir: dir,
+    };
+    std::fs::write(&m.plan, plan).expect("plan");
+    std::fs::write(&m.approval, &bytes).expect("doc");
+    std::fs::write(m.approval.with_extension("sig"), sidecar(&bytes, k, false)).expect("sig");
+    std::fs::write(&m.approver_key, pem(&k.console)).expect("approver");
+    std::fs::write(&m.confirmation_key, pem(&k.console)).expect("console");
+    std::fs::write(&m.snapshot, snapshot).expect("snapshot");
+    std::fs::write(
+        &m.allowed,
+        r#"{"allowed_cluster_ids":["TARGET00000000000000000"]}"#,
+    )
+    .expect("allowed");
+    std::fs::write(&m.signing, k.signing.to_pkcs8_pem().expect("pkcs8")).expect("signing");
+    m
+}
+
+/// **The real runner admits a console-approved bundle and refuses the
+/// requester's own approval**, exit 3, before any client is constructed.
+#[test]
+fn the_real_runner_admits_a_console_approval_and_refuses_the_requesters_own() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let m = mount_console(&k, PLAN, &pair_approved(PLAN), &snapshot);
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    for refusal in AUTHORIZATION_REFUSALS {
+        assert!(
+            !transcript.contains(refusal),
+            "{refusal} (exit {code}):\n{transcript}"
+        );
+    }
+    assert!(
+        !transcript.contains("no data operation was started"),
+        "every startup guard passed; the run must fail LATER (exit {code}):\n{transcript}"
+    );
+    assert_ne!(code, 0, "no broker is running");
+
+    let mut own = pair_approved(PLAN);
+    own.approver = Some(logweir_core::approval_policy::Approver {
+        issuer: IDP.into(),
+        subject: "alice".into(),
+    });
+    let m = mount_console(&k, PLAN, &own, &snapshot);
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    assert_eq!(code, 3, "{transcript}");
+    assert!(transcript.contains("is the requester"), "{transcript}");
+    assert!(
+        transcript.contains("no data operation was started"),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("19099"),
+        "no broker was dialled:\n{transcript}"
+    );
+
+    // The request alone, mounted as the approval: exit 3 too.
+    let m = mount_console(&k, PLAN, &pair_request(PLAN), &snapshot);
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    assert_eq!(code, 3, "{transcript}");
+    assert!(transcript.contains("nobody has approved"), "{transcript}");
+}
+
+/// **A runner built BEFORE two-person approval refuses a two-person bundle.**
+/// Run with `LOGWEIR_OLDER_RUNNER_BIN=<a logweir built from an older
+/// commit>`; without it the row measures nothing and says so (CI has no
+/// older binary).
+///
+/// - The bundle as this build's controller mounts it (the console key as the
+///   approver, the `Console` snapshot, the 2.2.0 document): exit 3, before
+///   any client exists. The older runner never runs a two-person policy as a
+///   personal-key one.
+/// - CONTROL: this build's 2.0.0 one-person bundle is still admitted by it.
+#[test]
+fn an_older_runner_refuses_a_console_approved_bundle() {
+    let Some(older) = std::env::var_os("LOGWEIR_OLDER_RUNNER_BIN") else {
+        eprintln!(
+            "an_older_runner_refuses_a_console_approved_bundle: LOGWEIR_OLDER_RUNNER_BIN is not \
+             set, so no older runner was measured"
+        );
+        return;
+    };
+    let older = std::path::PathBuf::from(older);
+    assert!(older.is_file(), "{} is not a file", older.display());
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    for (label, doc) in [
+        ("the approved document", pair_approved(PLAN)),
+        ("the request alone", pair_request(PLAN)),
+    ] {
+        let m = mount_console(&k, PLAN, &doc, &snapshot);
+        let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+        println!("older runner, a two-person bundle ({label}): exit {code}\n{transcript}");
+        assert_eq!(code, 3, "{label}: {transcript}");
+        assert!(
+            transcript.contains("no data operation was started"),
+            "{label}: {transcript}"
+        );
+        assert!(
+            !transcript.contains("19099"),
+            "{label}: no broker was dialled:\n{transcript}"
+        );
+        assert!(
+            transcript.contains("unknown field `approverSignature`"),
+            "{label}: the older runner stops at the snapshot: {transcript}"
+        );
+    }
+    // The 2.2.0 document beside a snapshot the older runner CAN read (the
+    // same policy with a personal key, which it would otherwise run): it
+    // refuses the document itself.
+    let mut personal = pair_policy();
+    personal.approver_signature = logweir_core::approval_policy::ApproverSignature::PersonalKey;
+    let mut doc = pair_approved(PLAN);
+    doc.policy = PolicyRef {
+        name: personal.name.clone(),
+        digest: personal.digest(),
+    };
+    let m = mount_console(&k, PLAN, &doc, &personal.snapshot_bytes());
+    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+    println!(
+        "older runner, a 2.2.0 document beside a personal-key snapshot: exit {code}\n{transcript}"
+    );
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("unknown field `approver`"),
+        "{transcript}"
+    );
+
+    // CONTROL: this build's 2.0.0 one-person bundle.
+    let m = mount(&k, ApprovalMode::Ordinary, false);
+    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
+    println!("older runner, a 2.0.0 one-person bundle: exit {code}\n{transcript}");
+    assert!(
+        !transcript.contains("no data operation was started"),
+        "the older runner admits a 2.0.0 document (exit {code}):\n{transcript}"
+    );
+    assert_ne!(code, 0, "no broker is running");
+}
+
+// ---------------------------------------------------------------------------
+// PROD-16.2: the fixture the controller's rows read
+// ---------------------------------------------------------------------------
+
+/// Where the controller's console-approval fixture lives. `weirkeeper` cannot
+/// sign (`scripts/check-one-signer.sh`), so its rows read documents and
+/// signatures this crate produced; this crate's own row below reads the same
+/// file, so both sides are held to it.
+const CONSOLE_APPROVAL_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../weirkeeper/tests/fixtures/console-approval.json"
+);
+
+/// The fixture's fixed instants: the request, the click, its expiry, and the
+/// controller's clock.
+const FIXTURE_ISSUED_AT: &str = "2026-10-10T12:00:00Z";
+const FIXTURE_APPROVED_AT: &str = "2026-10-10T12:04:00Z";
+const FIXTURE_EXPIRES_AT: &str = "2026-10-10T13:00:00Z";
+const FIXTURE_NOW: &str = "2026-10-10T12:05:00Z";
+const FIXTURE_NS: &str = "logweir-t16";
+const FIXTURE_RESTORE: &str = "r1";
+const FIXTURE_UID: &str = "restore-uid-1";
+
+fn fixture_instant(text: &str) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .expect("a fixture instant")
+        .with_timezone(&Utc)
+}
+
+/// **THE GENERATOR** of `crates/weirkeeper/tests/fixtures/console-approval.json`.
+/// Run it with `LOGWEIR_WRITE_CONSOLE_APPROVAL_FIXTURE=1`; without the
+/// variable it does nothing.
+///
+/// Every document is built by this build's own writer and signed by two
+/// THROWAWAY keys that exist only in this process: a console key and a
+/// personal approver key. Only their public halves, their key ids, the
+/// documents and the signatures are written. Regenerating changes every key
+/// id and signature, and nothing else.
+#[test]
+fn write_the_console_approval_fixture_for_the_controllers_rows() {
+    if std::env::var_os("LOGWEIR_WRITE_CONSOLE_APPROVAL_FIXTURE").is_none() {
+        return;
+    }
+    use logweir_core::approval_policy::Approver;
+    let k = keys();
+    let foreign = SigningKey::generate_ed25519();
+    let pair = pair_policy();
+    let strict = strict_policy();
+    let base = |plan: &str| {
+        let mut doc = pair_request(plan);
+        doc.subject.namespace = FIXTURE_NS.into();
+        doc.subject.name = FIXTURE_RESTORE.into();
+        doc.subject.uid = FIXTURE_UID.into();
+        doc.issued_at = fixture_instant(FIXTURE_ISSUED_AT);
+        doc.expires_at = fixture_instant(FIXTURE_EXPIRES_AT);
+        doc.ticket = Some("CHG-4711".into());
+        doc
+    };
+    let approve = |mut doc: RestoreAuthorization, issuer: &str, subject: &str| {
+        doc.approver = Some(Approver {
+            issuer: issuer.into(),
+            subject: subject.into(),
+        });
+        doc.approved_at = Some(fixture_instant(FIXTURE_APPROVED_AT));
+        doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
+            doc.approval_subject.as_deref(),
+            doc.original_name_confirmation.as_ref(),
+            true,
+        )
+        .into();
+        doc
+    };
+    let approved = || approve(base(PLAN), IDP, "bob");
+    let under_strict = |mut doc: RestoreAuthorization| {
+        doc.policy = PolicyRef {
+            name: strict.name.clone(),
+            digest: strict.digest(),
+        };
+        doc
+    };
+    let asked_by = |mut doc: RestoreAuthorization, issuer: &str, subject: &str| {
+        doc.requester = Requester {
+            issuer: issuer.into(),
+            subject: subject.into(),
+        };
+        doc
+    };
+    let at = |mut doc: RestoreAuthorization, instant: chrono::DateTime<Utc>| {
+        doc.approved_at = Some(instant);
+        doc
+    };
+    let versioned = |mut doc: RestoreAuthorization, version: &str| {
+        doc.format_version = version.into();
+        doc
+    };
+    let original = || {
+        let mut doc = base(ORIGINAL_PLAN);
+        doc.approval_subject = Some("originalName".into());
+        doc.format_version =
+            logweir_core::approval_policy::restore_authorization_format_version_for(
+                doc.approval_subject.as_deref(),
+                None,
+            )
+            .into();
+        doc
+    };
+    // (name, document, countersigned by the personal approver key)
+    let mut cases: Vec<(&str, RestoreAuthorization, bool)> = vec![
+        ("request", base(PLAN), false),
+        ("approved", approved(), false),
+        (
+            "approved-by-requester",
+            approve(base(PLAN), IDP, "alice"),
+            false,
+        ),
+        (
+            "approved-by-requester-in-another-case",
+            approve(base(PLAN), IDP, "ALICE"),
+            false,
+        ),
+        (
+            "approved-by-requester-behind-a-trailing-slash",
+            approve(base(PLAN), "https://idp.example/", "alice"),
+            false,
+        ),
+        (
+            "approved-by-a-second-person-behind-a-trailing-slash",
+            approve(base(PLAN), "https://idp.example/", "bob"),
+            false,
+        ),
+        (
+            "approved-by-the-same-subject-of-another-issuer",
+            approve(base(PLAN), "https://other.example", "alice"),
+            false,
+        ),
+        (
+            "approved-by-a-subject-with-a-trailing-space",
+            approve(base(PLAN), IDP, "alice "),
+            false,
+        ),
+        (
+            "approved-by-a-decomposed-spelling",
+            approve(asked_by(base(PLAN), IDP, "jos\u{e9}"), IDP, "jose\u{301}"),
+            false,
+        ),
+        (
+            "approved-by-the-local-admin",
+            approve(base(PLAN), "urn:logweir:local-admin", "admin"),
+            false,
+        ),
+        (
+            "requested-by-the-local-admin",
+            approve(
+                asked_by(base(PLAN), "urn:logweir:local-admin", "admin"),
+                IDP,
+                "bob",
+            ),
+            false,
+        ),
+        (
+            "requested-by-a-service-account",
+            approve(
+                asked_by(
+                    base(PLAN),
+                    IDP,
+                    "system:serviceaccount:logweir-t16:deployer",
+                ),
+                IDP,
+                "bob",
+            ),
+            false,
+        ),
+        (
+            "approved-before-the-request",
+            at(
+                approved(),
+                fixture_instant(FIXTURE_ISSUED_AT) - Duration::seconds(1),
+            ),
+            false,
+        ),
+        (
+            "approved-at-the-expiry",
+            at(approved(), fixture_instant(FIXTURE_EXPIRES_AT)),
+            false,
+        ),
+        (
+            "approved-ahead-of-the-controllers-clock",
+            at(
+                approved(),
+                fixture_instant(FIXTURE_NOW) + Duration::seconds(61),
+            ),
+            false,
+        ),
+        (
+            "approver-under-2-1-0",
+            versioned(approved(), "2.1.0"),
+            false,
+        ),
+        (
+            "approver-under-2-0-0",
+            versioned(approved(), "2.0.0"),
+            false,
+        ),
+        ("strict-request", under_strict(base(PLAN)), false),
+        (
+            "strict-request-countersigned",
+            under_strict(base(PLAN)),
+            true,
+        ),
+        (
+            "strict-with-a-console-approver",
+            under_strict(approved()),
+            true,
+        ),
+        ("request-countersigned-by-a-personal-key", base(PLAN), true),
+        ("original-name-request", original(), false),
+        (
+            "original-name-approved",
+            approve(original(), IDP, "bob"),
+            false,
+        ),
+    ];
+    let mut half = approved();
+    half.approved_at = None;
+    cases.push(("approver-without-the-instant", half, false));
+    let mut other_uid = approved();
+    other_uid.subject.uid = "restore-uid-2".into();
+    cases.push(("approved-for-another-uid", other_uid, false));
+    let mut other_plan = approved();
+    other_plan.plan_hash = sha256_prefixed(b"another plan");
+    cases.push(("approved-for-another-plan", other_plan, false));
+    let mut other_ns = approved();
+    other_ns.subject.namespace = "elsewhere".into();
+    cases.push(("approved-for-another-namespace", other_ns, false));
+    let mut other_name = approved();
+    other_name.subject.name = "r2".into();
+    cases.push(("approved-for-another-restore", other_name, false));
+    let mut typed = approve(original(), IDP, "bob");
+    typed.original_name_confirmation =
+        Some(logweir_core::original_name::OriginalNameConfirmation {
+            typed_topics: vec!["orders".into()],
+        });
+    cases.push(("original-name-approved-with-typed-names", typed, false));
+
+    let mut out = serde_json::Map::new();
+    for (name, doc, countersign) in cases {
+        let bytes = doc.to_bytes();
+        out.insert(
+            name.to_string(),
+            serde_json::json!({
+                "document": String::from_utf8(bytes.clone()).expect("utf-8"),
+                "sidecar": String::from_utf8(sidecar(&bytes, &k, countersign)).expect("utf-8"),
+            }),
+        );
+    }
+    // The approved document, signed by a key nobody trusts instead of the
+    // console's.
+    let bytes = approved().to_bytes();
+    let foreign_sidecar =
+        sign_detached(&foreign, PAYLOAD_TYPE_RESTORE_AUTHORIZATION, &bytes).expect("sig");
+    out.insert(
+        "approved-signed-by-another-key".to_string(),
+        serde_json::json!({
+            "document": String::from_utf8(bytes).expect("utf-8"),
+            "sidecar": serde_json::to_string(&foreign_sidecar).expect("json"),
+        }),
+    );
+    let fixture = serde_json::json!({
+        "comment": "PROD-16.2. Generated by crates/logweir/tests/authorization_v2.rs \
+                    (write_the_console_approval_fixture_for_the_controllers_rows, \
+                    LOGWEIR_WRITE_CONSOLE_APPROVAL_FIXTURE=1) with throwaway keys that existed \
+                    only in that process. It holds public halves, key ids, documents and \
+                    signatures: no private key.",
+        "namespace": FIXTURE_NS,
+        "restore": FIXTURE_RESTORE,
+        "restoreUid": FIXTURE_UID,
+        "planBytes": PLAN,
+        "originalPlanBytes": ORIGINAL_PLAN,
+        "policyDocument": PAIR_POLICIES.split("namespaces:").next().expect("policies"),
+        "twoPersonPolicy": pair.name,
+        "strictPolicy": strict.name,
+        "issuedAt": FIXTURE_ISSUED_AT,
+        "approvedAt": FIXTURE_APPROVED_AT,
+        "expiresAt": FIXTURE_EXPIRES_AT,
+        "now": FIXTURE_NOW,
+        "consoleKeyId": k.console.key_id(),
+        "consolePublicPem": String::from_utf8(pem(&k.console)).expect("pem"),
+        "approverKeyId": k.approver.key_id(),
+        "approverPublicPem": String::from_utf8(pem(&k.approver)).expect("pem"),
+        "cases": out,
+    });
+    let mut text = serde_json::to_string_pretty(&fixture).expect("json");
+    text.push('\n');
+    std::fs::write(CONSOLE_APPROVAL_FIXTURE, text).expect("the fixture is written");
+    eprintln!("wrote {CONSOLE_APPROVAL_FIXTURE}");
+}
+
+/// **The checked-in fixture is what THIS runner admits and refuses**, read
+/// with the public halves it carries: the approved case verifies and names
+/// the approver, and the request, the requester's own approval and the
+/// version cases are refused. So the controller's rows and the runner's judge
+/// one file.
+#[test]
+fn the_checked_in_console_approval_fixture_is_judged_the_same_by_the_runner() {
+    let text = std::fs::read_to_string(CONSOLE_APPROVAL_FIXTURE).expect("the fixture exists");
+    let fixture: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert!(
+        !text.contains("PRIVATE"),
+        "the fixture carries public halves only"
+    );
+    let field = |name: &str| fixture[name].as_str().expect("a string field").to_string();
+    let policies = ApprovalPolicySet::parse(&format!(
+        "{}namespaces:\n  {}: {}\n",
+        field("policyDocument"),
+        field("namespace"),
+        field("twoPersonPolicy")
+    ))
+    .expect("the fixture's policy document validates");
+    let policy = policies
+        .resolve(&field("namespace"))
+        .bound()
+        .cloned()
+        .expect("bound");
+    let subject = ContractSubject {
+        namespace: field("namespace"),
+        name: field("restore"),
+        uid: field("restoreUid"),
+    };
+    let signing = SigningKey::generate_ed25519();
+    let judge = |case: &str, plan: &str| {
+        let entry = &fixture["cases"][case];
+        phase1_approval::verify_authorization_v2_bytes(
+            plan,
+            entry["document"].as_str().expect("document").as_bytes(),
+            entry["sidecar"].as_str().expect("sidecar").as_bytes(),
+            field("consolePublicPem").as_bytes(),
+            field("consolePublicPem").as_bytes(),
+            &policy.snapshot_bytes(),
+            &subject,
+            &signing.verifying_key(),
+        )
+    };
+    let plan = field("planBytes");
+    let approved = judge("approved", &plan).expect("the approved case verifies");
+    assert_eq!(approved.approval.approver, "https://idp.example#bob");
+    assert_eq!(approved.approval.key_id, field("consoleKeyId"));
+    assert_eq!(
+        approved.approval_mode,
+        phase1_approval::APPROVAL_MODE_CONSOLE
+    );
+    assert!(judge("approved-by-a-second-person-behind-a-trailing-slash", &plan).is_ok());
+    // The runner reads no clock: an approval the controller's clock refuses
+    // as too far ahead is inside the request's window, which is all it reads.
+    assert!(judge("approved-ahead-of-the-controllers-clock", &plan).is_ok());
+    let original = judge("original-name-approved", &field("originalPlanBytes"))
+        .expect("the combination verifies");
+    assert_eq!(
+        original.approval_subject,
+        logweir_core::original_name::ApprovalSubject::OriginalName
+    );
+    for (case, needle) in [
+        ("request", "nobody has approved"),
+        ("approved-by-requester", "is the requester"),
+        ("approved-by-requester-in-another-case", "is the requester"),
+        (
+            "approved-by-requester-behind-a-trailing-slash",
+            "is the requester",
+        ),
+        (
+            "approved-by-the-same-subject-of-another-issuer",
+            "two issuers",
+        ),
+        (
+            "approved-by-a-subject-with-a-trailing-space",
+            "not in a form that can be compared",
+        ),
+        (
+            "approved-by-a-decomposed-spelling",
+            "not in a form that can be compared",
+        ),
+        ("approved-by-the-local-admin", "administrator console"),
+        ("requested-by-the-local-admin", "administrator console"),
+        (
+            "requested-by-a-service-account",
+            "Kubernetes system identity",
+        ),
+        (
+            "approved-before-the-request",
+            "outside the request's own window",
+        ),
+        ("approved-at-the-expiry", "outside the request's own window"),
+        ("approver-under-2-1-0", "defined from formatVersion 2.2.0"),
+        ("approver-under-2-0-0", "defined from formatVersion 2.2.0"),
+        ("approver-without-the-instant", "without the other"),
+        ("approved-for-another-uid", "uid restore-uid-2"),
+        ("approved-for-another-plan", "plan hash"),
+        ("approved-for-another-namespace", "namespace elsewhere"),
+        ("approved-for-another-restore", "name r2"),
+        ("strict-with-a-console-approver", POLICY_MISMATCH),
+        (
+            "request-countersigned-by-a-personal-key",
+            "nobody has approved",
+        ),
+        ("approved-signed-by-another-key", "console confirmation"),
+    ] {
+        let result = judge(case, &plan);
+        assert!(is_guard(&result), "{case}: {}", message(&result));
+        assert!(
+            message(&result).contains(needle),
+            "{case}: {}",
+            message(&result)
+        );
+    }
 }

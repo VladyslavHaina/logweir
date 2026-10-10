@@ -1,8 +1,8 @@
 use crate::drill::DrillError;
 use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
-    self as approval_policy, ApprovalMode, ApprovalPolicy, ExpectedSubject, RestoreAuthorization,
-    PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as approval_policy, ApprovalMode, ApprovalPolicy, ApproverSignature, ExpectedSubject,
+    RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::guard::GuardRefusal;
 use logweir_core::ids::sha256_prefixed;
@@ -144,6 +144,14 @@ pub const APPROVAL_MODE_GOVERNED: &str = "governed";
 /// [`Approved::approval_mode`] for an authorization document v2 under an
 /// `Ordinary` policy: a one-person confirmation (OD-10).
 pub const APPROVAL_MODE_ORDINARY: &str = "ordinary";
+/// **PROD-16.2.** [`Approved::approval_mode`] for an authorization document
+/// v2 under a `Governed` policy whose `approverSignature` is `Console`: the
+/// console's confirmation of the requester, and a SECOND PERSON who signed in
+/// and approved, named inside the bytes the console signed. Not
+/// [`APPROVAL_MODE_GOVERNED`]: no personal key countersigned, and a reader
+/// must not be told one did
+/// (`logweir_core::scorecard::ORIGINAL_NAME_APPROVAL_MODE_CONSOLE`).
+pub const APPROVAL_MODE_CONSOLE: &str = "consoleApproval";
 
 /// The approval subject a signed document carries, as a refusal when it is
 /// one this build does not know.
@@ -327,6 +335,17 @@ fn verify_under(
 ///    as the authoriser is not an ordinary run. `Governed`: the approver key
 ///    is a DIFFERENT key and its signature over the same bytes verifies.
 ///
+///    **PROD-16.2 — `Governed`, and the SNAPSHOT says `approverSignature:
+///    Console`:** the rule "the console key cannot be the approver" is
+///    relaxed, here and only here. The mounted approver key must then BE the
+///    console key, and the second person is inside the bytes that key signed:
+///    step 3's [`approval_policy::check_binding`] has already required
+///    `approver` and `approvedAt`, a second person of the requester's own
+///    issuer (never the local administrator or a service account), and an
+///    approval given inside the request's window. The relaxation reads the
+///    snapshot the Job template pins by digest, and nothing else: not the
+///    document, not a flag, not which key happens to be mounted.
+///
 /// The document's EXPIRY is deliberately not re-checked against this pod's
 /// clock: the controller admitted the run inside the window and D0 says an
 /// admitted run "continues under its recorded policy snapshot"; a pod that
@@ -392,6 +411,32 @@ pub fn verify_authorization_v2_bytes(
             }
             doc.requester.principal_id()
         }
+        // PROD-16.2: THE ONE RELAXATION, AND WHAT DECIDES IT IS THE SNAPSHOT.
+        ApprovalMode::Governed if policy.approver_signature == ApproverSignature::Console => {
+            if approver_id != confirmation_id {
+                return Err(GuardRefusal(format!(
+                    "policy {} takes its approval from the console (approverSignature: Console), \
+                     so the console's signature over a document naming the approver is the whole \
+                     authorization, but the bundle names approver key {approver_id} and \
+                     confirmation key {confirmation_id}; a personal-key countersignature is not \
+                     accepted under this policy; no data operation was started",
+                    policy.name
+                ))
+                .into());
+            }
+            // `check_binding` required the approver; a document without one
+            // never reaches here. Stated, not assumed.
+            doc.approver
+                .as_ref()
+                .map(approval_policy::Approver::principal_id)
+                .ok_or_else(|| {
+                    DrillError::Guard(GuardRefusal(format!(
+                        "policy {} takes its approval from the console and the document names \
+                         no approver; no data operation was started",
+                        policy.name
+                    )))
+                })?
+        }
         ApprovalMode::Governed => {
             if approver_id == confirmation_id {
                 return Err(GuardRefusal(format!(
@@ -410,9 +455,10 @@ pub fn verify_authorization_v2_bytes(
     let approval_subject = signed_subject(doc.approval_subject.as_deref())?;
     Ok(Approved {
         approval_subject,
-        approval_mode: match policy.mode {
-            ApprovalMode::Governed => APPROVAL_MODE_GOVERNED,
-            ApprovalMode::Ordinary => APPROVAL_MODE_ORDINARY,
+        approval_mode: match (policy.mode, policy.approver_signature) {
+            (ApprovalMode::Governed, ApproverSignature::Console) => APPROVAL_MODE_CONSOLE,
+            (ApprovalMode::Governed, ApproverSignature::PersonalKey) => APPROVAL_MODE_GOVERNED,
+            (ApprovalMode::Ordinary, _) => APPROVAL_MODE_ORDINARY,
         },
         original_name_confirmation: doc.original_name_confirmation.clone(),
         validated_at: Utc::now(),
@@ -420,7 +466,9 @@ pub fn verify_authorization_v2_bytes(
             approver: approver_label,
             ticket: doc.ticket.clone().unwrap_or_default(),
             plan_hash: doc.plan_hash.clone(),
-            approved_at: doc.issued_at,
+            // PROD-16.2: when the second person approved, where the document
+            // says so; otherwise when the console signed, as before.
+            approved_at: doc.approved_at.unwrap_or(doc.issued_at),
             key_id: approver_id,
             self_attested,
         },

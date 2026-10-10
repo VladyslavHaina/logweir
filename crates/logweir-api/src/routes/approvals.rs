@@ -140,6 +140,11 @@ pub async fn policy(
                     && key.is_some()
                     && (state.shared().is_some() || operator_mode.allowed_in_local_admin()),
                 ticket_required: bound.is_some_and(|p| p.mode == ApprovalMode::Governed),
+                // PROD-16.2: a second person approves here only through the
+                // shared console, and only once the console holds its key.
+                console_approval_available: operator_mode == OperatorMode::TwoPerson
+                    && key.is_some()
+                    && state.shared().is_some(),
             },
         },
     ))

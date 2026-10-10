@@ -3894,8 +3894,9 @@ pub enum OperatorModeView {
     /// One-person confirmation in the console (internal `Ordinary`).
     #[serde(rename = "confirm")]
     Confirm,
-    /// Two-person approval in the console (PROD-16.2; never served by this
-    /// build).
+    /// Two-person approval in the console (PROD-16.2: internal `Governed`
+    /// with `approverSignature: Console`): a second person signs in to the
+    /// shared console and clicks Approve.
     #[serde(rename = "two-person")]
     TwoPerson,
     /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
@@ -4035,6 +4036,14 @@ pub struct ApprovalPolicyView {
     /// Whether a submission here must carry a change ticket (an explicit
     /// Governed binding; D0).
     pub ticket_required: bool,
+    /// PROD-16.2: whether THIS console will take a second person's approval
+    /// here: `true` for a `two-person` policy when the console runs in shared
+    /// mode and holds its confirmation key. `false` under `two-person` means
+    /// this is the in-cluster administrator console, whose one identity
+    /// cannot be two people (nothing can be requested or approved through
+    /// it), or the key is not there yet. Always `false` for `confirm` and
+    /// `strict`.
+    pub console_approval_available: bool,
 }
 
 /// `GET .../approval-policy`.
@@ -4066,6 +4075,153 @@ pub struct SubmitApprovalRequest {
     /// At most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_bytes: Option<String>,
+}
+
+/// `POST .../restores/{name}/console-approval` (PROD-16.2) — the second
+/// person's click. The body names the request the approver was shown and
+/// NOTHING the approval is built from: requester, subject, UID, plan hash,
+/// policy and expiry come only from the stored request, after the console
+/// verified its own signature on it. An unknown field is refused.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConsoleApprovalRequest {
+    /// `sha256:` and 64 lowercase hex characters: `confirmationSha256` as
+    /// `GET .../approval-request` showed it. COMPARED with the stored
+    /// request's bytes and never copied: a request that changed between the
+    /// view and the click is refused (409 `state_conflict`).
+    pub confirmation_sha256: String,
+}
+
+/// Where a two-person request stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalRequestState {
+    /// The console's own request, verified, bound to this Restore, this plan
+    /// and the namespace's current policy, inside its window, and not yet
+    /// approved.
+    Pending,
+    /// An Approval already exists under the Restore's `approvalRef`.
+    Approved,
+    /// The request's window has closed; it authorises nothing. Submit the
+    /// Restore again.
+    Expired,
+    /// There is no request this console confirmed for this Restore, this plan
+    /// and the current policy: none was stored, the stored one does not carry
+    /// this console's signature, or it names another Restore, plan or policy.
+    /// Nothing of such an object is shown, and it is never approved.
+    NotConfirmed,
+}
+
+/// Why THIS session is not offered the Approve button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApproveRefusal {
+    /// The request is not pending (see `state`).
+    NotPending,
+    /// This console is the in-cluster administrator console.
+    LocalAdmin,
+    /// The session holds no Approver role in this namespace. An Administrator
+    /// is not an Approver unless separately bound as one.
+    NotApprover,
+    /// The session is the requester.
+    Requester,
+    /// The session's identity, or the requester's, cannot establish a second
+    /// person: it is not in a form that can be compared, it is a machine
+    /// identity, or the two come from different issuers.
+    NotSecondPerson,
+}
+
+/// Whether this session may approve, decided by the server with the same
+/// rules the click is held to. Advisory: the click is checked again.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveOfferView {
+    /// Whether the Approve button is offered to this session.
+    pub offered: bool,
+    /// Why not, when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ApproveRefusal>,
+    /// One sentence for the page: what approving means, or why this session
+    /// cannot.
+    pub sentence: String,
+}
+
+/// PROD-16.2: a two-person request as the approver is shown it. Every field
+/// from `requester` to `confirmationSha256` comes from the request's signed
+/// bytes, AFTER the console verified its own signature on them; none is read
+/// from the stored object's metadata.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestView {
+    /// The namespace.
+    pub namespace: String,
+    /// The Restore the request is for.
+    pub restore: String,
+    /// That Restore's UID, now.
+    pub restore_uid: String,
+    /// The Approval the Restore references (`spec.approvalRef.name`), which a
+    /// click creates.
+    pub approval_name: String,
+    /// The stored request, `<approvalName>-confirmation`.
+    pub confirmation_name: String,
+    /// The namespace's current policy.
+    pub policy: String,
+    /// Its snapshot digest.
+    pub policy_digest: String,
+    /// Where the request stands.
+    pub state: ApprovalRequestState,
+    /// One sentence saying so.
+    pub state_sentence: String,
+    /// Who asked, `<issuer>#<subject>`, as the console attested them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+    /// The plan hash the request names — the Restore's own, recomputed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    /// What is being approved: an ordinary restore, or one under the original
+    /// topic names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_subject: Option<ApprovalSubjectView>,
+    /// For a restore under the original topic names: the names, from the
+    /// Restore's own plan (at most 100; `originalTopicsCount` says how many
+    /// there are). Absent for an ordinary restore, and when the plan does not
+    /// parse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_topics: Option<Vec<String>>,
+    /// How many original topic names the plan restores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_topics_count: Option<usize>,
+    /// The change ticket the requester gave.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// When the console signed the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<DateTime<Utc>>,
+    /// When it stops authorising anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// `sha256:<hex>` of the request's signed bytes: what a click must name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_sha256: Option<String>,
+    /// Who approved, `<issuer>#<subject>`, when an approval this console
+    /// signed exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    /// When they approved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
+    /// Whether this session may approve.
+    pub approve: ApproveOfferView,
+}
+
+/// `GET .../restores/{name}/approval-request`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The request.
+    pub item: ApprovalRequestView,
 }
 
 /// `GET .../operations/{kind}/{name}`.
