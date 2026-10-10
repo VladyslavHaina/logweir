@@ -337,9 +337,9 @@ fn compare_versions(
         ));
     }
     let same_set = {
-        let (a, b): (BTreeSet<&(String, i64)>, BTreeSet<&(String, i64)>) =
-            (mine.iter().collect(), upstream.iter().collect());
-        a == b
+        let listed: BTreeSet<&(String, i64)> = mine.iter().collect();
+        let pinned: BTreeSet<&(String, i64)> = upstream.iter().collect();
+        listed == pinned
     };
     if same_set && mine != upstream {
         report.lines.push(format!(
