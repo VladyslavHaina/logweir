@@ -7689,6 +7689,24 @@ fn fx22_371_points_evaluate_differently_under_keep_last_300_and_10() {
         (ten.kept.len(), ten.truncated_by_cap),
         "the defect: both read 321 kept and nothing about the ceiling"
     );
+
+    // AN APPROVED DIGEST SURVIVES THE FIX. The plan is a function of the
+    // candidates and of what stays in the archive this run — never of whether
+    // a point that stays is LABELLED kept or held back. The pre-fix evaluation
+    // of these inputs is this one with the held-back ids filed under `kept`,
+    // and it renders the same bytes.
+    for evaluation in [&three_hundred, &ten] {
+        let mut pre_fix = evaluation.clone();
+        let held: Vec<String> = pre_fix.held_back.drain(..).collect();
+        pre_fix.kept.extend(held);
+        let digest = |e: &plan::Evaluation| {
+            let rules = rules(Some(300), None, 3);
+            let document =
+                plan::plan_document(&identity(), &destination(), rules, e).expect("a plan");
+            plan::plan_bytes(&document).expect("bytes").1
+        };
+        assert_eq!(digest(evaluation), digest(&pre_fix));
+    }
     // NOTHING IS IN TWO PLACES: a held-back point is not kept and not planned.
     for evaluation in [&three_hundred, &ten] {
         let kept: BTreeSet<&str> = evaluation.kept.iter().map(String::as_str).collect();
@@ -8452,4 +8470,94 @@ fn fx22_only_a_member_the_stored_block_lacks_is_compared_as_stored() {
         Value::Null
     );
     assert_eq!(ctrl::stored_for_instant(None, &next), None);
+}
+
+/// The CR-shaped fixture every other surface's FX-22 row starts from.
+const FX22_FIXTURE: &str = "ui/tests/fixtures/retention-held-back.json";
+
+/// **The fixture the API and the console read is this controller's own
+/// output.** Two `Report` policies over the same 371 points — `keep-300` and
+/// `keep-10` — exactly as one reconcile leaves each of them.
+///
+/// THREE SIDES READ IT, so the numbers cannot drift between the surfaces:
+///
+/// * here, the checked-in file must equal what the reconciler writes;
+/// * `crates/logweir-api/tests/retention_accounting.rs` serves the two objects
+///   through the real router and holds
+///   `ui/tests/fixtures/console/retention-policies-held-back.json` to the
+///   answer;
+/// * `ui/tests/d3.spec.js` decodes and renders that console fixture.
+///
+/// Regenerate with:
+///
+/// ```text
+/// LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper \
+///   --test retention_policy_controller fx22_the_shared_fixture
+/// ```
+#[tokio::test]
+async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
+    let entries = fx22_entries(371);
+    let mut items = Vec::new();
+    for (name, uid, keep_last) in [
+        ("keep-300", "22220300-0000-4000-8000-000000000022", 300),
+        ("keep-10", "22220010-0000-4000-8000-000000000022", 10),
+    ] {
+        let mut object = policy_value(fx22_rules(keep_last), json!({}));
+        object["metadata"]["name"] = json!(name);
+        object["metadata"]["uid"] = json!(uid);
+        object["metadata"]["namespace"] = json!("team-a");
+        let mut routes = happy_routes(&entries);
+        let suffix: &'static str =
+            Box::leak(format!("/retentionpolicies/{name}/status").into_boxed_str());
+        routes.push(route("PATCH", suffix, object.to_string()));
+        let f = fixture(routes);
+        run(
+            &f,
+            &serde_json::from_value(object.clone()).expect("the fixture is a policy"),
+        )
+        .await;
+        object["status"] = f.status();
+        items.push(object);
+    }
+    let document = json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "RetentionPolicyList",
+        "metadata": {"resourceVersion": "4242"},
+        "items": items
+    });
+    let want = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&document).expect("the fixture serialises")
+    );
+    let path = repo_root().join(FX22_FIXTURE);
+    if std::env::var_os("LOGWEIR_WRITE_FIXTURES").is_some() {
+        std::fs::write(&path, &want).expect("the fixture is writable");
+    }
+    let got = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{} is missing ({e}); regenerate it with LOGWEIR_WRITE_FIXTURES=1",
+            path.display()
+        )
+    });
+    assert_eq!(
+        got, want,
+        "{FX22_FIXTURE} has drifted from what the RetentionPolicy reconciler writes. Regenerate \
+         it with LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper --test \
+         retention_policy_controller fx22_the_shared_fixture"
+    );
+
+    // AND THE FILE SAYS WHAT THE ROW IS ABOUT, so a regenerated fixture that
+    // had gone back to "321 kept" for both could not pass by being consistent.
+    let read: Value = serde_json::from_str(&got).expect("the fixture is JSON");
+    let counts = |index: usize| {
+        let ev = &read["items"][index]["status"]["lastEvaluation"];
+        (
+            ev["pointsEvaluated"].as_i64(),
+            ev["keptCount"].as_i64(),
+            ev["candidateCount"].as_i64(),
+            ev["truncatedByCap"].as_i64(),
+        )
+    };
+    assert_eq!(counts(0), (Some(371), Some(300), Some(50), Some(21)));
+    assert_eq!(counts(1), (Some(371), Some(10), Some(50), Some(311)));
 }

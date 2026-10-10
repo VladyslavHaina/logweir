@@ -133,18 +133,50 @@ pub struct RetentionEvaluationView {
     /// changed, not when the controller last looked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
-    /// How many points were considered.
+    /// How many points were considered. With the accounting below, each is
+    /// counted once: `pointsEvaluated` = `keptCount` + `candidateCount` +
+    /// `truncatedByCap` + the skipped points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub points_evaluated: Option<i64>,
-    /// How many candidates there are in total, which may exceed the rows
-    /// below.
+    /// How many points stay: the rules keep them, or something protects them.
+    /// Never a point the per-run ceiling held back.
+    ///
+    /// ABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22). The
+    /// status of a controller that did not record what the per-run ceiling
+    /// held back lists those points under `kept`, so its list is not
+    /// published as kept and no count is derived from it. The same holds when
+    /// the status's counts do not add up to `pointsEvaluated`, which is what
+    /// an older controller leaves behind after a rollback of its image alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_count: Option<i64>,
+    /// How many points THIS plan would remove, which may exceed the rows
+    /// below. At most the per-run ceiling; `truncatedByCap` is what the rules
+    /// would remove beyond it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<i64>,
-    /// The points the rules keep.
+    /// How many more points the rules would remove, that nothing protects and
+    /// that the per-run ceiling left out of this plan. They are due, not
+    /// kept. `0` means this plan is everything the rules would remove; absent
+    /// means not recorded, never 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_by_cap: Option<i64>,
+    /// The per-run ceiling the evaluation applied: the policy's
+    /// `maxDeletionsPerRun`, or the default of 50 for a policy that does not
+    /// enforce. Published with the accounting it explains.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_deletions_per_run: Option<i64>,
+    /// Whether the catalog said the view this evaluation read does not hold
+    /// every point of the archive (a window of `viewLimit`, or a walk that
+    /// had not finished). Points outside it were not evaluated and are in
+    /// none of the counts. Absent means the catalog did not say, or the
+    /// accounting is not recorded; never `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_incomplete: Option<bool>,
+    /// The points that stay, when `keptCount` is recorded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub kept: Vec<String>,
-    /// The points the rules would remove.
+    /// The points this plan would remove.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub candidates: Vec<CandidateView>,
@@ -157,7 +189,7 @@ pub struct RetentionEvaluationView {
     #[schemars(default)]
     pub skipped: Vec<SkippedEntryView>,
     /// Whether any of the four lists above was cut short by this route's own
-    /// row bound.
+    /// row bound. The counts are exact either way.
     pub truncated: bool,
     /// The plan `ConfigMap`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -418,8 +450,15 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
     let spec = &policy.spec;
     let status = policy.status.as_ref();
     let evaluation = status.and_then(|s| s.last_evaluation.as_ref());
+    // THE ACCOUNTING IS READ ONCE, THROUGH THE CRD'S OWN RULE (FX-22):
+    // `Some` only when the block records the four counts and they add up to
+    // `pointsEvaluated`. Without it this projection publishes no kept count,
+    // no held-back count and NO `kept` LIST — the list of a controller that
+    // did not record the ceiling's effect holds the held-back points, and a
+    // response that passed it on would be calling them kept.
+    let accounting = evaluation.and_then(|e| e.accounting());
     let truncated = evaluation.is_some_and(|e| {
-        e.kept.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
+        (accounting.is_some() && e.kept.as_ref().is_some_and(|v| v.len() > MAX_ROWS))
             || e.candidates.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
             || e.protected.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
             || e.skipped.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
@@ -477,11 +516,16 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
         last_evaluation: evaluation.map(|e| RetentionEvaluationView {
             at: e.at,
             points_evaluated: e.points_evaluated,
+            kept_count: accounting.map(|a| a.kept),
             candidate_count: e.candidate_count,
+            truncated_by_cap: accounting.map(|a| a.held_back),
+            max_deletions_per_run: accounting.and(e.max_deletions_per_run),
+            view_incomplete: accounting.and(e.view_incomplete),
             kept: e
                 .kept
                 .iter()
                 .flatten()
+                .filter(|_| accounting.is_some())
                 .take(MAX_ROWS)
                 .map(|p| bounded(p, 128))
                 .collect(),

@@ -3435,6 +3435,79 @@ export const ENFORCEMENT_DEGRADED_SENTENCE =
   "scheduling them until its spec changes. Nothing was deleted by the failed runs beyond what " +
   "their own records name.";
 
+/** THE FOUR COUNTS OF A RETENTION EVALUATION, OR `null` WHEN THEY ARE NOT
+ *  RECORDED (FX-22).
+ *
+ *  `pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` +
+ *  the skipped points. `truncatedByCap` is what the policy's rules would
+ *  remove and its per-run ceiling left out of this plan: DUE, NOT KEPT. A
+ *  controller that did not record it filed those points under `kept` -- 371
+ *  points read "321 kept, 50 candidate(s)" for `keepLast: 300` and for
+ *  `keepLast: 10` alike -- so where the counts are absent this page says
+ *  "not recorded" and NEVER counts the `kept` list.
+ *
+ *  THE RULE IS THE CONTROLLER'S, AND THE PRODUCT API APPLIES IT
+ *  (`RetentionEvaluation::accounting`, `routes/retention.rs`): the API
+ *  publishes the two counts only when all four add up. Legacy mode hands this
+ *  page the custom resource itself, with no API in between, so the sum is
+ *  checked here as well wherever the lists in hand are whole -- which is every
+ *  legacy read, and every console read whose `truncated` is not `true`. A
+ *  block whose counts do not add up is two writers' numbers (an older
+ *  controller, after a rollback, rewrote the lists and could not remove the
+ *  counts), and a stale count is not a count. */
+export function evaluationAccounting(evaluation) {
+  const e = evaluation || {};
+  const whole = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0;
+  if (!whole(e.pointsEvaluated) || !whole(e.keptCount) || !whole(e.candidateCount) ||
+    !whole(e.truncatedByCap)) {
+    return null;
+  }
+  if (e.truncated !== true) {
+    const skipped = Array.isArray(e.skipped) ? e.skipped.length : 0;
+    if (e.keptCount + e.candidateCount + e.truncatedByCap + skipped !== e.pointsEvaluated) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    pointsEvaluated: e.pointsEvaluated,
+    kept: e.keptCount,
+    candidates: e.candidateCount,
+    heldBack: e.truncatedByCap,
+    ceiling: whole(e.maxDeletionsPerRun) ? e.maxDeletionsPerRun : null,
+  });
+}
+
+/** What the retention panel prints where a count the evaluation does not
+ *  record would go. Never a number derived from a list. */
+export const ACCOUNTING_NOT_RECORDED = "not recorded";
+
+/** Why a retention evaluation shows no kept count and no held-back count. */
+export const ACCOUNTING_NOT_RECORDED_SENTENCE =
+  "The controller that wrote this evaluation did not record how many points it keeps or how " +
+  "many its per-run ceiling held back, so this page does not say: the evaluation's kept list " +
+  "may include points that are due for removal.";
+
+/** The sentence a retention evaluation carries when its per-run ceiling cut
+ *  the plan. `ceiling` is `null` when the evaluation does not record it. */
+export function heldBackSentence(heldBack, ceiling) {
+  const limit = ceiling === null || ceiling === undefined
+    ? "maxDeletionsPerRun"
+    : "maxDeletionsPerRun " + String(ceiling);
+  return String(heldBack) + (heldBack === 1 ? " more point is" : " more points are") +
+    " due under this policy's rules and held back by its per-run ceiling (" + limit + "). " +
+    (heldBack === 1 ? "It is not kept and it is" : "They are not kept and they are") +
+    " not in this plan: a plan names at most that many points, and the rest stay due until " +
+    "a later plan names them.";
+}
+
+/** The sentence a retention evaluation carries when the catalog said its view
+ *  does not hold every point of the archive. */
+export const VIEW_INCOMPLETE_SENTENCE =
+  "The catalog view this evaluation read does not hold every point of the archive: the view " +
+  "is a window of the newest points, or the catalog's walk had not finished. Points outside " +
+  "it were not evaluated, are in none of the numbers above, and are never candidates while " +
+  "they stay outside the view.";
+
 /** The sentence the legacy schedule retention report carries once a
  *  RetentionPolicy covers the same destination. */
 export const SUPERSEDED_SENTENCE =

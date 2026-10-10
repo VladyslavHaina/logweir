@@ -2765,6 +2765,11 @@ const D3_LAST_EVALUATION = shapeOf(
   { truncated: bool },
   {
     at: str, pointsEvaluated: int, candidateCount: int,
+    // FX-22: the closed accounting. Each is ABSENT when the API could not
+    // establish it (an evaluation an older controller wrote), and then
+    // `kept` is absent too.
+    keptCount: int, truncatedByCap: int, maxDeletionsPerRun: int,
+    viewIncomplete: bool,
     kept: listOf(str),
     candidates: listOf(objectOf(D3_CANDIDATE)),
     protected: listOf(objectOf(D3_PROTECTED_POINT)),

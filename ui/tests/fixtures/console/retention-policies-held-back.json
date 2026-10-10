@@ -1,0 +1,893 @@
+{
+  "requestId": "01FX22HELDBACK0000000000000",
+  "items": [
+    {
+      "name": "keep-10",
+      "namespace": "team-a",
+      "uid": "22220010-0000-4000-8000-000000000022",
+      "resourceVersion": "1002",
+      "generation": 4,
+      "createdAt": "2026-09-15T10:00:00Z",
+      "destinationRef": {
+        "name": "archive"
+      },
+      "catalogRef": {
+        "name": "primary"
+      },
+      "scopePrefix": "team-a",
+      "mode": "Report",
+      "keepLast": 10,
+      "minUsablePoints": 3,
+      "holds": 0,
+      "observedGeneration": 4,
+      "enforcement": "RecommendationOnly",
+      "guarantees": {
+        "ageExpiry": "NotEnforced",
+        "minUsablePoints": "LogweirEnforced",
+        "activeRestoreProtection": "LogweirEnforced",
+        "sharedSegments": "NotEnforced",
+        "legalHold": "ProviderEnforcedUnverified"
+      },
+      "approvedPlanState": "notApplicable",
+      "lastEvaluation": {
+        "at": "2026-09-17T04:17:00Z",
+        "pointsEvaluated": 371,
+        "keptCount": 10,
+        "candidateCount": 50,
+        "truncatedByCap": 311,
+        "maxDeletionsPerRun": 50,
+        "kept": [
+          "p001",
+          "p002",
+          "p003",
+          "p004",
+          "p005",
+          "p006",
+          "p007",
+          "p008",
+          "p009",
+          "p010"
+        ],
+        "candidates": [
+          {
+            "pointId": "p011",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-06T04:17:00Z"
+          },
+          {
+            "pointId": "p012",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-05T04:17:00Z"
+          },
+          {
+            "pointId": "p013",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-04T04:17:00Z"
+          },
+          {
+            "pointId": "p014",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-03T04:17:00Z"
+          },
+          {
+            "pointId": "p015",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-02T04:17:00Z"
+          },
+          {
+            "pointId": "p016",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-01T04:17:00Z"
+          },
+          {
+            "pointId": "p017",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-31T04:17:00Z"
+          },
+          {
+            "pointId": "p018",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-30T04:17:00Z"
+          },
+          {
+            "pointId": "p019",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-29T04:17:00Z"
+          },
+          {
+            "pointId": "p020",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-28T04:17:00Z"
+          },
+          {
+            "pointId": "p021",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-27T04:17:00Z"
+          },
+          {
+            "pointId": "p022",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-26T04:17:00Z"
+          },
+          {
+            "pointId": "p023",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-25T04:17:00Z"
+          },
+          {
+            "pointId": "p024",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-24T04:17:00Z"
+          },
+          {
+            "pointId": "p025",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-23T04:17:00Z"
+          },
+          {
+            "pointId": "p026",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-22T04:17:00Z"
+          },
+          {
+            "pointId": "p027",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-21T04:17:00Z"
+          },
+          {
+            "pointId": "p028",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-20T04:17:00Z"
+          },
+          {
+            "pointId": "p029",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-19T04:17:00Z"
+          },
+          {
+            "pointId": "p030",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-18T04:17:00Z"
+          },
+          {
+            "pointId": "p031",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-17T04:17:00Z"
+          },
+          {
+            "pointId": "p032",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-16T04:17:00Z"
+          },
+          {
+            "pointId": "p033",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-15T04:17:00Z"
+          },
+          {
+            "pointId": "p034",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-14T04:17:00Z"
+          },
+          {
+            "pointId": "p035",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-13T04:17:00Z"
+          },
+          {
+            "pointId": "p036",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-12T04:17:00Z"
+          },
+          {
+            "pointId": "p037",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-11T04:17:00Z"
+          },
+          {
+            "pointId": "p038",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-10T04:17:00Z"
+          },
+          {
+            "pointId": "p039",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-09T04:17:00Z"
+          },
+          {
+            "pointId": "p040",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-08T04:17:00Z"
+          },
+          {
+            "pointId": "p041",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-07T04:17:00Z"
+          },
+          {
+            "pointId": "p042",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-06T04:17:00Z"
+          },
+          {
+            "pointId": "p043",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-05T04:17:00Z"
+          },
+          {
+            "pointId": "p044",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-04T04:17:00Z"
+          },
+          {
+            "pointId": "p045",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-03T04:17:00Z"
+          },
+          {
+            "pointId": "p046",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-02T04:17:00Z"
+          },
+          {
+            "pointId": "p047",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-08-01T04:17:00Z"
+          },
+          {
+            "pointId": "p048",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-31T04:17:00Z"
+          },
+          {
+            "pointId": "p049",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-30T04:17:00Z"
+          },
+          {
+            "pointId": "p050",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-29T04:17:00Z"
+          },
+          {
+            "pointId": "p051",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-28T04:17:00Z"
+          },
+          {
+            "pointId": "p052",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-27T04:17:00Z"
+          },
+          {
+            "pointId": "p053",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-26T04:17:00Z"
+          },
+          {
+            "pointId": "p054",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-25T04:17:00Z"
+          },
+          {
+            "pointId": "p055",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-24T04:17:00Z"
+          },
+          {
+            "pointId": "p056",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-23T04:17:00Z"
+          },
+          {
+            "pointId": "p057",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-22T04:17:00Z"
+          },
+          {
+            "pointId": "p058",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-21T04:17:00Z"
+          },
+          {
+            "pointId": "p059",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-20T04:17:00Z"
+          },
+          {
+            "pointId": "p060",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-07-19T04:17:00Z"
+          }
+        ],
+        "truncated": false,
+        "planRef": {
+          "name": "lwr-3c927ad018863158cbd7-plan-42df12ab1b6c"
+        },
+        "planSha256": "sha256:42df12ab1b6c396464b8c24dbf182e34ce032635c7e17befcc95859452d0cfa6",
+        "planExpiresAt": "2026-09-17T05:17:00Z"
+      },
+      "leasedPoints": 0,
+      "consecutiveRunFailures": 0,
+      "enforcementDegraded": false,
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "PolicyReady",
+          "message": "the destination and the catalog resolve",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "Evaluated",
+          "status": "True",
+          "reason": "EvaluationComplete",
+          "message": "371 point(s) evaluated at this destination: 10 kept, 50 candidate(s), 0 protected, 0 skipped. 311 more point(s) are due under the rules and held back by the per-run ceiling (maxDeletionsPerRun 50): they are not kept and not in this plan, and they stay due until a later plan names them. This catalog view carries no segment keys. Points that name one backup set are protected together (SharedSegment, matched on backupId), but a segment one set's manifest names under another set's directory cannot be seen, so sharedSegments is NotEnforced, and the plan names each set's key prefix rather than its objects: candidates[].objects is omitted rather than guessed, and `logweir-retention --dry-run` enumerates the real count. 50 point(s) would be removed by this plan.",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "Enforced",
+          "status": "False",
+          "reason": "RecommendationOnly",
+          "message": "this policy reports what would be removed and removes nothing; set spec.mode: Enforce and approve a plan digest to change that",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "ExternalLifecycleConflict",
+          "status": "False",
+          "reason": "NoConflict",
+          "message": "no bucket lifecycle rule is declared for this destination",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "EnforcementDegraded",
+          "status": "False",
+          "reason": "Healthy",
+          "message": "the spec changed; the consecutive-failure budget is released and status.consecutiveRunFailures is reset to 0",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        }
+      ]
+    },
+    {
+      "name": "keep-300",
+      "namespace": "team-a",
+      "uid": "22220300-0000-4000-8000-000000000022",
+      "resourceVersion": "1001",
+      "generation": 4,
+      "createdAt": "2026-09-15T10:00:00Z",
+      "destinationRef": {
+        "name": "archive"
+      },
+      "catalogRef": {
+        "name": "primary"
+      },
+      "scopePrefix": "team-a",
+      "mode": "Report",
+      "keepLast": 300,
+      "minUsablePoints": 3,
+      "holds": 0,
+      "observedGeneration": 4,
+      "enforcement": "RecommendationOnly",
+      "guarantees": {
+        "ageExpiry": "NotEnforced",
+        "minUsablePoints": "LogweirEnforced",
+        "activeRestoreProtection": "LogweirEnforced",
+        "sharedSegments": "NotEnforced",
+        "legalHold": "ProviderEnforcedUnverified"
+      },
+      "approvedPlanState": "notApplicable",
+      "lastEvaluation": {
+        "at": "2026-09-17T04:17:00Z",
+        "pointsEvaluated": 371,
+        "keptCount": 300,
+        "candidateCount": 50,
+        "truncatedByCap": 21,
+        "maxDeletionsPerRun": 50,
+        "kept": [
+          "p001",
+          "p002",
+          "p003",
+          "p004",
+          "p005",
+          "p006",
+          "p007",
+          "p008",
+          "p009",
+          "p010",
+          "p011",
+          "p012",
+          "p013",
+          "p014",
+          "p015",
+          "p016",
+          "p017",
+          "p018",
+          "p019",
+          "p020",
+          "p021",
+          "p022",
+          "p023",
+          "p024",
+          "p025",
+          "p026",
+          "p027",
+          "p028",
+          "p029",
+          "p030",
+          "p031",
+          "p032",
+          "p033",
+          "p034",
+          "p035",
+          "p036",
+          "p037",
+          "p038",
+          "p039",
+          "p040",
+          "p041",
+          "p042",
+          "p043",
+          "p044",
+          "p045",
+          "p046",
+          "p047",
+          "p048",
+          "p049",
+          "p050",
+          "p051",
+          "p052",
+          "p053",
+          "p054",
+          "p055",
+          "p056",
+          "p057",
+          "p058",
+          "p059",
+          "p060",
+          "p061",
+          "p062",
+          "p063",
+          "p064",
+          "p065",
+          "p066",
+          "p067",
+          "p068",
+          "p069",
+          "p070",
+          "p071",
+          "p072",
+          "p073",
+          "p074",
+          "p075",
+          "p076",
+          "p077",
+          "p078",
+          "p079",
+          "p080",
+          "p081",
+          "p082",
+          "p083",
+          "p084",
+          "p085",
+          "p086",
+          "p087",
+          "p088",
+          "p089",
+          "p090",
+          "p091",
+          "p092",
+          "p093",
+          "p094",
+          "p095",
+          "p096",
+          "p097",
+          "p098",
+          "p099",
+          "p100",
+          "p101",
+          "p102",
+          "p103",
+          "p104",
+          "p105",
+          "p106",
+          "p107",
+          "p108",
+          "p109",
+          "p110",
+          "p111",
+          "p112",
+          "p113",
+          "p114",
+          "p115",
+          "p116",
+          "p117",
+          "p118",
+          "p119",
+          "p120",
+          "p121",
+          "p122",
+          "p123",
+          "p124",
+          "p125",
+          "p126",
+          "p127",
+          "p128",
+          "p129",
+          "p130",
+          "p131",
+          "p132",
+          "p133",
+          "p134",
+          "p135",
+          "p136",
+          "p137",
+          "p138",
+          "p139",
+          "p140",
+          "p141",
+          "p142",
+          "p143",
+          "p144",
+          "p145",
+          "p146",
+          "p147",
+          "p148",
+          "p149",
+          "p150",
+          "p151",
+          "p152",
+          "p153",
+          "p154",
+          "p155",
+          "p156",
+          "p157",
+          "p158",
+          "p159",
+          "p160",
+          "p161",
+          "p162",
+          "p163",
+          "p164",
+          "p165",
+          "p166",
+          "p167",
+          "p168",
+          "p169",
+          "p170",
+          "p171",
+          "p172",
+          "p173",
+          "p174",
+          "p175",
+          "p176",
+          "p177",
+          "p178",
+          "p179",
+          "p180",
+          "p181",
+          "p182",
+          "p183",
+          "p184",
+          "p185",
+          "p186",
+          "p187",
+          "p188",
+          "p189",
+          "p190",
+          "p191",
+          "p192",
+          "p193",
+          "p194",
+          "p195",
+          "p196",
+          "p197",
+          "p198",
+          "p199",
+          "p200"
+        ],
+        "candidates": [
+          {
+            "pointId": "p301",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-20T04:17:00Z"
+          },
+          {
+            "pointId": "p302",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-19T04:17:00Z"
+          },
+          {
+            "pointId": "p303",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-18T04:17:00Z"
+          },
+          {
+            "pointId": "p304",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-17T04:17:00Z"
+          },
+          {
+            "pointId": "p305",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-16T04:17:00Z"
+          },
+          {
+            "pointId": "p306",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-15T04:17:00Z"
+          },
+          {
+            "pointId": "p307",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-14T04:17:00Z"
+          },
+          {
+            "pointId": "p308",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-13T04:17:00Z"
+          },
+          {
+            "pointId": "p309",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-12T04:17:00Z"
+          },
+          {
+            "pointId": "p310",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-11T04:17:00Z"
+          },
+          {
+            "pointId": "p311",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-10T04:17:00Z"
+          },
+          {
+            "pointId": "p312",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-09T04:17:00Z"
+          },
+          {
+            "pointId": "p313",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-08T04:17:00Z"
+          },
+          {
+            "pointId": "p314",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-07T04:17:00Z"
+          },
+          {
+            "pointId": "p315",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-06T04:17:00Z"
+          },
+          {
+            "pointId": "p316",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-05T04:17:00Z"
+          },
+          {
+            "pointId": "p317",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-04T04:17:00Z"
+          },
+          {
+            "pointId": "p318",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-03T04:17:00Z"
+          },
+          {
+            "pointId": "p319",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-02T04:17:00Z"
+          },
+          {
+            "pointId": "p320",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-11-01T04:17:00Z"
+          },
+          {
+            "pointId": "p321",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-31T04:17:00Z"
+          },
+          {
+            "pointId": "p322",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-30T04:17:00Z"
+          },
+          {
+            "pointId": "p323",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-29T04:17:00Z"
+          },
+          {
+            "pointId": "p324",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-28T04:17:00Z"
+          },
+          {
+            "pointId": "p325",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-27T04:17:00Z"
+          },
+          {
+            "pointId": "p326",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-26T04:17:00Z"
+          },
+          {
+            "pointId": "p327",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-25T04:17:00Z"
+          },
+          {
+            "pointId": "p328",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-24T04:17:00Z"
+          },
+          {
+            "pointId": "p329",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-23T04:17:00Z"
+          },
+          {
+            "pointId": "p330",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-22T04:17:00Z"
+          },
+          {
+            "pointId": "p331",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-21T04:17:00Z"
+          },
+          {
+            "pointId": "p332",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-20T04:17:00Z"
+          },
+          {
+            "pointId": "p333",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-19T04:17:00Z"
+          },
+          {
+            "pointId": "p334",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-18T04:17:00Z"
+          },
+          {
+            "pointId": "p335",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-17T04:17:00Z"
+          },
+          {
+            "pointId": "p336",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-16T04:17:00Z"
+          },
+          {
+            "pointId": "p337",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-15T04:17:00Z"
+          },
+          {
+            "pointId": "p338",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-14T04:17:00Z"
+          },
+          {
+            "pointId": "p339",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-13T04:17:00Z"
+          },
+          {
+            "pointId": "p340",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-12T04:17:00Z"
+          },
+          {
+            "pointId": "p341",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-11T04:17:00Z"
+          },
+          {
+            "pointId": "p342",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-10T04:17:00Z"
+          },
+          {
+            "pointId": "p343",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-09T04:17:00Z"
+          },
+          {
+            "pointId": "p344",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-08T04:17:00Z"
+          },
+          {
+            "pointId": "p345",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-07T04:17:00Z"
+          },
+          {
+            "pointId": "p346",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-06T04:17:00Z"
+          },
+          {
+            "pointId": "p347",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-05T04:17:00Z"
+          },
+          {
+            "pointId": "p348",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-04T04:17:00Z"
+          },
+          {
+            "pointId": "p349",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-03T04:17:00Z"
+          },
+          {
+            "pointId": "p350",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2025-10-02T04:17:00Z"
+          }
+        ],
+        "truncated": true,
+        "planRef": {
+          "name": "lwr-061897e0f3916c45a3df-plan-9f5fa0b41632"
+        },
+        "planSha256": "sha256:9f5fa0b41632defcc8a4979b9869406c620be7f18b1bd4ff641a9e5eb0f17407",
+        "planExpiresAt": "2026-09-17T05:17:00Z"
+      },
+      "leasedPoints": 0,
+      "consecutiveRunFailures": 0,
+      "enforcementDegraded": false,
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "PolicyReady",
+          "message": "the destination and the catalog resolve",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "Evaluated",
+          "status": "True",
+          "reason": "EvaluationComplete",
+          "message": "371 point(s) evaluated at this destination: 300 kept, 50 candidate(s), 0 protected, 0 skipped. 21 more point(s) are due under the rules and held back by the per-run ceiling (maxDeletionsPerRun 50): they are not kept and not in this plan, and they stay due until a later plan names them. This catalog view carries no segment keys. Points that name one backup set are protected together (SharedSegment, matched on backupId), but a segment one set's manifest names under another set's directory cannot be seen, so sharedSegments is NotEnforced, and the plan names each set's key prefix rather than its objects: candidates[].objects is omitted rather than guessed, and `logweir-retention --dry-run` enumerates the real count. 50 point(s) would be removed by this plan.",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "Enforced",
+          "status": "False",
+          "reason": "RecommendationOnly",
+          "message": "this policy reports what would be removed and removes nothing; set spec.mode: Enforce and approve a plan digest to change that",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "ExternalLifecycleConflict",
+          "status": "False",
+          "reason": "NoConflict",
+          "message": "no bucket lifecycle rule is declared for this destination",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        },
+        {
+          "type": "EnforcementDegraded",
+          "status": "False",
+          "reason": "Healthy",
+          "message": "the spec changed; the consecutive-failure budget is released and status.consecutiveRunFailures is reset to 0",
+          "lastTransitionTime": "2026-09-17T04:17:00Z"
+        }
+      ]
+    }
+  ],
+  "page": {
+    "limit": 50,
+    "snapshot": "1002"
+  }
+}

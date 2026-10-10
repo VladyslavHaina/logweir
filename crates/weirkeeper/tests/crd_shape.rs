@@ -689,6 +689,15 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
                 ".status.lastEvaluation.candidateCount",
                 "integer",
             ),
+            // FX-22: CANDIDATES is THIS plan, cut at the per-run ceiling. On
+            // its own it read "50 is all there is" while 311 more points were
+            // due; the count the ceiling held back stands beside it, as
+            // `RecoveryCatalog`'s TRUNCATED stands beside POINTS.
+            (
+                "HELD-BACK",
+                ".status.lastEvaluation.truncatedByCap",
+                "integer",
+            ),
             ("EVALUATED", ".status.lastEvaluation.at", "date"),
             ("AGE", ".metadata.creationTimestamp", "date"),
         ],

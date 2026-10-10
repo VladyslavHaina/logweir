@@ -53,6 +53,7 @@ import {
 } from "../contract.js";
 import {
   BACKOFF_MS,
+  listD3,
   readD3,
   CONNECTS_BEFORE_POLLING,
   ERRORS_BEFORE_SLOWING,
@@ -66,6 +67,7 @@ import {
   STREAM_END_REASONS,
 } from "../operation-watch.js";
 import {
+  ACCOUNTING_NOT_RECORDED_SENTENCE,
   COMPLETION_GUIDANCE,
   ENFORCEMENT_DEGRADED_SENTENCE,
   ENFORCEMENT_SENTENCES,
@@ -83,8 +85,11 @@ import {
   TWO_HEALTHS_SENTENCE,
   TWO_INSTANTS_SENTENCE,
   UNKNOWN_IS_NOT_VALID_SENTENCE,
+  VIEW_INCOMPLETE_SENTENCE,
   basisAllowsGreen,
+  evaluationAccounting,
   healthBadge,
+  heldBackSentence,
   stateBadge,
   trustStateCase,
   unverifiedCaption,
@@ -162,6 +167,7 @@ import {
   enforcementOf,
   policyForSchedule,
   renderEnforcement,
+  renderEvaluationCounts,
   renderRetentionPanel,
   retentionSentenceFor,
 } from "../pages/schedules.js";
@@ -2686,4 +2692,190 @@ test("a_finished_restore_without_a_completion_says_not_yet_verified_and_never_ze
   // And a legacy custom resource, finished by its phase, says the same.
   assert.match(decode(renderCompletion({ kind: "restore", completion: null, terminal: false,
     phase: "Succeeded" })), /Completion not yet verified/);
+});
+
+// ===========================================================================
+// FX-22 -- the retention panel says what the per-run ceiling held back, and
+// never calls it kept
+// ===========================================================================
+//
+// THE EVIDENCE (PoC batch 3, F-3): 371 points, and the status read "321 kept,
+// 50 candidate(s)" for `keepLast: 300` and for `keepLast: 10` alike.
+//
+// THE FIXTURES ARE A CHAIN THREE SIDES READ. `fixtures/retention-held-back.json`
+// is the two policies as the reconciler leaves them
+// (`weirkeeper/tests/retention_policy_controller.rs` fails when it is not);
+// `fixtures/console/retention-policies-held-back.json` is the product API's
+// answer for them (`logweir-api/tests/retention_accounting.rs` fails when it
+// is not); and these rows render both -- the API's answer in console mode and
+// the custom resources themselves in legacy mode.
+
+/** The two policies as the shared console reads them: through the product
+ *  API's list, decoded by the published contract and projected back into the
+ *  renderer's vocabulary. */
+async function heldBackPolicies() {
+  const list = await listD3("retention", "team-a", {}, {
+    modeOf: () => "console",
+    consoleList: async () => con("retention-policies-held-back.json"),
+  });
+  const byName = {};
+  for (const item of list.items) {
+    byName[item.metadata.name] = item;
+  }
+  return byName;
+}
+
+/** One `<dt>caption</dt><dd>value</dd>` out of a rendered facts list. */
+function fact(html, caption) {
+  const marker = "<dt>" + caption + "</dt><dd>";
+  const at = html.indexOf(marker);
+  if (at === -1) {
+    return null;
+  }
+  const from = at + marker.length;
+  return html.slice(from, html.indexOf("</dd>", from));
+}
+
+test("the_retention_panel_tells_300_kept_from_the_ceiling_stopped_at_50", async () => {
+  const policies = await heldBackPolicies();
+
+  // ---- keepLast: 300 ------------------------------------------------------
+  const threeHundred = decode(renderEnforcement({}, policies["keep-300"]));
+  assert.equal(fact(threeHundred, "points evaluated"), "371");
+  assert.equal(fact(threeHundred, "kept"), "300");
+  assert.equal(fact(threeHundred, "in this plan"), "50");
+  assert.equal(fact(threeHundred, "held back by the per-run ceiling"), "21");
+  assert.match(threeHundred, /data-accounting="recorded" data-kept="300" data-held-back="21"/);
+  assert.ok(threeHundred.indexOf(heldBackSentence(21, 50)) !== -1,
+    "and the sentence says what the 21 are: " + threeHundred);
+  assert.match(heldBackSentence(21, 50),
+    /^21 more points are due under this policy's rules and held back by its per-run ceiling \(maxDeletionsPerRun 50\)\. They are not kept and they are not in this plan/);
+  // THE COUNT IS NOT THE NUMBER OF ROWS. The API publishes 200 of this
+  // policy's 300 kept ids (`truncated: true`); a panel that counted the list
+  // would say 200.
+  assert.equal(policies["keep-300"].status.lastEvaluation.kept.length, 200);
+  assert.equal(policies["keep-300"].status.lastEvaluation.truncated, true);
+
+  // ---- keepLast: 10 -------------------------------------------------------
+  const ten = decode(renderEnforcement({}, policies["keep-10"]));
+  assert.equal(fact(ten, "points evaluated"), "371");
+  assert.equal(fact(ten, "kept"), "10");
+  assert.equal(fact(ten, "in this plan"), "50");
+  assert.equal(fact(ten, "held back by the per-run ceiling"), "311");
+  assert.ok(ten.indexOf(heldBackSentence(311, 50)) !== -1);
+
+  // THE DEFECT, AS A NEGATIVE CONTROL: neither reads 321 kept, and the two no
+  // longer read alike.
+  for (const html of [threeHundred, ten]) {
+    assert.notEqual(fact(html, "kept"), "321");
+  }
+  assert.notEqual(fact(threeHundred, "kept"), fact(ten, "kept"));
+  assert.notEqual(fact(threeHundred, "held back by the per-run ceiling"),
+    fact(ten, "held back by the per-run ceiling"));
+  // And they are Report policies: the block is not an enforcing policy's alone.
+  assert.equal(enforcementOf(policies["keep-10"]), "RecommendationOnly");
+  assert.equal(ten.indexOf("The approved plan"), -1);
+});
+
+test("legacy_mode_reads_the_same_counts_off_the_custom_resource", () => {
+  // The custom resources themselves, as `kubectl proxy` serves them -- the file
+  // the controller's own test holds to the reconciler's output.
+  const items = fixture("retention-held-back.json").items;
+  const byName = {};
+  for (const item of items) {
+    byName[item.metadata.name] = item;
+  }
+  const threeHundred = decode(renderEnforcement({}, byName["keep-300"]));
+  assert.equal(fact(threeHundred, "kept"), "300");
+  assert.equal(fact(threeHundred, "held back by the per-run ceiling"), "21");
+  const ten = decode(renderEnforcement({}, byName["keep-10"]));
+  assert.equal(fact(ten, "kept"), "10");
+  assert.equal(fact(ten, "in this plan"), "50");
+  assert.equal(fact(ten, "held back by the per-run ceiling"), "311");
+  assert.deepEqual({ ...evaluationAccounting(byName["keep-10"].status.lastEvaluation) },
+    { pointsEvaluated: 371, kept: 10, candidates: 50, heldBack: 311, ceiling: 50 });
+
+  // COUNTS THAT DO NOT ADD UP ARE NOT COUNTS. After a rollback of the
+  // controller image alone the older controller rewrites `pointsEvaluated` and
+  // the lists and cannot remove the two counts it does not know. The product
+  // API refuses that block; in legacy mode this page is the only reader.
+  const stale = JSON.parse(JSON.stringify(byName["keep-10"]));
+  stale.status.lastEvaluation.pointsEvaluated = 372;
+  assert.equal(evaluationAccounting(stale.status.lastEvaluation), null);
+  const html = decode(renderEnforcement({}, stale));
+  assert.equal(fact(html, "kept"), "not recorded");
+  assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded");
+});
+
+test("an_evaluation_that_records_no_accounting_reads_not_recorded_and_never_counts_its_list", () => {
+  // A LIVE PRE-FIX OBJECT: one id under `kept`, and no `keptCount`. Its list
+  // may hold points the ceiling held back, so the panel does not count it.
+  const older = d3("retention-report.json");
+  assert.equal(older.status.lastEvaluation.kept.length, 1);
+  assert.equal(older.status.lastEvaluation.keptCount, undefined);
+  assert.equal(evaluationAccounting(older.status.lastEvaluation), null);
+  const html = decode(renderEnforcement({}, older));
+  assert.match(html, /data-accounting="not-recorded"/);
+  assert.equal(fact(html, "kept"), "not recorded",
+    "NOT `1`: a count read off the list is the defect this row exists for");
+  assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded",
+    "and NOT `0`: absent is not observed, never zero");
+  assert.equal(fact(html, "in this plan"), "3", "the plan's own count is still the plan's");
+  assert.ok(html.indexOf(ACCOUNTING_NOT_RECORDED_SENTENCE) !== -1);
+  assert.equal(html.indexOf("data-held-back-sentence"), -1);
+
+  // THE PRE-FIX SHAPE AT THE EVIDENCE'S SIZE: 321 ids under `kept`.
+  const preFix = JSON.parse(JSON.stringify(fixture("retention-held-back.json").items[1]));
+  const ev = preFix.status.lastEvaluation;
+  for (const key of ["keptCount", "truncatedByCap", "maxDeletionsPerRun"]) {
+    delete ev[key];
+  }
+  ev.kept = Array.from({ length: 321 }, (_, i) => "p" + String(i + 1));
+  const before = decode(renderEnforcement({}, preFix));
+  assert.equal(fact(before, "kept"), "not recorded");
+  assert.equal(before.indexOf("<dd>321</dd>"), -1, "321 is never printed as a count");
+
+  // A policy that evaluates nothing renders no block and no "not recorded".
+  assert.equal(renderEvaluationCounts(undefined), "");
+  assert.equal(renderEvaluationCounts({}), "");
+  const external = decode(renderEnforcement({}, d3("retention-external.json")));
+  assert.equal(external.indexOf("The last evaluation"), -1);
+});
+
+test("a_plan_under_the_ceiling_shows_zero_held_back_and_no_ceiling_sentence", async () => {
+  const policies = await heldBackPolicies();
+  const under = JSON.parse(JSON.stringify(policies["keep-10"]));
+  // 371 points, 350 kept, 21 due and every one of them in the plan.
+  Object.assign(under.status.lastEvaluation,
+    { keptCount: 350, candidateCount: 21, truncatedByCap: 0 });
+  const html = decode(renderEnforcement({}, under));
+  assert.equal(fact(html, "kept"), "350");
+  assert.equal(fact(html, "in this plan"), "21");
+  assert.equal(fact(html, "held back by the per-run ceiling"), "0",
+    "zero is an answer and is printed as one");
+  assert.match(html, /data-held-back="0"/);
+  assert.equal(html.indexOf("data-held-back-sentence"), -1,
+    "CONTROL: nothing is said about a ceiling that held nothing back");
+  assert.equal(html.indexOf("held back by its per-run ceiling"), -1);
+
+  // One point is one point, and an unrecorded ceiling is not a number.
+  assert.match(heldBackSentence(1, 50), /^1 more point is due .* It is not kept and it is not in this plan/);
+  assert.match(heldBackSentence(4, null), /per-run ceiling \(maxDeletionsPerRun\)\./);
+});
+
+test("a_catalog_view_that_is_not_the_whole_archive_is_said_on_the_panel", async () => {
+  const policies = await heldBackPolicies();
+  const whole = decode(renderEnforcement({}, policies["keep-10"]));
+  assert.equal(whole.indexOf("data-view-incomplete"), -1,
+    "CONTROL: the fixture's catalog did not say, and the panel does not either");
+
+  const windowed = JSON.parse(JSON.stringify(policies["keep-10"]));
+  windowed.status.lastEvaluation.viewIncomplete = true;
+  const html = decode(renderEnforcement({}, windowed));
+  assert.match(html, /data-view-incomplete="true"/);
+  assert.ok(html.indexOf(VIEW_INCOMPLETE_SENTENCE) !== -1);
+
+  const said = JSON.parse(JSON.stringify(policies["keep-10"]));
+  said.status.lastEvaluation.viewIncomplete = false;
+  assert.equal(decode(renderEnforcement({}, said)).indexOf("data-view-incomplete"), -1);
 });

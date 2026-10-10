@@ -12425,24 +12425,36 @@
             "nullable": true
           },
           "candidateCount": {
-            "description": "How many candidates there are in total, which may exceed the rows below.",
+            "description": "How many points THIS plan would remove, which may exceed the rows below. At most the per-run ceiling; `truncatedByCap` is what the rules would remove beyond it.",
             "type": "integer",
             "format": "int64",
             "nullable": true
           },
           "candidates": {
-            "description": "The points the rules would remove.",
+            "description": "The points this plan would remove.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CandidateView"
             }
           },
           "kept": {
-            "description": "The points the rules keep.",
+            "description": "The points that stay, when `keptCount` is recorded.",
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "keptCount": {
+            "description": "How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back.\n\nABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22). The status of a controller that did not record what the per-run ceiling held back lists those points under `kept`, so its list is not published as kept and no count is derived from it. The same holds when the status's counts do not add up to `pointsEvaluated`, which is what an older controller leaves behind after a rollback of its image alone.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "maxDeletionsPerRun": {
+            "description": "The per-run ceiling the evaluation applied: the policy's `maxDeletionsPerRun`, or the default of 50 for a policy that does not enforce. Published with the accounting it explains.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
           },
           "planExpiresAt": {
             "description": "When the plan ages out.",
@@ -12461,7 +12473,7 @@
             "nullable": true
           },
           "pointsEvaluated": {
-            "description": "How many points were considered.",
+            "description": "How many points were considered. With the accounting below, each is counted once: `pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` + the skipped points.",
             "type": "integer",
             "format": "int64",
             "nullable": true
@@ -12481,8 +12493,19 @@
             }
           },
           "truncated": {
-            "description": "Whether any of the four lists above was cut short by this route's own row bound.",
+            "description": "Whether any of the four lists above was cut short by this route's own row bound. The counts are exact either way.",
             "type": "boolean"
+          },
+          "truncatedByCap": {
+            "description": "How many more points the rules would remove, that nothing protects and that the per-run ceiling left out of this plan. They are due, not kept. `0` means this plan is everything the rules would remove; absent means not recorded, never 0.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "viewIncomplete": {
+            "description": "Whether the catalog said the view this evaluation read does not hold every point of the archive (a window of `viewLimit`, or a walk that had not finished). Points outside it were not evaluated and are in none of the counts. Absent means the catalog did not say, or the accounting is not recorded; never `false`.",
+            "type": "boolean",
+            "nullable": true
           }
         }
       },
