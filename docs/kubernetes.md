@@ -2433,8 +2433,12 @@ ceiling held back is not "kept"** (FX-22). Four numbers add up:
 | `candidateCount` | the points **this plan** would remove, at most the ceiling |
 | `truncatedByCap` | the points the rules would remove, that nothing protects, and that the ceiling left out of this plan |
 
-`pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` + the
-points in `skipped`. `maxDeletionsPerRun` beside them is the ceiling the
+`pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` +
+`skippedCount`. Each list (`kept`, `candidates`, `protected`, `skipped`) holds
+at most its first 500 entries, the CRD's bound, and its count (`keptCount`,
+`candidateCount`, `protectedCount`, `skippedCount`) is the whole number, so a
+policy that keeps or skips more than 500 points still writes its status and
+still enforces (FX-39). `maxDeletionsPerRun` beside them is the ceiling the
 evaluation applied: `spec.enforcement.maxDeletionsPerRun`, or the default of 50
 for a policy with no `spec.enforcement`, because a `Report` preview is bounded
 as a run would be. A held-back point is **due, not kept**. It is in no list
@@ -2514,6 +2518,14 @@ catalog's own numbers, and the catalog's `Synced` message counts the entries it
 refused as too large. `false` means the catalog said its walk finished and its
 view holds every point it counted; absent means the catalog did not say. The
 evaluation of the points that are in the view is unchanged, and so is the plan.
+
+**An `Enforce` policy starts no run from a view that is not the whole, current
+archive** (FX-40): one with `viewIncomplete` `true` or not stated
+(`Enforced=False/ViewIncomplete`), or one past, or without, the catalog's
+`status.viewExpiresAt` (`Enforced=False/ViewExpired`). The message names the
+cause and the remedy (raise `spec.sync.viewLimit`, let the walk finish, or let
+the catalog sync), the evaluation is still published, and nothing is deleted.
+A `Report` policy is unaffected.
 
 The product API and the console apply one rule to this member: **a warning is
 never hidden, and completeness is never asserted when it is not recorded.**
