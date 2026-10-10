@@ -754,6 +754,7 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   const served = [];
   const unpublished = [];
   const badRequests = [];
+  const badAnswers = [];
   let requests = 0;
   const original = globalThis.fetch;
   globalThis.fetch = (url, init) => {
@@ -779,6 +780,16 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
       requests += 1;
     }
     const body = typeof answer === "string" ? wire(answer) : answer.body();
+    // AND WHAT THE ROW ANSWERS WITH IS A DOCUMENT THE ROUTE MAY SEND: every
+    // answer, the two written out in this file included, is an instance of
+    // the schema the document publishes for the route (or for its variant).
+    const publishes = ROUTE_VARIANTS[key] === undefined
+      ? operation.schema
+      : ROUTE_VARIANTS[key].schema;
+    for (const finding of schemaFindings(publishes, body)) {
+      badAnswers.push(key + " is answered here with a body that is not a " + publishes + ": " +
+        finding);
+    }
     const text = JSON.stringify(body);
     served.push({ key: key, operation: operation, text: text, decodedBy: [] });
     return Promise.resolve({
@@ -805,6 +816,9 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   assert.deepEqual(unpublished, [],
     "the console addressed a route the document does not publish, or this row has no answer " +
       "for one it does");
+  assert.deepEqual(badAnswers, [],
+    "this row answers a route with a body the document does not publish for it:\n" +
+      badAnswers.join("\n"));
   assert.deepEqual(badRequests, [],
     "a body the console builds must be an instance of the request schema the document " +
       "publishes for the route it is sent to:\n" + badRequests.join("\n"));
@@ -1297,14 +1311,14 @@ async function projectionReach() {
       const routes = (document) => table.map(([pattern, body]) =>
         [pattern, body === "@" ? document : body]);
       // THE FIXTURE, COMPLETED: every member the shape declares is present.
-      const whole = () => filled(shape, wire(name), itemShape);
-      serve(routes(whole()));
+      const whole = filled(shape, wire(name), itemShape);
+      serve(routes(structuredClone(whole)));
       const baseline = JSON.stringify(await read());
-      for (const leaf of leavesOf(shape, whole(), "", [], itemShape)) {
+      for (const leaf of leavesOf(shape, whole, "", [], itemShape)) {
         const key = shape.name + ": " + leaf.path.replace(/\[\d+\]/g, "[]");
         let reached = false;
-        for (const other of otherValues(leaf, valueAt(whole(), leaf.path))) {
-          const document = whole();
+        for (const other of otherValues(leaf, valueAt(whole, leaf.path))) {
+          const document = structuredClone(whole);
           valueAt(document, leaf.path, () => other);
           serve(routes(document));
           changes += 1;

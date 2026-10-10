@@ -186,7 +186,9 @@ test("back_up_now_on_the_detail_re_reads_the_history_and_keeps_the_run_on_screen
   // run it had just made was not in the table until the next page load.
   const ns = "detail-run-now";
   const state = { schedule: scheduleIn(ns), backups: [] };
-  const answer = fixture("console/manual-backup.json");
+  // What `runBackupNow` hands on is the DECODED answer's `schedule` and a run
+  // projected from its `item`; the double answers with the decoded document.
+  const answer = decoded("manual-backup.json");
   const page = detailPage(ns, state, {
     runBackupNow(namespace) {
       const made = runOf(state.schedule, "logweir-manual-1", "set-new");

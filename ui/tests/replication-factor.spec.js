@@ -81,7 +81,7 @@ const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
  *  row (`crates/logweir-api/tests/topic_discoveries.rs`,
  *  `a_discovery_publishes_the_broker_count_its_result_recorded`) holds its
  *  projection to: two brokers, fresh. */
-const DISCOVERY = () => fixture("console/discovery-target-latest.json");
+const DISCOVERY = () => decoded("discovery-target-latest.json");
 const BROKERS = DISCOVERY().lastSuccessful.brokerCount;
 
 /** The wizard fixtures, with the target connection re-identified as the one the
