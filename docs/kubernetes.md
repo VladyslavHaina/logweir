@@ -3622,12 +3622,15 @@ is the one mapping, `logweir.approvalPolicy.internalMode` the chart's half):
 | mode | internal | who approves a `Restore` |
 |---|---|---|
 | **confirm** | `Ordinary` (v2) | the requester, one click in the console; no key handled by anyone |
-| **two-person** | PROD-16.2, not in this build | a second person, one click in the console |
+| **two-person** | `Governed` (v2) with `approverSignature: Console` (PROD-16.2) | a second person, signed in to the shared console, one click; no key handled by anyone |
 | **strict** | `Governed` (v2) or `legacy-governed-v1` (v1) | an approver's personal `GovernedApproval` key |
 
-`approvalPolicy.policies[].mode` may be written `confirm` or `strict` (the
-chart renders `Ordinary`/`Governed`, so an image-only rollback reads the same
-document); `two-person` is refused by name.
+`approvalPolicy.policies[].mode` may be written `confirm`, `two-person` or
+`strict`. The chart renders the internal words (`Ordinary`, `Governed`, and
+for two-person `Governed` plus `approverSignature: Console`), so an image-only
+rollback reads the same document for `confirm` and `strict`; a document that
+carries `approverSignature` makes an older controller or console refuse to
+start, by name (*Two-person approval in the console*, below).
 
 **An unbound namespace** resolves, in this order: an explicit
 `approvalPolicy.default` (`defaultMode` in the document) — `confirm` (which
@@ -3784,7 +3787,9 @@ principal is `urn:logweir:local-admin#admin`. **Residual:** whoever can reach
 that console — the Kubernetes permission to port-forward to
 `deploy/<release>-api`, which is already full console administrator authority
 — can confirm a restore alone; SECURITY.md says so. `two-person` (PROD-16.2)
-is never served there: its one identity cannot be two people. A `strict`
+is never served there: its one identity cannot be two people, so that console
+neither requests nor approves a restore in a two-person namespace
+(`policy_mismatch`, nothing created). A `strict`
 namespace works in both modes: the console only attests the requester, and an
 independent approver key decides. `GET .../approval-policy` answers
 `ordinaryConfirmationAvailable: false` only while the console's key is not
@@ -3892,6 +3897,93 @@ document for another UID or plan, or a self-countersigned one creates **no**
 ConfigMap and **no** Job. The legacy `kubectl proxy` page cannot produce a v2
 document at all (D0: "Ordinary confirmation is unavailable through this legacy
 direct-CR UI").
+
+### Two-person approval in the console (PROD-16.2)
+
+A namespace bound to a policy written `mode: two-person` runs a restore only
+after **a second person, signed in to the shared console, clicks Approve**.
+Nobody generates, holds or pastes a key: the console attests who asked and who
+approved, and signs both. It is the `Governed` mode with one setting,
+`approverSignature: Console`, inside the policy and therefore inside the
+snapshot every signed document names by digest.
+
+```yaml
+approvalPolicy:
+  policies:
+    - name: prod-pair
+      mode: two-person          # rendered: mode: Governed, approverSignature: Console
+      maxAgeSeconds: 3600       # how long a request may wait for its approver
+  namespaces:
+    prod: prod-pair
+api:
+  console:
+    enabled: true
+    mode: shared                # the chart refuses two-person in any other mode
+```
+
+**The protocol** (full record:
+[PROD-16.2-console-approval.md](to-do/decisions/PROD-16.2-console-approval.md)).
+An Operator submits the Restore with a change ticket; the console signs the
+same request a strict namespace's console signs and stores it as
+`Approval/<approvalRef>-confirmation`. The approver opens the Restore's
+approval page (`GET .../restores/{name}/approval-request`): the console
+verifies its own signature over the stored request, and shows it with **the
+whole approval scope** — the source archive and backup set, the recovery
+point, the target cluster, every topic and the name it is restored under
+(original names marked), the verification — all from the plan the request
+names by hash. The click (`POST .../console-approval`, Approver role, never the
+requester) adds `approver` and `approvedAt` to the verified document, signs it
+with the same console key (format `2.2.0`) and stores it as the `Approval` the
+Restore references. The controller, at the verdict and at admission, and the
+runner each re-check from the signed bytes.
+
+**Who is "a second person":** the issuer and the subject the identity provider
+vouched for, and nothing else; each visible ASCII of at most 255 characters;
+neither `urn:logweir:local-admin` nor a `system:` subject; the same issuer
+(case and a trailing `/` ignored) and another subject (case ignored). Two
+sessions of one user are one person; an Administrator is not an Approver
+unless bound as one.
+
+**Time:** `issuedAt <= approvedAt < expiresAt` inside the signed bytes; the
+controller also refuses an `approvedAt` more than 60 s ahead of its clock. A
+document naming an approver and no `approvedAt` is refused everywhere.
+
+**Size:** a two-person request names at most 1024 topics, because the
+approver is shown every one; a larger plan is refused at the create
+(`scope_incomplete`) — split it, or bind the namespace `strict`.
+
+**What refuses what.**
+
+| Attempt | Refused by |
+| --- | --- |
+| the requester approves (any role, case or trailing `/`) | console 403; controller `SelfApprovalRefused`; runner exit 3 |
+| a confirmation not signed by this console | console: "not confirmed by this console", nothing shown; controller and runner again |
+| a confirmation of another Restore, UID, plan or policy | console 409; controller; runner |
+| an expired request; `approvedAt` outside the window | console 409; controller; runner |
+| a scope that cannot be shown in full | console: not offered, click 409 `scope_incomplete`, create 422 |
+| a second approver | console 409 (create-only) |
+| a personal-key countersignature here; a console approval in a strict namespace | console 409; controller; runner |
+| another origin, no CSRF token, a `GET` | console 403 |
+| the administrator (`localAdmin`) console | console 409; the chart refuses the setting |
+
+A `strict` namespace is unchanged byte for byte. An original-name restore
+(PROD-15.1) approved this way needs no typed names. The scorecard carries
+`approval.console` (who asked, who approved, both instants) and both verifiers
+print it. **Residual** (SECURITY.md): whoever controls the console, its key,
+the identity provider, the role bindings or the policy document can produce
+both halves; `strict` is the mode where the console is not enough.
+
+**Upgrade and rollback.** Binding a namespace to a two-person policy is a
+policy rollout like any other (below): requests signed under the previous
+digest are refused `ApprovalPolicyMismatch` and are submitted again. Order:
+controller and runner image, then the console, then the policy. **Rollback:**
+an older controller or console **refuses to start** on a document that carries
+`approverSignature` (`unknown field`), and an older runner refuses the snapshot
+the same way and a `2.2.0` document by its unknown fields — all fail closed.
+So remove the two-person policy (or rebind its namespaces) **before** rolling
+the images back; a console-approved Restore not yet admitted is then refused
+and submitted again under the namespace's new mode, and a run already admitted
+continues.
 
 **What it does not cover.** A `RehearsalSchedule`'s standing authorization
 keeps its own `GovernedApproval`-only format (§7g) whatever the namespace is

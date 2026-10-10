@@ -348,6 +348,60 @@ and only as follows:
   carrying `defaultMode` at start. Existing Approvals, v1/v2 documents, standing
   authorizations and signed archives are untouched.
 
+## Amendment (2026-10-10, PROD-16.2): two-person approval in the console
+
+The third operator-facing mode exists. This record's approval contract is
+amended as follows, and only as follows; the full contract is
+[PROD-16.2-console-approval.md](PROD-16.2-console-approval.md).
+
+- **`two-person` = `Governed` with `approverSignature: Console`.** The 2026-10-07
+  amendment's "`two-person` = PROD-16.2 (not yet)" is superseded. The setting
+  is a field of one policy, set per namespace through its binding, and is
+  inside the policy snapshot's bytes and digest; a policy without it has the
+  bytes and the digest it always had. `approvalPolicy.default` cannot be
+  `two-person`.
+- **"Governed needs an independent approver signature" now has two forms.**
+  Under a policy without the setting (`strict`) it is unchanged: a second
+  signature by a personal `GovernedApproval` key whose `principal.id` is not
+  the requester's. Under `approverSignature: Console` the approval is the
+  console's `ConsoleConfirmation` signature over the SAME document with
+  `approver {issuer, subject}` and `approvedAt` added (authorization document
+  v2 format `2.2.0`): the console attests a second signed-in person, and no
+  personal key exists. A request made under one setting cannot be approved
+  under the other, at the API, the controller and the runner.
+- **The console key's usage does not grow.** It is still `ConsoleConfirmation`
+  and nothing else; what it attests grows from "which principal asked" to
+  "which principal asked, and which other principal approved, and when".
+  "The console's signature attests which authenticated principal asked and
+  nothing else" stands for `confirm` and `strict`.
+- **Separation of duties is between principals the console attested**, by one
+  rule (issuer and subject only, each visible ASCII of at most 255 characters,
+  the same issuer and another subject after folding case and a trailing `/`,
+  neither the local administrator nor a system identity), applied by the
+  console before it signs, by the controller at the `Approval` verdict and at
+  `Restore` admission, by the runner, and by both scorecard readers. An
+  Administrator is not an Approver unless bound as one.
+- **The console verifies its own earlier signature before it reads anything of
+  a stored request**, and copies every field of the approval from the verified
+  bytes; the click's body names the request by the hash of those bytes and
+  supplies nothing else.
+- **`localAdmin` neither requests nor approves under `two-person`** (its one
+  identity cannot be two people), and the chart refuses the setting outside
+  `api.console.mode=shared`. The 2026-10-07 amendment's "`two-person` will be
+  refused there" is now the behaviour.
+- **Evidence.** A scorecard of such a run carries the optional
+  `approval.console` (format 1.9.0, and 2.1.0 for a partition subset): the
+  mode, both principals, both instants, the request's expiry and the console
+  key. MINOR under OD-7.
+- **Residual, in SECURITY.md.** Whoever controls the console pod, its key, the
+  identity provider, the role-binding table or the approval-policy document
+  can produce both the request and the approval. `strict` remains the mode
+  where the console is not enough.
+- **Rollback fails closed.** An older controller or console refuses to start
+  on a document carrying `approverSignature`; an older runner refuses the
+  snapshot and a `2.2.0` document. Remove the two-person policy before rolling
+  images back.
+
 ## Amendment at integration (2026-09-21, PLAT-17.1 stage 7)
 
 The chart's deployment stage landed under the existing `api.*` values block that D3 W13

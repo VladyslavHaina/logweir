@@ -969,6 +969,33 @@ into topics that do not exist, created by the run itself, exclusively
   sampled verification; a partition subset. Nothing — teardown, a lost race, a
   stopped creation step — deletes a topic under its original name.
 
+### Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0: two-person approval in the console (PROD-16.2)
+
+- **The policy snapshot** gains `approverSignature: Console` as its last key,
+  only when set; every existing policy's bytes and digest are unchanged. An
+  older controller, console or runner refuses the key (`deny_unknown_fields`).
+- **Authorization document v2 2.2.0** adds `approver {issuer, subject}` and
+  `approvedAt`, both or neither. 2.0.0 and 2.1.0 documents are written byte for
+  byte as before; the DSSE payload type is unchanged. This build refuses
+  either field under a version before 2.2.0; an older reader refuses them as
+  unknown fields (the safer verdict).
+- **Scorecard 1.9.0 (format 1) and 2.1.0 (format 2)** add the optional
+  `approval.console` ([the format](formats/drill-scorecard.md#approvalconsole-format-190-and-210)),
+  written only for a run a second person approved in the console; arms CA-1 to
+  CA-8 read the block or hold an existing field against it, and can only
+  refuse (OD-7 (a) and its third case). `target.original_name.approval_mode`
+  gains the member `consoleApproval` from 1.9.0; ON-5 is split by version as
+  PROD-01.3 split `target.auth.mode`, so a 1.8.0 document is judged in the same
+  words as before. `-1.8.0.json` and `-2.0.0.json` are frozen; `-1.9.0.json`
+  and `-2.1.0.json` are generated. A partition-subset restore approved in the
+  console is allowed (2.1.0). A reader before these minors accepts such a
+  document and ignores the block; a 1.28.0 reader refuses an original-name
+  document naming `consoleApproval` by its own ON-5. No MAJOR.
+- **The approval-mode vocabulary is one set** (`logweir_core::scorecard`'s
+  constants); `docs/verify_scorecard.py` holds a copy that
+  `two_reader_parity.rs::the_approval_mode_vocabulary_is_the_same_set_in_both_readers`
+  holds to it member for member. `verify_scorecard.py` 1.29.0.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the

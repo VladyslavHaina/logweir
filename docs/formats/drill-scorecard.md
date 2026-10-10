@@ -3,8 +3,15 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-2.0.0.json`](../../schemas/logweir-drill-scorecard-2.0.0.json)
-and CI diffs it against the code on every build, so this document and the
+[`schemas/logweir-drill-scorecard-2.1.0.json`](../../schemas/logweir-drill-scorecard-2.1.0.json)
+(format 2's newest) and
+[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json)
+(format 1's newest), and CI diffs both against the code on every build. Format
+**1.9.0** and **2.1.0** (PROD-16.2) add the nested optional
+[`approval.console`](#approvalconsole-format-190-and-210): a restore a second
+person approved in the console; `-1.8.0.json` and `-2.0.0.json` are frozen
+beside them. Before PROD-16.2 the current schema was
+[`schemas/logweir-drill-scorecard-2.0.0.json`](../../schemas/logweir-drill-scorecard-2.0.0.json), so this document and the
 schema cannot drift apart silently. Format **2.0.0** (PROD-11.1b, the owner's
 decision OD-9 (a)) is the format's first MAJOR and is written ONLY for a
 restore that states a partition subset: 1.7.0's fields with
@@ -573,6 +580,54 @@ script's `SCORECARD_ORIGINAL_NAME_VERSION`, and the corpus cases `original_name_
 | `approval.approved_at` | RFC 3339 | When. |
 | `approval.key_id` | string | Lowercase hex sha256 of the approver key's SPKI DER. |
 | `approval.self_attested` | bool | `true` when the approving key **equals** the signing key: the same party planned, ran and vouches for the result. **The WRITER never refuses to sign such a run; it labels it.** Treat `true` as a reason to seek corroboration. **The READERS treat this field as a CLAIM, not a finding**: both derive the answer from `approval.key_id` against the key that verified the signature, and refuse a document whose claim disagrees with that derivation (`drill verify` exit 4, `verify_scorecard.py` exit 1). The two are not in tension — a self-attested run is signed and labelled; a document that *lies about* being self-attested, in either direction, is refused. That narrows the accepted set without changing the format: no field is added, removed or retyped, `format_version` stays `1.0.0`, and no document Logweir has ever written is refused, because the writer has always derived the field correctly. |
+
+**What `approver`, `approved_at` and `key_id` mean, by how the run was
+authorised** (`target.original_name.approval_mode`'s words):
+
+| mode | `approver` | `approved_at` | `key_id` |
+|---|---|---|---|
+| `v1Approval` | the approval document's `approver` | its `approved_at` | the approver's personal key |
+| `governed` (strict) | `governed approver key <id>` | when the console signed the request (`issuedAt`) | the approver's personal key |
+| `ordinary` (confirm) | the requester's `<issuer>#<subject>` | when the console signed the confirmation (`issuedAt`) | the console key |
+| `consoleApproval` (two-person) | the approver's `<issuer>#<subject>` | when the second person approved (`approvedAt`), never the request's time | the console key, which is expected in this mode |
+
+### `approval.console` (format 1.9.0 and 2.1.0)
+
+PROD-16.2: present exactly when a second person approved the run in the
+console. Absent on every other document.
+
+```json
+"console": {
+  "mode": "consoleApproval",
+  "requester": {"issuer": "https://idp.example", "subject": "alice"},
+  "approver": {"issuer": "https://idp.example", "subject": "bob"},
+  "requested_at": "2026-10-10T12:00:00Z",
+  "approved_at": "2026-10-10T12:04:00Z",
+  "request_expires_at": "2026-10-10T13:00:00Z",
+  "confirmation_key_id": "c0c0…"
+}
+```
+
+Both readers refuse (arms CA-1 to CA-8, the same words): the block under a
+version before 1.9.0 of format 1 or 2.1.0 of format 2; another `mode`; two
+principals that are not two people (each visible ASCII of at most 255
+characters, neither the local administrator nor a `system:` subject, one issuer
+and two subjects, case and a trailing `/` ignored); `approved_at` before the
+request or at or after its expiry; `approval.approver` that is not the
+approver's `<issuer>#<subject>`; `approval.key_id` that is not
+`confirmation_key_id` (a distinct personal key is not a console approval);
+`approval.approved_at` that is not the block's; and an original-name document
+whose `approval_mode` is `consoleApproval` without the block, or the block
+beside another mode. From 1.9.0 `target.original_name.approval_mode` may be
+`consoleApproval`; under 1.8.0 that value is refused by the version. Both
+readers print one line:
+
+```text
+console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key c0c0… signed the request and the approval, which is expected in this mode: no personal key is involved
+```
+
+A reader before 1.9.0 accepts a 1.9.0 or 2.1.0 document and ignores the block;
+a 1.28.0 reader refuses an original-name document naming `consoleApproval`.
 
 ## `phases`
 

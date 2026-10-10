@@ -1179,8 +1179,10 @@ change at all.
 
 Three modes (`docs/kubernetes.md` §8, *The three modes*): **confirm** — one
 person clicks Create in the console, no key (internal `Ordinary`);
-**two-person** — PROD-16.2, not in this release; **strict** — an approver's
-personal key (internal `Governed`, or today's `legacy-governed-v1`).
+**two-person** — a second person signs in to the shared console and clicks
+Approve, no key (internal `Governed` with `approverSignature: Console`,
+PROD-16.2); **strict** — an approver's personal key (internal `Governed`, or
+today's `legacy-governed-v1`).
 
 **A fresh install with the console needs no step here.** A first `helm
 install` — with **Helm 3.19 or newer, or Helm 4** — with `api.console.enabled`,
@@ -1250,9 +1252,36 @@ finish the step; opt in as below.
 namespace on `legacy-governed-v1` even on a fresh install;
 `approvalPolicy.default: confirm` (with `allowOrdinaryConfirmation: true`)
 makes them confirm. Bind namespaces explicitly with `approvalPolicy.policies`
-(`mode: confirm` or `strict`) and `approvalPolicy.namespaces`
+(`mode: confirm`, `two-person` or `strict`) and `approvalPolicy.namespaces`
 (`charts/logweir/examples/approval-policy.values.yaml`); an explicit binding
-always wins. For a `strict` namespace put each approver's `GovernedApproval`
+always wins.
+
+**Two-person** needs the shared console and two people, and no key:
+
+```yaml
+approvalPolicy:
+  policies:
+    - name: prod-pair
+      mode: two-person
+      maxAgeSeconds: 3600      # how long a request waits for its approver
+  namespaces:
+    prod: prod-pair
+```
+
+(`charts/logweir/examples/console-two-person.values.yaml`.) Bind the requester
+the console role Operator and the approver the role **Approver** in that
+namespace (`api.roleBindings`); an Administrator is not an Approver unless
+bound as one, and the requester can never approve their own request. The
+chart refuses the mode unless `api.console.enabled` and `api.console.mode:
+shared` — the in-cluster administrator console has one identity, which cannot
+be two people — and `approvalPolicy.default` cannot be `two-person`. The
+console key the namespace's `TrustPolicy` already trusts for `confirm`
+(`ConsoleConfirmation`) is the only key involved. What it does and does not
+establish is in `SECURITY.md`: whoever controls the console, its key or the
+identity provider can produce both halves, so a namespace that cannot accept
+that is bound `strict`. **Before rolling images back** past this release,
+remove two-person policies: an older controller or console refuses to start on
+a document that carries one (`docs/kubernetes.md` §8). For a `strict` namespace put each approver's `GovernedApproval`
 key, with `principal.id` = the approver's `<issuer>#<subject>`, on the
 `TrustPolicy` that governs it (`docs/keys.md`, *Key usage separation*).
 
