@@ -799,6 +799,151 @@ fn the_receipt_fold_answers_what_these_functions_answer() {
     }
 }
 
+/// **No production path of the controller parses bytes into a tree, except
+/// the sites listed here, and none of them can hold a receipt.**
+///
+/// A `serde_json::Value` of a document is many times its bytes (37 times for
+/// a document of tiny values), and this process serves every namespace. So
+/// every place `crates/weirkeeper/src` builds a `Value` out of bytes or text
+/// is on the list below with what the bytes are and what bounds them. A new
+/// one fails this row until it is classified — which is the question "can a
+/// backup receipt reach this parse?" asked of whoever adds it.
+///
+/// The scan is of the sources' production code: a file is read up to its
+/// first `#[cfg(test)]`, and `testing.rs` (test support) is not read. The
+/// tokens are assembled so this file does not match itself.
+///
+/// KILLS: the receipt fold replaced by a whole parse anywhere in the
+/// controller — in `claim_of`, in `observe_archive`, in the relayed-receipt
+/// path, or in a new error or logging path.
+#[test]
+fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
+    let value = "Value";
+    let patterns = [
+        format!("from_slice::<{value}>"),
+        format!("from_slice::<serde_json::{value}>"),
+        format!("from_str::<{value}>"),
+        format!("from_str::<serde_json::{value}>"),
+        format!(": {value} = serde_json::from_slice"),
+        format!(": serde_json::{value} = serde_json::from_slice"),
+        format!(": {value} = serde_json::from_str"),
+        format!(": serde_json::{value} = serde_json::from_str"),
+        format!("from_reader::<_, {value}>"),
+    ];
+    // (file, a fragment of the line, what the bytes are and what bounds them)
+    let allowed: [(&str, &str, &str); 7] = [
+        (
+            "verification.rs",
+            "match serde_json::from_slice::<Value>(payload) {",
+            "claim_of: a document that is NOT a backup receipt, and only within the 1 MiB \
+             document cap (the two lines above it)",
+        ),
+        (
+            "controllers/restore.rs",
+            "let doc: Value = serde_json::from_slice(bytes).ok()?;",
+            "scorecard_observation: a scorecard, after within_scorecard_cap",
+        ),
+        (
+            "controllers/restore.rs",
+            ".and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())",
+            "the relayed scorecard's run id, after within_scorecard_cap",
+        ),
+        (
+            "controllers/restore.rs",
+            "serde_json::from_str::<Value>(&approval.spec.approval_bytes)",
+            "an Approval's own spec text, bounded by the API server's object size",
+        ),
+        (
+            "controllers/restore.rs",
+            "serde_json::from_str::<Value>(&approval.spec.sidecar_bytes)",
+            "an Approval's own spec text",
+        ),
+        (
+            "controllers/restore.rs",
+            "let doc: Value = serde_json::from_str(raw?).ok()?;",
+            "a status annotation of the Restore itself",
+        ),
+        (
+            "backup_execution.rs",
+            "let version = serde_json::from_str::<serde_json::Value>(stored)",
+            "the frozen inputs of a plan ConfigMap, at most 1 MiB",
+        ),
+    ];
+    let src = repo_root().join("crates/weirkeeper/src");
+    let mut files = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a source directory") {
+            let path = entry.expect("readable").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() > 40, "the scan reads the controller's sources");
+    let mut used = vec![false; allowed.len()];
+    let mut scanned = 0usize;
+    for path in &files {
+        let rel = path
+            .strip_prefix(&src)
+            .expect("under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "testing.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).expect("a source file");
+        let production = text.split("\n#[cfg(test)]").next().unwrap_or(&text);
+        for (number, line) in production.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !patterns.iter().any(|p| line.contains(p.as_str())) {
+                continue;
+            }
+            scanned += 1;
+            let known = allowed
+                .iter()
+                .position(|(file, fragment, _)| rel == *file && line.contains(fragment));
+            match known {
+                Some(at) => used[at] = true,
+                None => panic!(
+                    "{rel}:{} builds a serde_json::Value out of bytes or text:\n    {}\nThe \
+                     controller builds no tree of a backup receipt (FX-33): fold what you need \
+                     (logweir_core::receipt_facts), or, if these bytes can never be a receipt, \
+                     add the site to this row's list with what bounds it.",
+                    number + 1,
+                    line.trim()
+                ),
+            }
+        }
+    }
+    assert!(scanned >= allowed.len(), "the patterns match the sources");
+    for ((file, fragment, why), used) in allowed.iter().zip(&used) {
+        assert!(
+            used,
+            "{file} no longer contains `{fragment}` ({why}); remove it from this row's list so \
+             the list stays the whole truth"
+        );
+    }
+    // AND THE THREE SITES A RECEIPT REACHES FOLD IT. Named, so replacing one
+    // with a typed or untyped parse is a change to this row.
+    let read = |rel: &str| std::fs::read_to_string(src.join(rel)).expect("a source file");
+    let fold = "receipt_facts::ReceiptFacts::fold(";
+    assert!(
+        read("verification.rs").contains(fold),
+        "claim_of folds a receipt"
+    );
+    assert_eq!(
+        read("controllers/backup.rs").matches(fold).count()
+            + read("controllers/backup.rs")
+                .matches("and_then(logweir_core::receipt_facts::ReceiptFacts::fold)")
+                .count(),
+        2,
+        "observe_archive and the relayed-receipt path each fold the receipt once"
+    );
+}
+
 // ===========================================================================
 // 5. A relay waits for the read budget
 // ===========================================================================

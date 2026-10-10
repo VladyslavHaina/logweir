@@ -9175,6 +9175,16 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
     assert_eq!(cap_of(&f.receipt_key), caps::CATALOG_RECEIPT);
     assert_eq!(cap_of(&f.receipt_key), caps::CONTROLLER_RECEIPT);
     assert_eq!(cap_of(&f.sidecar_key), caps::SIDECAR);
+    assert_eq!(cap_of(&f.manifest_key), caps::MANIFEST);
+    // FX-33: each of the five kinds has ITS cap, and no two reads of one walk
+    // share a number by accident — a record is never read under the
+    // manifest's 256 MiB, nor a sidecar under a receipt's 5 MB.
+    assert!(
+        caps::SIDECAR < caps::CATALOG_RECEIPT
+            && caps::CATALOG_RECEIPT < caps::CATALOG_RECORD
+            && caps::CATALOG_RECORD < caps::MANIFEST
+            && caps::CATALOG_INDEX_ROW <= caps::SIDECAR
+    );
     assert!(
         !caps_read.iter().any(|(key, _)| *key == f.log_key),
         "a point whose record reads spends no read on its index row: {caps_read:?}"
@@ -11029,6 +11039,135 @@ fn a_full_rescan_lists_a_point_without_a_record_from_its_key_alone() {
         !run.everything().contains("script"),
         "a key's text is not shown"
     );
+}
+
+/// **Each of the walk's reads is fenced by the cap of the document it is
+/// reading, on the bytes as they arrive — not on what the store says.** A
+/// REAL `Store` that reports ten bytes for every object and then streams the
+/// whole body (`in_memory_misreporting_size`): the reported-size fence
+/// passes everything, so what stops each oversized document is the running
+/// cap of its own kind.
+///
+/// One site at a time, the document is a VALID one padded past its cap, so a
+/// walk that read it would use it:
+///
+/// | document | its cap | read whole it would give | cut off it gives |
+/// |---|---|---|---|
+/// | record | `CATALOG_RECORD` | an `Available` point | `record`/`overReadCap`, facts from the index row |
+/// | receipt | `CATALOG_RECEIPT` | a receipt to judge | `receipt`/`overReadCap` |
+/// | sidecar | `SIDECAR` | the signer it names | no signer at all: nothing of it was parsed |
+/// | index row | `CATALOG_INDEX_ROW` | `factsFrom: indexRow` | `factsFrom: key`: the row contributed nothing |
+///
+/// The cause carries the cap and NO size: the store never reported one over
+/// the bound. (The manifest's read is fenced by the same `Store` under
+/// `caps::MANIFEST`, 256 MiB; `a_counted_point_is_always_listed_with_its_own_reason`
+/// holds its reported-size fence and `a_catalog_walk_reads_every_document_under_its_cap`
+/// the cap it is asked under.)
+///
+/// KILLS: a cap read as `u64::MAX` at any one site; a bound checked on the
+/// reported size only.
+#[test]
+fn a_store_that_reports_small_and_streams_more_is_cut_off_at_each_documents_cap() {
+    use logweir_engine_oso::storage::{caps, Store};
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Site {
+        Record,
+        Receipt,
+        Sidecar,
+        IndexRow,
+    }
+    let padded = |document: &[u8], cap: u64| -> Vec<u8> {
+        let mut doc: serde_json::Value = serde_json::from_slice(document).expect("JSON");
+        doc["e2e_padding"] = serde_json::json!("x".repeat(usize::try_from(cap).unwrap() + 4096));
+        serde_json::to_vec(&doc).expect("JSON")
+    };
+    for (site, cap, over) in [
+        (Site::Record, caps::CATALOG_RECORD, true),
+        (Site::Receipt, caps::CATALOG_RECEIPT, true),
+        (Site::Sidecar, caps::SIDECAR, true),
+        (Site::IndexRow, caps::CATALOG_INDEX_ROW, true),
+        // THE CONTROL: the same store, every document within its cap. The
+        // walk reads through the lie and the point is Available.
+        (Site::Record, caps::CATALOG_RECORD, false),
+    ] {
+        let (store, _meter) = Store::in_memory_misreporting_size("", 10);
+        let mut receipt = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+        receipt.archive.manifest_key = "logweir/archive/set-a/manifest.json".to_string();
+        let f = catalog_fixture(
+            &receipt,
+            "s3://lw-archive/kafka-backups",
+            &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        let big = |this: Site, bytes: &[u8]| -> Vec<u8> {
+            if over && this == site {
+                let fat = padded(bytes, cap);
+                assert!(fat.len() as u64 > cap);
+                fat
+            } else {
+                bytes.to_vec()
+            }
+        };
+        // The index row is read only when the record gives no facts.
+        let record = if over && site == Site::IndexRow {
+            b"not a record".to_vec()
+        } else {
+            big(Site::Record, &f.record_bytes)
+        };
+        for (key, bytes) in [
+            (f.log_key.as_str(), big(Site::IndexRow, &f.log_bytes)),
+            (f.record_key.as_str(), record),
+            (f.receipt_key.as_str(), big(Site::Receipt, &f.receipt_bytes)),
+            (f.sidecar_key.as_str(), big(Site::Sidecar, &f.sidecar_bytes)),
+            (f.manifest_key.as_str(), CATALOG_MANIFEST.to_vec()),
+        ] {
+            store
+                .put_create_only(key, &bytes)
+                .expect("the object is put");
+        }
+        let wiring = FakeWiring {
+            shared_store: Some(Arc::new(store)),
+            ..FakeWiring::default()
+        };
+        let body = body_of(&drive_sync(sync_request(), &wiring));
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{site:?}: a counted point is listed");
+        let entry = &entries[0];
+        let cut = serde_json::json!({"reason": "overReadCap", "capBytes": cap});
+        let cause_of = |document: &str| {
+            let mut want = cut.clone();
+            want["document"] = serde_json::json!(document);
+            want
+        };
+        match (site, over) {
+            (_, false) => {
+                assert_eq!(entry["availability"], "Available", "CONTROL: {entry}");
+                assert_eq!(entry["signerKeyId"], CATALOG_CLAIMED_KEY_ID, "{entry}");
+                assert!(entry.get("cause").is_none(), "{entry}");
+            }
+            (Site::Record, true) => {
+                assert_eq!(entry["availability"], "Unreadable", "{entry}");
+                assert_eq!(entry["cause"], cause_of("record"), "{entry}");
+                assert_eq!(entry["factsFrom"], "indexRow", "{entry}");
+            }
+            (Site::Receipt, true) => {
+                assert_eq!(entry["availability"], "Unreadable", "{entry}");
+                assert_eq!(entry["cause"], cause_of("receipt"), "{entry}");
+                assert!(entry.get("factsFrom").is_none(), "{entry}");
+            }
+            (Site::Sidecar, true) => {
+                assert_eq!(entry["signature"], "notAttempted", "{entry}");
+                assert!(
+                    entry.get("signerKeyId").is_none(),
+                    "a sidecar past its cap is not parsed for the key it names: {entry}"
+                );
+            }
+            (Site::IndexRow, true) => {
+                assert_eq!(entry["factsFrom"], "key", "{entry}");
+                assert!(entry.get("backupId").is_none(), "{entry}");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1006,6 +1006,30 @@ topics and 5,092,802 bytes (within one percent of the cap):
 - 32 verifications started together add 103 MB under the budget and 329 MB
   without it; 12 relays add 84 MB under the budget and 321 MB without it.
 
+**The catalog walk holds one point at a time.** A `catalogSync` check Job
+reads five kinds of document, each under its own cap from the table above: a
+point's record, its receipt, the receipt's sidecar, the manifest, and (only
+for a point whose record gave no facts) its index row. Each read is fenced
+twice by the store, on the size it reports and then on the bytes as they
+arrive. What the walk holds at once is the record of the point it is on, with
+its typed parse, and beside it one of: the receipt and its typed parse; the
+receipt and the signature's copy of it; the manifest. Each is released before
+the next is read, and what is kept when the walk moves on is the point's
+entry, under 1 KB without its topic list. No document is parsed into a tree:
+a record's version is folded from its bytes, where a tree of a planted
+6,131,070-byte record of tiny values cost 223 MB and now costs the walk 4 MB.
+
+Measured by `crates/logweir/tests/check_cli.rs`
+(`the_walks_peak_memory_is_one_points`) over points with a 5.09 MB receipt and
+a 4.2 MB record, each signature verified: a walk of one adds 23.6 MB to a
+walk of small points, a walk of four adds 25.7 MB, and the same four read and
+kept add 85.7 MB. The row's bound for one point is 48 MiB. The manifest is
+read whole to hash it, one at a time, under the runner's 256 MiB cap; a real
+manifest is about 540 bytes a segment. **A check Job states no memory request
+or limit in the chart**, so a namespace `LimitRange` is what applies to it: a
+`catalogSync` Job needs about 50 MiB above its baseline for the largest
+point, plus its largest manifest.
+
 A degraded store makes evidence reads for every namespace wait on one another.
 The store's own request timeout bounds that wait, and it is the trade the
 controller's four-permit evidence-read pool already makes.
