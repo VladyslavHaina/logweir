@@ -1834,8 +1834,9 @@ do not, and should not, because neither ends the attempt. That clear can be
 forced: a `GET /auth/callback` that carries the login cookie with no query,
 or from a cross-site top-level navigation (the cookie is `SameSite=Lax`), is
 refused and clears it, so a page the operator has open can abort a sign-in in
-flight; nothing server-side is burned (such a request cannot name the
-`state`, so none is redeemed) and starting again at `/auth/login` works.
+flight; no sign-in state is burned (such a request cannot name the `state`,
+so none is redeemed; like any callback it counts against that client's
+sign-in limit), and starting again at `/auth/login` works.
 
 **A sign-in state is single-use on each replica, and the provider's
 single-use code is the backstop across replicas (FX-13a).** A sealed cookie
