@@ -1657,6 +1657,7 @@ fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
 /// `Verified` merged in — a merge PATCH replaces arrays, and a list built
 /// from anything older would delete a condition another pass wrote.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn write_fetch_verdict(
     backups: &Api<Backup>,
     backup: &Backup,
@@ -1665,19 +1666,28 @@ async fn write_fetch_verdict(
     result: &VerificationResult,
     observation: Value,
     facts: serde_json::Map<String, Value>,
+    empty_capture: bool,
     now: DateTime<Utc>,
 ) -> Result<StatusVersion, BackupError> {
     let current = backup
         .status
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok());
+    let conditions = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref())
+        .unwrap_or_default();
+    // PROD-02.1: only beside a pass over the verified bytes (the caller's
+    // `empty_capture` is decided there and nowhere else).
+    let conditions = if empty_capture && result.is_pass() {
+        with_empty_capture(conditions)
+    } else {
+        conditions.to_vec()
+    };
     let (patch, badge) = crate::evidence_fetch::verdict_patch(
         current.as_ref(),
-        backup
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_deref())
-            .unwrap_or_default(),
+        &conditions,
         backup.meta().generation,
         result,
         observation,
@@ -1786,6 +1796,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::pending(payload_type, detail),
                 observation_patch(mode.as_deref(), None, attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1799,6 +1810,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::pending(payload_type, detail),
                 observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1812,6 +1824,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::not_attempted(payload_type, detail),
                 observation_patch(mode.as_deref(), None, attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1835,6 +1848,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::not_attempted(payload_type, detail),
                 observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, retry),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1855,6 +1869,7 @@ async fn evidence_fetch_pass(
                 uid: job_uid,
             };
             let mut facts = serde_json::Map::new();
+            let mut empty_capture = false;
             let result = match relayed {
                 Relayed::Unread { detail } => {
                     // STEP 5's ORPHAN CHECK, FROM THE RELAY'S PRESENCE. Only a
@@ -1933,6 +1948,9 @@ async fn evidence_fetch_pass(
                                     );
                                 }
                                 if result.is_pass() {
+                                    // PROD-02.1: the relayed bytes ARE the
+                                    // verified ones (digest = the anchor).
+                                    empty_capture = receipt_is_empty_capture(&payload);
                                     if let Some(records) = records_from_receipt(doc) {
                                         facts.insert("records".to_string(), json!(records));
                                     }
@@ -1965,6 +1983,7 @@ async fn evidence_fetch_pass(
                     retry,
                 ),
                 facts,
+                empty_capture,
                 now,
             )
             .await?;
@@ -2236,6 +2255,7 @@ async fn settle_controller_read(
         &VerificationResult::not_attempted(logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT, why),
         crate::evidence_fetch::observation_patch(Some(&mode), None, attempt, None, None),
         serde_json::Map::new(),
+        false,
         now,
     )
     .await?;
@@ -2372,7 +2392,10 @@ async fn controller_read_pass(
     // fetched receipt IS the runner's (the digest agrees), the attested counts
     // only beside a pass.
     let mut facts = serde_json::Map::new();
+    let mut empty_capture = false;
     if fetched == Some(reported.as_str()) {
+        // PROD-02.1: beside a pass over these, the runner's, bytes only.
+        empty_capture = result.is_pass() && observed.as_ref().is_some_and(|o| o.empty_capture);
         if let Some((from_ms, to_ms)) = observed.as_ref().and_then(|o| o.covered) {
             facts.insert("windowCovered".to_string(), window_covered(from_ms, to_ms));
         }
@@ -2406,6 +2429,7 @@ async fn controller_read_pass(
         &result,
         crate::evidence_fetch::observation_patch(Some(mode), None, attempt, None, retry),
         facts,
+        empty_capture,
         now,
     )
     .await?;
@@ -2481,6 +2505,10 @@ pub struct ArchiveObservation {
     /// `BackupReceipt.{started_at, finished_at}` — D3 §2.2's `status.capture`,
     /// copied verbatim from the same verified receipt.
     pub capture: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// **PROD-02.1.** The fetched receipt parses, its arms hold and it is an
+    /// EMPTY CAPTURE ([`receipt_is_empty_capture`]). Acted on ONLY beside a
+    /// passing verdict over these same bytes ([`with_empty_capture`]).
+    pub empty_capture: bool,
 }
 
 /// What the archive-facing half of this reconciler is handed, and the reason
@@ -2614,12 +2642,14 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     // runner's immutable capture claim during this completion pass. This
     // observation is never published as a fallback claim.
     let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
+    let empty_capture = receipt.as_deref().is_some_and(receipt_is_empty_capture);
     Some(ArchiveObservation {
         presence: EvidencePresence { payload, sidecar },
         covered,
         receipt_sha256,
         records,
         capture,
+        empty_capture,
     })
 }
 
@@ -2859,24 +2889,6 @@ pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
             v.trim(),
         )
     })
-}
-
-/// **PROD-02.1.** The capture outcome the backup runner named on its
-/// `capture-reason=` line — the last one in the tail — when it is the one
-/// value this build knows ([`CONDITION_REASON_EMPTY_CAPTURE`]) and the run
-/// exited 0; `None` otherwise.
-#[must_use]
-pub fn capture_reason(exit_code: i32, log: &str) -> Option<&'static str> {
-    if exit_code != 0 {
-        return None;
-    }
-    let mut found = None;
-    for line in tail_lines(log) {
-        if let Some(v) = line.strip_prefix(logweir_core::guard::CAPTURE_REASON_PREFIX) {
-            found = Some(v.trim());
-        }
-    }
-    (found == Some(CONDITION_REASON_EMPTY_CAPTURE)).then_some(CONDITION_REASON_EMPTY_CAPTURE)
 }
 
 /// Whether an exit-4 run left a payload without its sidecar.
@@ -3738,7 +3750,6 @@ pub fn finished_status_patch(
         refusal,
         orphan,
         None,
-        None,
         covered,
         receipt_sha256,
         now,
@@ -3762,7 +3773,6 @@ pub fn finished_status_patch_with_failure(
     refusal: Option<&str>,
     orphan: Option<&str>,
     failure: Option<&str>,
-    capture: Option<&str>,
     covered: Option<(i64, i64)>,
     receipt_sha256: Option<&str>,
     now: DateTime<Utc>,
@@ -3775,14 +3785,7 @@ pub fn finished_status_patch_with_failure(
     // the wire string too, so an operator reading `kubectl describe` sees both
     // spellings of the one fact in one place.
     let wire_reason = wire_reason_for_exit(exit_code);
-    // PROD-02.1: an exit 0 the runner named an EMPTY CAPTURE (`capture_reason`)
-    // completes with that reason, never `Ok` and never a failure.
-    let empty_capture = exit_code == 0 && capture == Some(CONDITION_REASON_EMPTY_CAPTURE);
-    let cond_reason = if empty_capture {
-        CONDITION_REASON_EMPTY_CAPTURE
-    } else {
-        reason_for_exit(exit_code)
-    };
+    let cond_reason = reason_for_exit(exit_code);
     let (phase, cond_type) = if exit_code == 0 {
         (PHASE_SUCCEEDED, CONDITION_COMPLETE)
     } else {
@@ -3795,15 +3798,6 @@ pub fn finished_status_patch_with_failure(
         "True",
         cond_reason,
         &match failure {
-            None if empty_capture => format!(
-                "the runner exited {exit_code} ({wire_reason}): an EMPTY CAPTURE. Every selected \
-                 partition's source low and high watermarks were equal before the engine, so \
-                 the source held no record; the signed receipt records none and this run is not \
-                 a recovery point. The code was read from \
-                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode and \
-                 the outcome from the runner's `{}` line",
-                logweir_core::guard::CAPTURE_REASON_PREFIX
-            ),
             Some(state) => format!(
                 "the runner exited {exit_code} ({wire_reason}: {state}); the code was read from \
                  status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode \
@@ -4043,6 +4037,42 @@ pub fn covered_from_receipt(receipt: &Value) -> Option<(i64, i64)> {
         covered.get("to_ms")?.as_i64()?,
     );
     (from_ms < to_ms).then_some((from_ms, to_ms))
+}
+
+/// **PROD-02.1.** Whether receipt `bytes` are an EMPTY CAPTURE: they parse as
+/// a receipt, every arm holds (arm 4 admits the empty window only beside the
+/// watermarks arm 45 proves), and the window is empty. Says nothing about the
+/// signature: a caller acts on it only beside a passing verdict over the same
+/// digest-anchored bytes, never on a listing, a log line or unverified bytes.
+#[must_use]
+pub fn receipt_is_empty_capture(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<logweir_core::backup_receipt::BackupReceipt>(bytes)
+        .is_ok_and(|r| r.validate_invariants().is_ok() && r.is_empty_capture())
+}
+
+/// **PROD-02.1.** `conditions` with a `Complete=True` condition's reason and
+/// message naming an EMPTY CAPTURE. Applied on a verdict patch only beside a
+/// pass over a receipt [`receipt_is_empty_capture`] accepts; its status — and
+/// so its transition time — is unchanged.
+#[must_use]
+pub fn with_empty_capture(conditions: &[Condition]) -> Vec<Condition> {
+    conditions
+        .iter()
+        .cloned()
+        .map(|mut c| {
+            if c.r#type == CONDITION_COMPLETE && c.status == "True" {
+                c.reason = Some(CONDITION_REASON_EMPTY_CAPTURE.to_string());
+                c.message = Some(
+                    "the runner exited 0 and its verified receipt is an EMPTY CAPTURE: every \
+                     selected partition's source low and high watermarks were equal before the \
+                     engine, so the source held no record, the archive holds none and this run \
+                     is not a recovery point"
+                        .to_string(),
+                );
+            }
+            c
+        })
+        .collect()
 }
 
 /// What one reconcile did.
@@ -5515,8 +5545,6 @@ async fn reconcile_backup_inner(
     // RECEIPT-DUP: the claim outcome the runner named, lifted only beside its
     // own exit code (`failure_state` is closed and paired).
     let failure = failure_state(exit_code, &log);
-    // PROD-02.1: an empty capture the runner named, on an exit 0 only.
-    let capture = capture_reason(exit_code, &log);
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
     let reported_receipt_sha256 = keys.receipt_sha256.as_deref();
@@ -5581,7 +5609,6 @@ async fn reconcile_backup_inner(
             refusal.as_deref(),
             orphan,
             failure,
-            capture,
             covered,
             receipt_sha256.as_deref(),
             now,
@@ -5788,8 +5815,20 @@ async fn reconcile_backup_inner(
         // `windowCovered` predates the trust work and changing when it is
         // written would change the meaning of a field other code already
         // reads (`orphan_state`'s siblings, the protection evaluation).
+        // PROD-02.1: `Complete`'s reason names an EMPTY CAPTURE only beside a
+        // pass over the receipt bytes whose digest is the runner's — the
+        // verified bytes — and never on any other verdict.
+        let terminal_conditions = conditions_in(&terminal);
+        let terminal_conditions = if result.is_pass()
+            && observed.as_ref().is_some_and(|o| {
+                o.empty_capture && o.receipt_sha256.as_deref() == reported_receipt_sha256
+            }) {
+            with_empty_capture(&terminal_conditions)
+        } else {
+            terminal_conditions
+        };
         let mut evidence_patch = second_patch(
-            &conditions_in(&terminal),
+            &terminal_conditions,
             verified,
             crate::verification::verification_patch_value(block),
         );

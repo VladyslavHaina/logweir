@@ -4366,6 +4366,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
                 // writes no `status.records`.
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -4781,6 +4782,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
                     covered: None,
                     records: None,
                     capture: None,
+                    empty_capture: false,
                 })
             })
         };
@@ -9446,6 +9448,7 @@ async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
                 ),
                 records: Some(42),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9511,6 +9514,7 @@ async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
                 ),
                 records: Some(9001),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9572,6 +9576,7 @@ async fn old_runner_missing_or_unreadable_receipt_is_explicitly_legacy_unbound()
                 receipt_sha256: None,
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -9652,6 +9657,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -9992,6 +9998,7 @@ async fn a_receipt_this_installation_refuses_never_populates_the_records_column(
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -11758,6 +11765,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -11976,6 +11984,7 @@ fn observed_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObs
             receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
             records: None,
             capture: None,
+            empty_capture: false,
         })
     })
 }
@@ -13903,6 +13912,7 @@ mod p12_controller_read_retry {
                         records: readable.then_some(75),
                         capture: readable
                             .then(|| (utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                        empty_capture: false,
                     })
                 })
             }
@@ -14533,6 +14543,7 @@ mod p12_controller_read_retry {
                     receipt_sha256: Some(format!("sha256:{}", "b".repeat(64))),
                     records: Some(75),
                     capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                    empty_capture: false,
                 })
             })
         };

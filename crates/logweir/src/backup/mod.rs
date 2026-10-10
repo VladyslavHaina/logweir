@@ -65,7 +65,6 @@ pub mod topic_ids;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
-use logweir_core::guard::{CAPTURE_REASON_EMPTY_CAPTURE, CAPTURE_REASON_PREFIX};
 use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSpec};
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::ClusterReader;
@@ -980,13 +979,6 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Err(_) => None,
     };
     let receipt_sha256 = outcome.as_ref().ok().map(|o| o.receipt_sha256.clone());
-    // PROD-02.1: an empty capture is named on its own line, read by the
-    // controller into the `Complete` condition's reason.
-    let capture_reason = outcome
-        .as_ref()
-        .ok()
-        .filter(|o| o.source_watermarks.is_some() && o.covered_from_ms == o.covered_to_ms)
-        .map(|_| CAPTURE_REASON_EMPTY_CAPTURE);
     // RECEIPT-DUP: the claim outcome, carried to `exiting` so it is the LAST
     // stdout line — the only place a controller can read it (I9's argument).
     let failure_reason = outcome.as_ref().err().and_then(BackupError::failure_reason);
@@ -1023,9 +1015,13 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         evidence_keys,
         catalog_key,
         receipt_sha256,
-        capture_reason,
     )
 }
+
+/// PROD-02.1: what the summary line says of an EMPTY CAPTURE.
+const EMPTY_CAPTURE_SUMMARY: &str = " — an EMPTY CAPTURE: every selected partition's low and \
+     high watermarks were equal before the engine, so the source held no record, the archive \
+     holds none and this run is not a recovery point";
 
 /// One line on stdout so `backup run` is not silent, quoting only measured
 /// values.
@@ -1036,18 +1032,17 @@ fn summary_line(o: &BackupOutcome) -> String {
     // without the watermarks it says the coverage was not recorded.
     let coverage = match &o.source_watermarks {
         None => " (source coverage not recorded)".to_string(),
-        Some(_) if o.covered_from_ms == o.covered_to_ms => format!(
-            " — an EMPTY CAPTURE: every selected partition's low and high watermarks were \
-             equal before the engine, so the source held no record, the archive holds none and \
-             this run is not a recovery point ({CAPTURE_REASON_PREFIX}{CAPTURE_REASON_EMPTY_CAPTURE})"
-        ),
+        Some(_) if o.covered_from_ms == o.covered_to_ms => EMPTY_CAPTURE_SUMMARY.to_string(),
         Some(block) => {
             let empty = logweir_core::backup_receipt::empty_partitions(block);
             if empty.is_empty() {
                 String::new()
             } else {
-                let mut named: Vec<String> =
-                    empty.iter().take(10).map(|(t, p)| format!("{t}:{p}")).collect();
+                let mut named: Vec<String> = empty
+                    .iter()
+                    .take(10)
+                    .map(|(t, p)| format!("{t}:{p}"))
+                    .collect();
                 if empty.len() > 10 {
                     named.push(format!("and {} more", empty.len() - 10));
                 }
@@ -1083,7 +1078,6 @@ fn summary_line(o: &BackupOutcome) -> String {
 /// "the drill passed" / "a drill ran and did not pass" are false on this
 /// command. `drill::exiting` is also inside `drill/mod.rs`'s emitter-closure
 /// gate region, which this task must leave untouched.
-#[allow(clippy::too_many_arguments)]
 fn exiting(
     run_id: &str,
     code: ExitCode,
@@ -1092,7 +1086,6 @@ fn exiting(
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
     receipt_sha256: Option<String>,
-    capture_reason: Option<&str>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => {
@@ -1173,9 +1166,6 @@ fn exiting(
     // conditional: a line naming a key nothing was written to would be the
     // worst possible output. The warning on the log says what to do instead.
     if code == ExitCode::Ok {
-        if let Some(capture_reason) = capture_reason {
-            println!("{CAPTURE_REASON_PREFIX}{capture_reason}");
-        }
         if let Some(catalog_key) = catalog_key {
             println!("catalog-key={catalog_key}");
         }

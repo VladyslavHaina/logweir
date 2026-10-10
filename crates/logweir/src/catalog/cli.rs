@@ -422,15 +422,19 @@ pub fn sync_with(
                 continue;
             }
         }
-        if receipt.is_empty_capture() {
-            report.record(&key, &id, PointOutcome::EmptyCapture);
-            continue;
-        }
         let sidecar_key = sidecar_key_of(&key);
         let Some(installation) = verified_signer(evidence, &sidecar_key, &bytes, trust) else {
             report.record(&key, &id, PointOutcome::UnverifiedSigner);
             continue;
         };
+        // PROD-02.1: an EMPTY CAPTURE gets no record. Decided only over bytes
+        // whose signature just verified AND whose arms hold (arm 4 admits the
+        // empty window only beside the watermarks that arm 45 proves), so
+        // unsigned or tampered bytes are `unverified-signer` above, never this.
+        if receipt.validate_invariants().is_ok() && receipt.is_empty_capture() {
+            report.record(&key, &id, PointOutcome::EmptyCapture);
+            continue;
+        }
         let inputs = RecordInputs {
             receipt_key: key.clone(),
             sidecar_key,

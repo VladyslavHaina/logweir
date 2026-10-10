@@ -97,11 +97,12 @@ pub fn wire_reason_for_exit(code: i32) -> &'static str {
 
 /// Exit **0**'s condition `reason`.
 pub const CONDITION_REASON_OK: &str = "Ok";
-/// **PROD-02.1.** Exit **0**'s `Complete` reason for an EMPTY CAPTURE, off the
-/// backup runner's `capture-reason=` line: the source held no record in any
-/// selected partition, so the signed receipt records none and the run is not
-/// a recovery point. Never an operational failure.
-pub const CONDITION_REASON_EMPTY_CAPTURE: &str = logweir_core::guard::CAPTURE_REASON_EMPTY_CAPTURE;
+/// **PROD-02.1.** Exit **0**'s `Complete` reason for an EMPTY CAPTURE, set
+/// only beside a passing verification of a receipt whose arms hold and whose
+/// window is empty (`controllers::backup::with_empty_capture`): the source
+/// held no record in any selected partition, so the signed receipt records
+/// none and the run is not a recovery point. Never an operational failure.
+pub const CONDITION_REASON_EMPTY_CAPTURE: &str = "EmptyCapture";
 /// Exit **1**'s condition `reason`. The crashed-Job case's `exitReason` says
 /// the same thing in the other vocabulary ([`REASON_OPERATIONAL`]).
 pub const CONDITION_REASON_OPERATIONAL: &str = "Operational";

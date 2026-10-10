@@ -552,17 +552,6 @@ pub fn failure_reason_line(state: &str) -> String {
     format!("{FAILURE_REASON_PREFIX}{state}")
 }
 
-/// **PROD-02.1.** The backup runner's line, on an exit 0 only, naming a
-/// capture outcome more specific than "ok", before interface I7's two keys.
-pub const CAPTURE_REASON_PREFIX: &str = "capture-reason=";
-
-/// **PROD-02.1.** The one capture outcome the line names: the source held no
-/// record in any selected partition (every partition's low and high
-/// watermarks were equal before the engine), so the archive holds none, the
-/// signed receipt says so, and the run is not a recovery point. The
-/// `Backup`'s `Complete` condition carries it as its reason.
-pub const CAPTURE_REASON_EMPTY_CAPTURE: &str = "EmptyCapture";
-
 /// The state a `failure-reason=` VALUE names, if the value is on `kind`'s
 /// closed list for THIS exit code; `None` otherwise — a state of the other
 /// kind included.
