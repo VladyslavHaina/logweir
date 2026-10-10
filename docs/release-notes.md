@@ -2388,7 +2388,14 @@ run put a receipt through the product's own store at
 `logweir/backups/nightly 7/run 1.receipt.json`: MinIO holds the key with its
 spaces as written, and the preflight over it is `ready`. A docs lint
 now holds both grant tables to the readers that read by version and by
-receipt. The
+receipt, under both names the read by version has since item 52. The read
+caps: one row holds an absent receipt, other bytes, an object one byte over
+the receipt cap and one far over it to one answer, at the same two store
+calls under the same caps, with the over-cap object holding the bound
+receipt's bytes; six planted mutants on the caps and the single answer, all
+killed. Live on the same MinIO (2026-10-10): nothing, other bytes, an object
+of 67,108,865 bytes and one of 200 MiB at one receipt key are one answer in
+every row of the result, and the bound receipt at that key is `ready`. The
 controller relays these rows unchanged; the next PoC upgrade runs a catalog
 restore's preflight.
 **Rollback:** an older runner reads the current manifest alone again and can
