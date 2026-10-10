@@ -38,8 +38,9 @@ client that stops reading or sending meets a stall deadline), 45 (FX-29, a
 controller no longer rewrites a status whose content has not changed), 46
 (PROD-03.0, schema-dependent topics flagged from the archived bytes), 47
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
-deadline) and 48 (FX-20c, a destination's Test access compares every grant's
-binding) so far. Items continue the next entry's
+deadline), 48 (FX-20c, a destination's Test access compares every grant's
+binding) and 49 (FX-14, a catalog restore's preflight judges the archive as
+the runner will, and reads only that point's own receipt) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -120,6 +121,12 @@ console rows over one shared fixture; it changes the controller and the
 runner (the check plan, a new check row, and a `RetentionPolicy`'s `Enforced`
 after a binding refusal), and the PoC upgrade that carries
 it re-creates PoC batch 4's F6 thief destination, tests it, and deletes it.
+Item 49 is fix-now row FX-14, proven by runner rows that hold the preflight
+to the runner's own binding over one archive each, by a read-counting store
+double, and on the compose stack's MinIO with the built binary; it changes
+the runner (a restore preflight's archive rows, and two check codes the
+controller relays) and three descriptions, and the PoC upgrade that carries it
+runs the preflight of a restore started from the Catalog view.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1484,6 +1491,65 @@ refused retention run's `Enforced` flips back to `True` on the next pass), and
 every run still refuses a foreign Secret. Nothing is stored, so nothing needs
 converting.
 
+#### 49. A restore preflight of a catalog point judges the archive as the runner will, and reads only that point's own receipt (FX-14)
+
+**Changed.** A plan bound to a recovery point (`source.point`, every restore
+started from the Catalog view) is restored only if the runner proves the
+point against the archive (item 11's pin, item 34's set). The restore
+preflight read the set's CURRENT manifest alone, so it could answer `ready`
+over a set that was written again after the point was signed, and the run was
+then refused (exit 3). Now `archive.backupSet` makes the runner's own
+comparisons for such a plan: the bound receipt's digest and point id, the
+manifest digest it attests, the set it describes, the manifest version it
+pins, and the current manifest's digest. A set written again is `notReady`,
+**`ManifestSuperseded`**; every other disagreement is `notReady`,
+**`PointBindingMismatch`**; a pinned version that cannot be read keeps the
+store's code (`AccessDenied` for a 403) with a remedy that names
+`s3:GetObjectVersion`; a pin this bucket cannot check (a copy of the archive,
+an unversioned bucket) passes on the digest and says `PointPinUnchecked`.
+`archive.coverage` and `archive.segments` are `BlockedByPrerequisite` behind
+a refusal. **A preflight runs before any approval, so what it may read is
+confined first:** nothing is opened unless the plan's `source.backup` is the
+set the check reads and its receipt key is the key a backup of that set
+writes (`logweir/backups/<backupId>/<run id>.receipt.json`); a key under
+another prefix, of another set, or naming any other object is refused by name
+and not fetched, a receipt that is absent and one with other bytes get one
+answer, and no answer repeats a digest, a version id or a receipt field read
+from the store. A plan with no `source.point` is judged exactly as before.
+Three descriptions were also corrected, with no change of behaviour: a
+`RehearsalSchedule`'s `recordsPerPartition` and a scorecard's
+`sample.records_restored` (and the product API's `recordsRestored`) count the
+records READ BACK for the sample, not the records the restore wrote.
+**Do:** roll the controller and the runner image together (the chart does):
+an older controller cannot parse a result carrying either new code and reports
+`ResultUnreadable`. If you restore catalog points with an `archiveRead` grant
+narrower than the catalog-sync row, add `s3:GetObject` on
+`<bucket>/logweir/backups/*` (the runner's binding has always read the receipt
+there) and, on a versioned bucket, `s3:GetObjectVersion` on
+`<bucket>/<prefix>/*`: the preflight now reports a missing one as
+`AccessDenied` before the run does ([kubernetes.md](kubernetes.md) §7a, *The
+read of a pinned version*; §21.8).
+**Scope:** the preflight and the runner's binding over one archive each, in
+process, required to agree (unchanged, written again, an unversioned copy, a
+copy of another manifest, an unreadable pinned version, an unpinned point,
+five refused receipts, a foreign set); thirteen receipt keys outside the
+plan's own receipts refused with a read-counting store double untouched
+(`crates/logweir/tests/check_cli.rs`, `crates/logweir/src/catalog/record.rs`);
+20 planted mutants, all killed. Live on compose (2026-10-09, the stack's
+MinIO, a versioned bucket, the built `logweir check run`): unchanged `ready`,
+written again with identical bytes `ManifestSuperseded`, an unversioned copy
+`ready` with the note. The same run measured the grant on MinIO, which serves
+a read by version under `s3:GetObject`; AWS S3's separate
+`s3:GetObjectVersion` is
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. A docs lint
+now holds both grant tables to the readers that read by version. The
+controller relays these rows unchanged; the next PoC upgrade runs a catalog
+restore's preflight.
+**Rollback:** an older runner reads the current manifest alone again and can
+answer `ready` over a set the runner's binding will refuse; an older
+controller reports a newer runner's refusal as `ResultUnreadable`. Nothing is
+stored, so nothing needs converting.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1523,6 +1589,14 @@ In addition to the next entry's six, in its order:
 - **Before the runner image rolls, name the point's set in every standalone
   point-bound plan that says `backup: latestCompleted`**, and approve it again
   (item 34).
+- **Check the `archiveRead` grant of every destination you restore catalog
+  points from** (item 49): `s3:GetObject` on `<bucket>/logweir/backups/*`
+  and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*`.
+  The restore preflight now reads the bound receipt and, when the manifest's
+  current version is not the pinned one, the pinned version; a grant without
+  them answers `archive.backupSet` `AccessDenied` where the preview used to be
+  `ready` and the run then failed. A destination whose catalog syncs already
+  grants the first ([kubernetes.md](kubernetes.md) §7a).
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
@@ -1549,7 +1623,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48 and 49, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1582,7 +1656,10 @@ and controller), the product API and the console, and needs nothing; item 47
 changes the console only and needs nothing; item 48
 changes the controller and the runner together (the check plan and a check
 row, and the retention controller's `Enforced` after a binding refusal) and
-needs nothing beyond rolling them together. To roll back to
+needs nothing beyond rolling them together; item 49 changes the runner's
+restore preflight and adds two check codes the controller must know to relay
+(and corrects one CRD description), and needs the two rolled together and, for
+a narrow `archiveRead` grant, the two reads above. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

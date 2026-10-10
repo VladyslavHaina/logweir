@@ -2089,6 +2089,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "Test access compares every grant's binding",
             "destination.credentialBound",
         ),
+        // FX-14 (2026-10-09, item 49): a restore preflight of a catalog point
+        // makes the runner's own comparisons, reads only that point's own
+        // receipt, and names the refusal an operator will meet.
+        (
+            "a catalog restore's preflight judges the archive as the runner will",
+            "ManifestSuperseded",
+        ),
     ];
     assert_eq!(
         items.len(),
