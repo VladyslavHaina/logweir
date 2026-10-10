@@ -248,7 +248,7 @@ fn the_controllers_document_cap_is_one_of_its_two_rows() {
     assert_eq!(caps::CONTROLLER_RECEIPT, topic_budget::MAX_RECEIPT_BYTES);
     assert_eq!(caps::CONTROLLER_RECEIPT, caps::CATALOG_RECEIPT);
     assert_eq!(caps::CONTROLLER_DOCUMENT, 1 << 20);
-    assert!(caps::CONTROLLER_RECEIPT > caps::CONTROLLER_DOCUMENT);
+    const _: () = assert!(caps::CONTROLLER_RECEIPT > caps::CONTROLLER_DOCUMENT);
     // What each read reserves is at least what it can hold.
     assert_eq!(
         RECEIPT_READ_COST_BYTES,

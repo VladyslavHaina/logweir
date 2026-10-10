@@ -8935,7 +8935,9 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
 
     // The last column is FX-33's `cause`: the document the examination
     // stopped at and why, or `None` for a point that is `Available`.
-    let cases: Vec<(&str, String, Fault, &str, &str, Option<(&str, &str)>)> = vec![
+    type Cause<'a> = Option<(&'a str, &'a str)>;
+    type Case<'a> = (&'a str, String, Fault, &'a str, &'a str, Cause<'a>);
+    let cases: Vec<Case<'_>> = vec![
         (
             "the record is absent",
             f.record_key.clone(),
@@ -9179,7 +9181,7 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
     // FX-33: each of the five kinds has ITS cap, and no two reads of one walk
     // share a number by accident — a record is never read under the
     // manifest's 256 MiB, nor a sidecar under a receipt's 5 MB.
-    assert!(
+    const _: () = assert!(
         caps::SIDECAR < caps::CATALOG_RECEIPT
             && caps::CATALOG_RECEIPT < caps::CATALOG_RECORD
             && caps::CATALOG_RECORD < caps::MANIFEST

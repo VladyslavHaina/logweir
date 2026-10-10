@@ -4516,7 +4516,8 @@ fn fx33_an_entry_line_that_is_both_a_claim_and_evidence_is_malformed() {
         (1, 0),
         "CONTROL: the runner's own claim line is an entry"
     );
-    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+    type Edit = Box<dyn Fn(&mut Value)>;
+    let edits: Vec<(&str, Edit)> = vec![
         (
             "Available",
             Box::new(|e| e["availability"] = json!("Available")),
