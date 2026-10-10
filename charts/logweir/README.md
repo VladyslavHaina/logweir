@@ -1005,7 +1005,11 @@ only after the Helm hooks succeed.
 minimal S3 action set with its resource scope — one bisected row per action,
 each naming the live harness row that proved the role's own operation fails
 without it. A wider grant than that table is not required by anything this
-chart installs.
+chart installs. On a VERSIONED archive bucket the table's `archiveRead` and
+catalog-sync rows include `s3:GetObjectVersion`: a restore of a catalog point,
+its preflight and the catalog's deep check read a receipt's pinned manifest
+version by id, which AWS S3 authorises as its own action (§7a, *The read of a
+pinned version*, says what was measured and on which store).
 
 The controller's read-only evidence credential is the `logweir-evidence-ro`
 Secret in the release namespace. It is `optional: true` on the Deployment: the

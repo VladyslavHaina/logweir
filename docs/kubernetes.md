@@ -476,11 +476,11 @@ The `Harness row` column names the phase that measured the line; the
 | Role | Minimal actions, each at the resource scope shown | Proved by | Harness row |
 |---|---|---|---|
 | `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-045` | `U6/archive-write` |
-| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*` | Preflight `u6-da-010+u6-rp-011` | `U6/archive-read` |
+| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`. **For a restore of a catalog point (a plan bound to a recovery point) and its preflight, also:** `s3:GetObject` on `<bucket>/logweir/backups/*` and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | Preflight `u6-da-010+u6-rp-011` (the first two actions); the point-bound additions were exercised on MinIO, not bisected (FX-14 `live/grants/`) | `U6/archive-read` |
 | `evidenceWrite` | `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-033` | `U6/evidence-write` |
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
 | write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | Preflight `u6-bp-019` | `U6/write-probe` |
-| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-052` | `U6/catalog-sync` |
+| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*`; on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | RecoveryCatalog `u6-cat-052` (the first three actions) | `U6/catalog-sync` |
 | retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` — **SUPERSEDED: this build also needs `s3:GetObject` on `<bucket>/<prefix>/*`**, see the note below the bisection | Job `u6-ret-060` (measured before OBJECT-LOCK-DELETE-MARKER) | `U6/retention-enforcer` |
 
 | Role | Action removed | Verdict, and the product's own answer | Harness object |
@@ -592,17 +592,52 @@ listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
-**A pinned point's read BY VERSION (FX-7) is one action the rows above do not
-name.** A point whose receipt pins its manifest's version is checked, wherever
-the manifest's current version is not the pin — on every copy of the archive,
-and after a set was written again — by reading the pinned version by id
-(`GET ?versionId=`). AWS S3 authorises that read as `s3:GetObjectVersion` on
-`<bucket>/<prefix>/*`, for the `catalogSync` reader and for a point-bound
-restore's runner alike
-[UNVERIFIED — needs a real AWS S3 bucket and a credential source]; the rows
-above were measured before FX-7. Without it such a point is `Unreadable` in the
-catalog and its point-bound restore exits 1 ("could not tell"), never a silent
-pass ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`, and what
+was measured.** A point whose receipt pins its manifest's version is checked,
+wherever the manifest's current version is not the pin — on every copy of the
+archive, and after a set was written again — by reading the pinned version by
+id (`GET ?versionId=`). Three readers make that read, each with the
+destination's `archiveRead` grant: the `catalogSync` deep check, a point-bound
+restore's runner, and (since FX-14) the restore preflight of a point-bound
+plan. The two rows above name the action for them.
+
+- **AWS S3** authorises a read that names a version as `s3:GetObjectVersion`,
+  a different action from `s3:GetObject`, on `<bucket>/<prefix>/*`
+  [UNVERIFIED — needs a real AWS S3 bucket and a credential source]. Without it
+  the read is a 403: the point is `Unreadable` in the catalog, its point-bound
+  restore exits 1, and its preflight answers `archive.backupSet` `AccessDenied`
+  with a remedy that names the action — "could not tell", never a silent pass
+  ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+- **MinIO does not ask for it separately. Measured** (2026-10-09, FX-14,
+  compose, the stack's MinIO `RELEASE.2025-09-07T16-13-09Z` rebuild, one
+  deny-by-default principal, the manifest written again so the pin is not
+  current): with `s3:ListBucket` alone both the current read and the read by
+  version are refused and the preflight answers `AccessDenied`; with
+  `s3:GetObject` added, and no `s3:GetObjectVersion`, the read by version is
+  served and the preflight answers `ManifestSuperseded`; with
+  `s3:GetObjectVersion` and no `s3:GetObject`, MinIO serves both reads. So on
+  MinIO the grant is already inside `s3:GetObject`, and naming
+  `s3:GetObjectVersion` as well costs nothing and is what moves to AWS S3
+  unchanged.
+- **The read is made only when the current version is not the pin.** Measured
+  in the same run: over an unchanged manifest the preflight of a point-bound
+  plan is `ready` for the principal without `s3:GetObjectVersion`. A bucket
+  that is not versioned issues no pin, so its points never ask for the read; a
+  COPY of a pinned point in such a bucket does (the read answers "no such
+  version" and the digest decides).
+
+**A plan bound to a recovery point reads its receipt through `archiveRead`
+too.** The runner's binding, and since FX-14 the restore preflight, read the
+bound receipt at `logweir/backups/<backupId>/<run id>.receipt.json` (the runner
+also reads its signature beside it) with the source destination's `archiveRead`
+grant, which is why that row adds `s3:GetObject` on `<bucket>/logweir/backups/*`
+for such a restore. The `catalogSync` reader row already grants it under
+`logweir/*`, and a destination whose catalog you sync carries that row on the
+same grant, so a point picked from a synced catalog needs nothing more
+[UNVERIFIED — the receipt read was not bisected on a restricted principal; the
+reads are `drill::binding` and `check::kinds::restore`]. The docs lint
+`the_documented_grants_name_the_version_read_of_every_role_that_makes_one`
+holds the two tables (here and `install.md`) to the readers that make the read.
 
 **SUPERSEDED — the retention enforcer now needs `s3:GetObject`.** When this
 row was measured the worker listed a set's objects and deleted them by the key
@@ -1596,10 +1631,14 @@ no configuration is reconstructed by hand.**
    same rule the wizard applies to a Backup's `windowCovered`
    (WIZARD-DEFAULT-PIT-EXCLUSIVE). The approver signs those bytes, so the approval covers WHICH
    archive object is recovered.
-6. **Readiness re-reads the row.** Step 5 starts a `Preflight` with
-   `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most one of
-   it and `recoveryPointRef`, CEL rule P10). §21.8 lists what
-   `recoveryPoint.state` answers.
+6. **Readiness re-reads the row, and the archive.** Step 5 starts a `Preflight`
+   with `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most
+   one of it and `recoveryPointRef`, CEL rule P10). §21.8 lists what
+   `recoveryPoint.state` answers from the catalog. The check Job then judges
+   the archive itself as the runner will in step 7 (FX-14): `archive.backupSet`
+   reads the bound receipt and the manifest with the receipt's pin, so a set
+   that was written again after the point was signed is `ManifestSuperseded`
+   here and not a `ready` preview of a run the runner refuses (§21.8).
 7. **Approve and run.** The `Restore` is the ordinary one — `backupSetRef` is
    the point's set, `sourceDestinationRef`/`evidenceDestinationRef` the
    catalog's destination — and waits for its `Approval`. The runner, before it
@@ -9322,6 +9361,47 @@ readiness check holds the submit*).
   The signer row uses the recovery point as the claimed signing time, because
   the view carries no receipt `finished_at`: a key retired between the two
   instants passes here and is refused by the runner, which reads the real one.
+- **A plan bound to a recovery point has its archive judged as the runner will
+  judge it (FX-14).** A plan that carries `source.point` is restored only if
+  the runner's binding proves the point against the archive, and before FX-14
+  the check Job read the set's CURRENT manifest alone: it could answer `ready`
+  over a set written again after the point was signed, which the runner then
+  refused (exit 3). `archive.backupSet` now makes the binding's own
+  comparisons, in its order, and `archive.coverage` and `archive.segments` are
+  `unknown`, `BlockedByPrerequisite` behind every refusal, because they would
+  describe a manifest the run will not accept.
+
+  **What the plan may make the check read is decided first, from the plan
+  alone.** A preflight runs before any approval, for whoever can create one,
+  with the namespace's archive-read credential, and `source.point.receipt_key`
+  is that person's text. So nothing is opened or read unless the binding is
+  well-formed, the plan's `source.backup` is the set the check reads
+  (`backupSetRef`; never `latestCompleted`), and the receipt key is the key a
+  backup of that set writes — `logweir/backups/<backupId>/<run id>.receipt.json`,
+  each id one path segment. A key under another prefix, of another set, with a
+  relative or nested path, or naming any object that is not a receipt, is
+  refused by name and not fetched. The receipt is then read only after that
+  set's manifest was read under the destination's own prefix.
+
+  | What the check found | `archive.backupSet` |
+  |---|---|
+  | the binding is malformed, names another set than the one the check reads, or names a receipt key outside that set's receipts | `notReady`, `PointBindingMismatch`; nothing was read |
+  | the receipt is not at its key, or its bytes are not the bound digest | `notReady`, `PointBindingMismatch` — ONE answer for both, so it does not say whether an object exists at a key the plan chose |
+  | the receipt does not derive the bound point id, is not a receipt, attests another manifest digest, or describes another set or manifest key than the one this restore reads | `notReady`, `PointBindingMismatch` |
+  | the receipt pins a manifest version the bucket still holds, and it is not the current one | `notReady`, `ManifestSuperseded`: the set was written again after the point was signed; restore from another point |
+  | the pinned version could not be read (a 403, an outage) | the store's own code (`AccessDenied` is `notReady`, `Timeout` is `unknown`), with the remedy that names `s3:GetObjectVersion` |
+  | the receipt could not be read | the store's own code |
+  | the receipt pins a version this bucket does not hold (a copy of the archive, an unversioned bucket, a version expired or deleted) and the manifest hashes to the bound digest | `ready`, `ManifestReadable`; the message says `PointPinUnchecked` and the remedy carries the note the catalog gives such a point |
+  | the manifest does not hash to the bound digest | `notReady`, `PointBindingMismatch` |
+  | otherwise | `ready`, `ManifestReadable`, naming the point |
+
+  No answer repeats anything read from the store — not a digest, not a version
+  id, not a field of the receipt; a message names only what the plan and the
+  request already state. The receipt's SIGNATURE is not checked here: a check
+  Job is given no evidence keyring, `recoveryPoint.state` above judges the
+  signer, and the runner verifies the signature before any data moves. A plan
+  with no `source.point` is judged exactly as before. The grants these reads
+  need are in §7a.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID
@@ -9416,6 +9496,18 @@ answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
 after a rollback, re-run the check or restore without it. The one Restore
 controller row added, the advisory `destination.evidenceReadable`, never
 changes the aggregate.
+
+**A point-bound plan's archive rows (FX-14).** No plan field and no object
+changes: the runner reads `source.point` from the plan bytes it already
+hashes. A runner image from this build answers `archive.backupSet` for such a
+plan as §21.8 says, with two codes that are new to the closed vocabulary,
+`ManifestSuperseded` and `PointBindingMismatch`. A controller OLDER than this
+build cannot parse a result that carries either, so the `Preflight` lands
+`Failed`, `ResultUnreadable` — never `ready`; upgrade the controller with the
+runner image, as for every check code. A runner older than this build reads
+the current manifest alone, as before, and can still answer `ready` over a set
+the runner's binding will refuse. A `Preflight` already stored is not revised;
+create a new one after the upgrade.
 
 **A refused broker-configuration read (FX-4).** A runner image from FX-4 on
 answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an

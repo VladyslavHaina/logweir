@@ -2181,3 +2181,182 @@ fn trademarks_states_the_clearance_act_and_the_announcement_gate() {
          the install path"
     );
 }
+
+// ------------------------------------- the grant tables and the version read
+
+/// Every `*.rs` under `crates/*/src`, as `(repository-relative path, the
+/// file's non-comment lines above its first `#[cfg(test)]`)`.
+fn production_sources() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut files = Vec::new();
+    let mut stack = vec![root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{} is readable: {e}", dir.display()))
+        {
+            let path = entry.expect("a directory entry is readable").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name != "target" && name != "tests" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let relative = path
+                .strip_prefix(&root)
+                .expect("under the repository")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !relative.contains("/src/") {
+                return None;
+            }
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+            let production = body.split("#[cfg(test)]").next().unwrap_or_default();
+            let code = production
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((relative, code))
+        })
+        .collect()
+}
+
+/// The row of the Markdown table under `header` whose first cell is `role`.
+fn table_row<'a>(document: &'a str, file: &str, header: &str, role: &str) -> &'a str {
+    let start = document
+        .find(header)
+        .unwrap_or_else(|| panic!("{file} has no table headed `{header}`"));
+    document[start..]
+        .lines()
+        .take_while(|line| line.starts_with('|'))
+        .find(|line| {
+            line.split('|')
+                .nth(1)
+                .is_some_and(|cell| cell.trim() == role)
+        })
+        .unwrap_or_else(|| panic!("{file}: the table headed `{header}` has no `{role}` row"))
+}
+
+/// **FX-14 item 2: the documented grants and the code's reads cannot drift.**
+///
+/// FX-7 taught three readers to read a manifest BY VERSION (`GET
+/// ?versionId=`), which AWS S3 authorises as `s3:GetObjectVersion`, a
+/// different action from `s3:GetObject`. The measured minimal-grant tables
+/// predated it and went on saying a role needed less than its code asked for,
+/// until a review noticed.
+///
+/// So: every source file that asks a store for one version of an object is
+/// named here with the ROLE whose grant it reads with, and that role's row in
+/// both tables must name the action. The check fails in each direction a
+/// drift can take:
+///
+/// * a NEW reader of a version (a file calling `.get_version(` that is not in
+///   [`READERS`]) — say which role's grant it uses, and put the action in that
+///   role's rows;
+/// * a row that LOSES the action while its reader still makes the read;
+/// * a reader that no longer makes the read (a stale entry here, and a grant
+///   the docs may then stop asking for);
+/// * the store no longer reading by version at all.
+#[test]
+fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
+    /// `(reader, its row in docs/kubernetes.md, its row in docs/install.md)`.
+    const READERS: [(&str, &str, &str); 3] = [
+        (
+            "crates/logweir/src/check/kinds/catalog_sync.rs",
+            "`catalogSync` reader",
+            "`RecoveryCatalog` sync",
+        ),
+        (
+            "crates/logweir/src/check/kinds/restore.rs",
+            "`archiveRead`",
+            "`archiveRead`",
+        ),
+        (
+            "crates/logweir/src/drill/binding.rs",
+            "`archiveRead`",
+            "`archiveRead`",
+        ),
+    ];
+    /// Where the read is IMPLEMENTED and delegated; neither is a role.
+    const IMPLEMENTATION: [&str; 2] = [
+        "crates/logweir-store/src/lib.rs",
+        "crates/logweir/src/check/store.rs",
+    ];
+    const ACTION: &str = "s3:GetObjectVersion";
+
+    let sources = production_sources();
+    assert!(
+        sources.len() > 100,
+        "the walk found {} source files; a scan that read nothing proves nothing",
+        sources.len()
+    );
+    let store = sources
+        .iter()
+        .find(|(path, _)| path == IMPLEMENTATION[0])
+        .map(|(_, code)| code.as_str())
+        .expect("the store crate is scanned");
+    assert!(
+        store.contains("pub fn get_version(")
+            && store.contains("version: Some(version.to_string())"),
+        "the store no longer reads an object by version; if no reader needs {ACTION} any more, \
+         take it out of the grant tables and out of this test"
+    );
+
+    let callers: BTreeSet<&str> = sources
+        .iter()
+        .filter(|(path, code)| {
+            !IMPLEMENTATION.contains(&path.as_str()) && code.contains(".get_version(")
+        })
+        .map(|(path, _)| path.as_str())
+        .collect();
+    let named: BTreeSet<&str> = READERS.iter().map(|(path, ..)| *path).collect();
+    assert_eq!(
+        callers, named,
+        "the files that read an object BY VERSION are not the ones this test maps to a role. A \
+         new reader needs {ACTION} on its role's grant: add it to READERS with the role, and \
+         name the action in that role's rows of docs/kubernetes.md §7a and docs/install.md. A \
+         reader that stopped making the read leaves a grant the docs may stop asking for."
+    );
+
+    let kubernetes = read("docs/kubernetes.md");
+    let install = read("docs/install.md");
+    for (reader, kubernetes_role, install_role) in READERS {
+        for (file, document, header, role) in [
+            (
+                "docs/kubernetes.md",
+                &kubernetes,
+                "| Role | Minimal actions, each at the resource scope shown |",
+                kubernetes_role,
+            ),
+            (
+                "docs/install.md",
+                &install,
+                "| Role | Actions | Resources |",
+                install_role,
+            ),
+        ] {
+            let row = table_row(document, file, header, role);
+            assert!(
+                row.contains(ACTION),
+                "{file}: the {role} row does not name {ACTION}, and {reader} reads a manifest by \
+                 version with that role's grant (a 403 there is `Unreadable`, exit 1, or \
+                 `archive.backupSet AccessDenied`): {row}"
+            );
+        }
+    }
+    // What the tables rest on is said beside them: measured where it was
+    // measured, and labelled where it was not.
+    assert!(
+        kubernetes.contains("**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`"),
+        "docs/kubernetes.md §7a must keep the paragraph that says which store was measured"
+    );
+}
