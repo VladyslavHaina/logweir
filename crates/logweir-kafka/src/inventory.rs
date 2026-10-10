@@ -1515,10 +1515,12 @@ mod client {
     /// One to each bootstrap address and one to each broker the cluster
     /// lists, for the length of the observation: on a three-broker cluster
     /// with three bootstrap addresses that is six, where the first version
-    /// said "one more connection" and opened three or four. The handle is
-    /// producer-shaped, so it has no group and dials no group coordinator; it
-    /// never produces. Every connection is closed when the function returns:
-    /// the handle is local to it.
+    /// said "one more connection" and opened three or four. The handle is an
+    /// ADMIN client, as the check's own second handle is: it has no group, so
+    /// it dials no group coordinator (a consumer handle needs a `group.id`,
+    /// and looks its coordinator up), and it can produce nothing. The one
+    /// request it makes is the metadata read. Every connection is closed when
+    /// the function returns: the handle is local to it.
     ///
     /// # How long
     ///
@@ -1550,13 +1552,13 @@ mod client {
             .set("debug", "feature")
             .set("enable.sparse.connections", "false")
             .set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        let observer: rdkafka::producer::BaseProducer = cfg
+        let observer: rdkafka::admin::AdminClient<rdkafka::client::DefaultClientContext> = cfg
             .create()
             .map_err(|e| not_observed(format!("the observing client could not be built: {e}")))?;
-        let client = rdkafka::producer::Producer::client(&observer);
+        let client = observer.inner();
         // THE BROKER LIST: whom to expect an answer from. All-topics, as the
         // inventory's own metadata read is: a request for one topic by name
-        // may create it on a producer-shaped handle
+        // may create that topic on a handle that is not a consumer
         // (`rd_kafka_metadata`, `rdkafka_metadata.c:98-128`). A list that
         // could not be read leaves `listed` empty, which is never a whole
         // view.
