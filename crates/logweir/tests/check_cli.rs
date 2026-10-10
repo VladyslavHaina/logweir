@@ -4590,6 +4590,119 @@ fn a_point_bound_preflight_refuses_a_set_the_point_does_not_describe() {
     );
 }
 
+/// `p`'s receipt with one field changed by `edit`, written as run `run` of
+/// the SAME set — so its key is confined — and the point bound to those bytes
+/// over the same archive. The manifest digest the plan binds is unchanged.
+fn rebound(p: BoundPoint, run: &str, edit: impl FnOnce(&mut BackupReceipt)) -> BoundPoint {
+    let (bytes, _) = p
+        .store
+        .get(&p.binding.receipt_key)
+        .expect("the receipt reads");
+    let mut receipt: BackupReceipt = serde_json::from_slice(&bytes).expect("a receipt");
+    edit(&mut receipt);
+    let bytes =
+        logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
+    let key = logweir::backup::phase_run::receipt_keys(BOUND_SET, run).receipt_key;
+    p.store
+        .put_create_only(&key, &bytes)
+        .expect("the edited receipt is written");
+    BoundPoint {
+        binding: logweir_core::execution_contract::PointBinding {
+            point_id: logweir::catalog::record::point_id(&bytes),
+            receipt_key: key,
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&bytes),
+            manifest_sha256: p.binding.manifest_sha256,
+        },
+        store: p.store,
+        bucket: None,
+        keys: p.keys,
+    }
+}
+
+/// What both readers must say of a receipt that describes another set or
+/// another manifest key than the one this restore reads: the runner's binding
+/// refuses the plan (exit 3, `PointBindingSetMismatch`), and the preflight is
+/// `notReady PointBindingMismatch` opening with the same token, with the two
+/// later archive rows held back.
+fn assert_both_refuse_the_set(point: BoundPoint) -> String {
+    let refused = bound_binding(&point).expect_err("the runner's binding refuses");
+    assert_eq!(refused.exit_code(), ExitCode::GuardRefused, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains(logweir::drill::binding::POINT_BINDING_SET_MISMATCH),
+        "{refused}"
+    );
+    let run = bound_preflight(point.store, Some(&point.binding));
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::PointBindingMismatch),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .starts_with(logweir::drill::binding::POINT_BINDING_SET_MISMATCH),
+        "{}",
+        row.message
+    );
+    assert_archive_rest_blocked(&run);
+    row.message
+}
+
+/// **FX-14 review M2 (O4) — the manifest-KEY half of the set comparison, on
+/// its own.** The receipt names THIS set and attests its manifest at ANOTHER
+/// key than the one this restore reads: the archive copied under another
+/// prefix of the same bucket, byte for byte, with a destination at the copy.
+/// Receipts are bucket-absolute and shared by both copies, so the set id
+/// agrees and the digest agrees; only the key tells the two apart. The
+/// runner's binding refuses it (FX-16 review M-1, the engine's key), and the
+/// preflight must too — `a_point_bound_preflight_refuses_a_set_the_point_does_
+/// not_describe` changes the set id and the key together, so it cannot see
+/// this half dropped.
+///
+/// KILLS: the preflight's set comparison without `same_object_key` (it is
+/// then `ready` for a point the run refuses).
+#[test]
+fn a_receipt_attesting_its_manifest_at_another_key_is_refused_by_the_binding_and_the_preflight() {
+    const ELSEWHERE: &str = "logweir/elsewhere/nightly-7/manifest.json";
+    let p = bound_point(false);
+    p.store
+        .put_create_only(ELSEWHERE, &bound_manifest())
+        .expect("the copy of the manifest");
+    let point = rebound(p, "run-2", |receipt| {
+        receipt.archive.manifest_key = ELSEWHERE.to_string();
+    });
+    let message = assert_both_refuse_the_set(point);
+    assert!(
+        !message.contains("elsewhere"),
+        "the key the receipt names is the archive's, and the answer does not repeat it: {message}"
+    );
+}
+
+/// **FX-14 review M2 (O5) — the set-ID half, on its own.** The receipt
+/// attests the manifest at exactly the key this restore reads, with its
+/// digest, and says it is a receipt of ANOTHER set. No writer produces such a
+/// receipt; a reader is still held to what the receipt says, because every
+/// decision the receipt informs is about the set it names. The runner's
+/// binding refuses it (FX-16), and so does the preflight.
+///
+/// KILLS: the preflight's set comparison without the `backup_id` (it is then
+/// `ready`: the key, the digest and the pin all agree).
+#[test]
+fn a_receipt_of_another_set_naming_this_sets_manifest_is_refused_by_the_binding_and_the_preflight()
+{
+    let point = rebound(bound_point(false), "run-2", |receipt| {
+        assert_eq!(receipt.archive.manifest_key, BOUND_MANIFEST_KEY);
+        receipt.backup_id = "nightly-8".to_string();
+    });
+    let message = assert_both_refuse_the_set(point);
+    assert!(
+        !message.contains("nightly-8"),
+        "the receipt's own set is the archive's, and the answer does not repeat it: {message}"
+    );
+}
+
 /// **FX-14 review M1 — a set id and a run id that hold a SPACE.** A backup
 /// set id is free text (`BackupSpec::backup_id`; `Restore.spec.backupSetRef`
 /// carries no pattern), a space is addressed by the store exactly as written,
@@ -5057,6 +5170,102 @@ fn a_look_alike_of_a_set_id_with_a_space_is_refused_with_no_store_read() {
         ],
         "the set's manifest and its one confined receipt, as written, and no other object"
     );
+}
+
+/// **FX-14 review M2 (O3) — a store FAILURE is a classified code, never the
+/// store's own text.** A preflight's answer is read by whoever can create
+/// one, before any approval, and a backend's error text carries what the
+/// backend chose to say: request ids, host ids, bucket and endpoint names.
+/// So a failed read of the bound receipt, and a failed read of the manifest
+/// at the version the receipt pins, answer with the classified code and a
+/// message made of the plan's own values — and the text planted in each
+/// failure is nowhere in the output, in any stream.
+///
+/// KILLS: the store's error interpolated into the message in place of its
+/// code (`PointRefusal::store`).
+#[test]
+fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stores_text() {
+    const PLANTED: [&str; 2] = ["PLANTED-REQUEST-7Q2", "PLANTED-HOST-9Z4"];
+    let tail = format!("RequestId={} HostId={}", PLANTED[0], PLANTED[1]);
+    let assert_nothing_planted = |case: &str, run: &Run| {
+        let all = run.everything();
+        for planted in PLANTED {
+            assert!(
+                !all.contains(planted),
+                "{case}: the store's own text is in the output"
+            );
+        }
+    };
+
+    // The receipt read.
+    let (objects, real) = confined_fixture(&[]);
+    let yaml = confined_yaml(&real, BACKUP_ID);
+    for (case, text, state, code) in [
+        (
+            "403",
+            format!("Client error with status 403 Forbidden: AccessDenied {tail}"),
+            CheckState::NotReady,
+            CheckCode::AccessDenied,
+        ),
+        (
+            "timeout",
+            format!("operation timed out {tail}"),
+            CheckState::Unknown,
+            CheckCode::Timeout,
+        ),
+        (
+            "500",
+            format!("Server error 500 InternalError {tail}"),
+            CheckState::NotReady,
+            CheckCode::StoreErrorUnclassified,
+        ),
+        (
+            "unclassified",
+            format!("something nobody classified {tail}"),
+            CheckState::NotReady,
+            CheckCode::StoreErrorUnclassified,
+        ),
+    ] {
+        let objects = objects
+            .clone()
+            .failing_key(&real.receipt_key, Fault::Io(text));
+        let run = confined_preflight(&objects, &yaml);
+        let row = run.row(CheckId::ArchiveBackupSet);
+        assert_eq!((row.state, row.code), (state, code), "{case}: {row:?}");
+        assert_eq!(
+            row.message,
+            format!(
+                "the receipt `{}` of recovery point {} could not be read: {code}",
+                real.receipt_key, real.point_id
+            ),
+            "{case}: the plan's own values and the classified code, nothing else"
+        );
+        assert!(!row.remedy.is_empty(), "{case}: a refusal names its remedy");
+        assert_nothing_planted(case, &run);
+        assert_archive_rest_blocked(&run);
+    }
+
+    // The read of the manifest at the version the receipt pins.
+    let p = bound_point(true);
+    p.rewrite_manifest(&bound_manifest());
+    p.bucket
+        .as_ref()
+        .expect("versioned")
+        .fail_version_reads(&format!("403 Forbidden: AccessDenied {tail}"));
+    let run = bound_preflight(p.store, Some(&p.binding));
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::AccessDenied),
+        "{row:?}"
+    );
+    assert!(
+        row.message.ends_with(": AccessDenied"),
+        "the classified code closes the message: {}",
+        row.message
+    );
+    assert_nothing_planted("the pinned version", &run);
+    assert_archive_rest_blocked(&run);
 }
 
 // ===========================================================================
