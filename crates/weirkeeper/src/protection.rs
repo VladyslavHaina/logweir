@@ -2163,12 +2163,12 @@ pub fn classify_delivery(exit_code: Option<i32>, log_tail: &[&str]) -> (Delivery
             DeliveryState::Failed,
             format!(
                 "{}: the credential Secret of the {} route is not bound to this policy, its \
-                 sink and its endpoint, so the delivery Job refused it and posted nothing to it; \
-                 set the Secret's `logweir-binding` key to the value status.credentialBindings \
-                 names ({})",
+                 sink and its endpoint, so the delivery Job refused it and posted nothing to it \
+                 ({}). {}",
                 logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH,
                 refused.join(" and "),
-                sinks(&results)
+                sinks(&results),
+                logweir_core::credential_binding::BINDING_REMEDY
             ),
         );
     }

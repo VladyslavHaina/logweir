@@ -37,6 +37,7 @@ fn plan() -> DestinationPlan {
         location_digest: "sha256:00".into(),
         ca_file: None,
         credentials: CredentialMode::Static,
+        grant_bindings: Vec::new(),
     }
 }
 

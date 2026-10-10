@@ -8641,10 +8641,18 @@ request**, and refuses an absent or different binding with
   `refusal-reason=CredentialBindingMismatch`, the `Backup`'s or `Restore`'s
   terminal state;
 * the check runner (`Preflight`, the catalog sync, evidence fetch): the
-  `CredentialBindingMismatch` check code on the row, before any store exists;
+  `CredentialBindingMismatch` check code on the row, before any store exists —
+  and, for a `Preflight`, on `destination.credentialBound` for every grant the
+  run would present, probed or not (below);
 * `logweir-retention`: exit 3, `retention-refusal=CredentialBindingMismatch`,
   `Enforced=False/CredentialBindingMismatch` on the `RetentionPolicy`; nothing
-  is deleted;
+  is deleted. The refusal **stands** until a later run is harvested (FX-20c):
+  the controller reads no Secret, so only the next run can see a rebound one,
+  and the evaluation passes in between publish neither `Enforced=True` nor
+  "enforced by Logweir" over it — `status.enforcement` reads
+  `RecommendationOnly` and `status.guarantees.ageExpiry` `NotEnforced`, the two
+  fields the console's retention panel reads, which also prints the
+  `Enforced=False` reason;
 * `logweir notify deliver`: `notify-result=<sink>:refused` for that sink only
   (the others are still attempted), and
   `NotificationsDelivered=False/CredentialBindingMismatch` (§7e).
@@ -8652,6 +8660,84 @@ request**, and refuses an absent or different binding with
 A Job builder that projected a credential without its expectation would hand
 the runner an unchecked credential; `job::build` gives such a credential the
 never-satisfied `unbound:missing-expectation`, so the omission fails closed.
+
+**Test access, and every readiness check, compares every grant's binding
+(FX-20c).** A check compares a binding where it opens a store, and some grants
+are never opened by a check: `archiveWrite` (a check may not write into the
+archive prefix, so `destination.archivePrefixWritable` is execution-only), and
+a separate `evidenceWrite` Secret on a check with no marker probe. Before
+FX-20c a destination whose only grant named another destination's
+`archiveWrite` Secret therefore tested **READY** — `destination.credentialProjected`
+said `Projected` — while every backup of it was refused
+`CredentialBindingMismatch` (PoC batch 4, FX-20 F6). Now:
+
+* The controller lists, in the check plan, every `SecretKeys` grant the run
+  would present — `destination.grantBindings: [{role, secretName}]`, references
+  only:
+
+  | `Preflight` operation | Grants listed |
+  |---|---|
+  | `DestinationAccess` (*Test access*) | every grant the destination **declares** (`archiveWrite`, and `archiveRead`, `evidenceWrite`, `evidenceRead` when present), whichever roles the test exercises |
+  | `Backup` | `archiveWrite` and `evidenceWrite` (a missing `evidenceWrite` is `archiveWrite`'s Secret) |
+  | `Restore` | the source destination's `archiveRead`, and the evidence destination's `evidenceWrite`, each held to **its own** destination's binding |
+  | `SourceConnection` | none (no destination) |
+
+  A workload-identity, `ControllerIdentity` or absent grant carries no binding
+  and is not listed (FX-20b is the workload-identity follow-up).
+* Each listed grant reaches the check pod as a **binding-only pair**: its
+  Secret's `logweir-binding` as an optional `secretKeyRef`
+  (`LOGWEIR_ARCHIVE_WRITE_GRANT_BINDING`, `LOGWEIR_ARCHIVE_READ_GRANT_BINDING`,
+  `LOGWEIR_EVIDENCE_WRITE_GRANT_BINDING`, `LOGWEIR_EVIDENCE_READ_GRANT_BINDING`)
+  and the destination's binding as a literal (`…_GRANT_BINDING_EXPECTED`). **No
+  credential variable rides with it**: a grant the check does not exercise is
+  compared and never used, so nothing is dialled with a foreign Secret to learn
+  that it is foreign, and no Secret value reaches a status, a log or the API.
+* The runner answers **`destination.credentialBound`** — **blocking**, from the
+  check Job, expiring with the other credential rows (15 minutes) — by
+  comparing each pair the way every run does (several bindings in one key are
+  accepted, an absent expectation is refused). `ready`/`CredentialBound` when
+  every listed grant is bound; otherwise `notReady`/`CredentialBindingMismatch`,
+  and the message LEADS with one entry per refused grant — its `spec.access`
+  field, its Secret, and `no binding` or `foreign binding` — so the per-grant
+  answer survives the 512-character status cap; the destination is the row's
+  scope (the refused grant's, on a restore spanning two destinations, where the
+  entry names it too). The row's facts carry one
+  `<grant>=bound|CredentialBindingMismatch` per listed grant (rendered into the
+  message as `[archiveWrite=CredentialBindingMismatch; …]`). Neither binding
+  value is ever written. **The remedy never tells anyone to bind the refused
+  Secret to this destination** — on a thief's row that Secret is another
+  destination's: give this destination its own Secret (enter the credential
+  through the console, or bind a Secret only it names with
+  `scripts/bind-credential.py`, which refuses a Secret another object names),
+  and treat a Secret two objects name as an incident. Every
+  `CredentialBindingMismatch` text the runners and the controller write says
+  the same (FX-20c review).
+* The controller expects the row whenever the plan lists a grant, so a runner
+  that does not answer it leaves the verdict `unknown` — **readiness is never
+  `ready` for a destination a run would refuse on a binding**. The product API
+  returns the row unchanged in the preflight's `checks` (and the destination's
+  `lastTest` follows the verdict); the console's *Test access* panel shows it
+  with the other blocking rows.
+
+```text
+destination.credentialBound  notReady  blocking  CredentialBindingMismatch
+  archiveWrite (Secret `lwd-primary-archive-write`: foreign binding): a run that
+  presents it is refused before it builds a store; nothing was dialled
+  [archiveWrite=CredentialBindingMismatch]
+  scope: BackupDestination/fx20-thief
+```
+
+Upgrade and rollback: roll the controller and the runner together (the chart
+does). A plan that lists a grant carries a new field, which an older runner
+refuses at startup (`deny_unknown_fields`, exit 3): the `Preflight` lands
+`phase: Failed`, reason `CheckContractMismatch`, naming `grantBindings`, and
+nothing is dialled (§21.9). A plan with no Secret-backed grant is
+byte-identical to before. An older controller lists nothing, so a newer runner
+emits no binding row and the verdict is what it was. Nothing is stored: a
+verdict recorded before the upgrade keeps its rows until its expiry, and
+re-testing adds the row. Rolling back removes the row and the pairs; the
+check reverts to the pre-FX-20c overclaim, and every run still refuses a
+foreign Secret.
 
 **Changing the endpoint never keeps the credential.** A destination's
 `spec.storage` and `spec.transport.security` are immutable, so another endpoint
@@ -8808,7 +8894,7 @@ exactly one block to it.
 |---|---|---|---|
 | `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
 | `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows |
-| `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles |
+| `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles, and `destination.credentialBound` over every `SecretKeys` grant the destination declares (§20.10) |
 | `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
 ```yaml
@@ -9122,7 +9208,11 @@ to the marker and a `DestinationAccess` check requests `ArchiveWrite`: the marke
 is under `logweir/readiness/`, which proves nothing about the archive prefix, and
 a check may not write into the archive prefix to find out. The row's message
 names the archive prefix and says it was not write-probed; the run's own guards
-answer it.
+answer it. **Its binding is compared all the same** (FX-20c): the grant's
+Secret's `logweir-binding` is compared with no request on
+`destination.credentialBound`, a blocking row, so a destination whose
+`archiveWrite` Secret was written for another one is `notReady` here and not
+only when its backup runs (§20.10).
 
 **The probe also proves the store enforces conditional create** (RECEIPT-DUP).
 A backup runner claims each execution with a create-only put before its engine
@@ -9436,7 +9526,9 @@ readiness check holds the submit*).
   plan asks for the `archiveRead`, `evidenceWrite` and — when the destination
   configures one — `evidenceRead` grants. The archive-WRITE grant is what the
   run itself exercises, and its row's whole content is "verified by the run", so
-  requesting it would add a line and no information.
+  requesting it would add a line and no information. Its BINDING is still
+  compared, with the `evidenceWrite` grant's, on `destination.credentialBound`
+  (FX-20c, §20.10): a foreign Secret on either is `notReady` here.
 - **`destination.evidenceReadable` is only requested when the destination
   configures an `evidenceRead` grant.** Probing a role the object leaves
   unconfigured would report a refusal about a grant nobody asked for; when it is
@@ -9478,6 +9570,10 @@ the destination grant, as before. **A runner that refuses a plan** reports
 `phase: Failed`, reason `CheckContractMismatch`, with a message saying the runner
 image is older than the controller and should be upgraded, naming the plan field
 it refused (`evidenceWrite`, `evidenceRead`) when its own log line says which.
+**`grantBindings` (FX-20c) follows the same rules**: a destination plan carries
+it only when the run would present a `SecretKeys` grant (§20.10); an older
+runner refuses such a plan (exit 3, `grantBindings` named); a newer runner
+handed an older plan answers no `destination.credentialBound` row, as before.
 
 **A restore check over `legacySourceArchive` (this build).** The plan it renders
 is an ordinary `restorePreflight` plan — no new field — whose source destination

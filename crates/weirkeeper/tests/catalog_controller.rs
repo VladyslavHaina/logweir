@@ -577,6 +577,7 @@ fn sync_request() -> view::CatalogSyncRequest {
             location_digest: format!("sha256:{}", "2".repeat(64)),
             ca_file: None,
             credentials: logweir_core::check_contract::CredentialMode::Static,
+            grant_bindings: Vec::new(),
         },
         mode: weirkeeper::crds::recovery_catalog::SyncMode::Index.into(),
         deep_check: weirkeeper::crds::recovery_catalog::DeepCheck::ManifestDigest.into(),
