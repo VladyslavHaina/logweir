@@ -751,6 +751,46 @@ fn a_receipt_recorded_owner_blocks_only_on_the_cluster_it_describes() {
         "OriginalNameOwnerNotChecked",
     );
     admitted(admit(&plan_no_owner(), None, &Broker::disabled(), &other));
+
+    // The fix round's sweep of review M2: the receipt ADDS owners and never
+    // stands in for looking. A receipt that looked and recorded NO owner (a
+    // backup records a KafkaTopic whose reference it cannot record as none)
+    // is not "none found" on the cluster it describes: the plan must state
+    // it, or the runner be given the resources. KILLS: reading the receipt's
+    // look as the restore's own.
+    let looked_and_found_none = phase0_admit::OriginalNameInputs {
+        receipt_source_cluster_id: Some(TARGET.into()),
+        receipt_owners: Some(ReceiptOwners {
+            owner_detection: vec!["kafkaTopicResources".into()],
+            owners: BTreeMap::new(),
+        }),
+        ..no_inputs()
+    };
+    let message = refused(
+        admit(
+            &plan(None, false),
+            None,
+            &Broker::disabled(),
+            &looked_and_found_none,
+        ),
+        "OriginalNameOwnerNotChecked",
+    );
+    assert!(message.contains("receipt alone is not a look"), "{message}");
+    // With the approver's statement beside it, the same receipt is consulted
+    // and the restore is admitted, naming both places.
+    let (a, _, _) = admitted(admit(
+        &plan_no_owner(),
+        None,
+        &Broker::disabled(),
+        &looked_and_found_none,
+    ));
+    assert_eq!(
+        a.original_name
+            .expect("original-name")
+            .owners
+            .owner_detection,
+        vec!["plan".to_string(), "pointReceipt".to_string()]
+    );
 }
 
 /// A declaration naming a topic the restore does not restore. KILLS: not

@@ -39,6 +39,7 @@ These are written in the tracker's *Owner decisions* style. The tracker holds th
 | Finding | Decision |
 | --- | --- |
 | M2: an owner reference over 256 characters was dropped | The restore's scan (`topic_configuration::strimzi_owner_scan`) reports every `KafkaTopic` it cannot record or read. The runner refuses `OriginalNameOwnerUnreadable` and never drops one. |
+| M2's sweep: the receipt path | A backup records a `KafkaTopic` whose reference it cannot record as NO owner (`crates/logweir/src/backup/mod.rs`, PROD-05.1 warns and goes on). The receipt therefore ADDS owners but never stands in for looking: "none found" needs the plan's statement or the resources file. Changing what a backup records is PROD-05.1's contract and is owed as a class-sweep row. |
 | L2: any parseable file counted as "looked" | A file with no `KafkaTopic` is refused unless it is the explicit empty `List`. The file's `sha256` is signed as `kafka_topic_resources_sha256` (arm ON-12). |
 | L3: the allowlist's `source_cluster_id` counted | Only the verified receipt's measured id counts. Without a bound point the source is unknown, and auto-creation must be proven disabled. |
 | M3: removing the runner's subject checks survived CI | Each call site has a CI-run row that fails without it: startup (`original_name_cli.rs`, the binary), before phase 0 and after phase 1 (`original_name_runner.rs`, the orchestrator fixture). `drill approve` has its row too. |

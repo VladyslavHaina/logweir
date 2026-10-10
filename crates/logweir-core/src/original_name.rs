@@ -710,20 +710,37 @@ pub fn owner_verdict(
             );
         }
     }
-    if detection.is_empty() {
-        return Err(format!(
-            "{ORIGINAL_NAME_OWNER_NOT_CHECKED}: nothing was checked for a declarative owner of \
-             the restored names (a Strimzi KafkaTopic, a GitOps or Terraform definition). Such an \
-             owner recreates a deleted name on its own and reverts the restored topic's settings, \
-             and this runner cannot read Kubernetes or a repository, so it never assumes there is \
-             none. State it in the plan — target.topic_naming.original_name.owners: [] when no \
-             owner manages any restored name, or each owner as {{topic, kind, reference}} — or \
-             give the runner the target's KafkaTopic resources (--kafka-topic-resources, `kubectl \
-             get kafkatopics -A -o yaml`); nothing was written"
-        ));
-    }
     owners.sort();
     owners.dedup();
+    // **THE RECEIPT ADDS OWNERS; IT NEVER STANDS IN FOR LOOKING** (the fix
+    // round's sweep of review M2). A backup records a `KafkaTopic` whose
+    // reference it cannot record as NO owner (PROD-05.1 warns and goes on), so
+    // "the receipt looked and found none" is not proof for a restore that
+    // recreates a production name. An owner the receipt names still blocks
+    // (below); "none found" needs the approved plan's statement or the
+    // target's `KafkaTopic` resources.
+    let looked = detection
+        .iter()
+        .any(|place| place != OWNER_FOUND_IN_POINT_RECEIPT);
+    if !looked && (owners.is_empty() || owner_path) {
+        return Err(format!(
+            "{ORIGINAL_NAME_OWNER_NOT_CHECKED}: nothing was checked for a declarative owner of \
+             the restored names (a Strimzi KafkaTopic, a GitOps or Terraform definition){}. Such \
+             an owner recreates a deleted name on its own and reverts the restored topic's \
+             settings, and this runner cannot read Kubernetes or a repository, so it never \
+             assumes there is none. State it in the plan — \
+             target.topic_naming.original_name.owners: [] when no owner manages any restored \
+             name, or each owner as {{topic, kind, reference}} — or give the runner the \
+             target's KafkaTopic resources (--kafka-topic-resources, `kubectl get kafkatopics \
+             -A -o yaml`); nothing was written",
+            if detection.is_empty() {
+                ""
+            } else {
+                "; the bound point's receipt alone is not a look, because a backup records an \
+                 owner it cannot record as none"
+            }
+        ));
+    }
     if !owners.is_empty() && !owner_path {
         let listed: Vec<String> = owners
             .iter()

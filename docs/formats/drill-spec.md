@@ -462,9 +462,10 @@ plan's `owners`, the `KafkaTopic` resources given to `logweir restore run
 --kafka-topic-resources <file>` (optionally narrowed by `--strimzi-cluster`;
 a `KafkaTopic` the runner cannot read or whose reference it cannot record,
 and a file holding no `KafkaTopic` unless it is the explicit empty `List`,
-are refused `OriginalNameOwnerUnreadable` — never read as none), or, for a
-target that may be the source, the owners the point's receipt recorded at
-backup — and none was found unless `owner_path` is `true`
+are refused `OriginalNameOwnerUnreadable` — never read as none) — and none
+was found, there or, for a target that may be the source, among the owners
+the point's receipt recorded at backup (which adds owners but never stands
+in for looking), unless `owner_path` is `true`
 (`OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`,
 `OriginalNameOwnersInvalid`); and the `LogAppendTime` probe's name,
 `<topic_mapping_prefix>logweir-probe-<12 hex of the plan hash>`, is legal, is

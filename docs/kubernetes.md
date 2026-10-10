@@ -6551,16 +6551,20 @@ nothing created, nothing deleted):
 An owner recreates a deleted name on its own and reverts the restored topic's
 settings — the pinned `retention.ms=-1` included — which can delete the
 restored records. The runner cannot read Kubernetes or a repository, so it
-looks in three places and REFUSES when it looked in none: the approved plan's
+looks in three places and REFUSES when it looked in neither of the first
+two: the approved plan's
 `original_name.owners` (an empty list is the approver's signed statement that
 no owner exists; `{topic, kind: strimzi|external, reference}` names one); the
 target's `KafkaTopic` resources given to `logweir restore run
 --kafka-topic-resources <file>` (`kubectl get kafkatopics -A -o yaml`; CLI
 only); and, for a target that may be the source cluster, the owners the bound
-point's verified receipt recorded at backup time (PROD-05.1). **The controller
+point's verified receipt recorded at backup time (PROD-05.1). **The receipt
+adds owners and never stands in for looking:** an owner it names blocks, but
+"the receipt found none" is not enough on its own, because a backup records a
+`KafkaTopic` whose reference it cannot record as no owner. **The controller
 does not list `KafkaTopic` resources** (child row PROD-05.1a, which needs a
-`kafka.strimzi.io` grant), so a `Restore` relies on the plan's statement or
-the receipt. **The owner path** (`owner_path: true`) restores although an
+`kafka.strimzi.io` grant), so a `Restore` relies on the plan's statement,
+with the receipt's owners beside it. **The owner path** (`owner_path: true`) restores although an
 owner is found: the approver states that the owner's reconciliation is paused
 for the restore (`strimzi.io/pause-reconciliation: "true"` on the
 `KafkaTopic`, and any GitOps sync that would revert that annotation
