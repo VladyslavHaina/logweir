@@ -73,3 +73,39 @@ pub fn print_refusal_reason(message: &str) {
 pub fn print_refusal_reason_to<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
     writeln!(w, "{}", logweir_core::guard::refusal_reason_line(message))
 }
+
+/// **FX-34.** Both lines a guard refusal prints, in the order the contract
+/// fixes: `refusal-detail=<one JSON object>` and then I9's
+/// `refusal-reason=<TerminalState>`, which stays the process's FINAL stdout
+/// line.
+///
+/// # Why a second line, and why it is first
+///
+/// `refusal-reason=` names a state from a closed list, and most refusals have
+/// none: the sentence that says WHY (`PartitionSubsetsAwaitOwnerDecision: …
+/// Remove restore.partitions …`) was only on the human line, in a pod log
+/// that is gone with the pod. The detail line carries the reason code and
+/// that sentence in a form a controller can validate before it stores them,
+/// and it goes BEFORE the state line so every reader of "the final line",
+/// this build's or an older one's, still finds the state there.
+///
+/// The human line on stderr and the tracing lines are unchanged. The detail
+/// line is written by `logweir_core::refusal_detail`, which cleans and bounds
+/// the sentence; a refusal with nothing printable in it prints no detail
+/// line, and the state line is printed either way.
+pub fn print_refusal(message: &str) {
+    // `expect`-free for `print_refusal_reason`'s reason: a closed stdout does
+    // not change an exit code GC11 has already decided.
+    let _ = print_refusal_detail_to(&mut std::io::stdout().lock(), message);
+    print_refusal_reason(message);
+}
+
+/// The writer seam [`print_refusal`] prints its first line through, so a test
+/// asserts the exact bytes. Writes nothing when the message has nothing
+/// printable in it.
+pub fn print_refusal_detail_to<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    match logweir_core::refusal_detail::refusal_detail_line(message) {
+        Some(line) => writeln!(w, "{line}"),
+        None => Ok(()),
+    }
+}

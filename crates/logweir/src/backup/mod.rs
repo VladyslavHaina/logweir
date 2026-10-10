@@ -1064,9 +1064,10 @@ fn exiting(
     // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout.
     // `unwrap_or("")` is the fail-safe direction: an empty message classifies
     // as `GuardRefused`, so a future path reaching exit 3 without one still
-    // satisfies GC11 rather than printing nothing.
+    // satisfies GC11 rather than printing nothing. FX-34: `refusal-detail=`
+    // first, then the state line (`crate::exit::print_refusal`).
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+        crate::exit::print_refusal(refusal_message.unwrap_or(""));
     }
     // RECEIPT-DUP: `failure-reason=` as the FINAL stdout line of an exit 1
     // or 4 whose state is more specific than its code, for the same reason

@@ -1383,8 +1383,12 @@ fn exiting(
     // message, and an empty message classifies as `GuardRefused` — so a future
     // path that reaches exit 3 without one still satisfies the contract
     // instead of printing nothing.
+    //
+    // FX-34: `print_refusal` writes `refusal-detail=` (the reason code and
+    // the sentence, cleaned and bounded) and THEN `refusal-reason=`, so the
+    // state line is still the last one.
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+        crate::exit::print_refusal(refusal_message.unwrap_or(""));
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
