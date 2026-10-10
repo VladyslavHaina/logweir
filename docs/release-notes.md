@@ -40,9 +40,10 @@ controller no longer rewrites a status whose content has not changed), 46
 (FX-28, a sign-in whose identity provider stalls is answered at the provider
 deadline), 48 (FX-20c, a destination's Test access compares every grant's
 binding), 49 (PROD-01.4a, each topic's ID in the receipt and the catalog
-point), 50 (PROD-04.1, consumer position evidence for selected groups) and 51
+point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
-format 2.0.0 and named on every surface) so far. Items continue the next entry's
+format 2.0.0 and named on every surface) and 52 (FX-34, a guard-refused Restore
+or Backup says why in its status) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -143,6 +144,13 @@ preview, both verifiers, the controller's `Restore` status, the product API,
 the console and the runner's notification, and the PoC upgrade that carries
 it runs a subset `Restore`, reads its scorecard with both readers, and reads
 the selection on its status, the API, the console and the notification.
+Item 52 is fix-now row FX-34 (PoC batch 5's findings F-1 and F-2), proven by
+unit rows, rows over the shipped runner binary, controller rows over a recording
+API double with goldens captured at the base commit, and console rows; it
+changes the runner (one more stdout line at exit 3), the controller and the
+console's text, and the PoC upgrade that carries it submits a `Restore` the
+runner refuses and reads the reason on its status and in the console after the
+pod is gone.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1722,6 +1730,65 @@ console do not carry `integrity.selection`, so after a rollback they show a
 subset restore without its selection again: read the subset restores' signed
 scorecards (2.0.0) with this release's verifiers.
 
+#### 52. A guard-refused Restore or Backup says why in its status (FX-34)
+
+**Changed.** When a `Restore`'s or a `Backup`'s runner exits 3, the `Failed`
+condition's message now ends with the runner's own reason code and sentence,
+after the text it always carried:
+
+```
+the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode; the runner's own reason, cleaned and bounded: GuardRefused: source.storage.endpoint is a plain http:// endpoint but source.storage.allow_http is false. … Set allow_http: true to state plaintext explicitly, or use an https:// endpoint.
+```
+
+Before, the object said only that a guard refused; which guard, and what to
+change, was in the pod log, which goes with the pod. `status.progress.message`
+carries the same text and the console's operation page shows it. A rehearsal's
+`Restore` and a scheduled `Backup` are the same two kinds. `status.exitReason`
+and the condition's `reason` are unchanged.
+**How it gets there.** `logweir restore run` and `logweir backup run` print one
+more stdout line at exit 3, `refusal-detail={"code":"…","message":"…"}`,
+immediately before `refusal-reason=`, which stays the final line
+([stability.md](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
+The controller reads that one line by its key name and treats it as untrusted
+text: the code must be ASCII letters and digits (64 bytes at most); the
+sentence keeps printable ASCII and `§ – — … →`, a line break or control
+character becomes a space and anything else (a bidi override included) becomes
+`U+FFFD`; URLs lose their query string and userinfo and credential shapes read
+`[redacted]`; and it is cut to 760 bytes with a `…`. A line that does not
+validate is not shown
+([kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34)).
+**A log that cannot be read no longer stalls a refused run.** For exit 3 the
+controller reads the `runner` container's last 32 lines, at most 512 KiB,
+once. If the pod is already gone, or the read answers `403` or `500`, the
+object is still `Failed` with `exitCode: 3` and the message says the reason
+could not be read and why; the read is not retried. Before, any failure of
+that read failed the reconcile, so with `pods/log` refused the object stayed
+`Running` over a finished Job. Every other exit code reads the log as it did.
+**Also.** `refusal-reason=`'s value reaches `status.exitReason` only when it
+is a state name (ASCII letters and digits); it was copied as printed. A
+standing (rehearsal) `Restore` waiting for or refused over its approval names
+`spec.authorization.approvalRef`, where it named `spec.approvalRef`, a field
+it does not have. The console shows a bidi control character in any message a
+controller wrote as `U+FFFD`.
+**Do:** nothing. An alert or a script that compared a refused run's condition
+message for equality should compare its opening text instead: the message is
+longer when the runner states a reason.
+**Scope:** unit rows over the line's grammar, its cleaning and its bounds; rows
+over the shipped runner binary (the line before `refusal-reason=` at exit 3,
+none at another exit, no credential value in it); controller rows over a
+recording API double for both kinds (the reason carried; hostile lines refused
+or cleaned; the pod gone and the read refused; a second reconcile that reads
+and writes nothing), with every request and every status write of exits 0, 1,
+2, 4 and 137 compared byte for byte against goldens captured before the
+change; console rows over a message holding markup, an HTML entity and a bidi
+override. No cluster ran it: its live row is the next PoC upgrade's.
+**Not changed:** the check, notification and retention Jobs. Their exit 3
+still names a code from a closed list and no sentence.
+**Rollback:** in either order. An older controller ignores the new line and
+writes the message it always wrote; an older runner prints no such line, and
+this controller then writes that same message. Statuses already written keep
+the text they have.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1787,7 +1854,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50 and 51, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 and 52, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1828,7 +1895,8 @@ item 51 changes the runner, the restore preview, both verifiers, the
 controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
-older verifier a subset scorecard). To roll back to
+older verifier a subset scorecard); item 52 changes the runner, the
+controller and the console's text and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

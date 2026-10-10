@@ -2107,6 +2107,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a partition subset signs scorecard format 2.0.0",
             "logweir-drill-scorecard-2.0.0.json",
         ),
+        // FX-34 (2026-10-10, item 52): a guard-refused Restore or Backup says
+        // why in its status, off the one stdout line the runner adds for it.
+        (
+            "a guard-refused run says why in its status",
+            "refusal-detail=",
+        ),
     ];
     assert_eq!(
         items.len(),
