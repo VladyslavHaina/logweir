@@ -122,8 +122,13 @@ fn longest<T: serde::Serialize + Clone>(candidates: &[T]) -> T {
 /// `notAssessed` one a reason and nothing else. Both shapes are built and the
 /// longer taken, so a vocabulary that grows is measured, not assumed.
 fn longest_schema_dependency() -> TopicSchemaDependency {
+    longest(&schema_dependency_shapes())
+}
+
+/// The shapes [`longest_schema_dependency`] chooses between.
+fn schema_dependency_shapes() -> Vec<TopicSchemaDependency> {
     use logweir_core::schema_dependency as sd;
-    longest(&[
+    vec![
         TopicSchemaDependency {
             verdict: sd::SCHEMA_DEPENDENT.to_string(),
             reason: None,
@@ -138,7 +143,7 @@ fn longest_schema_dependency() -> TopicSchemaDependency {
             key: None,
             value: None,
         },
-    ])
+    ]
 }
 
 /// The longest `generations` entry the receipt's arms admit (39 and 40): an
@@ -146,11 +151,16 @@ fn longest_schema_dependency() -> TopicSchemaDependency {
 /// is present exactly when an ID is. All four shapes are built and the
 /// longest taken.
 fn longest_identity() -> TopicIdentity {
+    longest(&identity_shapes())
+}
+
+/// The shapes [`longest_identity`] chooses between.
+fn identity_shapes() -> Vec<TopicIdentity> {
     use logweir_core::topic_identity as ti;
     let id = || Some("A".repeat(ti::TOPIC_ID_TEXT_LEN));
     let reason = || Some(longest_of(&ti::TOPIC_ID_REASONS).to_string());
     let source = || Some(longest_of(&ti::TOPIC_ID_SOURCES).to_string());
-    longest(&[
+    vec![
         TopicIdentity {
             topic_id: id(),
             topic_id_after: id(),
@@ -179,7 +189,31 @@ fn longest_identity() -> TopicIdentity {
             topic_id_reason: reason(),
             topic_id_after_reason: reason(),
         },
-    ])
+    ]
+}
+
+/// **Every per-topic shape [`longest_outcome`] chooses between**, as the
+/// receipt encodes them.
+///
+/// Some of a receipt's fields exclude one another (an ID or a reason; a
+/// judged entry or a `notAssessed` one), so the longest VALID entry does not
+/// carry every field at once. The projection measures each valid shape and
+/// takes the longest. This is the list of those shapes, for the row that
+/// holds the projection to the receipt's schema: a field the schema defines
+/// must be in the projected receipt or in one of these, or nothing measured
+/// it.
+#[must_use]
+pub fn considered_shapes() -> Vec<serde_json::Value> {
+    let json = |v: serde_json::Result<serde_json::Value>| v.unwrap_or_default();
+    schema_dependency_shapes()
+        .iter()
+        .map(|s| json(serde_json::to_value(s)))
+        .chain(
+            identity_shapes()
+                .iter()
+                .map(|s| json(serde_json::to_value(s))),
+        )
+        .collect()
 }
 
 /// The longest word of a closed set.

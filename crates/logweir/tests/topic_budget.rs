@@ -909,7 +909,10 @@ fn keys_of(value: &serde_json::Value, out: &mut std::collections::BTreeSet<Strin
 
 /// **The projection gives a longest value to every field the receipt
 /// defines.** The receipt's own schema lists every property of every struct
-/// in it; each one appears in the receipt the projection measures.
+/// in it; each one appears in the receipt the projection measures, or in one
+/// of the per-topic shapes it chose that receipt's entries from
+/// (`document_budget::considered_shapes`: fields that exclude one another,
+/// such as a topic ID and the reason there is none, are never in one entry).
 ///
 /// This is what makes "a block added to the receipt cannot silently shrink
 /// the supported topic count" true of the BYTE bound as well: a new optional
@@ -965,6 +968,15 @@ fn the_projection_carries_every_field_the_receipt_defines() {
     let value = serde_json::to_value(&receipt).expect("JSON");
     let mut present = std::collections::BTreeSet::new();
     keys_of(&value, &mut present);
+    let in_the_receipt = present.len();
+    for shape in document_budget::considered_shapes() {
+        keys_of(&shape, &mut present);
+    }
+    assert!(
+        present.len() > in_the_receipt,
+        "the shapes the projection chose between carry fields the chosen one does not; if they \
+         no longer do, this union proves nothing"
+    );
     let defined = schema_property_names();
     assert!(
         defined.len() >= 45,
