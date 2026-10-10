@@ -29,7 +29,9 @@ jobs:
         run: bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # ci-check.sh takes 18-24 minutes; at 25 the job on main 4bfc8b4a was
+    # cancelled while saving the cache, so publish was skipped.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       # Docker Hub rate-limits anonymous pulls per IP; GitHub's shared runners
