@@ -3113,12 +3113,12 @@ fn execute_with_validated_approval(
     let marker_note = if c.spec.restore.allow_transaction_markers {
         Some(logweir_core::transaction_markers::OVERRIDE_NOTE)
     } else {
-        let counts = count_transaction_markers(
-            &c.archive,
-            &facts,
-            &selected,
-            replay_selection.as_ref().map(|r| &r.selection),
-        )?;
+        let window = logweir_core::replay_selection::ReplaySelection {
+            topics: selected.iter().cloned().collect(),
+            ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
+                .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+        };
+        let counts = count_transaction_markers(&c.archive, &facts, &window)?;
         if let Some(refusal) = logweir_core::transaction_markers::refusal(&counts) {
             return Err(DrillError::Guard(GuardRefusal(refusal)));
         }
@@ -3939,20 +3939,19 @@ pub fn resolve_selection(
     selection.resolve(&facts.topics).map(Some).map_err(refused)
 }
 
-/// **PROD-01.1a.** The archived records of the restored partitions that have
-/// a transaction marker's shape, per topic and partition. It reads EVERY
-/// segment the manifest lists for those partitions, whatever the window (a
-/// marker after the window's end closes a transaction whose aborted records
-/// the window can hold), streamed through the bounded `kbak::scan_segment`:
-/// one stored segment and a few hundred KiB held at a time. A segment the
-/// scan cannot read refuses the run (`GuardRefused`): it cannot say there is
-/// no marker in it.
+/// **PROD-01.1a.** The records shaped like a transaction marker in the
+/// segments the restore reads, per topic and partition: the selected
+/// partitions' segments that overlap the window by the engine's own rule
+/// (`ReplaySelection::segment_overlaps`), every record of each, streamed
+/// through the bounded `kbak::scan_segment` (one stored segment and a few
+/// hundred KiB held at a time). A segment the scan cannot decode refuses the
+/// run (`GuardRefused`): it cannot say there is no marker in it.
 fn count_transaction_markers(
     archive: &Store,
     facts: &BackupSetFacts,
-    topics: &[String],
-    selection: Option<&logweir_core::replay_selection::ReplaySelection>,
+    window: &logweir_core::replay_selection::ReplaySelection,
 ) -> Result<logweir_core::transaction_markers::MarkerCounts, DrillError> {
+    use logweir_core::replay_selection::ReplaySelection;
     use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
     use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
     use logweir_engine_oso::storage::caps;
@@ -3960,14 +3959,22 @@ fn count_transaction_markers(
         max_decompressed: caps::SEGMENT,
         deadline: None,
     };
+    let start = window.window_start_ms.unwrap_or(i64::MIN);
     let mut counts = MarkerCounts::new();
-    for topic in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
+    for topic in &facts.topics {
         for p in topic
             .partitions
             .iter()
-            .filter(|p| selection.is_none_or(|s| s.selects_partition(&topic.name, p.partition_id)))
+            .filter(|p| window.selects_partition(&topic.name, p.partition_id))
         {
-            for seg in &p.segments {
+            for seg in p.segments.iter().filter(|s| {
+                ReplaySelection::segment_overlaps(
+                    start,
+                    window.window_end_ms,
+                    s.start_timestamp,
+                    s.end_timestamp,
+                )
+            }) {
                 let (bytes, _) = archive
                     .get_capped(&seg.key, caps::SEGMENT)
                     .map_err(logweir_core::engine::EngineError::from)?;

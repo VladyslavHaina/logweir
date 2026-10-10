@@ -5,8 +5,8 @@
 //! and abort marker as an ordinary record, and the restore writes each one,
 //! with the aborted records before it, as data every consumer reads
 //! (`docs/to-do/decisions/PROD-01.1-record-semantics.md` §2.1). Before phase 2
-//! the runner counts the archived records of the restored partitions that
-//! have a marker's shape ([`is_control_shaped`]); a count is refused by name
+//! the runner counts the records with a marker's shape ([`is_control_shaped`])
+//! in the segments the restore reads; a count is refused by name
 //! ([`refusal`]) unless the approved plan states
 //! `restore.allow_transaction_markers: true`, and a run under that override
 //! says so in its scorecard ([`OVERRIDE_NOTE`]).
@@ -14,8 +14,9 @@
 //! The shape alone is the signal: the source is not read, so the decision
 //! record's offset-gap confirmation (§6.2) is not made, and a user record of
 //! the same shape is counted too. Not seen: a transaction open at capture
-//! whose marker is not in the archive, one opened after the backup began, and
-//! a marker of another encoding version.
+//! whose marker is not in the archive, one opened after the backup began, one
+//! whose marker is in a segment the restore's window does not reach, and a
+//! marker of another encoding version.
 
 use std::collections::BTreeMap;
 

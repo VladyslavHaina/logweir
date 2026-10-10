@@ -2535,8 +2535,8 @@ controller also writes `Enforced=False/NothingToDo` where this build writes
 **Changed.** The engine archives every transaction commit and abort marker as
 an ordinary record, and a restore wrote each one, with the records of aborted
 transactions beside it, as data every consumer reads. Before it creates
-anything on the target, a restore now reads every archived segment of the
-partitions it restores and counts the records shaped like a marker. If there
+anything on the target, a restore now reads every segment the engine will
+restore and counts the records shaped like a marker. If there
 are any, the restore is refused, as a drill or as a `newTopic` restore. It
 exits 3 with `refusal-reason=TransactionMarkersInArchive`; the `Restore`'s
 `exitReason`, the product API's `result.exitReason` and the console show the
@@ -2547,7 +2547,8 @@ signed scorecard's `sample.coverage_note` says so. The check reads each
 restored segment once more before the engine runs. It reads the shape only,
 so a record of your own with that shape is counted too. A transaction open at
 backup time whose marker is not archived, a transaction opened after the backup
-began, and a marker of another encoding version are not detected
+began, one whose marker is past the restore's window, and a marker of another
+encoding version are not detected
 ([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
 **Do:** nothing, unless you restore transactional topics (Kafka Streams or
 Connect exactly-once, Flink): to restore one as it is, add

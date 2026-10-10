@@ -1370,8 +1370,9 @@ transactional recovery. Measured by
 markers and five aborted or open-transaction records came back as data, and the drill was signed
 `pass`.
 
-Since PROD-01.1a, before it creates anything on the target, a restore reads every archived segment
-of the partitions it restores, whatever its window, and counts the records shaped like a marker:
+Since PROD-01.1a, before it creates anything on the target, a restore reads every segment the
+engine will restore (the selected partitions' segments that its window overlaps) and counts the
+records shaped like a marker:
 key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
 `x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
 or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
@@ -1386,10 +1387,10 @@ a large archive it adds about one more read of the restored partitions to the re
 
 The record's shape is the only signal: the check does not read the source. A record of your own
 with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, and the override gets
-past it. Three cases are not detected, and their records are still restored as data: a
+past it. These cases are not detected, and their records are still restored as data: a
 transaction open at backup time whose marker is not in the archive, a transaction opened after the
-backup began, and a marker of another encoding version. Detecting them is deferred to PROD-01.1b
-and PROD-00.3a.
+backup began, a transaction whose marker is in a segment the restore's window does not reach, and a
+marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
 
 ### Recovery-point selection uses segment first and last timestamps
 
