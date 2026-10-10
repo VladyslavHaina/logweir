@@ -5444,7 +5444,13 @@ async fn reconcile_backup_inner(
     // THE ONLY GATE: every other exit code takes the read it always took and
     // carries no runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
-        let read = crate::refusal::read(&pods, &namespace, &pod_name).await;
+        let read = crate::refusal::read(
+            &pods,
+            &namespace,
+            &pod_name,
+            logweir_core::refusal_detail::RefusingRun::Backup,
+        )
+        .await;
         (read.body, Some(read.reason))
     } else {
         let log = pods

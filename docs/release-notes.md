@@ -1746,17 +1746,26 @@ carries the same text and the console's operation page shows it. A rehearsal's
 `Restore` and a scheduled `Backup` are the same two kinds. `status.exitReason`
 and the condition's `reason` are unchanged.
 **How it gets there.** `logweir restore run` and `logweir backup run` print one
-more stdout line at exit 3, `refusal-detail={"code":"…","message":"…"}`,
-immediately before `refusal-reason=`, which stays the final line
+more stdout line at every exit 3, `refusal-detail={"code":"…","message":"…"}`,
+immediately before `refusal-reason=`, which stays the final line; the two are
+the last two lines the runner writes
 ([stability.md](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
-The controller reads that one line by its key name and treats it as untrusted
-text: the code must be ASCII letters and digits (64 bytes at most); the
-sentence keeps printable ASCII and `§ – — … →`, a line break or control
-character becomes a space and anything else (a bidi override included) becomes
-`U+FFFD`; URLs lose their query string and userinfo and credential shapes read
+The controller treats the log as untrusted text. Whoever writes a plan can
+start a line in the runner's log (an error's text is printed as it is, and it
+may repeat a plan value that holds a line break), so the line is honoured only
+where the runner prints it, directly before the final `refusal-reason=` line,
+and a `refusal-detail=` line anywhere else is ignored. Its code must be one of
+a closed list for that kind of run (a `Backup`'s log cannot carry a
+restore-only code) and must agree with the state line beside it; the sentence
+keeps printable ASCII and `§ – — … →`, a line break or control character
+becomes a space and anything else (a bidi override included) becomes `U+FFFD`;
+URLs lose their query string and userinfo and credential shapes read
 `[redacted]`; and it is cut to 760 bytes with a `…`. A line that does not
 validate is not shown
 ([kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34)).
+The sentence is the runner's, and a refusal names what it refused, so it can
+hold words the plan's author chose (a topic name, a field's value), cleaned
+and inside that bound.
 **A log that cannot be read no longer stalls a refused run.** For exit 3 the
 controller reads the `runner` container's last 32 lines, at most 512 KiB,
 once. If the pod is already gone, or the read answers `403` or `500`, the
@@ -1773,15 +1782,24 @@ controller wrote as `U+FFFD`.
 **Do:** nothing. An alert or a script that compared a refused run's condition
 message for equality should compare its opening text instead: the message is
 longer when the runner states a reason.
-**Scope:** unit rows over the line's grammar, its cleaning and its bounds; rows
-over the shipped runner binary (the line before `refusal-reason=` at exit 3,
-none at another exit, no credential value in it); controller rows over a
-recording API double for both kinds (the reason carried; hostile lines refused
-or cleaned; the pod gone and the read refused; a second reconcile that reads
-and writes nothing), with every request and every status write of exits 0, 1,
-2, 4 and 137 compared byte for byte against goldens captured before the
+**Scope:** unit rows over the line's grammar, its closed sets, its cleaning
+and its bounds; rows over the shipped runner binary (both streams in written
+order: the pair is the last two lines of every refused run, after the error
+text, also when the plan itself writes marker lines; none at another exit; no
+credential value in it); controller rows over a recording API double for both
+kinds (the reason carried; forged, misplaced and hostile lines ignored,
+refused or cleaned; the pod gone and the read refused; a second reconcile that
+reads and writes nothing), with every request and every status write of exits
+0, 1, 2, 4 and 137 compared byte for byte against goldens captured before the
 change; console rows over a message holding markup, an HTML entity and a bidi
 override. No cluster ran it: its live row is the next PoC upgrade's.
+**Known limit.** The controller tells the runner's line from a forged one by
+where it stands, and a pod log is two streams merged in no promised order. A
+runner image that prints an error's text with its line breaks puts text a plan
+chose on stderr; if that text is copied after the runner's own two lines and
+itself ends with a well-formed pair, that pair is shown. What it can say is
+bounded as above, on the plan author's own object. A runner that escapes line
+breaks in the error text it prints closes it (PROD-15.1).
 **Not changed:** the check, notification and retention Jobs. Their exit 3
 still names a code from a closed list and no sentence.
 **Rollback:** in either order. An older controller ignores the new line and

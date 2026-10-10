@@ -82,30 +82,48 @@ pub fn print_refusal_reason_to<W: std::io::Write>(w: &mut W, message: &str) -> s
 /// # Why a second line, and why it is first
 ///
 /// `refusal-reason=` names a state from a closed list, and most refusals have
-/// none: the sentence that says WHY (`PartitionSubsetsAwaitOwnerDecision: …
-/// Remove restore.partitions …`) was only on the human line, in a pod log
+/// none: the sentence that says WHY was only on the human line, in a pod log
 /// that is gone with the pod. The detail line carries the reason code and
 /// that sentence in a form a controller can validate before it stores them,
 /// and it goes BEFORE the state line so every reader of "the final line",
 /// this build's or an older one's, still finds the state there.
 ///
-/// The human line on stderr and the tracing lines are unchanged. The detail
-/// line is written by `logweir_core::refusal_detail`, which cleans and bounds
-/// the sentence; a refusal with nothing printable in it prints no detail
-/// line, and the state line is printed either way.
-pub fn print_refusal(message: &str) {
+/// # The two lines are the LAST two the runner writes, at every exit 3
+///
+/// A plan can start a line of its own in a pod log: the human line on stderr
+/// prints an error's text raw, and an error may repeat a plan value that
+/// holds a line break. So a controller honours a `refusal-detail=` line only
+/// at the position the runner prints it, directly before the final
+/// `refusal-reason=` line (`weirkeeper::refusal::runner_reason`). Three
+/// things here keep that position the runner's own:
+///
+/// * the detail line is printed ALWAYS, also for a refusal that says nothing
+///   (`logweir_core::refusal_detail::NO_SENTENCE`), so the position is never
+///   left for another line to occupy;
+/// * both lines go out in ONE write, so nothing this process prints can come
+///   between them;
+/// * the callers (`drill::exiting`, `backup::exiting`) print nothing after
+///   them at exit 3, and the human line and every tracing line come before.
+///
+/// The human line on stderr and the tracing lines are unchanged.
+pub fn print_refusal(run: logweir_core::refusal_detail::RefusingRun, message: &str) {
     // `expect`-free for `print_refusal_reason`'s reason: a closed stdout does
     // not change an exit code GC11 has already decided.
-    let _ = print_refusal_detail_to(&mut std::io::stdout().lock(), message);
-    print_refusal_reason(message);
+    let _ = print_refusal_to(&mut std::io::stdout().lock(), run, message);
 }
 
-/// The writer seam [`print_refusal`] prints its first line through, so a test
-/// asserts the exact bytes. Writes nothing when the message has nothing
-/// printable in it.
-pub fn print_refusal_detail_to<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
-    match logweir_core::refusal_detail::refusal_detail_line(message) {
-        Some(line) => writeln!(w, "{line}"),
-        None => Ok(()),
-    }
+/// The writer seam [`print_refusal`] prints through, so a test asserts the
+/// exact bytes: the detail line, the state line, each with its newline, in
+/// one `write_all`.
+pub fn print_refusal_to<W: std::io::Write>(
+    w: &mut W,
+    run: logweir_core::refusal_detail::RefusingRun,
+    message: &str,
+) -> std::io::Result<()> {
+    let both = format!(
+        "{}\n{}\n",
+        logweir_core::refusal_detail::refusal_detail_line(run, message),
+        logweir_core::guard::refusal_reason_line(message)
+    );
+    w.write_all(both.as_bytes())
 }

@@ -10723,8 +10723,8 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
 // read logs.
 
 use logweir_core::refusal_detail::{
-    refusal_detail_line, REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
-    TRUNCATION_MARKER,
+    refusal_detail_line, RefusingRun, REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
+    RESTORE_REASON_CODES, TRUNCATION_MARKER,
 };
 use weirkeeper::controllers::restore::finished_status_patch_with_reason;
 use weirkeeper::refusal::{
@@ -10762,7 +10762,7 @@ fn fx34_k3_sentence() -> String {
 /// own formatter writes for that sentence, immediately before
 /// `refusal-reason=`.
 fn fx34_k3_log_with_detail() -> String {
-    let detail = refusal_detail_line(&fx34_k3_sentence()).expect("a sentence prints a line");
+    let detail = refusal_detail_line(RefusingRun::Restore, &fx34_k3_sentence());
     let old = fx34_fixture("k3-runner.log");
     assert!(old.ends_with("refusal-reason=GuardRefused\n"));
     old.replace(
@@ -10776,6 +10776,23 @@ fn fx34_detail(code: &str, message: &str) -> String {
     format!(
         "{REFUSAL_DETAIL_PREFIX}{}",
         serde_json::json!({ "code": code, "message": message })
+    )
+}
+
+/// A log tail whose last two lines are `detail` and a plain state line: the
+/// position the runner prints its detail line at, and the only one it is
+/// honoured at.
+fn fx34_at_the_position(detail: &str) -> String {
+    format!("{detail}\nrefusal-reason=GuardRefused\n")
+}
+
+/// The two lines a runner carrying FX-34 prints last for `message`, built by
+/// its own formatters.
+fn fx34_runner_pair(message: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        refusal_detail_line(RefusingRun::Restore, message),
+        logweir_core::guard::refusal_reason_line(message)
     )
 }
 
@@ -10905,7 +10922,11 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
 
     let (status, seen) = fx34_refused(fx34_k3_log_with_detail()).await;
     let sentence = fx34_k3_sentence();
-    let expected = format!("{FX34_OLD_MESSAGE}{FX34_STATED}{sentence}");
+    // K3's opening word was a reason code when PoC batch 5 ran and is in no
+    // closed set today (PROD-11.1b retired that refusal), so it is shown as
+    // what any word outside the set is: part of the sentence, behind the
+    // default code.
+    let expected = format!("{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: {sentence}");
     assert_eq!(fx34_message(&status), expected);
     assert!(
         sentence.starts_with(
@@ -10956,13 +10977,27 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
         (32, 524_288)
     );
     fx34_assert_nothing_raw(&seen, "k3");
+
+    // A REFUSAL THIS BUILD MAKES, WITH A CODE OF ITS OWN: every member of a
+    // restore's closed set arrives as the code, with the sentence after it.
+    for code in RESTORE_REASON_CODES {
+        let message = format!("{code}: a sentence that says what to change");
+        let (status, _) = fx34_refused(log_body(&fx34_runner_pair(&message))).await;
+        assert_eq!(
+            fx34_message(&status),
+            format!("{FX34_OLD_MESSAGE}{FX34_STATED}{message}"),
+            "{code}"
+        );
+    }
 }
 
 /// The log tails of the passes FX-34 must not change, each carrying a VALID
 /// detail line: only an exit 3 may lift one.
 fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
-    let detail = refusal_detail_line("StorageRegionInvalid: a sentence only an exit 3 may carry")
-        .expect("a line");
+    let detail = refusal_detail_line(
+        RefusingRun::Restore,
+        "StorageRegionInvalid: a sentence only an exit 3 may carry",
+    );
     vec![
         ("exit-0-with-keys", 0, format!("{detail}\n{}", i8_tail())),
         ("exit-0-without-keys", 0, format!("{detail}\n")),
@@ -11086,10 +11121,10 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
 /// exact message the status must carry. `fx34_assert_nothing_raw` then walks
 /// every string the pass wrote.
 ///
-/// TWO DETAIL LINES: THE LAST ONE COUNTS. The runner prints its own line
-/// last, immediately before `refusal-reason=`, after everything the run could
-/// have printed, so a look-alike from a library or from text the run echoed
-/// is superseded by it. A first-wins reader would show the look-alike.
+/// THE LINE IS HONOURED WHERE THE RUNNER PRINTS IT AND NOWHERE ELSE: directly
+/// before the final `refusal-reason=` line. Every arm about what a line HOLDS
+/// therefore puts it there (`fx34_at_the_position`), so what refuses it is
+/// what the arm names and not its place.
 #[tokio::test]
 async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     let unreadable = format!(
@@ -11111,121 +11146,132 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         kept.push(TRUNCATION_MARKER);
         kept
     };
+    let here = fx34_at_the_position;
 
     let arms: Vec<(&str, String, String)> = vec![
         (
             "a detail line of 100 KiB",
-            format!("{}\n", fx34_detail("GuardRefused", &words(100 * 1024))),
+            here(&fx34_detail("GuardRefused", &words(100 * 1024))),
             unreadable.clone(),
         ),
         (
             "a sentence over the bound is cut on a character boundary with a marker",
-            format!("{}\n", fx34_detail("GuardRefused", &over_bound)),
+            here(&fx34_detail("GuardRefused", &over_bound)),
             stated(&format!("GuardRefused: {cut}")),
         ),
         (
-            "two detail lines: the last one counts",
+            "an invalid line at the position is not rescued by a valid earlier one",
             format!(
-                "{}\n{}\n",
-                fx34_detail("First", "the first line"),
-                fx34_detail("Last", "the last line")
-            ),
-            stated("Last: the last line"),
-        ),
-        (
-            "a look-alike printed by a library before the runner's own line",
-            format!(
-                "{}\nguard: plan refused by the admission guard: the real reason\n{}\n\
-                 refusal-reason=GuardRefused\n",
-                fx34_detail("Forged", "printed by something the run echoed"),
-                fx34_detail("GuardRefused", "the real reason"),
-            ),
-            stated("GuardRefused: the real reason"),
-        ),
-        (
-            "an invalid last line is not rescued by a valid earlier one",
-            format!(
-                "{}\n{REFUSAL_DETAIL_PREFIX}{{\"code\":\"Bad Code\",\"message\":\"m\"}}\n",
-                fx34_detail("Earlier", "a valid earlier line")
+                "{}\n{}",
+                fx34_detail("PointUntrusted", "a valid earlier line"),
+                here(&format!(
+                    "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"Bad Code\",\"message\":\"m\"}}"
+                ))
             ),
             unreadable.clone(),
         ),
         (
             "a reason code that is not a code",
-            format!("{}\n", fx34_detail("<script>alert(1)</script>", "a sentence")),
+            here(&fx34_detail("<script>alert(1)</script>", "a sentence")),
             unreadable.clone(),
         ),
         (
             "a reason code over 64 bytes",
-            format!("{}\n", fx34_detail(&"A".repeat(65), "a sentence")),
+            here(&fx34_detail(&"A".repeat(65), "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a well-formed word that is in no closed set",
+            here(&fx34_detail("Succeeded", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a retired code",
+            here(&fx34_detail("PartitionSubsetsAwaitOwnerDecision", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a backup's code in a restore's log",
+            here(&fx34_detail("ConsumerGroupIdInvalid", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a detail beside a state it was not printed with",
+            format!(
+                "{}\nrefusal-reason=TargetTopicConfigRefused\n",
+                fx34_detail("PointUntrusted", "a sentence")
+            ),
             unreadable.clone(),
         ),
         (
             "control characters, an ANSI escape, a line break and a bidi override",
-            format!(
-                "{}\n",
-                fx34_detail(
-                    "GuardRefused",
-                    "topic\u{0000} `a\u{001B}[2Jb`\nsecond line\r\n\tthird \u{202E}reversed\u{202C} \
-                     zero\u{200B}width"
-                )
-            ),
+            here(&fx34_detail(
+                "GuardRefused",
+                "topic\u{0000} `a\u{001B}[2Jb`\nsecond line\r\n\tthird \u{202E}reversed\u{202C} \
+                 zero\u{200B}width",
+            )),
             stated(&format!(
                 "GuardRefused: topic `a [2Jb` second line third {r}reversed{r} zero{r}width"
             )),
         ),
         (
             "markup is kept as the text it is",
-            format!(
-                "{}\n",
-                fx34_detail("GuardRefused", "<script>alert(1)</script> &lt;b&gt; <img src=x onerror=y>")
-            ),
+            here(&fx34_detail(
+                "GuardRefused",
+                "<script>alert(1)</script> &lt;b&gt; <img src=x onerror=y>",
+            )),
             stated("GuardRefused: <script>alert(1)</script> &lt;b&gt; <img src=x onerror=y>"),
         ),
         (
             "a credential shape is removed",
-            format!(
-                "{}\n",
-                fx34_detail(
-                    "GuardRefused",
-                    "http://user:hunter2@minio:9000/b?X-Amz-Signature=abc sasl.password=hunter2"
-                )
-            ),
+            here(&fx34_detail(
+                "GuardRefused",
+                "http://user:hunter2@minio:9000/b?X-Amz-Signature=abc sasl.password=hunter2",
+            )),
             stated("GuardRefused: http://minio:9000/b sasl.password=[redacted]"),
         ),
         (
             "the key inside another line is not the line",
-            "{\"level\":\"ERROR\",\"message\":\"refusal-detail={\\\"code\\\":\\\"A\\\",\\\"message\\\":\\\"m\\\"}\"}\n \
-             refusal-detail={\"code\":\"A\",\"message\":\"indented\"}\n"
+            "{\"level\":\"ERROR\",\"message\":\"refusal-detail={\\\"code\\\":\\\"GuardRefused\\\",\\\"message\\\":\\\"m\\\"}\"}\n \
+             refusal-detail={\"code\":\"GuardRefused\",\"message\":\"indented\"}\nrefusal-reason=GuardRefused\n"
                 .to_string(),
             FX34_OLD_MESSAGE.to_string(),
         ),
         (
             "not JSON",
-            format!("{REFUSAL_DETAIL_PREFIX}GuardRefused: a sentence\n"),
+            here(&format!("{REFUSAL_DETAIL_PREFIX}GuardRefused: a sentence")),
             unreadable.clone(),
         ),
         (
             "a JSON array",
-            format!("{REFUSAL_DETAIL_PREFIX}[\"GuardRefused\",\"a sentence\"]\n"),
+            here(&format!("{REFUSAL_DETAIL_PREFIX}[\"GuardRefused\",\"a sentence\"]")),
             unreadable.clone(),
         ),
         (
             "a third member",
-            format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"A\",\"message\":\"m\",\"html\":\"<b>\"}}\n"),
+            here(&format!(
+                "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\"m\",\"html\":\"<b>\"}}"
+            )),
             unreadable.clone(),
         ),
         (
             "a repeated member",
-            format!("{REFUSAL_DETAIL_PREFIX}{{\"code\":\"A\",\"message\":\"m\",\"message\":\"n\"}}\n"),
+            here(&format!(
+                "{REFUSAL_DETAIL_PREFIX}{{\"code\":\"GuardRefused\",\"message\":\"m\",\"message\":\"n\"}}"
+            )),
             unreadable.clone(),
         ),
         (
             "a sentence with nothing printable in it",
-            format!("{}\n", fx34_detail("GuardRefused", "\u{0007}\n\t ")),
+            here(&fx34_detail("GuardRefused", "\u{0007}\n\t ")),
             unreadable.clone(),
         ),
     ];
+    // NEGATIVE CONTROL for every `unreadable` arm: the same position holds a
+    // line that IS shown.
+    let (control, _) =
+        fx34_refused(log_body(&here(&fx34_detail("GuardRefused", "a sentence")))).await;
+    assert_eq!(fx34_message(&control), stated("GuardRefused: a sentence"));
     for (label, tail, expected) in arms {
         let (status, seen) = fx34_refused(log_body(&tail)).await;
         assert_eq!(fx34_message(&status), expected, "[{label}]");
@@ -11272,6 +11318,176 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
         fx34_assert_nothing_raw(&seen, label);
     }
+}
+
+/// **A plan can start a line in the pod log, and a line it started is never
+/// shown as the runner's** (PROD-15.1's review, applied to this line).
+///
+/// The runner prints an error's text raw on stderr; an error may repeat a
+/// plan value; a YAML scalar may hold a line break. So a `refusal-detail=`
+/// line, a `refusal-reason=` line or both can stand at the start of a log line
+/// because the plan's author put them there. The controller honours the
+/// detail line only where the runner prints it: directly before the final
+/// `refusal-reason=` line.
+///
+/// (a) is the reviewer's own shape. (c) and (d) are the same idea from two
+/// more directions. The last arms are what the rule does when the log is NOT
+/// in the order the runner wrote it, because a pod log is two streams merged.
+///
+/// KILLS: "the last valid detail line in the tail counts" (the three
+/// `misplaced` arms); "the first one counts" ((a), (c), (d)); "text may
+/// follow the pair whatever else the log holds" (the forged block copied
+/// last); "the pair must end the log, always" (the human line copied last).
+#[tokio::test]
+async fn a_forged_refusal_line_is_ignored_wherever_the_runner_did_not_print_it() {
+    let stated = |text: &str| format!("{FX34_OLD_MESSAGE}{FX34_STATED}{text}");
+    let misplaced = format!(
+        "{FX34_OLD_MESSAGE}; the runner gave no readable reason: the pod log has a \
+         `refusal-detail=` line that is not where the runner prints it, directly before the \
+         final `refusal-reason=` line, so nothing from it is shown"
+    );
+    const GENUINE: &str = "restore.partitions.orders names partition 99, which the archive \
+                           set's manifest does not list for `orders`";
+    const FORGED: &str = "Contact the address in this message to release your data";
+    let genuine = fx34_runner_pair(GENUINE);
+    let genuine_shown = stated(&format!("GuardRefused: {GENUINE}"));
+    // The forged lines are VALID: a code of the closed set, a clean sentence,
+    // a state that agrees. Nothing but their place tells them apart.
+    let forged_detail = fx34_detail("TargetTopicConfigRefused", FORGED);
+    let forged_pair = format!("{forged_detail}\nrefusal-reason=TargetTopicConfigRefused\n");
+    let human = format!("guard: plan refused by the admission guard: {GENUINE}\n");
+    let tracing =
+        "{\"level\":\"INFO\",\"fields\":{\"message\":\"drill finished\",\"exit_code\":3}}\n";
+
+    // NEGATIVE CONTROL: the forged pair, where the runner prints, IS shown.
+    // So every arm below that does not show it is refusing its PLACE.
+    let (control, _) = fx34_refused(log_body(&forged_pair)).await;
+    assert_eq!(
+        fx34_message(&control),
+        stated(&format!("TargetTopicConfigRefused: {FORGED}"))
+    );
+
+    let arms: Vec<(&str, String, &str, Option<&str>)> = vec![
+        (
+            "(a) the reviewer's shape: markers inside the error text, the runner's pair last",
+            format!(
+                "guard: plan refused by the admission guard: source.backup `x\n{forged_pair}` is \
+                 not a backup set id\n{tracing}{genuine}"
+            ),
+            genuine_shown.as_str(),
+            Some("GuardRefused"),
+        ),
+        (
+            "(c) a forged marker earlier in the tail, a genuine different pair last",
+            format!("{forged_detail}\n{human}{tracing}{genuine}"),
+            genuine_shown.as_str(),
+            Some("GuardRefused"),
+        ),
+        (
+            "(d) two detail lines back to back: the one directly before the state line",
+            format!("{forged_detail}\n{genuine}"),
+            genuine_shown.as_str(),
+            Some("GuardRefused"),
+        ),
+        (
+            "(d) two complete pairs: the one that ends the log",
+            format!("{forged_pair}{genuine}"),
+            genuine_shown.as_str(),
+            Some("GuardRefused"),
+        ),
+        (
+            "the human line copied AFTER the runner's pair (two streams, no promised order)",
+            format!("{tracing}{genuine}{human}"),
+            genuine_shown.as_str(),
+            Some("GuardRefused"),
+        ),
+        (
+            "the forged block copied after the runner's pair, text after its markers",
+            format!(
+                "{tracing}{genuine}guard: plan refused by the admission guard: source.backup \
+                 `x\n{forged_pair}` is not a backup set id\n"
+            ),
+            misplaced.as_str(),
+            None,
+        ),
+        (
+            "a detail line and no state line",
+            format!("{human}{forged_detail}\n"),
+            misplaced.as_str(),
+            None,
+        ),
+        (
+            "a detail line that is not directly before the state line",
+            format!("{forged_detail}\n{human}refusal-reason=GuardRefused\n"),
+            misplaced.as_str(),
+            None,
+        ),
+        (
+            "a detail line after the state line",
+            format!("{human}refusal-reason=GuardRefused\n{forged_detail}\n"),
+            misplaced.as_str(),
+            None,
+        ),
+    ];
+    for (label, tail, expected, exit_reason) in arms {
+        let (status, seen) = fx34_refused(log_body(&tail)).await;
+        assert_eq!(fx34_message(&status), expected, "[{label}]");
+        assert_eq!(status["progress"]["message"], expected, "[{label}]");
+        if let Some(exit_reason) = exit_reason {
+            assert_eq!(status["exitReason"], exit_reason, "[{label}]");
+        }
+        let mut strings = Vec::new();
+        fx34_strings(&status, &mut strings);
+        assert!(
+            !strings.iter().any(|s| s.contains(FORGED)),
+            "[{label}] the forged sentence is nowhere in the status"
+        );
+        assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
+        fx34_assert_nothing_raw(&seen, label);
+    }
+}
+
+/// **(b) A forged refusal pair as the last lines of a log whose exit code is
+/// not 3 is ignored**: the pass writes byte for byte what it writes without
+/// it.
+///
+/// The CONTROL is the same pair at the end of an exit-3 log, where it is
+/// shown: so what ignores it here is the exit code and nothing about the
+/// lines.
+///
+/// KILLS: the gate widened to any other exit code.
+#[tokio::test]
+async fn a_forged_refusal_pair_at_the_end_of_another_exit_codes_log_is_ignored() {
+    const FORGED: &str = "TargetTopicConfigRefused: forged, and well-formed";
+    let forged = fx34_runner_pair(FORGED);
+    for (label, exit_code, tail) in [
+        ("exit 1", 1, "operational: boom\n".to_string()),
+        ("exit 2 with its keys", 2, i8_tail()),
+        ("exit 2 without keys", 2, "a drill ran\n".to_string()),
+        ("exit 0 with its keys", 0, i8_tail()),
+        ("exit 4", 4, "signing or lock proof failed: x\n".to_string()),
+        ("exit 137", 137, "killed\n".to_string()),
+    ] {
+        let plain = fx34_observe(exit_code, &tail).await;
+        for (place, log) in [
+            ("last", format!("{tail}{forged}")),
+            ("first", format!("{forged}{tail}")),
+        ] {
+            let got = fx34_observe(exit_code, &log).await;
+            assert_eq!(got, plain, "[{label}, the pair {place}]");
+            assert!(
+                !got.to_string().contains("forged, and well-formed"),
+                "[{label}, the pair {place}]"
+            );
+        }
+    }
+    let (shown, _) = fx34_refused(log_body(&format!("operational: boom\n{forged}"))).await;
+    assert_eq!(
+        fx34_message(&shown),
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}{FORGED}"),
+        "the control: at exit 3 the same lines are the runner's"
+    );
+    assert_eq!(shown["exitReason"], "TargetTopicConfigRefused");
 }
 
 /// Invalid UTF-8 is a body `Route` cannot hold, so this row answers the log
@@ -11518,7 +11734,7 @@ async fn a_refusal_recomputed_later_is_the_same_bytes_and_is_not_written_again()
             later,
         )
     };
-    let same = recompute(&runner_reason(&log));
+    let same = recompute(&runner_reason(RefusingRun::Restore, &log));
     assert!(
         weirkeeper::conditions::status_unchanged(Some(&stored), &same),
         "an hour later the recomputed status is what is stored: {same}"
@@ -11639,24 +11855,36 @@ async fn a_refusal_state_that_is_not_a_state_name_never_reaches_exit_reason() {
 /// because one of them was cut.
 #[tokio::test]
 async fn the_longest_refusal_message_fits_the_progress_field() {
-    let code = "A".repeat(64);
+    let code = RESTORE_REASON_CODES
+        .into_iter()
+        .max_by_key(|c| c.len())
+        .expect("the set is not empty");
     // 1200 bytes: under the line bound, over the sentence bound.
     let sentence = "wörd ".repeat(200);
-    let (status, _) = fx34_refused(log_body(&format!("{}\n", fx34_detail(&code, &sentence)))).await;
+    let (status, _) = fx34_refused(log_body(&fx34_at_the_position(&fx34_detail(
+        code, &sentence,
+    ))))
+    .await;
     let message = fx34_message(&status);
     assert!(message.starts_with(&format!("{FX34_OLD_MESSAGE}{FX34_STATED}{code}: w")));
     assert!(message.ends_with(TRUNCATION_MARKER), "{message}");
-    assert!(message.len() <= 1024, "{} bytes", message.len());
     assert_eq!(
         message.len(),
-        FX34_OLD_MESSAGE.len() + FX34_STATED.len() + 64 + 2 + REASON_MESSAGE_MAX_BYTES,
-        "the old text, the label, a 64-byte code, `: ` and a 760-byte sentence"
+        FX34_OLD_MESSAGE.len() + FX34_STATED.len() + code.len() + 2 + REASON_MESSAGE_MAX_BYTES,
+        "the old text, the label, the code, `: ` and a 760-byte sentence"
     );
+    // The bound's note counts a code of the pattern's full 64 bytes, which is
+    // more than any member of a closed set: 997, inside the field's 1024.
     assert_eq!(
-        (FX34_OLD_MESSAGE.len(), FX34_STATED.len(), message.len()),
+        (
+            FX34_OLD_MESSAGE.len(),
+            FX34_STATED.len(),
+            FX34_OLD_MESSAGE.len() + FX34_STATED.len() + 64 + 2 + REASON_MESSAGE_MAX_BYTES
+        ),
         (123, 48, 997),
         "the figures `REASON_MESSAGE_MAX_BYTES`'s note quotes"
     );
+    assert!(code.len() <= 64 && message.len() <= 997);
     assert_eq!(status["progress"]["message"], message);
 }
 

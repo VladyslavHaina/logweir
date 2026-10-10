@@ -5911,14 +5911,37 @@ pod runs in the tenant's namespace, and its sentence repeats what the plan, the
 broker and the archive said. So the controller takes one line, validates it,
 and cleans it before it is stored:
 
-- **One line, by its key name.** The runner prints
-  `refusal-detail={"code":"…","message":"…"}` immediately before
-  `refusal-reason=` ([the line's contract](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
-  The controller reads the last such line in the final sixteen non-empty log
-  lines. A line printed earlier by anything else is superseded by the runner's
-  own, and if the last one does not validate nothing is shown.
-- **The code** is ASCII letters and digits, a letter first, at most 64 bytes.
-  A refusal with no name of its own carries `GuardRefused`.
+- **One line, and only where the runner prints it.** At every exit 3 the
+  runner's last two lines are `refusal-detail={"code":"…","message":"…"}` and
+  then `refusal-reason=`
+  ([the line's contract](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
+  The controller honours the detail line at that position, directly before the
+  final `refusal-reason=` line, and nowhere else. This is not caution for its
+  own sake: whoever writes a plan can start a line in the runner's log, because
+  the runner prints an error's text as it is and an error may repeat a plan
+  value that holds a line break. A `refusal-detail=` line anywhere else in the
+  log is therefore ignored however well-formed it is, and so is a second one.
+- **Lines after the pair.** A pod log is stdout and stderr merged in no
+  promised order, and the runner's human line is on stderr, so it can be
+  copied after the pair. The controller accepts that only when the pair is the
+  one `refusal-detail=` line and the one `refusal-reason=` line in everything
+  it read, and no more than fourteen lines follow. One more of either key
+  anywhere and nothing is shown.
+- **The code is one of a closed list, per kind.** It must be a code that kind
+  of run can print; any other word is not shown, however code-shaped. For a
+  `Restore`: `GuardRefused`, `CredentialNotRenderable`,
+  `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`,
+  `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`,
+  `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`,
+  `PointUntrusted`, `RehearsalScopeViolation`. For a `Backup`: `GuardRefused`,
+  `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`,
+  `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`,
+  `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
+  `WorkloadIdentityNotInjected`. A refusal with no name of its own carries
+  `GuardRefused`, and so does one whose sentence opens with a word that is
+  not on its kind's list: the word stays in the sentence.
+- **The two lines agree.** The state on `refusal-reason=` is the detail's code
+  or `GuardRefused`; a detail line beside any other state is not shown.
 - **The sentence** keeps printable ASCII and `§ – — … →`. A run of whitespace
   or control characters (a line break, a tab, an ANSI escape's `ESC`) becomes
   one space, and a run of anything else (a bidi override, a zero-width
@@ -5941,7 +5964,8 @@ and cleans it before it is stored:
 | The message ends with | It means |
 |---|---|
 | *(nothing after `…exitCode`)* | The runner printed no `refusal-detail=` line: it predates this release. The pod log, while it exists, has the sentence. |
-| ``; the runner gave no readable reason: its `refusal-detail=` line did not validate, so nothing from it is shown`` | The line was there and was not what a runner prints: a bad code, not the two-member JSON object, or longer than 2048 bytes. |
+| ``; the runner gave no readable reason: its `refusal-detail=` line did not validate, so nothing from it is shown`` | The line was where the runner prints it and was not what a runner prints: a code that is not on that kind's list, not the two-member JSON object, longer than 2048 bytes, or beside a `refusal-reason=` state it could not have been printed with. |
+| ``; the runner gave no readable reason: the pod log has a `refusal-detail=` line that is not where the runner prints it, directly before the final `refusal-reason=` line, so nothing from it is shown`` | A `refusal-detail=` line is in the log and none is at the runner's position: another line stands between it and the state line, it follows the state line, there is no state line, or other lines follow the pair and the log holds a second line of either key. Read the pod log while it exists. If the plan holds line breaks in a value, that is the likely cause. |
 | `; the runner's reason could not be read because the pod is gone` | The pod was already collected when the controller read its log (a `404`). The exit code was read before that and is recorded. |
 | `; the runner's reason could not be read: the pod log read answered HTTP 403` (or `500`, …) | The read was refused or failed. The controller logs one warning naming the pod and the status, and does not read again. |
 | `; the runner's reason could not be read: the last 32 lines of the pod log are over the 512 KiB this controller reads` | Possible only on a runtime that stores log lines longer than CRI's default 16 KiB. Nothing is taken from a log that was cut, the terminal state included (`exitReason: GuardRefusedUnknownReason`). |
@@ -5952,9 +5976,28 @@ reconcile failing, which is what a `403` on `pods/log` used to do. Only exit 3
 changed. Every other exit code reads the log as it always did, and a failure
 of that read is still a reconcile error.
 
-`refusal-reason=`'s own value is held to the same rule as the code: it reaches
-`status.exitReason` only when it is a state name (ASCII letters and digits, 64
-bytes). Anything else is `GuardRefusedUnknownReason`.
+`refusal-reason=`'s own value reaches `status.exitReason` only when it is
+shaped like a state name (ASCII letters and digits, 64 bytes); anything else is
+`GuardRefusedUnknownReason`. It is still read the way it always was, as the
+last such line in the final sixteen non-empty lines, and its list of states is
+not closed, so a newer runner's state arrives.
+
+**What the sentence can still hold.** It is the runner's sentence, and a
+refusal names what it refused: a topic, a field, a cluster id. Those are words
+the plan's author chose, and they are in the message, cleaned and inside the
+760 bytes. Treat the text after "the runner's own reason" as a description of
+that one object written partly by whoever wrote its plan, not as a statement
+by the platform.
+
+**What the position rule does not decide.** The controller tells the runner's
+line from a forged one by where it stands, and the two streams of a pod log
+are merged in no promised order. A runner image that prints an error's text
+with its line breaks puts text the plan chose on stderr; if that text is copied
+after the runner's own two lines and itself ends with a well-formed pair, that
+pair ends the log and is shown. What it can then say is bounded by everything
+above: a code from the kind's list, a cleaned sentence of 760 bytes, on the
+plan author's own object. A runner that escapes line breaks in the error text
+it prints closes it.
 
 ### What a run says about itself while it is running — `status.progress`
 

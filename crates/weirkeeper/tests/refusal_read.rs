@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use logweir_core::refusal_detail::refusal_detail_line;
+use logweir_core::refusal_detail::{refusal_detail_line, RefusingRun};
 use weirkeeper::refusal::{read, RefusalLog, RunnerReason};
 use weirkeeper::testing::{mock_client_recording, Route};
 
@@ -59,7 +59,7 @@ async fn capture(status: u16, body: String) -> (RefusalLog, Vec<serde_json::Valu
         body,
     }]);
     let pods: Api<Pod> = Api::namespaced(client, NS);
-    let log = read(&pods, NS, POD).await;
+    let log = read(&pods, NS, POD, RefusingRun::Restore).await;
     let requests = seen.lock().unwrap().len();
     let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
     let events = text
@@ -130,21 +130,32 @@ async fn a_refused_or_failed_read_is_an_answer_and_one_warning() {
 /// no event at all. Whatever a read logs, it never logs the log.
 #[tokio::test]
 async fn a_read_logs_nothing_the_pod_wrote() {
-    let detail = refusal_detail_line(SENTENCE).expect("a line");
+    let detail = refusal_detail_line(RefusingRun::Restore, SENTENCE);
     let body = format!("{detail}\nrefusal-reason=GuardRefused\n");
     let (log, events, _) = capture(200, body.clone()).await;
     match &log.reason {
-        RunnerReason::Stated(d) => assert_eq!(d.to_string(), SENTENCE),
+        // `SeededReason` is in no closed set, so it stays in the sentence.
+        RunnerReason::Stated(d) => assert_eq!(d.to_string(), format!("GuardRefused: {SENTENCE}")),
         other => panic!("{other:?}"),
     }
     assert_eq!(log.body, body);
     assert!(events.is_empty(), "{events:?}");
 
-    // A line that does not validate, and a tail over the bound: each is said
-    // at `debug`, and neither event quotes the line.
-    let bad = format!("refusal-detail={{\"code\":\"Bad Code\",\"message\":\"{SENTENCE}\"}}\n");
+    // A line that does not validate, a line that is not where the runner
+    // prints it, and a tail over the bound: each is said at `debug`, and no
+    // event quotes the line.
+    let bad = format!(
+        "refusal-detail={{\"code\":\"Bad Code\",\"message\":\"{SENTENCE}\"}}\n\
+         refusal-reason=GuardRefused\n"
+    );
     let (log, events, _) = capture(200, bad).await;
     assert_eq!(log.reason, RunnerReason::Unreadable);
+    assert_eq!(levels(&events), vec!["DEBUG"]);
+    assert!(!format!("{events:?}").contains("seeded-refusal-sentence"));
+
+    let misplaced = format!("{detail}\nanother line\nrefusal-reason=GuardRefused\n");
+    let (log, events, _) = capture(200, misplaced).await;
+    assert_eq!(log.reason, RunnerReason::Misplaced);
     assert_eq!(levels(&events), vec!["DEBUG"]);
     assert!(!format!("{events:?}").contains("seeded-refusal-sentence"));
 

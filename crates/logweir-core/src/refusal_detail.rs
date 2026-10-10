@@ -15,10 +15,11 @@
 //! refusal-detail={"code":"<ReasonCode>","message":"<sentence>"}
 //! ```
 //!
-//! One JSON object with exactly those two string members, on one line, read
-//! by its key name like every other line a controller takes off a log
-//! (erratum E4). The runner prints it at exit 3 only, immediately BEFORE
-//! `refusal-reason=`, so I9's "the final stdout line" still holds.
+//! One JSON object with exactly those two string members, on one line. The
+//! runner prints it at exit 3 only, ALWAYS, immediately BEFORE
+//! `refusal-reason=`, so I9's "the final stdout line" still holds and the two
+//! lines are the last two the runner writes. A controller honours it at that
+//! position and nowhere else (`weirkeeper::refusal::runner_reason`).
 //!
 //! # A pod log is untrusted text, on both sides
 //!
@@ -30,7 +31,9 @@
 //!
 //! * the code is ASCII letters and digits, at most
 //!   [`REASON_CODE_MAX_BYTES`] bytes, starting with a letter
-//!   ([`is_reason_code`]); anything else and the whole line is refused;
+//!   ([`is_reason_code`]), AND a member of the closed set of codes the
+//!   refusing runner can print ([`RefusingRun::reason_codes`], one set per
+//!   kind of run); anything else and the whole line is refused;
 //! * the sentence is reduced to printable text ([`clean_message`]): every
 //!   control character, line break, bidi override and other code point
 //!   outside the small allow-list is replaced, credential shapes are removed
@@ -44,6 +47,16 @@
 //! The runner cleans before it prints and the reader cleans again. The second
 //! pass is what a controller relies on; the first keeps an honest runner's
 //! line inside the bounds the reader enforces.
+//!
+//! # A line in a pod log can be forged by whoever wrote the plan
+//!
+//! The runner prints an error's text raw on stderr, some errors repeat a plan
+//! value, and a YAML scalar may hold a line break: a plan can start a line of
+//! its own choosing in the pod log (PROD-15.1's review). So a well-formed
+//! line is not thereby the runner's. Two things here answer that and the
+//! third is the reader's: the code is one of a CLOSED set per kind, the two
+//! refusal lines must AGREE ([`RefusalDetail::agrees_with_state`]), and the
+//! reader takes the line only from the position the runner prints it at.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,16 +86,17 @@ pub const REASON_CODE_MAX_BYTES: usize = 64;
 /// interpolated: at the 512 every other relayed message is capped at
 /// ([`crate::check_contract::MESSAGE_MAX_CHARS`]) the commonest real refusal
 /// would lose its last clause with one topic in it. At 760 it keeps about
-/// eight. The refusal PoC batch 5 met is 366 bytes.
+/// eight. The refusal PoC batch 5 met is 402 bytes, its opening word included.
 ///
 /// BYTES, not characters, because a status is stored and sent as bytes.
 pub const REASON_MESSAGE_MAX_BYTES: usize = 760;
 
 /// The longest `refusal-detail=` line, prefix included, in bytes.
 ///
-/// [`RefusalDetail::to_line`] cannot exceed it: a 64-byte code, a 760-byte
-/// sentence whose every byte is a `"` or a `\` and doubles in JSON, and 39
-/// bytes of prefix and punctuation come to 1623. It is well under the 16 KiB
+/// [`RefusalDetail::to_line`] cannot exceed it: a code of at most 64 bytes
+/// (the longest in a closed set is 30), a 760-byte sentence whose every byte
+/// is a `"` or a `\` and doubles in JSON, and 39 bytes of prefix and
+/// punctuation come to at most 1623. It is well under the 16 KiB
 /// at which CRI splits a container log line, so the line always arrives
 /// whole. A reader ignores a longer line instead of parsing it.
 pub const REFUSAL_DETAIL_LINE_MAX_BYTES: usize = 2048;
@@ -95,6 +109,78 @@ pub const REPLACEMENT: char = '\u{FFFD}';
 
 /// The code of a refusal whose sentence opens with none: I9's default state.
 pub const DEFAULT_REASON_CODE: &str = crate::guard::TERMINAL_STATE_GUARD_REFUSED;
+
+/// What the line carries for a refusal that has nothing printable in it. The
+/// runner prints a detail line at EVERY exit 3, so that the position a reader
+/// trusts is never left for another line to occupy.
+pub const NO_SENTENCE: &str = "the refusal carried no sentence";
+
+/// Which runner refused. Each kind of run has its OWN closed set of reason
+/// codes: a `Backup`'s log cannot put a restore-only code on a `Backup`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusingRun {
+    /// `logweir restore run` (and its alias `drill run`): a `Restore`'s Job.
+    Restore,
+    /// `logweir backup run`: a `Backup`'s Job.
+    Backup,
+}
+
+/// Every reason code `logweir restore run` can print: the code a guard
+/// refusal's sentence may open with on that path, and the default.
+///
+/// The list is the exit-3 sweep's (FX-34's report carries the table, one row
+/// per place a refusal is built). Four of the codes are constants of the
+/// `logweir` crate, which this crate cannot name; `crates/logweir/tests/
+/// refusal_detail.rs` holds each literal here to its constant.
+pub const RESTORE_REASON_CODES: [&str; 13] = [
+    crate::guard::TERMINAL_STATE_GUARD_REFUSED,
+    crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    crate::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+    crate::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
+    crate::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    crate::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    crate::guard::STORAGE_REGION_INVALID,
+    crate::execution_contract::AUTHORIZATION_INVALID,
+    crate::execution_contract::AUTHORIZATION_EXPIRED,
+    // `logweir::drill::binding`'s four.
+    "PointBindingMismatch",
+    "PointBindingSetMismatch",
+    "PointUntrusted",
+    "RehearsalScopeViolation",
+];
+
+/// Every reason code `logweir backup run` can print. See
+/// [`RESTORE_REASON_CODES`]; the last one is
+/// `logweir_engine_oso::storage::WORKLOAD_IDENTITY_NOT_INJECTED`.
+pub const BACKUP_REASON_CODES: [&str; 9] = [
+    crate::guard::TERMINAL_STATE_GUARD_REFUSED,
+    crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+    crate::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+    crate::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    crate::guard::STORAGE_REGION_INVALID,
+    crate::consumer_positions::SELECTION_TOO_LARGE,
+    crate::consumer_positions::SELECTION_ID_INVALID,
+    crate::consumer_positions::SELECTION_REPEATED,
+    "WorkloadIdentityNotInjected",
+];
+
+impl RefusingRun {
+    /// The closed set of reason codes this kind of run can print.
+    #[must_use]
+    pub const fn reason_codes(self) -> &'static [&'static str] {
+        match self {
+            Self::Restore => &RESTORE_REASON_CODES,
+            Self::Backup => &BACKUP_REASON_CODES,
+        }
+    }
+
+    /// The member of this kind's closed set that equals `code`, if any. The
+    /// answer is the set's own `&'static str`, never the caller's text.
+    #[must_use]
+    pub fn reason_code(self, code: &str) -> Option<&'static str> {
+        self.reason_codes().iter().copied().find(|c| *c == code)
+    }
+}
 
 /// The typographic punctuation the runner's own sentences use, kept beside
 /// printable ASCII. Every other non-ASCII code point is replaced.
@@ -234,27 +320,28 @@ fn truncate(text: &str) -> String {
 /// named reasons write `<Code>: ` (`StorageRegionInvalid: …`,
 /// `PlainWithoutTls: …`); the recovery-point and standing-authorization
 /// refusals write `<Code>. ` (`PointBindingMismatch. The plan is bound …`).
-/// Both are read. The code is a CamelCase word: an ASCII upper-case letter,
-/// then two or more ASCII letters and digits, at most
-/// [`REASON_CODE_MAX_BYTES`] in all, and the separator is part of the match.
-/// A sentence that opens with anything else carries
-/// [`DEFAULT_REASON_CODE`] and is kept whole.
+/// Both are read, and the separator is part of the match.
+///
+/// **Only a member of `run`'s closed set is a code.** A sentence that opens
+/// with any other word, however code-shaped, carries [`DEFAULT_REASON_CODE`]
+/// and is kept WHOLE, opening word included. So the runner cannot print a
+/// code outside the set whatever a sentence says, and a sentence's first word
+/// (which may be a name the plan chose) never becomes a code by its shape.
 ///
 /// Either way `"{code}: {rest}"` is the runner's own sentence (with `: `
-/// where it wrote `. `), or that sentence behind `GuardRefused: `, so a word
-/// mistaken for a code changes nothing a reader sees.
+/// where it wrote `. `), or that sentence behind `GuardRefused: `, so nothing
+/// a reader sees is lost.
 #[must_use]
-pub fn split_reason_code(message: &str) -> (&str, &str) {
+pub fn split_reason_code(run: RefusingRun, message: &str) -> (&'static str, &str) {
     let word_end = message
         .bytes()
         .position(|b| !b.is_ascii_alphanumeric())
         .unwrap_or(message.len());
     let (head, tail) = message.split_at(word_end);
-    let camel = head.len() >= 3 && head.as_bytes()[0].is_ascii_uppercase() && is_reason_code(head);
-    if camel {
+    if let Some(code) = run.reason_code(head) {
         for separator in [": ", ". "] {
             if let Some(rest) = tail.strip_prefix(separator) {
-                return (head, rest);
+                return (code, rest);
             }
         }
     }
@@ -275,20 +362,21 @@ struct Wire {
 /// A refusal's reason code and sentence, **validated and cleaned**.
 ///
 /// The fields are private and the two constructors below are the only ones,
-/// so a value of this type has always passed [`is_reason_code`] and
-/// [`clean_message`]. What reaches a status is built from one of these and
-/// never from a raw line.
+/// so a value of this type has always passed [`is_reason_code`], is a member
+/// of its run's closed set, and has been through [`clean_message`]. What
+/// reaches a status is built from one of these and never from a raw line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusalDetail {
-    code: String,
+    code: &'static str,
     message: String,
 }
 
 impl RefusalDetail {
-    /// The reason code: [`is_reason_code`] holds.
+    /// The reason code: a member of the refusing run's closed set
+    /// ([`RefusingRun::reason_codes`]), so [`is_reason_code`] holds too.
     #[must_use]
-    pub fn code(&self) -> &str {
-        &self.code
+    pub fn code(&self) -> &'static str {
+        self.code
     }
 
     /// The sentence: [`clean_message`]'s output, never empty.
@@ -300,25 +388,35 @@ impl RefusalDetail {
     /// **The runner's side.** From a guard refusal's own message (the
     /// `GuardRefusal`'s text, not an error enum's wrapped `Display`).
     ///
-    /// `None` when nothing printable is left: a refusal that says nothing
-    /// prints no line, and the reader then reports exactly what it reported
-    /// before this line existed.
+    /// ALWAYS a value. A refusal with nothing printable in it carries
+    /// [`NO_SENTENCE`]: the runner prints a detail line at every exit 3, so
+    /// the one position a reader trusts is always the runner's own line.
     #[must_use]
-    pub fn from_refusal_message(message: &str) -> Option<Self> {
-        let (code, rest) = split_reason_code(message);
-        Self::checked(code, rest)
+    pub fn from_refusal_message(run: RefusingRun, message: &str) -> Self {
+        let (code, rest) = split_reason_code(run, message);
+        let cleaned = clean_message(rest);
+        Self {
+            code,
+            message: if cleaned.is_empty() {
+                NO_SENTENCE.to_string()
+            } else {
+                cleaned
+            },
+        }
     }
 
-    /// **The reader's side.** From one log line, prefix included.
+    /// **The reader's side.** From one log line, prefix included, of a run of
+    /// kind `run`.
     ///
     /// `None` for a line that does not open with [`REFUSAL_DETAIL_PREFIX`],
     /// that is longer than [`REFUSAL_DETAIL_LINE_MAX_BYTES`], whose value is
     /// not a JSON object with exactly the string members `code` and
-    /// `message`, whose code is not a reason code, or whose sentence has
-    /// nothing printable in it. The sentence is cleaned whatever the runner
-    /// did to it.
+    /// `message`, whose code is not a reason code OF THAT KIND OF RUN
+    /// ([`RefusingRun::reason_codes`]: a well-formed word outside the closed
+    /// set is not a code), or whose sentence has nothing printable in it. The
+    /// sentence is cleaned whatever the runner did to it.
     #[must_use]
-    pub fn from_line(line: &str) -> Option<Self> {
+    pub fn from_line(run: RefusingRun, line: &str) -> Option<Self> {
         if line.len() > REFUSAL_DETAIL_LINE_MAX_BYTES {
             return None;
         }
@@ -329,21 +427,31 @@ impl RefusalDetail {
             return None;
         }
         let wire: Wire = serde_json::from_str(value).ok()?;
-        Self::checked(&wire.code, &wire.message)
-    }
-
-    fn checked(code: &str, message: &str) -> Option<Self> {
-        if !is_reason_code(code) {
+        // The pattern first, then the set: the set implies the pattern, and
+        // the pattern is what bounds the comparison's input.
+        if !is_reason_code(&wire.code) {
             return None;
         }
-        let message = clean_message(message);
+        let code = run.reason_code(&wire.code)?;
+        let message = clean_message(&wire.message);
         if message.is_empty() {
             return None;
         }
-        Some(Self {
-            code: code.to_string(),
-            message,
-        })
+        Some(Self { code, message })
+    }
+
+    /// Whether the state a `refusal-reason=` line names is the one THIS
+    /// detail's runner would have printed beside it.
+    ///
+    /// The runner derives both lines from one refusal: the state is the
+    /// detail's code when that code is one of I9's terminal states and the
+    /// sentence named it with `: `, and [`DEFAULT_REASON_CODE`] otherwise. So
+    /// a genuine pair's state is the code or the default, never a third
+    /// word, and a detail line beside a state it could not have been printed
+    /// with is not the runner's.
+    #[must_use]
+    pub fn agrees_with_state(&self, state: &str) -> bool {
+        state == DEFAULT_REASON_CODE || state == self.code
     }
 
     /// The line, prefix included and with no newline. At most
@@ -351,7 +459,7 @@ impl RefusalDetail {
     #[must_use]
     pub fn to_line(&self) -> String {
         let wire = Wire {
-            code: self.code.clone(),
+            code: self.code.to_string(),
             message: self.message.clone(),
         };
         // Two `String` members cannot fail to serialise; the fallback keeps
@@ -369,18 +477,19 @@ impl std::fmt::Display for RefusalDetail {
     }
 }
 
-/// The `refusal-detail=` line for a guard refusal's message, or `None` when
-/// the message has nothing printable in it. Pure, for the reason
-/// [`crate::guard::refusal_reason_line`] is: this crate does no I/O, and the
-/// binary prints what this returns.
+/// The `refusal-detail=` line `run` prints for a guard refusal's message.
+/// Always a line ([`RefusalDetail::from_refusal_message`]). Pure, for the
+/// reason [`crate::guard::refusal_reason_line`] is: this crate does no I/O,
+/// and the binary prints what this returns.
 #[must_use]
-pub fn refusal_detail_line(message: &str) -> Option<String> {
-    RefusalDetail::from_refusal_message(message).map(|d| d.to_line())
+pub fn refusal_detail_line(run: RefusingRun, message: &str) -> String {
+    RefusalDetail::from_refusal_message(run, message).to_line()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use RefusingRun::{Backup, Restore};
 
     /// The sentence PoC batch 5's K3 runner printed (`k3-runner.log`).
     const K3: &str = "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition \
@@ -424,38 +533,47 @@ mod tests {
 
     #[test]
     fn the_real_refusal_round_trips_whole() {
-        let line = refusal_detail_line(K3).expect("a sentence prints a line");
+        // K3's opening word was a reason code when PoC batch 5 ran and is in
+        // no closed set today (PROD-11.1b retired the refusal). So it is what
+        // any word outside the set is: part of the sentence, kept whole,
+        // behind the default code.
+        let line = refusal_detail_line(Restore, K3);
         assert!(line.starts_with(REFUSAL_DETAIL_PREFIX));
         assert!(!line.contains('\n'), "one line: {line}");
-        let read = RefusalDetail::from_line(&line).expect("the reader accepts the runner's line");
-        assert_eq!(read.code(), "PartitionSubsetsAwaitOwnerDecision");
-        assert!(read
-            .message()
-            .starts_with("restore.partitions names a partition subset"));
+        let read =
+            RefusalDetail::from_line(Restore, &line).expect("the reader accepts the runner's line");
+        assert_eq!(read.code(), DEFAULT_REASON_CODE);
+        assert_eq!(read.message(), K3, "the sentence is the runner's own words");
         assert!(
             read.message().ends_with("\"<start>/<end>\", is accepted)"),
             "the remedy at the end survives: {}",
             read.message()
         );
-        assert_eq!(
-            read.to_string(),
-            K3,
-            "code and sentence are the runner's own words"
-        );
+        assert_eq!(read.to_string(), format!("GuardRefused: {K3}"));
         assert_eq!(
             read.message().len(),
-            366,
+            402,
             "the figure the bound's note quotes"
         );
+        // A sentence that opens with a member of the set gives it as the
+        // code, and `<code>: <sentence>` is the runner's own text again.
+        let named = "PointInTimeByProducerTime: topic `lat` records LogAppendTime; state \
+                     restore.time_basis: producerTime";
+        let read = RefusalDetail::from_line(Restore, &refusal_detail_line(Restore, named))
+            .expect("a line");
+        assert_eq!(read.code(), "PointInTimeByProducerTime");
+        assert_eq!(read.to_string(), named);
     }
 
     #[test]
     fn a_sentence_with_no_code_carries_the_default_state() {
         let plain = "target cluster id abc is not in allowedClusterIds";
-        let d = RefusalDetail::from_refusal_message(plain).expect("a line");
+        let d = RefusalDetail::from_refusal_message(Restore, plain);
         assert_eq!(d.code(), DEFAULT_REASON_CODE);
         assert_eq!(d.message(), plain);
-        // Words before a colon that are not ONE CamelCase word are prose.
+        // Words before a colon that are not a member of the set are prose,
+        // however code-shaped: a retired code, a made-up one, a name a plan
+        // chose, and a code of the OTHER kind of run.
         for prose in [
             "plan_hash mismatch: the approval names a",
             "incomplete Restore execution contract: X is missing",
@@ -463,10 +581,43 @@ mod tests {
             "lowercase: is not a code",
             "Has-Dash: is not a code",
             "NoSpaceAfterColon:x",
+            "PartitionSubsetsAwaitOwnerDecision: a retired code",
+            "Succeeded: a word the plan chose",
+            "ConsumerGroupIdInvalid: a backup's code, in a restore's sentence",
+            "WorkloadIdentityNotInjected: another",
+            "GuardRefusedX: a member with a letter added",
+            "guardrefused: a member in another case",
         ] {
-            let d = RefusalDetail::from_refusal_message(prose).expect("a line");
+            let d = RefusalDetail::from_refusal_message(Restore, prose);
+            assert_eq!(d.code(), DEFAULT_REASON_CODE, "{prose}");
+            assert_eq!(d.message(), prose, "kept whole, opening word included");
+        }
+        // And the other way round: a restore's code is prose to a backup.
+        for prose in [
+            "PointUntrusted. the receipt is not signed",
+            "TargetTopicConfigRefused: cleanup.policy is compact",
+            "AuthorizationInvalid. x",
+        ] {
+            let d = RefusalDetail::from_refusal_message(Backup, prose);
             assert_eq!(d.code(), DEFAULT_REASON_CODE, "{prose}");
             assert_eq!(d.message(), prose);
+        }
+        // NEGATIVE CONTROL: each kind's own members ARE promoted, with either
+        // separator, and the sentence loses exactly the word and separator.
+        for (run, codes) in [
+            (Restore, &RESTORE_REASON_CODES[..]),
+            (Backup, &BACKUP_REASON_CODES[..]),
+        ] {
+            for code in codes {
+                for separator in [": ", ". "] {
+                    let d = RefusalDetail::from_refusal_message(
+                        run,
+                        &format!("{code}{separator}a sentence"),
+                    );
+                    assert_eq!(d.code(), *code, "{run:?} {code}{separator}");
+                    assert_eq!(d.message(), "a sentence");
+                }
+            }
         }
     }
 
@@ -474,10 +625,10 @@ mod tests {
     fn a_code_that_ends_in_a_full_stop_is_read_too() {
         // The recovery-point refusals' own spelling (`drill/binding.rs`).
         let d = RefusalDetail::from_refusal_message(
+            Restore,
             "PointBindingMismatch. The plan is bound to recovery point lwp1-abc; no data \
              operation was started.",
-        )
-        .expect("a line");
+        );
         assert_eq!(d.code(), "PointBindingMismatch");
         assert_eq!(
             d.message(),
@@ -490,20 +641,129 @@ mod tests {
             "it. is lower case",
             "Has Space. Not a code",
         ] {
-            let d = RefusalDetail::from_refusal_message(prose).expect("a line");
+            let d = RefusalDetail::from_refusal_message(Restore, prose);
             assert_eq!(d.code(), DEFAULT_REASON_CODE, "{prose}");
             assert_eq!(d.message(), prose);
         }
         // Only at the very start, and only one word.
-        let d = RefusalDetail::from_refusal_message("the plan: PointUntrusted. x").expect("a line");
+        let d = RefusalDetail::from_refusal_message(Restore, "the plan: PointUntrusted. x");
         assert_eq!(d.code(), DEFAULT_REASON_CODE);
     }
 
     #[test]
-    fn a_refusal_that_says_nothing_prints_no_line() {
-        assert_eq!(refusal_detail_line(""), None);
-        assert_eq!(refusal_detail_line(" \n\t "), None);
-        assert_eq!(refusal_detail_line("StorageRegionInvalid: \u{0007}"), None);
+    fn a_refusal_that_says_nothing_still_prints_a_line() {
+        // The runner prints a detail line at EVERY exit 3: the position a
+        // reader trusts must never be left for another line to occupy.
+        for (run, message, code) in [
+            (Restore, "", DEFAULT_REASON_CODE),
+            (Backup, " \n\t ", DEFAULT_REASON_CODE),
+            (
+                Restore,
+                "StorageRegionInvalid: \u{0007}",
+                "StorageRegionInvalid",
+            ),
+        ] {
+            let line = refusal_detail_line(run, message);
+            let read = RefusalDetail::from_line(run, &line).expect("the reader accepts it");
+            assert_eq!(read.code(), code, "{message:?}");
+            assert_eq!(read.message(), NO_SENTENCE, "{message:?}");
+        }
+        // NEGATIVE CONTROL: a sentence is never replaced by that text.
+        assert_eq!(
+            RefusalDetail::from_refusal_message(Restore, "x").message(),
+            "x"
+        );
+    }
+
+    #[test]
+    fn the_closed_sets_are_the_sweeps_and_each_kind_has_its_own() {
+        for (run, codes) in [
+            (Restore, &RESTORE_REASON_CODES[..]),
+            (Backup, &BACKUP_REASON_CODES[..]),
+        ] {
+            assert_eq!(run.reason_codes(), codes);
+            let unique: std::collections::BTreeSet<&str> = codes.iter().copied().collect();
+            assert_eq!(unique.len(), codes.len(), "{run:?}: a code listed twice");
+            for code in codes {
+                assert!(is_reason_code(code), "{code}");
+                assert!(code.len() <= 30, "the line bound's note quotes 30: {code}");
+                assert_eq!(run.reason_code(code), Some(*code));
+            }
+            assert!(
+                codes.contains(&DEFAULT_REASON_CODE),
+                "{run:?} has the default"
+            );
+            // Every state `refusal-reason=` can name is a code of a restore;
+            // a backup has the four it can reach.
+        }
+        for state in crate::guard::TERMINAL_STATES {
+            assert!(RESTORE_REASON_CODES.contains(&state), "{state}");
+        }
+        let restore: std::collections::BTreeSet<&str> = RESTORE_REASON_CODES.into_iter().collect();
+        let backup: std::collections::BTreeSet<&str> = BACKUP_REASON_CODES.into_iter().collect();
+        assert_eq!(
+            restore.intersection(&backup).copied().collect::<Vec<_>>(),
+            vec![
+                "CredentialBindingMismatch",
+                "CredentialNotRenderable",
+                "GuardRefused",
+                "PlainWithoutTls",
+                "StorageRegionInvalid",
+            ],
+            "what both kinds of run can print"
+        );
+        assert_eq!(
+            restore.union(&backup).count(),
+            17,
+            "the exit-3 sweep's count of distinct codes"
+        );
+        // PER KIND: a code of one is not a code of the other.
+        for only_restore in restore.difference(&backup) {
+            assert_eq!(Backup.reason_code(only_restore), None, "{only_restore}");
+        }
+        for only_backup in backup.difference(&restore) {
+            assert_eq!(Restore.reason_code(only_backup), None, "{only_backup}");
+        }
+        // And membership is exact: no prefix, no other case, no padding.
+        for near in [
+            "GuardRefuse",
+            "GuardRefusedX",
+            "guardrefused",
+            " GuardRefused",
+            "GuardRefused ",
+        ] {
+            assert_eq!(Restore.reason_code(near), None, "{near:?}");
+            assert_eq!(Backup.reason_code(near), None, "{near:?}");
+        }
+    }
+
+    #[test]
+    fn a_detail_and_a_state_agree_or_the_pair_is_not_the_runners() {
+        // What the runner prints beside each detail: the state
+        // `guard::terminal_state` derives from the SAME message.
+        for message in [
+            "TargetTopicConfigRefused: cleanup.policy is `compact`",
+            "PointBindingMismatch. The plan is bound to another point",
+            "CredentialNotRenderable. named with a full stop, so the state line says GuardRefused",
+            "restore.partitions.orders names partition 99",
+            "",
+        ] {
+            let detail = RefusalDetail::from_refusal_message(Restore, message);
+            let state = crate::guard::terminal_state(message);
+            assert!(
+                detail.agrees_with_state(state),
+                "{message:?}: code {} beside state {state}",
+                detail.code()
+            );
+        }
+        // A state that is neither the code nor the default was not printed
+        // beside this detail.
+        let detail = RefusalDetail::from_refusal_message(Restore, "PointUntrusted. x");
+        assert!(detail.agrees_with_state("GuardRefused"));
+        assert!(detail.agrees_with_state("PointUntrusted"));
+        for other in ["TargetTopicConfigRefused", "Succeeded", "", "guardrefused"] {
+            assert!(!detail.agrees_with_state(other), "{other:?}");
+        }
     }
 
     #[test]
@@ -554,12 +814,54 @@ mod tests {
             &"A".repeat(65),
         ] {
             assert_eq!(
-                RefusalDetail::from_line(&line(bad, "a sentence")),
+                RefusalDetail::from_line(Restore, &line(bad, "a sentence")),
                 None,
                 "{bad:?}"
             );
         }
-        assert!(RefusalDetail::from_line(&line("GuardRefused", "a sentence")).is_some());
+        // PATTERN-SHAPED IS NOT ENOUGH: a well-formed word outside the closed
+        // set is not a code, and neither is the other kind's.
+        for unknown in [
+            "A",
+            "Succeeded",
+            "PartitionSubsetsAwaitOwnerDecision",
+            "GuardRefusedUnknownReason",
+            "ConsumerGroupIdInvalid",
+            "WorkloadIdentityNotInjected",
+        ] {
+            assert!(
+                is_reason_code(unknown),
+                "the control: {unknown} IS pattern-shaped"
+            );
+            assert_eq!(
+                RefusalDetail::from_line(Restore, &line(unknown, "a sentence")),
+                None,
+                "{unknown}"
+            );
+        }
+        for restore_only in [
+            "PointUntrusted",
+            "TargetTopicConfigRefused",
+            "AuthorizationExpired",
+        ] {
+            assert_eq!(
+                RefusalDetail::from_line(Backup, &line(restore_only, "a sentence")),
+                None,
+                "{restore_only}"
+            );
+            assert!(RefusalDetail::from_line(Restore, &line(restore_only, "a sentence")).is_some());
+        }
+        // NEGATIVE CONTROL: every member of each set is read, for its kind.
+        for (run, codes) in [
+            (Restore, &RESTORE_REASON_CODES[..]),
+            (Backup, &BACKUP_REASON_CODES[..]),
+        ] {
+            for code in codes {
+                let read = RefusalDetail::from_line(run, &line(code, "a sentence"))
+                    .unwrap_or_else(|| panic!("{run:?} reads its own code {code}"));
+                assert_eq!(read.code(), *code);
+            }
+        }
     }
 
     #[test]
@@ -567,38 +869,40 @@ mod tests {
         let p = REFUSAL_DETAIL_PREFIX;
         for bad in [
             // not this key, or not at the start of the line
-            r#"refusal-reason={"code":"A","message":"m"}"#.to_string(),
-            format!(r#" {p}{{"code":"A","message":"m"}}"#),
-            format!(r#"x {p}{{"code":"A","message":"m"}}"#),
+            r#"refusal-reason={"code":"GuardRefused","message":"m"}"#.to_string(),
+            format!(r#" {p}{{"code":"GuardRefused","message":"m"}}"#),
+            format!(r#"x {p}{{"code":"GuardRefused","message":"m"}}"#),
             // not an object, a member missing, a member of the wrong type
             format!("{p}GuardRefused: a sentence"),
             format!(r#"{p}"a string""#),
-            format!(r#"{p}["A","m"]"#),
-            format!(r#"{p} {{"code":"A","message":"m"}}"#),
-            format!(r#"{p}{{"code":"A"}}"#),
+            format!(r#"{p}["GuardRefused","m"]"#),
+            format!(r#"{p} {{"code":"GuardRefused","message":"m"}}"#),
+            format!(r#"{p}{{"code":"GuardRefused"}}"#),
             format!(r#"{p}{{"message":"m"}}"#),
             format!(r#"{p}{{"code":1,"message":"m"}}"#),
-            format!(r#"{p}{{"code":"A","message":["m"]}}"#),
-            format!(r#"{p}{{"code":"A","message":null}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":["m"]}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":null}}"#),
             // a third member, a repeated member, trailing text
-            format!(r#"{p}{{"code":"A","message":"m","remedy":"r"}}"#),
-            format!(r#"{p}{{"code":"A","message":"m","message":"n"}}"#),
-            format!(r#"{p}{{"code":"A","code":"B","message":"m"}}"#),
-            format!(r#"{p}{{"code":"A","message":"m"}} and more"#),
-            format!(r#"{p}{{"code":"A","message":"m"}}{{"code":"B","message":"n"}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":"m","remedy":"r"}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":"m","message":"n"}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","code":"PointUntrusted","message":"m"}}"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":"m"}} and more"#),
+            format!(
+                r#"{p}{{"code":"GuardRefused","message":"m"}}{{"code":"PointUntrusted","message":"n"}}"#
+            ),
             // cut short, or empty
-            format!(r#"{p}{{"code":"A","message":"m"#),
+            format!(r#"{p}{{"code":"GuardRefused","message":"m"#),
             p.to_string(),
         ] {
-            assert_eq!(RefusalDetail::from_line(&bad), None, "{bad}");
+            assert_eq!(RefusalDetail::from_line(Restore, &bad), None, "{bad}");
         }
-        let good = format!(r#"{p}{{"code":"A","message":"m"}}"#);
-        assert!(RefusalDetail::from_line(&good).is_some());
+        let good = format!(r#"{p}{{"code":"GuardRefused","message":"m"}}"#);
+        assert!(RefusalDetail::from_line(Restore, &good).is_some());
         // Member order is not part of the document.
-        let swapped = format!(r#"{p}{{"message":"m","code":"A"}}"#);
+        let swapped = format!(r#"{p}{{"message":"m","code":"GuardRefused"}}"#);
         assert_eq!(
-            RefusalDetail::from_line(&swapped),
-            RefusalDetail::from_line(&good)
+            RefusalDetail::from_line(Restore, &swapped),
+            RefusalDetail::from_line(Restore, &good)
         );
     }
 
@@ -607,7 +911,7 @@ mod tests {
         // One mebibyte on one line: not parsed, whatever it holds.
         let huge = line("GuardRefused", &prose(1024 * 1024));
         assert!(huge.len() > 1024 * 1024);
-        assert_eq!(RefusalDetail::from_line(&huge), None);
+        assert_eq!(RefusalDetail::from_line(Restore, &huge), None);
         // The bound is on the LINE: at it the line is read (and its sentence
         // cut), one byte over it is not.
         let overhead = line("GuardRefused", "").len();
@@ -616,7 +920,7 @@ mod tests {
             &prose(REFUSAL_DETAIL_LINE_MAX_BYTES - overhead),
         );
         assert_eq!(at.len(), REFUSAL_DETAIL_LINE_MAX_BYTES);
-        let read = RefusalDetail::from_line(&at).expect("a line at the bound is read");
+        let read = RefusalDetail::from_line(Restore, &at).expect("a line at the bound is read");
         assert!(read.message().ends_with(TRUNCATION_MARKER));
         assert_clean(read.message());
         let over = line(
@@ -624,7 +928,7 @@ mod tests {
             &prose(REFUSAL_DETAIL_LINE_MAX_BYTES - overhead + 1),
         );
         assert_eq!(over.len(), REFUSAL_DETAIL_LINE_MAX_BYTES + 1);
-        assert_eq!(RefusalDetail::from_line(&over), None);
+        assert_eq!(RefusalDetail::from_line(Restore, &over), None);
     }
 
     #[test]
@@ -826,8 +1130,8 @@ mod tests {
     #[test]
     fn a_hostile_sentence_is_read_cleaned_and_never_raw() {
         let hostile = "restore.partitions\u{001B}[2J names\n\u{202E}<script>alert(1)</script>";
-        let read =
-            RefusalDetail::from_line(&line("GuardRefused", hostile)).expect("cleaned, not refused");
+        let read = RefusalDetail::from_line(Restore, &line("GuardRefused", hostile))
+            .expect("cleaned, not refused");
         assert_eq!(
             read.message(),
             format!("restore.partitions [2J names {REPLACEMENT}<script>alert(1)</script>")
@@ -835,25 +1139,43 @@ mod tests {
         assert_clean(read.message());
         // Lossily decoded invalid UTF-8 is one replacement, not a failure.
         let lossy = String::from_utf8_lossy(b"bad \xFF\xFE bytes").into_owned();
-        let read = RefusalDetail::from_line(&line("GuardRefused", &lossy)).expect("a line");
+        let read =
+            RefusalDetail::from_line(Restore, &line("GuardRefused", &lossy)).expect("a line");
         assert_eq!(read.message(), format!("bad {REPLACEMENT} bytes"));
     }
 
     #[test]
     fn the_runners_line_never_exceeds_the_bound_the_reader_enforces() {
-        // The worst case for JSON: every byte of the sentence doubles.
-        for filler in ["\"", "\\", "ab ", "—", "\u{202E}x", "\n"] {
-            let message = format!("{}: x{}", "A".repeat(64), filler.repeat(4000));
-            let line = refusal_detail_line(&message).expect("a line");
-            assert!(
-                line.len() <= REFUSAL_DETAIL_LINE_MAX_BYTES,
-                "{filler:?}: {} bytes",
-                line.len()
-            );
-            assert!(line.len() <= 1623, "the figure the bound's note quotes");
-            assert!(!line.contains('\n') && !line.contains('\r'));
-            let read = RefusalDetail::from_line(&line).expect("the reader accepts it");
-            assert_eq!(read.to_line(), line, "and reading it changes nothing");
+        // The worst case for JSON: every byte of the sentence doubles. Under
+        // the longest code of each set, and under a 64-byte word that is NOT
+        // a code and so stays in the sentence.
+        let longest = |codes: &[&'static str]| {
+            codes
+                .iter()
+                .copied()
+                .max_by_key(|c| c.len())
+                .expect("a set is not empty")
+        };
+        let openings = [
+            (Restore, longest(&RESTORE_REASON_CODES).to_string()),
+            (Backup, longest(&BACKUP_REASON_CODES).to_string()),
+            (Restore, "A".repeat(64)),
+        ];
+        for (run, opening) in openings {
+            for filler in ["\"", "\\", "ab ", "—", "\u{202E}x", "\n"] {
+                let message = format!("{opening}: x{}", filler.repeat(4000));
+                let line = refusal_detail_line(run, &message);
+                assert!(
+                    line.len() <= REFUSAL_DETAIL_LINE_MAX_BYTES,
+                    "{filler:?}: {} bytes",
+                    line.len()
+                );
+                assert!(line.len() <= 1623, "the figure the bound's note quotes");
+                assert!(!line.contains('\n') && !line.contains('\r'));
+                let read = RefusalDetail::from_line(run, &line).expect("the reader accepts it");
+                assert_eq!(read.to_line(), line, "and reading it changes nothing");
+                assert!(run.reason_codes().contains(&read.code()));
+            }
         }
     }
 }

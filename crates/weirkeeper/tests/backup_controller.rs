@@ -14937,7 +14937,9 @@ mod prod_04_1 {
 // arms that could differ here: the builder, the gate on exit 3, the read and
 // the two guards against a second read or write.
 
-use logweir_core::refusal_detail::{refusal_detail_line, REFUSAL_DETAIL_PREFIX, REPLACEMENT};
+use logweir_core::refusal_detail::{
+    refusal_detail_line, RefusingRun, BACKUP_REASON_CODES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
+};
 use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
 
 /// What a refused `Backup`'s terminal condition said before FX-34, and still
@@ -14963,6 +14965,23 @@ fn fx34_detail(code: &str, message: &str) -> String {
     format!(
         "{REFUSAL_DETAIL_PREFIX}{}",
         serde_json::json!({ "code": code, "message": message })
+    )
+}
+
+/// A log tail whose last two lines are `detail` and a plain state line: the
+/// position the runner prints its detail line at, and the only one it is
+/// honoured at.
+fn fx34_at_the_position(detail: &str) -> String {
+    format!("{detail}\nrefusal-reason=GuardRefused\n")
+}
+
+/// The two lines `logweir backup run` prints last for `message`, built by its
+/// own formatters.
+fn fx34_runner_pair(message: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        refusal_detail_line(RefusingRun::Backup, message),
+        logweir_core::guard::refusal_reason_line(message)
     )
 }
 
@@ -15065,7 +15084,7 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     assert_eq!(old["progress"]["message"], FX34_OLD_MESSAGE);
     assert_eq!(old["exitReason"], "GuardRefused");
 
-    let detail = refusal_detail_line(FX34_SENTENCE).expect("a sentence prints a line");
+    let detail = refusal_detail_line(RefusingRun::Backup, FX34_SENTENCE);
     let new_log = old_log.replace(
         "refusal-reason=GuardRefused\n",
         &format!("{detail}\nrefusal-reason=GuardRefused\n"),
@@ -15090,16 +15109,22 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     // A NAMED reason: the code is the name, and `exitReason` is the closed
     // state it always was.
     let named = "CredentialNotRenderable: LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID is unset or empty";
-    let (status, _) = fx34_refused(log_body(&format!(
-        "{}\nrefusal-reason=CredentialNotRenderable\n",
-        refusal_detail_line(named).expect("a line")
-    )))
-    .await;
+    let (status, _) = fx34_refused(log_body(&fx34_runner_pair(named))).await;
     assert_eq!(
         fx34_message(&status),
         format!("{FX34_OLD_MESSAGE}{FX34_STATED}{named}")
     );
     assert_eq!(status["exitReason"], "CredentialNotRenderable");
+    // And every member of a backup's closed set arrives as the code.
+    for code in BACKUP_REASON_CODES {
+        let message = format!("{code}: a sentence that says what to change");
+        let (status, _) = fx34_refused(log_body(&fx34_runner_pair(&message))).await;
+        assert_eq!(
+            fx34_message(&status),
+            format!("{FX34_OLD_MESSAGE}{FX34_STATED}{message}"),
+            "{code}"
+        );
+    }
 
     // ONE READ, BOUNDED IN LINES AND IN BYTES, OF THE `runner` CONTAINER.
     let reads = fx34_log_reads(&seen);
@@ -15124,8 +15149,10 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
 /// not a case: the reconciler itself answers that one `NotAttempted` with a
 /// clock read for `verifiedAt`, which a golden cannot hold.
 fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
-    let detail = refusal_detail_line("StorageRegionInvalid: a sentence only an exit 3 may carry")
-        .expect("a line");
+    let detail = refusal_detail_line(
+        RefusingRun::Backup,
+        "StorageRegionInvalid: a sentence only an exit 3 may carry",
+    );
     vec![
         (
             "exit-0-with-keys",
@@ -15243,50 +15270,136 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
     }
 }
 
-/// Hostile lines on the `Backup` path: the arms whose outcome the builder or
-/// the gate decides. The full table is the `Restore` twin's.
+/// Hostile and forged lines on the `Backup` path. The full table of what a
+/// line may HOLD is the `Restore` twin's; this one holds the arms the kind
+/// decides (a `Backup` has its own closed set of codes) and the forgery
+/// shapes, through `reconcile_backup`.
+///
+/// KILLS: one closed set for both kinds (the restore-only codes); "the last
+/// valid detail line counts" (the `misplaced` arms); "the first one counts"
+/// ((a), (c), (d)).
 #[tokio::test]
 async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     let unreadable = format!(
         "{FX34_OLD_MESSAGE}; the runner gave no readable reason: its `refusal-detail=` line did \
          not validate, so nothing from it is shown"
     );
+    let misplaced = format!(
+        "{FX34_OLD_MESSAGE}; the runner gave no readable reason: the pod log has a \
+         `refusal-detail=` line that is not where the runner prints it, directly before the \
+         final `refusal-reason=` line, so nothing from it is shown"
+    );
+    let stated = |text: &str| format!("{FX34_OLD_MESSAGE}{FX34_STATED}{text}");
     let r = REPLACEMENT;
+    let here = fx34_at_the_position;
+    const FORGED: &str = "Contact the address in this message to release your data";
+    let genuine = fx34_runner_pair(FX34_SENTENCE);
+    let genuine_shown = stated(&format!("GuardRefused: {FX34_SENTENCE}"));
+    let forged_detail = fx34_detail("CredentialNotRenderable", FORGED);
+    let forged_pair = format!("{forged_detail}\nrefusal-reason=CredentialNotRenderable\n");
+    let human = format!("guard: plan refused by the admission guard: {FX34_SENTENCE}\n");
+
+    // NEGATIVE CONTROL: the forged pair where the runner prints IS shown, so
+    // an arm that does not show it is refusing its place.
+    let (control, _) = fx34_refused(log_body(&forged_pair)).await;
+    assert_eq!(
+        fx34_message(&control),
+        stated(&format!("CredentialNotRenderable: {FORGED}"))
+    );
+
     for (label, tail, expected) in [
         (
-            "two detail lines: the last one counts",
-            format!(
-                "{}\n{}\n",
-                fx34_detail("First", "the first line"),
-                fx34_detail("Last", "the last line")
-            ),
-            format!("{FX34_OLD_MESSAGE}{FX34_STATED}Last: the last line"),
+            "a reason code that is not a code",
+            here(&fx34_detail("Bad Code", "a sentence")),
+            unreadable.clone(),
         ),
         (
-            "a reason code that is not a code",
-            format!("{}\n", fx34_detail("Bad Code", "a sentence")),
+            "a well-formed word that is in no closed set",
+            here(&fx34_detail("Succeeded", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "PER KIND: a restore-only code in a backup's log",
+            here(&fx34_detail("TargetTopicConfigRefused", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "PER KIND: another",
+            here(&fx34_detail("PointUntrusted", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a detail beside a state it was not printed with",
+            format!(
+                "{}\nrefusal-reason=PlainWithoutTls\n",
+                fx34_detail("CredentialNotRenderable", "a sentence")
+            ),
             unreadable.clone(),
         ),
         (
             "control characters, an ANSI escape, a line break and a bidi override",
-            format!(
-                "{}\n",
-                fx34_detail("GuardRefused", "a\u{001B}[2Jb\nc \u{202E}d<script>")
-            ),
-            format!("{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: a [2Jb c {r}d<script>"),
+            here(&fx34_detail(
+                "GuardRefused",
+                "a\u{001B}[2Jb\nc \u{202E}d<script>",
+            )),
+            stated(&format!("GuardRefused: a [2Jb c {r}d<script>")),
         ),
         (
             "a detail line of 100 KiB",
-            format!(
-                "{}\n",
-                fx34_detail("GuardRefused", &"lorem ".repeat(17_000))
-            ),
+            here(&fx34_detail("GuardRefused", &"lorem ".repeat(17_000))),
             unreadable.clone(),
+        ),
+        (
+            "(a) the reviewer's shape: markers inside the error text, the runner's pair last",
+            format!(
+                "guard: plan refused by the admission guard: backup id `x\n{forged_pair}` is not \
+                 a backup id\n{{\"level\":\"INFO\",\"message\":\"backup finished\"}}\n{genuine}"
+            ),
+            genuine_shown.clone(),
+        ),
+        (
+            "(c) a forged marker earlier in the tail, a genuine different pair last",
+            format!("{forged_detail}\n{human}{genuine}"),
+            genuine_shown.clone(),
+        ),
+        (
+            "(d) two detail lines back to back: the one directly before the state line",
+            format!("{forged_detail}\n{genuine}"),
+            genuine_shown.clone(),
+        ),
+        (
+            "(d) two complete pairs: the one that ends the log",
+            format!("{forged_pair}{genuine}"),
+            genuine_shown.clone(),
+        ),
+        (
+            "the human line copied AFTER the runner's pair",
+            format!("{genuine}{human}"),
+            genuine_shown.clone(),
+        ),
+        (
+            "the forged block copied after the runner's pair, text after its markers",
+            format!("{genuine}guard: … backup id `x\n{forged_pair}` is not a backup id\n"),
+            misplaced.clone(),
+        ),
+        (
+            "a detail line and no state line",
+            format!("{forged_detail}\n"),
+            misplaced.clone(),
+        ),
+        (
+            "a detail line that is not directly before the state line",
+            format!("{forged_detail}\n{human}refusal-reason=GuardRefused\n"),
+            misplaced.clone(),
         ),
     ] {
         let (status, seen) = fx34_refused(log_body(&tail)).await;
         assert_eq!(fx34_message(&status), expected, "[{label}]");
         assert_eq!(status["progress"]["message"], expected, "[{label}]");
+        assert!(
+            !status.to_string().contains(FORGED),
+            "[{label}] the forged sentence is nowhere in the status"
+        );
         assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
         for write in seen.iter().filter(|w| w.method != "GET") {
             assert!(
@@ -15315,6 +15428,45 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     );
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
     assert_eq!(fx34_log_reads(&seen).len(), 1);
+}
+
+/// **(b) A forged refusal pair as the last lines of a log whose exit code is
+/// not 3 is ignored**: the pass writes byte for byte what it writes without
+/// it. The CONTROL is the same pair at the end of an exit-3 log, where it is
+/// shown.
+///
+/// KILLS: the gate widened to any other exit code.
+#[tokio::test]
+async fn a_forged_refusal_pair_at_the_end_of_another_exit_codes_log_is_ignored() {
+    const FORGED: &str = "CredentialNotRenderable: forged, and well-formed";
+    let forged = fx34_runner_pair(FORGED);
+    for (label, exit_code, tail) in [
+        ("exit 1", 1, "operational: boom\n".to_string()),
+        ("exit 2", 2, "a result that is not a pass\n".to_string()),
+        ("exit 0 with its keys", 0, i7_tail_with_digest()),
+        ("exit 4", 4, "signing: x\n".to_string()),
+        ("exit 137", 137, "killed\n".to_string()),
+    ] {
+        let plain = fx34_observe(exit_code, &tail).await;
+        for (place, log) in [
+            ("last", format!("{tail}{forged}")),
+            ("first", format!("{forged}{tail}")),
+        ] {
+            let got = fx34_observe(exit_code, &log).await;
+            assert_eq!(got, plain, "[{label}, the pair {place}]");
+            assert!(
+                !got.to_string().contains("forged, and well-formed"),
+                "[{label}, the pair {place}]"
+            );
+        }
+    }
+    let (shown, _) = fx34_refused(log_body(&format!("operational: boom\n{forged}"))).await;
+    assert_eq!(
+        fx34_message(&shown),
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}{FORGED}"),
+        "the control: at exit 3 the same lines are the runner's"
+    );
+    assert_eq!(shown["exitReason"], "CredentialNotRenderable");
 }
 
 /// **The pod gone; the log unreadable.** An honest message, the exit code
@@ -15391,8 +15543,7 @@ async fn a_refusal_whose_pod_or_log_is_gone_is_recorded_once_and_says_so() {
 /// KILLS: reading the log before the already-terminal guard, or removing it.
 #[tokio::test]
 async fn a_second_pass_over_a_refused_backup_reads_and_writes_nothing() {
-    let detail = refusal_detail_line(FX34_SENTENCE).expect("a line");
-    let log = log_body(&format!("{detail}\nrefusal-reason=GuardRefused\n"));
+    let log = log_body(&fx34_runner_pair(FX34_SENTENCE));
     let (status, _) = fx34_refused(log.clone()).await;
     let mut settled: Value = serde_json::to_value(frozen_backup()).expect("serialises");
     let mut stored = settled["status"].clone();

@@ -1,13 +1,24 @@
 //! **FX-34**, the RUNNER's half: a guard refusal prints its reason code and
 //! its sentence as ONE `refusal-detail=` line, immediately before I9's
-//! `refusal-reason=` line, at exit 3 and at no other exit.
+//! `refusal-reason=` line, at EVERY exit 3 and at no other exit, and those two
+//! lines are the last two the process writes.
 //!
-//! Every row runs the shipped `logweir` binary against a loopback sentinel
-//! that must never be dialled, and reads the line back through
+//! Most rows run the shipped `logweir` binary against a loopback sentinel
+//! that must never be dialled, and read the line back through
 //! `logweir_core::refusal_detail::RefusalDetail::from_line`: the reader a
 //! controller uses, so "the runner printed it" and "a controller accepts it"
-//! are one assertion. The controller's own rows are
-//! `crates/weirkeeper/tests/refusal_detail.rs`.
+//! are one assertion. The controller's own rows are in
+//! `crates/weirkeeper/tests/{restore,backup}_controller.rs` and
+//! `crates/weirkeeper/src/refusal.rs`.
+//!
+//! # Why the POSITION is asserted
+//!
+//! A plan can start a line of its own in a pod log: the human line prints an
+//! error's text raw and an error may repeat a plan value that holds a line
+//! break (PROD-15.1's review). A controller therefore honours the detail line
+//! only where the runner prints it. The rows at the end of this file hold the
+//! runner to that: over both streams in the order they were WRITTEN, the last
+//! two lines are the pair, after the error text, whatever the plan says.
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
@@ -17,9 +28,11 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use logweir_core::refusal_detail::{
-    clean_message, split_reason_code, RefusalDetail, REASON_MESSAGE_MAX_BYTES,
-    REFUSAL_DETAIL_LINE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT, TRUNCATION_MARKER,
+    clean_message, split_reason_code, RefusalDetail, RefusingRun, BACKUP_REASON_CODES, NO_SENTENCE,
+    REASON_MESSAGE_MAX_BYTES, REFUSAL_DETAIL_LINE_MAX_BYTES, REFUSAL_DETAIL_PREFIX, REPLACEMENT,
+    RESTORE_REASON_CODES, TRUNCATION_MARKER,
 };
+use RefusingRun::{Backup, Restore};
 
 const LIMIT: Duration = Duration::from_secs(20);
 /// A password no stream may ever carry.
@@ -158,6 +171,11 @@ fn backup(
     env: &[(&str, &str)],
     label: &str,
 ) -> (Option<i32>, String, String) {
+    run(backup_command(root, bootstrap, auth, env), label)
+}
+
+/// The command [`backup`] runs.
+fn backup_command(root: &Path, bootstrap: &str, auth: &str, env: &[(&str, &str)]) -> Command {
     let spec = format!(
         "backup_id: refusal-detail-row\nsource:\n  bootstrap_servers: [\"{bootstrap}\"]\n  \
          auth:\n{auth}  topics: [orders]\nstorage:\n  backend: filesystem\n  path: {}\n",
@@ -179,7 +197,7 @@ fn backup(
     for (k, v) in env {
         command.env(k, v);
     }
-    run(command, label)
+    command
 }
 
 fn example_restore_spec() -> String {
@@ -201,7 +219,7 @@ fn detail_lines(stdout: &str) -> Vec<&str> {
 /// The ONE detail line of an exit-3 run, read as a controller reads it, with
 /// the shape every such run owes: it is the line before `refusal-reason=`,
 /// which is still last.
-fn the_detail(stdout: &str, label: &str) -> RefusalDetail {
+fn the_detail(run: RefusingRun, stdout: &str, label: &str) -> RefusalDetail {
     let all = lines(stdout);
     assert!(all.len() >= 2, "{label}: {stdout}");
     let last = all[all.len() - 1];
@@ -224,8 +242,13 @@ fn the_detail(stdout: &str, label: &str) -> RefusalDetail {
         "{label}: {} bytes",
         before.len()
     );
-    RefusalDetail::from_line(before)
-        .unwrap_or_else(|| panic!("{label}: a controller must accept the runner's line: {before}"))
+    let detail = RefusalDetail::from_line(run, before)
+        .unwrap_or_else(|| panic!("{label}: a controller must accept the runner's line: {before}"));
+    assert!(
+        detail.agrees_with_state(&last["refusal-reason=".len()..]),
+        "{label}: the two lines agree: {before} / {last}"
+    );
+    detail
 }
 
 /// The guard's own sentence off the human line on stderr.
@@ -245,7 +268,7 @@ fn a_refused_restore_prints_one_detail_line_before_its_state_line() {
         example_restore_spec().replace("topics: [orders, payments]", "topics: [\"orders*\"]");
     let (code, stdout, stderr) = restore(&spec, &[], "glob");
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-    let detail = the_detail(&stdout, "glob");
+    let detail = the_detail(Restore, &stdout, "glob");
     assert_eq!(detail.code(), "GuardRefused");
     let human = human_sentence(&stderr, "glob");
     assert!(
@@ -253,7 +276,7 @@ fn a_refused_restore_prints_one_detail_line_before_its_state_line() {
             && human.ends_with("this build cannot restore it."),
         "{human}"
     );
-    assert_eq!(split_reason_code(human).0, "GuardRefused");
+    assert_eq!(split_reason_code(Restore, human).0, "GuardRefused");
     // THE SAME SENTENCE, WHOLE: it is under the bound, so it ends as the
     // human line ends. What differs is one run the credential rules read as
     // key-shaped, the upstream source path the sentence cites: a relayed
@@ -287,7 +310,7 @@ fn a_sentence_over_the_bound_is_cut_with_a_marker() {
     let spec = example_restore_spec() + "\nengine_overrides:\n" + &nested;
     let (code, stdout, stderr) = restore(&spec, &[], "forbidden keys");
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-    let detail = the_detail(&stdout, "forbidden keys");
+    let detail = the_detail(Restore, &stdout, "forbidden keys");
     assert_eq!(detail.code(), "GuardRefused");
     let human = human_sentence(&stderr, "forbidden keys");
     assert!(
@@ -326,7 +349,7 @@ fn a_refused_backup_names_its_reason_code_and_another_exit_prints_no_detail() {
         );
         if refused {
             assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-            let detail = the_detail(&stdout, "plain");
+            let detail = the_detail(Backup, &stdout, "plain");
             assert_eq!(detail.code(), "PlainWithoutTls");
             assert_eq!(
                 lines(&stdout).last().copied(),
@@ -393,7 +416,7 @@ fn a_refusal_about_a_credential_never_carries_its_value() {
         "binding",
     );
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-    let detail = the_detail(&stdout, "binding");
+    let detail = the_detail(Backup, &stdout, "binding");
     assert_eq!(detail.code(), "CredentialBindingMismatch");
     for secret in [SEEDED, EXPECTED, FOREIGN] {
         assert!(
@@ -412,7 +435,7 @@ fn a_refusal_about_a_credential_never_carries_its_value() {
         "unrenderable",
     );
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-    let detail = the_detail(&stdout, "unrenderable");
+    let detail = the_detail(Restore, &stdout, "unrenderable");
     assert_eq!(detail.code(), "CredentialNotRenderable");
     assert!(
         detail.message().contains("LOGWEIR_SOURCE_PASSWORD"),
@@ -445,7 +468,7 @@ fn a_hostile_name_in_the_plan_is_cleaned_in_the_detail_line() {
             || c == TRUNCATION_MARKER),
         "the line itself is printable: {line:?}"
     );
-    let detail = the_detail(&stdout, "hostile");
+    let detail = the_detail(Restore, &stdout, "hostile");
     assert!(
         detail
             .message()
@@ -456,32 +479,137 @@ fn a_hostile_name_in_the_plan_is_cleaned_in_the_detail_line() {
     assert!(human_sentence(&stderr, "hostile").contains('\u{202E}'));
 }
 
-/// The writer seam, byte for byte, over the sentence PoC batch 5's runner
-/// printed (`claude/artifacts/poc-batch-5/prod111/k3-runner.log`, an earlier
-/// build's named reason): one line and its newline, and nothing for a refusal
-/// with nothing to say.
+/// A writer that records every `write` call it is given, whole.
+#[derive(Default)]
+struct Writes(Vec<Vec<u8>>);
+
+impl std::io::Write for Writes {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.push(buf.to_vec());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// **The writer seam, byte for byte**: the detail line and the state line,
+/// each with its newline, in ONE write, so nothing this process prints can
+/// come between them. Over the sentence PoC batch 5's runner printed
+/// (`claude/artifacts/poc-batch-5/prod111/k3-runner.log`): its opening word
+/// was a reason code then and is in no closed set now, so it stays in the
+/// sentence.
+///
+/// KILLS: two writes; the detail line skipped for a refusal that says nothing
+/// (the position a reader trusts would be left for another line); a word
+/// outside the closed set printed as the code.
 #[test]
-fn the_detail_writer_prints_exactly_one_json_line() {
+fn the_refusal_writer_prints_both_lines_in_one_write() {
     let sentence = "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition \
         subset of orders; a restore of a partition subset is refused until the owner decides \
         how its scorecard is versioned (OD-9), because a verifier that predates it would read \
         the narrowed restore as a full one. Remove restore.partitions to restore every \
         partition (a window start, restore.point_in_time: \"<start>/<end>\", is accepted)";
-    let mut out = Vec::new();
-    logweir::exit::print_refusal_detail_to(&mut out, sentence).unwrap();
-    let text = String::from_utf8(out).unwrap();
+    let mut out = Writes::default();
+    logweir::exit::print_refusal_to(&mut out, Restore, sentence).unwrap();
+    assert_eq!(out.0.len(), 1, "one write holds both lines");
     assert_eq!(
-        text,
-        "refusal-detail={\"code\":\"PartitionSubsetsAwaitOwnerDecision\",\"message\":\"\
-         restore.partitions names a partition subset of orders; a restore of a partition \
-         subset is refused until the owner decides how its scorecard is versioned (OD-9), \
-         because a verifier that predates it would read the narrowed restore as a full one. \
-         Remove restore.partitions to restore every partition (a window start, \
-         restore.point_in_time: \\\"<start>/<end>\\\", is accepted)\"}\n"
+        String::from_utf8(out.0.remove(0)).unwrap(),
+        "refusal-detail={\"code\":\"GuardRefused\",\"message\":\"\
+         PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of \
+         orders; a restore of a partition subset is refused until the owner decides how its \
+         scorecard is versioned (OD-9), because a verifier that predates it would read the \
+         narrowed restore as a full one. Remove restore.partitions to restore every partition \
+         (a window start, restore.point_in_time: \\\"<start>/<end>\\\", is accepted)\"}\n\
+         refusal-reason=GuardRefused\n"
     );
-    let mut nothing = Vec::new();
-    logweir::exit::print_refusal_detail_to(&mut nothing, " \n").unwrap();
-    assert!(nothing.is_empty());
+
+    // A NAMED reason of this kind of run: the code, and the state line too
+    // when it is one of I9's states.
+    for (run, message, want) in [
+        (
+            Restore,
+            "TargetTopicConfigRefused: cleanup.policy is `compact`",
+            "refusal-detail={\"code\":\"TargetTopicConfigRefused\",\"message\":\"cleanup.policy is \
+             `compact`\"}\nrefusal-reason=TargetTopicConfigRefused\n",
+        ),
+        (
+            Restore,
+            "PointUntrusted. The receipt is not signed by a pinned key",
+            "refusal-detail={\"code\":\"PointUntrusted\",\"message\":\"The receipt is not signed \
+             by a pinned key\"}\nrefusal-reason=GuardRefused\n",
+        ),
+        // The same sentence from a BACKUP: not a code of that kind of run.
+        (
+            Backup,
+            "PointUntrusted. The receipt is not signed by a pinned key",
+            "refusal-detail={\"code\":\"GuardRefused\",\"message\":\"PointUntrusted. The receipt \
+             is not signed by a pinned key\"}\nrefusal-reason=GuardRefused\n",
+        ),
+        // A refusal that says nothing STILL prints both lines.
+        (
+            Backup,
+            " \n",
+            "refusal-detail={\"code\":\"GuardRefused\",\"message\":\"the refusal carried no \
+             sentence\"}\nrefusal-reason=GuardRefused\n",
+        ),
+    ] {
+        let mut out = Writes::default();
+        logweir::exit::print_refusal_to(&mut out, run, message).unwrap();
+        assert_eq!(out.0.len(), 1, "{message:?}");
+        assert_eq!(String::from_utf8(out.0.remove(0)).unwrap(), want, "{message:?}");
+    }
+    assert_eq!(NO_SENTENCE, "the refusal carried no sentence");
+}
+
+/// **The closed sets name the constants the runner's refusals open with.**
+/// `logweir-core` cannot name this crate's constants or the engine crate's,
+/// so its sets spell five codes as literals; this row holds each literal to
+/// its constant, and holds every code to the kind of run that can print it.
+#[test]
+fn the_closed_sets_hold_the_constants_the_refusals_open_with() {
+    use logweir::drill::binding;
+    for code in [
+        binding::POINT_BINDING_MISMATCH,
+        binding::POINT_BINDING_SET_MISMATCH,
+        binding::POINT_UNTRUSTED,
+        binding::REHEARSAL_SCOPE_VIOLATION,
+        logweir_core::execution_contract::AUTHORIZATION_INVALID,
+        logweir_core::execution_contract::AUTHORIZATION_EXPIRED,
+        logweir_core::guard::STORAGE_REGION_INVALID,
+    ] {
+        assert!(RESTORE_REASON_CODES.contains(&code), "restore: {code}");
+    }
+    for state in logweir_core::guard::TERMINAL_STATES {
+        assert!(RESTORE_REASON_CODES.contains(&state), "restore: {state}");
+    }
+    for code in [
+        logweir_engine_oso::storage::WORKLOAD_IDENTITY_NOT_INJECTED,
+        logweir_core::consumer_positions::SELECTION_TOO_LARGE,
+        logweir_core::consumer_positions::SELECTION_ID_INVALID,
+        logweir_core::consumer_positions::SELECTION_REPEATED,
+        logweir_core::guard::STORAGE_REGION_INVALID,
+        logweir_core::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+        logweir_core::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
+        logweir_core::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    ] {
+        assert!(BACKUP_REASON_CODES.contains(&code), "backup: {code}");
+    }
+    // PER KIND: a restore-only code is not a backup's, and the reverse.
+    for code in [
+        binding::POINT_UNTRUSTED,
+        logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+        logweir_core::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
+        logweir_core::execution_contract::AUTHORIZATION_INVALID,
+    ] {
+        assert!(!BACKUP_REASON_CODES.contains(&code), "{code}");
+    }
+    for code in [
+        logweir_engine_oso::storage::WORKLOAD_IDENTITY_NOT_INJECTED,
+        logweir_core::consumer_positions::SELECTION_TOO_LARGE,
+    ] {
+        assert!(!RESTORE_REASON_CODES.contains(&code), "{code}");
+    }
 }
 
 /// The example `docs/kubernetes.md` §10 quotes is what the runner prints for
@@ -498,7 +626,7 @@ fn the_documented_example_is_what_the_runner_prints() {
     );
     let (code, stdout, stderr) = restore(&spec, &[], "c15");
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
-    let detail = the_detail(&stdout, "c15");
+    let detail = the_detail(Restore, &stdout, "c15");
     let documented = "GuardRefused: source.storage.endpoint is a plain http:// endpoint but \
         source.storage.allow_http is false. The pinned engine (kafka-backup 0.22.0 and later) \
         derives plaintext transport from an http:// endpoint whatever allow_http says, so it \
@@ -521,4 +649,334 @@ fn the_documented_example_is_what_the_runner_prints() {
         !detail_lines(&stdout)[0].contains(":9000"),
         "the endpoint's value is not in the line: {stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The position: the pair is the last thing the process writes, at every exit 3
+// ---------------------------------------------------------------------------
+
+/// Runs `command` with stdout AND stderr on ONE open file, so the file holds
+/// both streams in the order the process wrote them. A pod log merges the two
+/// in no promised order; this is the order the runner is answerable for.
+fn run_merged(mut command: Command, label: &str) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("merged.log");
+    let file = std::fs::File::create(&path).unwrap();
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file.try_clone().unwrap()))
+        .stderr(Stdio::from(file));
+    let started = Instant::now();
+    let mut child = command.spawn().expect("spawn logweir");
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() >= LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "{label}: exceeded {LIMIT:?}: {}",
+                std::fs::read_to_string(&path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    (
+        status.code(),
+        String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned(),
+    )
+}
+
+fn restore_command(dir: &Path, spec: &str, env: &[(&str, &str)]) -> Command {
+    let path = dir.join("restore.yaml");
+    std::fs::write(&path, spec).unwrap();
+    let mut command = base(dir);
+    command
+        .args(["restore", "run", "--spec"])
+        .arg(&path)
+        .args(approved_bundle_args(dir, spec));
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    command
+}
+
+/// What every exit-3 run owes over both streams in written order: the pair is
+/// the last two non-empty lines, each key appears once at the start of a line
+/// the runner wrote last, and the human line came before.
+fn assert_the_pair_ends_the_log(run: RefusingRun, merged: &str, label: &str) -> RefusalDetail {
+    let all = lines(merged);
+    assert!(all.len() >= 3, "{label}: {merged}");
+    let (before, last) = (all[all.len() - 2], all[all.len() - 1]);
+    assert!(
+        before.starts_with(REFUSAL_DETAIL_PREFIX) && last.starts_with("refusal-reason="),
+        "{label}: the last two lines the process wrote are the pair:\n{merged}"
+    );
+    let human_at = all
+        .iter()
+        .position(|l| l.starts_with(HUMAN_PREFIX))
+        .unwrap_or_else(|| panic!("{label}: the human line is present:\n{merged}"));
+    assert!(
+        human_at < all.len() - 2,
+        "{label}: the error text is written BEFORE the pair:\n{merged}"
+    );
+    let detail = RefusalDetail::from_line(run, before)
+        .unwrap_or_else(|| panic!("{label}: a controller accepts the line: {before}"));
+    assert!(detail.agrees_with_state(&last["refusal-reason=".len()..]));
+    detail
+}
+
+/// One refused restore of the row below: its label, its plan, the variables
+/// added to the runner's environment, and the reason code it must print.
+type RefusedRestore<'a> = (&'a str, String, Vec<(&'a str, &'a str)>, &'a str);
+
+/// **Every exit-3 path prints the pair after the error text, as its last two
+/// lines.** Six refusals, from the plan scan to the credential checks, on
+/// both runners: each ends the same way, because every exit 3 of a run leaves
+/// through `exiting` (the source-level row below holds that).
+///
+/// KILLS: the pair printed before the human line; a line printed after it; a
+/// refusal path that skips the detail line.
+#[test]
+fn every_refused_run_writes_the_pair_last_after_its_error_text() {
+    let example = example_restore_spec();
+    let unrenderable = format!("{SEEDED}\n bootstrap_servers:");
+    let restores: Vec<RefusedRestore<'_>> = vec![
+        (
+            "a glob topic (the admission guard)",
+            example.replace("topics: [orders, payments]", "topics: [\"orders*\"]"),
+            vec![],
+            "GuardRefused",
+        ),
+        (
+            "a forbidden key (the plan scan)",
+            example.clone() + "\nengine_overrides:\n  x:\n    dry_run: true\n",
+            vec![],
+            "GuardRefused",
+        ),
+        (
+            "an http endpoint without allow_http (C15)",
+            example.replacen("    allow_http: true\n", "    allow_http: false\n", 1),
+            vec![],
+            "GuardRefused",
+        ),
+        (
+            "an unrenderable projected password",
+            example.clone(),
+            vec![("LOGWEIR_SOURCE_PASSWORD", unrenderable.as_str())],
+            "CredentialNotRenderable",
+        ),
+    ];
+    for (label, spec, env, code) in restores {
+        let dir = tempfile::tempdir().unwrap();
+        let (exit, merged) = run_merged(restore_command(dir.path(), &spec, &env), label);
+        assert_eq!(exit, Some(3), "{label}:\n{merged}");
+        let detail = assert_the_pair_ends_the_log(Restore, &merged, label);
+        assert_eq!(detail.code(), code, "{label}");
+        assert!(!merged.contains(SEEDED), "{label}");
+    }
+
+    // The backup runner, two refusals.
+    for (label, auth, env, code) in [
+        (
+            "SASL/PLAIN without TLS",
+            "    mode: plain\n    username: logweir\n    tls: false\n",
+            vec![("LOGWEIR_SOURCE_PASSWORD", SEEDED)],
+            "PlainWithoutTls",
+        ),
+        (
+            "a credential bound to another connection",
+            "    mode: scramSha512\n    username: logweir\n    tls: false\n",
+            vec![
+                ("LOGWEIR_SOURCE_PASSWORD", SEEDED),
+                ("LOGWEIR_SOURCE_CREDENTIAL_BINDING_EXPECTED", EXPECTED),
+                ("LOGWEIR_SOURCE_CREDENTIAL_BINDING", FOREIGN),
+            ],
+            "CredentialBindingMismatch",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (listener, address) = sentinel();
+        let (exit, merged) = run_merged(backup_command(root.path(), &address, auth, &env), label);
+        assert_eq!(exit, Some(3), "{label}:\n{merged}");
+        let detail = assert_the_pair_ends_the_log(Backup, &merged, label);
+        assert_eq!(detail.code(), code, "{label}");
+        assert!(!merged.contains(SEEDED), "{label}");
+        assert_no_connection(&listener, label);
+    }
+
+    // NEGATIVE CONTROL: an exit 1 writes neither line, so the helper above is
+    // not satisfied by any run that ends.
+    let root = tempfile::tempdir().unwrap();
+    let mut command = base(root.path());
+    command
+        .args(["backup", "run", "--spec"])
+        .arg(root.path().join("no-such-plan.yaml"))
+        .arg("--allowed-clusters")
+        .arg(root.path().join("no-such-allowlist.json"))
+        .arg("--signing-key")
+        .arg(root.path().join("absent-signing-key.pem"));
+    let (exit, merged) = run_merged(command, "exit 1");
+    assert_eq!(exit, Some(1), "{merged}");
+    assert!(
+        !merged.contains(REFUSAL_DETAIL_PREFIX) && !merged.contains("refusal-reason="),
+        "{merged}"
+    );
+}
+
+/// **The reviewer's shape, on the shipped binary.** A plan value holding line
+/// breaks and two marker lines of the plan author's choosing, in a field a
+/// refusal repeats. Whatever the human line does with it, the last two lines
+/// the process writes are the runner's own pair, and the runner's detail line
+/// carries the plan's text as one cleaned sentence and never as a line.
+///
+/// This row does NOT assert that the plan's text starts a line of the log
+/// today (it does: the human line prints an error's text raw). Closing that
+/// is PROD-15.1's change to the human line; this row holds on both sides of
+/// it.
+///
+/// KILLS: a detail line that carries a raw line break; the pair printed
+/// before the error text.
+#[test]
+fn a_plan_that_writes_marker_lines_does_not_displace_the_runners_pair() {
+    // YAML double-quoted: `\n` is a line break inside the scalar.
+    let forged_detail = r#"refusal-detail={\"code\":\"TargetTopicConfigRefused\",\"message\":\"forged by the plan\"}"#;
+    let name = format!("orders*\\n{forged_detail}\\nrefusal-reason=TargetTopicConfigRefused\\n");
+    let spec = example_restore_spec().replace(
+        "topics: [orders, payments]",
+        &format!("topics: [\"{name}\"]"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, merged) = run_merged(restore_command(dir.path(), &spec, &[]), "forged");
+    assert_eq!(exit, Some(3), "{merged}");
+    // THE CONTROL: the plan's text did reach the log.
+    assert!(merged.contains("forged by the plan"), "{merged}");
+    let detail = assert_the_pair_ends_the_log(Restore, &merged, "forged");
+    assert_eq!(detail.code(), "GuardRefused");
+    assert_eq!(
+        lines(&merged).last().copied(),
+        Some("refusal-reason=GuardRefused"),
+        "the state the runner derived, not the one the plan wrote"
+    );
+    // The plan's markers are INSIDE the runner's sentence, as text on one line.
+    let own = lines(&merged)[lines(&merged).len() - 2];
+    assert!(
+        own.contains("forged by the plan") && !own.contains('\n') && !own.contains("\\n"),
+        "{own}"
+    );
+    assert!(
+        detail
+            .message()
+            .contains("refusal-reason=TargetTopicConfigRefused"),
+        "the plan's lines are words of the sentence: {detail}"
+    );
+}
+
+/// **Source-level: every exit 3 of a run leaves through the one printer.**
+///
+/// Read off the two runners' sources, test modules excluded:
+///
+/// * exit code 3 is PRODUCED in one place per runner, the `Guard` arm of its
+///   error's `exit_code`;
+/// * `exiting` is called from one place per runner, and it is where
+///   `crate::exit::print_refusal(` is called, once, directly under
+///   `if code == ExitCode::GuardRefused {`;
+/// * nothing in either runner prints the state line by itself
+///   (`print_refusal_reason`), which would leave the detail line's position
+///   to whatever came before.
+///
+/// KILLS: a second exit-3 path that returns the code without `exiting`; the
+/// state line printed alone.
+#[test]
+fn every_exit_three_of_a_run_leaves_through_the_one_printer() {
+    fn production(path: &str) -> String {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let cut = text.find("\n#[cfg(test)]").unwrap_or(text.len());
+        text[..cut]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
+    }
+    for (path, guard_arm, run) in [
+        (
+            "src/drill/mod.rs",
+            "DrillError::Guard(_) => ExitCode::GuardRefused,",
+            "Restore",
+        ),
+        (
+            "src/backup/mod.rs",
+            "BackupError::Guard(_) => ExitCode::GuardRefused,",
+            "Backup",
+        ),
+    ] {
+        let text = production(path);
+        assert_eq!(
+            count(&text, guard_arm),
+            1,
+            "{path}: the one producer of exit 3"
+        );
+        assert_eq!(
+            count(&text, "=> ExitCode::GuardRefused"),
+            1,
+            "{path}: no other arm produces exit 3"
+        );
+        assert_eq!(
+            count(&text, "return ExitCode::GuardRefused"),
+            0,
+            "{path}: and nothing returns it directly"
+        );
+        assert_eq!(count(&text, "\nfn exiting("), 1, "{path}");
+        assert_eq!(
+            count(&text, "    exiting(\n"),
+            1,
+            "{path}: `exiting` has one caller, the one terminal path"
+        );
+        let printer = format!(
+            "    if code == ExitCode::GuardRefused {{\n        crate::exit::print_refusal(\n            \
+             logweir_core::refusal_detail::RefusingRun::{run},\n"
+        );
+        assert_eq!(
+            count(&text, &printer),
+            1,
+            "{path}: the pair is printed under the exit-3 gate, for this kind of run"
+        );
+        assert_eq!(
+            count(&text, "print_refusal("),
+            1,
+            "{path}: and nowhere else"
+        );
+        assert_eq!(
+            count(&text, "print_refusal_reason"),
+            0,
+            "{path}: the state line is never printed by itself"
+        );
+    }
+    // No other file of either runner produces the code or prints the lines.
+    for dir in ["src/drill", "src/backup"] {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.to_string_lossy().into_owned();
+            if !name.ends_with(".rs") || name.ends_with("/mod.rs") {
+                continue;
+            }
+            let text = production(&name);
+            for needle in [
+                "ExitCode::GuardRefused",
+                "print_refusal",
+                "refusal-reason=",
+                "refusal-detail=",
+            ] {
+                assert_eq!(count(&text, needle), 0, "{name}: `{needle}`");
+            }
+        }
+    }
+    // NEGATIVE CONTROL: the reader of sources sees code and skips comments.
+    let exit = production("src/exit.rs");
+    assert!(exit.contains("pub fn print_refusal_to<W: std::io::Write>("));
+    assert!(!exit.contains("/// **FX-34.**"));
 }

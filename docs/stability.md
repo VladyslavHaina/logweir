@@ -1772,9 +1772,15 @@ refusal-reason=GuardRefused
 ```
 
 `logweir restore run` (and its `drill run` alias) and `logweir backup run` print this line at
-**exit 3 and at no other exit**, immediately before `refusal-reason=`. Interface I9 is unchanged:
-`refusal-reason=<TerminalState>` is still the final stdout line of a refused run, and the human line
-on stderr and the tracing lines are what they were.
+**every exit 3 and at no other exit**, immediately before `refusal-reason=`. Interface I9 is
+unchanged: `refusal-reason=<TerminalState>` is still the final stdout line of a refused run, and the
+human line on stderr and the tracing lines are what they were.
+
+**The two lines are the last two the runner writes, in one write, and that position is part of the
+contract.** A reader may rely on it: at exit 3 nothing is printed after them, the error text and
+every tracing line come before, and the detail line is printed also for a refusal that has nothing
+to say (its `message` is then `the refusal carried no sentence`). A change that prints anything
+after them at exit 3, or skips the detail line, breaks this contract.
 
 **Why a second line.** `refusal-reason=` names a state from a closed list, and most refusals have
 none of their own: they are a plain `GuardRefused`. The sentence that says which guard fired and
@@ -1785,20 +1791,35 @@ what to change was on the human line only, in a pod log that goes with the pod, 
 
 | member | what it is |
 |---|---|
-| `code` | The name the refusal opens with (`<Code>: ` or `<Code>. `, a CamelCase word), or `GuardRefused` when it opens with none. ASCII letters and digits, a letter first, at most 64 bytes. |
+| `code` | A member of the CLOSED set of reason codes that kind of run can print (below). It is the name the refusal's sentence opens with (`<Code>: ` or `<Code>. `) when that name is in the set, and `GuardRefused` otherwise; a sentence that opens with any other word keeps the word. ASCII letters and digits, a letter first, at most 64 bytes. |
 | `message` | The rest of the refusal's sentence, cleaned: printable ASCII and `§ – — … →` are kept, a run of whitespace or control characters is one space, a run of anything else is one `U+FFFD`; a URL has no query string and no userinfo; credential shapes read `[redacted]`. At most 760 bytes, cut on a character boundary, and a cut sentence ends with `…`. |
 
-The line is at most 2048 bytes, so CRI's 16 KiB line split never divides it. A refusal with nothing
-printable in it prints no line.
+The line is at most 2048 bytes, so CRI's 16 KiB line split never divides it.
 
-**A reader validates it; it is not trusted because the runner printed it.** A pod log is stdout and
-stderr merged, and the sentence repeats text from the plan, the broker and the archive. `weirkeeper`
-reads the LAST `refusal-detail=` line of the bounded tail by its key name (the rule erratum E4 draws
-for `refusal-reason=`), ignores a line over 2048 bytes, requires the two-member object and the code
-pattern, and cleans the sentence again whatever the runner did. A line that fails any of that is not
-shown, and an earlier line is not used in its place. `logweir_core::refusal_detail` is the one
-implementation of both sides. What the controller does with it is in
-[docs/kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34).
+**The closed sets, one per kind of run.** Adding a code to a set is additive; a reader that predates
+the code does not show that line (it shows "the runner gave no readable reason").
+
+| run | codes |
+|---|---|
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation` |
+| `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
+
+**The two lines agree.** Both come from one refusal: the state on `refusal-reason=` is the detail's
+code (when the code is one of I9's states and the sentence named it with `: `) or `GuardRefused`.
+
+**A reader validates it, and takes it only from the runner's position; it is not trusted because it
+is well-formed.** A pod log is stdout and stderr merged, the sentence repeats text from the plan,
+the broker and the archive, and the plan's author can start a line in the log: the human line prints
+an error's text as it is, and an error may repeat a plan value that holds a line break. So
+`weirkeeper` does NOT read this line by key name over a tail, as erratum E4 reads the others. It
+honours the `refusal-detail=` line directly before the LAST `refusal-reason=` line and ignores every
+other one. That pair must end the log, or be followed only by lines of neither key while being the
+one line of each key in everything read (the human line, on stderr, can be copied after it). Then
+the line must be at most 2048 bytes, the two-member object, a code of that kind's closed set, in
+agreement with the state beside it, and its sentence is cleaned again whatever the runner did. A
+line that fails any of that is not shown, and another line is never used in its place.
+`logweir_core::refusal_detail` is the one implementation of both sides. What the controller does
+with it is in [docs/kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34).
 
 **Mixed versions.** The line is additive both ways.
 
@@ -1806,6 +1827,8 @@ implementation of both sides. What the controller does with it is in
   name and ignores a line it does not know. The status is what it was.
 - *An older runner under a newer controller.* No line, so the condition's message is byte for byte
   what it was before this line existed.
+- *A newer runner whose code this controller does not know.* The line is not shown; the state on
+  `refusal-reason=` and the exit code are recorded as always.
 
 **Not printed by the other three binaries that exit 3.** `logweir check run` prints
 `refusal-reason=CheckContractMismatch` and nothing else on stdout, `logweir notify deliver` prints

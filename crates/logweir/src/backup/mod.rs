@@ -1067,7 +1067,10 @@ fn exiting(
     // satisfies GC11 rather than printing nothing. FX-34: `refusal-detail=`
     // first, then the state line (`crate::exit::print_refusal`).
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal(refusal_message.unwrap_or(""));
+        crate::exit::print_refusal(
+            logweir_core::refusal_detail::RefusingRun::Backup,
+            refusal_message.unwrap_or(""),
+        );
     }
     // RECEIPT-DUP: `failure-reason=` as the FINAL stdout line of an exit 1
     // or 4 whose state is more specific than its code, for the same reason
