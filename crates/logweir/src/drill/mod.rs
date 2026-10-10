@@ -4605,7 +4605,7 @@ mod tests {
         RestoreOutcome {
             scorecard: sc,
             topic_preflight: phase0_admit::TopicPreflight {
-                timestamp_type: "CreateTime".into(),
+                timestamp_type: Some("CreateTime".into()),
                 retention_ms: "-1".into(),
                 timestamp_bound_ms: None,
                 configs_set: Vec::new(),
@@ -5701,7 +5701,7 @@ mod tests {
                 .collect(),
             topic_mapping_prefix: "drill-".into(),
             topic_preflight: phase0_admit::TopicPreflight {
-                timestamp_type: "CreateTime".into(),
+                timestamp_type: Some("CreateTime".into()),
                 retention_ms: "-1".into(),
                 timestamp_bound_ms: None,
                 configs_set: Vec::new(),
