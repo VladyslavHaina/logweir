@@ -1810,3 +1810,163 @@ fn the_renderer_accepts_an_unmeasured_broker() {
     assert!(ran.status.success(), "{}", ran.transcript());
     assert!(after.contains("| v0.21.0 | unmeasured |"), "{after}");
 }
+
+// ---------------------------------------------------------------------------
+// 11. PROD-01.5c: the broker-lines job
+// ---------------------------------------------------------------------------
+
+/// The `supported` lines of `e2e/compose/stack-env.sh`'s one table
+/// (`LINE PINNED-VERSION IMAGE-DIGEST STATUS`), in its order.
+fn supported_broker_lines() -> Vec<String> {
+    let script = read("e2e/compose/stack-env.sh");
+    let table = script
+        .split_once("LINES=\"\n")
+        .and_then(|(_, rest)| rest.split_once("\"\n"))
+        .map(|(table, _)| table)
+        .expect("stack-env.sh declares its LINES table");
+    table
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f.len() == 4 && f[3] == "supported")
+        .map(|f| f[0].to_string())
+        .collect()
+}
+
+/// What keeps a `broker-lines` job from asserting PROD-01.1's and PROD-01.4's
+/// suites on every supported line with the engine Logweir ships; empty when
+/// nothing does.
+fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let lines: Vec<String> = job["strategy"]["matrix"]["line"]
+        .as_sequence()
+        .map(|s| {
+            s.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if lines != supported {
+        out.push(format!(
+            "its lines are {lines:?}; stack-env.sh supports {supported:?}"
+        ));
+    }
+    if job["strategy"]["fail-fast"].as_bool() != Some(false) {
+        out.push("one red line would cancel the others (fail-fast)".to_string());
+    }
+    let run = run_lines(job);
+    let at = |pred: &dyn Fn(&str) -> bool| run.iter().position(|l| pred(l));
+    let build = at(&|l| l == "bash scripts/engine-source.sh build");
+    let engine_checked = at(&|l| l.contains("third_party/kafka-backup-build.env"));
+    let line_selected =
+        at(&|l| l.starts_with("stack=$(e2e/compose/stack-env.sh --slot 0 --kafka \"$LINE\""));
+    let up = at(&|l| l == "just e2e-up");
+    let suites = at(&|l| {
+        l.starts_with("cargo test --locked -p e2e --features e2e ")
+            && l.contains(" --test record_semantics ")
+            && l.contains(" --test topic_identity ")
+    });
+    let down = at(&|l| l == "just e2e-down");
+    let Some(suites) = suites else {
+        out.push(
+            "no step runs both suites (`--test record_semantics --test topic_identity`)".into(),
+        );
+        return out;
+    };
+    for (what, step) in [
+        (
+            "Logweir's engine is built (`engine-source.sh build`)",
+            build,
+        ),
+        (
+            "the engine is checked against the build env",
+            engine_checked,
+        ),
+        (
+            "the line is selected through stack-env.sh's digest pin",
+            line_selected,
+        ),
+        ("the stack is brought up (`just e2e-up`)", up),
+    ] {
+        if !step.is_some_and(|s| s < suites) {
+            out.push(format!("before the suites, {what}: missing or after them"));
+        }
+    }
+    if !down.is_some_and(|d| d > suites) {
+        out.push("the stack is not torn down after the suites".to_string());
+    }
+    if serde_yaml::to_string(&job["env"])
+        .unwrap()
+        .contains("KAFKA_")
+    {
+        out.push("the job pins a broker by hand instead of through stack-env.sh".to_string());
+    }
+    out
+}
+
+/// PROD-01.5c: the two suites PROD-01.5 re-ran on 3.9, 4.1 and 4.3 run on
+/// every supported line with the engine `CONTRACT_ENGINE` names, so the
+/// record-semantics contract is ASSERTED there (the `matrix` job's OSO
+/// engines only record it). A line added to stack-env.sh's table as
+/// `supported` fails here until the job runs it too.
+#[test]
+fn the_broker_lines_job_runs_both_suites_on_every_supported_line_with_the_shipped_engine() {
+    let supported = supported_broker_lines();
+    assert!(
+        supported.len() >= 3,
+        "stack-env.sh's table parsed to {supported:?}; this guard reads the wrong text"
+    );
+    let doc = workflow("engine-matrix.yml");
+    let job = &doc["jobs"]["broker-lines"];
+    let offenders = broker_lines_offenders(job, &supported);
+    assert!(offenders.is_empty(), "broker-lines: {offenders:#?}");
+
+    // Each control removes one property and must be named for it.
+    let drop_step = |needle: &str| {
+        let mut j = job.clone();
+        let steps = j["steps"].as_sequence_mut().unwrap();
+        let before = steps.len();
+        steps.retain(|s| !s["run"].as_str().unwrap_or_default().contains(needle));
+        assert_eq!(steps.len() + 1, before, "exactly one step runs `{needle}`");
+        j
+    };
+    let mut fewer_lines = job.clone();
+    fewer_lines["strategy"]["matrix"]["line"]
+        .as_sequence_mut()
+        .unwrap()
+        .pop();
+    let mut one_suite = job.clone();
+    for s in one_suite["steps"].as_sequence_mut().unwrap() {
+        if let Some(r) = s["run"].as_str().map(str::to_string) {
+            s["run"] = Value::from(r.replace(" --test topic_identity", ""));
+        }
+    }
+    let mut hand_pinned = job.clone();
+    hand_pinned["env"]["KAFKA_VERSION"] = Value::from("${{ matrix.line }}");
+    let mut fail_fast = job.clone();
+    fail_fast["strategy"]["fail-fast"] = Value::from(true);
+    for (control, names) in [
+        (fewer_lines, "its lines are"),
+        (
+            drop_step("engine-source.sh build"),
+            "engine-source.sh build",
+        ),
+        (
+            drop_step("kafka-backup-build.env"),
+            "checked against the build env",
+        ),
+        (
+            drop_step("stack-env.sh --slot 0"),
+            "stack-env.sh's digest pin",
+        ),
+        (drop_step("just e2e-down"), "torn down"),
+        (one_suite, "runs both suites"),
+        (hand_pinned, "by hand"),
+        (fail_fast, "fail-fast"),
+    ] {
+        let found = broker_lines_offenders(&control, &supported);
+        assert!(
+            found.iter().any(|f| f.contains(names)),
+            "the control naming `{names}` was not caught: {found:#?}"
+        );
+    }
+}
