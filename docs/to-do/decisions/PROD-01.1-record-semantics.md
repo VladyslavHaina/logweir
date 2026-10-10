@@ -14,6 +14,9 @@ Decision record for **PROD-01.1** ("Prove record and transaction behaviour") in 
   the contract asserted on that build, on linux/arm64 and linux/amd64. All nine outcome files compared
   the same, in semantics, as OSO's 0.23.3 binary's in the same session. **No contract change**
   (`PROD-00-engine-route.md` §13.5). OSO's 0.23.3 now records outcomes without asserting them.
+- **Addendum, 2026-10-10 (PROD-01.5c):** every live row was re-run on Apache Kafka **3.9.2, 4.1.2 and
+  4.3.1**, and on 3.7.1 again in the same session, with `0.23.3+logweir.2` and the contract asserted.
+  **No contract change, and no line diverges from 3.7.1:** §12 records the runs.
 - Engine: `kafka-backup` v0.21.0, the pinned source `third_party/kafka-backup-v0.21.0.tar.gz`
   (sha256 `0252a83735148331c16d7c4e737a41f099c0f52eda5d7a66db75b8848ddc405b`) and the pinned image
   `osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`.
@@ -794,10 +797,11 @@ PROD-00.1's to propose and OD-3's to decide — this record supplies each one's 
 
 ## 10. Limits of this record
 
-- **One broker line.** Every row ran on Apache Kafka 3.7.1 in the single-node compose stack.
-  PROD-01.5's 3.9, 4.1 and 4.3 profiles should re-run `e2e/tests/record_semantics.rs`; nothing
-  here depends on a broker version except S3's premise (the broker rewrites only the batch max
-  timestamp for `LogAppendTime`), which is Kafka's documented batch format.
+- **Four broker lines, one topology.** This record was measured on Apache Kafka 3.7.1. PROD-01.5c
+  re-ran every row on 3.9.2, 4.1.2 and 4.3.1 and found the same outcomes (§12), S3's premise
+  included (the broker rewrites only the batch max timestamp for `LogAppendTime`). Every line is the
+  single-node compose stack: no replication and no leader movement. The 4.0 and 4.2 lines are not
+  run.
 - **One producer library.** Fixtures were produced with librdkafka (rust-rdkafka 0.36.2). A Java
   producer batches and compresses differently; the engine's decode of a record does not depend on
   that, and the engine's own test over a Java-produced batch (`kafka/fetch.rs:618-663`) exercises the
@@ -849,6 +853,52 @@ and `runs/c2-*/`.
 **Contract change: none.** The capture, replay and verification statements of §3, the
 counterexamples of §2 and the routes of §9 hold on 0.23.3 unchanged. The one new fact (sample 6)
 is about Logweir's verdict on a duplicate it can count, not about the engine: C5 is as it was.
+
+## 12. Re-measured on the 3.9, 4.1 and 4.3 broker lines (PROD-01.5c, 2026-10-10)
+
+§10 left one broker line. From source, nothing here should depend on the broker's version: the
+engine sends fixed protocol versions that every line accepts
+([support matrix](../../support-matrix.md), "Broker versions"), and S1–S13 are statements about
+the engine and about Logweir, resting on Kafka's record-batch format and its transaction markers,
+which these lines share. The runs agree.
+
+**Runs.** Compose slot 2, one line at a time, the digest-pinned images of
+`e2e/compose/stack-env.sh --kafka LINE` with the `auth` profile up as in CI, each version read back
+from the running broker; branch `claude/prod-01-5c` at `fa7a9b0b` (the suites and the product code
+are main `64b66a15`'s). The engine was `0.23.3+logweir.2`, which equals `CONTRACT_ENGINE`, run
+natively from the published linux/arm64 runner image (`vladyslavhaina/logweir@sha256:4f082ae8…`,
+main `739f17c5`). Outcome files, logs and the comparison are under `artifacts/prod-01-5c/<line>/`.
+3.7.1 was run again the same way, as the baseline.
+
+| Row | 3.7.1 | 3.9.2 | 4.1.2 | 4.3.1 |
+|---|---|---|---|---|
+| The eight live rows of §2 (TXN, which also writes txn-late; ts-floor; ts-pit; ts-bound; LAT; shapes; compaction; recreate), contract asserted | 8 passed | 8 passed | 8 passed | 8 passed |
+| The whole file's default set (the eight, and the four complete-coverage rows of PROD-08.1 and 08.1a) | 12 passed, 3 ignored | 12 passed, 3 ignored | 12 passed, 3 ignored | 12 passed, 3 ignored |
+| Outcome files against 3.7.1's, in semantics (PROD-00.2's projection: counts, recorded configurations, divergence classes and counts, Logweir's exit, outcome and count bound) | — | 13 of 13 the same | 13 of 13 the same | 13 of 13 the same |
+| Ack fault (§5.1), one sample | frozen at 6,000: 2 requests timed out at 60 s and were resent, 2,000 `duplicate`, 1,000 `missing`; then NOT_LEADER, "Unknown broker ID: -1", engine exit 1; Logweir exit 1, no scorecard | frozen at 6,000: 3 resent, 3,000 `duplicate`, 4,000 `missing`; the same ending | frozen at 6,000: 3 resent, 3,000 `duplicate`, 10,000 `missing`; the same ending | frozen at 7,000: 3 resent, 3,000 `duplicate`, 8,000 `missing`; the same ending |
+| Kill (§5.2), one sample | killed at 17,000: the engine container was running right after, and the target held all 60,000 within two seconds | killed at 2,000: the same | killed at 10,000: the same | killed at 10,000: the same |
+
+- **The contract holds on every line.** Each of the eight rows asserts its exact divergence set and
+  Logweir's verdict, and every divergence of §2's table reappeared: 7 `extra:control-marker` and a
+  signed `pass` over 19 of 19 for transactions; the dropped record below the floor; the skipped
+  in-window record signed `pass`; the false `fail-integrity` of ts-bound; 9 `timestamp-changed` for
+  `LogAppendTime`; one `headers-collapsed` at capture and one at replay; compaction and recreation
+  exact.
+- **The broker's time retention deleted no segment of these rows** (A-C20-2 holds): each line's
+  read-back names one deletion, topic identity's own retention row.
+- **The outage rows show §5.1's first two findings on every line**: a resent batch is a duplicate,
+  and a single-node broker frozen past its session leaves partitions leaderless when it thaws, which
+  the engine treats as fatal. They are samples, and their counts are not comparable between lines.
+  Sample 6's signed `fail-integrity` did not recur: all four runs ended in the engine's exit 1.
+- **One difference from an older baseline is Logweir's, not a broker's.** Against FX-21's 3.7.1
+  outcome files (2026-10-08, `15deaaa1`), ts-floor and ts-bound differ in the text of Logweir's
+  count-bound error, which since FX-23 also names the partition that is short. The same text appears
+  on 3.7.1 at this tip, which is why the baseline was run again.
+
+**Contract change: none.** §3, §2's counterexamples and §9's routes hold on 3.9.2, 4.1.2 and 4.3.1
+unchanged. CI: the `broker-lines` job of `.github/workflows/engine-matrix.yml` is declared to run
+this file's default set on each of the three lines with Logweir's engine build, so that the
+contract is asserted there and not only recorded. It has not run on GitHub yet.
 
 ---
 
