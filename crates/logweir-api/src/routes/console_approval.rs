@@ -425,6 +425,9 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
         target: ScopeTargetView {
             bootstrap_servers: scope.target.bootstrap_servers.clone(),
             auth_mode: scope.target.auth_mode.to_string(),
+            auth_username: scope.target.auth_username.clone(),
+            replication_factor: scope.target.replication_factor,
+            teardown: scope.target.teardown.clone(),
             mode: scope.target.mode.to_string(),
             topic_prefix: scope.target.topic_prefix.clone(),
         },

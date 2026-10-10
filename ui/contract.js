@@ -877,7 +877,11 @@ const SCOPE_RECOVERY = shapeOf(
 );
 const SCOPE_TARGET = shapeOf(
   "ScopeTargetView",
-  { bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str },
+  {
+    bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str,
+    replicationFactor: int, teardown: str,
+  },
+  { authUsername: str },
 );
 const SCOPE_TOPIC = shapeOf(
   "ScopeTopicView",

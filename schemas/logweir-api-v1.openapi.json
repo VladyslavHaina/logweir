@@ -14225,12 +14225,19 @@
           "authMode",
           "bootstrapServers",
           "mode",
+          "replicationFactor",
+          "teardown",
           "topicPrefix"
         ],
         "properties": {
           "authMode": {
             "description": "How it authenticates there (`plaintext`, `scramSha512`, …).",
             "type": "string"
+          },
+          "authUsername": {
+            "description": "The SASL principal the plan authenticates as, when it names one.",
+            "type": "string",
+            "nullable": true
           },
           "bootstrapServers": {
             "description": "The bootstrap servers the runner dials.",
@@ -14241,6 +14248,15 @@
           },
           "mode": {
             "description": "`scratch` or `newTopic`.",
+            "type": "string"
+          },
+          "replicationFactor": {
+            "description": "The replication factor of every topic the run creates.",
+            "type": "integer",
+            "format": "int16"
+          },
+          "teardown": {
+            "description": "`target.teardown`: what happens to a SCRATCH run's targets afterwards (`delete`: the topics the run created are deleted; a `newTopic` restore deletes nothing whatever it says).",
             "type": "string"
           },
           "topicPrefix": {

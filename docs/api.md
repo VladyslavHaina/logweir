@@ -320,7 +320,8 @@ anything. `state` is:
 names by hash (never from the Restore object's other fields): `source`
 (archive location, endpoint, region, plain HTTP, backup set, bound point),
 `recovery` (point in time, window start, time basis), `target` (bootstrap
-servers, auth mode, mode, topic prefix), **`topics` — every one, `{source,
+servers, auth mode and principal, mode, topic prefix, replication factor,
+teardown), **`topics` — every one, `{source,
 target, originalName, partitions?}`, never a slice** — `topicsCount`,
 `verification` and `evidence`. It is present exactly when `scopeComplete` is
 `true`; otherwise `scopeIncomplete` (`tooManyTopics`, `planUnreadable`,

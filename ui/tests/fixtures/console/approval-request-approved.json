@@ -47,7 +47,9 @@
         ],
         "authMode": "plaintext",
         "mode": "newTopic",
-        "topicPrefix": "restore-20260907T140500Z-"
+        "topicPrefix": "restore-20260907T140500Z-",
+        "replicationFactor": 1,
+        "teardown": "delete"
       },
       "topics": [
         {

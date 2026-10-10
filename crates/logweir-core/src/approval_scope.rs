@@ -137,6 +137,14 @@ pub struct ScopeTarget {
     pub bootstrap_servers: Vec<String>,
     /// How it authenticates there: `plaintext`, `scramSha512`, …
     pub auth_mode: &'static str,
+    /// The SASL principal the plan authenticates as, when it names one.
+    pub auth_username: Option<String>,
+    /// The replication factor of every topic the run creates.
+    pub replication_factor: i16,
+    /// `target.teardown`: what phase 9 does with a SCRATCH run's targets
+    /// (`delete` removes the topics the run created, never an original name;
+    /// a `newTopic` restore deletes nothing whatever it says).
+    pub teardown: String,
     /// `scratch` or `newTopic`.
     pub mode: &'static str,
     /// The prefix every source topic is mapped through
@@ -368,7 +376,8 @@ impl std::fmt::Display for ScopeIncomplete {
 }
 
 /// Whether `text` is printable ASCII (space to `~`) of at most
-/// [`MAX_SCOPE_TEXT_CHARS`] characters.
+/// [`MAX_SCOPE_TEXT_CHARS`] characters: no control character, no
+/// right-to-left override, no look-alike outside ASCII.
 fn showable(text: &str) -> bool {
     text.len() <= MAX_SCOPE_TEXT_CHARS && text.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
@@ -561,6 +570,9 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
         target: ScopeTarget {
             bootstrap_servers,
             auth_mode: plan.target.auth.mode_str(),
+            auth_username: shown_opt(plan.target.auth.username(), "the target's SASL principal")?,
+            replication_factor: plan.target.default_replication_factor,
+            teardown: shown(&plan.target.teardown, "the target's teardown")?,
             mode: match plan.target.mode {
                 TargetMode::Scratch => "scratch",
                 TargetMode::NewTopic => "newTopic",
@@ -608,19 +620,25 @@ pub fn approval_scope(
     if subject != plan.approval_subject {
         return Err(ScopeIncomplete::SubjectNotThePlans);
     }
+    // THE REQUEST'S OWN TEXT, BY THE SAME RULE. Who asked is the fact the
+    // second person decides on ("I am not the requester"): a right-to-left
+    // override or a control character in it could make them misread it. The
+    // console's identity rule already keeps such a requester from being
+    // compared at all; this keeps it from being SHOWN, whatever made the
+    // request.
     Ok(ApprovalScope {
         requester: ScopePrincipal {
-            issuer: request.requester.issuer.clone(),
-            subject: request.requester.subject.clone(),
+            issuer: shown(&request.requester.issuer, "the requester's issuer")?,
+            subject: shown(&request.requester.subject, "the requester's subject")?,
         },
-        namespace: request.subject.namespace.clone(),
-        restore: request.subject.name.clone(),
-        restore_uid: request.subject.uid.clone(),
+        namespace: shown(&request.subject.namespace, "the namespace")?,
+        restore: shown(&request.subject.name, "the Restore's name")?,
+        restore_uid: shown(&request.subject.uid, "the Restore's UID")?,
         plan_hash: request.plan_hash.clone(),
         approval_subject: subject,
-        policy_name: request.policy.name.clone(),
-        policy_digest: request.policy.digest.clone(),
-        ticket: request.ticket.clone(),
+        policy_name: shown(&request.policy.name, "the policy's name")?,
+        policy_digest: shown(&request.policy.digest, "the policy's digest")?,
+        ticket: shown_opt(request.ticket.as_deref(), "the change ticket")?,
         requested_at: request.issued_at,
         expires_at: request.expires_at,
         plan_name: plan.plan_name,
@@ -762,6 +780,9 @@ mod tests {
         );
         assert_eq!(scope.target.mode, "newTopic");
         assert_eq!(scope.target.auth_mode, "plaintext");
+        assert_eq!(scope.target.auth_username, None);
+        assert_eq!(scope.target.replication_factor, 1);
+        assert_eq!(scope.target.teardown, "delete");
         assert_eq!(scope.target.topic_prefix, "restore-20260907T140500Z-");
         assert_eq!(
             scope.topics,
@@ -1049,6 +1070,37 @@ mod tests {
             plan_scope(text.as_bytes()),
             Err(ScopeIncomplete::BootstrapServersNotShowable)
         );
+    }
+
+    /// **Who asked is shown only as it is** (the coordinator's review of
+    /// `138abc58`, item 1). A requester subject carrying a right-to-left
+    /// override could make the approver misread who asked, which is the fact
+    /// they decide on: the scope is incomplete. The same for the ticket and
+    /// the policy's name. NEGATIVE CONTROL: the plain request is complete.
+    /// KILLS: a scope that copies a request field without the rule.
+    #[test]
+    fn request_text_that_cannot_be_shown_faithfully_leaves_no_scope() {
+        let text = plan(&["orders"]);
+        assert!(approval_scope(&request(&text, None), text.as_bytes()).is_ok());
+        let mut bidi = request(&text, None);
+        bidi.requester.subject = "bob\u{202e}ecila".into();
+        assert_eq!(
+            approval_scope(&bidi, text.as_bytes()),
+            Err(ScopeIncomplete::ValueNotShowable {
+                what: "the requester's subject"
+            })
+        );
+        let mut ticket = request(&text, None);
+        ticket.ticket = Some("CHG-1\nApproved by: security".into());
+        assert_eq!(
+            approval_scope(&ticket, text.as_bytes()),
+            Err(ScopeIncomplete::ValueNotShowable {
+                what: "the change ticket"
+            })
+        );
+        let mut policy = request(&text, None);
+        policy.policy.name = "prod-pair\u{200b}".into();
+        assert!(approval_scope(&policy, text.as_bytes()).is_err());
     }
 
     /// Every reason has a stable word and a sentence of fixed words that

@@ -4196,6 +4196,15 @@ pub struct ScopeTargetView {
     pub bootstrap_servers: Vec<String>,
     /// How it authenticates there (`plaintext`, `scramSha512`, …).
     pub auth_mode: String,
+    /// The SASL principal the plan authenticates as, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_username: Option<String>,
+    /// The replication factor of every topic the run creates.
+    pub replication_factor: i16,
+    /// `target.teardown`: what happens to a SCRATCH run's targets afterwards
+    /// (`delete`: the topics the run created are deleted; a `newTopic`
+    /// restore deletes nothing whatever it says).
+    pub teardown: String,
     /// `scratch` or `newTopic`.
     pub mode: String,
     /// The prefix every source topic is mapped through; empty for a restore

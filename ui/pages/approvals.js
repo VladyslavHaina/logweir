@@ -1490,8 +1490,14 @@ export function renderApprovalScope(scope) {
     ["time basis", typeof recovery.timeBasis === "string" ? esc(recovery.timeBasis) : cell(null)],
     ["target cluster", "<span id=\"scope-target-cluster\">" +
       servers.map((b) => "<code>" + esc(b) + "</code>").join(", ") + "</span>"],
-    ["target authentication", esc(target.authMode)],
+    ["target authentication", esc(target.authMode) +
+      (typeof target.authUsername === "string" ? " as <code>" + esc(target.authUsername) +
+        "</code>" : "")],
     ["target mode", esc(target.mode)],
+    ["replication factor", esc(String(target.replicationFactor))],
+    ["afterwards", target.mode === "scratch" && target.teardown === "delete"
+      ? "<strong id=\"scope-teardown\">the topics this run creates are deleted</strong>"
+      : "nothing is deleted (teardown " + esc(target.teardown) + ")"],
     ["topic prefix", typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? "<code>" + esc(target.topicPrefix) + "</code>"
       : "none: every topic is written under its own name"],

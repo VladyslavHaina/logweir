@@ -410,6 +410,14 @@ test("an_ordinary_request_shows_the_whole_scope_and_not_only_a_hash", () => {
   assert.ok(html.includes("<code>restore-20260907T140500Z-</code>"), "the prefix");
   assert.ok(html.includes("<code>s3://logweir-evidence/logweir/</code>"), "the evidence");
   assert.ok(html.includes("2 topic(s), every one listed"));
+  // What happens afterwards: a newTopic restore deletes nothing; a scratch
+  // drill with teardown delete deletes the topics it creates, and says so.
+  assert.ok(html.includes("nothing is deleted (teardown delete)"), html);
+  const scratch = structuredClone(request("pending"));
+  scratch.scope.target.mode = "scratch";
+  assert.match(renderConsoleApprovalPanel(view(TWO_PERSON, { request: scratch })),
+    /<strong id="scope-teardown">the topics this run creates are deleted<\/strong>/);
+  assert.ok(html.includes("replication factor"));
   // A partition subset is listed number by number.
   const subset = structuredClone(request("pending"));
   subset.scope.topics[0].partitions = [0, 2, 5];
