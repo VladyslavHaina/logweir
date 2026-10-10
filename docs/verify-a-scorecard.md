@@ -910,6 +910,8 @@ from the commit before PROD-15.1 print `VALID` and the restored topics' own
 build's `drill show` prints `mode=newTopic` with the mapping's entry count. They do not say the restore
 wrote under the original names, nor which condition admitted it; the document
 does, and this release's readers print it (`drill show` in its footer).
+`verify_scorecard.py` 1.27.0 (the last before this item) does the same over
+six later live 1.8.0 scorecards: `VALID`, and no `original name:` line.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print
