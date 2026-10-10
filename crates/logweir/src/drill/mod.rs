@@ -1043,7 +1043,7 @@ pub const DRILL_RUN_DEPRECATION: &str =
     "logweir drill run is the tag-0 name for logweir restore run and will be removed in tag 2";
 
 /// The deprecation line, through a writer seam, for the same reason
-/// `crate::exit::print_refusal_reason_to` has one: a `eprintln!` nobody can
+/// `crate::exit::print_refusal_to` has one: a `eprintln!` nobody can
 /// observe is a contract nothing pins.
 ///
 /// It goes on STDERR and it is the ONLY thing the alias adds. Stdout is
@@ -1415,7 +1415,7 @@ fn exiting(
     // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout —
     // a controller tailing the pod log reads the final line, and the pod log
     // API has no stream selector, so stderr would not be distinguishable at
-    // all (`crate::exit::print_refusal_reason`'s doc comment carries the
+    // all (`crate::exit::print_refusal`'s doc comment carries the
     // measurement). Global Constraint 11: EVERY guard refusal prints it.
     //
     // `unwrap_or("")` is the fail-safe direction, not a shrug: `GuardRefused`
@@ -1536,7 +1536,7 @@ fn exiting(
 
 /// **The stopped creation step's TWO stdout lines, through a writer seam**
 /// (PROD-15.1 review 2, L1), for the reason `crate::exit::
-/// print_refusal_reason_to` has one: these two lines carry everything a
+/// print_refusal_to` has one: these two lines carry everything a
 /// controller learns about the stop, and a `println!` nobody can observe is a
 /// contract nothing pins.
 ///

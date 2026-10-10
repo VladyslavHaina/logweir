@@ -22,17 +22,20 @@
 //!
 //! # Who wrote the line: the Job's token, and nothing about where it stands
 //!
-//! A plan can start a line of its own in a pod log: the runner prints an
-//! error's text raw on stderr, an error may repeat a plan value, and a YAML
-//! scalar may hold a line break (PROD-15.1's review). Both streams reach a
-//! controller as ONE log, so no rule about where a line stands, or how
-//! well-formed it is, can tell the runner's line from text the runner was
-//! made to print. What the plan's author cannot have is a value that did not
-//! exist when the plan was written. So the controller makes a fresh random
-//! [`LineToken`] each time it builds a Job, hands it to the runner as a
-//! command-line ARGUMENT, and honours a `refusal-detail=` line only when the
-//! line carries that Job's token ([`RefusalDetail::read_line`]). A line with
-//! no token, or another token, is not the runner's and is not read at all.
+//! A plan can start a line of its own in a pod log. An error may repeat a
+//! plan value, and a YAML scalar may hold a line break. The runner escapes
+//! every line break in the error text it prints itself (PROD-15.1's
+//! `one_line`, which this line was designed before); the Kafka client inside
+//! the runner logs to the same stderr by itself, unescaped (FX-43). Both
+//! streams reach a controller as ONE log, so no rule about where a line
+//! stands, or how well-formed it is, can tell the runner's line from text a
+//! plan's author got into the log. What the plan's author cannot have is a
+//! value that did not exist when the plan was written. So the controller
+//! makes a fresh random [`LineToken`] each time it builds a Job, hands it to
+//! the runner as a command-line ARGUMENT, and honours a `refusal-detail=`
+//! line only when the line carries that Job's token
+//! ([`RefusalDetail::read_line`]). A line with no token, or another token, is
+//! not the runner's and is not read at all.
 //!
 //! An argument and not an environment variable, for two reasons that are
 //! properties of this codebase: the engine child process inherits the

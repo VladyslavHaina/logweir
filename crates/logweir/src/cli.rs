@@ -959,8 +959,15 @@ pub enum BackupCmd {
 
 /// `--line-token`'s value: lower-case hex, 32 to 128 digits.
 ///
-/// The message names the shape and never repeats the value, as every other
-/// message about this flag must not.
+/// THIS message names the shape and does not repeat the value. clap's own
+/// text around it does repeat what it was given, in two cases: a value that
+/// is NOT a token (`error: invalid value '<value>' for '--line-token <HEX>'`),
+/// and an extra positional argument, whatever its shape
+/// (`error: unexpected argument '<value>' found`). Neither is a token a
+/// controller wrote: the controller writes a well-formed value, last, after
+/// the flag, and a well-formed value is never echoed (the flag given twice
+/// and the flag with no value name the flag only). So a token reaches no
+/// usage error, and a string a person typed wrongly is shown back to them.
 fn parse_line_token(value: &str) -> Result<logweir_core::refusal_detail::LineToken, String> {
     logweir_core::refusal_detail::LineToken::parse(value).ok_or_else(|| {
         "a line token is 32 to 128 lower-case hex digits; the controller writes this flag, and \

@@ -1015,9 +1015,10 @@ fn a_refused_probe_readback_is_operational_never_an_override_verdict() {
 /// `a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`
 /// fixture is handed to `logweir_core::guard::refusal_reason_line` and the
 /// result is byte-equal to `refusal-reason=TargetTopicConfigRefused`; then
-/// `logweir::exit::print_refusal_reason_to` is asserted to write exactly that
-/// line, with its newline, to the writer `print_refusal_reason` prints stdout
-/// through.
+/// `logweir::exit::print_refusal_to`, the writer `print_refusal` prints stdout
+/// through, is asserted to END its output with exactly that line and its
+/// newline, after the one `refusal-detail=` line FX-34 put before it. (The
+/// printer of the state line alone is gone: FX-34's review, L5.)
 ///
 /// **In process, never the binary** — a binary-level arm would need both a
 /// broker and a `LogAppendTime` broker, so the only binary assertion of this
@@ -1054,12 +1055,25 @@ fn a_target_topic_refusal_prints_its_terminal_state() {
         "refusal-reason=TargetTopicConfigRefused"
     );
 
-    // …and the runner actually WRITES it, to stdout, through this seam.
+    // …and the runner actually WRITES it, to stdout, through this seam: the
+    // detail line, then the state line LAST.
     let mut captured: Vec<u8> = Vec::new();
-    logweir::exit::print_refusal_reason_to(&mut captured, &msg).expect("write");
+    logweir::exit::print_refusal_to(
+        &mut captured,
+        logweir_core::refusal_detail::RefusingRun::Restore,
+        None,
+        &msg,
+    )
+    .expect("write");
+    let written = String::from_utf8(captured).expect("utf8");
+    let lines: Vec<&str> = written.split_inclusive('\n').collect();
+    assert_eq!(lines.len(), 2, "two lines, nothing after them: {written}");
+    assert!(
+        lines[0].starts_with("refusal-detail={\"code\":\"TargetTopicConfigRefused\","),
+        "{written}"
+    );
     assert_eq!(
-        String::from_utf8(captured).expect("utf8"),
-        "refusal-reason=TargetTopicConfigRefused\n",
+        lines[1], "refusal-reason=TargetTopicConfigRefused\n",
         "the line, and its newline — a controller tailing pods/log reads the final line, and the \
          pod log API has no stream selector, so stderr would not be distinguishable at all"
     );
@@ -1508,7 +1522,7 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
 /// `drill::exiting` is a private function that writes with `println!` to the
 /// process's real stdout, and the branch that prints this line is reached only
 /// at `ExitCode::Ok` — a full drill that dialled a broker, restored into it and
-/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_reason_to`
+/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_to`
 /// is the precedent for one, and it covers interface I9's line, not this one),
 /// and libtest gives a test no way to read back its own captured stdout. So
 /// the print itself is not observable in process without a broker, and this row

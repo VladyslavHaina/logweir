@@ -15,9 +15,11 @@
 //!
 //! # Why the token, and not where the line stands
 //!
-//! A plan can start a line of its own in a pod log: the human line prints an
-//! error's text raw and an error may repeat a plan value that holds a line
-//! break (PROD-15.1's review). Both streams reach a controller as one log, so
+//! A plan can start a line of its own in a pod log. This build's runner
+//! escapes the line breaks in the error text it prints itself (PROD-15.1's
+//! `one_line`); the Kafka client inside it logs to the same stderr by itself,
+//! unescaped, and an error may repeat a plan value that holds a line break
+//! (FX-43). Both streams reach a controller as one log, so
 //! nothing about a line's place tells the runner's line from the plan's. The
 //! token does: the controller makes it when it builds the Job, and a plan is
 //! older than its Job. The last rows of this file run a plan that writes
@@ -891,10 +893,13 @@ fn every_refused_run_writes_the_pair_last_after_its_error_text() {
 /// other. Every `refusal-detail=` line the plan produced is read as nobody's.
 /// The runner's sentence carries the plan's text as words, cleaned.
 ///
-/// This row does NOT assert that the plan's text starts a line of the log
-/// today (it does: the human line prints an error's text raw). Closing that
-/// is PROD-15.1's change to the human line; this row holds on both sides of
-/// it, and the token is what makes it not matter.
+/// This row does NOT assert that the plan's text starts a line of the log.
+/// Before PROD-15.1 it did: the human line printed an error's text raw. With
+/// PROD-15.1's `one_line` the human line holds the plan's line breaks as
+/// escapes, so the plan's marker lines are words inside one line (that is
+/// `a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`'s
+/// assertion, not this row's). This row holds on both sides of that change,
+/// and the token is what makes it not matter.
 ///
 /// KILLS: the token printed on any other line (the human line, a tracing
 /// line); a detail line that carries a raw line break.
@@ -1097,12 +1102,14 @@ fn a_run_prints_the_token_it_was_given_in_one_line_and_none_otherwise() {
 /// * `exiting` is called from one place per runner, and it is where
 ///   `crate::exit::print_refusal(` is called, once, directly under
 ///   `if code == ExitCode::GuardRefused {`;
-/// * nothing in either runner prints the state line by itself
-///   (`print_refusal_reason`), which would leave the detail line's position
-///   to whatever came before.
+/// * nothing in either runner prints the state line by itself, which would
+///   leave the detail line's position to whatever came before; and
+///   `src/exit.rs` has no printer of the state line alone to reach for (the
+///   old `print_refusal_reason` and its writer seam are removed, and
+///   `refusal_reason_line` is called in one place, inside `print_refusal_to`).
 ///
 /// KILLS: a second exit-3 path that returns the code without `exiting`; the
-/// state line printed alone.
+/// state line printed alone; a printer of the state line alone put back.
 #[test]
 fn every_exit_three_of_a_run_leaves_through_the_one_printer() {
     fn production(path: &str) -> String {
@@ -1193,5 +1200,16 @@ fn every_exit_three_of_a_run_leaves_through_the_one_printer() {
     // NEGATIVE CONTROL: the reader of sources sees code and skips comments.
     let exit = production("src/exit.rs");
     assert!(exit.contains("pub fn print_refusal_to<W: std::io::Write>("));
-    assert!(!exit.contains("/// **FX-34.**"));
+    assert!(!exit.contains("/// # Why a second line, and why it is first (FX-34)"));
+    // ONE PRINTER IN `exit.rs` TOO: no function prints the state line alone
+    // (its name appears in comments only, which `production` drops), and the
+    // state line's text is built in one place, beside the detail line's.
+    assert_eq!(count(&exit, "print_refusal_reason"), 0);
+    assert_eq!(count(&exit, "refusal_reason_line("), 1);
+    assert_eq!(count(&exit, "refusal_detail_line("), 1);
+    assert_eq!(
+        count(&exit, "pub fn print_refusal"),
+        2,
+        "`print_refusal` and its writer seam, and no third"
+    );
 }

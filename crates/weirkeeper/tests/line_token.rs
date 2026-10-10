@@ -16,7 +16,8 @@
 //! The rows about which log lines are honoured are in
 //! `tests/restore_controller.rs`, `tests/backup_controller.rs` and
 //! `src/refusal.rs`; the rows about what a read logs are in
-//! `tests/refusal_read.rs`.
+//! `tests/refusal_read.rs`, and the rows about what the pass that CREATES the
+//! Job logs are in `tests/create_pass_log.rs`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -326,14 +327,25 @@ fn the_token_is_read_back_off_the_job_and_only_from_where_it_is_written() {
 /// and both are the ones it exists for**: the Job's argument
 /// (`job::add_line_token`) and the runner's line (`RefusalDetail::to_line`).
 /// `LineToken` has no `Display`, and its `Debug` prints no value, so
-/// `expose_token()` is the only way out; this row counts its callers in every
-/// crate's product source.
+/// `expose_token` is the only way out; this row counts every mention of that
+/// name in every crate's product source, HOWEVER IT IS SPELLED: a method call
+/// (`token.expose_token()`), a path (`token.map(LineToken::expose_token)`,
+/// which the first version of this row did not see) or anything else. The
+/// one definition is set aside.
 ///
 /// So the token cannot reach a status, a condition, an event, an annotation
-/// or a log line through any code that exists, and a change that adds a
-/// third caller meets this row.
+/// or a log line THROUGH THE TYPE, and a change that adds a third mention
+/// meets this row.
 ///
-/// KILLS: the token written into a condition, a log line or an annotation.
+/// **What this row cannot see**, and which rows do: once `job::add_line_token`
+/// has run, the token is a plain `String` among the Job's arguments, and code
+/// that logs or stores the JOB (a `?job` on a log line) never names the
+/// accessor. `tests/create_pass_log.rs` captures every event of a create pass
+/// for both kinds and holds the posted Job's token out of all of them; the
+/// controller rows hold it out of every status.
+///
+/// KILLS: the token written into a condition, a log line or an annotation
+/// through the accessor, in either spelling.
 #[test]
 fn the_tokens_text_leaves_the_type_in_two_places_only() {
     let root = workspace_root();
@@ -350,9 +362,15 @@ fn the_tokens_text_leaves_the_type_in_two_places_only() {
         files.len()
     );
     let mut callers = Vec::new();
+    let mut definitions = 0;
     for file in &files {
         let text = production(file);
-        for (at, _) in text.match_indices(".expose_token()") {
+        for (at, _) in text.match_indices("expose_token") {
+            // The definition is not a caller. It is counted by itself below.
+            if text[..at].ends_with("pub fn ") {
+                definitions += 1;
+                continue;
+            }
             let line = text[..at].lines().count();
             callers.push(format!(
                 "{}:{line}",
@@ -370,9 +388,15 @@ fn the_tokens_text_leaves_the_type_in_two_places_only() {
             "crates/logweir-core/src/refusal_detail.rs".to_string(),
             "crates/weirkeeper/src/job.rs".to_string(),
         ],
-        "every caller of `expose_token()`: {callers:?}"
+        "every mention of `expose_token`, the definition aside: {callers:?}"
     );
     assert_eq!(callers.len(), 2, "one in each: {callers:?}");
+    assert_eq!(definitions, 1, "and it is defined once");
+    // NEGATIVE CONTROL: the count sees the spelling with no dot and no
+    // parentheses, which is the one a `.expose_token()` search misses.
+    let other_spelling = "let shown = token.map(LineToken::expose_token);";
+    assert_eq!(other_spelling.match_indices("expose_token").count(), 1);
+    assert_eq!(other_spelling.match_indices(".expose_token()").count(), 0);
 
     // The type gives no other way out.
     let core = production(&root.join("crates/logweir-core/src/refusal_detail.rs"));

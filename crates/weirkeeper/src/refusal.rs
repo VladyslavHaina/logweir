@@ -17,12 +17,14 @@
 //! shows. So:
 //!
 //! * **One line, and only when it carries this Job's token**
-//!   ([`runner_reason`]). A plan can start a line of its own in this log: the
-//!   runner prints an error's text raw on stderr, an error may repeat a plan
-//!   value, and a YAML scalar may hold a line break (PROD-15.1's review).
+//!   ([`runner_reason`]). Text the runner did not choose can start a line of
+//!   its own in this log. The runner escapes every line break in the error
+//!   text it prints itself (`logweir::exit::one_line`, PROD-15.1); the Kafka
+//!   client inside it logs to the same stderr by itself, unescaped, and what
+//!   it logs can repeat a plan value that holds a line break (FX-43).
 //!   Both streams reach this controller as one log, so nothing about where a
 //!   line stands, or how well-formed it is, tells the runner's line from text
-//!   the runner was made to print. What tells them apart is a value the
+//!   a plan's author got into the log. What tells them apart is a value the
 //!   plan's author could not have had: the line token this controller made
 //!   when it built the Job ([`crate::job::new_line_token`]), gave the runner
 //!   as an argument, and reads back off the Job's own pod template
@@ -71,11 +73,23 @@ use crate::controllers::backup::REFUSAL_REASON_PREFIX;
 
 /// How many trailing log lines the exit-3 read asks for.
 ///
-/// Twice [`crate::controllers::backup::KEY_SCAN_TAIL_LINES`]. The scan looks
-/// at the final sixteen NON-EMPTY lines; the API counts every line, and CRI
-/// stores a long line as several, so the read asks for twice as many. A
-/// refused run prints its two key lines last, so nothing it owes is further
-/// back than that.
+/// Twice [`crate::controllers::backup::KEY_SCAN_TAIL_LINES`], and that number
+/// belongs to ONE of the two readers this body is handed to:
+///
+/// - [`crate::controllers::backup::refusal_state`], the reader of
+///   `refusal-reason=`, looks at the final sixteen NON-EMPTY lines. The API
+///   counts every line, and CRI stores a long line as several, so the read
+///   asks for twice as many. A refused run prints its two key lines last, so
+///   nothing that reader owes is further back than that.
+/// - [`runner_reason`], the reader of `refusal-detail=`, has no window of its
+///   own: it scans EVERY line of the body this read returned.
+///
+/// So the two can disagree about one log, on purpose and harmlessly: with
+/// more than sixteen non-empty lines after the runner's pair, the detail line
+/// is still found and shown, beside `exitReason: GuardRefusedUnknownReason`,
+/// because the state line is outside the other reader's window (the unit row
+/// `the_runners_line_is_shown_wherever_it_stands` puts 25 lines after the
+/// pair).
 pub const REFUSAL_LOG_TAIL_LINES: i64 = 32;
 
 /// The byte bound on the exit-3 read: 512 KiB.
