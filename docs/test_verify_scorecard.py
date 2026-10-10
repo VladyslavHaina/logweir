@@ -4588,7 +4588,13 @@ def test_on14_the_block_never_sits_beside_a_partition_subset():
     # ON-1 reads major 1 on purpose: with ON-14 out of the way a 2.x document
     # carrying the block is still refused, in words that do not call 2.0.0 old.
     assert not mod._defines_original_name("2.0.0")
-    assert mod._defines_original_name("1.8.0") and not mod._defines_original_name("1.7.0")
+    # 2.0.0 is refused by its MINOR whatever the major rule says, so it cannot
+    # tell "major 1" from "any major from minor 8". A 2.x minor at or past 8
+    # can (the twin of the Rust row's `defines_original_name("2.8.0")`).
+    assert not mod._defines_original_name("2.8.0")
+    assert mod._defines_original_name("1.8.0") and mod._defines_original_name("1.9.0")
+    assert not mod._defines_original_name("1.7.0")
+    assert not mod._defines_original_name("1.x.0")
 
 
 def test_on13_an_original_name_restore_is_verified_completely_or_is_not_a_pass():
