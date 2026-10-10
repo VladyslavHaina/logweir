@@ -242,6 +242,11 @@ closed_vocabulary! {
         ApprovalVerified => "ApprovalVerified",
         ApproverKeyValid => "ApproverKeyValid",
         Valid => "Valid",
+        // FX-20c: every Secret-backed grant a check stands for carries the
+        // `logweir-binding` its destination expects
+        // (`destination.credentialBound`). Compared in the check pod; nothing
+        // is dialled to find out.
+        CredentialBound => "CredentialBound",
         Succeeded => "Succeeded",
         // -- notReady codes (D2 §6.3, §3.3, §3.4) ------------------------
         ConnectionNotFound => "ConnectionNotFound",
@@ -426,6 +431,10 @@ closed_vocabulary! {
         DestinationEvidenceWritable => "destination.evidenceWritable",
         DestinationArchivePrefixWritable => "destination.archivePrefixWritable",
         DestinationEvidenceReadable => "destination.evidenceReadable",
+        // FX-20c: whether each Secret-backed grant the run would present is
+        // bound to its destination — answered for EVERY such grant, including
+        // `archiveWrite`, which no check may probe with a request.
+        DestinationCredentialBound => "destination.credentialBound",
         SignerPrivateKeyUsable => "signer.privateKeyUsable",
         SignerRostered => "signer.rostered",
         RunnerImage => "runner.image",
@@ -825,6 +834,44 @@ pub struct DestinationPlan {
     /// the kubelet projected", `workloadIdentity` means "use the injected web
     /// identity only", `ambient` means the object_store chain.
     pub credentials: CredentialMode,
+    /// FX-20c: every `SecretKeys` grant of this destination whose binding the
+    /// runner compares for `destination.credentialBound` — the grants a run
+    /// this check stands for would present (every configured grant, for a
+    /// `destinationAccess`). REFERENCES ONLY: a role and a Secret name. The
+    /// Secret's `logweir-binding` key reaches the pod as the role's
+    /// [`crate::credential_binding::grant_binding_env`] pair, and no
+    /// credential value is projected for an entry here.
+    ///
+    /// Empty — and then absent from the bytes, so a plan with no Secret-backed
+    /// grant is byte-identical to every plan rendered before it existed — when
+    /// the destination has no such grant, or the controller predates FX-20c.
+    /// An older runner refuses a plan that carries it (`deny_unknown_fields`,
+    /// exit 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_bindings: Vec<GrantBindingRef>,
+}
+
+/// FX-20c: one Secret-backed grant whose binding a check compares without
+/// using its credential — see [`DestinationPlan::grant_bindings`].
+///
+/// # Why the binding of a grant nobody probes is still compared
+///
+/// `destination.archivePrefixWritable` is execution-only (a check may not
+/// write into an adopter's archive), so before FX-20c a destination whose only
+/// grant was an `archiveWrite` Secret written for another destination tested
+/// READY — `destination.credentialProjected` said `Projected` — while every
+/// backup of it was refused `CredentialBindingMismatch` (PoC batch 4, FX-20
+/// F6). The binding is a public value compared in the pod; comparing it sends
+/// nothing anywhere, so it is checked for every grant whether or not the grant
+/// is probed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GrantBindingRef {
+    /// Which grant: `spec.access.<role>` (a role that falls back to
+    /// `archiveWrite` names `archiveWrite`'s Secret).
+    pub role: DestinationRole,
+    /// The Secret that grant names. A public reference (D2 §6.5).
+    pub secret_name: String,
 }
 
 /// How the store credential reaches the process (D2 §3.5,
@@ -1379,6 +1426,103 @@ impl CheckRequest {
             Self::SourceConnection(_) => CheckPlanKind::SourceConnection,
         }
     }
+
+    /// FX-20c: the destinations whose [`DestinationPlan::grant_bindings`] this
+    /// request's `destination.credentialBound` row compares, each with its
+    /// field path — the source (or only) destination first.
+    ///
+    /// The three readiness kinds and no other: an `evidenceFetch` and a
+    /// `catalogSync` are not readiness questions, and their store handles are
+    /// already refused by the binding of the credential they use
+    /// (`STORE_BINDING_PAIRS`).
+    #[must_use]
+    pub fn bound_destinations(&self) -> Vec<(&'static str, &DestinationPlan)> {
+        match self {
+            Self::DestinationAccess(r) => {
+                vec![("request.destinationAccess.destination", &r.destination)]
+            }
+            Self::OperationReadiness(r) => r
+                .destination
+                .iter()
+                .map(|d| ("request.operationReadiness.destination", d))
+                .collect(),
+            Self::RestorePreflight(r) => {
+                let mut out = vec![(
+                    "request.restorePreflight.sourceDestination",
+                    &r.source_destination,
+                )];
+                if let Some(e) = r.evidence_destination.as_ref() {
+                    out.push(("request.restorePreflight.evidenceDestination", e));
+                }
+                out
+            }
+            Self::TopicInventory(_)
+            | Self::EvidenceFetch(_)
+            | Self::CatalogSync(_)
+            | Self::SourceConnection(_) => Vec::new(),
+        }
+    }
+
+    /// Whether the runner emits `destination.credentialBound` for this
+    /// request: when, and only when, one of its
+    /// [`bound_destinations`](Self::bound_destinations) names a grant binding.
+    /// The ONE predicate both the runner and the controller's expected-row
+    /// mirror (`weirkeeper::controllers::preflight::job_rows`) read.
+    #[must_use]
+    pub fn compares_grant_bindings(&self) -> bool {
+        self.bound_destinations()
+            .iter()
+            .any(|(_, d)| !d.grant_bindings.is_empty())
+    }
+}
+
+/// FX-20c: the shape rules every [`DestinationPlan::grant_bindings`] obeys.
+///
+/// * Only the three readiness kinds carry one ([`CheckRequest::
+///   bound_destinations`]); a binding on an `evidenceFetch` or `catalogSync`
+///   destination is a plan no row would compare, refused rather than ignored.
+/// * Each names a Kubernetes object name.
+/// * A role appears ONCE across the whole request: the role names the pair of
+///   variables the binding reaches the pod under, and two entries sharing one
+///   pair would compare one Secret's binding twice and the other's never.
+fn validate_grant_bindings(request: &CheckRequest) -> Result<(), CheckPlanError> {
+    let unread: Vec<(&str, &DestinationPlan)> = match request {
+        CheckRequest::EvidenceFetch(r) => {
+            vec![("request.evidenceFetch.destination", &r.destination)]
+        }
+        CheckRequest::CatalogSync(r) => vec![("request.catalogSync.destination", &r.destination)],
+        _ => Vec::new(),
+    };
+    for (field, d) in unread {
+        if !d.grant_bindings.is_empty() {
+            return Err(CheckPlanError::field(
+                &format!("{field}.grantBindings"),
+                "only a readiness check compares grant bindings",
+            ));
+        }
+    }
+    let mut seen: Vec<DestinationRole> = Vec::new();
+    for (field, d) in request.bound_destinations() {
+        for (i, g) in d.grant_bindings.iter().enumerate() {
+            if !is_object_name(&g.secret_name) {
+                return Err(CheckPlanError::field(
+                    &format!("{field}.grantBindings[{i}].secretName"),
+                    "not a Kubernetes object name (DNS-1123 subdomain, at most 253 characters)",
+                ));
+            }
+            if seen.contains(&g.role) {
+                return Err(CheckPlanError::field(
+                    &format!("{field}.grantBindings[{i}].role"),
+                    format!(
+                        "{} is named twice in this request; one role is one binding pair",
+                        g.role.as_str()
+                    ),
+                ));
+            }
+            seen.push(g.role);
+        }
+    }
+    Ok(())
 }
 
 /// The document mounted at `/check/check-plan.json` (D2 §4.2).
@@ -1498,6 +1642,7 @@ impl CheckPlan {
                 format!("{} is outside 1..={ceiling}", self.timeout_seconds),
             ));
         }
+        validate_grant_bindings(&self.request)?;
         match &self.request {
             CheckRequest::TopicInventory(r) => {
                 if r.expected_topics.len() > MAX_EXPECTED_TOPICS {

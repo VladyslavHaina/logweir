@@ -99,6 +99,18 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     let mut details: Vec<String> = Vec::new();
     checks.push(runner_contract(now));
 
+    // 0 — FX-20c: the binding of every grant the restore presents (the
+    // source's `archiveRead`, the evidence destination's `evidenceWrite`),
+    // compared with no request and before the plan bytes, because it is not a
+    // claim about them: a refused grant is refused whatever the plan says.
+    if want(CheckId::DestinationCredentialBound) {
+        let mut plans = vec![&req.source_destination];
+        plans.extend(req.evidence_destination.as_ref());
+        if let Some(row) = super::access::credential_bound_row(&plans, wiring) {
+            checks.push(row);
+        }
+    }
+
     // 1 — THE PLAN BYTES, BEFORE ANY SOCKET.
     let spec = match plan_spec(req, wiring).and_then(|spec| {
         // PROD-11.1: a replay selection the plan states WRONGLY is a fact

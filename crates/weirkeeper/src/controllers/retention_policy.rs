@@ -94,7 +94,7 @@ use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unc
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
-use crate::crds::retention_policy::{RetentionMode, RetentionPolicy};
+use crate::crds::retention_policy::{RetentionEnforcementRun, RetentionMode, RetentionPolicy};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError, ResolvedDestination};
 use crate::job::RunnerOwner;
@@ -1237,8 +1237,8 @@ impl Pass<'_> {
                  ({REASON_CREDENTIAL_BINDING_MISMATCH}): the Secret \
                  spec.enforcement.credentialSecretRef names, or the destination's \
                  evidenceWrite Secret, carries no `logweir-binding` or one written for another \
-                 policy, destination route or scope. Set it to status.credentialBinding (the \
-                 record Secret: the destination's status.credentialBinding). Nothing was deleted"
+                 policy, destination route or scope. Nothing was deleted. {}",
+                logweir_core::credential_binding::BINDING_REMEDY
             ),
             Some(0) => format!("retention run {run_id} completed"),
             Some(3) => format!(
@@ -1304,7 +1304,16 @@ impl Pass<'_> {
             ),
         ]);
         let mut harvest_status = json!({
-                "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
+                // FX-20c (review M-1): a run refused on its credential's binding
+                // leaves a policy that deletes nothing until a human rebinds the
+                // Secret — a standing state, published as
+                // `publish_standing_refusal` publishes one, so the console
+                // does not read "enforced by Logweir" over it.
+                "enforcement": if binding_refused {
+                    ENFORCEMENT_RECOMMENDATION_ONLY
+                } else {
+                    ENFORCEMENT_LOGWEIR_WORKER
+                },
                 // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
                 // WROTE (review `d3w9` H2). `failed[]` is the input
                 // `previously_refused()` reads, so without it D3 §6.5's "a provider
@@ -1331,6 +1340,10 @@ impl Pass<'_> {
                 "consecutiveRunFailures": failures,
                 "conditions": conditions,
         });
+        if binding_refused {
+            // Object-wise, one key: the other guarantees are untouched.
+            harvest_status["guarantees"] = json!({ "ageExpiry": GUARANTEE_NOT_ENFORCED });
+        }
         // Through the helper like every other writer. It adopts the generation
         // and adds nothing here: this patch already carries the count (already
         // released by `budget_before()`) and its own `EnforcementDegraded`.
@@ -2891,13 +2904,28 @@ impl Pass<'_> {
         // case. `LogweirEnforced` would claim it; the Evaluated message says
         // exactly which half is in force instead.
         let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
+        // FX-20c (the class sweep): a binding refusal the newest run reached
+        // STANDS while the decision would enforce again — on the condition AND
+        // on the two fields the console reads (review M-1): only a human
+        // rebinding the Secret clears it, so it is a standing state, as
+        // [`Self::publish_standing_refusal`] publishes one.
+        let held = if decision.start {
+            self.held_binding_refusal()
+        } else {
+            None
+        };
+        let enforcement = if held.is_some() {
+            ENFORCEMENT_RECOMMENDATION_ONLY
+        } else {
+            decision.enforcement
+        };
         let guarantees = json!({
             // NOT WHILE THE RETRY BUDGET IS SPENT (review M4). A degraded policy
             // schedules no run — and one degraded by `VersionedBucket` can never
             // delete at all — so "age expiry is enforced by Logweir" is not true
             // of it, whatever `spec.mode` asks for. `EnforcementDegraded` says
             // why; this field must not contradict it.
-            "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER
+            "ageExpiry": if enforcement == ENFORCEMENT_LOGWEIR_WORKER
                 && !self.budget_spent()
             {
                 GUARANTEE_LOGWEIR
@@ -2958,12 +2986,28 @@ impl Pass<'_> {
                     }
                 ),
             ),
-            (
-                CONDITION_ENFORCED,
-                if decision.start { "True" } else { "False" },
-                decision.reason,
-                decision.message.clone(),
-            ),
+            // FX-20c (the class sweep): A BINDING REFUSAL IS NOT UN-SAID BY
+            // THE NEXT DECISION. After a run refused its credential
+            // (`Enforced=False/CredentialBindingMismatch`), the following
+            // evaluation pass in the same slot decided `start` again and
+            // published `Enforced=True` (`UnattendedDeletionEnabled`,
+            // `RunInProgress`) while every run of the policy was refused. The
+            // controller reads no Secret, so only a later run can see a
+            // rebound one; until one is harvested, the refusal stands.
+            match held {
+                Some(message) => (
+                    CONDITION_ENFORCED,
+                    "False",
+                    REASON_CREDENTIAL_BINDING_MISMATCH,
+                    message,
+                ),
+                None => (
+                    CONDITION_ENFORCED,
+                    if decision.start { "True" } else { "False" },
+                    decision.reason,
+                    decision.message.clone(),
+                ),
+            },
             (
                 CONDITION_EXTERNAL_CONFLICT,
                 "False",
@@ -3046,7 +3090,7 @@ impl Pass<'_> {
             "at",
         );
         let mut status = json!({
-            "enforcement": decision.enforcement,
+            "enforcement": enforcement,
             "guarantees": guarantees,
             "lastEvaluation": last_evaluation,
             // FX-20: what `spec.enforcement.credentialSecretRef` must carry
@@ -3300,6 +3344,34 @@ impl Pass<'_> {
         out.into_iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect()
+    }
+
+    /// FX-20c: the stored `Enforced=False/CredentialBindingMismatch` message,
+    /// when the newest run is FINISHED, exited 3, and is the run that
+    /// condition was written for — the refusal an evaluation pass must not
+    /// overwrite with a decision to enforce. `None` once a later run has
+    /// started (its `finishedAt` is cleared) or finished otherwise.
+    fn held_binding_refusal(&self) -> Option<String> {
+        let refused = self.existing_conditions().into_iter().find(|c| {
+            c.r#type == CONDITION_ENFORCED
+                && c.status == "False"
+                && c.reason.as_deref() == Some(REASON_CREDENTIAL_BINDING_MISMATCH)
+        })?;
+        let message = refused.message?;
+        let observed = self.observed();
+        let last = observed
+            .as_ref()
+            .and_then(|status| status.get("lastEnforcement").cloned())
+            .and_then(|r| serde_json::from_value::<RetentionEnforcementRun>(r).ok())
+            .or_else(|| {
+                self.policy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.last_enforcement.clone())
+            })?;
+        let run = last.run_id.as_deref()?;
+        (last.finished_at.is_some() && last.exit_code == Some(3) && message.contains(run))
+            .then_some(message)
     }
 
     /// The conditions as this pass believes they now stand.

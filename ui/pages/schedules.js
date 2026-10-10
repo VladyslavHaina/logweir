@@ -693,6 +693,18 @@ export function renderEnforcement(report, policy) {
             "</p>") +
         "<p class=\"irreversible\">" + esc(IRREVERSIBLE_SENTENCE) + "</p>"
       : "") +
+    // FX-20c (review M-1): A POLICY ASKED TO ENFORCE THAT IS NOT ENFORCING
+    // SAYS WHY. A run refused on its credential's binding leaves the policy
+    // `RecommendationOnly` -- nothing is deleted until a human gives it its
+    // own Secret -- and the `Enforced=False` reason is the only place that
+    // says which; the approved-plan block above, where this note used to be
+    // the only one, is not rendered for it.
+    (state !== "LogweirWorker" && spec.mode === "Enforce" && enforced !== null &&
+      String(enforced.status) === "False"
+      ? "<p class=\"complaint\" data-enforced-refusal=\"" + esc(String(enforced.reason || "")) +
+        "\">Not enforcing: Enforced=False " + esc(String(enforced.reason || "")) + ": " +
+        esc(String(enforced.message || "")) + "</p>"
+      : "") +
     (degraded !== null && String(degraded.status) === "True"
       ? "<p class=\"complaint\" data-enforcement-degraded=\"true\">" +
         esc(ENFORCEMENT_DEGRADED_SENTENCE) + " " + esc(String(degraded.message || "")) + "</p>"
