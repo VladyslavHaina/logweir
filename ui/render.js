@@ -3556,8 +3556,8 @@ const EVALUATION_LIST_BOUND = 500;
  *
  *  - the four counts add up, with `skippedCount` where the status has it;
  *    and
- *  - the `kept` list is `keptCount` long, up to the status's bound of 500
- *    (review M2, FX-39).
+ *  - the `kept` and `skipped` lists are as long as their counts, up to the
+ *    status's bound of 500 (review M2, FX-39, FX-39 review S1).
  *
  *  A block that fails either is two writers' numbers: after a rollback of the
  *  controller image alone the older controller rewrites the lists and cannot
@@ -3589,6 +3589,11 @@ export function evaluationAccounting(evaluation) {
     }
     const listed = Array.isArray(e.kept) ? e.kept.length : 0;
     if (listed !== Math.min(e.keptCount, EVALUATION_LIST_BOUND)) {
+      return null;
+    }
+    // And `skipped` beside a `skippedCount` (review S1).
+    const skippedListed = Array.isArray(e.skipped) ? e.skipped.length : 0;
+    if (skippedListed !== Math.min(skipped, EVALUATION_LIST_BOUND)) {
       return null;
     }
   }

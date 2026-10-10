@@ -487,8 +487,9 @@ impl RetentionEvaluation {
     /// writers', whatever the sum says.
     ///
     /// THE LISTS ARE CUT AT [`EVALUATION_LIST_BOUND`] (FX-39), so the sum
-    /// reads the counts, and the `kept` list is held to
-    /// `min(keptCount, 500)`.
+    /// reads the counts, and the `kept` and `skipped` lists are held to
+    /// `min(count, 500)`: an older controller rewrites a list and cannot
+    /// remove the count beside it (review S1).
     #[must_use]
     pub fn accounting(&self) -> Option<RetentionAccounting> {
         let list_len = |len: usize| i64::try_from(len).ok();
@@ -514,8 +515,13 @@ impl RetentionEvaluation {
         // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG, UP TO THE
         // BOUND (review M2) — see the doc comment for the rollback this
         // refuses.
+        let bound = list_len(EVALUATION_LIST_BOUND)?;
         let listed = list_len(self.kept.as_ref().map_or(0, Vec::len))?;
-        if listed != accounting.kept.min(list_len(EVALUATION_LIST_BOUND)?) {
+        if listed != accounting.kept.min(bound) {
+            return None;
+        }
+        let skipped_listed = list_len(self.skipped.as_ref().map_or(0, Vec::len))?;
+        if skipped_listed != accounting.skipped.min(bound) {
             return None;
         }
         let sum = parts.iter().try_fold(0i64, |acc, n| acc.checked_add(*n))?;

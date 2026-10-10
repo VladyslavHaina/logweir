@@ -9940,14 +9940,19 @@ async fn fx40_an_incomplete_view_starts_no_run() {
     for (status, remedy) in [
         (
             json!({"truncated": true, "cursor": {"complete": true}, "viewExpiresAt": fx40_current()}),
-            "raise spec.sync.viewLimit",
+            "re-create the RecoveryCatalog with a larger viewLimit",
         ),
         (
             json!({"truncated": false, "cursor": {"complete": false}, "viewExpiresAt": fx40_current()}),
-            "let the walk finish",
+            "Synced condition says why",
         ),
         (
             json!({"viewExpiresAt": fx40_current()}),
+            "did not say whether its walk finished",
+        ),
+        // Only one half said (review mutant R4d).
+        (
+            json!({"truncated": false, "viewExpiresAt": fx40_current()}),
             "did not say whether its walk finished",
         ),
     ] {
@@ -9957,6 +9962,10 @@ async fn fx40_an_incomplete_view_starts_no_run() {
         let message = enforced["message"].as_str().expect("a message");
         assert!(message.contains(remedy), "{status}: {message}");
         assert!(message.contains("nothing is deleted"), "{message}");
+        // No remedy the catalog cannot take (review D3): `spec.sync` is
+        // immutable, and Index walks do not continue from a cursor.
+        assert!(!message.contains("raise spec.sync.viewLimit"), "{message}");
+        assert!(!message.contains("let the walk finish"), "{message}");
         assert_eq!(written["lastEvaluation"]["candidateCount"], 3);
     }
 }
@@ -10052,4 +10061,61 @@ async fn fx40_report_mode_is_unaffected_by_the_view() {
     assert_eq!(written["lastEvaluation"]["viewIncomplete"], true);
     assert_eq!(written["lastEvaluation"]["candidateCount"], 3);
     assert!(f.seen().iter().all(|(m, _)| m != "POST"));
+}
+
+/// **A `skipped` list that is not as long as `skippedCount` is two writers'
+/// block** (FX-39 review S1). After a rollback of the controller image alone
+/// to one that writes no counts, it rewrites `pointsEvaluated`, `candidates`,
+/// `kept` and `skipped` and cannot remove the stale `keptCount`,
+/// `truncatedByCap` and `skippedCount`. Here one due point became unreadable:
+/// the older controller lists it under `skipped`, and the stale counts (10 +
+/// 50 + 1 held back + 0 skipped) still add up to its 61.
+///
+/// CONTROL: the block this controller writes for the same archive.
+#[test]
+fn fx39_a_stale_skipped_count_beside_a_rewritten_list_is_not_recorded() {
+    let block = |value: Value| -> RetentionEvaluation {
+        serde_json::from_value(value).expect("a RetentionEvaluation")
+    };
+    let rewritten = json!({
+        "pointsEvaluated": 61, "keptCount": 10, "candidateCount": 50,
+        "truncatedByCap": 1, "skippedCount": 0,
+        "kept": fx22_names(1..=10),
+        "skipped": [{"pointId": "p061", "reason": "Unreadable"}]
+    });
+    assert_eq!(block(rewritten.clone()).accounting(), None);
+
+    let mut ours = rewritten;
+    ours["truncatedByCap"] = json!(0);
+    ours["skippedCount"] = json!(1);
+    assert_eq!(
+        block(ours).accounting(),
+        Some(RetentionAccounting {
+            points_evaluated: 61,
+            kept: 10,
+            candidates: 50,
+            held_back: 0,
+            skipped: 1,
+        })
+    );
+}
+
+/// **More than 500 protected points: the count is the whole number.** 600
+/// points with no manifest key are protected `Unknown`, and `minUsablePoints:
+/// 3` protects a third: `protected` holds the first 500, `protectedCount`
+/// says 601, and the status is one the CRD accepts.
+#[tokio::test]
+async fn fx39_600_protected_points_are_counted_past_the_list() {
+    let mut entries = fx22_entries(610);
+    for entry in entries.iter_mut().skip(10) {
+        entry
+            .as_object_mut()
+            .expect("an entry")
+            .remove("manifestKey");
+    }
+    let status = fx22_status(&entries, fx22_rules(2)).await;
+    assert_eq!(fx39_refused(&status), Vec::<String>::new(), "{status}");
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["protectedCount"], 601);
+    assert_eq!(ev["protected"].as_array().expect("protected").len(), 500);
 }

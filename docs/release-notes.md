@@ -2543,16 +2543,26 @@ enforcing. Each list now holds its first 500 entries, and two new counts,
 now starts no run from a catalog view that may not hold every point (a window,
 an unfinished walk, or a catalog that did not say: `Enforced=False/ViewIncomplete`)
 or that is past, or states no, `status.viewExpiresAt`
-(`Enforced=False/ViewExpired`). The message names the remedy, the evaluation
-is still published, and nothing is deleted. `Report` policies are unchanged,
+(`Enforced=False/ViewExpired`). The message names what helps, the evaluation
+is still published, and nothing is deleted. A `mode: Full` catalog now
+publishes a sync resumed from its cursor as a window (`truncated: true`): that
+sync lists only the archive's tail. **On v1 an archive of more than 5000
+points, a view the catalog cut for page space, and a Full catalog whose walk
+does not finish in one sync are never enforced.** Under both reasons
+`status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
+`LogweirEnforced`, as under `NothingFitsCeiling`; the `Enforced` condition is
+the authority. `Report` policies are unchanged,
 and so is what a run from a complete, current view deletes: its plan and
 `planSha256` are the same, so an approved digest stays approved
 ([kubernetes.md](kubernetes.md) §7f).
 **Do:** apply the CRDs before the controller rolls (two additive `status`
 fields). Before the upgrade, read `status.lastEvaluation.viewIncomplete` of
 every `Enforce` policy: where it is `true`, the policy stops deleting until the
-catalog's view is whole; raise the catalog's `spec.sync.viewLimit` (up to
-5000) or let its walk finish.
+catalog's view is whole. When the catalog's `spec.sync.viewLimit` cut the view,
+re-create the `RecoveryCatalog` with a larger one (`spec.sync` is immutable;
+5000 at most); when its walk stopped, its `Synced` condition says why; a
+`mode: Full` catalog needs a `maxObjectsPerRun` that finishes in one sync, or
+`mode: Index`.
 **Scope:** the controller over a fake API: a policy keeping 720 points and one
 skipping 600 write statuses the generated CRD schema accepts (the uncut list,
 as the control, is refused by `maxItems`) and start their approved run; a small
@@ -2560,9 +2570,14 @@ policy's status is the pre-FX-39 bytes plus the two counts; an approved plan
 over a window, an unfinished walk, a silent catalog, an expired view and one
 with no expiry starts nothing and names the reason; a complete, current view
 runs the plan rendered directly from the same view; a `Report` policy over a
-partial, expired view is unchanged (`crates/weirkeeper/tests/retention_policy_controller.rs`).
-The console's legacy mode reads the counts past the bound
-(`ui/tests/d3.spec.js`). Over the 437 fixtures of FX-22's plan probe, the plan
+partial, expired view is unchanged; a `skipped` list that is not
+`skippedCount` long reads "not recorded"
+(`crates/weirkeeper/tests/retention_policy_controller.rs`). A Full catalog's
+budget-stopped sync and its resumed sync both publish a view a retention pass
+refuses, and the same points in one sync do not
+(`crates/weirkeeper/tests/catalog_controller.rs`).
+The console's legacy mode reads the counts past the bound and applies the same
+`skipped` check (`ui/tests/d3.spec.js`). Over the 437 fixtures of FX-22's plan probe, the plan
 bytes and digests are identical to the build before. Not proven live: the PoC
 upgrade that carries it reads `protectedCount` and `skippedCount` on its
 policies.
@@ -2570,7 +2585,10 @@ policies.
 500 stops enforcing again) and starts runs from a partial view. It does not
 rewrite `protectedCount` or `skippedCount`; the accounting then compares a
 stale `skippedCount` with fresh counts and reads "not recorded" when they no
-longer add up. Re-applying the older CRDs prunes the two fields.
+longer add up, or when the `skipped` list it rewrote is not as long as the
+stale `skippedCount` (up to 500). An older catalog controller publishes a
+resumed Full rescan as whole again. Re-applying the older CRDs prunes the two
+fields.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2579,7 +2597,9 @@ In addition to the next entry's six, in its order:
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 59): where it is `true`, the
   policy deletes nothing from the upgrade on until its catalog's view is
-  whole; raise the catalog's `spec.sync.viewLimit` or let its walk finish.
+  whole. Re-create a catalog whose `viewLimit` cut its view with a larger one
+  (`spec.sync` is immutable), and read a stopped walk's `Synced` condition. An
+  archive of more than 5000 points is not enforced on v1.
 
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
   chart publishes** (item 53): with `api.console.mode: shared` and

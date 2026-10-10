@@ -3775,16 +3775,25 @@ impl CatalogView {
             }
         }
         let mut causes: Vec<&str> = Vec::new();
+        // NO REMEDY THE CATALOG CANNOT TAKE (review D3): `spec.sync` is
+        // immutable, and `viewLimit` cures only a window the limit cut.
         if self.truncated == Some(true) {
             causes.push(
-                "its view is a window (status.truncated); raise spec.sync.viewLimit on the \
-                 catalog (up to 5000) so the view holds every point",
+                "its view is a window (status.truncated). When spec.sync.viewLimit cut it, \
+                 re-create the RecoveryCatalog with a larger viewLimit (spec.sync is \
+                 immutable); an archive of more than 5000 points, the largest viewLimit, is \
+                 never enforced and reads ViewIncomplete. A larger viewLimit does not help a \
+                 view cut for page space, for an entry too large for one page or by merged \
+                 duplicate rows, nor a mode: Full catalog resuming a walk that does not finish \
+                 in one sync (re-create it with a larger spec.sync.maxObjectsPerRun, or use \
+                 mode: Index)",
             );
         }
         if self.walk_complete == Some(false) {
             causes.push(
-                "its walk has not finished (status.cursor.complete is false); let the walk \
-                 finish, each sync continues from its cursor",
+                "its walk stopped before the end (status.cursor.complete is false); the \
+                 catalog's Synced condition says why: its object budget \
+                 (spec.sync.maxObjectsPerRun), its clock, or a shard it could not read",
             );
         }
         if causes.is_empty() && (self.truncated.is_none() || self.walk_complete.is_none()) {

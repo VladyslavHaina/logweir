@@ -2509,8 +2509,9 @@ were published anyway, `Synced=False/ScanIncomplete`). Points outside the view
 are not evaluated, are in none of the four counts, and are **never candidates
 while they stay outside it**. In a window those are the oldest points, the ones
 an age rule is for, so a policy over an archive larger than its catalog's
-`viewLimit` does not expire them: raise `viewLimit` (100–5000), or let the sync
-finish. **Raising `viewLimit` helps only when the limit is what cut the view.**
+`viewLimit` does not expire them. **A larger `viewLimit` helps only when the
+limit is what cut the view**, and `spec.sync` is immutable: re-create the
+`RecoveryCatalog` under the same name with a larger `viewLimit` (100–5000).
 The catalog also sets `status.truncated` when it left entries out for page
 space, when an entry was too large for one page, and when its walk counted rows
 it then merged as duplicates; the `Evaluated` message says so beside the
@@ -2523,9 +2524,18 @@ evaluation of the points that are in the view is unchanged, and so is the plan.
 archive** (FX-40): one with `viewIncomplete` `true` or not stated
 (`Enforced=False/ViewIncomplete`), or one past, or without, the catalog's
 `status.viewExpiresAt` (`Enforced=False/ViewExpired`). The message names the
-cause and the remedy (raise `spec.sync.viewLimit`, let the walk finish, or let
-the catalog sync), the evaluation is still published, and nothing is deleted.
-A `Report` policy is unaffected.
+cause and what helps: re-creating the catalog with a larger `viewLimit` when the
+limit cut the view, the catalog's `Synced` condition for why a walk stopped, or
+the next sync. The evaluation is still published, and nothing is deleted. A
+`Report` policy is unaffected. **On v1 an archive of more than 5000 points (the
+largest `viewLimit`) is never enforced, nor is one whose view the catalog cut
+for page space**, and a `mode: Full` catalog whose walk does not finish in one
+sync (`spec.sync.maxObjectsPerRun`) publishes each resumed sync as a window, so
+it never enforces either: use `mode: Index`, or a budget that finishes in one
+sync. Under `ViewIncomplete` and `ViewExpired`, as under `NothingFitsCeiling`,
+`status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
+`LogweirEnforced`; the `Enforced` condition is the authority on whether a run
+can start.
 
 The product API and the console apply one rule to this member: **a warning is
 never hidden, and completeness is never asserted when it is not recorded.**
@@ -2627,8 +2637,10 @@ front of them:
 
 **`status.enforcement` says what is actually happening**, which is not always
 what `spec.mode` asked for: `RecommendationOnly` (nothing is deleted — every
-`Report` policy, and an `Enforce` policy that cannot run, for example
-`EvidenceGrantUnusable` above), `LogweirWorker` (the isolated worker deletes
+`Report` policy, and an `Enforce` policy refused for `EvidenceGrantUnusable`
+above, a binding mismatch or an unreadable schedule; the other refusals, `AwaitingApproval`,
+`ViewIncomplete` and `NothingFitsCeiling` among them, leave `LogweirWorker`),
+`LogweirWorker` (the isolated worker deletes
 under this policy) or `ExternalLifecycleDeclared` (the bucket's own rule does).
 The console keys its retention sentence on this field and never on the mode.
 

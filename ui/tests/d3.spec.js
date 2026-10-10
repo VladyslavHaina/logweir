@@ -2857,6 +2857,26 @@ test("legacy_mode_reads_the_counts_past_the_status_lists_bound", () => {
   assert.equal(evaluationAccounting({ ...ev, kept: ev.kept.slice(1) }), null);
 });
 
+// FX-39 review S1: a `skipped` list that is not as long as `skippedCount` is
+// two writers' block (an older controller rewrote the list beside a stale
+// count), however the stale counts add up.
+test("legacy_mode_refuses_a_skipped_list_beside_a_stale_skipped_count", () => {
+  const items = fixture("retention-held-back.json").items;
+  const policy = JSON.parse(JSON.stringify(items.find((i) => i.metadata.name === "keep-10")));
+  const ev = policy.status.lastEvaluation;
+  Object.assign(ev, {
+    pointsEvaluated: 61, keptCount: 10, candidateCount: 50, truncatedByCap: 1, skippedCount: 0,
+    kept: ev.kept.slice(0, 10),
+    skipped: [{ pointId: "p061", reason: "Unreadable" }],
+  });
+  assert.equal(evaluationAccounting(ev), null);
+  assert.equal(fact(decode(renderEnforcement({}, policy)), "held back by the per-run ceiling"),
+    "not recorded");
+  // CONTROL: the counts this controller writes for the same archive.
+  assert.deepEqual({ ...evaluationAccounting({ ...ev, truncatedByCap: 0, skippedCount: 1 }) },
+    { pointsEvaluated: 61, kept: 10, candidates: 50, heldBack: 0, ceiling: 50 });
+});
+
 // FX-22 review M1: console mode READS the API's word. It does not infer "not
 // recorded" from an absent count, and it does not let a count stand against
 // the API's `NotRecorded`.
