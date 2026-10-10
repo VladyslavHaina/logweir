@@ -2334,9 +2334,10 @@ runs, raise `spec.enforcement.maxDeletionsPerRun` (1–500).
 **When no due point fits the ceiling, the plan is empty and the object says
 why.** A backup set that more due points name than `maxDeletionsPerRun` is
 never selected: a set goes whole or not at all ("Plans over re-run receipts
-change", below). When every due point is in such a set, `candidateCount` is `0`, `truncatedByCap` is every due
-point, and no later plan names them either: the next evaluation finds the same
-sets over the same ceiling. The object does not call that "nothing to remove":
+change", below). When every due point is in such a set, `candidateCount` is
+`0`, `truncatedByCap` is every due point, and no later plan names them either:
+the next evaluation finds the same sets over the same ceiling. The object does
+not call that "nothing to remove":
 
 ```text
 Evaluated: … 2 point(s) are due under the rules and held back by the per-run ceiling
@@ -2355,9 +2356,9 @@ the smallest of those sets; 2 fits all of them.
 `Enforce` policy whose plan is empty while `truncatedByCap` is above 0. An empty
 plan with nothing due is still `Enforced=False/NothingToDo`. A `Report` policy
 is `RecommendationOnly` either way and says it on `Evaluated` alone; its ceiling
-is the default of 50, which `spec.enforcement.maxDeletionsPerRun` sets once the
-policy enforces. Neither condition changes what is planned: the plan is empty
-in both cases, and its digest is the empty plan's.
+is `spec.enforcement.maxDeletionsPerRun` when it carries that block and the
+default of 50 when it does not. Neither condition changes what is planned: the
+plan is empty in both cases, and its digest is the empty plan's.
 
 **`status.lastEvaluation.viewIncomplete: true` says the evaluation did not see
 the whole archive.** The evaluation reads the catalog's view (§7d), and the
@@ -2413,10 +2414,18 @@ show depends on whether the ceiling had cut that policy's plan:
   `candidates` and the plan are the older controller's own and are published as
   before.
 - **`truncatedByCap` was 0.** The older controller's `kept` list is the same
-  list, so it writes nothing, and the API and the console go on showing the
-  newer controller's counts, which are still true of an archive that has not
-  moved. At the next archive change the older controller rewrites the block
-  and the stale counts stop matching it: `NotRecorded`, as above.
+  list, so it leaves `lastEvaluation` as it is, and the API and the console go
+  on showing the newer controller's counts. They stay `Recorded` for as long
+  as the older controller's `kept` list is `keptCount` long and the counts add
+  up, which is while the policy keeps the same number of points and its plans
+  stay under the ceiling; the counts shown are then still true. The first plan
+  the ceiling cuts puts held-back points under `kept` again, the list is
+  longer than `keptCount`, and the block reads `NotRecorded`, as above. **One
+  block reads as recorded and is not**: if the number of points the policy
+  keeps falls by exactly the number the ceiling newly holds back (a hold
+  expires over a plan already at the ceiling), the list has its old length and
+  the stored `truncatedByCap: 0` is stale. The check compares lengths and sums
+  and cannot see that; pruning the members (below) removes the doubt.
 
 `viewIncomplete: true`, if the newer controller's last evaluation wrote it,
 stays visible on both surfaces until the members are pruned (a warning is never

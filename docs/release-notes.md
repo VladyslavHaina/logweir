@@ -1598,10 +1598,14 @@ publishes no kept count, no held-back count and no `kept` rows, and the console
 prints "not recorded" for both, from the older controller's first write: its
 `kept` list is not `keptCount` long, which is refused even while the archive
 does not move and the stale counts still add up. For a policy the ceiling had
-not cut, the older controller's `kept` list is the same list and it writes
-nothing; the API and the console go on showing the newer controller's counts,
-which stay true until the archive changes, and read "not recorded" after
-that. A `viewIncomplete: true` the newer controller wrote stays visible. With
+not cut, the older controller's `kept` list is the same list and it leaves the
+block as it is; the API and the console go on showing the newer controller's
+counts for as long as that list stays `keptCount` long and the counts add up,
+and read "not recorded" from the first plan the ceiling cuts. (The check
+compares lengths and sums. One block reads as recorded and is not: the number
+of kept points falling by exactly the number the ceiling newly holds back,
+which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
+`viewIncomplete: true` the newer controller wrote stays visible. With
 `kubectl`, re-apply the older CRDs, which prunes the four fields and drops the
 `HELD-BACK` column, or ignore them while the older controller runs. An older
 controller also writes `Enforced=False/NothingToDo` where this build writes
