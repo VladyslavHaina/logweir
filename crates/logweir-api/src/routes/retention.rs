@@ -243,6 +243,13 @@ pub struct EnforcementRunView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub failed: Vec<FailedDeletionView>,
+    /// `true` when `failed` was cut short by this projection's row bound
+    /// (FX-22's class sweep: a run of up to 500 points that the store refuses
+    /// one and all published its first 200 failures and nothing saying there
+    /// were more). Present only when it was cut, so an older client's reading
+    /// of an absent member stays what it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_truncated: Option<bool>,
     /// How many objects went.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub objects_deleted: Option<i64>,
@@ -594,6 +601,11 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
                         code: bounded(&f.code, 64),
                     })
                     .collect(),
+                failed_truncated: r
+                    .failed
+                    .as_ref()
+                    .is_some_and(|f| f.len() > MAX_ROWS)
+                    .then_some(true),
                 objects_deleted: r.objects_deleted,
                 record_key: r.record_key.clone(),
                 record_sha256: r.record_sha256.clone(),

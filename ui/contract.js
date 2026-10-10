@@ -2786,6 +2786,9 @@ const D3_LAST_ENFORCEMENT = shapeOf(
   {
     runId: str, startedAt: str, finishedAt: str, planSha256: str,
     deleted: listOf(str), failed: listOf(objectOf(D3_FAILED_DELETION)),
+    // FX-22: present, and `true`, only when `failed` was cut at the route's
+    // row bound.
+    failedTruncated: bool,
     objectsDeleted: int, recordKey: str, recordSha256: str, exitCode: int,
   },
 );

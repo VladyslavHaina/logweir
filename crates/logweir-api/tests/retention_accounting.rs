@@ -347,3 +347,42 @@ fn zero_held_back_is_published_as_zero_and_the_view_flag_is_passed_on() {
         json!(false)
     );
 }
+
+/// **The class sweep, in this route: a run's `failed` list says when it was
+/// cut.** `deleted` has carried `deletedTruncated` since the route existed;
+/// `failed` was cut at the same 200 rows with nothing saying so. A run may
+/// name up to 500 points (`maxDeletionsPerRun`), and a delete credential the
+/// store refuses fails every one of them.
+///
+/// CONTROL: exactly 200 failures are whole, and the member is ABSENT — an
+/// older client reads an absent member as it always did.
+///
+/// MUTANT A9: never publish the member.
+#[test]
+fn a_cut_failed_list_says_it_was_cut() {
+    let live: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repo_root().join("crates/logweir-api/tests/fixtures/retention-policy-enforce.json"),
+        )
+        .expect("the live fixture"),
+    )
+    .expect("JSON");
+    let with_failures = |n: usize| {
+        let mut object = live.clone();
+        object["status"]["lastEnforcement"]["failed"] = json!((0..n)
+            .map(|i| json!({"pointId": format!("p{i:03}"), "code": "AccessDenied"}))
+            .collect::<Vec<_>>());
+        project(object)["lastEnforcement"].clone()
+    };
+
+    let cut = with_failures(MAX_ROWS + 1);
+    assert_eq!(cut["failed"].as_array().expect("failed").len(), MAX_ROWS);
+    assert_eq!(cut["failedTruncated"], json!(true), "{cut}");
+
+    let whole = with_failures(MAX_ROWS);
+    assert_eq!(whole["failed"].as_array().expect("failed").len(), MAX_ROWS);
+    assert!(
+        whole.get("failedTruncated").is_none(),
+        "absent when nothing was cut: {whole}"
+    );
+}

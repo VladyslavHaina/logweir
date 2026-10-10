@@ -1520,6 +1520,9 @@ alike. Now:
   budget stopped (`status.cursor.complete: false`). Points outside the view
   were never evaluated and never candidates, and still are not; the status
   used to read `EvaluationComplete` with nothing saying so.
+- The API's `lastEnforcement.failed` was cut at 200 rows with nothing saying
+  so (`deleted` has always had `deletedTruncated`); `failedTruncated: true`
+  is now present when it was cut.
 
 What a plan contains, its `planSha256` and what a run deletes are unchanged, so
 an approved digest stays approved ([kubernetes.md](kubernetes.md) §7f,
@@ -1543,8 +1546,8 @@ pruned) leaving `lastEvaluation.at` alone; an older controller's status
 converted by one write; a windowed view, an unfinished walk, and their
 controls (`crates/weirkeeper/tests/retention_policy_controller.rs`). The
 product API through its router, with the counts that are not the number of
-rows, an evaluation without the accounting, and counts that do not add up
-(`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
+rows, an evaluation without the accounting, counts that do not add up, and a
+cut `failed` list (`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
 console and legacy mode (`ui/tests/d3.spec.js`). The three read one chain of
 fixtures: the two policies as the reconciler writes them, and the API's answer
 for those two objects, each held to its writer by a test. Each guard has a

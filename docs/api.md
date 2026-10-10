@@ -484,7 +484,9 @@ older controller wrote, or one whose counts do not add up — and then `kept`,
 on as kept and derives no count from it. `viewIncomplete: true` says the catalog
 view the evaluation read was not the whole archive (a window of
 `sync.viewLimit`, or an unfinished walk), so points outside it were not
-evaluated and are in none of the counts.
+evaluated and are in none of the counts. A run's `lastEnforcement.failed` is
+cut at 200 rows like `deleted`, and `failedTruncated: true` is present when it
+was; `deleted` has always carried `deletedTruncated`.
 
 **A catalog's view is a window, and the response says so.** The durable truth is
 in object storage; Kubernetes holds the newest `sync.viewLimit` points in

@@ -8036,6 +8036,47 @@ async fn fx22_a_truncated_policy_writes_nothing_once_settled() {
     );
 }
 
+/// **The `kept` list of a small keep rule fits the CRD's own bound, however
+/// large the archive.** `status.lastEvaluation.kept` is `maxItems: 500`, and
+/// the API server refuses a status that exceeds it. While the held-back points
+/// were filed under `kept`, the list was "every point but this plan's": over
+/// 600 points a `keepLast: 10` policy wrote 550 ids there, 50 past the bound.
+/// It now writes the ten it keeps.
+///
+/// The bound is read from the generated CRD, so the row follows the schema.
+/// NOT COVERED HERE, and filed in FX-22's report: a rule that genuinely keeps
+/// more than 500 points, or more than 500 skipped or protected points, still
+/// writes a list past the bound — no writer truncates these lists.
+#[tokio::test]
+async fn fx22_a_small_keep_rule_writes_a_kept_list_inside_the_crds_bound() {
+    let crd: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+            .expect("the generated CRD"),
+    )
+    .expect("YAML");
+    let bound = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+        ["properties"]["lastEvaluation"]["properties"]["kept"]["maxItems"]
+        .as_u64()
+        .expect("status.lastEvaluation.kept declares maxItems");
+    assert_eq!(bound, 500);
+
+    let status = fx22_status(&fx22_entries(600), fx22_rules(10)).await;
+    let ev = &status["lastEvaluation"];
+    assert_eq!(ev["pointsEvaluated"], 600);
+    assert_eq!(ev["keptCount"], 10);
+    assert_eq!(ev["truncatedByCap"], 540);
+    let kept = ev["kept"].as_array().expect("kept").len() as u64;
+    assert_eq!(kept, 10);
+    assert!(kept <= bound);
+    // THE PRE-FIX LIST for these inputs: everything that is not in the plan.
+    let pre_fix = ev["keptCount"].as_u64().expect("a count")
+        + ev["truncatedByCap"].as_u64().expect("a count");
+    assert!(
+        pre_fix > bound,
+        "CONTROL: {pre_fix} ids under `kept` is what the status carried before, and the API          server refuses more than {bound}"
+    );
+}
+
 /// A status as an API server whose CRD predates FX-22 stores it: the four new
 /// `lastEvaluation` members pruned.
 fn fx22_pruned(mut status: Value) -> Value {
@@ -8429,6 +8470,23 @@ fn fx22_the_accounting_is_none_unless_it_closes() {
     let mut stale = closing.clone();
     stale["skipped"] = json!([]);
     assert_eq!(block(stale).accounting(), None);
+
+    // ABSENT IS NEVER ZERO, even where zero would make the sum close: five
+    // points, one kept, three planned, one skipped and no word about the
+    // ceiling is a block that does not record what the ceiling held back.
+    // MUTANT M9b: `self.truncated_by_cap.unwrap_or(0)`.
+    let silent = json!({
+        "pointsEvaluated": 5, "keptCount": 1, "candidateCount": 3,
+        "skipped": [{"pointId": "p900", "reason": "Unreadable"}]
+    });
+    assert_eq!(block(silent.clone()).accounting(), None);
+    let mut said = silent;
+    said["truncatedByCap"] = json!(0);
+    assert_eq!(
+        block(said).accounting().map(|a| a.held_back),
+        Some(0),
+        "CONTROL: the same block with the zero WRITTEN is an accounting"
+    );
 
     // Never a negative count dressed as a total.
     let mut negative = closing;

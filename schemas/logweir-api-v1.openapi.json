@@ -8473,6 +8473,11 @@
               "$ref": "#/components/schemas/FailedDeletionView"
             }
           },
+          "failedTruncated": {
+            "description": "`true` when `failed` was cut short by this projection's row bound (FX-22's class sweep: a run of up to 500 points that the store refuses one and all published its first 200 failures and nothing saying there were more). Present only when it was cut, so an older client's reading of an absent member stays what it was.",
+            "type": "boolean",
+            "nullable": true
+          },
           "finishedAt": {
             "description": "When it finished. Absent while a run is in flight.",
             "type": "string",
