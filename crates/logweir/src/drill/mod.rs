@@ -103,6 +103,16 @@ pub enum DrillError {
     /// or network side effect at all.
     #[error("signing or lock proof failed: {0}")]
     SigningPrerequisite(String),
+    /// **PROD-15.1 review M4: the creation step stopped, by name.** A mapped
+    /// target name phase 0 proved absent existed when the run came to create
+    /// it (a lost race), or creation failed after this execution had created
+    /// a topic. Exit 1 (phases 0–5 ran), like [`Self::Operational`], but
+    /// carried apart so the runner can say WHICH names appeared and which
+    /// topics this execution created and LEFT — on stdout as
+    /// `failure-reason=` and one bounded `target-topics-appeared=` line the
+    /// controller lifts onto the Restore. Nothing is ever deleted.
+    #[error("operational: {}", .0.message)]
+    CreationStopped(Box<phase0_admit::CreationStop>),
 }
 
 impl DrillError {
@@ -137,8 +147,12 @@ impl DrillError {
                 "RestoreNoOp must be intercepted in the orchestrator before reaching \
                  ExitCode conversion — see task-21a-addendum.md ruling A8"
             ),
-            // A Kafka or engine failure says nothing about the archive.
-            DrillError::Operational(_) | DrillError::Kafka(_) | DrillError::Engine(_) => {
+            // A Kafka or engine failure says nothing about the archive; nor
+            // does a lost creation race (PROD-15.1), which is named apart.
+            DrillError::Operational(_)
+            | DrillError::Kafka(_)
+            | DrillError::Engine(_)
+            | DrillError::CreationStopped(_) => {
                 ExitCode::Operational // 1
             }
         }
@@ -319,6 +333,14 @@ pub struct RunArgs {
     /// standalone, it is the operator's own trust anchor. A point-bound plan
     /// with no keyring is refused (`PointUntrusted`), never run unverified.
     pub evidence_keys: Option<PathBuf>,
+    /// `--kafka-topic-resources` (PROD-15.1): the target's Strimzi
+    /// `KafkaTopic` resources, read for a restore under the original topic
+    /// names only — a place the run looks for a declarative owner of the
+    /// restored names. A Restore Job never carries it (the controller does not
+    /// list `KafkaTopic` resources, PROD-05.1a).
+    pub kafka_topic_resources: Option<PathBuf>,
+    /// `--strimzi-cluster`: count only resources labelled for this cluster.
+    pub strimzi_cluster: Option<String>,
 }
 
 /// Controller-pinned identity and byte digests carried by a new Restore Job's
@@ -1041,14 +1063,18 @@ pub fn print_deprecation_to<W: std::io::Write>(
 /// what was found, the object and its digest, the reason, and the notice's
 /// kind. A function rather than a `format!` at each call site so the line a
 /// test asserts and the line an operator reads are the same bytes.
+///
+/// ONE LINE whatever the archive holds (PROD-15.1 review 2, M1's sweep): the
+/// backup id is the plan's and the key and reason are the store's, and none
+/// of them may start a line of the pod log (`crate::exit::one_line`).
 pub fn archive_notice_line(
     backup_id: &str,
     notice: &logweir_core::engine::ArchiveNotice,
 ) -> String {
-    format!(
+    crate::exit::one_line(&format!(
         "warning: backup set {backup_id}: {}: {} ({}): {} [{}]",
         notice.message, notice.key, notice.sha256, notice.reason, notice.kind
-    )
+    ))
 }
 
 /// Tells the operator every notice `DataEngine::describe_with_notices`
@@ -1250,7 +1276,13 @@ fn report_with(
             // field extractor) reads the event object and not its span. The
             // identity has to be on the line that survives both.
             tracing::error!(run_id = %run_id, error = %e, "drill failed");
-            eprintln!("{e}");
+            // ON ONE LINE (PROD-15.1 review 2, M1). The text can echo a
+            // string this process did not write (a plan's `source.backup`, a
+            // broker's error), and the pod log has no stream selector: a line
+            // break in it would let that string START a line a controller
+            // reads by key. The structured event above is JSON and already
+            // escapes it.
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             failure_message = Some(e.to_string());
         }
     }
@@ -1308,6 +1340,12 @@ fn report_with(
         Ok(o) => Some(&o.topic_preflight),
         Err(_) => None,
     };
+    // PROD-15.1 review M4: a stopped creation step says which names appeared
+    // and which topics this run created and left, where a controller reads it.
+    let race = match &outcome {
+        Err(DrillError::CreationStopped(stop)) => Some(stop.as_ref()),
+        _ => None,
+    };
     exiting(
         run_id,
         code,
@@ -1315,6 +1353,7 @@ fn report_with(
         evidence,
         preflight,
         sc,
+        race,
     )
 }
 
@@ -1361,6 +1400,7 @@ fn exiting(
     evidence: Option<&EvidenceKeys>,
     topic_preflight: Option<&phase0_admit::TopicPreflight>,
     scorecard: Option<&Scorecard>,
+    race: Option<&phase0_admit::CreationStop>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
@@ -1392,6 +1432,19 @@ fn exiting(
             logweir_core::refusal_detail::RefusingRun::Restore,
             refusal_message.unwrap_or(""),
         );
+    }
+    // **PROD-15.1 review M4: the stopped creation step, named.** Exit 1 like
+    // any operational failure, but the controller lifts `failure-reason=` (the
+    // RECEIPT-DUP mechanism, `logweir_core::guard::RESTORE_FAILURE_REASONS`)
+    // onto `status.exitReason`, and the one bounded line before it onto
+    // `status.targetTopicsAppeared` — the names that appeared, the topics
+    // this run created and LEFT (nothing is deleted), and the names it asked
+    // for and cannot account for. The reason is the LAST line
+    // (`print_creation_stop_to`).
+    if let (ExitCode::Operational, Some(race)) = (code, race) {
+        // A closed stdout is not a reason to change the exit code, which
+        // GC11 has already decided.
+        let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
@@ -1479,6 +1532,37 @@ fn exiting(
         }
     }
     code
+}
+
+/// **The stopped creation step's TWO stdout lines, through a writer seam**
+/// (PROD-15.1 review 2, L1), for the reason `crate::exit::
+/// print_refusal_reason_to` has one: these two lines carry everything a
+/// controller learns about the stop, and a `println!` nobody can observe is a
+/// contract nothing pins.
+///
+/// EXACTLY these bytes, in this order, each ended by one newline:
+///
+/// ```text
+/// target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],…}
+/// failure-reason=<TargetTopicAppeared|CreatedTopicsLeft>
+/// ```
+///
+/// `failure-reason=` is LAST: the controller lifts the pair only when it is
+/// the log's last non-empty line with the lists on the line before it, so
+/// nothing may be printed between them or after them on exit 1.
+///
+/// # Errors
+/// The writer's.
+pub fn print_creation_stop_to<W: std::io::Write>(
+    w: &mut W,
+    stop: &phase0_admit::CreationStop,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", stop.lists().line())?;
+    writeln!(
+        w,
+        "{}",
+        logweir_core::guard::failure_reason_line(stop.reason)
+    )
 }
 
 /// The scorecard file is written by `write_scorecard_artifact` from the bytes
@@ -1674,6 +1758,12 @@ pub struct Ctx {
     /// reader and to the plan's `target_auth`, so both clients present the
     /// same certificate. `None` for every other mode.
     pub target_client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
+    /// **PROD-15.1.** What the runner holds about an original-name restore's
+    /// source cluster and declarative owners beyond the plan: the verified
+    /// receipt's measured source cluster id and recorded owners, and the
+    /// Strimzi owners in the `KafkaTopic` resources it was given. Phase 0
+    /// reads it only for an original-name plan.
+    pub original_name: phase0_admit::OriginalNameInputs,
     /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
     /// backup receipt the plan's recovery point binds — VERIFIED (signature,
     /// digest, manifest) by `binding::verify_point_binding` before this
@@ -1699,6 +1789,7 @@ fn context(
     spec_text: String,
     allowed_text: String,
     contract: bool,
+    original_name: phase0_admit::OriginalNameInputs,
     source_config_coverage: SourceConfigCoverage,
     bound_set: Option<binding::BoundSet>,
 ) -> Result<Ctx, DrillError> {
@@ -1757,7 +1848,10 @@ fn context(
             );
             connect()?
         }
-    };
+    }
+    // PROD-15.1: the source topics' own names are never deleted, whatever
+    // the scratch prefix — teardown, the probe and any later caller alike.
+    .with_protected_names(spec.source.topics.iter().cloned());
 
     // === THE THREE HANDLES, UNDER THE STORE CONTRACT OR NOT (D2 §3.5) ===
     //
@@ -1846,6 +1940,8 @@ fn context(
         store,
         target_tls_ca_file,
         target_client_certificate,
+        // PROD-15.1: what the runner holds about the source and the owners.
+        original_name,
         // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
         // point, because there is then no signed capture record to read.
         source_config_coverage,
@@ -2423,6 +2519,27 @@ fn execute_for_reporting(
     if let Err(error) = region_refusal {
         return (Err(error.into()), Some(authenticated_spec));
     }
+    // **PROD-15.1: the original-name SHAPE, over the authenticated plan and
+    // BEFORE anything is read or dialled.** The block is legal only in
+    // `newTopic` mode, beside `prefix: ""`, and in a plan that asks for
+    // COMPLETE verification: a sampled plan with the identity mapping is
+    // refused here by name, exit 3, with no broker asked anything. Phase 0
+    // repeats the check (`phase0_admit::local`) for every path that reaches
+    // it another way.
+    if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
+        return (Err(GuardRefusal(refusal).into()), Some(authenticated_spec));
+    }
+    // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
+    // BEFORE anything is read or dialled.** An original-name plan needs its
+    // own approval subject, which an ordinary approval cannot satisfy and a
+    // standing authorization never carries (`startup.approved` is `None` on
+    // the standing path); an `originalName` approval authorises nothing else.
+    // The controller made the same comparison before the Job existed; this is
+    // the runner's own half.
+    if let Err(error) = check_original_name_subject(&authenticated_spec, startup.approved.as_ref())
+    {
+        return (Err(error), Some(authenticated_spec));
+    }
     // **Execution contract v2's two bindings, and they go HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
@@ -2483,10 +2600,19 @@ fn execute_for_reporting(
     // FX-4: the context is built WITH what the VERIFIED point binding
     // established about each source topic's configuration capture (unknown for
     // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
+    // PROD-15.1: what only the runner holds about an original-name restore's
+    // source and owners — the verified receipt's facts and the KafkaTopic
+    // resources it was given — read once, before any client exists.
+    let original_name = match original_name_inputs(args, &authenticated_spec, bindings.point_source)
+    {
+        Ok(inputs) => inputs,
+        Err(error) => return (Err(error), Some(authenticated_spec)),
+    };
     let outcome = match context(
         startup.spec_text,
         startup.allowed_text,
         store_contract,
+        original_name,
         bindings.source_config_coverage,
         bindings.bound_set,
     ) {
@@ -2507,6 +2633,10 @@ struct V2Bindings {
     /// **FX-16.** The set the verified point's receipt describes; `None` when
     /// the plan binds no point.
     bound_set: Option<binding::BoundSet>,
+    /// **PROD-15.1.** The verified receipt's measured source cluster id and
+    /// recorded owners, from the same `VerifiedPoint`; `None` when the plan
+    /// binds no point.
+    point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2587,6 +2717,7 @@ fn check_v2_bindings(
 
     let mut source_config_coverage = SourceConfigCoverage::unknown();
     let mut bound_set = None;
+    let mut point_source = None;
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
@@ -2621,12 +2752,14 @@ fn check_v2_bindings(
             }
             source_config_coverage = verified.config_coverage;
             bound_set = Some(verified.set);
+            point_source = Some((verified.source_cluster_id, verified.owners));
         }
     }
     Ok(V2Bindings {
         standing_approved,
         source_config_coverage,
         bound_set,
+        point_source,
     })
 }
 
@@ -2700,6 +2833,10 @@ fn standing_approved_from(
     }
     Ok(phase1_approval::Approved {
         validated_at: now,
+        // PROD-15.1: a standing scope is never the original-name subject.
+        approval_subject: logweir_core::original_name::ApprovalSubject::Ordinary,
+        approval_mode: phase1_approval::APPROVAL_MODE_STANDING,
+        original_name_confirmation: None,
         approval: logweir_core::scorecard::ApprovalInfo {
             approver: format!("standing-authorization/{}", doc.subject_ref.name),
             ticket: String::new(),
@@ -2775,6 +2912,22 @@ pub fn execute_with_outcome(
     execute_with_signer(args, run_id, c, &signer)
 }
 
+/// **PROD-15.1 review M3.** [`execute_with`] for an authorization ALREADY
+/// verified — the shape `execute_for_reporting` hands the phases after its
+/// startup checks. Public so a test can drive the pre-phase-0 hold of the
+/// approval subject over doubles: that check is the one `execute_for_reporting`
+/// relies on for every caller it does not cover itself, and no other public
+/// path reaches it.
+pub fn execute_with_approved(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    approved: phase1_approval::Approved,
+) -> Result<RestoreOutcome, DrillError> {
+    let signer = load_signer(&args.signing_key)?;
+    execute_with_prevalidated(args, run_id, c, &signer, approved)
+}
+
 fn execute_with_signer(
     args: &RunArgs,
     run_id: &str,
@@ -2822,9 +2975,23 @@ fn execute_with_validated_approval(
     let creator: &dyn TopicCreator = c.client.as_creator();
     let reader: &dyn ClusterReader = c.client.as_reader();
 
+    // PROD-15.1: a pre-validated approval's subject is held to the plan
+    // BEFORE phase 0, whose `LogAppendTime` arm may write; the production path
+    // checked it already, and this repeats it for every other caller.
+    if let Some(approved) = prevalidated_approval.as_ref() {
+        check_original_name_subject(&c.spec, Some(approved))?;
+    }
     // 0
     let admitted = record(&mut sc, 0, "admit", || {
-        phase0_admit::run(&c.spec, &c.spec_text, &c.allowed, reader, creator, deleter)
+        phase0_admit::run_with_original_name(
+            &c.spec,
+            &c.spec_text,
+            &c.allowed,
+            reader,
+            creator,
+            deleter,
+            &c.original_name,
+        )
     })?;
     let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
@@ -2855,6 +3022,16 @@ fn execute_with_validated_approval(
             .into()),
         },
     })?;
+    // PROD-15.1: the subject, held to the plan once more now that phase 1
+    // has verified it on every path, and — for an original-name restore —
+    // signed with what phase 0 proved (`target.original_name`, format 1.8.0).
+    check_original_name_subject(&c.spec, Some(&approved))?;
+    sc.target.original_name = original_name_info(&admitted, &approved);
+    sc.format_version = logweir_core::scorecard::format_version_with_original_name(
+        &sc.format_version,
+        sc.target.original_name.as_ref(),
+    )
+    .to_string();
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
 
@@ -4046,6 +4223,9 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // yet — and absent means plaintext, which is what every
             // scorecard this tree has written says by omission.
             auth: None,
+            // PROD-15.1: written once phase 1 has verified the approval
+            // subject (`original_name_info`), never on a draft.
+            original_name: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -4157,6 +4337,172 @@ fn source_info(
 /// `expect`: an unreachable refusal that becomes reachable through somebody
 /// else's edit must exit 3 with its `refusal-reason=` line, not abort the
 /// process.
+/// **PROD-15.1.** The approval's subject must be the plan's: an original-name
+/// plan needs an `originalName` approval, which an ordinary approval cannot
+/// satisfy and a standing authorization never is (`approved: None` here is
+/// the standing path at startup); an `originalName` approval authorises
+/// nothing else. Exit 3 either way.
+fn check_original_name_subject(
+    spec: &DrillSpec,
+    approved: Option<&phase1_approval::Approved>,
+) -> Result<(), DrillError> {
+    use logweir_core::original_name::{check_approval_subject, ApprovalSubject};
+    let needed = ApprovalSubject::of_plan(spec);
+    let signed = match approved {
+        Some(approved) if approved.approval_mode == phase1_approval::APPROVAL_MODE_STANDING => {
+            ApprovalSubject::Ordinary
+        }
+        Some(approved) => approved.approval_subject,
+        None => ApprovalSubject::Ordinary,
+    };
+    check_approval_subject(needed, signed).map_err(GuardRefusal)?;
+    // OD-10: a one-person confirmation (v2 under `Ordinary`) of an
+    // original-name plan carries every original topic name re-typed, exactly,
+    // inside the signed bytes; held here to the plan this run executes.
+    let one_person =
+        approved.is_some_and(|a| a.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY);
+    logweir_core::original_name::check_typed_confirmation(
+        &spec.source.topics,
+        signed,
+        one_person,
+        approved.and_then(|a| a.original_name_confirmation.as_ref()),
+    )
+    .map_err(|e| GuardRefusal(e).into())
+}
+
+/// **PROD-15.1.** What only the runner holds about an original-name restore,
+/// read once before any client exists: the verified receipt's measured
+/// source cluster id and recorded owners, and — when given — the Strimzi
+/// owners of the restored names in the target's `KafkaTopic` resources.
+///
+/// The resources file is read ONLY for an original-name plan; for every other
+/// plan it is not opened. A file that cannot be read or parsed is exit 1,
+/// before anything is dialled.
+fn original_name_inputs(
+    args: &RunArgs,
+    spec: &DrillSpec,
+    point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
+) -> Result<phase0_admit::OriginalNameInputs, DrillError> {
+    let (receipt_source_cluster_id, receipt_owners) = match point_source {
+        Some((source, owners)) => (Some(source), Some(owners)),
+        None => (None, None),
+    };
+    let kafka_topic_owners = match (
+        logweir_core::original_name::is_original_name_restore(spec),
+        &args.kafka_topic_resources,
+    ) {
+        (true, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| DrillError::Operational(format!("{}: {e}", path.display())))?;
+            let docs = logweir_core::topic_configuration::parse_resource_documents(&text).map_err(
+                |e| {
+                    DrillError::Operational(format!(
+                        "--kafka-topic-resources {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+            let scan = logweir_core::topic_configuration::strimzi_owner_scan(
+                &docs,
+                &spec.source.topics,
+                args.strimzi_cluster.as_deref(),
+            );
+            refuse_unreadable_owners(path, &scan)?;
+            Some((
+                scan.owners,
+                logweir_core::ids::sha256_prefixed(text.as_bytes()),
+            ))
+        }
+        _ => None,
+    };
+    let (kafka_topic_owners, kafka_topic_resources_sha256) = match kafka_topic_owners {
+        Some((owners, digest)) => (Some(owners), Some(digest)),
+        None => (None, None),
+    };
+    Ok(phase0_admit::OriginalNameInputs {
+        receipt_source_cluster_id,
+        receipt_owners,
+        kafka_topic_owners,
+        kafka_topic_resources_sha256,
+    })
+}
+
+/// **PROD-15.1 review M2 and L2: the owner condition fails CLOSED.** A
+/// `KafkaTopic` that manages a restored name but whose reference cannot be
+/// recorded, a `KafkaTopic` whose topic cannot be read, and a file holding no
+/// `KafkaTopic` at all (unless it is the explicit empty `List` `kubectl`
+/// writes) are refused by name — never dropped into "looked, none found".
+fn refuse_unreadable_owners(
+    path: &std::path::Path,
+    scan: &logweir_core::topic_configuration::StrimziOwnerScan,
+) -> Result<(), DrillError> {
+    use logweir_core::original_name::ORIGINAL_NAME_OWNER_UNREADABLE;
+    let mut why: Vec<String> = Vec::new();
+    for (topic, reference) in &scan.unrecordable {
+        why.push(format!(
+            "a KafkaTopic manages `{topic}` and its reference ({reference}) is longer than the {} \
+             characters an owner is recorded with",
+            logweir_core::topic_configuration::MAX_OWNER_REFERENCE_CHARS
+        ));
+    }
+    why.extend(scan.unreadable.iter().cloned());
+    if scan.kafka_topics == 0 && !scan.explicit_empty_list {
+        why.push(
+            "the file holds no KafkaTopic resource (and is not the explicit empty List \
+             `kubectl get kafkatopics -A -o yaml` writes when there are none)"
+                .to_string(),
+        );
+    }
+    if why.is_empty() {
+        return Ok(());
+    }
+    Err(GuardRefusal(format!(
+        "{ORIGINAL_NAME_OWNER_UNREADABLE}: --kafka-topic-resources {} cannot be read as the \
+         declarative owners of the restored names: {}. An owner this runner cannot see is never \
+         read as no owner; give it the target's KafkaTopic resources as `kubectl get kafkatopics \
+         -A -o yaml` writes them; nothing was written",
+        path.display(),
+        why.join("; ")
+    ))
+    .into())
+}
+
+/// **PROD-15.1.** The signed `target.original_name` block: what phase 0
+/// proved (the cluster condition, the owners) and what phase 1 verified (the
+/// approval subject and the document it was in). `None` for every restore
+/// that is not an original-name restore.
+fn original_name_info(
+    admitted: &phase0_admit::Admitted,
+    approved: &phase1_approval::Approved,
+) -> Option<logweir_core::scorecard::OriginalNameInfo> {
+    let proved = admitted.original_name.as_ref()?;
+    Some(logweir_core::scorecard::OriginalNameInfo {
+        approval_subject: approved.approval_subject.label().to_string(),
+        approval_mode: approved.approval_mode.to_string(),
+        cluster_condition: logweir_core::original_name::cluster_condition(&proved.relation)
+            .to_string(),
+        source_cluster_id: proved.relation.source().map(str::to_string),
+        owner_detection: proved.owners.owner_detection.clone(),
+        owners: proved
+            .owners
+            .owners
+            .iter()
+            .map(|o| logweir_core::scorecard::OriginalNameOwner {
+                topic: o.topic.clone(),
+                kind: o.kind.clone(),
+                reference: o.reference.clone(),
+                found_in: o.found_in.clone(),
+            })
+            .collect(),
+        owner_path: proved.owners.owner_path,
+        // OD-10: the check above admitted a one-person confirmation only with
+        // every name typed, so the document says how it was confirmed.
+        confirmation: (approved.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY)
+            .then(|| logweir_core::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.to_string()),
+        kafka_topic_resources_sha256: proved.kafka_topic_resources_sha256.clone(),
+    })
+}
+
 /// `TargetInfo::marker_topic` for a spec: the spec's value in `Scratch` mode
 /// and `None` in `NewTopic` mode.
 ///
@@ -4231,6 +4577,10 @@ fn target_info(
             mode: spec.target.auth.mode_str().into(),
             username: spec.target.auth.username().map(str::to_string),
         }),
+        // PROD-15.1: filled after phase 1 (`original_name_info`), the first
+        // point at which the approval subject is VERIFIED; a block written
+        // here would sign a subject nobody had checked yet.
+        original_name: None,
     })
 }
 
@@ -4286,6 +4636,99 @@ fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::score
     sample.partitions = u32::try_from(c.partitions.len()).unwrap_or(u32::MAX);
     let topics: BTreeSet<&str> = c.partitions.iter().map(|p| p.topic.as_str()).collect();
     sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
+}
+
+// =======================================================================
+// PROD-15.1 review 2, M1 and L1 — what this process puts at the start of a
+// line of its pod log
+// =======================================================================
+
+#[cfg(test)]
+mod pod_log_lines_pin {
+    /// The text of the top-level `fn <name>(` in `src`, up to its closing
+    /// brace at column 0.
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("\nfn {name}("))
+            .unwrap_or_else(|| panic!("no top-level `fn {name}(`"));
+        let rest = &src[start + 1..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` has no closing brace at column 0"));
+        &rest[..end + 2]
+    }
+
+    /// **The runner never starts a line with someone else's text.** An error's
+    /// text can echo a plan's string or a broker's, and `report_with` is the
+    /// one place this command prints it: through `crate::exit::one_line`,
+    /// which leaves no line break in it. The behaviour is
+    /// `exit::one_line_tests` and, through the real binary,
+    /// `tests/original_name_cli.rs::a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`;
+    /// this pins the call site, and that no raw print of an error is left in
+    /// either runner. KILLS: printing the error raw again (the review's
+    /// forgery: two key lines inside a plan string).
+    #[test]
+    fn an_errors_text_reaches_stderr_only_on_one_line() {
+        // Built from two halves so this row's own source is not a match.
+        let raw = concat!("eprintln!(\"{", "e}\")");
+        let drill = include_str!("mod.rs");
+        let report = fn_body(drill, "report_with");
+        assert!(
+            report.contains("eprintln!(\"{}\", crate::exit::one_line(&e.to_string()));"),
+            "report_with prints the error through one_line"
+        );
+        assert_eq!(drill.matches(raw).count(), 0, "no raw print of an error");
+        // `backup run`'s twin: a controller reads that pod log by key too.
+        let backup = include_str!("../backup/mod.rs");
+        assert!(backup.contains("eprintln!(\"{}\", crate::exit::one_line(&e.to_string()));"));
+        assert_eq!(backup.matches(raw).count(), 0, "no raw print of an error");
+    }
+
+    /// **Review 2, L1: `exiting` prints the stopped creation step's two lines
+    /// through the seam, on exit 1 only, and nothing else in this file prints
+    /// a `failure-reason=`.** The bytes are pinned by
+    /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
+    /// this pins that the terminal path calls it. KILLS: `exiting` no longer
+    /// printing the pair (the Restore would be a generic `Failed`, with the
+    /// left topics named nowhere durable); a second printer.
+    #[test]
+    fn exiting_prints_the_stopped_creation_step_through_its_seam() {
+        let drill = include_str!("mod.rs");
+        let production = drill
+            .split("\n#[cfg(test)]\nmod ")
+            .next()
+            .expect("the production half");
+        let exiting = fn_body(production, "exiting");
+        let call = "let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);";
+        let guard = "if let (ExitCode::Operational, Some(race)) = (code, race) {";
+        let at = exiting.find(guard).expect("on exit 1, with a stop");
+        assert!(
+            exiting[at..]
+                .trim_start_matches(guard)
+                .trim_start()
+                .starts_with("// A closed stdout"),
+            "the guard's body is the seam call"
+        );
+        assert_eq!(exiting.matches(call).count(), 1);
+        // The definition is generic (`…_to<W: …>(`), so this counts calls.
+        assert_eq!(
+            production.matches("print_creation_stop_to(").count(),
+            1,
+            "called from exactly one place"
+        );
+        // One printer of the reason in this command, inside the seam.
+        assert_eq!(production.matches("failure_reason_line(").count(), 1);
+        let seam = production
+            .find("pub fn print_creation_stop_to<W: std::io::Write>(")
+            .expect("the seam");
+        let seam = &production[seam..];
+        let seam = &seam[..seam.find("\n}\n").expect("the seam ends")];
+        let lists = seam.find("stop.lists().line()").expect("the lists' line");
+        let reason = seam
+            .find("failure_reason_line(stop.reason)")
+            .expect("the reason");
+        assert!(reason > lists, "the reason is printed LAST");
+    }
 }
 
 #[cfg(test)]
@@ -4357,7 +4800,7 @@ mod tests {
         assert!(
             body.contains(
                 "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n        \
-                 bound_set,\n    })"
+                 bound_set,\n        point_source,\n    })"
             ),
             "check_v2_bindings must return the coverage it kept"
         );
@@ -4648,6 +5091,8 @@ mod tests {
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         }
     }
 
@@ -5543,7 +5988,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None, None, None, None),
+                exiting("01TEST", c, None, None, None, None, None),
                 c,
                 "exiting must not alter the code"
             );
@@ -5714,6 +6159,7 @@ mod tests {
                 configs_set: Vec::new(),
                 topics_created: Vec::new(),
             },
+            original_name: None,
         };
 
         // `scratch` — v0.1's document, unchanged, and the mode absent on the
@@ -5837,6 +6283,8 @@ mod standing_approved_tests {
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
         }
     }
 
@@ -6008,6 +6456,178 @@ mod standing_approved_tests {
                 && call.contains("c.spec.sample.coverage"),
             "the version step reads the document's version, its sample block and the plan's \
              coverage: {call}"
+        );
+    }
+}
+
+// =======================================================================
+// PROD-15.1 — the runner holds the signed approval subject to the plan
+// =======================================================================
+
+#[cfg(test)]
+mod original_name_subject_tests {
+    use super::*;
+    use logweir_core::original_name::ApprovalSubject;
+
+    fn plan(original_name: bool) -> DrillSpec {
+        let naming = if original_name {
+            "  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n"
+        } else {
+            "  topic_naming:\n    prefix: \"restore-\"\n"
+        };
+        serde_yaml::from_str(&format!(
+            "source:\n  storage:\n    backend: filesystem\n    path: /a\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [x:9092]\n  mode: newTopic\n  \
+             topic_mapping_prefix: \"drill-\"\n{naming}\
+             sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n\
+             objectives: {{}}\n\
+             evidence:\n  backend: filesystem\n  path: /b\n"
+        ))
+        .expect("a plan")
+    }
+
+    fn approved(subject: ApprovalSubject, mode: &'static str) -> phase1_approval::Approved {
+        phase1_approval::Approved {
+            approval: logweir_core::scorecard::ApprovalInfo {
+                approver: "ops".into(),
+                ticket: "T-1".into(),
+                plan_hash: "sha256:00".into(),
+                approved_at: chrono::Utc::now(),
+                key_id: "k".into(),
+                self_attested: false,
+            },
+            validated_at: chrono::Utc::now(),
+            approval_subject: subject,
+            approval_mode: mode,
+            original_name_confirmation: None,
+        }
+    }
+
+    fn refused(r: Result<(), DrillError>) -> String {
+        let e = r.expect_err("refused");
+        let text = e.to_string();
+        assert!(
+            text.contains(logweir_core::original_name::APPROVAL_SUBJECT_MISMATCH),
+            "{text}"
+        );
+        text
+    }
+
+    /// The pair is checked in BOTH directions, and a standing rehearsal
+    /// authorization never carries the subject whatever it claims.
+    ///
+    /// KILLS: a check that passes an ordinary approval for an original-name
+    /// plan; one that lets an `originalName` approval authorise an ordinary
+    /// plan; reading a standing document's subject as signed.
+    #[test]
+    fn the_runner_holds_the_signed_subject_to_the_plan_in_both_directions() {
+        let v1 = phase1_approval::APPROVAL_MODE_V1;
+        let standing = phase1_approval::APPROVAL_MODE_STANDING;
+        assert!(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, v1))
+        )
+        .is_ok());
+        assert!(check_original_name_subject(
+            &plan(false),
+            Some(&approved(ApprovalSubject::Ordinary, v1))
+        )
+        .is_ok());
+        assert!(check_original_name_subject(&plan(false), None).is_ok());
+        refused(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::Ordinary, v1)),
+        ));
+        refused(check_original_name_subject(
+            &plan(false),
+            Some(&approved(ApprovalSubject::OriginalName, v1)),
+        ));
+        refused(check_original_name_subject(&plan(true), None));
+        refused(check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, standing)),
+        ));
+    }
+
+    /// OD-10, the runner's half: a one-person confirmation (v2 under
+    /// `Ordinary`) of an original-name plan needs every original topic name
+    /// re-typed, exactly, inside the signed bytes; a v1 or `Governed` approval
+    /// has a second person and needs none. KILLS: dropping the typed check
+    /// from the runner; reading "ordinary" as a mode with a second person.
+    #[test]
+    fn a_one_person_confirmation_reaches_the_runner_only_with_the_names_typed() {
+        use logweir_core::original_name::{
+            OriginalNameConfirmation, ORIGINAL_NAME_CONFIRMATION_MISMATCH,
+            ORIGINAL_NAME_CONFIRMATION_MISSING,
+        };
+        let ordinary = phase1_approval::APPROVAL_MODE_ORDINARY;
+        let typed = |names: &[&str]| {
+            let mut a = approved(ApprovalSubject::OriginalName, ordinary);
+            a.original_name_confirmation = Some(OriginalNameConfirmation {
+                typed_topics: names.iter().map(|n| (*n).to_string()).collect(),
+            });
+            a
+        };
+        assert!(check_original_name_subject(&plan(true), Some(&typed(&["orders"]))).is_ok());
+        let e = check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, ordinary)),
+        )
+        .expect_err("no typed names");
+        assert!(
+            e.to_string().contains(ORIGINAL_NAME_CONFIRMATION_MISSING),
+            "{e}"
+        );
+        let e =
+            check_original_name_subject(&plan(true), Some(&typed(&["order"]))).expect_err("a typo");
+        assert!(
+            e.to_string().contains(ORIGINAL_NAME_CONFIRMATION_MISMATCH),
+            "{e}"
+        );
+        // A second person needs no typed names.
+        for mode in [
+            phase1_approval::APPROVAL_MODE_V1,
+            phase1_approval::APPROVAL_MODE_GOVERNED,
+        ] {
+            assert!(check_original_name_subject(
+                &plan(true),
+                Some(&approved(ApprovalSubject::OriginalName, mode))
+            )
+            .is_ok());
+        }
+    }
+}
+
+// =======================================================================
+// PROD-15.1 review L5 (R05) — the run's reader protects the source names
+// =======================================================================
+
+#[cfg(test)]
+mod protected_names_pin {
+    /// The ONE construction site of the run's target reader (`context`, the
+    /// only place interface I1 lets a client be built) hands it the source
+    /// topics' own names to protect, after the scratch scope — so teardown,
+    /// the probe and any later caller can never delete one. The behaviour of
+    /// the protection itself is `rdkafka_reader::tests::
+    /// a_protected_source_name_is_refused_before_the_broker_even_inside_the_namespace`;
+    /// this pins that the run's reader carries it. KILLS: dropping
+    /// `.with_protected_names(...)` from `context`.
+    #[test]
+    fn the_runs_reader_is_built_with_the_source_names_protected() {
+        let src = include_str!("mod.rs");
+        let start = src.find("fn context(").expect("context exists");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("context ends");
+        let body = &body[..end];
+        let scoped = body
+            .find(".with_scratch_prefix(spec.target.topic_mapping_prefix.clone())")
+            .expect("the scratch scope");
+        let protected = body
+            .find(".with_protected_names(spec.source.topics.iter().cloned())")
+            .expect("the run's reader protects the source topics' own names");
+        assert!(
+            protected > scoped,
+            "protected after the scratch scope, on the same reader"
         );
     }
 }

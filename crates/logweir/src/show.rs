@@ -384,6 +384,36 @@ fn qualifiers(sc: &Scorecard) -> String {
             topics.join(", ")
         ));
     }
+    // PROD-15.1: the restore wrote under the source's ORIGINAL topic names
+    // (scorecard 1.8.0). A qualifier in this footer's sense — the `target`
+    // row reads `mode=newTopic` either way — printed only for a document
+    // carrying the block, so every other table is unchanged.
+    if let Some(on) = sc.target.original_name.as_ref() {
+        o.push_str(&format!(
+            "    target.original_name      restored under the original topic names (a new \
+             generation of each name); approval subject {} ({}{}); {}; owners looked for in {}: \
+             {}{}\n",
+            on.approval_subject,
+            on.approval_mode,
+            if on.confirmation.is_some() {
+                ", names typed"
+            } else {
+                ""
+            },
+            on.cluster_condition,
+            on.owner_detection.join(", "),
+            if on.owners.is_empty() {
+                "none found".to_string()
+            } else {
+                on.owners
+                    .iter()
+                    .map(|o| format!("{} ({} {})", o.topic, o.kind, o.reference))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            if on.owner_path { "; owner path" } else { "" }
+        ));
+    }
     o.push_str(&format!(
         "    redactions                {}\n",
         redactions_line(&sc.redactions)

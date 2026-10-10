@@ -45,7 +45,8 @@
       "name": "r1",
       "namespace": "logweir-t16",
       "uid": "restore-uid-1"
-    }
+    },
+    "approvalSubject": "unknown"
   },
   "requestId": "01M3A1REVOKEDAFTERUSE00000"
 }

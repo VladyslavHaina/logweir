@@ -548,7 +548,26 @@ FORMAT_VERSION = "1.4.0"
 # runs); the `replay selection:` line names the subset and the sampled-pass
 # line of a subset document is qualified by it, in the Rust reader's words.
 # Every reader before 1.27.0 refuses a 2.0.0 document as an unsupported major.
-SCRIPT_VERSION = "1.27.0"
+#
+# 1.28.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
+# `target.original_name`: a restore under the source's ORIGINAL topic names,
+# into absent topics (OD-2). Fourteen arms, ON-1 to ON-14, mirrored byte for
+# byte and in position from `Scorecard::validate_invariants`: the block only
+# under a 1.x version of at least 1.8.0, only in a newTopic document with the
+# empty prefix, the approval subject `originalName`, the approval mode and the
+# cluster condition from their closed sets, `targetIsNotSource` only beside a
+# known source cluster id that is not the target's, somewhere looked for an
+# owner, each owner from a place looked in, an owned name only on the owner
+# path, a one-person confirmation only with the names typed, the resources file
+# named by digest, a COMPLETE verification (never a sampled one, and never a
+# pass that records none), and never beside a partition subset (ON-14, judged
+# first: such a restore restores whole topics, so the block is format 1's and
+# no 2.x document carries it).
+# They fire only on a document carrying the block, so every document without
+# it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
+# that is not the writer's shape; two `original name:` lines say what admitted
+# the restore, in the Rust reader's words.
+SCRIPT_VERSION = "1.28.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -580,6 +599,21 @@ PROD_01_3_AUTH_MODES = ("scramSha256", "plain", "mtls")
 # `crates/logweir-core/src/scorecard.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_selection_minor_is_the_rust_readers`).
 SCORECARD_SELECTION_SINCE_MINOR = 7
+
+# The first minor of SCORECARD format 1 that defines `target.original_name`
+# (arm ON-1, PROD-15.1) -- `ORIGINAL_NAME_SINCE_MINOR` in
+# `crates/logweir-core/src/scorecard.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_original_name_minor_is_the_rust_readers`).
+SCORECARD_ORIGINAL_NAME_SINCE_MINOR = 8
+
+# `target.original_name`'s closed sets (PROD-15.1) -- `ORIGINAL_NAME_APPROVAL_MODES`
+# in `scorecard.rs`, `CLUSTER_CONDITIONS` and `OWNER_DETECTION_PLACES` in
+# `crates/logweir-core/src/original_name.rs`, and `OWNER_KINDS` in
+# `topic_configuration.rs`, which they must equal.
+ORIGINAL_NAME_APPROVAL_MODES = ("v1Approval", "governed", "ordinary")
+ORIGINAL_NAME_CLUSTER_CONDITIONS = ("targetIsNotSource", "autoCreateDisabled")
+ORIGINAL_NAME_OWNER_DETECTION_PLACES = ("plan", "kafkaTopicResources", "pointReceipt")
+ORIGINAL_NAME_OWNER_KINDS = ("strimzi", "external")
 
 # The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
@@ -1172,6 +1206,21 @@ def _defines_format_1_minor(version, since_minor) -> bool:
     return major == SCORECARD_PARTITION_SUBSETS_MAJOR
 
 
+def _defines_original_name(version) -> bool:
+    """Whether a document of `version` defines `target.original_name` -- the
+    twin of `logweir_core::scorecard::defines_original_name` (arm ON-1): a 1.x
+    document from 1.8.0 on, and NO document of another major. Unlike
+    `_defines_format_1_minor`, major 2 does not define it: a 2.x document is a
+    partition-subset restore's, and a restore under the original topic names
+    restores whole topics (arm ON-14)."""
+    minor = _minor(version)
+    return (
+        _major(version) == 1
+        and minor is not None
+        and minor >= SCORECARD_ORIGINAL_NAME_SINCE_MINOR
+    )
+
+
 def _narrows_partitions(block) -> bool:
     """`SelectionLabel::narrows_partitions`: the block names a partition
     subset (a non-empty `partitions` list). The shape layer has proved the
@@ -1260,6 +1309,48 @@ def _selection_shape_ok(block) -> bool:
     ):
         return False
     return True
+
+
+def _original_name_shape_ok(block) -> bool:
+    """`target.original_name` has the shape `OriginalNameInfo` deserialises
+    (PROD-15.1, format 1.8.0): strings `approval_subject`, `approval_mode` and
+    `cluster_condition`; `source_cluster_id` absent, null or a string;
+    `owner_detection` an array of strings; `owners` an array of objects of four
+    strings `topic`, `kind`, `reference`, `found_in`; a bool `owner_path`; and
+    `confirmation` and `kafka_topic_resources_sha256` absent, null or strings
+    (OD-10 and review L2). Unknown keys are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    for name in ("approval_subject", "approval_mode", "cluster_condition"):
+        if not isinstance(block.get(name), str):
+            return False
+    source = block.get("source_cluster_id")
+    if source is not None and not isinstance(source, str):
+        return False
+    if not _strings(block.get("owner_detection")):
+        return False
+    owners = block.get("owners")
+    if not isinstance(owners, list):
+        return False
+    for owner in owners:
+        if not isinstance(owner, dict) or not all(
+            isinstance(owner.get(k), str) for k in ("topic", "kind", "reference", "found_in")
+        ):
+            return False
+    for name in ("confirmation", "kafka_topic_resources_sha256"):
+        value = block.get(name)
+        if value is not None and not isinstance(value, str):
+            return False
+    return isinstance(block.get("owner_path"), bool)
+
+
+def _is_sha256_prefixed(value) -> bool:
+    """`sha256:` and 64 lowercase hex characters -- the twin of
+    `logweir_core::check_contract::is_sha256_prefixed`."""
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        return False
+    digest = value[len("sha256:"):]
+    return len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
 
 
 def _int_in(x, bits) -> bool:
@@ -1777,6 +1868,19 @@ def check_invariants(doc) -> str:
             "source.selection is not an object of the shape the writer gives it: a window end "
             "and an optional window start, both integers, an optional array of topic partition "
             "lists and an optional engine-run count"
+        )
+
+    # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
+    # `Option<OriginalNameInfo>` over there, so `null` is ABSENT and anything
+    # that is not the writer's shape is refused at DESERIALISATION. Arms ON-1
+    # to ON-14 below compare its fields, so the shape is asserted first. The
+    # bad shapes are cases in `shape-index.json`.
+    original_name = target.get("original_name")
+    if original_name is not None and not _original_name_shape_ok(original_name):
+        return (
+            "target.original_name is not an object of the shape the writer gives it: three "
+            "strings, an optional source cluster id, the places looked in, the owners found and "
+            "a bool owner_path"
         )
 
     # Also shape, and also the Rust reader's type doing the work over there:
@@ -2528,6 +2632,142 @@ def check_invariants(doc) -> str:
                             "integrity.verification.complete.partitions expects records from a "
                             "partition source.selection does not select"
                         )
+
+    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-14,
+    # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
+    # `redactions`) and with the same words from `Scorecard::validate_invariants`.
+    # They fire ONLY on a document carrying the block, so every document before
+    # 1.8.0 is decided exactly as before. Not interpolated except ON-1's
+    # version. The shape layer above has proved the block's types. ON-14 is
+    # judged FIRST.
+    if original_name is not None:
+        # ON-14, first. An original-name restore restores WHOLE topics: the
+        # block never sits beside a partition subset. Every 2.x document names
+        # a subset (PS-1), so this is the arm a 2.x document carrying the block
+        # meets; a subset under major 1 has already met PS-2.
+        if selection is not None and selection.get("partitions") is not None:
+            return (
+                "target.original_name is present beside source.selection.partitions; a "
+                "restore under the original topic names restores whole topics, never a "
+                "partition subset"
+            )
+        # ON-1. The block is format 1's, from 1.8.0. MAJOR 1 ON PURPOSE (the
+        # older optional blocks read `_defines_format_1_minor`): a 2.x document
+        # is a partition-subset restore's and never carries the block (ON-14).
+        if not _defines_original_name(version):
+            return (
+                f"target.original_name is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is format 1's, "
+                f"from 1.{SCORECARD_ORIGINAL_NAME_SINCE_MINOR}.0, and no other major carries it"
+            )
+        # ON-2. The identity ban stays in scratch mode (absent mode is scratch).
+        if target.get("mode") in (None, "scratch"):
+            return (
+                "target.original_name is present but target.mode is scratch; a scratch drill "
+                "never restores under the original topic names"
+            )
+        # ON-3. The original names ARE the identity mapping.
+        if target.get("topic_mapping_prefix") != "":
+            return (
+                "target.original_name is present but target.topic_mapping_prefix is not "
+                "empty; an original-name restore maps every topic onto its own name"
+            )
+        # ON-4.
+        if original_name["approval_subject"] != "originalName":
+            return (
+                "target.original_name.approval_subject is not \"originalName\"; an "
+                "original-name restore is authorised only by its own approval subject"
+            )
+        # ON-5.
+        if original_name["approval_mode"] not in ORIGINAL_NAME_APPROVAL_MODES:
+            return (
+                "target.original_name.approval_mode is not one of \"v1Approval\", "
+                "\"governed\", \"ordinary\""
+            )
+        # ON-6.
+        if original_name["cluster_condition"] not in ORIGINAL_NAME_CLUSTER_CONDITIONS:
+            return (
+                "target.original_name.cluster_condition is not one of \"targetIsNotSource\", "
+                "\"autoCreateDisabled\""
+            )
+        # ON-7. "Not the source" is a comparison of two known ids.
+        named_source = str(original_name.get("source_cluster_id") or "")
+        if original_name["cluster_condition"] == "targetIsNotSource" and (
+            not named_source.strip(RUST_WHITESPACE)
+            or named_source == target.get("cluster_id")
+        ):
+            return (
+                "target.original_name.cluster_condition is targetIsNotSource but "
+                "source_cluster_id is absent or equals target.cluster_id; the condition is a "
+                "comparison of two known cluster ids"
+            )
+        # ON-8. Somewhere was looked, each place once, from the closed set.
+        places = original_name["owner_detection"]
+        if (
+            not places
+            or len(set(places)) != len(places)
+            or any(p not in ORIGINAL_NAME_OWNER_DETECTION_PLACES for p in places)
+        ):
+            return (
+                "target.original_name.owner_detection is empty, repeats a place, or names "
+                "one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner "
+                "nobody looked for is never read as no owner"
+            )
+        # ON-9.
+        owners = original_name["owners"]
+        if any(
+            o["found_in"] not in places
+            or o["kind"] not in ORIGINAL_NAME_OWNER_KINDS
+            or not o["topic"].strip(RUST_WHITESPACE)
+            for o in owners
+        ):
+            return (
+                "target.original_name.owners names a place owner_detection does not list, a "
+                "kind outside \"strimzi\" and \"external\", or a blank topic"
+            )
+        # ON-10.
+        if owners and not original_name["owner_path"]:
+            return (
+                "target.original_name.owners is not empty and owner_path is false; an owned "
+                "name is restored only on the owner path"
+            )
+        # ON-11 (OD-10). A one-person confirmation is signed only with the
+        # topic names typed, and nothing else claims a typed confirmation.
+        confirmation = original_name.get("confirmation")
+        typed = confirmation == "typedTopicNames"
+        if (original_name["approval_mode"] == "ordinary") != typed or (
+            confirmation is not None and not typed
+        ):
+            return (
+                "target.original_name.confirmation is not \"typedTopicNames\" exactly when "
+                "approval_mode is \"ordinary\"; a one-person confirmation of an original-name "
+                "restore is signed only with every original topic name re-typed"
+            )
+        # ON-12. The resources file a runner looked in is named by digest,
+        # exactly when it is a place that was looked in.
+        digest = original_name.get("kafka_topic_resources_sha256")
+        listed = "kafkaTopicResources" in original_name["owner_detection"]
+        digest_ok = _is_sha256_prefixed(digest)
+        if listed != digest_ok or (digest is not None and not digest_ok):
+            return (
+                "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest "
+                "exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic "
+                "resources a runner looked in are named by their digest"
+            )
+        # ON-13. An original-name restore is verified COMPLETELY, never by
+        # sample; a pass that records no verification is refused too (the
+        # third case, decided to the safer side). IV-2 has already refused a
+        # coverage that is neither value.
+        on_coverage = verification["coverage"] if verification is not None else None
+        on_passes = doc.get("outcome") == "pass" or integrity.get("result") == "pass"
+        if (on_coverage is not None and on_coverage != "complete") or (
+            on_coverage is None and on_passes
+        ):
+            return (
+                "target.original_name is present but integrity.verification.coverage is not "
+                "\"complete\", or a pass records no verification; a restore under the original "
+                "topic names is verified completely, never by sample"
+            )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -4299,6 +4539,51 @@ def _selection_lines(block, before, outside):
     return [line]
 
 
+def _original_name_lines(block):
+    """`target.original_name` as lines -- the twin of `crates/logweir/src/
+    verify.rs::original_name_lines` (PROD-15.1): the writer's two sentences
+    (`OriginalNameInfo::lines`). Absent prints nothing: the restore did not
+    write under the original topic names."""
+    if block is None:
+        return []
+    source = block.get("source_cluster_id")
+    if block["cluster_condition"] == "targetIsNotSource":
+        cluster = f"the target cluster is not the source cluster ({source or 'unknown'})"
+    elif source is not None:
+        cluster = (
+            f"the target may be the source cluster ({source}) and every broker reported "
+            "auto.create.topics.enable=false"
+        )
+    else:
+        cluster = (
+            "no source cluster id was known and every broker reported "
+            "auto.create.topics.enable=false"
+        )
+    owners = block["owners"]
+    found = (
+        ", ".join(
+            f"{o['topic']} ({o['kind']} {o['reference']}, from {o['found_in']})" for o in owners
+        )
+        if owners
+        else "none found"
+    )
+    confirmed = (
+        " (the requester re-typed every original topic name)"
+        if block.get("confirmation") == "typedTopicNames"
+        else ""
+    )
+    digest = block.get("kafka_topic_resources_sha256")
+    return [
+        "original name: restored under the source's own topic names, into topics this run "
+        "created (a new generation of each name, not the original topic); approval subject "
+        f"{block['approval_subject']}, approved by {block['approval_mode']}{confirmed}; {cluster}",
+        f"original name: declarative owners looked for in {', '.join(block['owner_detection'])}: "
+        f"{found}"
+        + ("; the approved plan chose the owner path" if block["owner_path"] else "")
+        + (f"; KafkaTopic resources {digest}" if digest is not None else ""),
+    ]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -4656,6 +4941,11 @@ def main(
             doc["source"].get("selection"), _before_the_start(doc), _outside_the_subset(doc)
         ):
             print(f"       coverage: {line}")
+        # PROD-15.1: a restore under the original topic names, and what
+        # admitted it, in the words `logweir drill verify` prints
+        # (`original_name_lines`).
+        for line in _original_name_lines(doc["target"].get("original_name")):
+            print(f"       target:   {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -4705,6 +4995,13 @@ def main(
             "format 2.0.0 only with source.selection.partitions, a format-1 selection a start "
             "only, each subset list sorted and distinct, one engine run per distinct subset or "
             "one more, and a complete block that expects nothing from an unselected partition; "
+            "target.original_name only from 1.8.0 of format 1 and never beside a partition "
+            "subset, only in a newTopic document with the empty "
+            "prefix, its subject originalName, its approval mode and cluster condition from "
+            "their closed sets, targetIsNotSource only beside a known other source cluster id, "
+            "somewhere looked for an owner, each owner from a place looked in, an owned name "
+            "only on the owner path, a one-person confirmation only with the names typed, "
+            "the KafkaTopic resources looked in named by digest, and a complete verification; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

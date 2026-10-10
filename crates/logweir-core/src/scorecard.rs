@@ -485,6 +485,195 @@ pub const SELECTION_SINCE_MINOR: u64 = 7;
 /// file is this version's.
 pub const FORMAT_VERSION_WITH_SELECTION: &str = "1.7.0";
 
+/// **PROD-15.1.** The first minor of scorecard format 1 that defines
+/// `target.original_name`, which arm ON-1 enforces. **A renumber changes this
+/// and [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] together**, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_ORIGINAL_NAME_SINCE_MINOR` follows
+/// it.
+pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
+
+/// **PROD-15.1.** The `format_version` of a scorecard that carries
+/// `target.original_name` — a restore under the source's ORIGINAL topic names
+/// into absent topics (OD-2). A MINOR bump for a new optional block, under
+/// OD-7 (a): arms ON-1 to ON-14 read only that block (ON-2, ON-3, ON-7,
+/// ON-13 and ON-14 judge existing fields against it) and can only refuse.
+/// Written only for an original-name restore
+/// ([`format_version_with_original_name`]), so every other document is the
+/// one it was. The newest minor of FORMAT 1:
+/// `schemas/logweir-drill-scorecard-1.8.0.json` is this version's file
+/// ([`crate::schema::scorecard_format_1_schema`]).
+///
+/// **The block is format 1's only.** An original-name restore restores whole
+/// topics (`crate::original_name::refuse_shape`,
+/// `OriginalNameNeedsWholeTopics`), and a 2.x document is a partition-subset
+/// restore's, so no 2.x document carries the block: arm ON-14 refuses the
+/// pair, ON-1 reads major 1 on purpose, and the 2.0.0 schema does not
+/// describe it.
+pub const FORMAT_VERSION_WITH_ORIGINAL_NAME: &str = "1.8.0";
+
+/// The `format_version` a scorecard is written with once its target block is
+/// known (PROD-15.1): at least [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] when it
+/// carries `target.original_name`, else `current` unchanged. 1.8.0 defines
+/// everything 1.7.0 does. Monotonic: never lowers `current` — so a `current`
+/// of 2.0.0 (a partition subset) stays 2.0.0, and such a document is then
+/// refused at signing by arm ON-14. The runner never gets there: it refuses
+/// the plan before anything is created.
+#[must_use]
+pub fn format_version_with_original_name<'a>(
+    current: &'a str,
+    block: Option<&OriginalNameInfo>,
+) -> &'a str {
+    if block.is_some() {
+        newer_format_version(current, FORMAT_VERSION_WITH_ORIGINAL_NAME)
+    } else {
+        current
+    }
+}
+
+/// `target.original_name.approval_mode`'s closed set (arm ON-5): the approval
+/// document phase 1 verified — a per-run approval document v1 (the CLI, or a
+/// namespace on `legacy-governed-v1`), or an authorization document v2 under
+/// a `Governed` or an `Ordinary` policy. A standing rehearsal authorization
+/// never authorises an original-name restore.
+pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 3] = ["v1Approval", "governed", "ordinary"];
+
+/// **PROD-15.1, scorecard format 1.8.0: the restore wrote under the source's
+/// ORIGINAL topic names**, into topics phase 0 proved absent and the run
+/// created itself, exclusively (`crate::original_name`). Present exactly on
+/// such a restore's documents.
+///
+/// It records what the run PROVED before it wrote, so a reader can tell the
+/// one original-name path from an ordinary restore and see which of OD-2's
+/// conditions admitted it: the separate approval subject and the approval
+/// mode it was verified under, which cluster condition held, where the run
+/// looked for a declarative owner and what it found, and whether the plan
+/// chose the owner path.
+///
+/// **The restored topic is a NEW GENERATION of its name, never the original
+/// topic.** Kafka assigns topic ids at creation and none can be preserved; the
+/// block claims the name, not the identity (PROD-01.4 §7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OriginalNameInfo {
+    /// `originalName`, the approval subject phase 1 verified (arm ON-4).
+    pub approval_subject: String,
+    /// The approval document it was verified in
+    /// ([`ORIGINAL_NAME_APPROVAL_MODES`], arm ON-5).
+    pub approval_mode: String,
+    /// Which of OD-2's two cluster conditions admitted the identity mapping
+    /// (`crate::original_name::CLUSTER_CONDITIONS`, arm ON-6):
+    /// `targetIsNotSource` (a known source cluster id differs from
+    /// `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be,
+    /// the source cluster, and every broker reported
+    /// `auto.create.topics.enable=false`).
+    pub cluster_condition: String,
+    /// The source cluster id the condition compared, when one was known: the
+    /// bound point's verified receipt, measured at backup time (an unsigned
+    /// runner input never counts). Required beside `targetIsNotSource` (arm
+    /// ON-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cluster_id: Option<String>,
+    /// Where the run looked for declarative owners of the restored names
+    /// (`crate::original_name::OWNER_DETECTION_PLACES`): never empty, each
+    /// place once (arm ON-8).
+    pub owner_detection: Vec<String>,
+    /// Every owner found, sorted (arm ON-9).
+    pub owners: Vec<OriginalNameOwner>,
+    /// Whether the approved plan chose the owner path. Required for any owner
+    /// found (arm ON-10).
+    pub owner_path: bool,
+    /// **OD-10.** How a one-person confirmation was made:
+    /// [`crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES`] — the
+    /// requester re-typed every original topic name, exactly, and the console
+    /// signed what was typed. Present exactly when `approval_mode` is
+    /// `ordinary` (arm ON-11): every other mode has a second person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<String>,
+    /// `sha256:<64 hex>` of the `KafkaTopic` resources file the runner was
+    /// given (`--kafka-topic-resources`): an unsigned runner input, so the
+    /// document names exactly which file it looked in. Present exactly when
+    /// `owner_detection` lists `kafkaTopicResources` (arm ON-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_topic_resources_sha256: Option<String>,
+}
+
+/// One declarative owner an original-name restore found for a restored name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OriginalNameOwner {
+    /// The restored (original) topic name.
+    pub topic: String,
+    /// `strimzi` or `external`.
+    pub kind: String,
+    /// Where the desired state lives (a `KafkaTopic` `namespace/name`, a
+    /// repository path).
+    pub reference: String,
+    /// The place that named it: one of `owner_detection`.
+    pub found_in: String,
+}
+
+impl OriginalNameInfo {
+    /// The `original name:` line both readers print
+    /// (`logweir::verify::original_name_lines`,
+    /// `docs/verify_scorecard.py::_original_name_lines`).
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let cluster = match self.cluster_condition.as_str() {
+            "targetIsNotSource" => format!(
+                "the target cluster is not the source cluster ({})",
+                self.source_cluster_id.as_deref().unwrap_or("unknown")
+            ),
+            _ => match self.source_cluster_id.as_deref() {
+                Some(source) => format!(
+                    "the target may be the source cluster ({source}) and every broker reported \
+                     auto.create.topics.enable=false"
+                ),
+                None => "no source cluster id was known and every broker reported \
+                         auto.create.topics.enable=false"
+                    .to_string(),
+            },
+        };
+        let confirmed = match self.confirmation.as_deref() {
+            Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES) => {
+                " (the requester re-typed every original topic name)"
+            }
+            _ => "",
+        };
+        let mut lines = vec![format!(
+            "original name: restored under the source's own topic names, into topics this run \
+             created (a new generation of each name, not the original topic); approval subject \
+             {}, approved by {}{confirmed}; {cluster}",
+            self.approval_subject, self.approval_mode
+        )];
+        let owners = if self.owners.is_empty() {
+            "none found".to_string()
+        } else {
+            self.owners
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{} ({} {}, from {})",
+                        o.topic, o.kind, o.reference, o.found_in
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        lines.push(format!(
+            "original name: declarative owners looked for in {}: {owners}{}{}",
+            self.owner_detection.join(", "),
+            if self.owner_path {
+                "; the approved plan chose the owner path"
+            } else {
+                ""
+            },
+            match self.kafka_topic_resources_sha256.as_deref() {
+                Some(digest) => format!("; KafkaTopic resources {digest}"),
+                None => String::new(),
+            }
+        ));
+        lines
+    }
+}
+
 /// **PROD-11.1b (the owner's decision OD-9 (a), 2026-10-09).** The
 /// `format_version` of a scorecard whose restore stated a PARTITION SUBSET —
 /// the format's first MAJOR. It is 1.7.0's fields with the subset meaning:
@@ -512,6 +701,17 @@ pub fn defines_format_1_minor(format_version: &str, since_minor: u64) -> bool {
         Some(PARTITION_SUBSETS_MAJOR) => true,
         _ => false,
     }
+}
+
+/// Whether a document of `format_version` defines `target.original_name`
+/// (arm ON-1, PROD-15.1): a 1.x document from 1.8.0 on, and NO document of
+/// another major. Unlike [`defines_format_1_minor`], major 2 does not define
+/// it: a 2.x document is a partition-subset restore's, and a restore under
+/// the original topic names restores whole topics (arm ON-14).
+#[must_use]
+pub fn defines_original_name(format_version: &str) -> bool {
+    major_version(format_version) == Some(1)
+        && minor_version(format_version).is_some_and(|minor| minor >= ORIGINAL_NAME_SINCE_MINOR)
 }
 
 /// Whether this build reads `format_version`'s major at all: 1, and 2 (the
@@ -686,6 +886,13 @@ pub struct TargetInfo {
     /// `the_scorecard_top_level_shape_is_unchanged` still holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthSummary>,
+    /// **PROD-15.1 (format 1.8.0).** Present exactly when this restore wrote
+    /// under the source's ORIGINAL topic names: see [`OriginalNameInfo`].
+    /// ABSENT on every other document, which is every document before 1.8.0;
+    /// nested optional (Global Constraint 12 as amended) and skipped when
+    /// absent, so every other document keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<OriginalNameInfo>,
 }
 
 /// A nested optional block. GC12 as amended permits nested optional fields in
@@ -2436,6 +2643,197 @@ impl Scorecard {
                 }
             }
         }
+        // `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to
+        // ON-14. They fire ONLY on a document that CARRIES the block, so every
+        // document without it is decided exactly as before: MINOR under the
+        // owner's OD-7 (a). ON-2, ON-3, ON-7, ON-13 and ON-14 judge existing
+        // fields (`target`, `source.selection`, `integrity.verification`, the
+        // outcome) against the block and can only refuse.
+        //
+        // NOT INTERPOLATED, except ON-1's version, so the messages join
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `source.selection`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`. ON-14 is judged FIRST.
+        if let Some(on) = &self.target.original_name {
+            // ON-14, first. An original-name restore restores WHOLE topics:
+            // the block never sits beside a partition subset. The runner
+            // refuses such a plan before anything is created
+            // (`OriginalNameNeedsWholeTopics`), so a document carrying both
+            // was not written by one. Every 2.x document names a subset
+            // (PS-1), so this is the arm a 2.x document carrying the block
+            // meets; a subset under major 1 has already met PS-2.
+            if self
+                .source
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.partitions.is_some())
+            {
+                return Err(InvariantError(
+                    "target.original_name is present beside source.selection.partitions; a \
+                     restore under the original topic names restores whole topics, never a \
+                     partition subset"
+                        .into(),
+                ));
+            }
+            // ON-1. The block is format 1's, from 1.8.0: a document declaring
+            // an earlier minor cannot carry it. MAJOR 1 ON PURPOSE, where the
+            // older optional blocks read `defines_format_1_minor`: a 2.x
+            // document is a partition-subset restore's and never carries the
+            // block (ON-14), so 2.0.0 does not define it.
+            if !defines_original_name(&self.format_version) {
+                return Err(InvariantError(format!(
+                    "target.original_name is present but format_version {:?} does not define \
+                     it: the block is format 1's, from 1.{ORIGINAL_NAME_SINCE_MINOR}.0, and no \
+                     other major carries it",
+                    self.format_version
+                )));
+            }
+            // ON-2. The identity ban stays in scratch mode.
+            if self.target.mode.is_scratch() {
+                return Err(InvariantError(
+                    "target.original_name is present but target.mode is scratch; a scratch drill \
+                     never restores under the original topic names"
+                        .into(),
+                ));
+            }
+            // ON-3. The original names ARE the identity mapping.
+            if !self.target.topic_mapping_prefix.is_empty() {
+                return Err(InvariantError(
+                    "target.original_name is present but target.topic_mapping_prefix is not \
+                     empty; an original-name restore maps every topic onto its own name"
+                        .into(),
+                ));
+            }
+            // ON-4. Only its own approval subject authorises it.
+            if on.approval_subject != crate::original_name::APPROVAL_SUBJECT_ORIGINAL_NAME {
+                return Err(InvariantError(
+                    "target.original_name.approval_subject is not \"originalName\"; an \
+                     original-name restore is authorised only by its own approval subject"
+                        .into(),
+                ));
+            }
+            // ON-5.
+            if !ORIGINAL_NAME_APPROVAL_MODES.contains(&on.approval_mode.as_str()) {
+                return Err(InvariantError(
+                    "target.original_name.approval_mode is not one of \"v1Approval\", \
+                     \"governed\", \"ordinary\""
+                        .into(),
+                ));
+            }
+            // ON-6.
+            if !crate::original_name::CLUSTER_CONDITIONS.contains(&on.cluster_condition.as_str()) {
+                return Err(InvariantError(
+                    "target.original_name.cluster_condition is not one of \"targetIsNotSource\", \
+                     \"autoCreateDisabled\""
+                        .into(),
+                ));
+            }
+            // ON-7. "Not the source" is a comparison of two known ids.
+            let source_named = on
+                .source_cluster_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty());
+            if on.cluster_condition == crate::original_name::CLUSTER_CONDITION_TARGET_IS_NOT_SOURCE
+                && source_named.is_none_or(|s| s == self.target.cluster_id)
+            {
+                return Err(InvariantError(
+                    "target.original_name.cluster_condition is targetIsNotSource but \
+                     source_cluster_id is absent or equals target.cluster_id; the condition is a \
+                     comparison of two known cluster ids"
+                        .into(),
+                ));
+            }
+            // ON-8. Somewhere was looked, each place once, from the closed set.
+            let places = &crate::original_name::OWNER_DETECTION_PLACES;
+            let mut seen = std::collections::BTreeSet::new();
+            if on.owner_detection.is_empty()
+                || on
+                    .owner_detection
+                    .iter()
+                    .any(|p| !places.contains(&p.as_str()) || !seen.insert(p.as_str()))
+            {
+                return Err(InvariantError(
+                    "target.original_name.owner_detection is empty, repeats a place, or names \
+                     one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner \
+                     nobody looked for is never read as no owner"
+                        .into(),
+                ));
+            }
+            // ON-9. Every owner names a place that was looked in, a known
+            // kind and a topic.
+            if on.owners.iter().any(|o| {
+                !on.owner_detection.contains(&o.found_in)
+                    || !crate::topic_configuration::OWNER_KINDS.contains(&o.kind.as_str())
+                    || o.topic.trim().is_empty()
+            }) {
+                return Err(InvariantError(
+                    "target.original_name.owners names a place owner_detection does not list, a \
+                     kind outside \"strimzi\" and \"external\", or a blank topic"
+                        .into(),
+                ));
+            }
+            // ON-10. An owned name is restored only on the owner path.
+            if !on.owners.is_empty() && !on.owner_path {
+                return Err(InvariantError(
+                    "target.original_name.owners is not empty and owner_path is false; an owned \
+                     name is restored only on the owner path"
+                        .into(),
+                ));
+            }
+            // ON-11 (OD-10). A one-person confirmation is signed only with the
+            // topic names typed, and nothing else claims a typed confirmation.
+            let typed = on.confirmation.as_deref()
+                == Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES);
+            if (on.approval_mode == "ordinary") != typed || (on.confirmation.is_some() && !typed) {
+                return Err(InvariantError(
+                    "target.original_name.confirmation is not \"typedTopicNames\" exactly when \
+                     approval_mode is \"ordinary\"; a one-person confirmation of an original-name \
+                     restore is signed only with every original topic name re-typed"
+                        .into(),
+                ));
+            }
+            // ON-12. The resources file a runner looked in is named by digest,
+            // exactly when it is a place that was looked in.
+            let listed = on
+                .owner_detection
+                .iter()
+                .any(|p| p == crate::original_name::OWNER_FOUND_IN_KAFKA_TOPIC_RESOURCES);
+            let digest_ok = on
+                .kafka_topic_resources_sha256
+                .as_deref()
+                .is_some_and(crate::check_contract::is_sha256_prefixed);
+            if listed != digest_ok || (on.kafka_topic_resources_sha256.is_some() && !digest_ok) {
+                return Err(InvariantError(
+                    "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest \
+                     exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic \
+                     resources a runner looked in are named by their digest"
+                        .into(),
+                ));
+            }
+            // ON-13. An original-name restore is verified COMPLETELY, never
+            // by sample: the runner refuses a sampled original-name plan at
+            // phase 0, so a document carrying the block beside a sampled
+            // verification was not written by one. A run that stopped before
+            // phase 7 records no verification, and is never a pass — so a
+            // PASS that records none is refused too (the third case decided
+            // to the safer side). IV-2 has already refused a coverage that is
+            // neither value.
+            let coverage = self
+                .integrity
+                .verification
+                .as_ref()
+                .map(|v| v.coverage.as_str());
+            let passes =
+                self.outcome == Outcome::Pass || self.integrity.result == IntegrityResult::Pass;
+            if coverage.is_some_and(|c| c != COVERAGE_COMPLETE) || (coverage.is_none() && passes) {
+                return Err(InvariantError(
+                    "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -2532,6 +2930,7 @@ mod tests {
                 // `target.auth` arms have their own unit tests below, over
                 // this same base document.
                 auth: None,
+                original_name: None,
             },
             approval: ApprovalInfo {
                 approver: "sre-oncall@example.com".into(),
@@ -4798,6 +5197,500 @@ mod tests {
                 .coverage_note(lane)
                 .contains("was restored or expected"));
         }
+    }
+
+    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-14 ----
+
+    fn original_name_block() -> OriginalNameInfo {
+        OriginalNameInfo {
+            approval_subject: "originalName".into(),
+            approval_mode: "governed".into(),
+            cluster_condition: "targetIsNotSource".into(),
+            source_cluster_id: Some("SOURCE-CLUSTER".into()),
+            owner_detection: vec!["plan".into()],
+            owners: Vec::new(),
+            owner_path: false,
+            confirmation: None,
+            kafka_topic_resources_sha256: None,
+        }
+    }
+
+    const RESOURCES_DIGEST: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// A valid original-name document: newTopic, the empty prefix, 1.8.0, and
+    /// the COMPLETE verification such a restore requires (ON-13).
+    fn with_original_name() -> Scorecard {
+        let mut sc = with_verification(complete_verification());
+        sc.format_version = FORMAT_VERSION_WITH_ORIGINAL_NAME.into();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        sc.target.topic_mapping_prefix = String::new();
+        sc.target.original_name = Some(original_name_block());
+        sc
+    }
+
+    fn on_err(mutate: impl FnOnce(&mut Scorecard)) -> String {
+        let mut sc = with_original_name();
+        mutate(&mut sc);
+        sc.validate_invariants().unwrap_err().0
+    }
+
+    /// The writer's shape is accepted, with and without an owner on the owner
+    /// path, under both cluster conditions; and the version rule: at least
+    /// 1.8.0 exactly when the block is present. KILLS: writing 1.8.0 for every
+    /// document, or the old version beside the block.
+    #[test]
+    fn an_original_name_block_is_written_as_1_8_0_and_accepted() {
+        let sc = with_original_name();
+        assert!(
+            sc.validate_invariants().is_ok(),
+            "{:?}",
+            sc.validate_invariants()
+        );
+        let mut owned = with_original_name();
+        let block = owned.target.original_name.as_mut().unwrap();
+        block.owner_detection = vec!["plan".into(), "kafkaTopicResources".into()];
+        block.owners = vec![OriginalNameOwner {
+            topic: "orders".into(),
+            kind: "strimzi".into(),
+            reference: "kafka/orders".into(),
+            found_in: "kafkaTopicResources".into(),
+        }];
+        block.owner_path = true;
+        block.cluster_condition = "autoCreateDisabled".into();
+        block.source_cluster_id = None;
+        block.kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
+        assert!(owned.validate_invariants().is_ok());
+        // OD-10: a one-person confirmation, with the names typed.
+        let mut typed = with_original_name();
+        let block = typed.target.original_name.as_mut().unwrap();
+        block.approval_mode = "ordinary".into();
+        block.confirmation = Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+        assert!(
+            typed.validate_invariants().is_ok(),
+            "{:?}",
+            typed.validate_invariants()
+        );
+        assert_eq!(
+            format_version_with_original_name("1.6.0", sc.target.original_name.as_ref()),
+            "1.8.0"
+        );
+        assert_eq!(
+            format_version_with_original_name("1.7.0", sc.target.original_name.as_ref()),
+            "1.8.0"
+        );
+        assert_eq!(format_version_with_original_name("1.6.0", None), "1.6.0");
+        assert_eq!(
+            format_version_with_original_name("1.9.0", sc.target.original_name.as_ref()),
+            "1.9.0",
+            "monotonic: never lowers a later minor"
+        );
+        // Absent on the wire for every other document.
+        let plain = serde_json::to_value(valid_scorecard()).unwrap();
+        assert!(plain["target"].get("original_name").is_none());
+    }
+
+    /// ON-1. KILLS: deleting the arm; comparing against the wrong minor.
+    #[test]
+    fn on1_refuses_the_block_under_a_version_that_does_not_define_it() {
+        for version in ["1.4.0", "1.6.0", "1.7.0", "1.x.0"] {
+            assert_eq!(
+                on_err(|sc| {
+                    sc.format_version = version.into();
+                    // An unreadable minor also predates the verification
+                    // block (IV-1, an earlier arm): without that block the
+                    // refusal read here is ON-1's own.
+                    if version == "1.x.0" {
+                        sc.integrity.verification = None;
+                    }
+                }),
+                format!(
+                    "target.original_name is present but format_version {version:?} does not \
+                     define it: the block is format 1's, from 1.{ORIGINAL_NAME_SINCE_MINOR}.0, \
+                     and no other major carries it"
+                )
+            );
+        }
+    }
+
+    /// A 2.0.0 document that is otherwise BOTH a valid partition-subset
+    /// restore's and a valid original-name restore's: `orders` [0, 1] under
+    /// a complete verification of exactly those partitions, newTopic, the
+    /// empty prefix, the block.
+    fn subset_with_original_name() -> Scorecard {
+        let mut sc = with_original_name();
+        sc.format_version = FORMAT_VERSION_WITH_PARTITION_SUBSETS.into();
+        let end_ms = sc
+            .integrity
+            .verification
+            .as_ref()
+            .and_then(|v| v.complete.as_ref())
+            .expect("a complete block")
+            .window
+            .end_ms;
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: None,
+            window_end_ms: end_ms,
+            partitions: Some(vec![tp("orders", &[0, 1])]),
+            engine_runs: Some(1),
+        });
+        sc
+    }
+
+    /// **ON-14: the block never sits beside a partition subset** (an
+    /// original-name restore restores whole topics). The pair is refused
+    /// under 2.0.0, where it is the first ON arm a document meets, and the
+    /// version step never turns such a document into a 1.x one.
+    ///
+    /// The fixture is otherwise valid twice over, and the row shows it: the
+    /// same document without the block is an accepted subset document, and
+    /// without the subset (as 1.8.0) an accepted original-name one. KILLS:
+    /// deleting ON-14 (the refusal would become ON-1's, another sentence);
+    /// deleting ON-14 and reading major 2 in ON-1 (the document would be
+    /// accepted: a production-named topic with unselected partitions empty,
+    /// signed as covered).
+    #[test]
+    fn on14_refuses_the_block_beside_a_partition_subset() {
+        const ON14: &str = "target.original_name is present beside source.selection.partitions; a restore under the original topic names restores whole topics, never a partition subset";
+        let sc = subset_with_original_name();
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Err(ON14.into()));
+
+        // Without the block: an accepted 2.0.0 subset document.
+        let mut subset_only = subset_with_original_name();
+        subset_only.target.original_name = None;
+        assert_eq!(subset_only.validate_invariants().map_err(|e| e.0), Ok(()));
+        // Without the subset, as 1.8.0: an accepted original-name document.
+        let mut whole = subset_with_original_name();
+        whole.source.selection = None;
+        whole.format_version = FORMAT_VERSION_WITH_ORIGINAL_NAME.into();
+        assert_eq!(whole.validate_invariants().map_err(|e| e.0), Ok(()));
+        // A stated window START beside the block is whole partitions, bounded
+        // in time: accepted, as 1.8.0.
+        let mut windowed = whole.clone();
+        let window = windowed
+            .integrity
+            .verification
+            .as_mut()
+            .and_then(|v| v.complete.as_mut())
+            .map(|c| &mut c.window)
+            .expect("a complete block");
+        window.start_ms = Some(window.end_ms - 1_000);
+        windowed.source.selection = Some(SelectionLabel {
+            window_start_ms: Some(window.end_ms - 1_000),
+            window_end_ms: window.end_ms,
+            partitions: None,
+            engine_runs: None,
+        });
+        assert_eq!(windowed.validate_invariants().map_err(|e| e.0), Ok(()));
+
+        // The writer's version steps never make the pair a 1.x document: a
+        // subset is 2.0.0 and the original-name step keeps it.
+        let block = sc.target.original_name.as_ref();
+        assert_eq!(
+            format_version_with_original_name(
+                format_version_with_selection("1.4.0", sc.source.selection.as_ref()),
+                block
+            ),
+            "2.0.0"
+        );
+        assert_eq!(
+            format_version_with_selection(
+                format_version_with_original_name("1.4.0", block),
+                sc.source.selection.as_ref()
+            ),
+            "2.0.0"
+        );
+        // And 2.0.0 does not DEFINE the block the way it defines format 1's
+        // older optional blocks: ON-1 reads major 1 on purpose.
+        assert!(defines_format_1_minor("2.0.0", SELECTION_SINCE_MINOR));
+        assert!(!defines_original_name("2.0.0"));
+        assert!(!defines_original_name("2.8.0"));
+        assert!(defines_original_name("1.8.0") && defines_original_name("1.9.0"));
+        assert!(!defines_original_name("1.7.0") && !defines_original_name("1.x.0"));
+    }
+
+    /// ON-2 and ON-3. KILLS: deleting either; reading a scratch document or
+    /// a prefixed one as an original-name restore.
+    #[test]
+    fn on2_and_on3_hold_the_block_to_new_topic_and_the_empty_prefix() {
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.mode = TargetMode::Scratch;
+                sc.target.marker_topic = Some("logweir.scratch".into());
+            }),
+            "target.original_name is present but target.mode is scratch; a scratch drill never restores under the original topic names"
+        );
+        assert_eq!(
+            on_err(|sc| sc.target.topic_mapping_prefix = "restore-".into()),
+            "target.original_name is present but target.topic_mapping_prefix is not empty; an original-name restore maps every topic onto its own name"
+        );
+    }
+
+    /// ON-4 to ON-6, the closed sets. KILLS: deleting any; accepting an
+    /// ordinary subject, a standing authorization, an unknown condition.
+    #[test]
+    fn on4_to_on6_hold_the_subject_mode_and_condition_to_their_closed_sets() {
+        for subject in ["ordinary", "", "OriginalName"] {
+            assert_eq!(
+                on_err(|sc| sc.target.original_name.as_mut().unwrap().approval_subject = subject.into()),
+                "target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject"
+            );
+        }
+        for mode in ["standing", "Governed", ""] {
+            assert_eq!(
+                on_err(|sc| sc.target.original_name.as_mut().unwrap().approval_mode = mode.into()),
+                "target.original_name.approval_mode is not one of \"v1Approval\", \"governed\", \"ordinary\""
+            );
+        }
+        assert_eq!(
+            on_err(|sc| sc.target.original_name.as_mut().unwrap().cluster_condition = "sameCluster".into()),
+            "target.original_name.cluster_condition is not one of \"targetIsNotSource\", \"autoCreateDisabled\""
+        );
+    }
+
+    /// ON-7. KILLS: deleting it; checking only presence, or only inequality.
+    #[test]
+    fn on7_makes_target_is_not_source_a_comparison_of_two_known_ids() {
+        let message = "target.original_name.cluster_condition is targetIsNotSource but source_cluster_id is absent or equals target.cluster_id; the condition is a comparison of two known cluster ids";
+        assert_eq!(
+            on_err(|sc| sc.target.original_name.as_mut().unwrap().source_cluster_id = None),
+            message
+        );
+        assert_eq!(
+            on_err(
+                |sc| sc.target.original_name.as_mut().unwrap().source_cluster_id =
+                    Some("  ".into())
+            ),
+            message
+        );
+        assert_eq!(
+            on_err(|sc| {
+                let target = sc.target.cluster_id.clone();
+                sc.target.original_name.as_mut().unwrap().source_cluster_id = Some(target);
+            }),
+            message
+        );
+    }
+
+    /// ON-8 to ON-10. KILLS: deleting any; reading "looked nowhere" as "no
+    /// owner"; an owner from a place not looked in; an owned name off the
+    /// owner path.
+    #[test]
+    fn on8_to_on10_hold_the_owner_facts_together() {
+        let detection = "target.original_name.owner_detection is empty, repeats a place, or names one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner nobody looked for is never read as no owner";
+        for places in [vec![], vec!["plan", "plan"], vec!["kubernetes"]] {
+            assert_eq!(
+                on_err(|sc| {
+                    sc.target.original_name.as_mut().unwrap().owner_detection =
+                        places.iter().map(|p| (*p).to_string()).collect();
+                }),
+                detection
+            );
+        }
+        let owner = |found_in: &str, kind: &str, topic: &str| OriginalNameOwner {
+            topic: topic.into(),
+            kind: kind.into(),
+            reference: "kafka/orders".into(),
+            found_in: found_in.into(),
+        };
+        let owners = "target.original_name.owners names a place owner_detection does not list, a kind outside \"strimzi\" and \"external\", or a blank topic";
+        for bad in [
+            owner("pointReceipt", "strimzi", "orders"),
+            owner("plan", "terraform", "orders"),
+            owner("plan", "strimzi", " "),
+        ] {
+            assert_eq!(
+                on_err(|sc| {
+                    let block = sc.target.original_name.as_mut().unwrap();
+                    block.owners = vec![bad.clone()];
+                    block.owner_path = true;
+                }),
+                owners
+            );
+        }
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().owners =
+                    vec![owner("plan", "strimzi", "orders")];
+            }),
+            "target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path"
+        );
+    }
+
+    /// ON-11 (OD-10) and ON-12. KILLS: a one-person confirmation signed
+    /// without the typed names; a typed confirmation claimed for a mode with a
+    /// second person; an unknown confirmation; a resources file looked in
+    /// without its digest, or a digest for a file nobody looked in.
+    #[test]
+    fn on11_and_on12_tie_the_confirmation_and_the_resources_digest_to_their_facts() {
+        let confirmation = "target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed";
+        assert_eq!(
+            on_err(
+                |sc| sc.target.original_name.as_mut().unwrap().approval_mode = "ordinary".into()
+            ),
+            confirmation
+        );
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().confirmation =
+                    Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+            }),
+            confirmation
+        );
+        assert_eq!(
+            on_err(|sc| {
+                let block = sc.target.original_name.as_mut().unwrap();
+                block.approval_mode = "ordinary".into();
+                block.confirmation = Some("clicked".into());
+            }),
+            confirmation
+        );
+        let digest = "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest";
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().owner_detection =
+                    vec!["kafkaTopicResources".into()];
+            }),
+            digest
+        );
+        assert_eq!(
+            on_err(|sc| {
+                sc.target
+                    .original_name
+                    .as_mut()
+                    .unwrap()
+                    .kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
+            }),
+            digest
+        );
+        assert_eq!(
+            on_err(|sc| {
+                let block = sc.target.original_name.as_mut().unwrap();
+                block.owner_detection = vec!["kafkaTopicResources".into()];
+                block.kafka_topic_resources_sha256 = Some("sha256:XYZ".into());
+            }),
+            digest
+        );
+    }
+
+    /// ON-13. KILLS: an original-name document signed over a SAMPLED
+    /// verification; a pass that records no verification at all; refusing
+    /// the honest shapes — a complete verification (passing, failing, or not
+    /// covered and not a pass) and a run that stopped before phase 7.
+    #[test]
+    fn on13_an_original_name_restore_is_verified_completely_or_is_not_a_pass() {
+        let msg = "target.original_name is present but integrity.verification.coverage is not \"complete\", or a pass records no verification; a restore under the original topic names is verified completely, never by sample";
+        // A sampled verification beside the block.
+        assert_eq!(
+            on_err(|sc| sc.integrity.verification = Some(sampled_verification())),
+            msg
+        );
+        // ... even when the run did not pass.
+        let mut sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        sc.integrity.verification = Some(sampled_verification());
+        assert_eq!(sc.validate_invariants().unwrap_err().0, msg);
+        // A pass that records no verification.
+        assert_eq!(on_err(|sc| sc.integrity.verification = None), msg);
+        // An integrity pass beside a failed objective, with none recorded.
+        let mut sc = with_original_name();
+        sc.integrity.verification = None;
+        sc.outcome = Outcome::FailObjective;
+        sc.engine.matrix_verdict = MatrixVerdict::PassDegraded;
+        assert_eq!(sc.validate_invariants().unwrap_err().0, msg);
+
+        // CONTROLS. The writer's passing shape:
+        assert_eq!(
+            with_original_name().validate_invariants().map_err(|e| e.0),
+            Ok(())
+        );
+        // a complete verification that found something (fail-integrity):
+        let sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        // a run that stopped before phase 7 records none, and is not a pass:
+        let mut sc = not_a_pass(with_original_name(), IntegrityResult::Fail);
+        sc.integrity.verification = None;
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        // and a document WITHOUT the block is decided as before, sampled.
+        let sc = with_verification(sampled_verification());
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+    }
+
+    /// ON-1 to ON-14 sit after SEL-1 to SEL-3 and before `redactions`.
+    /// KILLS: moving the block.
+    #[test]
+    fn the_original_name_arms_sit_between_the_selection_arms_and_redactions() {
+        let mut sc = with_original_name();
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: Some(5),
+            window_end_ms: 5,
+            partitions: None,
+            engine_runs: None,
+        });
+        assert!(sc
+            .validate_invariants()
+            .unwrap_err()
+            .0
+            .starts_with("source.selection.window_start_ms is not before"));
+        let mut sc = with_original_name();
+        sc.format_version = "1.7.0".into();
+        sc.redactions = vec![Redaction {
+            path: "/x".into(),
+            reason: "y".into(),
+            present: true,
+        }];
+        assert!(sc
+            .validate_invariants()
+            .unwrap_err()
+            .0
+            .starts_with("target.original_name is present"));
+    }
+
+    /// The two lines both readers print. KILLS: a line claiming the original
+    /// topic rather than a new generation of its name; dropping the subject,
+    /// the approval mode, the condition or the owner path.
+    #[test]
+    fn the_original_name_lines_say_what_was_proved() {
+        let lines = original_name_block().lines();
+        assert_eq!(
+            lines,
+            vec![
+                "original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by governed; the target cluster is not the source cluster (SOURCE-CLUSTER)".to_string(),
+                "original name: declarative owners looked for in plan: none found".to_string(),
+            ]
+        );
+        let mut owned = original_name_block();
+        owned.cluster_condition = "autoCreateDisabled".into();
+        owned.owners = vec![OriginalNameOwner {
+            topic: "orders".into(),
+            kind: "strimzi".into(),
+            reference: "kafka/orders".into(),
+            found_in: "plan".into(),
+        }];
+        owned.owner_path = true;
+        let lines = owned.lines();
+        assert!(lines[0].ends_with("the target may be the source cluster (SOURCE-CLUSTER) and every broker reported auto.create.topics.enable=false"), "{lines:?}");
+        assert_eq!(
+            lines[1],
+            "original name: declarative owners looked for in plan: orders (strimzi kafka/orders, from plan); the approved plan chose the owner path"
+        );
+        // OD-10 and the resources digest, each in its line.
+        let mut typed = original_name_block();
+        typed.approval_mode = "ordinary".into();
+        typed.confirmation = Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+        typed.owner_detection = vec!["kafkaTopicResources".into()];
+        typed.kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
+        let lines = typed.lines();
+        assert!(
+            lines[0].contains(
+                "approved by ordinary (the requester re-typed every original topic name); "
+            ),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[1],
+            format!("original name: declarative owners looked for in kafkaTopicResources: none found; KafkaTopic resources {RESOURCES_DIGEST}")
+        );
     }
 
     /// **Review N1, the reader's predicate, a row per lane.** Only a complete

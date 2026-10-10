@@ -87,6 +87,7 @@ fn args_for(dir: &Path, scope: &Path, key: &Path, valid_days: i64) -> ApproveArg
         ticket: String::new(),
         out: dir.join("standing-authorization.json"),
         subject_kind: "RehearsalSchedule".to_string(),
+        approval_subject: None,
         standing: Some(StandingArgs {
             schedule_namespace: NS.to_string(),
             schedule_name: SCHEDULE.to_string(),

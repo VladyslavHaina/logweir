@@ -4890,6 +4890,13 @@ spec:
                   topicNaming:
                     description: How the new topics are named.
                     properties:
+                      originalName:
+                        description: |-
+                          **Restore under the ORIGINAL topic names**, into topics that do not exist: `true` declares what the plan's `target.topic_naming.original_name` block says, beside `prefix: ""` in `newTopic` mode ([`ORIGINAL_NAME_RULE`]). It is what a list, the API and the console read to show the restore — and its separate approval subject, `originalName` — distinctly, without parsing the plan; the controller refuses an object whose declaration and plan disagree (`ExecutionSpecInvalid`) and an approval whose signed subject is not the plan's (`ApprovalSubjectMismatch`), before any Job exists.
+
+                          ABSENT MEANS FALSE and is not serialised, so every object written before this field is byte-identical. An older controller ignores the key; its runner refuses the plan (a topic mapped onto itself), so nothing runs under a reading that drops it.
+                        nullable: true
+                        type: boolean
                       prefix:
                         description: 'Prepended to each source topic name to form the new topic''s name. The result is what `status.newTopics` records, and — for `mode: scratch` — what phase 9 tears down.'
                         type: string
@@ -4920,6 +4927,10 @@ spec:
               rule: has(self.approvalRef) != has(self.authorization)
             - message: 'completeMaxRecords bounds a complete verification and is set only with coverage: complete'
               rule: '!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage == ''complete'')'
+            - message: 'target.topicNaming.originalName is set only with target.mode newTopic and target.topicNaming.prefix "": a restore under the original topic names maps every topic onto its own name'
+              rule: '!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (self.target.mode == ''newTopic'' && self.target.topicNaming.prefix == '''')'
+            - message: 'target.topicNaming.originalName is set only with coverage: complete: a restore under the original topic names is verified completely, every restored record compared with the archive, never by sample'
+              rule: '!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (has(self.coverage) && self.coverage == ''complete'')'
           status:
             description: '`Restore.status`.'
             nullable: true
@@ -5490,7 +5501,7 @@ spec:
                     type: integer
                 type: object
               newTopics:
-                description: 'The topics this run CREATED. For `mode: scratch`, exactly what phase 9 tears down.'
+                description: 'The target topic names of this run. For a run that REACHED its restore these are the topics it created (for `mode: scratch`, exactly what phase 9 tears down). After a stopped creation step (`targetTopicsAppeared`) it is exactly `targetTopicsAppeared.left`, the topics the run''s own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for; and it is ABSENT when that list could not be read. For a run that was refused or failed before the creation step, it is the names the plan maps, none of which the run created.'
                 items:
                   type: string
                 nullable: true
@@ -5697,6 +5708,56 @@ spec:
                   `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
                 nullable: true
                 type: string
+              targetTopicsAppeared:
+                description: 'A creation step that stopped (`exitReason: TargetTopicAppeared` for a lost race, `CreatedTopicsLeft` for any other stop that left a topic; exit 1): mapped target names someone else created after phase 0 proved them absent (`appeared`), the topics THIS run created and LEFT (`left`: each created by this restore and left empty; remove it yourself once you have checked nothing writes to it), and the names it asked for and cannot account for (`unconfirmed`). Logweir never deletes any of them. Read off the LAST TWO lines of the runner''s log (`target-topics-appeared=`, then `failure-reason=`) and held to this Restore''s mapped target names; absent on every other run. The names are what the runner''s log gives: with a runner image older than this controller, check the list against the cluster before acting on it.'
+                nullable: true
+                properties:
+                  appeared:
+                    default: []
+                    description: 'Mapped target names someone else created after phase 0: never touched.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  appearedCount:
+                    description: 'How many names `appeared` has in all. More than the list holds when the 100-name bound cut it: the runner''s log names every one, and each is one of this restore''s mapped target topics.'
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
+                  left:
+                    default: []
+                    description: 'Topics this run created and LEFT under these names, empty. Logweir never deletes them: remove each yourself once you have checked nothing writes to it.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  leftCount:
+                    description: How many names `left` has in all.
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
+                  unconfirmed:
+                    description: 'Names this run ASKED the cluster to create and CANNOT ACCOUNT FOR: it got no definite answer (the whole request failed, or the name was answered with an error that is not "already exists"). With `unconfirmedSeen: true` each one exists now; it may be this restore''s or someone else''s, so check what it holds and who writes to it before you remove it. Never listed in `left`, which claims ownership, nor in `appeared`.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  unconfirmedCount:
+                    description: How many names `unconfirmed` has in all.
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
+                  unconfirmedSeen:
+                    description: 'Whether the runner LISTED the cluster after the stop and saw every `unconfirmed` name. `false`: it could not list the cluster, so each name MAY exist; look for it. Present only beside an `unconfirmed` name.'
+                    nullable: true
+                    type: boolean
+                type: object
               teardown:
                 description: What phase 9 removed, and what it could not.
                 nullable: true

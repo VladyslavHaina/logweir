@@ -32,7 +32,8 @@
         "name": "orders-drill-20260911",
         "namespace": "team-a",
         "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c11"
-      }
+      },
+      "approvalSubject": "ordinary"
     }
   ],
   "page": {

@@ -363,6 +363,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
             plan_hash: sha256_prefixed(&plan_bytes),
             approved_at: Utc::now(),
             subject_kind: "Restore".into(),
+            approval_subject: None,
         };
         let approval = serde_json::to_vec(&doc).expect("approval serialises");
         let sidecar = serde_json::to_vec(

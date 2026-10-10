@@ -3000,6 +3000,568 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
     assert_no_duplicate_condition_types(&status3);
 }
 
+/// One terminal reconcile of the fixture `Restore` (plan: `orders` and
+/// `payments`, mapped to `drill-orders` and `drill-payments`) over a pod that
+/// exited `exit_code` with `log`: the outcome, the first status patch, and
+/// the `pods/log` request's URI.
+async fn reconciled_with_log(
+    exit_code: i32,
+    log: &str,
+) -> (
+    weirkeeper::controllers::restore::RestoreOutcome,
+    Value,
+    String,
+) {
+    let (client, recorder, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(exit_code),
+        log_body(log),
+        "Failed",
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    let log_uri = recorder
+        .lock()
+        .expect("readable")
+        .iter()
+        .map(|c| c.uri.clone())
+        .find(|uri| path(uri).ends_with("/log"))
+        .expect("the pod log was read");
+    (outcome, status, log_uri)
+}
+
+fn condition_message(status: &Value) -> String {
+    status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The runner's own two last lines for a stop with these lists.
+fn stop_tail(lists: &str, state: &str) -> String {
+    format!("target-topics-appeared={lists}\nfailure-reason={state}\n")
+}
+
+/// **PROD-15.1 review M4: a lost creation race is NAMED on the Restore.** An
+/// exit-1 run whose LAST line is `failure-reason=TargetTopicAppeared` says so
+/// on `status.exitReason` and the reconcile outcome, carries the runner's
+/// `target-topics-appeared=` lists on `status.targetTopicsAppeared` (held to
+/// legal names this Restore's plan maps), and the `Failed` condition's
+/// message names the topics — every topic the run created and LEFT, with
+/// what to do about it — so the operator reads them on the object, not in a
+/// pod log garbage-collected with the Job. Nothing was deleted, so the status
+/// has no "removed" list: a line that carries one is not copied. The same for
+/// a creation step that stopped for another reason (`CreatedTopicsLeft`).
+/// Controls: an exit 1 without the line keeps the wire reason and no lists.
+/// KILLS: not reading `failure-reason=` on a Restore; dropping the lists;
+/// trusting an arbitrary name from the log; a status that claims a deletion.
+#[tokio::test]
+async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
+    let tail = stop_tail(
+        r#"{"appeared":["drill-payments"],"removed":["drill-orders"],"left":["drill-orders","bad name"]}"#,
+        "TargetTopicAppeared",
+    );
+    assert_eq!(
+        weirkeeper::controllers::restore::LEFT_TOPIC_SENTENCE,
+        "created by this restore and left empty; remove it yourself once you have checked \
+         nothing writes to it"
+    );
+    let (outcome, status, _) = reconciled_with_log(1, &tail).await;
+    assert_eq!(outcome.exit_code, Some(1));
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some("TargetTopicAppeared")
+    );
+    assert_eq!(
+        status["exitReason"].as_str(),
+        Some("TargetTopicAppeared"),
+        "{status}"
+    );
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({
+            "appeared": ["drill-payments"], "left": ["drill-orders"], "unconfirmed": [],
+            "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 0
+        }),
+        "nothing is ever removed, so no such list is copied: {status}"
+    );
+    let message = condition_message(&status);
+    for needle in [
+        "TargetTopicAppeared",
+        "`drill-payments` were created by someone else",
+        "`drill-orders`: created by this restore and left empty; remove it yourself once you \
+         have checked nothing writes to it",
+        "Logweir never deletes",
+    ] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+    assert!(!message.contains("bad name"), "{message}");
+    assert!(!message.contains(" more"), "nothing was cut: {message}");
+    // Review 2, L6: what this run CREATED is what it left, never the name
+    // someone else created.
+    assert_eq!(
+        status["newTopics"],
+        serde_json::json!(["drill-orders"]),
+        "{status}"
+    );
+    assert_eq!(
+        status["oldTopics"],
+        serde_json::json!(["orders", "payments"])
+    );
+
+    // A creation step that stopped for another reason after creating a topic:
+    // the other closed state, the same list and the same sentence.
+    let tail = stop_tail(
+        r#"{"appeared":[],"left":["drill-orders"]}"#,
+        "CreatedTopicsLeft",
+    );
+    let (outcome, status, _) = reconciled_with_log(1, &tail).await;
+    assert_eq!(outcome.terminal_state.as_deref(), Some("CreatedTopicsLeft"));
+    assert_eq!(status["exitReason"].as_str(), Some("CreatedTopicsLeft"));
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({
+            "appeared": [], "left": ["drill-orders"], "unconfirmed": [],
+            "appearedCount": 0, "leftCount": 1, "unconfirmedCount": 0
+        }),
+        "an older runner's two-list line is read: {status}"
+    );
+    let message = condition_message(&status);
+    assert!(
+        message.contains("`drill-orders`: created by this restore and left empty"),
+        "{message}"
+    );
+    assert!(!message.contains("created by someone else"), "{message}");
+
+    // Control: a plain exit 1 — no failure line — is the wire reason, no lists,
+    // and `newTopics` is what it was (the plan's names).
+    let (_, status, _) = reconciled_with_log(
+        1,
+        "target-topics-appeared={\"appeared\":[\"drill-payments\"]}\n",
+    )
+    .await;
+    assert_eq!(
+        status["exitReason"].as_str(),
+        Some(REASON_OPERATIONAL),
+        "{status}"
+    );
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+    assert_eq!(
+        status["newTopics"],
+        serde_json::json!(["drill-orders", "drill-payments"])
+    );
+}
+
+/// **PROD-15.1 review 2, M2: the THIRD list reaches the Restore with its own
+/// sentence, and a list the 100-name bound cut says how many more.** A stop
+/// whose `CreateTopics` call failed as a whole names the topics the cluster
+/// then listed as `unconfirmed`: on `status.targetTopicsAppeared` with the
+/// counts and `unconfirmedSeen`, and in the condition's words — "exists now …
+/// check … before you remove it", never "created by this restore". When the
+/// runner could not list the cluster the words say "may exist". KILLS: an
+/// unconfirmed topic called this restore's; a dropped third list; a count
+/// larger than the plan maps; a cut list that says nothing.
+#[tokio::test]
+async fn names_a_stopped_creation_step_cannot_account_for_are_shown_as_unconfirmed() {
+    use weirkeeper::controllers::restore::with_target_topics_appeared;
+
+    let tail = stop_tail(
+        r#"{"appeared":[],"left":[],"unconfirmed":["drill-orders","drill-payments"],"appearedCount":0,"leftCount":0,"unconfirmedCount":2,"unconfirmedSeen":true}"#,
+        "CreatedTopicsLeft",
+    );
+    let (outcome, status, _) = reconciled_with_log(1, &tail).await;
+    assert_eq!(outcome.terminal_state.as_deref(), Some("CreatedTopicsLeft"));
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({
+            "appeared": [], "left": [], "unconfirmed": ["drill-orders", "drill-payments"],
+            "appearedCount": 0, "leftCount": 0, "unconfirmedCount": 2, "unconfirmedSeen": true
+        }),
+        "{status}"
+    );
+    let message = condition_message(&status);
+    for needle in [
+        "the creation step stopped (CreatedTopicsLeft)",
+        "no CreateTopics answer says this restore created a topic",
+        "`drill-orders`, `drill-payments`: exists now; this restore asked the cluster to create \
+         it and got no definite answer, so it may be this restore's or someone else's: check \
+         what it holds and who writes to it before you remove it",
+        "(Logweir deletes none of them)",
+    ] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+    assert!(
+        !message.contains("created by this restore and left empty"),
+        "an unconfirmed topic is never called this restore's: {message}"
+    );
+    // L6: this run is not known to have created anything.
+    assert_eq!(status["newTopics"], serde_json::json!([]), "{status}");
+
+    // The runner could not list the cluster: "may exist", never "exists now".
+    let tail = stop_tail(
+        r#"{"appeared":[],"left":["drill-orders"],"unconfirmed":["drill-payments"],"appearedCount":0,"leftCount":1,"unconfirmedCount":1,"unconfirmedSeen":false}"#,
+        "CreatedTopicsLeft",
+    );
+    let (_, status, _) = reconciled_with_log(1, &tail).await;
+    assert_eq!(
+        status["targetTopicsAppeared"]["unconfirmedSeen"],
+        serde_json::json!(false)
+    );
+    let message = condition_message(&status);
+    assert!(
+        message.contains("`drill-payments`: may exist now; this restore asked the cluster to create it, got no definite answer, and could not list the cluster afterwards"),
+        "{message}"
+    );
+    assert!(!message.contains("exists now"), "{message}");
+    assert!(
+        message.contains("`drill-orders`: created by this restore and left empty"),
+        "{message}"
+    );
+    assert_eq!(status["newTopics"], serde_json::json!(["drill-orders"]));
+
+    // A count the runner claims beyond the plan's own two mapped names is
+    // held to them: the plan is the most this run can have touched.
+    let tail = stop_tail(
+        r#"{"appeared":[],"left":["drill-orders"],"leftCount":5000}"#,
+        "CreatedTopicsLeft",
+    );
+    let (_, status, _) = reconciled_with_log(1, &tail).await;
+    assert_eq!(status["targetTopicsAppeared"]["leftCount"], 2, "{status}");
+    let message = condition_message(&status);
+    assert!(
+        message.contains("`drill-orders` and 1 more: created by this restore and left empty"),
+        "{message}"
+    );
+    assert!(
+        message.contains("a list shows its first 100 names, each name is one of this restore's mapped target topics, and the runner's log names every one"),
+        "{message}"
+    );
+
+    // The bound itself, through the message builder: 150 left, 100 shown.
+    let names: Vec<String> = (0..150).map(|i| format!("t{i:03}")).collect();
+    let lists = logweir_core::creation_stop::CreationStopLists {
+        left: logweir_core::creation_stop::NameList::of(&names),
+        ..Default::default()
+    };
+    let patch = serde_json::json!({"status": {"exitReason": "CreatedTopicsLeft",
+        "conditions": [{"type": "Failed", "status": "True", "message": "the runner exited 1"}]}});
+    let patched = with_target_topics_appeared(patch, &lists);
+    let block = &patched["status"]["targetTopicsAppeared"];
+    assert_eq!(block["left"].as_array().unwrap().len(), 100);
+    assert_eq!(block["leftCount"], 150);
+    let message = patched["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.contains("`t099` and 50 more: created by this restore"),
+        "{message}"
+    );
+    assert!(!message.contains("`t100`"), "{message}");
+}
+
+/// **PROD-15.1 review 2, M1: the names beside "remove it yourself" are THIS
+/// run's, and a line elsewhere in the log cannot put them there.**
+///
+/// (1) THE FORGERY (the reviewer's probes C2 and B5): a plan string carrying
+/// the two key lines reaches an exit-1 error's text, and a runner that prints
+/// it raw puts them in the log, followed by the rest of the message and the
+/// runner's own finishing line. The pair is not the log's last two lines, so
+/// nothing is lifted: no state, no lists, the plain wire reason.
+///
+/// (2) A NAME OUTSIDE THE PLAN, in the runner's genuine place: dropped. When
+/// no name of the plan remains, the block is dropped whole and the condition
+/// says the list could not be read.
+///
+/// (3) A NAME IN THE PLAN that the run did not create, in a pair that is not
+/// the last two lines: never called "left". Only the runner's genuine last
+/// lines can say so.
+///
+/// KILLS: lifting the last `failure-reason=` of the tail wherever it sits;
+/// lifting names without holding them to the plan; keeping an empty block.
+#[tokio::test]
+async fn a_forged_pair_or_a_name_outside_the_plan_never_reaches_the_restore() {
+    use weirkeeper::controllers::restore::{creation_stop_lists, creation_stop_state};
+    let mapped = vec!["drill-orders".to_string(), "drill-payments".to_string()];
+
+    // (1) Probe C2's text as a non-escaping runner prints it, then the
+    // runner's own "drill finished" line (probe B5).
+    let forged = concat!(
+        "progress-phase=0\n",
+        "progress-phase=1\n",
+        "operational: the archive holds no backup set with id `x\n",
+        "target-topics-appeared={\"appeared\":[],\"left\":[\"payments-prod\",\"ledger\"]}\n",
+        "failure-reason=CreatedTopicsLeft\n",
+        "`; refusing to fall back to another set\n",
+        "{\"level\":\"INFO\",\"fields\":{\"message\":\"drill finished\",\"exit_code\":1}}\n",
+    );
+    assert_eq!(creation_stop_state(1, forged), None);
+    assert_eq!(creation_stop_lists(1, forged, &mapped), None);
+    let (outcome, status, _) = reconciled_with_log(1, forged).await;
+    assert_eq!(
+        outcome.terminal_state, None,
+        "a plain exit 1 names no state"
+    );
+    assert_eq!(status["exitReason"].as_str(), Some(REASON_OPERATIONAL));
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+    let message = condition_message(&status);
+    assert!(!message.contains("payments-prod"), "{message}");
+    assert!(!message.contains("remove it yourself"), "{message}");
+    assert_eq!(
+        status["newTopics"],
+        serde_json::json!(["drill-orders", "drill-payments"]),
+        "an ordinary exit 1 is what it was"
+    );
+
+    // (3) The same shape naming topics the plan DOES map: still not lifted.
+    let in_plan = forged
+        .replace("payments-prod", "drill-orders")
+        .replace("ledger", "drill-payments");
+    assert_eq!(creation_stop_lists(1, &in_plan, &mapped), None);
+    let (_, status, _) = reconciled_with_log(1, &in_plan).await;
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+    assert!(!condition_message(&status).contains("left empty"));
+    // ... nor when the lists are in place and the reason is not last, nor the
+    // reason last with the lists further up.
+    for misplaced in [
+        "target-topics-appeared={\"left\":[\"drill-orders\"]}\nfailure-reason=CreatedTopicsLeft\nanything after\n",
+        "target-topics-appeared={\"left\":[\"drill-orders\"]}\na line between\nfailure-reason=CreatedTopicsLeft\n",
+        "failure-reason=CreatedTopicsLeft\ntarget-topics-appeared={\"left\":[\"drill-orders\"]}\n",
+        " target-topics-appeared={\"left\":[\"drill-orders\"]}\nfailure-reason=CreatedTopicsLeft\n",
+    ] {
+        assert_eq!(creation_stop_lists(1, misplaced, &mapped), None, "{misplaced}");
+    }
+    // Blank lines and a carriage return around the genuine pair are not lines.
+    let genuine = "target-topics-appeared={\"left\":[\"drill-orders\"]}\r\n\nfailure-reason=CreatedTopicsLeft\r\n\n";
+    assert_eq!(
+        creation_stop_lists(1, genuine, &mapped).map(|l| l.left.names),
+        Some(vec!["drill-orders".to_string()])
+    );
+    // Beside exit 1 only.
+    for exit_code in [0, 2, 3, 4] {
+        assert_eq!(creation_stop_state(exit_code, genuine), None);
+        assert_eq!(creation_stop_lists(exit_code, genuine, &mapped), None);
+    }
+
+    // (2) The runner's genuine place, names the plan does not map.
+    let mixed = stop_tail(
+        r#"{"appeared":["payments-prod"],"left":["drill-orders","ledger"],"unconfirmed":["orders"],"appearedCount":1,"leftCount":2,"unconfirmedCount":1,"unconfirmedSeen":true}"#,
+        "CreatedTopicsLeft",
+    );
+    let (_, status, _) = reconciled_with_log(1, &mixed).await;
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({
+            "appeared": [], "left": ["drill-orders"], "unconfirmed": [],
+            "appearedCount": 0, "leftCount": 1, "unconfirmedCount": 0
+        }),
+        "only this Restore's mapped names are kept, and the counts follow: {status}"
+    );
+    let message = condition_message(&status);
+    for foreign in ["payments-prod", "ledger", "`orders`"] {
+        assert!(!message.contains(foreign), "{foreign}: {message}");
+    }
+    let foreign_only = stop_tail(
+        r#"{"appeared":[],"left":["payments-prod","ledger"]}"#,
+        "CreatedTopicsLeft",
+    );
+    assert_eq!(creation_stop_lists(1, &foreign_only, &mapped), None);
+    let (outcome, status, _) = reconciled_with_log(1, &foreign_only).await;
+    // The closed state is the runner's last line and is kept; the block is
+    // dropped, and the words say what is and is not known.
+    assert_eq!(outcome.terminal_state.as_deref(), Some("CreatedTopicsLeft"));
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+    let message = condition_message(&status);
+    assert!(
+        message.contains("the creation step stopped (CreatedTopicsLeft) and the runner's list of topics could not be read"),
+        "{message}"
+    );
+    assert!(!message.contains("payments-prod"), "{message}");
+    assert!(
+        status.get("newTopics").is_none(),
+        "with no list, the plan's names are not called created: {status}"
+    );
+}
+
+/// **The coordinator's row (2026-10-10): the OLDER-RUNNER shape, and what
+/// this controller does with it.** A runner image built before
+/// `logweir::exit::one_line` prints an error's text raw. If an exit-1 message
+/// ENDS with a plan-chosen string (the review-round probe found one: a store
+/// error ending with the plan's evidence path), and the stderr text lands
+/// after the runner's own stdout lines, the log's LAST TWO lines are a forged
+/// pair. When the names it carries are mapped targets of the plan, all three
+/// rules of this controller are satisfied.
+///
+/// **THE CONTROLLER LIFTS IT. That is the stated residual**, not a guard:
+/// the rule about where a line sits cannot tell the runner's own last line
+/// from text the runner was made to print last, and this row records the
+/// behaviour so nobody takes the place rule for more than it is. What closes
+/// it for this build is the runner's escape (no error text can contain a
+/// line break); what closes it for every runner is a value the plan cannot
+/// know (the per-Job token of row FX-43). `docs/kubernetes.md` says what an
+/// operator does meanwhile. This row changes when that row lands.
+#[tokio::test]
+async fn an_older_runners_raw_error_text_ending_in_the_pair_is_lifted_and_that_is_the_stated_residual(
+) {
+    // The runner's stdout first, then its raw stderr: a store error whose
+    // text ends with the plan's own string.
+    let log = concat!(
+        "progress-phase=0\n",
+        "{\"level\":\"INFO\",\"fields\":{\"message\":\"drill finished\",\"exit_code\":1}}\n",
+        "operational: storage: Generic LocalFileSystem error: Unable to canonicalize filesystem root: /x\n",
+        "target-topics-appeared={\"appeared\":[],\"left\":[\"drill-orders\"]}\n",
+        "failure-reason=CreatedTopicsLeft\n",
+    );
+    let (outcome, status, _) = reconciled_with_log(1, log).await;
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some("CreatedTopicsLeft"),
+        "RESIDUAL: the forged state is lifted"
+    );
+    assert_eq!(
+        status["targetTopicsAppeared"]["left"],
+        serde_json::json!(["drill-orders"]),
+        "RESIDUAL: a mapped name the run did not create is shown as left: {status}"
+    );
+    // What bounds it: only names the plan maps, at most as many as it maps,
+    // and nothing is deleted by Logweir on the strength of it.
+    let outside = log.replace("drill-orders", "payments-prod");
+    let (_, status, _) = reconciled_with_log(1, &outside).await;
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+    assert!(!condition_message(&status).contains("payments-prod"));
+    // And THIS build's runner prints that text on one line, which is not a
+    // pair (`crates/logweir/tests/original_name_cli.rs`).
+    let escaped = concat!(
+        "progress-phase=0\n",
+        "{\"level\":\"INFO\",\"fields\":{\"message\":\"drill finished\",\"exit_code\":1}}\n",
+        "operational: storage: Generic LocalFileSystem error: Unable to canonicalize filesystem root: /x\\ntarget-topics-appeared={\"appeared\":[],\"left\":[\"drill-orders\"]}\\nfailure-reason=CreatedTopicsLeft\\n\n",
+    );
+    let (outcome, status, _) = reconciled_with_log(1, escaped).await;
+    assert_eq!(
+        outcome.terminal_state, None,
+        "a plain exit 1 names no state"
+    );
+    assert_eq!(status["exitReason"].as_str(), Some(REASON_OPERATIONAL));
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+}
+
+/// **PROD-15.1 review 2, M1's class note: the closed `failure-reason=` set is
+/// PER KIND.** A Restore's log whose last line names a BACKUP's state is
+/// nothing to the Restore reconciler, and a Backup's log naming a Restore's
+/// state is nothing to the Backup's reader. KILLS: one list for both
+/// reconcilers.
+#[tokio::test]
+async fn a_backup_only_failure_state_is_never_lifted_onto_a_restore() {
+    use weirkeeper::controllers::backup::failure_state;
+    use weirkeeper::controllers::restore::creation_stop_state;
+
+    for state in ["ExecutionAlreadyClaimed", "ExecutionClaimUnproven"] {
+        for exit_code in [1, 4] {
+            let log = format!("failure-reason={state}\n");
+            assert_eq!(creation_stop_state(exit_code, &log), None, "{state}");
+            let (outcome, status, _) = reconciled_with_log(exit_code, &log).await;
+            assert_ne!(outcome.terminal_state.as_deref(), Some(state));
+            assert_ne!(status["exitReason"].as_str(), Some(state), "{status}");
+        }
+    }
+    // The other direction, at the Backup's own reader.
+    for state in ["TargetTopicAppeared", "CreatedTopicsLeft"] {
+        for exit_code in [1, 4] {
+            let log = format!(
+                "target-topics-appeared={{\"left\":[\"orders\"]}}\nfailure-reason={state}\n"
+            );
+            assert_eq!(failure_state(exit_code, &log), None, "{state}");
+        }
+    }
+    // Controls: each kind still reads its own.
+    assert_eq!(
+        failure_state(1, "failure-reason=ExecutionAlreadyClaimed\n"),
+        Some("ExecutionAlreadyClaimed")
+    );
+    assert_eq!(
+        creation_stop_state(1, "failure-reason=CreatedTopicsLeft\n"),
+        Some("CreatedTopicsLeft")
+    );
+}
+
+/// **PROD-15.1 review 2, L3 and L7: the count bound and the line bound, at
+/// the reconcile.** A genuine-position line with 150 mapped names is cut to
+/// 100 with its count, and the status the controller patches fits the CRD's
+/// `maxItems`; a line longer than any genuine one is not parsed at all, and
+/// the Restore still reaches its terminal state with words that say the list
+/// could not be read. The terminal read asks the API for a bounded tail.
+/// KILLS: an unbounded list (the status patch would be refused by the CRD
+/// and the Restore would never reach a terminal state, mutant R2-03);
+/// parsing a megabyte line to keep 100 names of it.
+#[tokio::test]
+async fn the_lists_are_bounded_in_count_and_the_line_in_length() {
+    use weirkeeper::controllers::restore::{
+        creation_stop_lists, creation_stop_status, TARGET_TOPICS_APPEARED_MAX_NAMES,
+        TERMINAL_LOG_TAIL_LINES,
+    };
+    let mapped: Vec<String> = (0..150).map(|i| format!("drill-t{i:03}")).collect();
+    let tail = stop_tail(
+        &serde_json::json!({"appeared": [], "left": mapped, "unconfirmed": mapped}).to_string(),
+        "CreatedTopicsLeft",
+    );
+    let lists = creation_stop_lists(1, &tail, &mapped).expect("the pair is in place");
+    assert_eq!(lists.left.names.len(), TARGET_TOPICS_APPEARED_MAX_NAMES);
+    assert_eq!(lists.unconfirmed.names.len(), 100);
+    let block = creation_stop_status(&lists);
+    for key in ["appeared", "left", "unconfirmed"] {
+        assert!(block[key].as_array().unwrap().len() <= 100, "{key}");
+    }
+    // The CRD's own bound is the same number.
+    let crd = serde_json::to_value(<Restore as kube::CustomResourceExt>::crd()).unwrap();
+    let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
+        ["properties"]["targetTopicsAppeared"]["properties"];
+    for key in ["appeared", "left", "unconfirmed"] {
+        assert_eq!(schema[key]["maxItems"], 100, "{key}");
+        assert_eq!(schema[key]["items"]["maxLength"], 249, "{key}");
+    }
+    for key in ["appearedCount", "leftCount", "unconfirmedCount"] {
+        assert_eq!(schema[key]["type"], "integer", "{key}");
+        assert_eq!(schema[key]["minimum"], 0.0, "{key}");
+    }
+    assert_eq!(schema["unconfirmedSeen"]["type"], "boolean");
+
+    // L7: one very long line in the runner's place is refused before it is
+    // parsed. The state is still named, with no list.
+    let many: Vec<String> = (0..400_000).map(|i| format!("t{i}")).collect();
+    let huge = stop_tail(
+        &serde_json::json!({"left": many}).to_string(),
+        "CreatedTopicsLeft",
+    );
+    assert!(huge.len() > 3_000_000);
+    let started = std::time::Instant::now();
+    assert_eq!(creation_stop_lists(1, &huge, &mapped), None);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "refused by its length, not parsed: {:?}",
+        started.elapsed()
+    );
+    let (outcome, status, log_uri) = reconciled_with_log(1, &huge).await;
+    assert_eq!(outcome.terminal_state.as_deref(), Some("CreatedTopicsLeft"));
+    assert!(status.get("targetTopicsAppeared").is_none());
+    assert!(condition_message(&status).contains("could not be read"));
+    // The read itself is a bounded tail.
+    assert!(
+        log_uri.contains(&format!("tailLines={TERMINAL_LOG_TAIL_LINES}")),
+        "{log_uri}"
+    );
+    assert_eq!(TERMINAL_LOG_TAIL_LINES, 256);
+}
+
 /// No two conditions in one status share a `type`.
 ///
 /// A condition array is a MAP KEYED BY `type`, so two entries sharing one is a
@@ -10467,6 +11029,206 @@ fn the_job_builder_refuses_a_coverage_the_plan_does_not_say() {
     }
 }
 
+/// PROD-15.1 review L5 (R07): a Restore whose `topicNaming.originalName`
+/// declaration is `declared`, over `plan`.
+fn restore_declaring_original_name(plan: &str, declared: Option<bool>) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(plan, APPROVAL, NAME)).expect("fixture JSON");
+    if let Some(d) = declared {
+        value["spec"]["target"]["topicNaming"]["originalName"] = serde_json::json!(d);
+    }
+    serde_json::from_value(value).expect("the fixture is a Restore")
+}
+
+/// The fixture plan restored under the ORIGINAL topic names.
+fn original_name_plan_bytes() -> String {
+    PLAN_BYTES.replace(
+        "  topic_mapping_prefix: \"drill-\"\n",
+        "  topic_mapping_prefix: \"drill-\"\n  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n",
+    )
+}
+
+/// **PROD-15.1 review L5 (R07), the reconcile's call site.** A declaration
+/// the plan does not say — `originalName: true` over an ordinary plan, or an
+/// original-name plan declared nothing — ends `Failed` / `ExecutionSpecInvalid`
+/// before the approval is read and with no Job, so a list never shows the
+/// wrong approval subject. KILLS: removing the reconcile's
+/// `original_name_agrees(restore)?`.
+#[tokio::test]
+async fn an_original_name_declaration_the_plan_does_not_say_is_refused_before_anything_is_read() {
+    for (label, object) in [
+        (
+            "originalName declared over an ordinary plan",
+            restore_declaring_original_name(PLAN_BYTES, Some(true)),
+        ),
+        (
+            "an original-name plan declared nothing",
+            restore_declaring_original_name(&original_name_plan_bytes(), None),
+        ),
+    ] {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            "{label}: {outcome:?}"
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&bodies, "/jobs"), 0, "{label}: no Job");
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "{label}: refused before the approval is read"
+        );
+    }
+}
+
+/// **A SAMPLED original-name Restore ends `Failed` before anything is read**
+/// (an original-name restore requires complete verification). The object's
+/// declaration agrees with its plan on both counts — `originalName: true`,
+/// no `coverage` — so only the plan's own shape is refused:
+/// `ExecutionSpecInvalid`, the condition opening with the runner's token
+/// `OriginalNameNeedsCompleteCoverage`, no Job, the approval never read.
+/// CONTROL: the same object asking for complete coverage is NOT refused for
+/// its shape (it goes on to read its approval). KILLS: the controller
+/// leaving a sampled plan to the runner, after an approver signed it and a
+/// Job was created.
+#[tokio::test]
+async fn a_sampled_original_name_restore_is_refused_before_anything_is_read() {
+    let sampled_plan = original_name_plan_bytes()
+        .replace("  mode: scratch\n", "  mode: newTopic\n")
+        .replace("  marker_topic: logweir.scratch\n", "")
+        .replace("  teardown: delete\n", "");
+    let complete_plan =
+        sampled_plan.replace("  anchor: head\n", "  anchor: head\n  coverage: complete\n");
+    assert_ne!(sampled_plan, complete_plan);
+    let object = |plan: &str, complete: bool| {
+        let mut value: Value =
+            serde_json::to_value(restore_declaring_original_name(plan, Some(true)))
+                .expect("serialises");
+        value["spec"]["target"]["mode"] = serde_json::json!("newTopic");
+        value["spec"]["target"]["topicNaming"]["prefix"] = serde_json::json!("");
+        if complete {
+            value["spec"]["coverage"] = serde_json::json!("complete");
+        }
+        serde_json::from_value::<Restore>(value).expect("the fixture is a Restore")
+    };
+    let run = |object: Restore| async move {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        let bodies = bodies.lock().expect("readable").clone();
+        let calls = recorder.lock().expect("readable").clone();
+        let read_approval = calls.iter().any(|c| path(&c.uri).contains("/approvals/"));
+        (outcome, bodies, read_approval)
+    };
+
+    let (outcome, bodies, read_approval) = run(object(&sampled_plan, false)).await;
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert_eq!(post_count(&bodies, "/jobs"), 0, "no Job");
+    assert!(!read_approval, "refused before the approval is read");
+    let status = patched_statuses(&bodies).remove(0);
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("OriginalNameNeedsCompleteCoverage: "),
+        "{message}"
+    );
+
+    // CONTROL: the complete plan is not refused for its shape.
+    let (outcome, _bodies, read_approval) = run(object(&complete_plan, true)).await;
+    assert_ne!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert!(read_approval, "the complete plan goes on to its approval");
+
+    // **PROD-15.1 after PROD-11.1b: the same, for a PARTITION SUBSET.** The
+    // complete plan narrowed to two partitions of `orders` ends `Failed`
+    // before anything is read: `ExecutionSpecInvalid`, the condition opening
+    // `OriginalNameNeedsWholeTopics`, no Job, the approval never read. There
+    // is no CEL rule for this (the CRD declares no partitions), so this
+    // reconcile is the Kubernetes boundary. KILLS: the controller leaving a
+    // subset plan under the original names to the runner.
+    let subset_plan = complete_plan.replace(
+        "  point_in_time: \"2026-09-07T14:05:00Z\"\n",
+        "  point_in_time: \"../2026-09-07T14:05:00Z\"\n  partitions:\n    orders: [0, 2]\n",
+    );
+    assert_ne!(subset_plan, complete_plan);
+    let (outcome, bodies, read_approval) = run(object(&subset_plan, true)).await;
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert_eq!(post_count(&bodies, "/jobs"), 0, "no Job");
+    assert!(!read_approval, "refused before the approval is read");
+    let status = patched_statuses(&bodies).remove(0);
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("OriginalNameNeedsWholeTopics: "),
+        "{message}"
+    );
+}
+
+/// **PROD-15.1 review L5 (R07), the Job builder's call site**: it refuses
+/// exactly what the reconcile refuses. KILLS: dropping `original_name_agrees`
+/// from `runner_job_spec_with_policy`.
+#[test]
+fn the_job_builder_refuses_an_original_name_declaration_the_plan_does_not_say() {
+    let refused = runner_job_spec(
+        &restore_declaring_original_name(PLAN_BYTES, Some(true)),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    );
+    match refused {
+        Err(weirkeeper::controllers::restore::RestoreError::Refused(state, message)) => {
+            assert_eq!(
+                state,
+                weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID
+            );
+            assert!(message.contains("topicNaming.originalName"), "{message}");
+        }
+        other => panic!("refused, not {other:?}"),
+    }
+}
+
 /// The fixture scorecard at format 1.4.0 carrying `integrity.verification`
 /// with `coverage` and, when given, its `complete` block; `outcome` and
 /// `integrity.result` as given.
@@ -11353,12 +12115,17 @@ const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
 /// valid `refusal-detail=` line, so this is also the row that fails when any
 /// exit code but 3 starts to carry a reason.
 ///
-/// For exit 3 the writes are compared whole and the requests with the log
-/// read's query set aside: that read is now bounded, on purpose.
+/// The writes are compared whole. The requests are compared with the log
+/// read's QUERY set aside, because the golden predates both bounds on that
+/// read: FX-34's at exit 3 (the `runner` container, 32 lines, 512 KiB) and
+/// PROD-15.1's at every other exit (`tailLines=256`, no byte bound). The
+/// query each exit asks is then asserted by itself, so the two reads cannot
+/// trade places unseen.
 ///
 /// KILLS: the gate widened to exit 1 (the `exit-1` case's condition message
-/// gains a suffix); the bounded read used for every exit code (the request
-/// line differs); a suffix added for `NotStated` (the three old-runner cases).
+/// gains a suffix); the bounded read used for every exit code, or the other
+/// exits' read used at exit 3 (the query asserted per exit differs); a suffix
+/// added for `NotStated` (the three old-runner cases).
 #[tokio::test]
 async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
     let golden: Value =
@@ -11377,27 +12144,53 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
         assert_eq!(got["writes"], want["writes"], "[{name}] the writes");
         assert_eq!(got["exitCode"], want["exitCode"], "[{name}]");
         assert_eq!(got["terminalState"], want["terminalState"], "[{name}]");
-        if exit_code == 3 {
-            let without_log_query = |v: &Value| -> Vec<String> {
-                v["requests"]
-                    .as_array()
-                    .expect("requests")
-                    .iter()
-                    .map(|r| r.as_str().expect("a request line").to_string())
-                    .map(|r| match r.split_once("/log?") {
-                        Some((head, _)) => format!("{head}/log?"),
-                        None => r,
-                    })
-                    .collect()
-            };
-            assert_eq!(
-                without_log_query(&got),
-                without_log_query(want),
-                "[{name}] the same requests, the log read's query aside"
-            );
+        let without_log_query = |v: &Value| -> Vec<String> {
+            v["requests"]
+                .as_array()
+                .expect("requests")
+                .iter()
+                .map(|r| r.as_str().expect("a request line").to_string())
+                .map(|r| match r.split_once("/log?") {
+                    Some((head, _)) => format!("{head}/log?"),
+                    None => r,
+                })
+                .collect()
+        };
+        assert_eq!(
+            without_log_query(&got),
+            without_log_query(want),
+            "[{name}] the same requests, the log read's query aside"
+        );
+        // WHICH READ EACH EXIT MAKES: one, and its query is the one that
+        // exit's reader asks.
+        let queries: Vec<Vec<String>> = got["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .filter_map(|r| r.as_str().expect("a request line").split_once("/log?"))
+            .map(|(_, query)| {
+                let mut parts: Vec<String> = query
+                    .split('&')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                parts.sort();
+                parts
+            })
+            .collect();
+        let expected = if exit_code == 3 {
+            vec![
+                "container=runner".to_string(),
+                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
+            ]
         } else {
-            assert_eq!(got["requests"], want["requests"], "[{name}] the requests");
-        }
+            vec![format!(
+                "tailLines={}",
+                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
+            )]
+        };
+        assert_eq!(queries, vec![expected], "[{name}] the one log read");
     }
 }
 
@@ -12601,6 +13394,13 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
             approval: a(),
             detail: d(),
         },
+        // PROD-15.1's variant. It is reached from the ordinary path only
+        // today; its sentence takes the field as the others do, so the day a
+        // standing Restore reaches it the condition names the right one.
+        RestoreAdmission::ApprovalSubjectNotThePlans {
+            approval: a(),
+            detail: d(),
+        },
         RestoreAdmission::AuthorizationPolicyMismatch {
             approval: a(),
             detail: d(),
@@ -12653,7 +13453,28 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
         assert_eq!(admission.message_for(&standing), admission.to_string());
         assert!(!admission.to_string().contains("spec.approvalRef"));
     }
-    assert_eq!(naming.len() + neutral.len(), 9, "every variant is in a row");
+    // The two lists are written by hand. This match has no wildcard arm, so
+    // a variant added to the type does not compile here until it is given a
+    // side, and the count below then fails until it is in a list.
+    let names_the_field = |admission: &RestoreAdmission| match admission {
+        RestoreAdmission::ApprovalNotVerified { .. }
+        | RestoreAdmission::ApprovalNotReceived { .. }
+        | RestoreAdmission::ApprovalSubjectMismatch { .. }
+        | RestoreAdmission::ApprovalSubjectNotThePlans { .. }
+        | RestoreAdmission::AuthorizationPolicyMismatch { .. }
+        | RestoreAdmission::AuthorizationExpired { .. } => true,
+        RestoreAdmission::Ok
+        | RestoreAdmission::PlanHashMismatch { .. }
+        | RestoreAdmission::ClusterNotReachable { .. }
+        | RestoreAdmission::StandingAuthorizationRefused { .. } => false,
+    };
+    assert!(naming.iter().all(names_the_field));
+    assert!(!neutral.iter().any(names_the_field));
+    assert_eq!(
+        (naming.len(), neutral.len()),
+        (6, 4),
+        "every variant is in a row"
+    );
 }
 
 // ===========================================================================

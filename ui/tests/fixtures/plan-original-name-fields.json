@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "PROD-15.1: the wizard state of a restore under the ORIGINAL topic names -- plan-fields.json",
+    "with the original-name choice ticked and the owner statement made. The emitter renders",
+    "`topic_naming: {prefix: \"\", original_name: {owners: []}}`; `topicMappingPrefix` stays the",
+    "scratch prefix the runner's LogAppendTime probe is created under. `sample.coverage` is",
+    "`complete`: a restore under the original names requires complete verification, and a",
+    "sampled one is never rendered.",
+    "",
+    "Both arms read this file: ui/tests/original-name.spec.js renders it and byte-compares the",
+    "result with plan-original-name.golden.yaml, and crates/logweir/tests/ui_lint.rs deserialises",
+    "the golden into `logweir_core::spec::RestoreSpec` and asserts the block ARRIVES.",
+    "Regenerate with `node ui/tests/emit-plan.js plan-original-name-fields.json >",
+    "ui/tests/fixtures/plan-original-name.golden.yaml`; `scripts/check-ui-behaviour.sh` re-runs",
+    "that emitter and `diff -u`s it on every `just lint`."
+  ],
+  "name": "orders-pitr-4471",
+  "backupSetRef": "01JB7Z0000000000000000000B",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "newTopic",
+    "topicPrefix": "",
+    "topicMappingPrefix": "drill-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete",
+    "originalName": true,
+    "originalNameNoOwner": true
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head",
+    "coverage": "complete"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  }
+}

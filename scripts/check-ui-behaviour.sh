@@ -270,5 +270,35 @@ exited $diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-complete-fiel
 fi
 echo "== plan golden: $cc_golden is byte-identical to node ui/tests/emit-plan.js plan-complete-fields.json =="
 
+# THE ORIGINAL-NAME GOLDEN (PROD-15.1): the same three arms for a plan that
+# restores under the ORIGINAL topic names. `ui_lint.rs` asserts the block
+# ARRIVES in `RestoreSpec` -- a misspelt `original_name:` would parse and be
+# dropped, leaving an empty prefix the runner refuses only after the approval.
+on_golden="ui/tests/fixtures/plan-original-name.golden.yaml"
+[ -f "$on_golden" ] || {
+  echo "check-ui-behaviour: $on_golden is missing. Regenerate with: node ui/tests/emit-plan.js \
+plan-original-name-fields.json > $on_golden" >&2; exit 1; }
+tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-plan-original-name-golden.XXXXXX")"
+set +e
+node ui/tests/emit-plan.js plan-original-name-fields.json > "$tmp"
+emit_rc=$?
+set -e
+if [ "$emit_rc" -ne 0 ]; then
+  rm -f "$tmp"
+  echo "check-ui-behaviour: node ui/tests/emit-plan.js plan-original-name-fields.json exited $emit_rc." >&2
+  exit "$emit_rc"
+fi
+set +e
+diff -u "$on_golden" "$tmp"
+diff_rc=$?
+set -e
+rm -f "$tmp"
+if [ "$diff_rc" -ne 0 ]; then
+  echo "check-ui-behaviour: the committed original-name golden and the emitter disagree (diff \
+exited $diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-original-name-fields.json > $on_golden" >&2
+  exit "$diff_rc"
+fi
+echo "== plan golden: $on_golden is byte-identical to node ui/tests/emit-plan.js plan-original-name-fields.json =="
+
 echo "== ui behaviour gate: $count test(s) under ui/tests/, node $v, LOGWEIR_BIN=$LOGWEIR_BIN =="
 exit 0

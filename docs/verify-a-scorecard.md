@@ -198,6 +198,17 @@ The current scorecard checks include:
   engine run per distinct subset or one more (PS-4), and a complete block
   beside it expects nothing from a partition it does not select (PS-5)
   ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
+- A `target.original_name` block (format 1.8.0, a restore under the source's
+  original topic names) appears only under a version that defines it, never in
+  a scratch drill and only beside an empty `target.topic_mapping_prefix`; its
+  approval subject is `originalName`; "not the source cluster" names a source
+  cluster id other than the target's; it names where owners were looked for
+  (a `KafkaTopic` resources file by its sha256), and an owner found only on
+  the owner path; a one-person confirmation is signed only with every
+  original topic name re-typed (`confirmation: typedTopicNames`); its
+  verification is complete, never sampled; and it never sits beside a
+  partition subset, because such a restore restores whole topics
+  ([the arms](formats/drill-scorecard.md#targetoriginal_name-format-180)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
@@ -278,6 +289,20 @@ before 1.6.0 (a build whose cap kept the first partitions in manifest order
 and recorded nothing about the rest, so there the absence says nothing). It
 never changes the exit code. See
 [what the sampled lane guarantees](#what-a-sampled-pass-guarantees-and-what-it-does-not).
+
+And both say when a restore wrote under the source's ORIGINAL topic names
+(`target.original_name`, format 1.8.0), and what admitted it:
+
+```
+original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by v1Approval; the target cluster is not the source cluster (5L6g3nShT-eMCtK--X86sw)
+original name: declarative owners looked for in plan: none found
+```
+
+Nothing is printed for any other document. Neither line changes the exit
+code. A restored topic under its original name is a new generation of the
+name: Kafka assigns it a new topic id, and the document claims the name, not
+the original topic
+([the format](formats/drill-scorecard.md#targetoriginal_name-format-180)).
 
 Backup receipts have their own shape and invariants — eleven arms since format
 1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
@@ -794,14 +819,15 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.27.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.28.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
 restore into a target whose auth mode is one PROD-01.3 added, `1.6.0` for
 every sampled drill since FX-23, `1.7.0` for a restore that states a window
-start since PROD-11.1, or `2.0.0` for a restore that states a partition
-subset since PROD-11.1b). It
+start since PROD-11.1, `1.8.0` for a restore under the original topic names
+since PROD-15.1, or `2.0.0` for a restore that states a partition subset since
+PROD-11.1b). It
 changes when the reader's accepted-document set changes. The compatibility
 history is:
 
@@ -834,6 +860,7 @@ history is:
 | `1.25.0` | Knows backup-receipt and catalog-point format `1.6.0` (PROD-01.4a). Adds the backup receipt's five `generations` arms (36–40: only from 1.6.0; covering exactly the named topic set; every recorded topic ID in Kafka's text — 22 URL-safe base64 characters over 16 bytes, never one of Kafka's reserved IDs, `AAAAAAAAAAAAAAAAAAAAAA` or `AAAAAAAAAAAAAAAAAAAAAQ`; a reason exactly for a null ID, from the closed six; a source exactly for a recorded one), its shape check (each field a string or null), and the `generations` lines: per topic, one generation, the ID CHANGED during the capture, or not established by ID (with the reason). For a catalog point it makes ONE check beyond the signature: every topic ID the record copies (`topics[].identity`) is a real one, else the record is refused in the Rust reader's words. Every document without the block is decided exactly as before. |
 | `1.26.0` | Knows backup-receipt and catalog-point format `1.7.0` (PROD-04.1). Adds the receipt's six `consumer_positions` arms (30–35, after PROD-03.0's 22–29): the block only from 1.7.0; a capture window that ends at or after it starts (compared as instants), a closed listing word and at least one group; this run's positions document named by a well-formed digest over at least one byte; each group's outcome and reason from the closed sets; what a captured (never `Dead` with no member, counts over at least one partition), a `GroupTypeNotCaptured` and any other group records; and an `active` the two states derive. With `--consumer-positions <file>` (backup receipts only) it checks the positions document the receipt binds — fourteen arms, CP-1 to CP-14: the receipt's digest and length, its backup and run, the named topics with their partitions in order and well-formed marks, a derived changed flag, exactly the captured groups, no kept position on a changed topic, no capture over an unread topic, every partition accounted for so absence is never offset 0, each position's status, value, reason and derived coverage, and the receipt's counts — and prints each position. Adds their shape checks and prints the `consumer_positions` lines: the document and whether it was verified, per group its outcome and counts, and with the document one line per position. Every document without the block is decided exactly as before. |
 | `1.27.0` | Knows scorecard format `2.0.0` (PROD-11.1b, the owner's decision OD-9 (a)), the format's first MAJOR, written only for a restore that states a partition subset. Reads major 2 for that shape alone: a 2.x document without `source.selection.partitions` is refused before any arm (PS-1), and every arm of major 1 holds for a 2.0.0 one. PS-2 holds a 1.x `source.selection` to a start and its end (a block without a start, or with `partitions` or `engine_runs`, is refused); PS-3 to PS-5 judge the subset list, the engine runs and a complete block that expects records from an unselected partition. The shape layer reads the 2.0.0 block (an optional start, the subsets, the runs). The `replay selection:` line names the subset (`ONLY orders partitions [0, 2] (every partition of any other restored topic), …, in N engine run(s); …`), saying no record of another partition was RESTORED only over a verification that passed; a sampled `pass` over a subset prints `a sampled pass over a partition subset from … to …: every selected partition was held to its own count bound over that window, every other partition of a narrowed topic was held empty, …`. A newer major is refused naming `2.0.0`. Every 1.x document is decided exactly as before, except a 1.7.0 block that is not a start and its end, which no writer produces and which 1.23.0 refused at its shape layer when the start was missing. |
+| `1.28.0` | Knows scorecard format `1.8.0` (PROD-15.1). Adds `target.original_name`'s fourteen arms (ON-1 to ON-14: only from 1.8.0 of format 1, and never beside a partition subset (ON-14, judged first: a restore under the original topic names restores whole topics, so no 2.x document carries the block); never in scratch mode; only beside an empty `target.topic_mapping_prefix`; the `originalName` approval subject; the approval mode, cluster condition and owner-detection places from their closed sets; `targetIsNotSource` beside a different, known source cluster id; every owner found in a place looked in, of a known kind, and only on the owner path; a one-person confirmation (`ordinary`) exactly with `confirmation: typedTopicNames`; the `KafkaTopic` resources looked in named by their sha256; and only beside a COMPLETE `integrity.verification`, never a sampled one and never a pass that records none) and its shape check, and prints the two `original name:` lines. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -870,6 +897,21 @@ but the payload is not a scorecard: missing field `window_start_ms``. None
 prints `VALID`. The media type keeps `version=1.0.0`, so an older reader
 reaches that refusal rather than a payload-type mismatch. To read a subset
 restore's scorecard, upgrade the verifier.
+A verifier older than `1.28.0`, and a `logweir` built before PROD-15.1, accept a
+1.8.0 scorecard — the major is unchanged — ignore `target.original_name`, check
+none of ON-1 to ON-14 and print no `original name:` line. What they print is
+true of the restore: measured on four live 1.8.0 scorecards (a second
+cluster, the same cluster and the owner path, each a pass, and a
+`fail-integrity` whose restored name another producer wrote into; every one
+under the complete verification such a restore requires),
+`verify_scorecard.py` 1.23.0 and 1.24.0 and a `logweir drill verify` built
+from the commit before PROD-15.1 print `VALID` and the restored topics' own
+`integrity coverage:` lines (complete, with the exact counts), and that
+build's `drill show` prints `mode=newTopic` with the mapping's entry count. They do not say the restore
+wrote under the original names, nor which condition admitted it; the document
+does, and this release's readers print it (`drill show` in its footer).
+`verify_scorecard.py` 1.27.0 (the last before this item) does the same over
+six later live 1.8.0 scorecards: `VALID`, and no `original name:` line.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print

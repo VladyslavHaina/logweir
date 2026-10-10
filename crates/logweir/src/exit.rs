@@ -149,3 +149,88 @@ pub fn set_line_token(token: Option<logweir_core::refusal_detail::LineToken>) {
 fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
     LINE_TOKEN.get().and_then(Option::as_ref)
 }
+
+/// **One line, whatever the text holds** (PROD-15.1 review 2, M1): every
+/// line-breaking code point in `text` becomes a visible escape, so a string
+/// this process did not write — a plan's `source.backup`, a broker's error, an
+/// object key — can never START A LINE of the pod log.
+///
+/// # Why it matters
+///
+/// A controller reads a runner's log by KEY at the start of a line
+/// (`refusal-reason=`, `failure-reason=`, `target-topics-appeared=`, the
+/// evidence keys), and the pod log API has no stream selector, so stderr is
+/// in the same stream. An error text printed raw with a line break in it
+/// could therefore carry a forged key line: the review's probe put
+/// `target-topics-appeared={…}` and `failure-reason=CreatedTopicsLeft` inside
+/// a plan string, and the Restore then named two topics the run never
+/// touched as its own, with "remove it yourself" beside them.
+///
+/// # What is escaped
+///
+/// Every code point some reader treats as a line boundary: `\n`, `\r`,
+/// vertical tab, form feed, the three information separators U+001C to
+/// U+001E, NEL (U+0085), and the line and paragraph separators U+2028 and
+/// U+2029. `\n` and `\r` are written as those two characters; the others as
+/// `\u{…}`. Nothing else is touched, so an ordinary message is the bytes it
+/// was. A backslash is not doubled: this is a display form for a person, not
+/// an encoding anything decodes.
+#[must_use]
+pub fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{b}' | '\u{c}' | '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{85}' | '\u{2028}'
+            | '\u{2029}' => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod one_line_tests {
+    use super::one_line;
+
+    /// KILLS: printing an error text raw; escaping `\n` only (a bare `\r`
+    /// overwrites the line on a terminal, and other readers split on the
+    /// rest); touching an ordinary message.
+    #[test]
+    fn no_line_breaking_code_point_survives_and_nothing_else_changes() {
+        let plain = "operational: the archive holds no backup set with id `nightly`; refusing";
+        assert_eq!(one_line(plain), plain);
+        assert_eq!(one_line(""), "");
+        // The review's forgery (probe C2): two key lines inside a plan string.
+        let hostile = "no backup set with id `x\ntarget-topics-appeared={\"left\":[\"payments-prod\"]}\nfailure-reason=CreatedTopicsLeft\n`; refusing";
+        let escaped = one_line(hostile);
+        assert_eq!(escaped.lines().count(), 1, "{escaped}");
+        assert!(
+            escaped.contains("`x\\ntarget-topics-appeared={")
+                && escaped.contains("\\nfailure-reason="),
+            "{escaped}"
+        );
+        // Every boundary some reader splits on: Rust's `lines`, Python's
+        // `splitlines`, a terminal's carriage return.
+        for breaker in [
+            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+            '\u{2029}',
+        ] {
+            let text = format!("a{breaker}failure-reason=CreatedTopicsLeft");
+            let escaped = one_line(&text);
+            assert!(!escaped.contains(breaker), "{:?}", breaker);
+            assert!(
+                escaped.starts_with("a\\") && escaped.ends_with("failure-reason=CreatedTopicsLeft"),
+                "{escaped}"
+            );
+        }
+        assert_eq!(one_line("a\r\nb"), "a\\r\\nb");
+        assert_eq!(one_line("a\u{2028}b"), "a\\u{2028}b");
+        // Not line breaks: left alone.
+        assert_eq!(
+            one_line("tab\there, caf\u{e9}, \\n typed"),
+            "tab\there, caf\u{e9}, \\n typed"
+        );
+    }
+}

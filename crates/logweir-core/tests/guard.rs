@@ -319,31 +319,92 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
 
 /// RECEIPT-DUP's `failure-reason=` vocabulary is closed in BOTH directions: a
 /// state is lifted only beside the one exit code it belongs to.
+///
+/// **And the closed set is PER KIND** (PROD-15.1 review 2, M1's class note):
+/// a Backup's log lifts only the two execution-claim states, a Restore's only
+/// the stopped creation step's two. KILLS: one list for both reconcilers (a
+/// Backup's log could then put `CreatedTopicsLeft` on a `Backup`, and a
+/// Restore's `ExecutionAlreadyClaimed` on a `Restore`).
 #[test]
-fn a_failure_reason_is_lifted_only_beside_its_own_exit_code() {
+fn a_failure_reason_is_lifted_only_beside_its_own_exit_code_and_only_for_its_own_kind() {
+    use logweir_core::guard::FailureReasonKind::{Backup, Restore};
     use logweir_core::guard::{
-        failure_reason_for_exit, failure_reason_line, TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED,
-        TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN,
+        failure_reason_for_exit, failure_reason_line, BACKUP_FAILURE_REASONS,
+        RESTORE_FAILURE_REASONS, TERMINAL_STATE_CREATED_TOPICS_LEFT,
+        TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN,
+        TERMINAL_STATE_TARGET_TOPIC_APPEARED,
     };
     assert_eq!(
         failure_reason_line(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED),
         "failure-reason=ExecutionAlreadyClaimed"
     );
     assert_eq!(
-        failure_reason_for_exit(1, "ExecutionAlreadyClaimed"),
+        failure_reason_for_exit(Backup, 1, "ExecutionAlreadyClaimed"),
         Some(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED)
     );
     assert_eq!(
-        failure_reason_for_exit(4, "ExecutionClaimUnproven"),
+        failure_reason_for_exit(Backup, 4, "ExecutionClaimUnproven"),
         Some(TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert_eq!(
+        failure_reason_for_exit(Restore, 1, "TargetTopicAppeared"),
+        Some(TERMINAL_STATE_TARGET_TOPIC_APPEARED)
+    );
+    assert_eq!(
+        failure_reason_for_exit(Restore, 1, "CreatedTopicsLeft"),
+        Some(TERMINAL_STATE_CREATED_TOPICS_LEFT)
     );
     // The wrong code for a known state, an unknown state, and exits that
     // never carry one.
-    assert_eq!(failure_reason_for_exit(4, "ExecutionAlreadyClaimed"), None);
-    assert_eq!(failure_reason_for_exit(1, "ExecutionClaimUnproven"), None);
-    assert_eq!(failure_reason_for_exit(1, "Anything"), None);
-    assert_eq!(failure_reason_for_exit(0, "ExecutionAlreadyClaimed"), None);
-    assert_eq!(failure_reason_for_exit(3, "ExecutionClaimUnproven"), None);
+    assert_eq!(
+        failure_reason_for_exit(Backup, 4, "ExecutionAlreadyClaimed"),
+        None
+    );
+    assert_eq!(
+        failure_reason_for_exit(Backup, 1, "ExecutionClaimUnproven"),
+        None
+    );
+    assert_eq!(failure_reason_for_exit(Backup, 1, "Anything"), None);
+    assert_eq!(
+        failure_reason_for_exit(Backup, 0, "ExecutionAlreadyClaimed"),
+        None
+    );
+    assert_eq!(
+        failure_reason_for_exit(Backup, 3, "ExecutionClaimUnproven"),
+        None
+    );
+    for code in [0, 2, 3, 4] {
+        assert_eq!(
+            failure_reason_for_exit(Restore, code, "CreatedTopicsLeft"),
+            None
+        );
+        assert_eq!(
+            failure_reason_for_exit(Restore, code, "TargetTopicAppeared"),
+            None
+        );
+    }
+    // PER KIND: every state of one kind is nothing for the other, at every
+    // exit code.
+    for code in 0..=4 {
+        for (state, _) in RESTORE_FAILURE_REASONS {
+            assert_eq!(
+                failure_reason_for_exit(Backup, code, state),
+                None,
+                "{state}"
+            );
+        }
+        for (state, _) in BACKUP_FAILURE_REASONS {
+            assert_eq!(
+                failure_reason_for_exit(Restore, code, state),
+                None,
+                "{state}"
+            );
+        }
+    }
+    // And the two lists share no state.
+    for (state, _) in BACKUP_FAILURE_REASONS {
+        assert!(!RESTORE_FAILURE_REASONS.iter().any(|(s, _)| *s == state));
+    }
 }
 
 /// **C15 at the spec layer** (PROD-00.3f, A-C15-1): the predicate and the

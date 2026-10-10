@@ -44,6 +44,9 @@ pub mod connection;
 /// PROD-04.1: the receipt's consumer position evidence (format 1.7.0), its
 /// closed vocabularies and the rules its arms re-derive.
 pub mod consumer_positions;
+/// PROD-15.1: the one line a runner prints about a stopped creation step
+/// (`target-topics-appeared=`), written and read through one definition.
+pub mod creation_stop;
 /// FX-20: the credential binding for every credential reference — object
 /// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
 pub mod credential_binding;
@@ -53,6 +56,10 @@ pub mod engine;
 pub mod execution_contract;
 pub mod guard;
 pub mod ids;
+/// PROD-15.1: restore under the original topic name into an absent topic —
+/// the conditions contract (OD-2), the separate approval subject, and the
+/// probe's scratch name.
+pub mod original_name;
 pub mod outcome;
 /// FX-34: a guard refusal's reason code and sentence as one validated,
 /// cleaned and bounded `refusal-detail=` line.

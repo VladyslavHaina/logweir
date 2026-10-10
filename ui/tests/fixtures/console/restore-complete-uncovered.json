@@ -25,7 +25,8 @@
         "name": "orders-scratch"
       },
       "mode": "scratch",
-      "topicPrefix": "drill-20260911-"
+      "topicPrefix": "drill-20260911-",
+      "originalName": false
     },
     "deadlineSeconds": 3600,
     "newTopics": [
@@ -47,6 +48,7 @@
       "verifiedSuccess": false,
       "exitCode": 2,
       "outcome": "fail-integrity"
-    }
+    },
+    "approvalSubject": "ordinary"
   }
 }
