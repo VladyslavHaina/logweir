@@ -2220,6 +2220,11 @@ export const APPROVED_PLAN_STATES = Object.freeze([
   "expired", "unknown",
 ]);
 
+/** `RetentionAccountingState` -- whether a retention evaluation's counts and
+ *  `kept` rows are published (FX-22 review M1). Always present on
+ *  `lastEvaluation`; with `NotRecorded` an absent `kept` says nothing. */
+export const RETENTION_ACCOUNTING_STATES = Object.freeze(["Recorded", "NotRecorded"]);
+
 /** `EvaluationState` -- whether a trust evaluation is believed. The API
  *  decides this, against ITS OWN clock, and publishes the instant it decided
  *  against; the page renders the answer. */
@@ -2762,13 +2767,18 @@ const D3_SKIPPED_ENTRY = shapeOf("SkippedEntryView", { reason: str }, { pointId:
 
 const D3_LAST_EVALUATION = shapeOf(
   "RetentionEvaluationView",
-  { truncated: bool },
+  // `accounting` IS REQUIRED: the API says on every answer whether the three
+  // counts and `kept` below are published, so this client never infers it
+  // from a member that is missing (FX-22 review M1).
+  { truncated: bool, accounting: oneOf(RETENTION_ACCOUNTING_STATES) },
   {
     at: str, pointsEvaluated: int, candidateCount: int,
-    // FX-22: the closed accounting. Each is ABSENT when the API could not
-    // establish it (an evaluation an older controller wrote), and then
-    // `kept` is absent too.
+    // FX-22: the closed accounting. Each is ABSENT when `accounting` is
+    // `NotRecorded` (an older controller's evaluation, or two controllers'
+    // numbers in one block), and then `kept` is absent too.
     keptCount: int, truncatedByCap: int, maxDeletionsPerRun: int,
+    // `true` whenever the status says it; `false` only with
+    // `accounting: Recorded`; absent is "not recorded".
     viewIncomplete: bool,
     kept: listOf(str),
     candidates: listOf(objectOf(D3_CANDIDATE)),
@@ -2979,7 +2989,7 @@ export const D3_SHAPES = Object.freeze({
   NamespaceConflictView: D3_NAMESPACE_CONFLICT,
 });
 
-/** The vocabularies D3 adds, by the name the document publishes. The eight
+/** The vocabularies D3 adds, by the name the document publishes. The nine
  *  TYPED ones are pinned member-for-member by `d3.spec.js`; the rest are
  *  published as `string` and are this client's rendering lists (see point 2 of
  *  this section's header). */
@@ -2988,6 +2998,7 @@ export const D3_ENUMS = Object.freeze({
   TrustState: TRUST_STATES,
   VerificationScopeLevel: SCOPE_LEVELS,
   ApprovedPlanState: APPROVED_PLAN_STATES,
+  RetentionAccountingState: RETENTION_ACCOUNTING_STATES,
   EvaluationState: EVALUATION_STATES,
   EvaluationReason: EVALUATION_REASONS,
   ConnectSyncMode: CONNECT_SYNC_MODES,

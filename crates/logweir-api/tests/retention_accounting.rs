@@ -23,7 +23,7 @@
 
 mod support;
 
-use logweir_api::routes::retention::{view, MAX_ROWS};
+use logweir_api::routes::retention::{published_view_incomplete, view, MAX_ROWS};
 use serde_json::{json, Value};
 use support::{repo_root, FakeKube, Options, TestApp, NS_A};
 use weirkeeper::crds::retention_policy::RetentionPolicy;
@@ -107,6 +107,12 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     let three_hundred = item("keep-300");
     let ev = &three_hundred["lastEvaluation"];
     assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
+    assert_eq!(ev["accounting"], "Recorded", "{ev}");
+    assert_eq!(
+        ev["viewIncomplete"],
+        json!(false),
+        "the fixture's catalog said its view is the whole archive"
+    );
     assert_eq!(ev["keptCount"], 300);
     assert_eq!(ev["candidateCount"], 50);
     assert_eq!(ev["truncatedByCap"], 21);
@@ -127,6 +133,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     let ten = item("keep-10");
     let ev = &ten["lastEvaluation"];
     assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
+    assert_eq!(ev["accounting"], "Recorded", "{ev}");
     assert_eq!(ev["keptCount"], 10);
     assert_eq!(ev["candidateCount"], 50);
     assert_eq!(ev["truncatedByCap"], 311);
@@ -214,6 +221,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
 fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
     // CONTROL: the controller's own object publishes all of it.
     let current = project(named("keep-10"));
+    assert_eq!(current["lastEvaluation"]["accounting"], "Recorded");
     assert_eq!(current["lastEvaluation"]["keptCount"], 10);
     assert_eq!(current["lastEvaluation"]["truncatedByCap"], 311);
     assert_eq!(ids(&current["lastEvaluation"]["kept"]).len(), 10);
@@ -241,6 +249,10 @@ fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
     }
     let view = project(older);
     let ev = &view["lastEvaluation"];
+    assert_eq!(
+        ev["accounting"], "NotRecorded",
+        "and the response SAYS the accounting is not recorded (review M1): {ev}"
+    );
     for absent in [
         "keptCount",
         "truncatedByCap",
@@ -279,10 +291,206 @@ fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
     );
     let view = project(live);
     let ev = &view["lastEvaluation"];
+    assert_eq!(ev["accounting"], "NotRecorded", "{ev}");
     assert!(ev.get("keptCount").is_none(), "{ev}");
     assert!(ev.get("truncatedByCap").is_none(), "{ev}");
     assert!(ev.get("kept").is_none(), "{ev}");
     assert_eq!(ev["candidateCount"], 3);
+}
+
+/// **The response says whether the accounting is recorded** (review M1).
+/// `lastEvaluation.accounting` is on every answer, `Recorded` or
+/// `NotRecorded`, so a client never has to infer it from a member that is
+/// missing.
+///
+/// THE TWO ANSWERS THE ABSENCE OF `kept` COULD NOT TELL APART, through the
+/// real router:
+///
+/// * an older-shape status (no counts, the held-back points under `kept`)
+///   answers `NotRecorded`, with no `kept` member and no counts;
+/// * THE CONTROL, a policy that keeps NOTHING and records it (both of its
+///   points skipped), answers `Recorded` with `keptCount: 0` — and no `kept`
+///   member either, because an empty list is not serialised.
+///
+/// Before this member the two read alike to a client of `kept`: no member,
+/// `truncated: false`.
+///
+/// MUTANTS: F1a — the member is the constant `Recorded`: the older shape reads
+/// `Recorded` beside no counts. F1b — the constant `NotRecorded`: the control
+/// and the controller's own two policies read `NotRecorded` beside their
+/// counts.
+#[tokio::test]
+async fn the_response_says_whether_the_accounting_is_recorded() {
+    // The pre-FX-22 shape of `keep-10`.
+    let mut older = named("keep-10");
+    older["metadata"]["name"] = json!("older-shape");
+    older["metadata"]["uid"] = json!("22220001-0000-4000-8000-000000000022");
+    {
+        let ev = older["status"]["lastEvaluation"]
+            .as_object_mut()
+            .expect("lastEvaluation");
+        for key in [
+            "keptCount",
+            "truncatedByCap",
+            "maxDeletionsPerRun",
+            "viewIncomplete",
+        ] {
+            ev.remove(key);
+        }
+        let old_kept: Vec<String> = (1..=10)
+            .chain(61..=371)
+            .map(|d| format!("p{d:03}"))
+            .collect();
+        ev.insert("kept".to_string(), json!(old_kept));
+    }
+    // A policy that keeps nothing, and says so.
+    let mut nothing_kept = named("keep-10");
+    nothing_kept["metadata"]["name"] = json!("keeps-nothing");
+    nothing_kept["metadata"]["uid"] = json!("22220000-0000-4000-8000-000000000022");
+    {
+        let ev = &mut nothing_kept["status"]["lastEvaluation"];
+        ev["pointsEvaluated"] = json!(2);
+        ev["keptCount"] = json!(0);
+        ev["candidateCount"] = json!(0);
+        ev["truncatedByCap"] = json!(0);
+        ev["kept"] = json!([]);
+        ev["candidates"] = json!([]);
+        ev["skipped"] = json!([
+            {"pointId": "a", "reason": "Unreadable"},
+            {"pointId": "b", "reason": "Unreadable"}
+        ]);
+    }
+
+    let fake = FakeKube::new();
+    fake.seed("retentionpolicies", NS_A, older);
+    fake.seed("retentionpolicies", NS_A, nothing_kept);
+    fake.seed("retentionpolicies", NS_A, named("keep-300"));
+    let app = TestApp::with(fake, Options::default());
+    let body = app
+        .get("/api/v1/namespaces/team-a/retention-policies")
+        .await;
+    assert_eq!(body.status.as_u16(), 200);
+    let answer = body.json();
+    let evaluation = |name: &str| -> Value {
+        answer["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|i| i["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {answer}"))["lastEvaluation"]
+            .clone()
+    };
+
+    let older = evaluation("older-shape");
+    assert_eq!(older["accounting"], "NotRecorded", "{older}");
+    for absent in ["kept", "keptCount", "truncatedByCap", "maxDeletionsPerRun"] {
+        assert!(older.get(absent).is_none(), "{absent}: {older}");
+    }
+    assert_eq!(
+        older["candidateCount"], 50,
+        "the plan is still the plan: {older}"
+    );
+
+    let nothing = evaluation("keeps-nothing");
+    assert_eq!(nothing["accounting"], "Recorded", "{nothing}");
+    assert_eq!(
+        nothing["keptCount"],
+        json!(0),
+        "zero is an answer: {nothing}"
+    );
+    assert_eq!(nothing["truncatedByCap"], json!(0));
+    assert!(
+        nothing.get("kept").is_none(),
+        "PREMISE: a policy that keeps nothing has no `kept` member either, which is why the \
+         absence of the member could not be the signal: {nothing}"
+    );
+    assert_eq!(
+        (older.get("kept"), older["truncated"].clone()),
+        (nothing.get("kept"), nothing["truncated"].clone()),
+        "PREMISE: to a reader of `kept` and `truncated` alone the two are the same answer"
+    );
+    assert_ne!(older["accounting"], nothing["accounting"]);
+
+    let recorded = evaluation("keep-300");
+    assert_eq!(recorded["accounting"], "Recorded");
+    assert_eq!(recorded["keptCount"], 300);
+
+    // The member is one of exactly two words, and always there.
+    for item in answer["items"].as_array().expect("items") {
+        let word = item["lastEvaluation"]["accounting"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no `accounting` on {}", item["name"]));
+        assert!(matches!(word, "Recorded" | "NotRecorded"), "{word}");
+    }
+    app.fake.assert_strict();
+}
+
+/// **A `kept` list that is not the recorded count is not published** (review
+/// M2). After a rollback of the controller image alone, and while no point
+/// lands or leaves, the older controller has rewritten `kept` in its own
+/// shape — 321 ids for `keepLast: 10`, the held-back points among them — and
+/// could not remove `keptCount: 10` and `truncatedByCap: 311`, which still
+/// add up to the unchanged 371. The sum closes; the list is not the count's.
+///
+/// The review's probe of this shape read `kept_rows=200 of which held-back
+/// ids=190 truncated=true`: 190 points that are due, published as kept.
+///
+/// MUTANT F2a: drop the list comparison from `RetentionEvaluation::accounting`.
+#[test]
+fn a_kept_list_that_is_not_the_recorded_count_is_not_published() {
+    let mut rolled = named("keep-10");
+    let old_kept: Vec<String> = (1..=10)
+        .chain(61..=371)
+        .map(|d| format!("p{d:03}"))
+        .collect();
+    assert_eq!(old_kept.len(), 321);
+    rolled["status"]["lastEvaluation"]["kept"] = json!(old_kept);
+    {
+        let ev = &rolled["status"]["lastEvaluation"];
+        assert_eq!(
+            (
+                ev["pointsEvaluated"].as_i64(),
+                ev["keptCount"].as_i64(),
+                ev["candidateCount"].as_i64(),
+                ev["truncatedByCap"].as_i64()
+            ),
+            (Some(371), Some(10), Some(50), Some(311)),
+            "PREMISE: the four counts are untouched and still add up"
+        );
+    }
+    let ev = project(rolled)["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "NotRecorded", "{ev}");
+    assert!(
+        ev.get("kept").is_none(),
+        "no `kept` rows: 311 of the 321 ids are due, not kept: {ev}"
+    );
+    for absent in ["keptCount", "truncatedByCap", "maxDeletionsPerRun"] {
+        assert!(ev.get(absent).is_none(), "{absent}: {ev}");
+    }
+    assert_eq!(
+        ev["truncated"], false,
+        "a list that is not published was not cut short"
+    );
+    assert_eq!(ev["pointsEvaluated"], 371);
+    assert_eq!(ev["candidateCount"], 50, "the plan is still the plan");
+    let listed: Vec<String> = ids(&ev["kept"])
+        .into_iter()
+        .chain(ids(&ev["candidates"]))
+        .collect();
+    for held in (61..=371).map(|d| format!("p{d:03}")) {
+        assert!(!listed.contains(&held), "{held} is held back and is listed");
+    }
+
+    // CONTROL: the controller's own block, list and count together.
+    let ev = project(named("keep-10"))["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "Recorded");
+    assert_eq!(ids(&ev["kept"]).len(), 10);
+    // CONTROL: `keep-300` publishes 200 of its 300 rows and is still an
+    // accounting — the comparison is with the STATUS's list, not the rows.
+    let ev = project(named("keep-300"))["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "Recorded");
+    assert_eq!(ids(&ev["kept"]).len(), MAX_ROWS);
+    assert_eq!(ev["keptCount"], 300);
 }
 
 /// **A count an older controller left behind is not a count.** After a
@@ -300,6 +508,7 @@ fn counts_that_do_not_add_up_are_published_as_not_recorded() {
     let mut stale = named("keep-10");
     stale["status"]["lastEvaluation"]["pointsEvaluated"] = json!(372);
     let ev = project(stale)["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "NotRecorded", "{ev}");
     assert!(ev.get("keptCount").is_none(), "{ev}");
     assert!(ev.get("truncatedByCap").is_none(), "{ev}");
     assert!(ev.get("maxDeletionsPerRun").is_none(), "{ev}");
@@ -311,41 +520,110 @@ fn counts_that_do_not_add_up_are_published_as_not_recorded() {
     moved["status"]["lastEvaluation"]["pointsEvaluated"] = json!(372);
     moved["status"]["lastEvaluation"]["truncatedByCap"] = json!(312);
     let ev = project(moved)["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "Recorded");
     assert_eq!(ev["keptCount"], 10);
     assert_eq!(ev["truncatedByCap"], 312);
 }
 
 /// A plan under the ceiling publishes `truncatedByCap: 0` — present, an
-/// answer — and `viewIncomplete` is the status's own word, absent when the
-/// catalog did not say.
+/// answer.
 #[test]
-fn zero_held_back_is_published_as_zero_and_the_view_flag_is_passed_on() {
+fn zero_held_back_is_published_as_zero() {
     let mut under = named("keep-300");
     {
         let ev = &mut under["status"]["lastEvaluation"];
         // 371 points, 350 kept, 21 due and all of them in the plan.
         ev["keptCount"] = json!(350);
+        ev["kept"] = json!((1..=350).map(|d| format!("p{d:03}")).collect::<Vec<_>>());
         ev["candidateCount"] = json!(21);
         ev["truncatedByCap"] = json!(0);
     }
-    let ev = project(under.clone())["lastEvaluation"].clone();
+    let ev = project(under)["lastEvaluation"].clone();
+    assert_eq!(ev["accounting"], "Recorded", "{ev}");
     assert_eq!(ev["truncatedByCap"], json!(0), "present and zero: {ev}");
     assert_eq!(ev["keptCount"], 350);
-    assert!(
-        ev.get("viewIncomplete").is_none(),
-        "the fixture's catalog did not say: {ev}"
+}
+
+/// **`viewIncomplete`, one rule** (review L3 and L5; the console applies the
+/// same one): never hide a warning, and never assert a completeness that is
+/// not recorded.
+///
+/// | the status says | accounting | the API publishes |
+/// |---|---|---|
+/// | `true` | recorded | `true` |
+/// | `true` | not recorded | `true` |
+/// | `false` | recorded | `false` |
+/// | `false` | not recorded | absent |
+/// | absent | either | absent |
+///
+/// MUTANTS: A8 (the worker's) — publish `false` when the status is silent;
+/// F6a — withhold `true` without the accounting (the branch's first rule);
+/// F6b — publish `false` without the accounting.
+#[test]
+fn the_view_flag_is_never_hidden_and_never_asserted_without_the_accounting() {
+    // The pure rule, every cell of the table.
+    assert_eq!(published_view_incomplete(Some(true), true), Some(true));
+    assert_eq!(published_view_incomplete(Some(true), false), Some(true));
+    assert_eq!(published_view_incomplete(Some(false), true), Some(false));
+    assert_eq!(published_view_incomplete(Some(false), false), None);
+    assert_eq!(published_view_incomplete(None, true), None);
+    assert_eq!(published_view_incomplete(None, false), None);
+
+    // And through the projection. `recorded` is the controller's own block;
+    // `unrecorded` is the same block with one count gone.
+    let with = |accounting: bool, flag: Option<bool>| -> Value {
+        let mut object = named("keep-10");
+        let ev = object["status"]["lastEvaluation"]
+            .as_object_mut()
+            .expect("lastEvaluation");
+        if !accounting {
+            ev.remove("truncatedByCap");
+        }
+        match flag {
+            Some(value) => {
+                ev.insert("viewIncomplete".to_string(), json!(value));
+            }
+            None => {
+                ev.remove("viewIncomplete");
+            }
+        }
+        project(object)["lastEvaluation"].clone()
+    };
+
+    let ev = with(true, Some(true));
+    assert_eq!(ev["accounting"], "Recorded");
+    assert_eq!(ev["viewIncomplete"], json!(true));
+
+    let ev = with(false, Some(true));
+    assert_eq!(ev["accounting"], "NotRecorded", "PREMISE: {ev}");
+    assert_eq!(
+        ev["viewIncomplete"],
+        json!(true),
+        "a warning is published whether or not the counts are: {ev}"
+    );
+    assert!(ev.get("keptCount").is_none() && ev.get("kept").is_none());
+
+    let ev = with(true, Some(false));
+    assert_eq!(
+        ev["viewIncomplete"],
+        json!(false),
+        "the catalog said its view is the whole archive, beside the counts of that evaluation"
     );
 
-    under["status"]["lastEvaluation"]["viewIncomplete"] = json!(true);
-    assert_eq!(
-        project(under.clone())["lastEvaluation"]["viewIncomplete"],
-        json!(true)
+    let ev = with(false, Some(false));
+    assert_eq!(ev["accounting"], "NotRecorded", "PREMISE: {ev}");
+    assert!(
+        ev.get("viewIncomplete").is_none(),
+        "completeness is not asserted beside an accounting that is not recorded: {ev}"
     );
-    under["status"]["lastEvaluation"]["viewIncomplete"] = json!(false);
-    assert_eq!(
-        project(under)["lastEvaluation"]["viewIncomplete"],
-        json!(false)
-    );
+
+    for accounting in [true, false] {
+        let ev = with(accounting, None);
+        assert!(
+            ev.get("viewIncomplete").is_none(),
+            "absent is never `false` (accounting recorded: {accounting}): {ev}"
+        );
+    }
 }
 
 /// **The class sweep, in this route: a run's `failed` list says when it was

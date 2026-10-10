@@ -72,6 +72,7 @@ import {
   ENFORCEMENT_DEGRADED_SENTENCE,
   ENFORCEMENT_SENTENCES,
   EVALUATION_UNKNOWN,
+  EVALUATION_VIEW_WORDS,
   GREEN_BASES,
   GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
@@ -88,6 +89,7 @@ import {
   VIEW_INCOMPLETE_SENTENCE,
   basisAllowsGreen,
   evaluationAccounting,
+  evaluationView,
   healthBadge,
   heldBackSentence,
   stateBadge,
@@ -2746,6 +2748,10 @@ test("the_retention_panel_tells_300_kept_from_the_ceiling_stopped_at_50", async 
   assert.equal(fact(threeHundred, "in this plan"), "50");
   assert.equal(fact(threeHundred, "held back by the per-run ceiling"), "21");
   assert.match(threeHundred, /data-accounting="recorded" data-kept="300" data-held-back="21"/);
+  // THE API SAID SO (review M1): the fixture is its answer, and both policies
+  // carry `accounting: "Recorded"`.
+  assert.equal(policies["keep-300"].status.lastEvaluation.accounting, "Recorded");
+  assert.equal(policies["keep-10"].status.lastEvaluation.accounting, "Recorded");
   assert.ok(threeHundred.indexOf(heldBackSentence(21, 50)) !== -1,
     "and the sentence says what the 21 are: " + threeHundred);
   assert.match(heldBackSentence(21, 50),
@@ -2805,6 +2811,110 @@ test("legacy_mode_reads_the_same_counts_off_the_custom_resource", () => {
   const html = decode(renderEnforcement({}, stale));
   assert.equal(fact(html, "kept"), "not recorded");
   assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded");
+
+  // THE SAME ROLLBACK WHILE THE ARCHIVE STANDS STILL (review M2). The counts
+  // still add up to the unchanged 371, and the `kept` list beside them is the
+  // older controller's: the ten kept points and the 311 the ceiling held back.
+  // A list that is not `keptCount` long is two writers' block.
+  const rolledBack = JSON.parse(JSON.stringify(byName["keep-10"]));
+  rolledBack.status.lastEvaluation.kept = Array.from({ length: 321 },
+    (_, i) => "p" + String(i < 10 ? i + 1 : i + 51).padStart(3, "0"));
+  const ev = rolledBack.status.lastEvaluation;
+  assert.equal(ev.keptCount + ev.candidateCount + ev.truncatedByCap, ev.pointsEvaluated,
+    "PREMISE: the four counts close, so the sum alone accepts this block");
+  assert.equal(evaluationAccounting(ev), null);
+  const rolled = decode(renderEnforcement({}, rolledBack));
+  assert.equal(fact(rolled, "kept"), "not recorded");
+  assert.equal(fact(rolled, "held back by the per-run ceiling"), "not recorded");
+  assert.equal(rolled.indexOf("<dd>321</dd>"), -1, "321 is never printed as a count");
+  assert.equal(rolled.indexOf("<dd>10</dd>"), -1, "and neither is a stale 10");
+  // CONTROL: a list one short is refused, the count's own list is not.
+  const oneShort = JSON.parse(JSON.stringify(byName["keep-10"]));
+  oneShort.status.lastEvaluation.kept.pop();
+  assert.equal(evaluationAccounting(oneShort.status.lastEvaluation), null);
+  assert.notEqual(evaluationAccounting(byName["keep-10"].status.lastEvaluation), null);
+});
+
+// FX-22 review M1: console mode READS the API's word. It does not infer "not
+// recorded" from an absent count, and it does not let a count stand against
+// the API's `NotRecorded`.
+test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async () => {
+  const policies = await heldBackPolicies();
+
+  // THE API SAYS `NotRecorded`. Whatever else the block carries, the two cells
+  // read "not recorded": here the counts are all present and add up, which is
+  // the case an inference from absence gets wrong.
+  const refused = JSON.parse(JSON.stringify(policies["keep-10"]));
+  refused.status.lastEvaluation.accounting = "NotRecorded";
+  assert.equal(evaluationAccounting(refused.status.lastEvaluation), null);
+  const html = decode(renderEnforcement({}, refused));
+  assert.match(html, /data-accounting="not-recorded"/);
+  assert.equal(fact(html, "kept"), "not recorded");
+  assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded");
+  assert.equal(fact(html, "in this plan"), "50", "the plan's own count is still the plan's");
+  assert.ok(html.indexOf(ACCOUNTING_NOT_RECORDED_SENTENCE) !== -1);
+
+  // CONTROL: the same block with the API's `Recorded` is the four numbers.
+  const said = decode(renderEnforcement({}, policies["keep-10"]));
+  assert.match(said, /data-accounting="recorded" data-kept="10" data-held-back="311"/);
+
+  // A word this build does not know is not `Recorded`.
+  const unknown = JSON.parse(JSON.stringify(policies["keep-10"]));
+  unknown.status.lastEvaluation.accounting = "Partial";
+  assert.equal(evaluationAccounting(unknown.status.lastEvaluation), null);
+
+  // `Recorded` is a word, not a number: without the counts there is nothing
+  // to print, and the page says so instead of printing an empty cell.
+  const hollow = JSON.parse(JSON.stringify(policies["keep-10"]));
+  delete hollow.status.lastEvaluation.keptCount;
+  assert.equal(evaluationAccounting(hollow.status.lastEvaluation), null);
+  assert.equal(fact(decode(renderEnforcement({}, hollow)), "kept"), "not recorded");
+
+  // THE OLDER-SHAPE ANSWER, as the API publishes it: the word, and no counts.
+  const older = con("retention-policy-enforce.json").item.lastEvaluation;
+  assert.equal(older.accounting, "NotRecorded");
+  assert.equal(older.keptCount, undefined);
+  assert.equal(evaluationAccounting(older), null);
+});
+
+// FX-22 review L3 (mutant R12): a negative number is not a count.
+test("a_negative_count_is_never_printed_as_a_count", () => {
+  const ids = (n) => Array.from({ length: n }, (_, i) => "p" + String(i + 1).padStart(3, "0"));
+  // The sum CLOSES over a negative (10 + 50 - 5 = 55) and the list is the
+  // count's, so only the sign refuses this block.
+  const closing = {
+    pointsEvaluated: 55, keptCount: 10, candidateCount: 50, truncatedByCap: -5,
+    maxDeletionsPerRun: 50, kept: ids(10),
+  };
+  assert.equal(closing.keptCount + closing.candidateCount + closing.truncatedByCap,
+    closing.pointsEvaluated, "PREMISE: the sum closes");
+  assert.equal(evaluationAccounting(closing), null);
+  const html = decode(renderEvaluationCounts(closing));
+  assert.match(html, /data-accounting="not-recorded"/);
+  assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded");
+  assert.equal(html.indexOf("-5"), -1, "a negative count is printed nowhere: " + html);
+  // CONTROL: the same block with the count that closes it honestly.
+  assert.notEqual(evaluationAccounting(Object.assign({}, closing,
+    { pointsEvaluated: 65, truncatedByCap: 5 })), null);
+
+  // Each of the four, in the API's shape with a cut list, where no sum and no
+  // list is checked and the sign is the only guard.
+  const recorded = {
+    accounting: "Recorded", truncated: true, pointsEvaluated: 371, keptCount: 300,
+    candidateCount: 50, truncatedByCap: 21, maxDeletionsPerRun: 50, kept: ids(200),
+  };
+  assert.notEqual(evaluationAccounting(recorded), null, "CONTROL: the block itself is accepted");
+  for (const key of ["pointsEvaluated", "keptCount", "candidateCount", "truncatedByCap"]) {
+    const negative = Object.assign({}, recorded, { [key]: -1 });
+    assert.equal(evaluationAccounting(negative), null, key + ": -1 is not a count");
+  }
+  // A negative ceiling is not a ceiling: the sentence names no number.
+  const noCeiling = evaluationAccounting(Object.assign({}, recorded, { maxDeletionsPerRun: -1 }));
+  assert.equal(noCeiling.ceiling, null);
+  const said = decode(renderEvaluationCounts(Object.assign({}, recorded,
+    { maxDeletionsPerRun: -1 })));
+  assert.ok(said.indexOf("(maxDeletionsPerRun)") !== -1, said);
+  assert.equal(said.indexOf("maxDeletionsPerRun -1"), -1);
 });
 
 test("an_evaluation_that_records_no_accounting_reads_not_recorded_and_never_counts_its_list", () => {
@@ -2845,9 +2955,12 @@ test("an_evaluation_that_records_no_accounting_reads_not_recorded_and_never_coun
 test("a_plan_under_the_ceiling_shows_zero_held_back_and_no_ceiling_sentence", async () => {
   const policies = await heldBackPolicies();
   const under = JSON.parse(JSON.stringify(policies["keep-10"]));
-  // 371 points, 350 kept, 21 due and every one of them in the plan.
-  Object.assign(under.status.lastEvaluation,
-    { keptCount: 350, candidateCount: 21, truncatedByCap: 0 });
+  // 371 points, 350 kept, 21 due and every one of them in the plan. The API
+  // publishes 200 of the 350 kept rows and says `truncated: true`.
+  Object.assign(under.status.lastEvaluation, {
+    keptCount: 350, candidateCount: 21, truncatedByCap: 0, truncated: true,
+    kept: Array.from({ length: 200 }, (_, i) => "p" + String(i + 1).padStart(3, "0")),
+  });
   const html = decode(renderEnforcement({}, under));
   assert.equal(fact(html, "kept"), "350");
   assert.equal(fact(html, "in this plan"), "21");
@@ -2863,19 +2976,148 @@ test("a_plan_under_the_ceiling_shows_zero_held_back_and_no_ceiling_sentence", as
   assert.match(heldBackSentence(4, null), /per-run ceiling \(maxDeletionsPerRun\)\./);
 });
 
+// FX-22 review L1, on this page: a plan that names NOTHING while points are
+// due does not promise that a later plan names them. Each is in a backup set
+// that more due points name than the ceiling, and the next plan finds the
+// same sets over the same ceiling.
+test("an_empty_plan_beside_held_back_points_promises_no_later_plan", () => {
+  const ids = (n) => Array.from({ length: n }, (_, i) => "p" + String(i + 1));
+  // The controller's own numbers for two receipts over one set, ceiling 1.
+  const nothingFits = {
+    pointsEvaluated: 6, keptCount: 4, candidateCount: 0, truncatedByCap: 2,
+    maxDeletionsPerRun: 1, kept: ids(4),
+  };
+  const html = decode(renderEvaluationCounts(nothingFits));
+  assert.equal(fact(html, "in this plan"), "0");
+  assert.equal(fact(html, "held back by the per-run ceiling"), "2");
+  assert.match(html, /data-held-back-sentence="nothing-fits"/);
+  assert.ok(html.indexOf(heldBackSentence(2, 1, 0)) !== -1, html);
+  assert.equal(heldBackSentence(2, 1, 0),
+    "2 points are due under this policy's rules and held back by its per-run ceiling " +
+    "(maxDeletionsPerRun 1). They are not kept, and not one of them fits this plan: each is " +
+    "in a backup set that more due points name than the ceiling (sets that share objects " +
+    "count as one), a set is planned whole or not at all, and no plan names them until " +
+    "maxDeletionsPerRun is raised.");
+  assert.equal(html.indexOf("a later plan names them"), -1,
+    "no later plan names a set that does not fit the ceiling: " + html);
+  assert.match(heldBackSentence(1, 1, 0), /^1 point is due .* It is not kept, and it does not fit this plan/);
+
+  // CONTROL: a plan that names something keeps the sentence about a later
+  // plan, because there a later plan does name the rest.
+  const partial = {
+    pointsEvaluated: 6, keptCount: 4, candidateCount: 1, truncatedByCap: 1,
+    maxDeletionsPerRun: 1, kept: ids(4),
+  };
+  const some = decode(renderEvaluationCounts(partial));
+  assert.match(some, /data-held-back-sentence="true"/);
+  assert.ok(some.indexOf("stay due until a later plan names them") !== -1, some);
+  assert.equal(heldBackSentence(1, 1, 1), heldBackSentence(1, 1));
+});
+
 test("a_catalog_view_that_is_not_the_whole_archive_is_said_on_the_panel", async () => {
   const policies = await heldBackPolicies();
   const whole = decode(renderEnforcement({}, policies["keep-10"]));
   assert.equal(whole.indexOf("data-view-incomplete"), -1,
-    "CONTROL: the fixture's catalog did not say, and the panel does not either");
+    "CONTROL: the fixture's catalog said its view is the whole archive");
 
   const windowed = JSON.parse(JSON.stringify(policies["keep-10"]));
   windowed.status.lastEvaluation.viewIncomplete = true;
   const html = decode(renderEnforcement({}, windowed));
   assert.match(html, /data-view-incomplete="true"/);
   assert.ok(html.indexOf(VIEW_INCOMPLETE_SENTENCE) !== -1);
+  // `status.truncated` HAS OTHER CAUSES THAN `viewLimit` (review L4): the
+  // sentence names the limit with the one case it helps, never as the remedy.
+  assert.match(VIEW_INCOMPLETE_SENTENCE,
+    /also when entries do not fit its pages or duplicate rows are merged, so raising viewLimit brings the missing points in only in the first case\.$/);
 
   const said = JSON.parse(JSON.stringify(policies["keep-10"]));
   said.status.lastEvaluation.viewIncomplete = false;
   assert.equal(decode(renderEnforcement({}, said)).indexOf("data-view-incomplete"), -1);
+});
+
+// FX-22 review L3 and L5: ONE RULE for `viewIncomplete`, the product API's
+// too. Never hide a warning; never assert a completeness that is not
+// recorded; and "the catalog said the view is whole" is no longer the same
+// page as "nobody said".
+//
+// MUTANTS: R13 (the review's) -- print the warning only when the accounting
+// is recorded; F6c -- print "the whole archive" without the accounting; F6d
+// -- print "the whole archive" when the member is absent.
+test("the_catalog_view_row_has_three_answers_and_never_hides_the_warning", async () => {
+  const policies = await heldBackPolicies();
+  const row = (html) => fact(html, "catalog view it read");
+  const mk = (flag, accounting) => {
+    const p = JSON.parse(JSON.stringify(policies["keep-10"]));
+    const e = p.status.lastEvaluation;
+    if (flag === undefined) {
+      delete e.viewIncomplete;
+    } else {
+      e.viewIncomplete = flag;
+    }
+    e.accounting = accounting;
+    if (accounting === "NotRecorded") {
+      // As the API publishes that answer: the counts and `kept` withheld.
+      for (const key of ["keptCount", "truncatedByCap", "maxDeletionsPerRun", "kept"]) {
+        delete e[key];
+      }
+    }
+    return decode(renderEnforcement({}, p));
+  };
+
+  // ---- `true`: shown whether or not the accounting is recorded ------------
+  const warnedRecorded = mk(true, "Recorded");
+  assert.equal(row(warnedRecorded), EVALUATION_VIEW_WORDS.incomplete);
+  assert.match(warnedRecorded, /data-view="incomplete"/);
+  assert.match(warnedRecorded, /data-view-incomplete="true"/);
+  const warnedUnrecorded = mk(true, "NotRecorded");
+  assert.match(warnedUnrecorded, /data-accounting="not-recorded"/, "PREMISE");
+  assert.equal(row(warnedUnrecorded), "not the whole archive",
+    "a warning is never hidden behind an accounting that is not recorded");
+  assert.match(warnedUnrecorded, /data-view-incomplete="true"/);
+  assert.ok(warnedUnrecorded.indexOf(VIEW_INCOMPLETE_SENTENCE) !== -1);
+
+  // ---- `false`: "the whole archive" only with the accounting --------------
+  const wholeRecorded = mk(false, "Recorded");
+  assert.equal(row(wholeRecorded), "the whole archive, the catalog said");
+  assert.match(wholeRecorded, /data-view="whole"/);
+  assert.equal(wholeRecorded.indexOf("data-view-incomplete"), -1);
+  const wholeUnrecorded = mk(false, "NotRecorded");
+  assert.equal(row(wholeUnrecorded), "not recorded",
+    "completeness is not asserted beside an accounting that is not recorded");
+  assert.match(wholeUnrecorded, /data-view="not-recorded"/);
+
+  // ---- absent: "not recorded", never "the whole archive" ------------------
+  for (const accounting of ["Recorded", "NotRecorded"]) {
+    const silent = mk(undefined, accounting);
+    assert.equal(row(silent), "not recorded", accounting);
+    assert.match(silent, /data-view="not-recorded"/);
+    assert.equal(silent.indexOf("data-view-incomplete"), -1);
+  }
+  // The three answers are three different pages (review L5: `false` and
+  // absent used to render identical HTML).
+  assert.notEqual(mk(false, "Recorded"), mk(undefined, "Recorded"));
+
+  // The pure rule, and a value that is not a boolean is not an answer.
+  assert.equal(evaluationView({ viewIncomplete: true }, false), "incomplete");
+  assert.equal(evaluationView({ viewIncomplete: true }, true), "incomplete");
+  assert.equal(evaluationView({ viewIncomplete: false }, true), "whole");
+  assert.equal(evaluationView({ viewIncomplete: false }, false), "not-recorded");
+  assert.equal(evaluationView({}, true), "not-recorded");
+  assert.equal(evaluationView({ viewIncomplete: "true" }, true), "not-recorded");
+  assert.equal(evaluationView({ viewIncomplete: "false" }, true), "not-recorded");
+  assert.equal(evaluationView(undefined, true), "not-recorded");
+
+  // LEGACY MODE, the custom resource itself: the same three answers.
+  const cr = fixture("retention-held-back.json").items[1];
+  assert.equal(cr.status.lastEvaluation.viewIncomplete, false,
+    "the reconciler's fixture: its catalog said the view is whole");
+  assert.equal(row(decode(renderEnforcement({}, cr))), "the whole archive, the catalog said");
+  const older = JSON.parse(JSON.stringify(cr));
+  delete older.status.lastEvaluation.truncatedByCap;
+  assert.equal(row(decode(renderEnforcement({}, older))), "not recorded",
+    "`false` beside counts that are not recorded is an older writer's word");
+  older.status.lastEvaluation.viewIncomplete = true;
+  const olderWarned = decode(renderEnforcement({}, older));
+  assert.equal(row(olderWarned), "not the whole archive");
+  assert.match(olderWarned, /data-view-incomplete="true"/);
 });

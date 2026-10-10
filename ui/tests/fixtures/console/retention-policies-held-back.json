@@ -32,10 +32,12 @@
       "lastEvaluation": {
         "at": "2026-09-17T04:17:00Z",
         "pointsEvaluated": 371,
+        "accounting": "Recorded",
         "keptCount": 10,
         "candidateCount": 50,
         "truncatedByCap": 311,
         "maxDeletionsPerRun": 50,
+        "viewIncomplete": false,
         "kept": [
           "p001",
           "p002",
@@ -379,10 +381,12 @@
       "lastEvaluation": {
         "at": "2026-09-17T04:17:00Z",
         "pointsEvaluated": 371,
+        "accounting": "Recorded",
         "keptCount": 300,
         "candidateCount": 50,
         "truncatedByCap": 21,
         "maxDeletionsPerRun": 50,
+        "viewIncomplete": false,
         "kept": [
           "p001",
           "p002",

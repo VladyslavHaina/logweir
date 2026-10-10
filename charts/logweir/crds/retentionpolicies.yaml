@@ -520,7 +520,7 @@ spec:
                     nullable: true
                     type: array
                   truncatedByCap:
-                    description: 'How many more points the rules would remove, that nothing protects and that the per-run ceiling (`maxDeletionsPerRun`) left out of this plan. They are due, not kept: no run deletes them until a later plan names them. `0` means this plan is everything the rules would remove. Absent means not recorded (an older controller), never 0.'
+                    description: 'How many more points the rules would remove, that nothing protects and that the per-run ceiling (`maxDeletionsPerRun`) left out of this plan. They are due, not kept: no run deletes them until a later plan names them, and a backup set that more due points name than the ceiling is named by no plan until the ceiling is raised. `0` means this plan is everything the rules would remove. Absent means not recorded (an older controller), never 0.'
                     format: int64
                     nullable: true
                     type: integer

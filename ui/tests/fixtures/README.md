@@ -298,6 +298,14 @@ three sides read them:**
 - `d3.spec.js` renders both: the API's answer in console mode and the custom resources
   themselves in legacy mode.
 
+Both policies were evaluated over a catalog that says its view is the whole archive
+(`status.truncated: false`, `status.cursor.complete: true`, the two members a real catalog
+writes beside its pages), so both carry `viewIncomplete: false`, and the API's answer carries
+`accounting: "Recorded"` for both. The two hand-kept console answers
+(`console/retention-policy-enforce.json`, `console/retention-policies-list.json`) are of
+statuses an older controller wrote: they carry `accounting: "NotRecorded"` and no counts,
+which is what the API answers for that shape.
+
 Regenerate both, in this order, with:
 
 ```

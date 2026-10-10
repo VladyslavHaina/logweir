@@ -47,6 +47,7 @@
           "candidateCount": 50,
           "truncatedByCap": 21,
           "maxDeletionsPerRun": 50,
+          "viewIncomplete": false,
           "kept": [
             "p001",
             "p002",
@@ -697,6 +698,7 @@
           "candidateCount": 50,
           "truncatedByCap": 311,
           "maxDeletionsPerRun": 50,
+          "viewIncomplete": false,
           "kept": [
             "p001",
             "p002",

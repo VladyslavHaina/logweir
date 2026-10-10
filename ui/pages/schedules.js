@@ -68,6 +68,7 @@ import {
   ACCOUNTING_NOT_RECORDED_SENTENCE,
   ENFORCEMENT_DEGRADED_SENTENCE,
   ENFORCEMENT_SENTENCES,
+  EVALUATION_VIEW_WORDS,
   GUARANTEE_WORDS,
   IRREVERSIBLE_SENTENCE,
   RETENTION_SENTENCE,
@@ -83,6 +84,7 @@ import {
   errorBox,
   esc,
   evaluationAccounting,
+  evaluationView,
   facts,
   fieldErrorLine,
   heldBackSentence,
@@ -638,10 +640,16 @@ export function policyCondition(policy, type) {
  *
  *  THE SAME NUMBERS THE STATUS AND THE API CARRY, read through
  *  [`evaluationAccounting`]: where they are not recorded the two cells say
- *  [`ACCOUNTING_NOT_RECORDED`] and the sentence under them says why. Nothing
- *  here is counted from a list. An evaluation with no `pointsEvaluated` -- none
- *  yet, or a policy that declares a bucket rule and evaluates nothing --
- *  renders no block at all. */
+ *  [`ACCOUNTING_NOT_RECORDED`] and the sentence under them says why. In
+ *  console mode "not recorded" is the product API's own word
+ *  (`lastEvaluation.accounting`), not an inference from an absent count.
+ *  Nothing here is counted from a list. An evaluation with no
+ *  `pointsEvaluated` -- none yet, or a policy that declares a bucket rule and
+ *  evaluates nothing -- renders no block at all.
+ *
+ *  THE CATALOG VIEW HAS ITS OWN ROW, AND THREE ANSWERS ([`evaluationView`]):
+ *  not the whole archive, the whole archive, or not recorded. The warning is
+ *  printed with or without the accounting; "the whole archive" only with it. */
 export function renderEvaluationCounts(evaluation) {
   const e = evaluation || {};
   if (typeof e.pointsEvaluated !== "number") {
@@ -650,11 +658,13 @@ export function renderEvaluationCounts(evaluation) {
   const accounting = evaluationAccounting(e);
   const recorded = accounting !== null;
   const heldBack = recorded ? accounting.heldBack : null;
+  const view = evaluationView(e, recorded);
   return (
     "<div class=\"evaluation\" data-accounting=\"" + (recorded ? "recorded" : "not-recorded") +
     "\"" +
     (recorded ? " data-kept=\"" + esc(String(accounting.kept)) + "\" data-held-back=\"" +
-      esc(String(heldBack)) + "\"" : "") + ">" +
+      esc(String(heldBack)) + "\"" : "") +
+    " data-view=\"" + esc(view) + "\">" +
     "<h5>The last evaluation</h5>" +
     facts([
       ["evaluated", when(e.at)],
@@ -663,16 +673,18 @@ export function renderEvaluationCounts(evaluation) {
       ["in this plan", cell(e.candidateCount)],
       ["held back by the per-run ceiling",
         recorded ? cell(heldBack) : esc(ACCOUNTING_NOT_RECORDED)],
+      ["catalog view it read", esc(EVALUATION_VIEW_WORDS[view])],
     ]) +
     (recorded && heldBack > 0
-      ? "<p class=\"caveat\" data-held-back-sentence=\"true\">" +
-        esc(heldBackSentence(heldBack, accounting.ceiling)) + "</p>"
+      ? "<p class=\"caveat\" data-held-back-sentence=\"" +
+        (accounting.candidates === 0 ? "nothing-fits" : "true") + "\">" +
+        esc(heldBackSentence(heldBack, accounting.ceiling, accounting.candidates)) + "</p>"
       : "") +
     (recorded
       ? ""
       : "<p class=\"note\" data-accounting-sentence=\"not-recorded\">" +
         esc(ACCOUNTING_NOT_RECORDED_SENTENCE) + "</p>") +
-    (e.viewIncomplete === true
+    (view === "incomplete"
       ? "<p class=\"caveat\" data-view-incomplete=\"true\">" + esc(VIEW_INCOMPLETE_SENTENCE) +
         "</p>"
       : "") +

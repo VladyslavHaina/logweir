@@ -370,8 +370,10 @@ pub struct RetentionEvaluation {
     /// How many more points the rules would remove, that nothing protects and
     /// that the per-run ceiling (`maxDeletionsPerRun`) left out of this plan.
     /// They are due, not kept: no run deletes them until a later plan names
-    /// them. `0` means this plan is everything the rules would remove. Absent
-    /// means not recorded (an older controller), never 0.
+    /// them, and a backup set that more due points name than the ceiling is
+    /// named by no plan until the ceiling is raised. `0` means this plan is
+    /// everything the rules would remove. Absent means not recorded (an older
+    /// controller), never 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated_by_cap: Option<i64>,
     /// The per-run ceiling this evaluation applied:
@@ -452,6 +454,22 @@ impl RetentionEvaluation {
     /// two counts it does not know, which then describe an earlier archive.
     /// Absent means not recorded, and a stale count is not a count: a reader
     /// that gets `None` says so, and never derives "kept" from the list.
+    ///
+    /// **And `None` when the `kept` list is not as long as `keptCount`**
+    /// (FX-22 review M2). The sum alone does not catch that rollback while
+    /// the archive stands still: the older controller writes its own `kept`
+    /// list — the kept points AND the ones the ceiling held back, 321 ids for
+    /// `keepLast: 10` over 371 points — beside `keptCount: 10` and
+    /// `truncatedByCap: 311`, which it cannot remove and which still add up
+    /// to an unchanged `pointsEvaluated`. A reader that trusted the sum
+    /// published 311 due points under the name `kept` until the next point
+    /// landed or left. This controller writes the list whole and the count
+    /// from the same vector in one patch, so a list of another length is two
+    /// writers', whatever the sum says.
+    ///
+    /// FX-39 WILL CUT THE STATUS LISTS AT THE CRD'S BOUND (`maxItems`). The
+    /// comparison below must then be `min(keptCount, bound)`, not `keptCount`;
+    /// until then a list is whole or the write was refused.
     #[must_use]
     pub fn accounting(&self) -> Option<RetentionAccounting> {
         let accounting = RetentionAccounting {
@@ -468,6 +486,13 @@ impl RetentionEvaluation {
             accounting.skipped,
         ];
         if parts.iter().any(|n| *n < 0) {
+            return None;
+        }
+        // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG (review
+        // M2) — see the doc comment for the rollback this refuses, and for
+        // what FX-39 must change here when it cuts the lists.
+        let listed = i64::try_from(self.kept.as_ref().map_or(0, Vec::len)).ok()?;
+        if listed != accounting.kept {
             return None;
         }
         let sum = parts.iter().try_fold(0i64, |acc, n| acc.checked_add(*n))?;

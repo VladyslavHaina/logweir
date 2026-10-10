@@ -211,6 +211,14 @@ pub const REASON_POD_CREATION_FORBIDDEN: &str =
 pub const REASON_UNATTENDED: &str = "UnattendedDeletionEnabled";
 /// `Enforced=False`: there is nothing to delete.
 pub const REASON_NOTHING_TO_DO: &str = "NothingToDo";
+/// `Enforced=False`: points are due and the plan is empty, because not one of
+/// them fits the per-run ceiling (FX-22 review L1). Each is in a backup set
+/// that more due points name than `spec.enforcement.maxDeletionsPerRun`, a set
+/// is planned whole or not at all, and so no plan names them until the ceiling
+/// is raised. NOT [`REASON_NOTHING_TO_DO`]: "the evaluation found nothing to
+/// remove" beside a held-back count above zero is the defect FX-22 is about,
+/// on the one condition an operator reads to learn why nothing is deleted.
+pub const REASON_NOTHING_FITS_CEILING: &str = "NothingFitsCeiling";
 /// `Enforced=False`: a Job of this run's name exists and is not ours.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
 /// `Enforced=False`: the destination has no `spec.access.evidenceWrite` grant
@@ -255,6 +263,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_POD_CREATION_FORBIDDEN,
     REASON_UNATTENDED,
     REASON_NOTHING_TO_DO,
+    REASON_NOTHING_FITS_CEILING,
     REASON_JOB_NAME_CONFLICT,
     REASON_EVIDENCE_GRANT_UNUSABLE,
     REASON_DECLARED_EXPIRY_CONFLICTS,
@@ -2702,6 +2711,26 @@ impl Pass<'_> {
             };
         }
         if evaluation.candidates.is_empty() {
+            // AN EMPTY PLAN BESIDE HELD-BACK POINTS IS NOT "NOTHING TO REMOVE"
+            // (FX-22 review L1). The rules would remove `truncated_by_cap`
+            // points and the ceiling left every one of them out, which only
+            // happens when each is in a group larger than the ceiling (a
+            // backup set, or sets linked by an object they share). This
+            // policy will delete nothing, on any firing, until someone raises
+            // the ceiling, and `Enforced` is where an operator looks to learn
+            // why nothing is deleted. Text and reason only: the plan is the
+            // evaluation's, and it is empty either way.
+            if evaluation.truncated_by_cap > 0 {
+                return EnforcementDecision {
+                    start: false,
+                    enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                    reason: REASON_NOTHING_FITS_CEILING,
+                    message: nothing_fits_ceiling_message(
+                        evaluation.truncated_by_cap,
+                        i64::from(enforcement.max_deletions_per_run),
+                    ),
+                };
+            }
             return EnforcementDecision {
                 start: false,
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
@@ -3715,9 +3744,27 @@ impl EvaluationBounds {
     /// The `Evaluated` message's sentence about the per-run ceiling. Empty
     /// when the ceiling held nothing back, so a plan under it reads as it
     /// always did.
+    ///
+    /// WHEN THE PLAN IS EMPTY THE SENTENCE DOES NOT PROMISE A LATER PLAN (FX-22
+    /// review L1). A plan that names nothing while points are due means not
+    /// one of them fits: each is in a backup set that more due points name
+    /// than the ceiling, and a set is planned whole or not at all. The next
+    /// evaluation finds the same sets over the same ceiling, so "they stay due
+    /// until a later plan names them" was a promise nothing keeps; the remedy
+    /// is the ceiling, and the sentence names it.
     fn held_back_sentence(&self, evaluation: &plan::Evaluation) -> String {
         if evaluation.truncated_by_cap <= 0 {
             return String::new();
+        }
+        if evaluation.candidates.is_empty() {
+            return format!(
+                " {} point(s) are due under the rules and held back by the per-run ceiling \
+                 (maxDeletionsPerRun {}): they are not kept, and this plan is empty because not \
+                 one of them fits. Each is in a backup set that more due points name than the \
+                 ceiling (sets that share objects count as one), a set is planned whole or not \
+                 at all, and no plan names them until maxDeletionsPerRun is raised.",
+                evaluation.truncated_by_cap, self.max_deletions_per_run
+            );
         }
         format!(
             " {} more point(s) are due under the rules and held back by the per-run ceiling \
@@ -3754,10 +3801,21 @@ impl EvaluationBounds {
                     self.view_entries
                 ),
             };
+            // `status.truncated` HAS MORE THAN ONE CAUSE (FX-22 review L4).
+            // The catalog sets it when the archive holds more points than
+            // `spec.sync.viewLimit`, and also when it left entries out for
+            // page space, when one entry was too large for a page, and when
+            // the walk counted rows it then merged as duplicates
+            // (`catalog_view::materialise`). Raising `viewLimit` helps the
+            // first and none of the others, so the remedy is named with its
+            // condition instead of as the answer.
             out.push_str(&format!(
                 " The catalog view is a window: {counted}. The points outside it were not \
                  evaluated, are in none of these counts, and are never candidates while they \
-                 stay outside the view (spec.sync.viewLimit)."
+                 stay outside the view. Raising spec.sync.viewLimit brings them in only when \
+                 the limit is what cut the view: the catalog also reports status.truncated \
+                 when it left entries out for page space or as too large for one page, and \
+                 when it merged duplicate rows."
             ));
         }
         if self.walk_complete == Some(false) {
@@ -3991,6 +4049,37 @@ pub struct EnforcementDecision {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// `Enforced=False/NothingFitsCeiling`'s message: how many points are due,
+/// the ceiling none of them fits, and what to change (FX-22 review L1).
+///
+/// `due` points in all are held back, so a ceiling of `due` fits every one of
+/// them in one plan; the field's own maximum is 500, and a backlog larger than
+/// that goes set by set.
+#[must_use]
+pub fn nothing_fits_ceiling_message(due: i64, ceiling: i64) -> String {
+    let remedy = if due <= i64::from(MAX_DELETIONS_PER_RUN_LIMIT) {
+        format!(
+            "Raise spec.enforcement.maxDeletionsPerRun to at least the number of points that \
+             name the smallest of those sets; {due} fits all of them"
+        )
+    } else {
+        format!(
+            "Raise spec.enforcement.maxDeletionsPerRun (at most {MAX_DELETIONS_PER_RUN_LIMIT}) \
+             to at least the number of points that name the smallest of those sets"
+        )
+    };
+    format!(
+        "{due} point(s) are due under the rules and the plan is empty: not one of them fits \
+         the per-run ceiling (spec.enforcement.maxDeletionsPerRun {ceiling}). Each is in a \
+         backup set that more due points name than the ceiling (sets that share objects count \
+         as one), and a set is planned whole or not at all, so no run removes them at this \
+         ceiling. {remedy}."
+    )
+}
+
+/// The largest `spec.enforcement.maxDeletionsPerRun` the CRD admits.
+pub const MAX_DELETIONS_PER_RUN_LIMIT: i32 = 500;
 
 /// The three `LOGWEIR_EVIDENCE_AWS_*` references an enforcement Job writes its
 /// intent tombstone and its run record with, or the message that names the

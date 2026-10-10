@@ -12416,13 +12416,37 @@
           }
         ]
       },
+      "RetentionAccountingState": {
+        "description": "Whether a retention evaluation records its accounting — the member a client reads BEFORE it reads `kept` (FX-22 review M1).\n\nThe response withholds `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and the `kept` rows when the status does not record an accounting that closes. Until this member existed nothing in the response said so: a client that read `kept`, the one member that predates FX-22, got no member and `truncated: false`, and read \"nothing is kept\". A policy that keeps nothing and records it publishes no `kept` member either, so the absence of the list never told the two apart.",
+        "oneOf": [
+          {
+            "description": "The status records `keptCount`, `candidateCount` and `truncatedByCap`, they add up to `pointsEvaluated` with the skipped points, and its `kept` list is `keptCount` long. The counts and the `kept` rows in this response are that status's own. `keptCount: 0` with no `kept` member then means nothing is kept.",
+            "type": "string",
+            "enum": [
+              "Recorded"
+            ]
+          },
+          {
+            "description": "The status does not record that accounting: an older controller wrote the evaluation, a newer controller's members were pruned by an older CRD, or two controllers' numbers stand in one block after a rollback (the counts do not add up, or the `kept` list is not `keptCount` long). `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept` are ABSENT and say nothing: an absent `kept` is not \"nothing is kept\". `candidateCount` and `candidates` are still this plan.",
+            "type": "string",
+            "enum": [
+              "NotRecorded"
+            ]
+          }
+        ]
+      },
       "RetentionEvaluationView": {
         "description": "What the last evaluation found. **Nothing here was deleted.**\n\nTHE NAME CARRIES ITS DOMAIN BECAUSE THE SCHEMA NAME IS GLOBAL. `schemars` keys `components/schemas` by the type's SHORT name, so two `EvaluationView` types in two route modules silently become one schema and one of the two `$ref`s points at the wrong shape — with no error anywhere. `trust.rs` has its own evaluation view, and `no_two_published_types_share_a_schema_name` in `tests/contract.rs` is what keeps the pair honest.",
         "type": "object",
         "required": [
+          "accounting",
           "truncated"
         ],
         "properties": {
+          "accounting": {
+            "description": "Whether `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept` below are published. Always present. Read it before `kept`: with `NotRecorded` those four members are absent and an absent `kept` does NOT mean nothing is kept.",
+            "$ref": "#/components/schemas/RetentionAccountingState"
+          },
           "at": {
             "description": "When an evaluation first reached the findings below. Later evaluations that find the same keep this instant, so it is when the findings last changed, not when the controller last looked.",
             "type": "string",
@@ -12443,14 +12467,14 @@
             }
           },
           "kept": {
-            "description": "The points that stay, when `keptCount` is recorded.",
+            "description": "The points that stay, when `accounting` is `Recorded`. Absent with `Recorded` means none is kept; absent with `NotRecorded` says nothing.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "keptCount": {
-            "description": "How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back.\n\nABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22). The status of a controller that did not record what the per-run ceiling held back lists those points under `kept`, so its list is not published as kept and no count is derived from it. The same holds when the status's counts do not add up to `pointsEvaluated`, which is what an older controller leaves behind after a rollback of its image alone.",
+            "description": "How many points stay: the rules keep them, or something protects them. Never a point the per-run ceiling held back.\n\nABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22); `accounting` says which. The status of a controller that did not record what the per-run ceiling held back lists those points under `kept`, so its list is not published as kept and no count is derived from it. The same holds when the status's counts do not add up to `pointsEvaluated`, or its `kept` list is not `keptCount` long, which is what an older controller leaves behind after a rollback of its image alone.",
             "type": "integer",
             "format": "int64",
             "nullable": true
@@ -12508,7 +12532,7 @@
             "nullable": true
           },
           "viewIncomplete": {
-            "description": "Whether the catalog said the view this evaluation read does not hold every point of the archive (a window of `viewLimit`, or a walk that had not finished). Points outside it were not evaluated and are in none of the counts. Absent means the catalog did not say, or the accounting is not recorded; never `false`.",
+            "description": "Whether the catalog said the view this evaluation read does not hold every point of the archive (the catalog cut its view, or its walk had not finished). Points outside it were not evaluated and are in none of the counts.\n\n`true` is published whenever the status says it, with or without the accounting: a warning is never withheld. `false`, \"the catalog said its view is the whole archive\", is published only with `accounting: Recorded`. Absent means not recorded: the catalog did not say, or the status says `false` beside an accounting that is not recorded. Absent is never `false`.",
             "type": "boolean",
             "nullable": true
           }
