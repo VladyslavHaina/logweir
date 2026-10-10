@@ -167,6 +167,12 @@ Item 55 is fix-now rows FX-13a and FX-32, proven by router rows over one and
 two console processes; it changes the console only, and the PoC upgrade that
 carries it signs in through Dex and replays the callback URL against both
 replicas.
+Item 56 is fix-now row FX-33, proven by runner, check, store, controller, API
+and console rows, by child-process peak-RSS measurements, and on the compose
+stack with a backup of 500 topics; it changes the runner, the check Jobs, the
+controller, the product API and the console, signs nothing differently, and
+the PoC upgrade that carries it takes a backup of several hundred topics and
+reads its catalog entry, its verdict and the controller's memory.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2092,10 +2098,102 @@ within its 600 s again, each replay a token request) and
 drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
 converting.
 
+#### 56. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
+
+**Changed.** A backup receipt records about 3 KB for every topic, and the
+catalog point record copies it. Both were read under caps nobody had tied to a
+topic count. A backup of about 80 topics wrote a record over the catalog
+walk's 256 KiB, and the point **vanished from the catalog without a line**
+(the entry was dropped, and the remedy shown for the count blamed the
+`archiveRead` grant). A backup of about 300 topics wrote a receipt over the
+controller's 1 MiB and was **never verified** (`NotAttempted`, final). Each
+backup had succeeded. Now one budget bounds what a backup signs, and every
+reader's cap is derived from it ([kubernetes.md](kubernetes.md) §7b.5):
+
+- **One backup names at most 1,000 topics**, and its receipt has a budget of
+  5,000 bytes a topic. The largest receipt is 5,131,072 bytes and the largest
+  catalog record is 6,131,072 bytes. A topic at broker defaults measures 3,090
+  bytes, and at most 4,003 once the engine has run.
+- **A selection over the budget is refused before the engine runs**, by name
+  (`BackupSelectionTooLarge`): by count at `logweir backup run`'s phase −1, at
+  the controller's freeze, in a schedule's run policy (`Ready=False`) and in
+  the dynamic selection; and by the bytes the run could sign, after the
+  runner's own configuration read. Nothing is left out to make a selection
+  fit, and Logweir no longer writes a backup it could not list and verify.
+- **The catalog walk, the controller and the evidence relay read a receipt
+  under the same 5,131,072 bytes**, so a point the catalog lists `Available`
+  is one the controller can verify. A backup of 500 topics (a 1.6 MB receipt)
+  is listed, verified, offered and restorable.
+- **The controller no longer parses a receipt into a tree.** It folds the five
+  facts it needs from the bytes. Three reads of a 5.09 MB receipt add 9.7 MB
+  of peak memory, where the parse added 25.3 MB. A relay of one, from its pod
+  log to its verdict, adds 26.9 MB and is now under the controller's 128 MiB
+  read budget (it was under none): at most three relays or ten receipt reads
+  are held at once.
+- **The cap is the reader's, by what the document is.** A scorecard keeps
+  1 MiB. A relay carrying more than its kind's cap is refused by the
+  controller as the frames arrive, whatever the plan asked the pod for.
+- **The catalog lists every point it counts.** A point that is not available
+  because of one document says which and why (`cause`), with the size against
+  the bound when it is a size, and a remedy that names no grant unless a read
+  actually failed. `counts` separate a size and a content fault from a
+  permission or transport failure, and so does the `Synced` message.
+- **An entry with no record behind it is information, never evidence.** It
+  carries `factsFrom`, is never selectable, and publishes no receipt key,
+  digest, window or location. Every reader of the view refuses it by name: a
+  restore readiness check, a rehearsal, protection, the product API and the
+  console. Retention may keep the set such an entry names, and can never
+  delete or release anything on its word. A planted index row for a point
+  whose record reads changes nothing.
+
+**The maximum is lower than it was.** A dynamic selection resolved up to
+5,000 names, and a named `spec.topics` list had no bound. Neither was safe: a
+5,000-topic receipt is about 15 MB, which no evidence relay carries.
+
+**Do, before the upgrade:** find every `Backup` and `BackupSchedule` that
+names, or last resolved to, more than 1,000 topics, with the two commands in
+[kubernetes.md](kubernetes.md) §7b.5, and split each across schedules. After
+the upgrade such an object is **refused by name at each run**; no topic is
+dropped silently and no partial backup is taken. A recovery point a larger
+backup already wrote is not lost: `logweir restore` and `logweir verify` read
+it, the catalog lists it `Unreadable` with its size against the bound, and the
+console does not offer it.
+
+**Do, after the runner image rolls:** set each `RecoveryCatalog`'s
+`spec.syncRequest` to a new value. Points of about 80 topics and more that
+the old walk dropped are listed by the new one.
+
+**Scope:** no signed format, invariant arm or frozen schema changes; both
+verifiers accept the same documents they accepted. Runner rows
+(`crates/logweir/tests/topic_budget.rs`): a topic's measured cost against its
+budget, the projection above real runs' documents, the two refusals through
+the backup seam with no client and no engine call, and receipts of 70, 105,
+113, 300, 500 and 1,000 topics inside their bounds while 5,000 are not. Check
+rows (`crates/logweir/tests/check_cli.rs`): those six sizes listed `Available`
+and signature-verified; a 5,000-topic point listed with its size; nine faults
+each listed with its own reason; planted index rows. Controller rows
+(`crates/weirkeeper/tests/topic_budget.rs`): the same six receipts and one at
+the bound verified `Valid` against committed signatures; the cap by document
+kind at each place bytes arrive; the largest receipt framed into 7,037,746
+bytes of pod log under the 8 MiB the controller reads; and, in child
+processes, the memory figures above with a control beside each. The
+controller's reconcilers verify a relayed 500-topic receipt and refuse a
+5 MiB relay where a scorecard is expected.
+[UNVERIFIED — no cluster has run this build: the controller, API and console rows are unit and mock-cluster rows, and the live row is the runner's on the compose stack. The PoC upgrade that carries this item runs the controller's.]
+**Rollback:** an older runner accepts larger selections again and an older
+controller reads a receipt under 1 MiB again; nothing is stored differently.
+An older controller skips a catalog entry that carries `factsFrom` (it has no
+receipt key) and counts it as malformed. Roll the runner and the controller
+together.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
 
+- **Before the upgrade, split every `Backup` and `BackupSchedule` that names
+  or resolves to more than 1,000 topics** (item 56). The two commands in
+  [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
+  selection is refused by name at each run.
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
   chart publishes** (item 53): with `api.console.mode: shared` and
   `api.console.ingress.enabled: true`, set `api.console.trustedProxyService`

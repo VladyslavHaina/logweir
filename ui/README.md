@@ -954,6 +954,22 @@ example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40
 characters. The schedule page joins a run to its catalog row on the same set
 id, so until the re-sync a scheduled run there reads `not in the catalog`.
 
+**A row with no record behind it is never offered and never joined (FX-33).**
+The catalog lists every point it counts, so a point whose record it could not
+read is a row too (`factsFrom` is present: the record is over the bound
+Logweir reads, is not a record, or is missing). What such a row shows is an
+object key's text and, at best, what the catalog's UNSIGNED index row says.
+`isIndexClaim` is the one test, asked of `factsFrom` itself and before
+`selectable`: `catalogPointOffer` refuses the row first, whatever else it
+carries; `#/catalog` prints *not offered* in the restore cell, a *Not
+verified* badge beside the id, the size against the bound when that is the
+cause, and the backup set and run the index row names, each only when it
+looks like an identifier and always as a claim; and the schedule detail's two
+joins by backup set id (`pointsForRun`, `catalogRowsForBackup`) leave it out,
+so a row anyone who can write a key under the catalog's log prefix can plant
+never puts `Unreadable` in a healthy run's verdict cells or takes its restore
+link away.
+
 **What the six steps do with it.** Step 1 reads the archive the catalog reads
 (its saved destination, frozen at mount by UID and location digest and checked
 again before the create, exactly as a Backup's destination is). Step 2 shows the

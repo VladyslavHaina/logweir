@@ -777,8 +777,10 @@ each judged against the partition's marks and the archive's offsets
   at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
   selection whose summary could exceed it as JSON writes it (escapes
   counted) is refused by name before anything runs — never on partitions, so
-  the catalog's 256 KiB read and the evidence fetch's 1 MiB hold; the
-  positions grow in their own document, which neither reads.
+  the receipt stays inside the one bound the catalog, the controller and the
+  evidence fetch read it under (5,131,072 bytes, the topic budget of
+  [kubernetes.md](kubernetes.md) §7b.5, whose base counts this block); the
+  positions grow in their own document, which none of them reads.
 - **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
   MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
   document without it changes verdict; the document's run only when a reader
@@ -1431,7 +1433,7 @@ machine's measurements and are **not** budgets.
 | Surface | Bound | Beyond it |
 |---|---|---|
 | Topic discovery | `maxTopics` 20,000 by default, 50,000 installation ceiling (`hardMaxTopics`); chunks of 2,500 names / 768 KiB, at most 64 | the inventory is `truncated: true` with `MaxTopics` or `RelayLimit` ([kubernetes.md](kubernetes.md) §7c) |
-| A dynamic backup's selection | 5,000 resolved names or 256 KiB | `SelectionTooLarge`; name the topics or split the schedule (§10) |
+| The topics of one backup (FX-33) | **1,000 topics**, named or resolved, at a budget of **5,000 bytes a topic** in the receipt: a receipt of at most **5,131,072 bytes** and a catalog record of at most **6,131,072 bytes**. A dynamic selection is also at most 256 KiB of names. This was 5,000 resolved names, and unbounded for a named list | refused before the engine runs, by name (`BackupSelectionTooLarge`; a dynamic selection's `Backup` is `SelectionTooLarge`); nothing is left out to fit. Split the selection across schedules ([kubernetes.md](kubernetes.md) §7b.5) |
 | Catalog view (history from an archive) | the newest `spec.sync.viewLimit` points, 100–5,000, in at most 8 page `ConfigMap`s | counted and histogrammed over the whole archive, `truncated: true`; the rest is `logweir catalog list` against the archive (§7d) |
 | Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
 | API list page | 200 objects | follow `nextCursor` |

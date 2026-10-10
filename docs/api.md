@@ -506,6 +506,28 @@ fetch is still running), an absent result, a passing `Valid`, and a `Valid` on
 `trust.basis: Unverified` (nothing has been compared yet) leave the row in
 charge; `backupVerdict` is absent then, and absent never means "verified".
 
+**A point that is not available says why, and an entry with no record behind
+it says so (FX-33).** Two additive fields:
+
+- `cause {document, reason, bytes?, capBytes?}` on a point that is not
+  `Available` because of one document: `document` is `record`, `receipt` or
+  `manifest`, and `reason` is `overReadCap`, `readFailed`, `notFound`,
+  `malformed` or `unsupportedFormat` (both are open words). `bytes` and
+  `capBytes` are present for a size. `remedy` fits the cause: a size or a
+  content fault names no grant;
+- `factsFrom`, `indexRow` or `key`, on an entry whose catalog RECORD could not
+  be read. The catalog lists every point it counts, so a point whose record
+  is over the bound Logweir reads (a backup of more than 1,000 topics written
+  by an older runner), is not a record, or is missing is a row too. **Such a
+  row is information and never evidence.** `selectable` is `false` and
+  `?selectable=true` does not list it; `receiptKey` and `receiptSha256` are
+  empty strings; there is no manifest, window, location, signer or topic
+  list. `backupId` and `runId` are what the catalog's unsigned index row says
+  (`indexRow`), or empty (`key`), and `recoveryPointAt` is the instant the
+  index key carries, when it carries one. Nothing in the row was verified, no
+  `backupVerdict` is joined to it, and a client must not bind a restore plan
+  to it or join it to a `Backup` by `backupId`.
+
 **The join degrades per object, never per page.** `Backup` objects are read
 through a lenient projection of the three fields the rule needs, so one object
 this build cannot type (a newer trigger kind, an older stored schema) does not
