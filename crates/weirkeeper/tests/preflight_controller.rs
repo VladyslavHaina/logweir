@@ -2726,9 +2726,9 @@ async fn a_relayed_backup_readiness_publishes_a_verdict_with_codes_and_scopes() 
     // controller cannot read the signing Secret or dial the broker, so
     // `signer.rostered` and `connection.clusterIdentity` are answered from what
     // the pod reported and from the objects only the controller can see.
-    let relayed = relay_from(&runner_pinned_ids(
+    let relayed = relay_from(&with_binding_row(runner_pinned_ids(
         "a_readiness_check_reports_every_row_it_owns",
-    ));
+    )));
     let log = relay_log(PLAN_DIGEST, relayed, None);
 
     let mut routes = referent_routes(Some("prod-id"), vec![]);
@@ -5109,6 +5109,7 @@ fn fixture_destination_plan() -> logweir_core::check_contract::DestinationPlan {
         location_digest: "sha256:aa".to_string(),
         ca_file: None,
         credentials: logweir_core::check_contract::CredentialMode::Static,
+        grant_bindings: Vec::new(),
     }
 }
 
@@ -5276,6 +5277,7 @@ fn backup_inputs(rich: bool) -> Inputs {
         write_probe: facts.write_probe,
         evidence_write_grant: facts.evidence_write_grant,
         evidence_read_grant: facts.evidence_read_grant,
+        grant_bindings: facts.grant_bindings,
         topics: vec!["orders".to_string()],
         ..Inputs::default()
     }
@@ -5495,6 +5497,7 @@ fn inputs_under(
         write_probe: facts.write_probe,
         evidence_write_grant: facts.evidence_write_grant,
         evidence_read_grant: facts.evidence_read_grant,
+        grant_bindings: facts.grant_bindings,
         ..Inputs::default()
     };
     if operation == PreflightOperation::Backup {
@@ -6557,6 +6560,16 @@ fn a_verified_relay_is_never_discarded_for_a_waiting_state() {
 /// Turn the runner's pinned id set into a relay, with the two facts the J+C
 /// rows need. **Never `job_rows`**: a fixture defined as the expectation is
 /// what hid reviewer finding F1.
+/// FX-20c: the runner's pinned ids for a plan that lists no grant, plus the
+/// binding row it ALSO emits for the plans these reconciles render — every
+/// destination fixture here grants with a Secret, so `grant_bindings_of`
+/// lists it and the runner reports `destination.credentialBound`
+/// (`a_destination_access_check_with_listed_grants_reports_every_row_it_owns`).
+fn with_binding_row(mut ids: BTreeSet<String>) -> BTreeSet<String> {
+    ids.insert(CheckId::DestinationCredentialBound.as_str().to_string());
+    ids
+}
+
 fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
     ids.iter()
         .map(|s| {
@@ -6582,7 +6595,9 @@ fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
 #[tokio::test]
 async fn a_healthy_backup_readiness_reports_ready() {
     let job = job_name(CheckPlanKind::OperationReadiness);
-    let ids = runner_pinned_ids("a_readiness_check_reports_every_row_it_owns");
+    let ids = with_binding_row(runner_pinned_ids(
+        "a_readiness_check_reports_every_row_it_owns",
+    ));
     let log = relay_log(PLAN_DIGEST, relay_from(&ids), None);
 
     let mut routes = vec![
@@ -6662,6 +6677,7 @@ async fn a_healthy_restore_preflight_reports_ready() {
     // this controller always sets. `the_expected_rows_follow_the_plan_and_not_the_operation`
     // is the row that proves that is the ONLY difference.
     ids.insert(CheckId::DestinationEvidenceWritable.as_str().to_string());
+    let ids = with_binding_row(ids);
     let log = relay_log(PLAN_DIGEST, relay_from(&ids), None);
 
     let plan = plan_yaml("restore-", "s3-bucket");
@@ -7393,9 +7409,9 @@ fn the_restore_allowlist_is_the_governing_policys() {
 #[tokio::test]
 async fn a_governed_namespaces_backup_readiness_judges_the_signer_by_its_policy() {
     let job = job_name(CheckPlanKind::OperationReadiness);
-    let relayed = relay_from(&runner_pinned_ids(
+    let relayed = relay_from(&with_binding_row(runner_pinned_ids(
         "a_readiness_check_reports_every_row_it_owns",
-    ));
+    )));
     let log = relay_log(PLAN_DIGEST, relayed, None);
     let policy = serde_json::to_value(governing_policy("team-a-trust", json!({})))
         .expect("the policy serialises");
@@ -8421,5 +8437,555 @@ fn fx20_a_legacy_source_check_expects_the_restore_jobs_location_binding() {
             .find(|(n, _)| n == cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
             .map(|(_, v)| v.as_str()),
         env.literal(cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-20c: every grant's binding is compared, `archiveWrite` included
+// ---------------------------------------------------------------------------
+
+const VICTIM_ARCHIVE_WRITE: &str = "lwd-primary-archive-write";
+
+fn secret_grant(name: &str) -> Value {
+    json!({
+        "mode": "SecretKeys",
+        "secret": {
+            "name": name,
+            "accessKeyIdKey": "access-key-id",
+            "secretAccessKeyKey": "secret-access-key"
+        }
+    })
+}
+
+/// The PoC batch 4 F6 thief: its ONLY grant names `primary`'s archive-write
+/// Secret beside an endpoint its author chose.
+fn thief_destination() -> Value {
+    let mut object = backup_destination("fx20-thief");
+    object["spec"]["access"]["archiveWrite"] = secret_grant(VICTIM_ARCHIVE_WRITE);
+    object
+}
+
+/// A destination declaring all four grants, each its own Secret.
+fn four_grant_destination() -> Value {
+    let mut object = backup_destination("primary");
+    let access = object["spec"]["access"].as_object_mut().expect("access");
+    access.insert("archiveWrite".to_string(), secret_grant("aw-secret"));
+    access.insert("archiveRead".to_string(), secret_grant("ar-secret"));
+    access.insert("evidenceWrite".to_string(), secret_grant("ew-secret"));
+    access.insert("evidenceRead".to_string(), secret_grant("er-secret"));
+    object
+}
+
+fn grant_pairs(shape: &pf::JobShape) -> BTreeMap<String, (String, String)> {
+    use logweir_core::credential_binding as cb;
+    let mut out = BTreeMap::new();
+    for role in DestinationRole::ALL {
+        let (projected, expected) = cb::grant_binding_env(role);
+        if let Some(from) = shape
+            .spec
+            .env_from_secret
+            .iter()
+            .find(|e| e.name == projected)
+        {
+            assert_eq!(
+                from.key,
+                cb::CREDENTIAL_BINDING_KEY,
+                "{projected}: the binding key only"
+            );
+            assert!(
+                from.optional,
+                "{projected}: an unbound Secret must still let the pod start"
+            );
+            let value = literal(shape, expected)
+                .unwrap_or_else(|| panic!("{projected} has no expectation beside it"))
+                .to_string();
+            out.insert(
+                cb::grant_field(role).to_string(),
+                (from.secret_name.clone(), value),
+            );
+        } else {
+            assert!(
+                literal(shape, expected).is_none(),
+                "{expected} without its projected half"
+            );
+        }
+    }
+    out
+}
+
+/// **The F6 thief, controller half.** A `DestinationAccess` check of a
+/// destination whose only grant is another destination's `archiveWrite`
+/// Secret lists that grant in its plan, projects the Secret's
+/// `logweir-binding` beside the THIEF's expected binding, and expects the
+/// runner's `destination.credentialBound` row — so a runner that does not
+/// report it leaves the verdict `unknown`, never `ready`.
+///
+/// KILLS: `grant_bindings_of` returning nothing for `DestinationAccess` (or
+/// skipping `archiveWrite`); the env pair left off; `job_rows` not expecting
+/// the row.
+#[test]
+fn fx20c_a_thief_access_check_lists_its_archive_write_grant() {
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &thief_destination(),
+        vec![DestinationRole::ArchiveWrite],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    let request = access_request(&shape);
+    assert_eq!(
+        request.destination.grant_bindings,
+        vec![logweir_core::check_contract::GrantBindingRef {
+            role: DestinationRole::ArchiveWrite,
+            secret_name: VICTIM_ARCHIVE_WRITE.to_string(),
+        }]
+    );
+    let thief_binding = match inputs.archive.as_ref() {
+        Some(Ok(d)) => d.credential_binding(),
+        other => panic!("the thief resolves: {other:?}"),
+    };
+    assert_eq!(
+        grant_pairs(&shape),
+        [(
+            "archiveWrite".to_string(),
+            (VICTIM_ARCHIVE_WRITE.to_string(), thief_binding)
+        )]
+        .into_iter()
+        .collect()
+    );
+    assert!(job_rows(&shape.plan.request, false).contains(&CheckId::DestinationCredentialBound));
+}
+
+/// **Every DECLARED grant is listed, whichever roles the check exercises —
+/// and a grant it does not exercise is never projected as a credential.** A
+/// *Test access* of `archiveRead` alone still compares `archiveWrite`,
+/// `evidenceWrite` and `evidenceRead`; only the `archiveRead` Secret's keys
+/// reach the pod, and the other three Secrets contribute their
+/// `logweir-binding` key and nothing else.
+///
+/// KILLS: listing the requested roles only (a foreign `archiveWrite` beside
+/// a bound `archiveRead` would test READY); projecting a listed grant's
+/// credential.
+#[test]
+fn fx20c_every_declared_grant_is_compared_and_only_the_exercised_one_is_projected() {
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &four_grant_destination(),
+        vec![DestinationRole::ArchiveRead],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    let pairs = grant_pairs(&shape);
+    assert_eq!(
+        pairs
+            .iter()
+            .map(|(k, (secret, _))| (k.as_str(), secret.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("archiveRead", "ar-secret"),
+            ("archiveWrite", "aw-secret"),
+            ("evidenceRead", "er-secret"),
+            ("evidenceWrite", "ew-secret"),
+        ]
+    );
+    let expectations: BTreeSet<&str> = pairs.values().map(|(_, e)| e.as_str()).collect();
+    assert_eq!(
+        expectations.len(),
+        1,
+        "one destination, one binding: {expectations:?}"
+    );
+    for unexercised in ["aw-secret", "ew-secret", "er-secret"] {
+        let keys: Vec<&str> = shape
+            .spec
+            .env_from_secret
+            .iter()
+            .filter(|e| e.secret_name == unexercised)
+            .map(|e| e.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![logweir_core::credential_binding::CREDENTIAL_BINDING_KEY],
+            "{unexercised}: only its binding is projected, never its credential"
+        );
+    }
+    assert_eq!(
+        projected(&shape, "AWS_ACCESS_KEY_ID").as_deref(),
+        Some("ar-secret")
+    );
+}
+
+/// **The class sweep, controller half.** A Backup check lists the two grants
+/// a backup Job presents (`archiveWrite`, `evidenceWrite`), a Restore check
+/// the source's `archiveRead` and the evidence destination's
+/// `evidenceWrite` (each against its own destination's binding), and a
+/// workload-identity destination lists nothing and expects no binding row.
+#[test]
+fn fx20c_each_operation_lists_the_grants_its_run_presents() {
+    let policy = weirkeeper::check::policy::Policy::defaults();
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(four_grant_destination()).expect("fixture");
+    let roles = |op| {
+        pf::grant_bindings_of(op, &object, &policy)
+            .into_iter()
+            .map(|g| (g.role, g.secret_name))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        roles(PreflightOperation::Backup),
+        vec![
+            (DestinationRole::ArchiveWrite, "aw-secret".to_string()),
+            (DestinationRole::EvidenceWrite, "ew-secret".to_string()),
+        ]
+    );
+    assert_eq!(
+        roles(PreflightOperation::Restore),
+        vec![(DestinationRole::ArchiveRead, "ar-secret".to_string())]
+    );
+    assert!(roles(PreflightOperation::SourceConnection).is_empty());
+    // A role the object does not declare falls back to archiveWrite's Secret
+    // for a run, and is listed under its own role for a Backup.
+    let plain: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(backup_destination("primary")).expect("fixture");
+    assert_eq!(
+        pf::grant_bindings_of(PreflightOperation::Backup, &plain, &policy)
+            .into_iter()
+            .map(|g| g.secret_name)
+            .collect::<Vec<_>>(),
+        vec!["logweir-s3".to_string(), "logweir-s3".to_string()]
+    );
+    assert_eq!(
+        pf::grant_bindings_of(PreflightOperation::DestinationAccess, &plain, &policy).len(),
+        1,
+        "an undeclared role is archiveWrite's, already listed"
+    );
+
+    // The rendered Backup plan carries the evidenceWrite pair even with no
+    // write probe — the case nothing compared before.
+    let shape = shape_of(&inputs_for(
+        PreflightOperation::Backup,
+        &four_grant_destination(),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    ))
+    .expect("renders");
+    let CheckRequest::OperationReadiness(r) = &shape.plan.request else {
+        panic!("a Backup renders operationReadiness")
+    };
+    assert!(!r.write_probe);
+    assert_eq!(
+        grant_pairs(&shape).keys().cloned().collect::<Vec<_>>(),
+        vec!["archiveWrite".to_string(), "evidenceWrite".to_string()]
+    );
+    assert!(job_rows(&shape.plan.request, false).contains(&CheckId::DestinationCredentialBound));
+
+    // A Restore: two destinations, two expectations.
+    let mut evidence_object = backup_destination("evidence");
+    evidence_object["metadata"]["uid"] = json!("cccccccc-0000-4000-8000-0000000000e1");
+    evidence_object["spec"]["access"]["archiveWrite"] = secret_grant("ev-secret");
+    let source: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(four_grant_destination()).expect("fixture");
+    let evidence: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(evidence_object).expect("fixture");
+    let target: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(kafka_cluster("target", Some("scratch-id"))).expect("fixture");
+    let archive = weirkeeper::destination::resolve(&source, DestinationRole::ArchiveRead, &policy);
+    let evidence_resolved =
+        weirkeeper::destination::resolve(&evidence, DestinationRole::EvidenceWrite, &policy);
+    let inputs = Inputs {
+        operation: PreflightOperation::Restore,
+        namespace: NS.to_string(),
+        timeout_seconds: 120,
+        policy_digest: policy.digest(),
+        connection: Some(weirkeeper::connection::resolve(
+            &target,
+            weirkeeper::connection::ConnectionUse::PreflightTarget,
+        )),
+        archive_name: Some("primary".to_string()),
+        archive: Some(archive.clone()),
+        evidence_name: Some("evidence".to_string()),
+        evidence: Some(evidence_resolved.clone()),
+        grant_bindings: pf::grant_bindings_of(PreflightOperation::Restore, &source, &policy),
+        plan: Some(plan_facts("restore-", "s3-bucket", None)),
+        backup_id: "bk-1".to_string(),
+        ..Inputs::default()
+    };
+    let shape = shape_of(&inputs).expect("renders");
+    let pairs = grant_pairs(&shape);
+    assert_eq!(
+        pairs.get("archiveRead"),
+        Some(&(
+            "ar-secret".to_string(),
+            archive.expect("source").credential_binding()
+        ))
+    );
+    assert_eq!(
+        pairs.get("evidenceWrite"),
+        Some(&(
+            "ev-secret".to_string(),
+            evidence_resolved.expect("evidence").credential_binding()
+        )),
+        "the evidence destination's grant is held to THAT destination's binding"
+    );
+    assert_ne!(pairs["archiveRead"].1, pairs["evidenceWrite"].1);
+    assert!(job_rows(&shape.plan.request, true).contains(&CheckId::DestinationCredentialBound));
+
+    // A workload identity carries no binding: nothing listed, no row.
+    let mut wi = backup_destination("primary");
+    wi["spec"]["access"]["archiveWrite"] = json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "backup-sa"}});
+    let shape = shape_of(&inputs_for(
+        PreflightOperation::DestinationAccess,
+        &wi,
+        vec![DestinationRole::ArchiveWrite],
+    ))
+    .expect("renders");
+    assert!(access_request(&shape).destination.grant_bindings.is_empty());
+    assert!(grant_pairs(&shape).is_empty());
+    assert!(!job_rows(&shape.plan.request, false).contains(&CheckId::DestinationCredentialBound));
+}
+
+/// **The verdict, end to end through `assemble`.** The F6 result — every
+/// controller and pod row ready, `archivePrefixWritable` execution-only —
+/// is `notReady` once the runner relays `destination.credentialBound
+/// notReady/CredentialBindingMismatch`; `unknown` (never `ready`) when a
+/// runner reports no binding row at all; and `ready` only when the binding
+/// row is ready (CONTROL).
+///
+/// KILLS: the mirror forgetting the row (the "ready on Projected alone"
+/// mutant: the second case reads `ready`).
+#[test]
+fn fx20c_readiness_is_never_ready_for_a_destination_a_backup_would_refuse() {
+    let shape = shape_of(&inputs_for(
+        PreflightOperation::DestinationAccess,
+        &thief_destination(),
+        vec![DestinationRole::ArchiveWrite],
+    ))
+    .expect("renders");
+    let expected = job_rows(&shape.plan.request, false);
+    let controller = || -> Vec<CheckOutcome> {
+        [
+            CheckId::DestinationResolved,
+            CheckId::DestinationCredentialProjected,
+            CheckId::RunnerImage,
+            CheckId::RunnerPod,
+        ]
+        .into_iter()
+        .map(|id| {
+            CheckOutcome::new(
+                id,
+                CheckState::Ready,
+                Gating::Blocking,
+                Authority::Controller,
+                CheckCode::Projected,
+            )
+        })
+        .collect()
+    };
+    let relayed = |bound: Option<CheckState>| -> Vec<CheckOutcome> {
+        let mut rows = vec![
+            runner_row(
+                CheckId::RunnerContract,
+                CheckState::Ready,
+                CheckCode::ContractSupported,
+                Gating::Blocking,
+            ),
+            runner_row(
+                CheckId::DestinationArchivePrefixWritable,
+                CheckState::Unknown,
+                CheckCode::ArchivePrefixWriteVerifiedOnlyAtExecution,
+                Gating::ExecutionOnly,
+            ),
+        ];
+        if let Some(state) = bound {
+            rows.push(runner_row(
+                CheckId::DestinationCredentialBound,
+                state,
+                if state == CheckState::Ready {
+                    CheckCode::CredentialBound
+                } else {
+                    CheckCode::CredentialBindingMismatch
+                },
+                Gating::Blocking,
+            ));
+        }
+        rows
+    };
+    let verdict = |bound| {
+        logweir_core::check_contract::aggregate(&assemble(
+            controller(),
+            relayed(bound),
+            false,
+            &expected,
+            &BTreeSet::new(),
+            now(),
+        ))
+    };
+    assert_eq!(verdict(Some(CheckState::NotReady)), OverallState::NotReady);
+    assert_eq!(
+        verdict(None),
+        OverallState::Unknown,
+        "a runner that does not answer the binding row cannot leave the verdict ready"
+    );
+    assert_eq!(verdict(Some(CheckState::Ready)), OverallState::Ready);
+}
+
+/// The binding row the runner pins for a plan that lists a grant is the one
+/// `job_rows` expects: `a_destination_access_check_with_listed_grants_reports_
+/// every_row_it_owns` in `crates/logweir/tests/check_cli.rs`.
+#[test]
+fn the_expected_rows_include_the_binding_row_when_a_grant_is_listed() {
+    let mut destination = fixture_destination_plan();
+    destination.grant_bindings = vec![logweir_core::check_contract::GrantBindingRef {
+        role: DestinationRole::ArchiveWrite,
+        secret_name: "lwd-primary-archive-write".to_string(),
+    }];
+    let request =
+        CheckRequest::DestinationAccess(logweir_core::check_contract::DestinationAccessRequest {
+            destination,
+            roles: vec![DestinationRole::ArchiveRead, DestinationRole::ArchiveWrite],
+            write_probe: false,
+            evidence_write: None,
+            evidence_read: None,
+        });
+    assert_eq!(
+        ids_of(&job_rows(&request, false)),
+        runner_pinned_ids_at_least(
+            "a_destination_access_check_with_listed_grants_reports_every_row_it_owns",
+            4
+        )
+    );
+}
+
+/// **The console fixture's binding row is what `entry_of` writes for the
+/// runner's row.** `crates/logweir/tests/check_grant_binding.rs` holds the
+/// runner's message and facts to the same fixture with this fold spelled
+/// out; this row holds the fold itself, so neither side can drift alone.
+#[test]
+fn fx20c_the_console_fixture_is_the_status_entry_entry_of_writes() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+    let fixture: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
+    let want = fixture["item"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["id"] == "destination.credentialBound")
+        .expect("the binding row")
+        .clone();
+    let message = want["message"].as_str().expect("message");
+    let (runner_message, _) = message
+        .rsplit_once(" [archiveWrite=")
+        .expect("the fact is folded in");
+    let outcome = CheckOutcome::new(
+        CheckId::DestinationCredentialBound,
+        CheckState::NotReady,
+        Gating::Blocking,
+        Authority::CheckJob,
+        CheckCode::CredentialBindingMismatch,
+    )
+    .with_message(runner_message)
+    .with_fact("archiveWrite", "CredentialBindingMismatch");
+    let entry = serde_json::to_value(entry_of(&outcome)).expect("json");
+    for key in ["id", "state", "gating", "authority", "code", "message"] {
+        assert_eq!(entry[key], want[key], "{key}");
+    }
+}
+
+/// **FX-20c review M-2: through the reconciler.** A `DestinationAccess`
+/// Preflight on the PoC batch 4 F6 thief — its only grant names
+/// `primary`'s archive-write Secret — goes through `reconcile_preflight`
+/// (the production entry point, `resolve()` included) and the bodies the
+/// controller really POSTs carry the binding: the plan `ConfigMap` lists the
+/// `archiveWrite` grant, and the Job projects that Secret's `logweir-binding`
+/// (optional) beside the THIEF's expected binding. Every other FX-20c
+/// controller row builds `Inputs` by hand, so without this one the single
+/// line that carries `grant_bindings` into a real reconcile was unguarded.
+///
+/// KILLS: `resolve()` not assigning `inputs.grant_bindings` (review mutant
+/// R1, which survived every weirkeeper test before this row).
+#[tokio::test]
+async fn fx20c_a_thief_access_preflight_carries_its_grant_binding_end_to_end() {
+    let job = job_name(CheckPlanKind::DestinationAccess);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
+        ),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            "/backupdestinations/fx20-thief",
+            thief_destination().to_string(),
+        ),
+        not_found("GET", leak(job.clone())),
+        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("POST", "/configmaps", echo("ConfigMap", "plan")),
+        route("POST", "/jobs", echo("Job", &job)),
+    ];
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let request = json!({
+        "operation": "DestinationAccess",
+        "destinationAccess": {
+            "destinationRef": {"name": "fx20-thief"},
+            "roles": ["ArchiveWrite"]
+        },
+        "timeoutSeconds": 120
+    });
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let body_of = |uri: &str| {
+        bodies
+            .iter()
+            .find(|b| b.method == "POST" && b.uri.contains(uri))
+            .unwrap_or_else(|| panic!("no POST {uri}"))
+            .body
+            .clone()
+    };
+    let plan_cm: Value = serde_json::from_str(&body_of("/configmaps")).expect("json");
+    let plan_json = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().filter(|s| s.contains("\"destinationAccess\"")))
+        .expect("the check plan document");
+    let plan: Value = serde_json::from_str(plan_json).expect("plan json");
+    assert_eq!(
+        plan["request"]["destinationAccess"]["destination"]["grantBindings"],
+        json!([{"role": "ArchiveWrite", "secretName": VICTIM_ARCHIVE_WRITE}]),
+        "{plan}"
+    );
+    let job: Value = serde_json::from_str(&body_of("/jobs")).expect("job json");
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("the container env")
+        .clone();
+    let (projected, expected) =
+        logweir_core::credential_binding::grant_binding_env(DestinationRole::ArchiveWrite);
+    let pair = env
+        .iter()
+        .find(|e| e["name"] == projected)
+        .unwrap_or_else(|| panic!("no {projected} in {env:?}"));
+    assert_eq!(
+        pair["valueFrom"]["secretKeyRef"],
+        json!({"name": VICTIM_ARCHIVE_WRITE, "key": "logweir-binding", "optional": true})
+    );
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(thief_destination()).expect("fixture");
+    let thief_binding = weirkeeper::destination::resolve(
+        &object,
+        DestinationRole::ArchiveWrite,
+        &weirkeeper::check::policy::Policy::defaults(),
+    )
+    .expect("resolves")
+    .credential_binding();
+    assert_eq!(
+        env.iter()
+            .find(|e| e["name"] == expected)
+            .and_then(|e| e["value"].as_str()),
+        Some(thief_binding.as_str()),
+        "the expectation is the THIEF's binding, never the Secret's own"
     );
 }

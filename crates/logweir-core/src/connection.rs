@@ -263,6 +263,21 @@ pub const CREDENTIAL_BINDING_KEY: &str = "logweir-binding";
 /// the controller's terminal state and the probe's condition reason.
 pub const CREDENTIAL_BINDING_MISMATCH: &str = "CredentialBindingMismatch";
 
+/// FX-20c (review LOW-2): what EVERY `CredentialBindingMismatch` refusal tells
+/// an operator to do — one sentence, so no surface can say otherwise.
+///
+/// **It never says "write this object's binding into the Secret".** On a
+/// refusal the Secret may be ANOTHER object's (the confused deputy the binding
+/// exists to stop): writing the refused object's binding into it would hand
+/// that object the victim's credential. So the remedy is the object's OWN
+/// Secret — entered through the console, or bound with
+/// `scripts/bind-credential.py`, which refuses a Secret any other object names
+/// — and a Secret two objects name is an incident, never a rebind.
+pub const BINDING_REMEDY: &str = "Give this object its own Secret: enter the credential \
+     through the console, or bind a Secret only it names with scripts/bind-credential.py \
+     (which refuses a Secret another object names). A Secret two objects name is an incident \
+     to investigate; never bind it to this one (docs/kubernetes.md §20.10).";
+
 /// The SOURCE side's projected binding (from the credential Secret, optional:
 /// absent when the Secret carries none).
 pub const SOURCE_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_SOURCE_CREDENTIAL_BINDING";
@@ -324,33 +339,22 @@ impl std::fmt::Display for CredentialBindingRefusal {
         // credentials; their wording names what they are bound to. A Kafka
         // connection's text is PROD-01.3's, byte for byte.
         let other = if self.binding_env.starts_with("NOTIFY_") {
-            Some((
-                "notification route",
-                "sink",
-                "Set the key to the route's entry in the ProtectionPolicy's \
-                 status.credentialBindings.",
-            ))
+            Some(("notification route", "sink"))
         } else if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
             || self.binding_env.starts_with("LOGWEIR_EVIDENCE_")
         {
-            Some((
-                "destination or archive location",
-                "object store",
-                "Enter the credential through the console, or add the key with the value in \
-                 the BackupDestination's or RetentionPolicy's status.credentialBinding (an \
-                 inline archive's location binding: docs/kubernetes.md §20.10).",
-            ))
+            Some(("destination or archive location", "object store"))
         } else {
             None
         };
-        if let Some((object, endpoint, remedy)) = other {
+        if let Some((object, endpoint)) = other {
             return if self.absent {
                 write!(
                     f,
                     "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
-                     {object} carries no `{CREDENTIAL_BINDING_KEY}` key (`{}` is unset), so \
-                     nothing shows it was entered for it; it is refused rather than presented \
-                     to the {endpoint}. {remedy} Nothing was dialled",
+                     {object} carries no `{CREDENTIAL_BINDING_KEY}` key (`{}` is unset), so it \
+                     is refused rather than presented to the {endpoint}. Nothing was dialled. \
+                     {BINDING_REMEDY}",
                     self.binding_env
                 )
             } else {
@@ -359,8 +363,7 @@ impl std::fmt::Display for CredentialBindingRefusal {
                     "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
                      {object} is bound to a different object or endpoint (`{}` does not equal \
                      the expected binding), so it is refused rather than presented to this \
-                     {object}'s {endpoint}. A changed endpoint needs the credential bound again. \
-                     Nothing was dialled",
+                     {object}'s {endpoint}. Nothing was dialled. {BINDING_REMEDY}",
                     self.binding_env
                 )
             };
@@ -371,9 +374,7 @@ impl std::fmt::Display for CredentialBindingRefusal {
                 "{CREDENTIAL_BINDING_MISMATCH}: the credential Secret projected for this \
                  connection carries no `{CREDENTIAL_BINDING_KEY}` key (`{}` is unset), so \
                  nothing shows it was entered for this connection; it is refused rather than \
-                 presented to the connection's brokers. Enter the credential through the \
-                 console, or add the key with the value in the connection's \
-                 status.credentialBinding. Nothing was dialled",
+                 presented to the connection's brokers. Nothing was dialled. {BINDING_REMEDY}",
                 self.binding_env
             )
         } else {

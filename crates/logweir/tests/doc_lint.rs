@@ -2104,7 +2104,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stalled identity provider meets the provider deadline",
             "provider_timeout",
         ),
-        // PROD-15.1 (2026-10-09, item 48): a restore under the original topic
+        // FX-20c (2026-10-09, item 48): a destination's Test access compares
+        // every grant's binding on a blocking row, and is never READY for a
+        // destination a backup would refuse.
+        (
+            "Test access compares every grant's binding",
+            "destination.credentialBound",
+        ),
+        // PROD-15.1 (2026-10-09, item 49): a restore under the original topic
         // names, into an absent topic, behind its own approval subject; the
         // flag an approver mints it with.
         (

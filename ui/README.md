@@ -2966,7 +2966,11 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   `RecommendationOnly` and is replaced by the mode's own sentence otherwise;
   printing "Logweir never deletes from your archive" beside a policy that
   deletes nightly would be the most consequential false sentence this console
-  could render. **The covering policy is named only by the schedule report's
+  could render. A policy asked to `Enforce` that is not enforcing prints its
+  `Enforced=False` reason as a complaint (`data-enforced-refusal`): a run
+  refused on its credential's binding leaves it `RecommendationOnly` with
+  `ageExpiry: NotEnforced` until a human gives it its own Secret (FX-20c), and
+  that reason is the only place that says why. **The covering policy is named only by the schedule report's
   `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination
