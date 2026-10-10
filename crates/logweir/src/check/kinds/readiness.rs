@@ -25,7 +25,7 @@ use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
     ConnectionPlan, OperationReadinessRequest,
 };
-use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
+use logweir_kafka::inventory::{CheckFailure, InventoryProbe, TopicPresence};
 
 use super::access::{credential_bound_row, destination_checks, DestinationProbe};
 use super::capability;
@@ -416,10 +416,20 @@ pub fn capability_rows(
                 | CheckId::ConnectionGroupTypes
         )
     };
-    let observed = listed
-        .iter()
-        .any(reads_api_versions)
-        .then(|| probe.api_versions());
+    // ONE observation, inside what is left of the check's own budget, and not
+    // started with none left (review L9): a dial begun after the deadline
+    // would overrun the check and report the clock as a broker problem.
+    let observed = listed.iter().any(reads_api_versions).then(|| {
+        if deadline.has_room() {
+            probe.api_versions(deadline.remaining())
+        } else {
+            Err(CheckFailure::new(
+                CheckCode::ApiVersionsNotObserved,
+                "the check's time budget was spent before the ApiVersions observation could \
+                 start, so the endpoint was not asked which request versions it serves",
+            ))
+        }
+    });
     let sasl = capability::engine_uses_sasl(connection);
     listed
         .iter()

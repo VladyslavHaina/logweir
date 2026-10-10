@@ -446,19 +446,28 @@ pub trait InventoryProbe {
         specs: &[crate::reader::NewTopicSpec],
     ) -> Result<Vec<TopicCreateOutcome>, CheckFailure>;
 
-    /// **PROD-01.2.** The Kafka API versions this endpoint serves, as its
-    /// brokers answered ApiVersions to this client
+    /// **PROD-01.2.** The Kafka API versions EVERY broker of this cluster
+    /// serves, as each answered ApiVersions to this client
     /// ([`crate::api_versions`]): what a capability row holds the engine's
     /// fixed request versions against.
+    ///
+    /// `within` is what is left of the check's own budget: the observation
+    /// dials, waits and reads inside it, and does not start with none left.
     ///
     /// The DEFAULT observes nothing and says so, so a probe that does not
     /// implement it (every test double written before PROD-01.2) can only
     /// leave a capability row `unknown`, never `ready`.
     ///
     /// # Errors
-    /// [`CheckFailure`] with [`CheckCode::ApiVersionsNotObserved`] when no
-    /// answer was read whole. Never an empty answer standing for one.
-    fn api_versions(&self) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+    /// [`CheckFailure`] with [`CheckCode::ApiVersionsNotObserved`] when the
+    /// view is not whole: some broker the cluster lists did not answer, or no
+    /// answer was read whole. Never an empty answer, and never some brokers'
+    /// answer standing for the cluster's.
+    fn api_versions(
+        &self,
+        within: Duration,
+    ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+        let _ = within;
         Err(CheckFailure::new(
             CheckCode::ApiVersionsNotObserved,
             "this probe does not observe the endpoint's ApiVersions answer",
@@ -1443,8 +1452,11 @@ mod client {
                 .collect())
         }
 
-        fn api_versions(&self) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
-            observe_api_versions(&self.config, self.timeouts.metadata)
+        fn api_versions(
+            &self,
+            within: Duration,
+        ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+            observe_api_versions(&self.config, within)
         }
     }
 
@@ -1454,22 +1466,25 @@ mod client {
     /// orders of magnitude longer than the gap inside one.
     pub const API_VERSIONS_QUIET: Duration = Duration::from_millis(250);
 
-    /// The longest one ApiVersions observation waits for its dial, and again
-    /// for its log to go quiet.
+    /// The longest one ApiVersions observation takes in all: learning the
+    /// broker list, waiting for every broker to answer, and reading the log.
     pub const API_VERSIONS_BUDGET: Duration = Duration::from_secs(10);
+
+    /// The least budget an observation starts with: one metadata round trip
+    /// and one quiet period.
+    pub const API_VERSIONS_MIN_BUDGET: Duration = Duration::from_secs(1);
 
     fn not_observed(why: impl AsRef<str>) -> CheckFailure {
         CheckFailure::new(CheckCode::ApiVersionsNotObserved, why)
     }
 
-    /// **PROD-01.2: what an endpoint answered ApiVersions, read off a
-    /// dedicated client's own log.**
+    /// **PROD-01.2: what EVERY broker of a cluster answered ApiVersions, read
+    /// off a dedicated client's own log.**
     ///
     /// `base` is the configuration a check's handles are built from
     /// ([`KafkaInventory`] passes its own), so the observation uses the same
     /// transport, trust anchor and credential as every other row. It builds
-    /// ONE more consumer handle, with three properties of its own, dials, reads
-    /// the handle's log and drops it:
+    /// ONE more handle, with four properties of its own:
     ///
     /// * `log.queue=true`: librdkafka queues this handle's log lines instead
     ///   of printing them, so they can be read
@@ -1477,58 +1492,117 @@ mod client {
     /// * `debug=feature`: the one debug context that prints a broker's
     ///   ApiVersions answer;
     /// * log level 7: rust-rdkafka resets a handle's level to the process's
-    ///   after creating it, and debug lines are dropped below 7.
+    ///   after creating it, and debug lines are dropped below 7;
+    /// * `enable.sparse.connections=false`: librdkafka then connects to every
+    ///   bootstrap address and to every broker it learns of, at once, instead
+    ///   of only to those it has a request for (`rd_kafka_broker_needs_
+    ///   connection`, `rdkafka_broker.c:119-125` in rdkafka-sys
+    ///   4.10.0+2.12.1). Without it the handle dials one or two brokers of a
+    ///   larger cluster, a different one or two from run to run.
     ///
-    /// **A dedicated handle, so nothing else changes.** The check's own two
-    /// handles keep printing what they always printed; only this short-lived
-    /// one has its log read, and it is dropped before the function returns. It
-    /// never subscribes, joins a group or commits.
+    /// # A whole view, or not an answer (review, M3)
+    ///
+    /// The handle reads the cluster's broker list from metadata, and the
+    /// observation answers only when every broker on it has answered
+    /// ApiVersions, and every bootstrap address has
+    /// ([`crate::api_versions::full_view`]). It waits for that until `budget`
+    /// is spent. A broker that did not answer by then makes the whole
+    /// observation NOT OBSERVED, with how many of how many answered and which
+    /// did not: a broker nobody asked is unknown, and unknown is never ready.
+    ///
+    /// # How many connections, truthfully
+    ///
+    /// One to each bootstrap address and one to each broker the cluster
+    /// lists, for the length of the observation: on a three-broker cluster
+    /// with three bootstrap addresses that is six, where the first version
+    /// said "one more connection" and opened three or four. The handle is
+    /// producer-shaped, so it has no group and dials no group coordinator; it
+    /// never produces. Every connection is closed when the function returns:
+    /// the handle is local to it.
+    ///
+    /// # How long
+    ///
+    /// At most `budget`, capped at [`API_VERSIONS_BUDGET`], plus one quiet
+    /// period for the last read. With less than
+    /// [`API_VERSIONS_MIN_BUDGET`] it does not dial at all.
     ///
     /// # Errors
     ///
-    /// [`CheckCode::ApiVersionsNotObserved`], with the reason: no broker
-    /// answered within `budget`, the log could not be read, or it held no
-    /// answer that was read whole. Never an empty answer.
+    /// [`CheckCode::ApiVersionsNotObserved`], with the reason. Never an empty
+    /// answer, and never a partial one.
     pub fn observe_api_versions(
         base: &ClientConfig,
         budget: Duration,
     ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+        use crate::api_versions::{answers, bootstrap_addresses, full_view, Broker};
         let budget = budget.min(API_VERSIONS_BUDGET);
+        if budget < API_VERSIONS_MIN_BUDGET {
+            return Err(not_observed(format!(
+                "{budget:?} is left of the check's budget, which is less than the \
+                 {API_VERSIONS_MIN_BUDGET:?} an ApiVersions observation needs: the endpoint was \
+                 not dialled for it"
+            )));
+        }
+        let deadline = std::time::Instant::now() + budget;
+        let left = || deadline.saturating_duration_since(std::time::Instant::now());
         let mut cfg = base.clone();
-        cfg.set("group.id", CHECK_GROUP_ID)
-            .set("enable.auto.commit", "false")
-            .set("log.queue", "true")
+        cfg.set("log.queue", "true")
             .set("debug", "feature")
+            .set("enable.sparse.connections", "false")
             .set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        let observer: BaseConsumer = cfg
+        let observer: rdkafka::producer::BaseProducer = cfg
             .create()
             .map_err(|e| not_observed(format!("the observing client could not be built: {e}")))?;
-        // THE DIAL. ApiVersions is the first request librdkafka sends on every
-        // connection, so once ANY request has been answered the answer is in
-        // the log. The cluster id is not wanted, the connection is; an
-        // endpoint that names no cluster id still answered, which the log
-        // below shows.
-        let _ = observer.client().fetch_cluster_id(budget);
-        let drained = logweir_rdkafka_ffi::logs::drain_logs(
-            observer.client(),
-            API_VERSIONS_QUIET,
-            budget.max(API_VERSIONS_QUIET),
-        )
-        .map_err(|e| not_observed(format!("the observing client's log could not be read: {e}")))?;
-        let lines: Vec<(&str, &str)> = drained
-            .lines
-            .iter()
-            .filter_map(|l| Some((l.facility.as_str()?, l.message.as_str()?)))
-            .collect();
-        crate::api_versions::fold(lines, drained.quiet).ok_or_else(|| {
-            not_observed(if drained.quiet {
-                "no broker answered ApiVersions on the observing connection within the check's \
-                 budget"
-            } else {
-                "the observing client was still logging when the read reached its bound, so no \
-                 ApiVersions answer was read whole"
+        let client = rdkafka::producer::Producer::client(&observer);
+        // THE BROKER LIST: whom to expect an answer from. All-topics, as the
+        // inventory's own metadata read is: a request for one topic by name
+        // may create it on a producer-shaped handle
+        // (`rd_kafka_metadata`, `rdkafka_metadata.c:98-128`). A list that
+        // could not be read leaves `listed` empty, which is never a whole
+        // view.
+        let listed: Vec<Broker> = client
+            .fetch_metadata(None, left().max(API_VERSIONS_QUIET))
+            .map(|metadata| {
+                metadata
+                    .brokers()
+                    .iter()
+                    .map(|b| Broker::new(b.id(), b.host(), b.port()))
+                    .collect()
             })
-        })
+            .unwrap_or_default();
+        let bootstrap = bootstrap_addresses(base.get("bootstrap.servers").unwrap_or_default());
+        // THE WAIT. ApiVersions is the first request librdkafka sends on a
+        // connection, so each broker's answer is in the log as soon as its
+        // connection is up. The log is read until the view is whole, or the
+        // budget is spent; the last read always runs, so what did arrive is
+        // counted.
+        let mut lines: Vec<(String, String)> = Vec::new();
+        let view = loop {
+            let drained = logweir_rdkafka_ffi::logs::drain_logs(
+                client,
+                API_VERSIONS_QUIET,
+                left().max(API_VERSIONS_QUIET * 2),
+            )
+            .map_err(|e| {
+                not_observed(format!("the observing client's log could not be read: {e}"))
+            })?;
+            lines.extend(drained.lines.iter().filter_map(|l| {
+                Some((
+                    l.facility.as_str()?.to_string(),
+                    l.message.as_str()?.to_string(),
+                ))
+            }));
+            let view = full_view(
+                &answers(lines.iter().map(|(f, m)| (f.as_str(), m.as_str()))),
+                drained.quiet,
+                &listed,
+                &bootstrap,
+            );
+            if view.is_ok() || left() < API_VERSIONS_QUIET {
+                break view;
+            }
+        };
+        view.map_err(|partial| not_observed(partial.to_string()))
     }
 
     /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so

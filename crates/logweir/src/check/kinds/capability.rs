@@ -31,6 +31,13 @@
 //! was not in the client's log, a DescribeConfigs call timed out) the row is
 //! `unknown` with the reason. No arm turns "I could not tell" into a verdict
 //! in either direction.
+//!
+//! **And an answer is about the CLUSTER only when every broker gave one**
+//! (review, M3). The engine may be sent to any broker, so a row that read two
+//! brokers of three has not read the cluster: it is `unknown`, and its
+//! message names how many of how many answered and which did not
+//! (`logweir_kafka::api_versions::full_view`). When the brokers' answers
+//! differ, the row is judged on what every one of them serves, and says so.
 
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{CheckCode, CheckId, CheckOutcome, CheckState, ConnectionPlan};
@@ -43,6 +50,37 @@ use logweir_kafka::inventory::{CheckFailure, InventoryProbe};
 use super::readiness::detail;
 use super::{ready, remedy_for, state_for};
 use crate::check::{catalogue, Deadline};
+
+/// The fact every row that read the ApiVersions answer carries: how many
+/// DISTINCT BROKERS answered, of how many the cluster lists. The two numbers
+/// are equal on every row that has an answer at all: a partial view is
+/// `unknown` and has no fact. Never a count of connections.
+const BROKERS_ANSWERED: &str = "brokersAnswered";
+
+fn brokers_answered(served: &ApiVersions) -> String {
+    format!("{0} of {0}", served.brokers())
+}
+
+/// Whose answer a message reports: the endpoint's one broker, or every one of
+/// its brokers. The ranges are the versions EVERY broker serves, so "all N
+/// brokers serve v3-v7" is true of a mixed cluster too.
+fn whose(served: &ApiVersions) -> String {
+    match served.brokers() {
+        1 => "this endpoint serves".to_string(),
+        n => format!("all {n} brokers of this endpoint serve"),
+    }
+}
+
+/// The sentence a message ends with when the brokers' answers were not all
+/// the same: the row was judged on the weakest of them.
+fn differing(served: &ApiVersions) -> &'static str {
+    if served.differ() {
+        " The brokers do not all serve the same versions: this row is judged on the versions \
+         every one of them serves."
+    } else {
+        ""
+    }
+}
 
 /// Whether the engine authenticates with SASL on this connection, and so
 /// sends SaslHandshake and SaslAuthenticate before anything else.
@@ -114,19 +152,21 @@ pub fn engine_protocol(
             .collect();
         return ready(id, CheckCode::EngineProtocolSupported, now)
             .with_message(&format!(
-                "this endpoint serves every request version the engine sends to {operation} it: \
-                 {}",
-                pairs.join(", ")
+                "{} every request version the engine sends to {operation} it: {}.{}",
+                whose(served),
+                pairs.join(", "),
+                differing(served)
             ))
             .with_fact("engineRequests", &sent.join(", "))
-            .with_fact("brokerConnections", &served.connections().to_string());
+            .with_fact(BROKERS_ANSWERED, &brokers_answered(served));
     }
     let named: Vec<String> = refused
         .iter()
         .map(|r| {
             format!(
-                "{} and this endpoint serves {} {}",
+                "{} and {} {} {}",
                 spelled(r),
+                whose(served),
                 r.api,
                 served.describe(r.key)
             )
@@ -136,12 +176,13 @@ pub fn engine_protocol(
     catalogue::outcome(id, state_for(code), code, now)
         .with_message(&format!(
             "the engine sends each request at one fixed version and never negotiates: it sends \
-             {}, so the engine cannot {operation} this endpoint",
-            named.join("; ")
+             {}, so the engine cannot {operation} this endpoint.{}",
+            named.join("; "),
+            differing(served)
         ))
         .with_remedy(remedy_for(code))
         .with_fact("engineRequests", &sent.join(", "))
-        .with_fact("brokerConnections", &served.connections().to_string())
+        .with_fact(BROKERS_ANSWERED, &brokers_answered(served))
         .with_detail(detail(
             &refused.iter().map(|r| spelled(r)).collect::<Vec<_>>(),
         ))
@@ -163,19 +204,26 @@ pub fn group_types(
     };
     let range = served.describe(LIST_GROUPS);
     if served.serves(LIST_GROUPS, LIST_GROUPS_WITH_TYPES) {
-        return ready(id, CheckCode::GroupTypesListed, now).with_message(&format!(
-            "this endpoint serves ListGroups {range}, so its group listing names each group's type"
-        ));
+        return ready(id, CheckCode::GroupTypesListed, now)
+            .with_message(&format!(
+                "{} ListGroups {range}, so its group listing names each group's type.{}",
+                whose(served),
+                differing(served)
+            ))
+            .with_fact(BROKERS_ANSWERED, &brokers_answered(served));
     }
     let code = CheckCode::GroupTypesNotListed;
     catalogue::outcome(id, state_for(code), code, now)
         .with_message(&format!(
-            "this endpoint serves ListGroups {range}, and a group's type is named only from \
+            "{} ListGroups {range}, and a group's type is named only from \
              v{LIST_GROUPS_WITH_TYPES}: it cannot say whether a group is a classic consumer \
              group, so a backup records every selected consumer group as excluded \
-             (GroupTypeNotCaptured) and archives no position for it"
+             (GroupTypeNotCaptured) and archives no position for it.{}",
+            whose(served),
+            differing(served)
         ))
         .with_remedy(remedy_for(code))
+        .with_fact(BROKERS_ANSWERED, &brokers_answered(served))
 }
 
 /// `connection.topicConfigsReadable`: DescribeConfigs on each selected topic,

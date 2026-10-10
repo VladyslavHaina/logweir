@@ -573,6 +573,19 @@ impl FakeProbe {
         self
     }
 
+    /// The whole view of a cluster of `brokers` brokers: its weakest answer,
+    /// and whether the brokers' answers differed.
+    fn with_cluster_api_versions(
+        self,
+        ranges: &[(i16, i16, i16)],
+        brokers: usize,
+        differ: bool,
+    ) -> Self {
+        self.state.lock().unwrap().api_versions =
+            Some(Ok(ApiVersions::of_cluster(ranges, brokers, differ)));
+        self
+    }
+
     fn failing_api_versions(self, message: &str) -> Self {
         self.state.lock().unwrap().api_versions = Some(Err((
             CheckCode::ApiVersionsNotObserved,
@@ -716,7 +729,7 @@ impl InventoryProbe for FakeProbe {
         }
     }
 
-    fn api_versions(&self) -> Result<ApiVersions, CheckFailure> {
+    fn api_versions(&self, _within: std::time::Duration) -> Result<ApiVersions, CheckFailure> {
         let mut s = self.state.lock().unwrap();
         s.api_versions_calls += 1;
         match &s.api_versions {
@@ -3418,6 +3431,206 @@ fn connection_engine_protocol_asks_for_the_sasl_requests_only_on_a_sasl_connecti
         "{}",
         row.message
     );
+}
+
+/// **PROD-01.2 review, M3: a capability row is about EVERY broker of the
+/// cluster, or it is `unknown`.** The first version said `ready` from
+/// whichever brokers the observing client had dialled.
+///
+/// * All three brokers answered and agree: `ready`, and both the message and
+///   the fact say three, as DISTINCT BROKERS of how many.
+/// * They answered and do not agree (a rolling upgrade): the row is judged on
+///   what every one of them serves, here Produce v3-v7, so the restore row is
+///   `notReady` although one broker serves v8, and the message says they
+///   differ.
+/// * Two of three answered: `unknown`, never `ready`, with the count and the
+///   silent broker in the message. The reason is the observation's own
+///   (`logweir_kafka::api_versions::full_view`), built here from the lines a
+///   two-of-three log holds.
+#[test]
+fn a_capability_row_is_about_every_broker_or_it_is_unknown() {
+    use logweir_kafka::api_versions::{answers, full_view, Broker};
+    let plan = || {
+        mount(&capability_plan(
+            vec![],
+            vec![
+                CheckId::ConnectionEngineProtocol,
+                CheckId::ConnectionGroupTypes,
+            ],
+        ))
+    };
+
+    // All three, agreeing.
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_cluster_api_versions(&KAFKA_4_3, 3, false)),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(row.state, CheckState::Ready, "{row:?}");
+        assert!(
+            row.message
+                .starts_with("all 3 brokers of this endpoint serve"),
+            "{}",
+            row.message
+        );
+        assert!(!row.message.contains("do not all serve"), "{}", row.message);
+        assert_eq!(
+            row.facts.get("brokersAnswered").map(String::as_str),
+            Some("3 of 3"),
+            "distinct brokers of how many, not connections: {row:?}"
+        );
+    }
+
+    // All three, DIFFERING: the weakest answer, ListGroups v0-v4 and Fetch
+    // v4-v10 (one broker has not been upgraded).
+    let mut weakest = KAFKA_4_3.to_vec();
+    weakest.iter_mut().find(|(k, _, _)| *k == 16).unwrap().2 = 4;
+    weakest.iter_mut().find(|(k, _, _)| *k == 1).unwrap().2 = 10;
+    let run = drive(
+        &plan(),
+        &capability_wiring(FakeProbe::new().with_cluster_api_versions(&weakest, 3, true)),
+    );
+    let row = run.row(CheckId::ConnectionEngineProtocol);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::EngineProtocolUnsupported),
+        "one broker that cannot be read from is enough: {row:?}"
+    );
+    assert!(
+        row.message
+            .contains("Fetch v11 and all 3 brokers of this endpoint serve Fetch v4-v10")
+            && row
+                .message
+                .contains("The brokers do not all serve the same versions"),
+        "{}",
+        row.message
+    );
+    let row = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(row.code, CheckCode::GroupTypesNotListed, "{row:?}");
+    assert!(
+        row.message
+            .contains("The brokers do not all serve the same versions"),
+        "{}",
+        row.message
+    );
+
+    // TWO OF THREE: the reason the observation itself gives.
+    let listed: Vec<Broker> = (1..=3)
+        .map(|id| Broker::new(id, &format!("b{id}.example"), 9092))
+        .collect();
+    let lines: Vec<(&str, String)> = [1, 3]
+        .iter()
+        .flat_map(|id| {
+            let at = format!("[thrd:b{id}.example:9092/{id}]: b{id}.example:9092/{id}: ");
+            vec![
+                ("APIVERSION", format!("{at}Broker API support:")),
+                (
+                    "APIVERSION",
+                    format!("{at}  ApiKey Produce (0) Versions 0..13"),
+                ),
+            ]
+        })
+        .collect();
+    let partial = full_view(
+        &answers(lines.iter().map(|(f, m)| (*f, m.as_str()))),
+        true,
+        &listed,
+        &[],
+    )
+    .expect_err("broker 2 did not answer");
+    let probe = FakeProbe::new().failing_api_versions(&partial.to_string());
+    let run = drive(&plan(), &capability_wiring(probe));
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "a partial view is never ready: {row:?}"
+        );
+        assert!(
+            row.message.contains("2 of 3 broker(s)")
+                && row.message.contains("broker 2 (b2.example:9092)"),
+            "{}",
+            row.message
+        );
+        assert!(!row.facts.contains_key("brokersAnswered"), "{row:?}");
+    }
+    assert_ne!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+}
+
+/// **Review L9: the observation is not started with no budget left.** A row
+/// that reads the ApiVersions answer is `unknown` and says the endpoint was
+/// not asked; the probe is never called, so nothing is dialled after the
+/// check's deadline.
+///
+/// CONTROL: with budget left the same probe is called once and the rows are
+/// `ready`.
+#[test]
+fn the_api_versions_observation_does_not_start_with_no_budget_left() {
+    use logweir::check::kinds::readiness::capability_rows;
+    let plan = capability_plan(vec![], backup_capabilities());
+    let CheckRequest::OperationReadiness(r) = &plan.request else {
+        unreachable!()
+    };
+    let listed = [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ];
+    let now = chrono::Utc::now();
+
+    let probe = FakeProbe::new().with_api_versions(&KAFKA_4_3);
+    let rows = capability_rows(
+        &listed,
+        &r.connection,
+        &probe,
+        &[],
+        (true, true),
+        logweir::check::Deadline::new(0),
+        now,
+    );
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "{row:?}"
+        );
+        assert!(
+            row.message.contains("was not asked"),
+            "the row says it did not ask: {}",
+            row.message
+        );
+    }
+    assert_eq!(
+        probe.api_versions_calls(),
+        0,
+        "no dial after the check's deadline"
+    );
+
+    let rows = capability_rows(
+        &listed,
+        &r.connection,
+        &probe,
+        &[],
+        (true, true),
+        logweir::check::Deadline::new(60),
+        now,
+    );
+    assert!(
+        rows.iter().all(|row| row.state == CheckState::Ready),
+        "{rows:?}"
+    );
+    assert_eq!(probe.api_versions_calls(), 1);
 }
 
 /// `connection.groupTypes`. PRESENT from ListGroups v5 (Apache Kafka 3.9 and
