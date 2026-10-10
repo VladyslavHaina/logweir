@@ -816,6 +816,32 @@ fn refuse_before_create(
                 ),
             ));
         }
+        // PROD-16.2 (the coordinator's addition 6): NOTHING IS REQUESTED HERE
+        // THAT A SECOND PERSON COULD NOT BE SHOWN IN FULL. The approver sees
+        // every topic and the name it is restored under, the source, the
+        // target cluster, the window and the coverage, from this plan; a plan
+        // too large for that, unreadable, or carrying a value a page cannot
+        // show faithfully would wait for an approval nobody is ever offered.
+        // So the largest restore this mode accepts is the largest one it can
+        // show (`logweir_core::approval_scope::MAX_SCOPE_TOPICS`); a larger
+        // one is split, or approved under a strict policy.
+        if let Err(incomplete) =
+            logweir_core::approval_scope::plan_scope(request.plan_bytes.as_bytes())
+        {
+            actor.audit.set_failure("scope_incomplete");
+            actor
+                .audit
+                .note("scope", &format!("incomplete:{}", incomplete.code()));
+            return Err(ApiError::validation(vec![FieldError::new(
+                "planBytes",
+                "scope_incomplete",
+                format!(
+                    "Namespace {ns} is bound to approval policy {} (two-person). {incomplete}. \
+                     Nothing was created.",
+                    policy.name
+                ),
+            )]));
+        }
     }
     if let Err(reason) =
         logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())

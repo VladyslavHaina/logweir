@@ -359,53 +359,161 @@ test("an_approved_request_names_the_approver_and_is_never_green", () => {
   assert.ok(!/id="request-approver"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
 });
 
-test("an_original_name_request_lists_the_topics_being_approved", () => {
+test("an_original_name_request_marks_every_name_it_writes_under", () => {
   const named = request("original-name");
   const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: named }));
   assert.match(html, /id="request-original-topics"/);
-  assert.ok(html.includes("<li><code>orders</code></li><li><code>payments</code></li>"), html);
-  assert.ok(html.includes("these 2 original topic name(s)"), html);
+  assert.ok(html.includes("<li><code>orders</code> restored as <code>orders</code> " +
+    "<strong class=\"original-name\">original name</strong>, every partition</li>"), html);
+  assert.ok(html.includes("<li><code>payments</code> restored as <code>payments</code> " +
+    "<strong class=\"original-name\">original name</strong>, every partition</li>"), html);
+  assert.ok(html.includes("none: every topic is written under its own name"), html);
   assert.match(html, /id="approve-in-console"/, "shown its names, the approver may approve");
-  // More names than the view lists: the page says how many it does not show.
-  const many = Object.assign({}, named, { originalTopicsCount: 140 });
-  assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: many }))
-    .includes("138 more are in the plan and are not listed here."));
-  // The names could not be read: no button, and the page says why.
-  for (const topics of [undefined, []]) {
-    const unread = Object.assign({}, named, { originalTopics: topics });
-    const v = view(TWO_PERSON, { request: unread });
-    assert.equal(consoleApprovalOffered(v), false);
-    const page = renderConsoleApprovalPanel(v);
-    assert.ok(!/id="approve-in-console"/.test(page), "nobody approves names they were not shown");
-    if (topics === undefined) {
-      assert.match(page, /id="request-topics-unread"/);
-    }
-  }
-  // NEGATIVE CONTROL: an ordinary request has no such block, and its button
-  // does not wait on one.
+  // NEGATIVE CONTROL: an ordinary request marks no name original.
   const ordinary = renderConsoleApprovalPanel(view(TWO_PERSON));
   assert.ok(!/id="request-original-topics"/.test(ordinary));
-  assert.match(ordinary, /id="approve-in-console"/);
+  assert.ok(!ordinary.includes("original name</strong>"));
+});
+
+// ======================================== what is approved is what was shown
+
+/** A pending request whose scope names `n` topics of `width` characters. */
+function scoped(n, width) {
+  const r = structuredClone(request("pending"));
+  r.scope.topics = Array.from({ length: n }, (_, i) => {
+    const stem = "t" + String(i).padStart(5, "0") + "-";
+    const name = stem + "x".repeat(Math.max(0, width - stem.length));
+    return { source: name, target: "restore-20260907T140500Z-" + name, originalName: false };
+  });
+  r.scope.topicsCount = n;
+  return r;
+}
+
+test("an_ordinary_request_shows_the_whole_scope_and_not_only_a_hash", () => {
+  // The mapping and the target cluster are part of what is approved, for an
+  // ordinary restore too (the coordinator's addition 6, point 3).
+  const html = renderConsoleApprovalPanel(view(TWO_PERSON));
+  assert.match(html, /id="approval-scope"/);
+  assert.ok(html.includes("<span id=\"scope-target-cluster\"><code>kafka-0.target:9092</code>, " +
+    "<code>kafka-1.target:9092</code></span>"), html);
+  assert.ok(html.includes("<li><code>orders</code> restored as " +
+    "<code>restore-20260907T140500Z-orders</code>, every partition</li>"), html);
+  assert.ok(html.includes("<li><code>payments</code> restored as " +
+    "<code>restore-20260907T140500Z-payments</code>, every partition</li>"));
+  assert.ok(html.includes("<code>s3://kafka-backups/drill-demo</code> at " +
+    "<code>http://localhost:9000</code>"), "the source archive");
+  assert.ok(html.includes("(over plain HTTP)"), "a plain-HTTP archive says so");
+  assert.ok(html.includes("<code>01JB7Z0000000000000000000B</code>"), "the backup set");
+  assert.ok(html.includes("2026-09-07T14:05:00Z"), "the recovery point");
+  assert.ok(html.includes("the archive's floor"), "restored from the floor");
+  assert.ok(html.includes("sampled over"), "the verification coverage");
+  assert.ok(html.includes("<code>restore-20260907T140500Z-</code>"), "the prefix");
+  assert.ok(html.includes("<code>s3://logweir-evidence/logweir/</code>"), "the evidence");
+  assert.ok(html.includes("2 topic(s), every one listed"));
+  // A partition subset is listed number by number.
+  const subset = structuredClone(request("pending"));
+  subset.scope.topics[0].partitions = [0, 2, 5];
+  assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: subset }))
+    .includes("restore-20260907T140500Z-orders</code>, partitions 0, 2, 5</li>"));
+});
+
+test("a_request_at_the_bound_renders_every_topic_by_count_and_by_name", () => {
+  const BOUND = 1024;
+  const r = scoped(BOUND, 12);
+  const v = view(TWO_PERSON, { request: r });
+  assert.equal(consoleApprovalOffered(v), true);
+  const html = renderConsoleApprovalPanel(v);
+  const items = html.match(/<li><code>t\d{5}-x*<\/code> restored as /g) || [];
+  assert.equal(items.length, BOUND, "every topic, counted");
+  for (const index of [0, BOUND / 2, BOUND - 1]) {
+    const name = r.scope.topics[index].source;
+    assert.ok(html.includes("<li><code>" + name + "</code> restored as <code>" +
+      "restore-20260907T140500Z-" + name + "</code>"), "topic " + String(index));
+  }
+  assert.ok(html.includes(String(BOUND) + " topic(s), every one listed"));
+  assert.ok(!/more are in the plan|and \d+ more|not listed here/.test(html), "no slice");
+  assert.match(html, /<ol class="approval-scope-topics" id="scope-topics" tabindex="0"/,
+    "the list scrolls inside the panel and is reachable by keyboard");
+});
+
+test("a_scope_the_server_says_is_incomplete_is_never_approvable_from_the_page", () => {
+  const incomplete = request("scope-incomplete");
+  const v = view(TWO_PERSON, { request: incomplete });
+  assert.equal(consoleApprovalOffered(v), false);
+  const html = renderConsoleApprovalPanel(v);
+  assert.match(html, /id="scope-incomplete"/);
+  assert.ok(html.includes("1025 topics") && html.includes("Split it"), html);
+  assert.ok(!/id="approval-scope"/.test(html), "no part of a scope is shown");
+  assert.ok(!/id="approve-in-console"/.test(html));
+  // EVEN IF the server's offer said yes: the page does not draw the button
+  // beside a scope it cannot show whole.
+  const inconsistent = [
+    Object.assign({}, incomplete, { approve: { offered: true, sentence: "go" } }),
+    Object.assign(structuredClone(request("pending")), { scopeComplete: false }),
+    (() => { const r = structuredClone(request("pending")); r.scope.topicsCount = 3; return r; })(),
+    (() => { const r = structuredClone(request("pending")); r.scope.topics = []; r.scope.topicsCount = 0; return r; })(),
+    (() => { const r = structuredClone(request("pending")); delete r.scope; return r; })(),
+  ];
+  for (const r of inconsistent) {
+    const page = renderConsoleApprovalPanel(view(TWO_PERSON, { request: r }));
+    assert.equal(consoleApprovalOffered(view(TWO_PERSON, { request: r })), false);
+    assert.ok(!/id="approve-in-console"/.test(page), JSON.stringify(r.scope));
+    assert.ok(!/id="approval-scope"/.test(page));
+  }
+  // NEGATIVE CONTROL: the complete scope is shown and offered.
+  assert.equal(consoleApprovalOffered(view(TWO_PERSON)), true);
+});
+
+test("a_name_of_the_greatest_legal_length_is_shown_whole", () => {
+  const longest = "n".repeat(249);
+  const r = structuredClone(request("original-name"));
+  r.scope.topics = [{ source: longest, target: longest, originalName: true }];
+  r.scope.topicsCount = 1;
+  const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: r }));
+  assert.ok(html.includes("<li><code>" + longest + "</code> restored as <code>" + longest +
+    "</code>"), "every character of the name");
+  const css = readFileSync(fileURLToPath(new URL("../style.css", import.meta.url)), "utf8");
+  const rule = (selector) => {
+    const at = css.indexOf(selector + " {");
+    assert.ok(at !== -1, selector + " is styled");
+    return css.slice(at, css.indexOf("}", at));
+  };
+  const list = rule(".approval-scope-topics");
+  assert.match(list, /overflow-y: auto/, "a long list scrolls inside the panel");
+  for (const clip of ["text-overflow", "white-space: nowrap", "overflow: hidden",
+    "overflow-x: hidden", "-webkit-line-clamp"]) {
+    assert.ok(!list.includes(clip), clip);
+  }
+  assert.match(rule(".approval-scope-topics li,\n.approval-scope dd"), /overflow-wrap: anywhere/,
+    "a long name wraps");
 });
 
 test("every_fact_of_the_request_is_rendered_as_text", () => {
-  const hostile = Object.assign({}, request("original-name"), {
+  const hostile = structuredClone(request("original-name"));
+  Object.assign(hostile, {
     requester: "https://idp.example#<img src=x onerror=alert(1)>",
     ticket: "\"><script>alert(2)</script>",
     policy: "<b>prod</b>",
     stateSentence: "<i>waiting</i>",
-    originalTopics: ["<svg onload=alert(3)>", "orders"],
     approve: { offered: true, sentence: "<u>approve</u> & run" },
   });
+  hostile.scope.topics = [
+    { source: "<svg onload=alert(3)>", target: "<svg onload=alert(3)>", originalName: true },
+    { source: "orders", target: "orders", originalName: true },
+  ];
+  hostile.scope.target.bootstrapServers = ["<a href=x>broker</a>"];
+  hostile.scope.source.storage.location = "s3://<em>bucket</em>";
   const html = renderApprovalSubject(view(
     Object.assign({}, TWO_PERSON, { name: "<em>pair</em>" }), { request: hostile },
   ));
-  for (const raw of ["<img", "<script>", "<b>prod", "<i>waiting", "<svg", "<u>approve", "<em>pair"]) {
+  for (const raw of ["<img", "<script>", "<b>prod", "<i>waiting", "<svg", "<u>approve", "<em>",
+    "<a href=x>"]) {
     assert.ok(!html.includes(raw), raw + " reached the page as markup");
   }
   for (const text of ["&lt;img src=x onerror=alert(1)&gt;", "&lt;script&gt;alert(2)&lt;/script&gt;",
     "&lt;b&gt;prod&lt;/b&gt;", "&lt;i&gt;waiting&lt;/i&gt;", "&lt;svg onload=alert(3)&gt;",
-    "&lt;u&gt;approve&lt;/u&gt; &amp; run", "&lt;em&gt;pair&lt;/em&gt;"]) {
+    "&lt;u&gt;approve&lt;/u&gt; &amp; run", "&lt;em&gt;pair&lt;/em&gt;",
+    "&lt;a href=x&gt;broker&lt;/a&gt;", "s3://&lt;em&gt;bucket&lt;/em&gt;"]) {
     assert.ok(html.includes(text), text + " is shown as text");
   }
 });

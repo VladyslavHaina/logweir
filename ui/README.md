@@ -849,23 +849,29 @@ the page is built so that there is nowhere to do any of that:
   nothing created.
 * **The approvals page** reads `GET .../restores/{name}/approval-request` and
   renders the request **as the server shows it** (`renderConsoleApprovalPanel`):
-  who asked, the Restore and its UID, the plan hash, what is approved, the
-  policy and its digest, the ticket, when it was asked and when it expires --
-  and, for a restore under the original topic names, **the names themselves**.
-  Every one of those is the server's, taken from bytes the console verified its
-  own signature on, and every one is rendered as text. The page never reads the
+  who asked, the Restore and its UID, the plan hash, the policy and its digest,
+  the ticket, when it was asked and when it expires -- and **the whole approval
+  scope** (`renderApprovalScope`): the source archive and backup set, the
+  recovery point, the target cluster's bootstrap servers, **every topic and the
+  name it is restored under** (original names marked, partition subsets listed
+  number by number), the verification and where the evidence goes. Every one of
+  those is the server's, taken from bytes the console verified its own
+  signature on and the plan they name by hash, and every one is rendered as
+  text. The topic list is never sliced: it scrolls inside the panel
+  (`.approval-scope-topics`) and a long name wraps. The page never reads the
   stored confirmation in this mode, never parses a document, and shows none.
   A request the console did not confirm shows its state sentence and **no
   field**.
 * **The Approve button is drawn only when the server offered it**
   (`consoleApprovalOffered`): the view's `approve.offered` is exactly `true`
   for a `pending` request of this Restore's name and UID, it carries a
-  well-formed `confirmationSha256`, the login holds `approvalSubmit`, and the
-  link agrees with the Restore. Otherwise the page shows the server's own
-  sentence -- you are the requester, you are not an approver here, the request
-  expired, it is already approved. An original-name request whose topic names
-  could not be read is never offered a button: nobody approves names they were
-  not shown.
+  well-formed `confirmationSha256`, the login holds `approvalSubmit`, the link
+  agrees with the Restore, and **the server said the scope is complete**
+  (`scopeComplete: true`, with as many topics as its `topicsCount`). Otherwise
+  the page shows the server's own sentence -- you are the requester, you are not
+  an approver here, the request expired, it is already approved, or it cannot
+  be shown in full (`scopeSentence`: split the restore, or approve it under
+  `strict`).
 * **The click sends one value** (`submitConsoleApproval`, `POST
   .../restores/{name}/console-approval`): `confirmationSha256`, the hash of the
   request that was shown, exactly as the server gave it. It names what was

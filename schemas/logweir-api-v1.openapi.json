@@ -5505,6 +5505,7 @@
           "policyDigest",
           "restore",
           "restoreUid",
+          "scopeComplete",
           "state",
           "stateSentence"
         ],
@@ -5558,21 +5559,6 @@
             "description": "The namespace.",
             "type": "string"
           },
-          "originalTopics": {
-            "description": "For a restore under the original topic names: the names, from the Restore's own plan (at most 100; `originalTopicsCount` says how many there are). Absent for an ordinary restore, and when the plan does not parse.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "nullable": true
-          },
-          "originalTopicsCount": {
-            "description": "How many original topic names the plan restores.",
-            "type": "integer",
-            "format": "uint",
-            "minimum": 0.0,
-            "nullable": true
-          },
           "planHash": {
             "description": "The plan hash the request names — the Restore's own, recomputed.",
             "type": "string",
@@ -5598,6 +5584,25 @@
           "restoreUid": {
             "description": "That Restore's UID, now.",
             "type": "string"
+          },
+          "scope": {
+            "description": "The approval scope: source, recovery point, target cluster, every topic and the name it is restored under, any partition subset and the verification coverage — from the plan the request names by hash. Present exactly when `scopeComplete`.",
+            "$ref": "#/components/schemas/ApprovalScopeView",
+            "nullable": true
+          },
+          "scopeComplete": {
+            "description": "Whether `scope` is everything a second person approves, in full. `false` for a request that cannot be shown whole — its plan is not the one the request names, cannot be read, names more topics than a request shows, or carries a value a page cannot show faithfully — and then nobody is offered it and the click refuses it by name. Always `false` for a request that is not confirmed.",
+            "type": "boolean"
+          },
+          "scopeIncomplete": {
+            "description": "Why the scope is not complete: a stable word (`tooManyTopics`, `planUnreadable`, …). Absent when it is.",
+            "type": "string",
+            "nullable": true
+          },
+          "scopeSentence": {
+            "description": "One sentence saying why and what to do. Absent when it is complete.",
+            "type": "string",
+            "nullable": true
           },
           "state": {
             "description": "Where the request stands.",
@@ -5633,6 +5638,59 @@
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          }
+        }
+      },
+      "ApprovalScopeView": {
+        "description": "PROD-16.2: **the approval scope** — everything a second person approves beside the request's own fields (requester, Restore, plan hash, subject, policy, ticket, expiry). Every value comes from the plan the request names by hash, never from a field of the Restore object; `topics` is EVERY topic, never a slice (`topicsCount` is its length, restated so a page can check it rendered them all). Present only when it is complete.",
+        "type": "object",
+        "required": [
+          "evidence",
+          "recovery",
+          "source",
+          "target",
+          "topics",
+          "topicsCount",
+          "verification"
+        ],
+        "properties": {
+          "evidence": {
+            "description": "Where the evidence is written.",
+            "$ref": "#/components/schemas/ScopeStorageView"
+          },
+          "planName": {
+            "description": "The plan's own name, when it states one.",
+            "type": "string",
+            "nullable": true
+          },
+          "recovery": {
+            "description": "The instant restored to and the window restored from.",
+            "$ref": "#/components/schemas/ScopeRecoveryView"
+          },
+          "source": {
+            "description": "Where the records come from.",
+            "$ref": "#/components/schemas/ScopeSourceView"
+          },
+          "target": {
+            "description": "The cluster written into.",
+            "$ref": "#/components/schemas/ScopeTargetView"
+          },
+          "topics": {
+            "description": "Every source topic and the name it is restored under, in the plan's order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeTopicView"
+            }
+          },
+          "topicsCount": {
+            "description": "How many topics the plan names: always `topics`' length.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "verification": {
+            "description": "How the restore is checked.",
+            "$ref": "#/components/schemas/ScopeVerificationView"
           }
         }
       },
@@ -5721,6 +5779,13 @@
             "type": "string",
             "enum": [
               "notSecondPerson"
+            ]
+          },
+          {
+            "description": "The request cannot be shown in full (`scopeComplete: false`), so nobody is offered it: a second person approves only what they were shown, all of it. The click is refused for the same reason.",
+            "type": "string",
+            "enum": [
+              "scopeIncomplete"
             ]
           }
         ]
@@ -14059,6 +14124,185 @@
             "description": "The retention report.",
             "$ref": "#/components/schemas/RetentionReportView",
             "nullable": true
+          }
+        }
+      },
+      "ScopeRecoveryView": {
+        "description": "PROD-16.2: the instant restored to, and the window restored from.",
+        "type": "object",
+        "required": [
+          "pointInTime",
+          "pointInTimeStated"
+        ],
+        "properties": {
+          "pointInTime": {
+            "description": "The recovery point.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "pointInTimeStated": {
+            "description": "Whether the plan states it (`restore.point_in_time`); when it does not, the recovery point is the end of the plan's check window.",
+            "type": "boolean"
+          },
+          "timeBasis": {
+            "description": "`producerTime` when the plan accepts producer time for its selection.",
+            "type": "string",
+            "nullable": true
+          },
+          "windowStart": {
+            "description": "The inclusive start of the replayed window, when the plan narrows it; absent restores from the archive's floor.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ScopeSourceView": {
+        "description": "PROD-16.2: where a restore's records come from.",
+        "type": "object",
+        "required": [
+          "backup",
+          "storage"
+        ],
+        "properties": {
+          "backup": {
+            "description": "The backup set: an id, or `latestCompleted`.",
+            "type": "string"
+          },
+          "pointId": {
+            "description": "The catalog point the plan is bound to, when it names one.",
+            "type": "string",
+            "nullable": true
+          },
+          "receiptSha256": {
+            "description": "That point's signed receipt, by digest.",
+            "type": "string",
+            "nullable": true
+          },
+          "storage": {
+            "description": "The archive.",
+            "$ref": "#/components/schemas/ScopeStorageView"
+          }
+        }
+      },
+      "ScopeStorageView": {
+        "description": "PROD-16.2: an object-store location a plan names, in the parts a reviewer reads. Never a credential: a plan carries none.",
+        "type": "object",
+        "required": [
+          "backend",
+          "location",
+          "plaintextHttp"
+        ],
+        "properties": {
+          "backend": {
+            "description": "`s3`, `azure`, `gcs` or `filesystem`.",
+            "type": "string"
+          },
+          "endpoint": {
+            "description": "The S3 endpoint the plan states.",
+            "type": "string",
+            "nullable": true
+          },
+          "location": {
+            "description": "The location in one line, e.g. `s3://bucket/prefix`.",
+            "type": "string"
+          },
+          "plaintextHttp": {
+            "description": "Whether the plan allows this location over plain HTTP.",
+            "type": "boolean"
+          },
+          "region": {
+            "description": "The S3 region the plan states.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ScopeTargetView": {
+        "description": "PROD-16.2: the cluster a restore writes into, as its plan states it.",
+        "type": "object",
+        "required": [
+          "authMode",
+          "bootstrapServers",
+          "mode",
+          "topicPrefix"
+        ],
+        "properties": {
+          "authMode": {
+            "description": "How it authenticates there (`plaintext`, `scramSha512`, …).",
+            "type": "string"
+          },
+          "bootstrapServers": {
+            "description": "The bootstrap servers the runner dials.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
+            "description": "`scratch` or `newTopic`.",
+            "type": "string"
+          },
+          "topicPrefix": {
+            "description": "The prefix every source topic is mapped through; empty for a restore under the original topic names.",
+            "type": "string"
+          }
+        }
+      },
+      "ScopeTopicView": {
+        "description": "PROD-16.2: one source topic and the name it is restored under.",
+        "type": "object",
+        "required": [
+          "originalName",
+          "source",
+          "target"
+        ],
+        "properties": {
+          "originalName": {
+            "description": "Whether this is a write under the source's ORIGINAL name.",
+            "type": "boolean"
+          },
+          "partitions": {
+            "description": "The partitions restored, when the plan narrows this topic to a subset: every number, never a count. Absent is every partition.",
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "nullable": true
+          },
+          "source": {
+            "description": "The topic in the archive.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The topic written on the target.",
+            "type": "string"
+          }
+        }
+      },
+      "ScopeVerificationView": {
+        "description": "PROD-16.2: how the restore is checked afterwards.",
+        "type": "object",
+        "required": [
+          "coverage",
+          "windowEnd",
+          "windowStart"
+        ],
+        "properties": {
+          "coverage": {
+            "description": "`sampled` or `complete`.",
+            "type": "string"
+          },
+          "windowEnd": {
+            "description": "Its end.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "windowStart": {
+            "description": "The window the check reads.",
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

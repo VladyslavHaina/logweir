@@ -4129,6 +4129,135 @@ pub enum ApproveRefusal {
     /// person: it is not in a form that can be compared, it is a machine
     /// identity, or the two come from different issuers.
     NotSecondPerson,
+    /// The request cannot be shown in full (`scopeComplete: false`), so
+    /// nobody is offered it: a second person approves only what they were
+    /// shown, all of it. The click is refused for the same reason.
+    ScopeIncomplete,
+}
+
+/// PROD-16.2: an object-store location a plan names, in the parts a reviewer
+/// reads. Never a credential: a plan carries none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeStorageView {
+    /// `s3`, `azure`, `gcs` or `filesystem`.
+    pub backend: String,
+    /// The location in one line, e.g. `s3://bucket/prefix`.
+    pub location: String,
+    /// The S3 endpoint the plan states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The S3 region the plan states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Whether the plan allows this location over plain HTTP.
+    pub plaintext_http: bool,
+}
+
+/// PROD-16.2: where a restore's records come from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeSourceView {
+    /// The archive.
+    pub storage: ScopeStorageView,
+    /// The backup set: an id, or `latestCompleted`.
+    pub backup: String,
+    /// The catalog point the plan is bound to, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_id: Option<String>,
+    /// That point's signed receipt, by digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// PROD-16.2: the instant restored to, and the window restored from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeRecoveryView {
+    /// The recovery point.
+    pub point_in_time: DateTime<Utc>,
+    /// Whether the plan states it (`restore.point_in_time`); when it does
+    /// not, the recovery point is the end of the plan's check window.
+    pub point_in_time_stated: bool,
+    /// The inclusive start of the replayed window, when the plan narrows it;
+    /// absent restores from the archive's floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_start: Option<DateTime<Utc>>,
+    /// `producerTime` when the plan accepts producer time for its selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<String>,
+}
+
+/// PROD-16.2: the cluster a restore writes into, as its plan states it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTargetView {
+    /// The bootstrap servers the runner dials.
+    pub bootstrap_servers: Vec<String>,
+    /// How it authenticates there (`plaintext`, `scramSha512`, …).
+    pub auth_mode: String,
+    /// `scratch` or `newTopic`.
+    pub mode: String,
+    /// The prefix every source topic is mapped through; empty for a restore
+    /// under the original topic names.
+    pub topic_prefix: String,
+}
+
+/// PROD-16.2: one source topic and the name it is restored under.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTopicView {
+    /// The topic in the archive.
+    pub source: String,
+    /// The topic written on the target.
+    pub target: String,
+    /// Whether this is a write under the source's ORIGINAL name.
+    pub original_name: bool,
+    /// The partitions restored, when the plan narrows this topic to a
+    /// subset: every number, never a count. Absent is every partition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<i32>>,
+}
+
+/// PROD-16.2: how the restore is checked afterwards.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeVerificationView {
+    /// `sampled` or `complete`.
+    pub coverage: String,
+    /// The window the check reads.
+    pub window_start: DateTime<Utc>,
+    /// Its end.
+    pub window_end: DateTime<Utc>,
+}
+
+/// PROD-16.2: **the approval scope** — everything a second person approves
+/// beside the request's own fields (requester, Restore, plan hash, subject,
+/// policy, ticket, expiry). Every value comes from the plan the request names
+/// by hash, never from a field of the Restore object; `topics` is EVERY
+/// topic, never a slice (`topicsCount` is its length, restated so a page can
+/// check it rendered them all). Present only when it is complete.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalScopeView {
+    /// The plan's own name, when it states one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// Where the records come from.
+    pub source: ScopeSourceView,
+    /// The instant restored to and the window restored from.
+    pub recovery: ScopeRecoveryView,
+    /// The cluster written into.
+    pub target: ScopeTargetView,
+    /// Every source topic and the name it is restored under, in the plan's
+    /// order.
+    pub topics: Vec<ScopeTopicView>,
+    /// How many topics the plan names: always `topics`' length.
+    pub topics_count: usize,
+    /// How the restore is checked.
+    pub verification: ScopeVerificationView,
+    /// Where the evidence is written.
+    pub evidence: ScopeStorageView,
 }
 
 /// Whether this session may approve, decided by the server with the same
@@ -4182,15 +4311,26 @@ pub struct ApprovalRequestView {
     /// topic names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_subject: Option<ApprovalSubjectView>,
-    /// For a restore under the original topic names: the names, from the
-    /// Restore's own plan (at most 100; `originalTopicsCount` says how many
-    /// there are). Absent for an ordinary restore, and when the plan does not
-    /// parse.
+    /// Whether `scope` is everything a second person approves, in full.
+    /// `false` for a request that cannot be shown whole — its plan is not the
+    /// one the request names, cannot be read, names more topics than a
+    /// request shows, or carries a value a page cannot show faithfully — and
+    /// then nobody is offered it and the click refuses it by name. Always
+    /// `false` for a request that is not confirmed.
+    pub scope_complete: bool,
+    /// Why the scope is not complete: a stable word (`tooManyTopics`,
+    /// `planUnreadable`, …). Absent when it is.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub original_topics: Option<Vec<String>>,
-    /// How many original topic names the plan restores.
+    pub scope_incomplete: Option<String>,
+    /// One sentence saying why and what to do. Absent when it is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub original_topics_count: Option<usize>,
+    pub scope_sentence: Option<String>,
+    /// The approval scope: source, recovery point, target cluster, every
+    /// topic and the name it is restored under, any partition subset and the
+    /// verification coverage — from the plan the request names by hash.
+    /// Present exactly when `scopeComplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ApprovalScopeView>,
     /// The change ticket the requester gave.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,

@@ -1423,20 +1423,113 @@ export function consoleApprovalOffered(view) {
   if (r.restore !== s.name || r.restoreUid !== s.uid) {
     return false;
   }
-  // A restore under the original topic names is approved with the names in
-  // front of the approver, or not from this page: a plan whose names the
-  // server could not read is not something to approve unseen.
-  if (r.approvalSubject === "originalName" &&
-    !(Array.isArray(r.originalTopics) && r.originalTopics.length > 0)) {
+  // WHAT IS APPROVED IS WHAT WAS SHOWN (PROD-16.2, the coordinator's
+  // addition 6). The server says whether the scope it sent is the whole of
+  // what is approved; the page draws the button only beside a scope it can
+  // render in full, every topic of it. The approve route refuses an
+  // incomplete scope on its own: this decides what is DRAWN.
+  if (scopeShowable(r) === null) {
     return false;
   }
   return typeof r.confirmationSha256 === "string" && SHA256.test(r.confirmationSha256);
 }
 
+/** The scope a request view carries, when the SERVER said it is complete and
+ *  it is whole on arrival: a topic list as long as the count the server
+ *  stated, and not empty. `null` otherwise -- and then nothing is offered. */
+export function scopeShowable(request) {
+  const r = request || {};
+  const scope = r.scope;
+  if (r.scopeComplete !== true || scope === null || typeof scope !== "object") {
+    return null;
+  }
+  const topics = scope.topics;
+  if (!Array.isArray(topics) || topics.length === 0 || topics.length !== scope.topicsCount) {
+    return null;
+  }
+  return scope;
+}
+
+/** One object-store location of a scope, as text. */
+function scopeStorageWords(storage) {
+  const st = storage || {};
+  return "<code>" + esc(st.location) + "</code>" +
+    (typeof st.endpoint === "string" ? " at <code>" + esc(st.endpoint) + "</code>" : "") +
+    (typeof st.region === "string" ? ", region <code>" + esc(st.region) + "</code>" : "") +
+    (st.plaintextHttp === true ? " <strong>(over plain HTTP)</strong>" : "");
+}
+
+/** THE APPROVAL SCOPE, ALL OF IT (PROD-16.2). Source, recovery point, target
+ *  cluster, EVERY topic and the name it is restored under -- original names
+ *  marked, partition subsets listed number by number -- the verification and
+ *  where the evidence goes. Never a slice and never "and N more": the list
+ *  scrolls inside the panel (`.approval-scope-topics`) and a long name wraps;
+ *  nothing clips or ellipsizes it. Every value is escaped text. */
+export function renderApprovalScope(scope) {
+  const sc = scope || {};
+  const source = sc.source || {};
+  const recovery = sc.recovery || {};
+  const target = sc.target || {};
+  const verification = sc.verification || {};
+  const topics = Array.isArray(sc.topics) ? sc.topics : [];
+  const original = topics.some((t) => (t || {}).originalName === true);
+  const servers = Array.isArray(target.bootstrapServers) ? target.bootstrapServers : [];
+  const rows = [
+    ["plan", typeof sc.planName === "string" ? "<code>" + esc(sc.planName) + "</code>" : cell(null)],
+    ["source archive", scopeStorageWords(source.storage)],
+    ["backup set", "<code>" + esc(source.backup) + "</code>"],
+    ["recovery point", typeof source.pointId === "string"
+      ? "<code>" + esc(source.pointId) + "</code> (receipt <code>" + esc(source.receiptSha256) +
+        "</code>)"
+      : cell(null)],
+    ["restored to", when(recovery.pointInTime) +
+      (recovery.pointInTimeStated === true ? "" : " (the end of the check window)")],
+    ["restored from", typeof recovery.windowStart === "string"
+      ? when(recovery.windowStart)
+      : "the archive's floor"],
+    ["time basis", typeof recovery.timeBasis === "string" ? esc(recovery.timeBasis) : cell(null)],
+    ["target cluster", "<span id=\"scope-target-cluster\">" +
+      servers.map((b) => "<code>" + esc(b) + "</code>").join(", ") + "</span>"],
+    ["target authentication", esc(target.authMode)],
+    ["target mode", esc(target.mode)],
+    ["topic prefix", typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
+      ? "<code>" + esc(target.topicPrefix) + "</code>"
+      : "none: every topic is written under its own name"],
+    ["verification", esc(verification.coverage) + " over " + when(verification.windowStart) +
+      " to " + when(verification.windowEnd)],
+    ["evidence", scopeStorageWords(sc.evidence)],
+  ];
+  const list = topics.map((t) => {
+    const topic = t || {};
+    return "<li><code>" + esc(topic.source) + "</code> restored as <code>" + esc(topic.target) +
+      "</code>" +
+      (topic.originalName === true ? " <strong class=\"original-name\">original name</strong>" : "") +
+      (Array.isArray(topic.partitions)
+        ? ", partitions " + topic.partitions.map((n) => esc(String(n))).join(", ")
+        : ", every partition") +
+      "</li>";
+  }).join("");
+  return (
+    "<div class=\"approval-scope\" id=\"approval-scope\"><h4>What you approve</h4>" +
+    "<p class=\"note\">Everything below is read from the plan this request names by hash, " +
+    "which the console's signature covers; none of it from the Restore object. Approving " +
+    "approves all of it.</p>" +
+    facts(rows) +
+    (original ? "<p class=\"caveat\" id=\"request-original-topics\">" +
+      esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>" : "") +
+    "<p class=\"note\" id=\"scope-topic-count\">" + esc(String(topics.length)) +
+    " topic(s), every one listed:</p>" +
+    "<ol class=\"approval-scope-topics\" id=\"scope-topics\" tabindex=\"0\" " +
+    "aria-label=\"every topic restored and the name it is restored under\">" + list + "</ol>" +
+    "</div>"
+  );
+}
+
 /** THE SECOND PERSON'S PANEL (PROD-16.2). What is being approved -- who asked,
  *  for which Restore and plan, under which policy, with which ticket, until
- *  when, and for a restore under the original topic names, WHICH names -- and
- *  ONE button, or the sentence saying why this login has none.
+ *  when, and THE WHOLE SCOPE: the source, the recovery point, the target
+ *  cluster, every topic and the name it is restored under -- and ONE button,
+ *  or the sentence saying why this login has none.
  *
  *  EVERY FACT IS THE SERVER'S, AND EVERY ONE IS TEXT. The request view carries
  *  them from bytes the console verified its own signature on; a request that
@@ -1487,8 +1580,6 @@ export function renderConsoleApprovalPanel(view) {
   if (r.state === "notConfirmed" || typeof r.requester !== "string") {
     return open + stateLine + "</section>";
   }
-  const topics = Array.isArray(r.originalTopics) ? r.originalTopics : null;
-  const count = typeof r.originalTopicsCount === "number" ? r.originalTopicsCount : null;
   const original = r.approvalSubject === "originalName";
   const rows = [
     ["requested by", "<code id=\"request-requester\">" + esc(r.requester) + "</code>"],
@@ -1507,23 +1598,16 @@ export function renderConsoleApprovalPanel(view) {
     rows.push(["approved by", "<code id=\"request-approver\">" + esc(r.approver) + "</code>"]);
     rows.push(["approved at", when(r.approvedAt)]);
   }
-  const originalBlock = !original
-    ? ""
-    : "<div class=\"caveat\" id=\"request-original-topics\"><p>" +
-      esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>" +
-      (topics === null
-        ? "<p class=\"complaint\" id=\"request-topics-unread\">The topic names could not be " +
-          "read from this Restore's plan, so this page offers no approval for it: nobody " +
-          "approves writing under names they were not shown.</p>"
-        : "<p>Approving this approves writing under " +
-          (count === null ? "these" : "these " + esc(String(count))) +
-          " original topic name(s):</p><ul class=\"sets\">" +
-          topics.map((t) => "<li><code>" + esc(t) + "</code></li>").join("") + "</ul>" +
-          (count !== null && count > topics.length
-            ? "<p class=\"note\">" + esc(String(count - topics.length)) + " more are in the " +
-              "plan and are not listed here.</p>"
-            : "")) +
-      "</div>";
+  // THE SCOPE, WHOLE, or the server's sentence saying why it cannot be
+  // shown -- never a part of it.
+  const shownScope = scopeShowable(r);
+  const scopeBlock = shownScope !== null
+    ? renderApprovalScope(shownScope)
+    : "<p class=\"complaint\" id=\"scope-incomplete\">" +
+      esc(typeof r.scopeSentence === "string" && r.scopeSentence.length > 0
+        ? r.scopeSentence
+        : "What this request approves could not be shown in full, so it cannot be approved " +
+          "here.") + "</p>";
   const offer = r.approve || {};
   const action = consoleApprovalOffered(v)
     ? "<form id=\"console-approval-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") +
@@ -1540,7 +1624,7 @@ export function renderConsoleApprovalPanel(view) {
         : (typeof offer.sentence === "string" && offer.sentence.length > 0
           ? offer.sentence
           : "This login is not offered an approval for this request.")) + "</p>";
-  return open + stateLine + facts(rows) + originalBlock + action + "</section>";
+  return open + stateLine + facts(rows) + scopeBlock + action + "</section>";
 }
 
 /** Sends the second person's approval, or refuses before anything is sent:

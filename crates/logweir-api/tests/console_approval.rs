@@ -464,7 +464,31 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
         logweir_core::ids::sha256_prefixed(request_bytes.as_bytes())
     );
     assert_eq!(item["approve"]["offered"], true, "{item}");
-    assert!(item.get("originalTopics").is_none());
+    // THE SCOPE: every topic and the name it is restored under, the target
+    // cluster, the source and the coverage, from the plan the request names.
+    assert_eq!(item["scopeComplete"], true, "{item}");
+    assert!(item.get("scopeIncomplete").is_none());
+    let scope = &item["scope"];
+    assert_eq!(scope["topicsCount"], 2);
+    assert_eq!(
+        scope["topics"],
+        json!([
+            {"source": "orders", "target": "restore-20260907T140500Z-orders", "originalName": false},
+            {"source": "payments", "target": "restore-20260907T140500Z-payments", "originalName": false}
+        ])
+    );
+    assert_eq!(
+        scope["target"]["bootstrapServers"],
+        json!(["localhost:9092"])
+    );
+    assert_eq!(scope["target"]["mode"], "newTopic");
+    assert_eq!(
+        scope["source"]["storage"]["location"],
+        "s3://kafka-backups/drill-demo"
+    );
+    assert_eq!(scope["source"]["backup"], "01JB7Z0000000000000000000B");
+    assert_eq!(scope["recovery"]["pointInTime"], "2026-09-07T14:05:00Z");
+    assert_eq!(scope["verification"]["coverage"], "sampled");
     let before = approvals_posted(&app.app.fake);
 
     // The click, a minute later.
@@ -562,6 +586,10 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
     assert_eq!(notes["requester"], format!("{ISSUER}#alice"));
     assert_eq!(notes["approverPrincipal"], format!("{ISSUER}#bob"));
     assert_eq!(notes["separation"], "distinct");
+    // The scope was shown complete: every topic of the plan, counted twice.
+    assert_eq!(notes["scope"], "complete");
+    assert_eq!(notes["scopeTopicsShown"], "2");
+    assert_eq!(notes["scopeTopicsInPlan"], "2");
     assert_eq!(notes["approval"], format!("{NS_A}/{}", r.approval));
     assert!(notes["approvedAt"].is_string() && notes["expiresAt"].is_string());
 
@@ -1904,6 +1932,16 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     let (app, console) = pair_app();
     let alice = signed_in(&app, "alice", &["ops"]);
     let mut body = restore_request("approval-original");
+    // THE PLAN OF AN ORIGINAL-NAME RESTORE: the scope a second person is
+    // shown comes from these bytes, and an original-name request over a plan
+    // that writes under a prefix is not one (its scope is incomplete).
+    let plan = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ui/tests/fixtures/plan-original-name.golden.yaml"),
+    )
+    .expect("the original-name plan golden");
+    body["planBytes"] = json!(plan);
+    body["planHash"] = json!(logweir_core::ids::sha256_prefixed(plan.as_bytes()));
     body["target"]["topicNaming"] = json!({"prefix": "", "originalName": true});
     body["coverage"] = json!("complete");
     // Typed names: not accepted where a second person approves.
@@ -1938,12 +1976,17 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     let item = view(&app, &bob, &r.restore).await.json()["item"].clone();
     assert_eq!(item["state"], "pending", "{item}");
     assert_eq!(item["approvalSubject"], "originalName");
+    assert_eq!(item["scopeComplete"], true, "{item}");
     assert_eq!(
-        item["originalTopics"],
-        json!(["orders", "payments"]),
+        item["scope"]["topics"],
+        json!([
+            {"source": "orders", "target": "orders", "originalName": true},
+            {"source": "payments", "target": "payments", "originalName": true}
+        ]),
         "{item}"
     );
-    assert_eq!(item["originalTopicsCount"], 2);
+    assert_eq!(item["scope"]["topicsCount"], 2);
+    assert_eq!(item["scope"]["target"]["topicPrefix"], "");
     let clicked = click(
         &app,
         &bob,
@@ -2269,4 +2312,335 @@ fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
         assert_eq!(route_of(&bound).ok(), Some(ApprovalRoute::SecondPersonInConsole));
     }
     std::fs::remove_dir_all(&dir).expect("removed");
+}
+
+// ---------------------------------------------------------------------------
+// The coordinator's addition 6: what is approved is what was shown
+// ---------------------------------------------------------------------------
+
+/// A plan of the golden's shape over `topics` (the wizard's own grammar),
+/// as a request body for the two-person namespace.
+fn plan_over(topics: &[String]) -> String {
+    let golden = support::golden_plan();
+    let start = golden.find("  topics:\n").expect("the golden lists topics");
+    let end = golden.find("target:\n").expect("then the target");
+    let list: String = topics.iter().map(|t| format!("    - \"{t}\"\n")).collect();
+    format!("{}  topics:\n{list}{}", &golden[..start], &golden[end..])
+}
+
+fn body_over(plan: &str, approval: &str) -> Value {
+    let mut body = restore_request(approval);
+    body["planBytes"] = json!(plan);
+    body["planHash"] = json!(logweir_core::ids::sha256_prefixed(plan.as_bytes()));
+    body
+}
+
+fn topic_names(n: usize, width: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| {
+            let stem = format!("t{i:05}-");
+            format!("{stem}{}", "x".repeat(width.saturating_sub(stem.len())))
+        })
+        .collect()
+}
+
+/// **At the bound, every topic is in the scope; one over, nothing is
+/// requested at all.** A two-person request is made only for a plan a second
+/// person can be shown in full: the largest restore this mode accepts is
+/// `MAX_SCOPE_TOPICS` topics, and one more is refused at the create, by name,
+/// with nothing created. At the bound the view carries every topic — counted,
+/// and checked by first, middle and last — and the click's audit record says
+/// it was shown complete.
+///
+/// KILLS: a view that slices the list; a create that lets a request nobody
+/// can be shown be made.
+#[tokio::test]
+async fn a_request_at_the_bound_shows_every_topic_and_one_over_is_never_made() {
+    use logweir_core::approval_scope::MAX_SCOPE_TOPICS;
+    let (log, _guard) = capture();
+    let (app, _console) = pair_app();
+    let alice = signed_in(&app, "alice", &["ops"]);
+
+    // One over: refused before anything exists.
+    let over = plan_over(&topic_names(MAX_SCOPE_TOPICS + 1, 8));
+    let refused = request_as(&app, &alice, "over", body_over(&over, "approval-over")).await;
+    refused.assert_problem(422, "validation_failed");
+    assert!(
+        refused.text().contains("scope_incomplete")
+            && refused.text().contains("1025 topics")
+            && refused.text().contains("Split it"),
+        "{}",
+        refused.text()
+    );
+    assert_eq!(
+        app.app.fake.count("restores", NS_A),
+        0,
+        "nothing was created"
+    );
+    assert_eq!(approvals_posted(&app.app.fake), 0);
+
+    // At the bound: made, shown whole, approved.
+    let names = topic_names(MAX_SCOPE_TOPICS, 8);
+    let at = plan_over(&names);
+    assert!(at.len() < 256 * 1024, "inside the plan's own byte bound");
+    let created = request_as(&app, &alice, "at", body_over(&at, "approval-at")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("name")
+        .to_string();
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    let seen = view(&app, &bob, &restore).await;
+    assert_eq!(seen.status, 200, "{}", seen.text());
+    let item = seen.json()["item"].clone();
+    assert_eq!(item["scopeComplete"], true);
+    assert_eq!(item["approve"]["offered"], true);
+    let topics = item["scope"]["topics"].as_array().expect("topics");
+    assert_eq!(topics.len(), MAX_SCOPE_TOPICS);
+    assert_eq!(item["scope"]["topicsCount"], MAX_SCOPE_TOPICS);
+    for index in [0, MAX_SCOPE_TOPICS / 2, MAX_SCOPE_TOPICS - 1] {
+        assert_eq!(topics[index]["source"], names[index]);
+        assert_eq!(
+            topics[index]["target"],
+            format!("restore-20260907T140500Z-{}", names[index])
+        );
+    }
+    let sha = item["confirmationSha256"]
+        .as_str()
+        .expect("sha")
+        .to_string();
+    let clicked = click(&app, &bob, &restore, &sha).await;
+    assert_eq!(clicked.status, 201, "{}", clicked.text());
+    let (_, notes) = log.audit(&clicked);
+    assert_eq!(notes["scope"], "complete");
+    assert_eq!(notes["scopeTopicsShown"], MAX_SCOPE_TOPICS.to_string());
+    assert_eq!(notes["scopeTopicsInPlan"], MAX_SCOPE_TOPICS.to_string());
+}
+
+/// **A request the console cannot show in full is offered to nobody, and
+/// the click refuses it by name** — whoever calls it, with the right hash.
+///
+/// Two ways a stored request can name what cannot be shown, each made the
+/// way it could be in the field:
+///
+/// 1. **the Restore's plan is not the one the request names** (a direct edit
+///    of the stored object; the CRD makes `spec` immutable, the fake does
+///    not). The scope comes from the request's signed hash and nothing else,
+///    so the request no longer binds: it is `notConfirmed`, NO scope and no
+///    field is shown, nothing is offered, and a direct POST with the view's
+///    earlier hash is refused (`confirmation_not_bound`);
+/// 2. **a request over a plan too large to show**, signed by this console's
+///    key (an older console without the create-time bound, made here by
+///    signing it directly): it binds, and its scope is incomplete. The view
+///    says `tooManyTopics` and offers nothing; a direct POST with the view's
+///    own hash is refused `scope_incomplete`, by the click's own check.
+///
+/// KILLS: an approve route that skips the completeness check (case 2 would be
+/// approved); a scope built from the Restore object rather than the signed
+/// hash (case 1 would show the edited plan).
+#[tokio::test]
+async fn a_request_that_cannot_be_shown_in_full_is_offered_to_nobody_and_refused_on_the_click() {
+    use logweir_core::approval_scope::MAX_SCOPE_TOPICS;
+    let (log, _guard) = capture();
+    let (app, console) = pair_app();
+    let bob = signed_in(&app, "bob", &["approvers"]);
+
+    // ---- 1. the plan is not the request's ---------------------------------
+    let r = requested(&app, "alice", "swapped").await;
+    let before = view(&app, &bob, &r.restore).await.json()["item"].clone();
+    assert_eq!(before["scopeComplete"], true, "THE CONTROL: as requested");
+    assert_eq!(before["approve"]["offered"], true);
+    let sha = before["confirmationSha256"]
+        .as_str()
+        .expect("sha")
+        .to_string();
+    let mut restore = app
+        .app
+        .fake
+        .object("restores", NS_A, &r.restore)
+        .expect("the Restore");
+    restore["spec"]["planBytes"] = json!(plan_over(&["orders".into(), "payroll".into()]));
+    app.app.fake.seed("restores", NS_A, restore);
+    let item = view(&app, &bob, &r.restore).await.json()["item"].clone();
+    assert_eq!(item["state"], "notConfirmed", "{item}");
+    assert_eq!(item["scopeComplete"], false);
+    assert!(item.get("scope").is_none() && item.get("requester").is_none());
+    assert_eq!(item["approve"]["offered"], false);
+    let clicked = click(&app, &bob, &r.restore, &sha).await;
+    clicked.assert_problem(409, "policy_mismatch");
+    assert_eq!(
+        log.audit(&clicked).0["failureCode"],
+        "confirmation_not_bound"
+    );
+    assert!(app
+        .app
+        .fake
+        .object("approvals", NS_A, &r.approval)
+        .is_none());
+
+    // ---- 2. a request over a plan too large to show -----------------------
+    let r = requested(&app, "alice", "large").await;
+    let large = plan_over(&topic_names(MAX_SCOPE_TOPICS + 1, 8));
+    let mut restore = app
+        .app
+        .fake
+        .object("restores", NS_A, &r.restore)
+        .expect("the Restore");
+    restore["spec"]["planBytes"] = json!(large);
+    app.app.fake.seed("restores", NS_A, restore);
+    let (mut request, _, _) = stored_document(&app, &r.confirmation);
+    request.plan_hash = logweir_core::ids::sha256_prefixed(large.as_bytes());
+    plant(
+        &app,
+        &r,
+        &request,
+        &signed_by_console(&console, &request),
+        json!({}),
+    );
+    let item = view(&app, &bob, &r.restore).await.json()["item"].clone();
+    assert_eq!(item["state"], "pending", "{item}");
+    assert_eq!(item["scopeComplete"], false);
+    assert_eq!(item["scopeIncomplete"], "tooManyTopics");
+    assert!(item.get("scope").is_none(), "no partial scope, ever");
+    assert!(
+        item["scopeSentence"]
+            .as_str()
+            .is_some_and(|s| s.contains("1025 topics") && s.contains("Split it")),
+        "{item}"
+    );
+    assert_eq!(item["approve"]["offered"], false);
+    assert_eq!(item["approve"]["refusal"], "scopeIncomplete");
+    let sha = item["confirmationSha256"]
+        .as_str()
+        .expect("sha")
+        .to_string();
+    let clicked = click(&app, &bob, &r.restore, &sha).await;
+    clicked.assert_problem(409, "state_conflict");
+    let (record, notes) = log.audit(&clicked);
+    assert_eq!(record["failureCode"], "scope_incomplete");
+    assert_eq!(notes["scope"], "incomplete:tooManyTopics");
+    assert!(app
+        .app
+        .fake
+        .object("approvals", NS_A, &r.approval)
+        .is_none());
+}
+
+/// **The click re-derives the scope itself.** A request whose Restore still
+/// binds it — the same plan bytes, the same hash — but whose plan the scope
+/// cannot show (a value a page cannot render faithfully: a bucket name with a
+/// tab) is refused on the click with `scope_incomplete`, the view's verdict
+/// being only advisory. The plan is accepted by the create in a namespace
+/// that is NOT two-person, and the namespace is then rebound — the case of a
+/// policy change, or an older console that made the request.
+///
+/// KILLS: an approve route that skips the completeness check.
+#[tokio::test]
+async fn the_click_refuses_a_request_whose_scope_is_incomplete_whatever_the_view_said() {
+    let (log, _guard) = capture();
+    let (app, console) = pair_app();
+    // A request the console signs for a plan whose bucket carries a tab: made
+    // here by signing it directly with the console's key, as an older console
+    // without the create-time check would have.
+    let plan =
+        support::golden_plan().replace("bucket: \"kafka-backups\"", "bucket: \"kafka\\tbackups\"");
+    assert!(
+        plan.contains("kafka\\tbackups"),
+        "the plan carries the escape"
+    );
+    let created = request_as(
+        &app,
+        &signed_in(&app, "alice", &["ops"]),
+        "tab",
+        body_over(&support::golden_plan(), "approval-tab"),
+    )
+    .await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("name")
+        .to_string();
+    // Swap the plan AND re-sign the request over it with the console's key,
+    // so the binding holds and only the scope can refuse.
+    let mut object = app
+        .app
+        .fake
+        .object("restores", NS_A, &restore)
+        .expect("Restore");
+    object["spec"]["planBytes"] = json!(plan);
+    app.app.fake.seed("restores", NS_A, object);
+    let (mut request, _, _) = stored_document(&app, "approval-tab-confirmation");
+    request.plan_hash = logweir_core::ids::sha256_prefixed(plan.as_bytes());
+    let r = Requested {
+        restore: restore.clone(),
+        approval: "approval-tab".into(),
+        confirmation: "approval-tab-confirmation".into(),
+    };
+    plant(
+        &app,
+        &r,
+        &request,
+        &signed_by_console(&console, &request),
+        json!({}),
+    );
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    let item = view(&app, &bob, &restore).await.json()["item"].clone();
+    assert_eq!(item["state"], "pending", "{item}");
+    assert_eq!(item["scopeComplete"], false, "{item}");
+    assert_eq!(item["scopeIncomplete"], "valueNotShowable");
+    assert_eq!(item["approve"]["offered"], false);
+    let sha = item["confirmationSha256"]
+        .as_str()
+        .expect("sha")
+        .to_string();
+    let clicked = click(&app, &bob, &restore, &sha).await;
+    clicked.assert_problem(409, "state_conflict");
+    assert!(
+        clicked
+            .text()
+            .contains("A second person approves only what they are shown in full"),
+        "{}",
+        clicked.text()
+    );
+    assert!(
+        !clicked.text().contains("kafka"),
+        "the sentence repeats no value of the plan"
+    );
+    let (record, notes) = log.audit(&clicked);
+    assert_eq!(record["failureCode"], "scope_incomplete");
+    assert_eq!(notes["scope"], "incomplete:valueNotShowable");
+    assert!(app
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-tab")
+        .is_none());
+    // NEGATIVE CONTROL: the same request over the plan it was first made for
+    // is complete and approved.
+    let mut object = app
+        .app
+        .fake
+        .object("restores", NS_A, &restore)
+        .expect("Restore");
+    object["spec"]["planBytes"] = json!(support::golden_plan());
+    app.app.fake.seed("restores", NS_A, object);
+    let (_, original_bytes, original_sidecar) = {
+        let mut original = request.clone();
+        original.plan_hash = logweir_core::ids::sha256_prefixed(support::golden_plan().as_bytes());
+        plant(
+            &app,
+            &r,
+            &original,
+            &signed_by_console(&console, &original),
+            json!({}),
+        );
+        stored_document(&app, "approval-tab-confirmation")
+    };
+    assert!(verifies(
+        &original_bytes,
+        &original_sidecar,
+        &console.public
+    ));
+    let sha = stored_sha(&app, "approval-tab-confirmation");
+    let clicked = click(&app, &bob, &restore, &sha).await;
+    assert_eq!(clicked.status, 201, "{}", clicked.text());
 }

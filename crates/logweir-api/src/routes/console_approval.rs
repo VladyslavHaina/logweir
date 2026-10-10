@@ -51,6 +51,7 @@ use logweir_core::approval_policy::{
     self as policy, ApprovalPolicy, ApprovalRoute, AuthorizationRefusal, ExpectedSubject,
     Requester, RestoreAuthorization,
 };
+use logweir_core::approval_scope::{self, ApprovalScope, ScopeIncomplete};
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
 use weirkeeper::crds::restore::Restore;
 
@@ -61,7 +62,9 @@ use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
     ApprovalRequestResponse, ApprovalRequestState, ApprovalRequestView, ApprovalResponse,
-    ApprovalSubjectView, ApproveOfferView, ApproveRefusal, ConsoleApprovalRequest,
+    ApprovalScopeView, ApprovalSubjectView, ApproveOfferView, ApproveRefusal,
+    ConsoleApprovalRequest, ScopeRecoveryView, ScopeSourceView, ScopeStorageView, ScopeTargetView,
+    ScopeTopicView, ScopeVerificationView,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::kube::KubeFailure;
@@ -353,22 +356,96 @@ fn capitalised(text: &str) -> String {
     }
 }
 
-/// The original topic names a restore under the original names restores, from
-/// the Restore's own plan: at most [`projection::MAX_LIST_ENTRIES`], and the
-/// whole count. `None` for a plan that does not parse (the controller refuses
-/// it before any Job).
-fn original_topics(restore: &Restore) -> Option<(Vec<String>, usize)> {
-    let plan =
-        serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes).ok()?;
-    let count = plan.source.topics.len();
-    Some((
-        plan.source
+/// **WHAT A SECOND PERSON IS SHOWN IS WHAT THEY APPROVE, ALL OF IT, OR
+/// NOTHING IS APPROVABLE** (PROD-16.2, the coordinator's addition 6).
+///
+/// The approval scope of a VERIFIED request: the one function
+/// (`logweir_core::approval_scope::approval_scope`) over the request's signed
+/// bytes and the plan they name by hash. `plan_bytes` is the Restore's
+/// `spec.planBytes`, and that function holds it to the request's `planHash`
+/// before it reads one byte of it — so nothing shown comes from a field of
+/// the Restore object the console's signature does not cover.
+///
+/// Beside it, the plan's topic count, counted a second and independent way:
+/// the audit record of an approval states both, and a scope whose list is not
+/// the plan's own length is refused as incomplete.
+///
+/// The view and the click BOTH call this; the click re-derives it, so an
+/// approval is never given on what a view found earlier.
+///
+/// # Errors
+///
+/// Why the request cannot be shown in full.
+fn scope_of(
+    request: &RestoreAuthorization,
+    plan_bytes: &str,
+) -> Result<(ApprovalScope, usize), ScopeIncomplete> {
+    let scope = approval_scope::approval_scope(request, plan_bytes.as_bytes())?;
+    let in_plan = serde_yaml::from_str::<logweir_core::spec::DrillSpec>(plan_bytes)
+        .map_err(|_| ScopeIncomplete::PlanUnreadable)?
+        .source
+        .topics
+        .len();
+    if scope.topics.len() != in_plan {
+        return Err(ScopeIncomplete::TooManyTopics { count: in_plan });
+    }
+    Ok((scope, in_plan))
+}
+
+fn storage_view(storage: &approval_scope::ScopeStorage) -> ScopeStorageView {
+    ScopeStorageView {
+        backend: storage.backend.to_string(),
+        location: storage.location.clone(),
+        endpoint: storage.endpoint.clone(),
+        region: storage.region.clone(),
+        plaintext_http: storage.plaintext_http,
+    }
+}
+
+/// The scope, as the page is sent it: every topic, never a slice.
+fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
+    ApprovalScopeView {
+        plan_name: scope.plan_name.clone(),
+        source: ScopeSourceView {
+            storage: storage_view(&scope.source.storage),
+            backup: scope.source.backup.clone(),
+            point_id: scope.source.point.as_ref().map(|p| p.point_id.clone()),
+            receipt_sha256: scope
+                .source
+                .point
+                .as_ref()
+                .map(|p| p.receipt_sha256.clone()),
+        },
+        recovery: ScopeRecoveryView {
+            point_in_time: scope.recovery.point_in_time,
+            point_in_time_stated: scope.recovery.point_in_time_stated,
+            window_start: scope.recovery.window_start,
+            time_basis: scope.recovery.time_basis.map(str::to_string),
+        },
+        target: ScopeTargetView {
+            bootstrap_servers: scope.target.bootstrap_servers.clone(),
+            auth_mode: scope.target.auth_mode.to_string(),
+            mode: scope.target.mode.to_string(),
+            topic_prefix: scope.target.topic_prefix.clone(),
+        },
+        topics: scope
             .topics
-            .into_iter()
-            .take(projection::MAX_LIST_ENTRIES)
+            .iter()
+            .map(|topic| ScopeTopicView {
+                source: topic.source.clone(),
+                target: topic.target.clone(),
+                original_name: topic.original_name,
+                partitions: topic.partitions.clone(),
+            })
             .collect(),
-        count,
-    ))
+        topics_count: scope.topics.len(),
+        verification: ScopeVerificationView {
+            coverage: scope.verification.coverage.to_string(),
+            window_start: scope.verification.window_start,
+            window_end: scope.verification.window_end,
+        },
+        evidence: storage_view(&scope.evidence),
+    }
 }
 
 /// `GET .../restores/{name}/approval-request` — the request, as the second
@@ -406,8 +483,10 @@ pub async fn request(
         requester: None,
         plan_hash: None,
         approval_subject: None,
-        original_topics: None,
-        original_topics_count: None,
+        scope_complete: false,
+        scope_incomplete: None,
+        scope_sentence: None,
+        scope: None,
         ticket: None,
         issued_at: None,
         expires_at: None,
@@ -448,10 +527,16 @@ pub async fn request(
         Ok(logweir_core::original_name::ApprovalSubject::Ordinary) => ApprovalSubjectView::Ordinary,
         Err(_) => ApprovalSubjectView::Unknown,
     });
-    if view.approval_subject == Some(ApprovalSubjectView::OriginalName) {
-        if let Some((topics, count)) = original_topics(&restore) {
-            view.original_topics = Some(topics);
-            view.original_topics_count = Some(count);
+    // THE APPROVAL SCOPE, WHOLE OR NOT AT ALL — from the verified request and
+    // the plan it names by hash, and from no field of the Restore object.
+    match scope_of(doc, &restore.spec.plan_bytes) {
+        Ok((scope, _)) => {
+            view.scope_complete = true;
+            view.scope = Some(scope_view(&scope));
+        }
+        Err(incomplete) => {
+            view.scope_incomplete = Some(incomplete.code().to_string());
+            view.scope_sentence = Some(format!("{incomplete}."));
         }
     }
     view.ticket.clone_from(&doc.ticket);
@@ -492,6 +577,15 @@ pub async fn request(
             doc.expires_at.to_rfc3339()
         );
         view.approve = offer(&state, &actor, &ns, &doc.requester);
+        // NOBODY IS OFFERED A REQUEST THAT CANNOT BE SHOWN IN FULL, whoever
+        // they are; and the click refuses it by name (`approve`, step 5b).
+        if let Some(sentence) = view.scope_sentence.clone() {
+            view.approve = ApproveOfferView {
+                offered: false,
+                refusal: Some(ApproveRefusal::ScopeIncomplete),
+                sentence: format!("{sentence} It cannot be approved in the console."),
+            };
+        }
     }
     Ok(json(
         StatusCode::OK,
@@ -643,6 +737,31 @@ pub async fn approve(
                 .to_string(),
         ));
     }
+    // ---- 5b. what was shown was the whole of it -----------------------------
+    // RE-DERIVED HERE, from the same verified bytes, and never taken from a
+    // view: a page with a bug, an older page or a direct call with the right
+    // hash cannot approve a request the console could not show in full.
+    let (scope, topics_in_plan) = match scope_of(doc, &restore.spec.plan_bytes) {
+        Ok(found) => found,
+        Err(incomplete) => {
+            actor
+                .audit
+                .note("scope", &format!("incomplete:{}", incomplete.code()));
+            return Err(refused(
+                &actor,
+                "scope_incomplete",
+                ProblemCode::StateConflict,
+                format!("{incomplete}. Nothing was approved."),
+            ));
+        }
+    };
+    actor.audit.note("scope", "complete");
+    actor
+        .audit
+        .note("scopeTopicsShown", &scope.topics.len().to_string());
+    actor
+        .audit
+        .note("scopeTopicsInPlan", &topics_in_plan.to_string());
     // ---- 6. requester is not approver --------------------------------------
     let approver = approver_of(&actor);
     if let Err(refusal) = policy::console_separation(&doc.requester, &approver) {

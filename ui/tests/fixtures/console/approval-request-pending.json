@@ -19,7 +19,59 @@
     "restoreUid": "uid-x",
     "state": "pending",
     "stateSentence": "The console confirmed this request and it is waiting for a second person to approve it.",
-    "ticket": "CHG-4711"
+    "ticket": "CHG-4711",
+    "scopeComplete": true,
+    "scope": {
+      "planName": "orders-pitr-4471",
+      "source": {
+        "storage": {
+          "backend": "s3",
+          "location": "s3://kafka-backups/drill-demo",
+          "endpoint": "http://localhost:9000",
+          "region": "us-east-1",
+          "plaintextHttp": true
+        },
+        "backup": "01JB7Z0000000000000000000B"
+      },
+      "recovery": {
+        "pointInTime": "2026-09-07T14:05:00Z",
+        "pointInTimeStated": true
+      },
+      "target": {
+        "bootstrapServers": [
+          "kafka-0.target:9092",
+          "kafka-1.target:9092"
+        ],
+        "authMode": "plaintext",
+        "mode": "newTopic",
+        "topicPrefix": "restore-20260907T140500Z-"
+      },
+      "topics": [
+        {
+          "source": "orders",
+          "target": "restore-20260907T140500Z-orders",
+          "originalName": false
+        },
+        {
+          "source": "payments",
+          "target": "restore-20260907T140500Z-payments",
+          "originalName": false
+        }
+      ],
+      "topicsCount": 2,
+      "verification": {
+        "coverage": "sampled",
+        "windowStart": "2026-09-07T12:00:00Z",
+        "windowEnd": "2026-09-07T15:00:00Z"
+      },
+      "evidence": {
+        "backend": "s3",
+        "location": "s3://logweir-evidence/logweir/",
+        "endpoint": "http://localhost:9000",
+        "region": "us-east-1",
+        "plaintextHttp": true
+      }
+    }
   },
   "requestId": "01M4JX07HA3SERHAG00YFRGV6G"
 }
