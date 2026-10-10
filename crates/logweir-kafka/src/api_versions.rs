@@ -491,9 +491,16 @@ pub fn full_view(
                 .iter()
                 .any(|b| address_key(&b.address) == key && answered_node(b.id))
     };
+    // A bootstrap address that IS a silent listed broker's is that broker,
+    // named once, as the broker.
+    let is_a_silent_broker = |address: &str| {
+        silent
+            .iter()
+            .any(|b| address_key(&b.address) == address_key(address))
+    };
     let silent_bootstrap: Vec<String> = bootstrap
         .iter()
-        .filter(|address| !answered_at(address))
+        .filter(|address| !answered_at(address) && !is_a_silent_broker(address))
         .cloned()
         .collect();
     if !silent.is_empty() || !silent_bootstrap.is_empty() {
@@ -672,8 +679,8 @@ mod tests {
                 "ListGroups (16) Versions 0..4",
             ],
         );
-        // One broker, whose advertised address is the bootstrap address: the
-        // one bootstrap connection is... not yet a broker.
+        // One broker, whose advertised address is the bootstrap address. The
+        // bootstrap connection alone is not the broker's answer.
         let listed = [Broker::new(1001, "broker.example", 9092)];
         assert!(
             matches!(
@@ -828,6 +835,24 @@ mod tests {
                 .to_string()
                 .contains("no answer from the bootstrap address(es) b3.example:9092"),
             "{partial}"
+        );
+
+        // A silent bootstrap address that is a silent LISTED broker's is named
+        // once, as the broker.
+        let only_one: Vec<(&'static str, String)> = answer(&node("b1.example", 1), &KAFKA);
+        assert_eq!(
+            full_view(
+                &read(&only_one),
+                true,
+                &listed,
+                &bootstrap(&["b1.example:9092", "b2.example:9092"]),
+            ),
+            Err(Partial::NotEveryone {
+                answered: 1,
+                listed: listed.clone(),
+                silent: vec![Broker::new(2, "b2.example", 9092)],
+                silent_bootstrap: vec![],
+            })
         );
 
         // An address that is no listed broker's (a load balancer) answers on

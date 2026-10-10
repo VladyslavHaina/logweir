@@ -1009,6 +1009,19 @@ fn the_classifier_table() {
             "error sending request for url (https://minio:9000/timeout-archive): tcp connect error: Connection refused (os error 61)".into(),
             C::EndpointUnreachable,
         ),
+        // A failure the client RETRIED carries its retry clause, whose
+        // `retry_timeout:` the first classifier read as a timeout. The clause
+        // is part of the request line and is not read: a retried transport
+        // failure is unreachable, and a retried 503 is an answer the tables do
+        // not name (release-notes item 56 says both classes moved).
+        (
+            "k: Generic S3 error: Error performing GET http://minio:9000/b/k in 6.2s, after 2 retries, max_retries: 2, retry_timeout: 5s  - HTTP error: error sending request".into(),
+            C::EndpointUnreachable,
+        ),
+        (
+            "k: Generic S3 error: Error performing GET http://minio:9000/b/k in 180.2s, after 10 retries, max_retries: 10, retry_timeout: 180s  - Server returned non-2xx status code: 503 Service Unavailable: <Error><Code>SlowDown</Code></Error>".into(),
+            C::StoreErrorUnclassified,
+        ),
         // The bare word is a word: a retry clause and a path are not it.
         (
             "Generic S3 error: after 2 retries, max_retries: 2, retry_timeout: 5s: builder error for /data/timeout-archive/timeout/k.timeout".into(),

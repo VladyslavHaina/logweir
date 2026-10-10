@@ -1207,7 +1207,35 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
     // --- the Restore Preflight, as the controller renders it -----------------
     sweep_drill_topics(&bootstrap, &auth);
     let dspec = drill_spec(&bootstrap, &auth, topic, &backup_id, window, &storage);
-    let preflight = restore_preflight(&auth, &bootstrap, &dspec, &backup_id, &storage);
+    // The plan a Preflight is asked about restores to the archive's LAST
+    // record: a recovery point the archive covers. (The drill's own window
+    // ends a minute later, to take every record; a Preflight says, rightly,
+    // that no archive covers a point after its last record.)
+    let mut preflight_plan = dspec.clone();
+    preflight_plan["restore"]["point_in_time"] = rfc3339(window.1).into();
+    let preflight = restore_preflight(&auth, &bootstrap, &preflight_plan, &backup_id, &storage);
+    // NO ROW of it is `notReady` on an endpoint a restore can run into, and
+    // exactly the engine-protocol row is on one it cannot.
+    let refused: Vec<CheckId> = preflight
+        .checks
+        .iter()
+        .filter(|c| c.state == CheckState::NotReady)
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(
+        refused,
+        if replay_ok {
+            Vec::new()
+        } else {
+            vec![CheckId::TargetEngineProtocol]
+        },
+        "{label}: the rows a Restore Preflight refuses: {:?}",
+        preflight
+            .checks
+            .iter()
+            .filter(|c| c.state == CheckState::NotReady)
+            .collect::<Vec<_>>()
+    );
     let parse = row(&preflight, CheckId::PlanParse);
     assert_eq!(
         parse.state,

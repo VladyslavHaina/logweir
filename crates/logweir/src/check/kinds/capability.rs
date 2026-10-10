@@ -67,6 +67,7 @@ fn brokers_answered(served: &ApiVersions) -> String {
 fn whose(served: &ApiVersions) -> String {
     match served.brokers() {
         1 => "this endpoint serves".to_string(),
+        2 => "both brokers of this endpoint serve".to_string(),
         n => format!("all {n} brokers of this endpoint serve"),
     }
 }
