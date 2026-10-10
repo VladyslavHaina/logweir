@@ -108,6 +108,15 @@ fn redact_ureq_error(e: &ureq::Error) -> String {
 /// pair); the field says WHY it is not, in a word a sink can branch on. The
 /// `incomplete_reason` text does not travel, for the reason `redactions`'
 /// does not: this body is pasted verbatim into Slack and PagerDuty.
+///
+/// **PROD-11.1b.** A restore that restored a SELECTION — a partition subset
+/// (scorecard format 2.0.0) or a window from a stated start (1.7.0) — carries
+/// `selection`, built by [`notify_selection`]: `scope: "partial"` always, so a
+/// sink that reads no further never takes the drill for a restore of every
+/// partition of every topic, and every verdict beside it (`outcome`,
+/// `integrity.covered`) is the selection's. ABSENT for an unnarrowed restore,
+/// whose body is exactly what it was. `format_version` travels too, so a sink
+/// can tell which contract the verdict is under.
 pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
     let verification = sc.integrity.verification.as_ref();
     let mut integrity = serde_json::json!({
@@ -118,14 +127,94 @@ pub fn notify_body(sc: &Scorecard) -> serde_json::Value {
     if let Some(complete) = verification.and_then(|v| v.complete.as_ref()) {
         integrity["covered"] = serde_json::json!(complete.covered);
     }
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "run_id": sc.run_id,
+        "format_version": sc.format_version,
         "outcome": sc.outcome,
         "rto_excluding_preflight_seconds": sc.measured.rto_excluding_preflight_seconds,
         "rpo_seconds": sc.measured.rpo_seconds,
         "integrity": integrity,
         "self_attested": sc.approval.self_attested,
         "redactions": sc.redactions.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+    });
+    if let Some(selection) = sc.source.selection.as_ref() {
+        body["selection"] = notify_selection(selection);
+    }
+    body
+}
+
+/// The most narrowed topics whose rows a notification lists; past it (or past
+/// [`NOTIFY_SELECTION_PARTITIONS_MAX`] partitions in one) the rows are left
+/// out and `narrowed_topics` still says how many — the rows stay in the signed
+/// scorecard, and this body is pasted into Slack and PagerDuty.
+pub const NOTIFY_SELECTION_TOPICS_MAX: usize = 256;
+/// The most partitions of one narrowed topic a notification lists.
+pub const NOTIFY_SELECTION_PARTITIONS_MAX: usize = 1024;
+
+/// **PROD-11.1b.** A scorecard's `source.selection` as the notification's
+/// `selection` object: `scope: "partial"`, the window's ends
+/// (`window_start_ms` only for a stated start), `narrowed_topics`, the rows
+/// (`partitions`, all of them or none, within the bounds above) and
+/// `engine_runs`.
+#[must_use]
+pub fn notify_selection(sel: &logweir_core::scorecard::SelectionLabel) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "scope": "partial",
+        "window_end_ms": sel.window_end_ms,
+    });
+    if let Some(start) = sel.window_start_ms {
+        out["window_start_ms"] = serde_json::json!(start);
+    }
+    if let Some(rows) = sel.partitions.as_ref().filter(|r| !r.is_empty()) {
+        out["narrowed_topics"] = serde_json::json!(rows.len());
+        if rows.len() <= NOTIFY_SELECTION_TOPICS_MAX
+            && rows
+                .iter()
+                .all(|r| r.partitions.len() <= NOTIFY_SELECTION_PARTITIONS_MAX)
+        {
+            out["partitions"] = serde_json::json!(rows
+                .iter()
+                .map(|r| serde_json::json!({"topic": r.topic, "partitions": r.partitions}))
+                .collect::<Vec<_>>());
+        }
+    }
+    if let Some(runs) = sel.engine_runs {
+        out["engine_runs"] = serde_json::json!(runs);
+    }
+    out
+}
+
+/// The most narrowed topics a PagerDuty incident title names one by one; past
+/// it the title says how many.
+pub const NOTIFY_SELECTION_TITLE_TOPICS: usize = 3;
+
+/// **PROD-11.1b.** The words a PagerDuty incident title appends for a
+/// narrowed restore — `partial: partitions 0, 2 of topic orders`, or
+/// `partial: a partition subset of 5 topics`, or `partial: from a stated
+/// window start` — so the title an on-call reader sees first never reads a
+/// subset as the whole. `None` for an unnarrowed restore, whose title is what
+/// it was.
+#[must_use]
+pub fn selection_title(sc: &Scorecard) -> Option<String> {
+    let sel = sc.source.selection.as_ref()?;
+    Some(match sel.partitions.as_ref().filter(|r| !r.is_empty()) {
+        Some(rows) if rows.len() <= NOTIFY_SELECTION_TITLE_TOPICS => format!(
+            "partial: {}",
+            rows.iter()
+                .map(|r| format!(
+                    "partitions {} of topic {}",
+                    r.partitions
+                        .iter()
+                        .map(i32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    r.topic
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Some(rows) => format!("partial: a partition subset of {} topics", rows.len()),
+        None => "partial: from a stated window start".to_string(),
     })
 }
 
@@ -541,7 +630,12 @@ pub fn notify_with_sink(
             "event_action": if sc.outcome == logweir_core::outcome::Outcome::Pass
                             { "resolve" } else { "trigger" },
             "dedup_key": dedup,
-            "payload": { "summary": format!("logweir drill {}: {:?}", sc.run_id, sc.outcome),
+            // PROD-11.1b: a narrowed restore's title says partial.
+            "payload": { "summary": match selection_title(sc) {
+                             None => format!("logweir drill {}: {:?}", sc.run_id, sc.outcome),
+                             Some(words) => format!("logweir drill {}: {:?} ({words})",
+                                                    sc.run_id, sc.outcome),
+                         },
                          "source": sc.target.cluster_id, "severity": "warning",
                          "custom_details": body },
         });

@@ -6927,7 +6927,7 @@
         ],
         "properties": {
           "covered": {
-            "description": "`true` when every partition of every restored topic was compared. `false` is NEVER a pass, on any surface.",
+            "description": "`true` when every SELECTED partition of every restored topic was compared: every partition of a topic unless `selection.partitions` narrows it (PROD-11.1b). `false` is NEVER a pass, on any surface.",
             "type": "boolean"
           },
           "incompleteReason": {
@@ -10084,6 +10084,89 @@
           }
         }
       },
+      "PointConsumerPositionsView": {
+        "description": "**PROD-04.1.** A recovery point's consumer position evidence, as the catalog's view lists it: how fresh the snapshot is against the recovery point, and per selected group its outcome and how many of its positions relate to archived data. Never a position: the positions are in the signed receipt, which the point record binds by digest.",
+        "type": "object",
+        "required": [
+          "listing"
+        ],
+        "properties": {
+          "groups": {
+            "description": "One per selected group, in id order; at most 32.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PointGroupView"
+            }
+          },
+          "groupsOmitted": {
+            "description": "How many groups the view left out of `groups`, so a reader never takes a partial list for the whole selection.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "listing": {
+            "description": "`complete` when the run's group listings were complete, `notComplete` when an unlisted id was classified by a targeted describe.",
+            "type": "string"
+          },
+          "observedBeforeRecoveryPointMs": {
+            "description": "The snapshot's FRESHNESS: how many milliseconds before the recovery point (`recoveryPointAt`) the positions were last observed. Positions of an active group may have moved after that, and are not atomic with the records the engine read.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "observedFrom": {
+            "description": "When the backup run started reading the groups.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "observedTo": {
+            "description": "When it finished, before the engine started: the positions are this old at the recovery point.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "PointGroupView": {
+        "description": "*PROD-04.1.** One selected consumer group of a recovery point.",
+        "type": "object",
+        "required": [
+          "groupId",
+          "outcome"
+        ],
+        "properties": {
+          "active": {
+            "description": "Whether the group had members when its positions were read.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "groupId": {
+            "description": "The group id.",
+            "type": "string"
+          },
+          "groupType": {
+            "description": "`classic`, `consumer`, or `other` (a share or streams group, or one the client could not type).",
+            "type": "string",
+            "nullable": true
+          },
+          "outcome": {
+            "description": "`captured`, `excluded` or `failed`. A group that is not captured carries no position: absence is never offset 0.",
+            "type": "string"
+          },
+          "positions": {
+            "description": "A captured group's positions, counted by what they say about archived data.",
+            "$ref": "#/components/schemas/PointPositionCountsView",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Why, when it is not captured (`GroupTypeNotCaptured`, `GroupNotFound`, `NotVisibleToPrincipal`, `PositionsUnstable`, ...).",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "PointLocationView": {
         "description": "One location a point was seen at.",
         "type": "object",
@@ -10151,6 +10234,56 @@
             "type": "string",
             "format": "date-time",
             "nullable": true
+          }
+        }
+      },
+      "PointPositionCountsView": {
+        "description": "*PROD-04.1.** A captured group's positions, one count per kind.",
+        "type": "object",
+        "required": [
+          "beyondEnd",
+          "failed",
+          "neverCommitted",
+          "notObserved",
+          "notRelated",
+          "related"
+        ],
+        "properties": {
+          "beyondEnd": {
+            "description": "Committed offsets above the partition's end at capture.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "failed": {
+            "description": "Partitions whose position could not be read.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "neverCommitted": {
+            "description": "Partitions with no committed offset (never offset 0).",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "notObserved": {
+            "description": "Partitions added during the capture, never asked for.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "notRelated": {
+            "description": "Committed positions that do not relate to archived data: before the archive or the source's log start, beyond the archive's end, or on a partition with nothing archived.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "related": {
+            "description": "Positions whose next record is in the archive, or right after its end.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
           }
         }
       },
@@ -10313,6 +10446,11 @@
           "backupVerdict": {
             "description": "The refusal the controller reached on this point's OWN `Backup` — the recorded result when it is `Invalid`, `Untrusted`, or a result this build does not recognise, and `Untrusted` when the recorded result is `Valid` on a trust basis the badge refuses (anything but no `trust` block, `Current`, `Historical` or `Unverified`) — present ONLY when there is such a reached refusal. It is `Unreadable` when the `Backup`'s verdict field is present but is not a verdict this build can read: an unreadable verdict refuses like an unknown one.\n\nThis is why a row can read `Available`/`Verified` and still be `selectable: false`: the view is served until `viewExpiresAt`, so the row may have been harvested before the receipt was replaced or its signer revoked. Absent means no `Backup` this request read refused the point — never that one verified it.",
             "type": "string",
+            "nullable": true
+          },
+          "consumerPositions": {
+            "description": "**PROD-04.1.** The consumer position evidence of the groups the backup selected, from a point record that agreed with its verified receipt. ABSENT is NOT PUBLISHED: the backup selected no group, the point predates format 1.7.0, the catalog was synced by an older runner, or the point is not `Available`.",
+            "$ref": "#/components/schemas/PointConsumerPositionsView",
             "nullable": true
           },
           "coveredFrom": {
@@ -12018,6 +12156,11 @@
             "description": "The resourceVersion.",
             "type": "string"
           },
+          "selection": {
+            "description": "**PROD-11.1b.** The signed replay selection (`status.integrity.selection`): a window from a stated start, or a partition subset of each narrowed topic — on the list too, so a row never reads a narrowed restore as a restore of everything. A CLAIM until the evidence verifies. ABSENT means the scorecard states none: every partition of every restored topic, from the archive's floor.",
+            "$ref": "#/components/schemas/RestoreSelectionView",
+            "nullable": true
+          },
           "sourceArchive": {
             "description": "The archive restored from.",
             "$ref": "#/components/schemas/ArchiveView"
@@ -12075,7 +12218,7 @@
             "nullable": true
           },
           "covered": {
-            "description": "For a recorded complete verification: whether it covered every partition. `false` is NEVER a pass.",
+            "description": "For a recorded complete verification: whether it covered every SELECTED partition (every partition unless `selection.partitions` narrows a topic). `false` is NEVER a pass.",
             "type": "boolean",
             "nullable": true
           },
@@ -12285,6 +12428,51 @@
           "state": {
             "description": "Where the submission goes next.",
             "$ref": "#/components/schemas/AuthorizationState"
+          }
+        }
+      },
+      "RestoreSelectionView": {
+        "description": "**PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the signed replay selection, copied from `status.integrity.selection` (itself copied from the scorecard's `source.selection`) and never recomputed. Present exactly when the scorecard states a selection; every field may be absent when the controller could not read the signed block, which is still a selection (never read as a restore of everything).",
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "engineRuns": {
+            "description": "How many engine runs restored the selection.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "narrowedTopics": {
+            "description": "How many topics were narrowed to a PARTITION SUBSET (scorecard format 2.0.0): present exactly when one was, even when `partitions` is not served.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "partitions": {
+            "description": "Each narrowed topic and the partitions it restored; absent past the status' bounds and for a window start alone. A restored topic not listed restored every partition.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SelectedPartitionsView"
+            },
+            "nullable": true
+          },
+          "scope": {
+            "description": "Always `partial`: the marker a client that reads no further cannot take for a restore of every partition of every topic.",
+            "type": "string"
+          },
+          "windowEndMs": {
+            "description": "The inclusive window end, epoch milliseconds.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "windowStartMs": {
+            "description": "The plan's stated inclusive window start, epoch milliseconds; absent: the archive's floor.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
           }
         }
       },
@@ -13339,6 +13527,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "SelectedPartitionsView": {
+        "description": "One narrowed topic of a [`RestoreSelectionView`].",
+        "type": "object",
+        "required": [
+          "partitions",
+          "topic"
+        ],
+        "properties": {
+          "partitions": {
+            "description": "The partitions it restored, ascending; no other partition of it was.",
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "topic": {
+            "description": "The source topic.",
+            "type": "string"
+          }
+        }
       },
       "SessionResponse": {
         "description": "`GET /api/v1/session`.",
@@ -14851,6 +15061,11 @@
             "description": "How many of them matched byte for byte.",
             "type": "integer",
             "format": "int64",
+            "nullable": true
+          },
+          "selection": {
+            "description": "**PROD-11.1b.** The signed replay selection every count above is over: a window from a stated start, or a partition subset of each narrowed topic. ABSENT means the scorecard states none (every partition of every restored topic, from the archive's floor).",
+            "$ref": "#/components/schemas/RestoreSelectionView",
             "nullable": true
           },
           "unsampledTopics": {

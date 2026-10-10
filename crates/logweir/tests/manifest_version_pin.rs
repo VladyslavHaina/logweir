@@ -81,6 +81,7 @@ impl Fixture {
                 backup_id_override: None,
                 kafka_topic_resources: None,
                 strimzi_cluster: None,
+                consumer_groups: Vec::new(),
             },
             key,
             _dir: dir,
@@ -262,14 +263,14 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         "the pin is the version of the bytes the run READ BACK — the last write — not an \
          earlier one and not none"
     );
-    // PROD-05.1 and PROD-03.0 merged after FX-7: every receipt this build
-    // signs carries `topic_configuration` and `schema_dependency`, so a pinned
-    // one is 1.5.0 too — its minor is at least the pin's, which is what a
-    // reader of the pin needs.
+    // PROD-05.1, PROD-03.0 and PROD-01.4a merged after FX-7: every receipt
+    // this build signs carries `topic_configuration`, `schema_dependency` and
+    // `generations`, so a pinned one is 1.6.0 too — its minor is at least the
+    // pin's, which is what a reader of the pin needs.
     assert_eq!(
         receipt.format_version,
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
-        "a pinned receipt this build signs is PROD-03.0's 1.5.0"
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
+        "a pinned receipt this build signs is PROD-01.4a's 1.6.0"
     );
     assert!(receipt.topic_configuration.is_some());
     let (pinned, _) = store
@@ -304,7 +305,7 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_eq!(
         record["format_version"],
-        logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
     );
     assert_eq!(record["archive"]["manifest_version_id"], last.as_str());
     for topic in record["topics"]
@@ -338,13 +339,13 @@ fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     };
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
-    // PROD-03.0: an unpinned receipt this build signs is 1.5.0 as well — it
-    // carries `topic_configuration` and `schema_dependency` — and still has NO
-    // pin key.
+    // PROD-05.1, PROD-03.0 and PROD-01.4a: an unpinned receipt this build
+    // signs is 1.6.0 as well — it carries `topic_configuration`,
+    // `schema_dependency` and `generations` — and still has NO pin key.
     assert_eq!(
         receipt.format_version,
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
-        "an unpinned receipt this build signs is PROD-03.0's 1.5.0"
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
+        "an unpinned receipt this build signs is PROD-01.4a's 1.6.0"
     );
     assert!(
         receipt.config_coverage.is_some(),
@@ -361,7 +362,7 @@ fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_eq!(
         record["format_version"],
-        logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
     );
     assert!(record["archive"].get("manifest_version_id").is_none());
 }
@@ -595,12 +596,12 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
     let record_key = logweir::catalog::record::record_key(&report.points[0].1);
     let (record, _) = versioned.get(&record_key).unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    // The receipt is this build's 1.5.0 (PROD-03.0), so its record is too —
+    // The receipt is this build's 1.6.0 (PROD-01.4a), so its record is too —
     // and still names no pin.
     assert_eq!(
         record["format_version"],
-        logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY,
-        "an unpinned point's record carries the receipt's schema dependency, at 1.5.0"
+        logweir::catalog::record::FORMAT_VERSION_WITH_GENERATIONS,
+        "an unpinned point's record carries the receipt's model and topic IDs, at 1.6.0"
     );
     assert!(
         record["archive"].get("manifest_version_id").is_none(),

@@ -198,7 +198,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
 | `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
 | `tests/d3.spec.js` | **the operation view, protection, the catalog, the keys view, the badge cases and the retention panel**: every state D3 declares, over the objects the D3 live runs recorded, and the five claims this product refuses to make. |
-| `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
+| `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. **PROD-04.1**: a point's consumer positions under its recovery point (how long before the point they were read, not atomic with the records, each group's outcome and how many positions relate to archived data, with every count that is not zero -- never committed, beyond the end, failed, not observed -- and groups the view left out counted), nothing for a point that publishes none, and a point selecting the most groups offered like any other (its Unreadable control is not). |
 | `tests/console-ux.spec.js` | **the console UX batch** (the human-like pass's MCP-1...MCP-34): the signed-out state, the header, the error box, the one-step wizard and its address, the point tables, the parallel and progressive reads, the two new projections, the forms and empty states, the timestamp formatter, and the lint that keeps internal task ids out of shipped strings -- each row with the behaviour it replaced. |
 | `tests/legacy-point.spec.js` | **a `v0.1.5` point after the upgrade** (PoC P3, P5, P6): the evidence bucket a point with no destination starts in, the readiness sentence, the Restore fetch commands' bucket and the catalog sync-mode help -- each with its negative control. |
 | `tests/typed-input.spec.js` | **P13 and its class**: every form that repaints when a read lands keeps what was typed -- the readiness panel, a connection's discovery form and filters, a destination's rotation form -- each row typing first and then letting the read land. |
@@ -2915,7 +2915,11 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   `RecommendationOnly` and is replaced by the mode's own sentence otherwise;
   printing "Logweir never deletes from your archive" beside a policy that
   deletes nightly would be the most consequential false sentence this console
-  could render. **The covering policy is named only by the schedule report's
+  could render. A policy asked to `Enforce` that is not enforcing prints its
+  `Enforced=False` reason as a complaint (`data-enforced-refusal`): a run
+  refused on its credential's binding leaves it `RecommendationOnly` with
+  `ageExpiry: NotEnforced` until a human gives it its own Secret (FX-20c), and
+  that reason is the only place that says why. **The covering policy is named only by the schedule report's
   `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination

@@ -3136,6 +3136,54 @@ export const COMPLETE_COVERAGE_COST =
   "the sampled check, and more for a larger archive or a slower object store. A record bound " +
   "that stops it, or an archive it cannot compare, signs `covered: false`, which is never a pass.";
 
+/** PROD-11.1b: a recorded replay selection -- `verificationScope.selection` or
+ *  the custom resource's `status.integrity.selection` -- as an object, or
+ *  `null` when none is recorded (every partition of every restored topic,
+ *  from the archive's floor). */
+export function selectionIn(holder) {
+  const s = holder || {};
+  return s.selection !== null && typeof s.selection === "object" && !Array.isArray(s.selection)
+    ? s.selection
+    : null;
+}
+
+/** An epoch-millisecond instant as RFC 3339, or the absent marker. */
+function epochText(ms) {
+  return typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : ABSENT;
+}
+
+/** PROD-11.1b: what a NARROWED restore restored, in the words every surface
+ *  uses -- "partial: partitions 0, 2 of topic orders; ..." for a partition
+ *  subset (format 2.0.0), "partial: every partition, from <start> ..." for a
+ *  window start, and a sentence that says so when the selection's rows are
+ *  not served or could not be read. Empty for no selection. It never reads a
+ *  narrowed restore as a restore of everything. */
+export function selectionWords(selection) {
+  const sel = selection || null;
+  if (sel === null || typeof sel !== "object") {
+    return "";
+  }
+  const window = typeof sel.windowStartMs === "number"
+    ? ", from " + epochText(sel.windowStartMs) + " (the plan's stated window start) to " +
+      epochText(sel.windowEndMs)
+    : "";
+  const rows = Array.isArray(sel.partitions) ? sel.partitions : null;
+  if (rows !== null && rows.length > 0) {
+    return "partial: " + rows.map((r) =>
+      "partitions " + (Array.isArray((r || {}).partitions) ? r.partitions.join(", ") : ABSENT) +
+      " of topic " + String((r || {}).topic)).join("; ") +
+      " (every partition of any other restored topic)" + window;
+  }
+  if (typeof sel.narrowedTopics === "number" && sel.narrowedTopics > 0) {
+    return "partial: a partition subset of " + String(sel.narrowedTopics) + " topic(s), listed " +
+      "in the signed scorecard" + window;
+  }
+  if (window !== "") {
+    return "partial: every partition" + window;
+  }
+  return "partial: a selection this page cannot read; the signed scorecard names it";
+}
+
 /** PROD-08.1a: whether a recorded coverage block says the restore was NOT
  *  covered. The one predicate every badge and list verdict in this tree uses,
  *  so no surface can read `covered: false` as a pass. */
@@ -3147,8 +3195,9 @@ export function notCovered(complete) {
  *  is the block (`verificationScope.complete` or the custom resource's
  *  `status.integrity.complete`), or `null` when the coverage was recorded and
  *  the block could not be read. */
-export function completeCoverageSentence(complete) {
+export function completeCoverageSentence(complete, selection) {
   const c = complete || null;
+  const narrowed = selectionWords(selection);
   if (c === null || typeof c !== "object" || typeof c.covered !== "boolean") {
     return "This restore's signed scorecard records complete coverage, and its counts could not " +
       "be read here, so whether it covered every partition is not known on this page. It is not " +
@@ -3168,8 +3217,14 @@ export function completeCoverageSentence(complete) {
         : "") +
       "A verification that did not cover the restore is never a pass.";
   }
-  return "Complete coverage: every record of every restored partition was compared with the " +
-    "archive. " + n(r.matching) + " of " + n(r.expected) + " expected records matched byte for " +
+  // PROD-11.1b: over a narrowed restore, the SELECTED partitions -- never
+  // "every restored partition", which reads as every partition of the topic.
+  return (narrowed === ""
+    ? "Complete coverage: every record of every restored partition was compared with the " +
+      "archive. "
+    : "Complete coverage of a " + narrowed + ": every record of every SELECTED partition was " +
+      "compared with the archive; no other partition of a narrowed topic was restored. ") +
+    n(r.matching) + " of " + n(r.expected) + " expected records matched byte for " +
     "byte, headers in order; " + n(r.restored) + " records were restored; missing " +
     n(r.missing) + ", unexpected " + n(r.unexpected) + ", duplicated " + n(r.duplicates) +
     ", out of order " + n(r.outOfOrder) + ", different " + n(r.mismatched) + ".";
@@ -3201,7 +3256,7 @@ export function coverageWords(recorded, requested, complete) {
  *  it was compared. `claim` captions each value the way the page captions every
  *  scorecard fact (a claim until the evidence verifies); it defaults to the
  *  plain cell. Empty for anything that is not a complete block. */
-export function renderCompleteCoverage(complete, claim) {
+export function renderCompleteCoverage(complete, claim, selection) {
   const c = complete || null;
   if (c === null || typeof c !== "object" || typeof c.covered !== "boolean") {
     return "";
@@ -3213,7 +3268,7 @@ export function renderCompleteCoverage(complete, claim) {
     "<section class=\"complete-coverage\" id=\"complete-coverage\" data-covered=\"" +
       (c.covered ? "true" : "false") + "\"><h3>Complete coverage</h3>" +
     "<p class=\"" + (c.covered ? "scope" : "caveat") + "\" id=\"complete-coverage-sentence\">" +
-      esc(completeCoverageSentence(c)) + "</p>" +
+      esc(completeCoverageSentence(c, selection)) + "</p>" +
     facts([
       ["covered", show(c.covered ? "true" : "false")],
       ["record bound", show(c.maxRecords)],
@@ -3264,13 +3319,16 @@ export function verificationScopeSentence(scope) {
       "not known here. An absent scope is not a complete one.";
   }
   if (s.coverage === "complete") {
-    return completeCoverageSentence(s.complete || null);
+    return completeCoverageSentence(s.complete || null, selectionIn(s));
   }
   const unsampled = Array.isArray(s.unsampledTopics) && s.unsampledTopics.length > 0
     ? " The partition cap left " + s.unsampledTopics.join(", ") + " without a sampled " +
       "partition: counted against the bound, not compared record by record."
     : "";
-  return sampledScopeSentence(s) + unsampled;
+  // PROD-11.1b: a sampled check over a narrowed restore says what it was over.
+  const narrowed = selectionWords(selectionIn(s));
+  return sampledScopeSentence(s) + unsampled +
+    (narrowed === "" ? "" : " This was a " + narrowed + ".");
 }
 
 function sampledScopeSentence(s) {

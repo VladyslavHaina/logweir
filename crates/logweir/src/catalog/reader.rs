@@ -264,7 +264,9 @@ pub fn cross_check(
     disagreements.extend(unbacked_coverage(point, receipt));
     disagreements.extend(unbacked_configuration(point, receipt));
     disagreements.extend(unbacked_owner_detection(point, receipt));
+    disagreements.extend(unbacked_consumer_positions(point, receipt));
     disagreements.extend(unbacked_schema_dependency(point, receipt));
+    disagreements.extend(unbacked_identity(point, receipt));
     if disagreements.is_empty() {
         CrossCheck::Agrees
     } else {
@@ -367,6 +369,49 @@ fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Op
     })
 }
 
+/// **PROD-04.1, rule 3 for `consumer_positions`.** The same one-way rule: a
+/// record may carry none (an older writer, or a backup that selected no
+/// group), never a summary or digest its verified receipt does not back. A
+/// record that claimed a group captured, or its positions related to archived
+/// data, where the receipt says otherwise would hand a cutover positions
+/// nobody signed — so the whole summary is recomputed from the receipt's block
+/// and compared, its digest first.
+fn unbacked_consumer_positions(point: &CatalogPoint, receipt: &BackupReceipt) -> Option<String> {
+    let claimed = point.consumer_positions.as_ref()?;
+    let backed = receipt
+        .consumer_positions
+        .as_ref()
+        .map(crate::catalog::record::RecordConsumerPositions::of);
+    match backed {
+        None => Some(format!(
+            "consumer_positions: {} vs none in the receipt",
+            claimed.sha256
+        )),
+        Some(Err(e)) => Some(format!("consumer_positions: {} vs {e}", claimed.sha256)),
+        Some(Ok(b)) if b.sha256 != claimed.sha256 => Some(format!(
+            "consumer_positions.sha256: {} vs {}",
+            claimed.sha256, b.sha256
+        )),
+        Some(Ok(b)) if &b != claimed => Some(format!(
+            "consumer_positions: the summary of {} is not the receipt block's",
+            claimed.sha256
+        )),
+        Some(Ok(_)) => None,
+    }
+}
+
+/// **PROD-04.1, rule 4.** Two records of one point must carry the same
+/// consumer position summary wherever BOTH carry one.
+fn consumer_positions_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Option<String> {
+    match (a.consumer_positions.as_ref(), b.consumer_positions.as_ref()) {
+        (Some(ca), Some(cb)) if ca != cb => Some(format!(
+            "consumer_positions: {} vs {}",
+            ca.sha256, cb.sha256
+        )),
+        _ => None,
+    }
+}
+
 /// **PROD-03.0, rule 3 for `topics[].schema_dependency`.** The same one-way
 /// rule as [`unbacked_coverage`]: a record may carry LESS than its receipt (an
 /// older writer copies nothing: absent is NOT ASSESSED, rule 2), never more
@@ -421,6 +466,71 @@ fn schema_dependency_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String
                     ta.name,
                     dependency_summary(da),
                     dependency_summary(db)
+                )
+            })
+        })
+        .collect()
+}
+
+/// **PROD-01.4a, rule 3 for `topics[].identity`.** The same one-way rule as
+/// [`unbacked_coverage`]: a record may carry no topic IDs (an older writer:
+/// absent is UNKNOWN, rule 2), never IDs its receipt does not back. A record
+/// that could swap an ID would turn a recreated topic into the same
+/// generation — offsets of one incarnation read as the other's.
+fn unbacked_identity(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<String> {
+    point
+        .topics
+        .iter()
+        .filter_map(|t| {
+            let claimed = t.identity.as_ref()?;
+            let backed = receipt
+                .generations
+                .as_ref()
+                .and_then(|block| block.get(&t.name));
+            (backed != Some(claimed)).then(|| {
+                format!(
+                    "topics[{:?}].identity: {} vs {}",
+                    t.name,
+                    identity_summary(claimed),
+                    backed.map_or_else(|| "none in the receipt".to_string(), identity_summary)
+                )
+            })
+        })
+        .collect()
+}
+
+/// A topic's IDs in one phrase, for a disagreement line.
+fn identity_summary(i: &logweir_core::backup_receipt::TopicIdentity) -> String {
+    let side = |id: &Option<String>, reason: &Option<String>| match (id, reason) {
+        (Some(id), _) => id.clone(),
+        (None, Some(reason)) => format!("null ({reason})"),
+        (None, None) => "null".to_string(),
+    };
+    format!(
+        "{} before, {} after",
+        side(&i.topic_id, &i.topic_id_reason),
+        side(&i.topic_id_after, &i.topic_id_after_reason)
+    )
+}
+
+/// **PROD-01.4a, rule 4 for `topics[].identity`.** Two records of one point
+/// must agree on a topic's IDs wherever BOTH carry them.
+fn identity_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
+    a.topics
+        .iter()
+        .filter_map(|ta| {
+            let ia = ta.identity.as_ref()?;
+            let ib = b
+                .topics
+                .iter()
+                .find(|tb| tb.name == ta.name)
+                .and_then(|tb| tb.identity.as_ref())?;
+            (ia != ib).then(|| {
+                format!(
+                    "topics[{:?}].identity: {} vs {}",
+                    ta.name,
+                    identity_summary(ia),
+                    identity_summary(ib)
                 )
             })
         })
@@ -531,7 +641,9 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     let mut disagreements = ReceiptFacts::of_record(a).disagreements(&ReceiptFacts::of_record(b));
     disagreements.extend(coverage_conflicts(a, b));
     disagreements.extend(configuration_conflicts(a, b));
+    disagreements.extend(consumer_positions_conflicts(a, b));
     disagreements.extend(schema_dependency_conflicts(a, b));
+    disagreements.extend(identity_conflicts(a, b));
     if !disagreements.is_empty() {
         return Duplicate::Conflict(disagreements);
     }

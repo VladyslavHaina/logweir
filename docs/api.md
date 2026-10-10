@@ -155,7 +155,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. A credential is entered once (`secret.new`) and becomes a Secret owned by and bound to the destination; an existing Secret is never named (`existing_credential_refused`, FX-20). |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. A new value is written to a new bound Secret; `secret.existing` may name only a Secret the destination already names (FX-20). |
-| `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. |
+| `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. `destination.credentialBound` (FX-20c, blocking) compares the `logweir-binding` of every `SecretKeys` grant the destination declares, whichever roles are exercised and `archiveWrite` included, with no request: a grant whose Secret is unbound or bound to another object is `notReady`/`CredentialBindingMismatch`, named in the message by its `spec.access` field, destination and Secret, so the verdict is never `ready` for a destination a backup would refuse ([kubernetes.md](kubernetes.md) §20.10). |
 | `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Adopt a legacy `BackupSchedule` or `Backup`'s location. **This build always refuses** — see below. |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
 | `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
@@ -174,7 +174,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). From receipt format 1.5.0 each topic also carries `schemaDependency` (PROD-03.0): `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), `basis` or `reason`, the dependent `sides` and the `schemaIds` they name (at most 16, `schemaIdsOmitted` when more were seen); absent is not assessed, never "not schema-dependent". |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). From receipt format 1.5.0 each topic also carries `schemaDependency` (PROD-03.0): `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), `basis` or `reason`, the dependent `sides` and the `schemaIds` they name (at most 16, `schemaIdsOmitted` when more were seen); absent is not assessed, never "not schema-dependent". For a point whose backup selected consumer groups (receipt and record format 1.7.0), `consumerPositions`: when the positions were observed, `observedBeforeRecoveryPointMs` (the snapshot's freshness), the listing word and, per group (at most 32, else `groupsOmitted`), its outcome, reason, type, whether it was active and its positions counted by what they say about archived data (`related`, `notRelated`, `neverCommitted`, `beyondEnd`, `failed`, `notObserved`); absent is not published, never "no positions". These are COUNTS: each position's own relation is in the positions document the point's receipt binds, which no route serves. The API neither sets nor shows a `Backup`'s or `BackupSchedule`'s `spec.consumerGroups`: the create bodies refuse the field (an unknown field, never silently dropped), and a selection is set with `kubectl` ([kubernetes.md](kubernetes.md#consumer-position-evidence-specconsumergroups)). |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
@@ -1012,6 +1012,28 @@ adds `coverage` (the same `recorded` value), `complete` — `covered`,
 FX-23's `unsampledTopics` for a sampled check: the restored topics the
 partition cap left without a sampled partition. `complete` is served only beside
 a recorded `coverage: complete`. All three are additive.
+
+**A narrowed restore says so (PROD-11.1b).** Both restore reads and the
+operation route's `verificationScope` carry an optional `selection` when the
+signed scorecard records one — a partition subset (format 2.0.0) or a window
+from a stated start (format 1.7.0):
+
+```json
+{"selection": {"scope": "partial", "windowEndMs": 1788789900000, "narrowedTopics": 1,
+               "partitions": [{"topic": "orders", "partitions": [0, 2]}], "engineRuns": 2}}
+```
+
+`scope` is always `partial`: a client that reads no further still never takes
+the restore for one of every partition of every topic. `narrowedTopics` counts
+the topics narrowed to a partition subset; `partitions` lists them (a restored
+topic not listed restored every partition), absent past 256 topics or 1024
+partitions in one (the count stays; the rows are in the scorecard).
+`windowStartMs` is present only for a stated start. Every verdict beside it —
+`coverage.covered`, `complete.covered`, the result — is the SELECTION's: a
+covered complete check over a subset compared every record of every *selected*
+partition, not of the topic. **Absent `selection` is an unnarrowed restore,
+exactly as before.** A selection the controller could not read is still served
+(`{"scope": "partial"}`), never omitted. Additive.
 
 `GET .../rehearsal-schedules[/{name}]`'s `bounds` carries `coverage` (`sampled`
 when the schedule states none, or `complete`) and `completeMaxRecords`.

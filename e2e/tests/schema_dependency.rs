@@ -456,7 +456,13 @@ fn a_backup_flags_raw_framed_records_with_their_ids() {
 
     let b = backup(&format!("p030ci-{n}"), &topics);
     let r = &b.receipt;
-    assert_eq!(r.format_version, "1.5.0");
+    // At least the version that defines `schema_dependency`: a later block
+    // (PROD-01.4a's `generations`) moves every receipt's minor past it.
+    harness::assert_format_at_least(
+        &r.format_version,
+        "1.5.0",
+        "the receipt carries schema_dependency",
+    );
     r.validate_invariants()
         .expect("the signed receipt is valid");
     let sd = r
@@ -640,7 +646,13 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
 
     let b = backup(&format!("p030-{n}"), &topics);
     let r = &b.receipt;
-    assert_eq!(r.format_version, "1.5.0");
+    // At least the version that defines `schema_dependency`: a later block
+    // (PROD-01.4a's `generations`) moves every receipt's minor past it.
+    harness::assert_format_at_least(
+        &r.format_version,
+        "1.5.0",
+        "the receipt carries schema_dependency",
+    );
     r.validate_invariants()
         .expect("the signed receipt is valid");
     let sd = r
@@ -724,7 +736,11 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
         .get(key)
         .unwrap_or_else(|e| panic!("read {key}: {e}"));
     let record: Value = serde_json::from_slice(&bytes).expect("a record");
-    assert_eq!(record["format_version"], "1.5.0");
+    harness::assert_format_at_least(
+        record["format_version"].as_str().expect("format_version"),
+        "1.5.0",
+        "the catalog record copies schema_dependency",
+    );
     for topic in record["topics"].as_array().unwrap() {
         let name = topic["name"].as_str().unwrap();
         assert_eq!(

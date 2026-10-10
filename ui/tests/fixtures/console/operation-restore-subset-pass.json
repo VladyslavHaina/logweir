@@ -1,0 +1,157 @@
+{
+  "requestId": "req-selection-0001",
+  "item": {
+    "kind": "restore",
+    "name": "orders-drill-subset",
+    "namespace": "logweir-t26",
+    "uid": "7c9b0a1d-2e3f-4a5b-8c7d-6e5f4a3b2c2e",
+    "resourceVersion": "40311",
+    "createdAt": "2026-09-11T12:41:00Z",
+    "state": "succeeded",
+    "stateReason": "Ok",
+    "terminal": true,
+    "lastUpdatedAt": "2026-09-11T12:42:32Z",
+    "result": {
+      "status": "pass",
+      "exitCode": 0,
+      "exitReason": "ok",
+      "outcome": "pass",
+      "lastPhaseCompleted": 9
+    },
+    "verification": {
+      "state": "valid",
+      "matchedKeyId": "6ea0c47f9a1b4d2e8c5f0a3b7d6e9012",
+      "verifiedAt": "2026-09-11T12:42:32Z",
+      "payloadType": "application/vnd.logweir.scorecard+json"
+    },
+    "verifiedSuccess": true,
+    "evidence": {
+      "payloadKey": "logweir/drills/01JB7Z0000000000000000000A.json",
+      "payloadSha256": "sha256:1122334455667788990011223344556677889900aabbccddeeff001122334455",
+      "sidecarKey": "logweir/drills/01JB7Z0000000000000000000A.json.sig",
+      "offsetReportKey": "logweir/drills/01JB7Z0000000000000000000A.offsets.json"
+    },
+    "conditions": [
+      {
+        "type": "Complete",
+        "status": "True",
+        "reason": "Ok",
+        "lastTransitionTime": "2026-09-11T12:42:20Z"
+      },
+      {
+        "type": "EvidenceRecorded",
+        "status": "True",
+        "reason": "EvidenceRecorded",
+        "lastTransitionTime": "2026-09-11T12:42:25Z"
+      },
+      {
+        "type": "Verified",
+        "status": "True",
+        "reason": "Verified",
+        "message": "verified by weirkeeper at 2026-09-11T12:42:32Z against key 6ea0c47f9a1b4d2e8c5f0a3b7d6e9012",
+        "lastTransitionTime": "2026-09-11T12:42:32Z"
+      }
+    ],
+    "stage": "finished",
+    "trust": {
+      "state": "verified",
+      "basis": "None"
+    },
+    "verificationScope": {
+      "level": "sampled",
+      "coverage": "complete",
+      "complete": {
+        "covered": true,
+        "segments": 4,
+        "segmentsVerified": 4,
+        "segmentsFailed": 0,
+        "segmentsUnverified": 0,
+        "recordsDecoded": 182,
+        "offsetHoles": 0,
+        "replay": {
+          "expected": 180,
+          "restored": 180,
+          "matching": 180,
+          "missing": 0,
+          "unexpected": 0,
+          "duplicates": 0,
+          "outOfOrder": 0,
+          "mismatched": 0
+        },
+        "partitionCount": 3,
+        "partitions": [
+          {
+            "topic": "orders",
+            "partition": 0,
+            "targetTopic": "drill-20260911-orders",
+            "compared": true,
+            "replay": {
+              "expected": 60,
+              "restored": 60,
+              "matching": 60,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "outOfOrder": 0,
+              "mismatched": 0
+            }
+          },
+          {
+            "topic": "orders",
+            "partition": 2,
+            "targetTopic": "drill-20260911-orders",
+            "compared": true,
+            "replay": {
+              "expected": 70,
+              "restored": 70,
+              "matching": 70,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "outOfOrder": 0,
+              "mismatched": 0
+            }
+          },
+          {
+            "topic": "payments",
+            "partition": 0,
+            "targetTopic": "drill-20260911-payments",
+            "compared": true,
+            "replay": {
+              "expected": 50,
+              "restored": 50,
+              "matching": 50,
+              "missing": 0,
+              "unexpected": 0,
+              "duplicates": 0,
+              "outOfOrder": 0,
+              "mismatched": 0
+            }
+          }
+        ]
+      },
+      "selection": {
+        "scope": "partial",
+        "windowEndMs": 1788789900000,
+        "narrowedTopics": 1,
+        "partitions": [
+          {
+            "topic": "orders",
+            "partitions": [
+              0,
+              2
+            ]
+          }
+        ],
+        "engineRuns": 2
+      }
+    },
+    "awaitingApproval": false,
+    "stale": false,
+    "readiness": {
+      "state": "unknown",
+      "basis": "notImplemented"
+    },
+    "targetMode": "scratch"
+  }
+}

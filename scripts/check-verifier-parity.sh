@@ -262,10 +262,14 @@ receipt_tb_cases=0
 receipt_model_cases=0
 receipt_unchecked_cases=0
 receipt_admin_cases=0
+receipt_cp_cases=0
 receipt_sd_dependent_cases=0
 receipt_sd_key_cases=0
 receipt_sd_absent_cases=0
 receipt_sd_entry_cases=0
+receipt_gen_same_cases=0
+receipt_gen_changed_cases=0
+receipt_gen_unknown_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
     receipt_count=$((receipt_count + 1))
@@ -418,6 +422,39 @@ $rust_tc"
         fi
         case "$want_route" in *"owner not checked"*) receipt_unchecked_cases=$((receipt_unchecked_cases + 1)) ;; esac
         case "$want_route" in *"applied through the admin API"*) receipt_admin_cases=$((receipt_admin_cases + 1)) ;; esac
+        # PROD-04.1: both readers print the consumer position evidence — a
+        # header and one line per selected group, or nothing when the backup
+        # selected none — and the SAME lines. The groups, their outcomes and
+        # how many positions relate to archived data are read from the
+        # DOCUMENT, so a reader that dropped a group, or counted a position the
+        # receipt does not relate, fails here; and at least one accepted case
+        # must carry the block (below).
+        rust_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/rust.all" || true)"
+        py_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/py.all" || true)"
+        if [ "$rust_cp" != "$py_cp" ]; then
+            fail "$name: the two readers print DIFFERENT consumer position lines.
+  rust:
+$rust_cp
+  python:
+$py_cp"
+        fi
+        want_cp="$("$PY" -c 'import json, sys
+cp = json.load(open(sys.argv[1])).get("consumer_positions")
+for g in sorted((cp or {}).get("groups") or {}):
+    entry = cp["groups"][g]
+    n = (entry.get("counts") or {}).get("related", 0)
+    print("consumer_positions[" + json.dumps(g) + "]: " + entry["outcome"] + " " + str(n))' "$doc")"
+        got_cp="$(printf '%s\n' "$rust_cp" | sed -n \
+            -e 's/^\(consumer_positions\[".*"\]: captured\) .*positions: \([0-9]*\) related to archived data.*/\1 \2/p' \
+            -e 's/^\(consumer_positions\[".*"\]: [a-z]*\) (.*/\1 0/p')"
+        if [ "$got_cp" != "$want_cp" ]; then
+            fail "$name: the consumer position lines do not name exactly the receipt's groups, outcomes and related positions.
+  want:
+$want_cp
+  got:
+$rust_cp"
+        fi
+        [ -z "$want_cp" ] || receipt_cp_cases=$((receipt_cp_cases + 1))
         # PROD-03.0: both readers print the schema dependency, one line per
         # topic or the one line saying it was not assessed (never "not
         # schema-dependent"), and the SAME lines. The lines are ALSO derived
@@ -469,6 +506,50 @@ $rust_sd"
         case "$want_sd" in *"key framed "*", dependent"*) receipt_sd_key_cases=$((receipt_sd_key_cases + 1)) ;; esac
         case "$want_sd" in *"schema_dependency: not assessed"*) receipt_sd_absent_cases=$((receipt_sd_absent_cases + 1)) ;; esac
         case "$want_sd" in *": not assessed ("*) receipt_sd_entry_cases=$((receipt_sd_entry_cases + 1)) ;; esac
+        # PROD-01.4a: both readers print each topic's IDs before and after the
+        # capture, one line per topic or the one line saying they were not
+        # recorded, and the SAME lines. What each line SAYS is derived from the
+        # DOCUMENT — one generation where the two IDs are equal, CHANGED where
+        # they differ, not established otherwise — so a reader that called a
+        # recreated topic "one generation", or an unknown ID anything but
+        # unknown, fails here even if the other reader made the same mistake.
+        rust_gen="$(grep -oE 'generations(\[|:).*' "$tmp/rust.all" || true)"
+        py_gen="$(grep -oE 'generations(\[|:).*' "$tmp/py.all" || true)"
+        [ -n "$rust_gen" ] || fail "$name: drill verify printed no generations line for an accepted receipt"
+        if [ "$rust_gen" != "$py_gen" ]; then
+            fail "$name: the two readers print DIFFERENT generations lines.
+  rust:
+$rust_gen
+  python:
+$py_gen"
+        fi
+        want_gen="$("$PY" -c 'import json, sys
+gens = json.load(open(sys.argv[1])).get("generations")
+if gens is None:
+    print("generations: not recorded")
+for t in sorted(gens or {}):
+    b, a = gens[t].get("topic_id"), gens[t].get("topic_id_after")
+    if b is not None and a is not None and b == a:
+        print("generations[" + json.dumps(t) + "] one generation")
+    elif b is not None and a is not None:
+        print("generations[" + json.dumps(t) + "] CHANGED")
+    else:
+        print("generations[" + json.dumps(t) + "] not established")' "$doc")"
+        got_gen="$(printf '%s\n' "$rust_gen" | sed -n \
+            -e 's/^\(generations: not recorded\),.*/\1/p' \
+            -e 's/^\(generations\[".*"\]\): topic ID [A-Za-z0-9_-]\{22\} before and after the capture (.*), \(one generation\)$/\1 \2/p' \
+            -e 's/^\(generations\[".*"\]\): topic ID \(CHANGED\) during the capture .*/\1 \2/p' \
+            -e 's/^\(generations\[".*"\]\): .*, so its generation is \(not established\) by ID and is UNKNOWN$/\1 \2/p')"
+        if [ "$got_gen" != "$want_gen" ]; then
+            fail "$name: the generations lines do not say what the receipt's topic IDs say.
+  want:
+$want_gen
+  got:
+$rust_gen"
+        fi
+        case "$want_gen" in *"] one generation"*) receipt_gen_same_cases=$((receipt_gen_same_cases + 1)) ;; esac
+        case "$want_gen" in *"] CHANGED"*) receipt_gen_changed_cases=$((receipt_gen_changed_cases + 1)) ;; esac
+        case "$want_gen" in *"] not established"*) receipt_gen_unknown_cases=$((receipt_gen_unknown_cases + 1)) ;; esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -483,6 +564,9 @@ fi
 if [ "$receipt_model_cases" -eq 0 ]; then
     fail "no accepted backup-receipt case carries topic_configuration, so the model lines (PROD-05.1) were never compared"
 fi
+if [ "$receipt_cp_cases" -eq 0 ]; then
+    fail "no accepted backup-receipt case carries consumer_positions, so the consumer position lines (PROD-04.1) were never compared"
+fi
 if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
 fi
@@ -490,7 +574,103 @@ if [ "$receipt_sd_dependent_cases" -eq 0 ] || [ "$receipt_sd_key_cases" -eq 0 ] 
     || [ "$receipt_sd_absent_cases" -eq 0 ] || [ "$receipt_sd_entry_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include a schema-dependent topic ($receipt_sd_dependent_cases), a dependent key side ($receipt_sd_key_cases), a receipt without the block ($receipt_sd_absent_cases) and a not-assessed entry ($receipt_sd_entry_cases), so the schema dependency lines (PROD-03.0) were never told apart"
 fi
+if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ] || [ "$receipt_gen_unknown_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a topic with one generation ($receipt_gen_same_cases), one recreated during the capture ($receipt_gen_changed_cases) and one whose ID is unknown ($receipt_gen_unknown_cases), so the generations lines (PROD-01.4a) were never told apart"
+fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
+
+# ---------------------------------------------------------------------------
+# PROD-04.1: the POSITIONS DOCUMENT a 1.7.0 receipt binds, on FULL refusal text
+# (`consumer-positions-index.json`, both readers with `--consumer-positions`).
+# On the accepted case both readers print the SAME consumer_positions lines,
+# and those lines name every position the DOCUMENT lists — read from the
+# document here, so a reader that dropped or invented a position fails even
+# when the other agrees with it.
+# ---------------------------------------------------------------------------
+RUST_POSITIONS_PREFIX="SIGNATURE VALID but the consumer positions document is refused: "
+mkdir -p "$tmp/positions"
+"$PY" - "$CORPUS" "$tmp/positions" > "$tmp/positions-cases.tsv" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+PT = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+key = serialization.load_pem_private_key(
+    (corpus.parent / "signed" / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+for e in json.loads((corpus / "consumer-positions-index.json").read_text()):
+    payload = (corpus / e["receipt"]).read_bytes()
+    t = PT.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{e['id']}.json").write_bytes(payload)
+    (out / f"{e['id']}.sig").write_text(json.dumps(
+        {"payloadType": PT,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+    (out / f"{e['id']}.positions.json").write_bytes((corpus / e["document"]).read_bytes())
+    print(f"{e['id']}\t{e['rust_exit']}\t{e['python_exit']}\t{e['reason']}")
+PYEOF
+
+positions_count=0
+positions_accepted=0
+while IFS=$'\t' read -r name want_rust want_py reason; do
+    [ -n "$name" ] || continue
+    positions_count=$((positions_count + 1))
+    doc="$tmp/positions/$name.json"
+    set +e
+    "$BIN" drill verify --payload-type backup-receipt --scorecard "$doc" \
+        --signature "$tmp/positions/$name.sig" --public-key "$FIX/public.pem" \
+        --consumer-positions "$tmp/positions/$name.positions.json" >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    "$PY" "$VERIFIER" --payload-type backup-receipt \
+        --consumer-positions "$tmp/positions/$name.positions.json" \
+        "$doc" "$tmp/positions/$name.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq "$want_rust" ] || { cat "$tmp/rust.err" >&2; fail "$name: drill verify exited $rust_rc, expected $want_rust"; }
+    [ "$py_rc" -eq "$want_py" ] || { cat "$tmp/py.err" >&2; fail "$name: verify_scorecard.py exited $py_rc, expected $want_py"; }
+    rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_POSITIONS_PREFIX")"
+    [ -n "$rust_msg" ] || rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_PREFIX")"
+    py_msg="$(refusal_text "$tmp/py.err" "$PY_PREFIX")"
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$reason" ]; then
+        fail "$name: the positions document refusals differ.
+  rust:   $rust_msg
+  python: $py_msg
+  index:  $reason"
+    fi
+    if [ -z "$reason" ]; then
+        positions_accepted=$((positions_accepted + 1))
+        rust_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/rust.out" || true)"
+        py_cp="$(grep -oE 'consumer_positions(\[|:).*' "$tmp/py.out" || true)"
+        [ "$rust_cp" = "$py_cp" ] || fail "$name: the two readers print DIFFERENT consumer position lines.
+  rust:
+$rust_cp
+  python:
+$py_cp"
+        want_pos="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+for g in sorted(doc["groups"]):
+    for e in doc["groups"][g]["positions"]:
+        print("consumer_positions[" + json.dumps(g) + "][" + json.dumps(e["topic"]) + ":" + str(e["partition"]) + "]")
+    print("consumer_positions[" + json.dumps(g) + "][*]: " + str(doc["groups"][g]["no_committed_position"]))' "$tmp/positions/$name.positions.json")"
+        got_pos="$(printf '%s\n' "$rust_cp" | sed -n \
+            -e 's/^\(consumer_positions\[".*"\]\[".*":[0-9]*\]\):.*/\1/p' \
+            -e 's/^\(consumer_positions\[".*"\]\[\*\]: [0-9]*\) other.*/\1/p')"
+        [ "$got_pos" = "$want_pos" ] || fail "$name: the position lines do not name exactly the document's positions.
+  want:
+$want_pos
+  got:
+$rust_cp"
+    fi
+    echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (positions document)"
+done <<< "$(cat "$tmp/positions-cases.tsv")"
+[ "$positions_count" -gt 0 ] || fail "walked zero positions document cases"
+[ "$positions_accepted" -eq 1 ] || fail "consumer-positions-index.json must carry exactly one accepted case, found $positions_accepted"
+echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $positions_count positions documents"
 
 # ---------------------------------------------------------------------------
 # FX-7: the pinned manifest version (backup receipt format 1.2.0).
@@ -623,12 +803,17 @@ CATALOG_PIN_VERSION="1.2.0"
 CATALOG_MODEL_VERSION="1.3.0"
 # PROD-01.3 (merged after PROD-05.1): the catalog point format whose
 # `source.auth_mode` may name one of the three modes PROD-01.3 added
-# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES,
-# the newest MINOR. A renumber moves that constant, the justfile's
-# `catalog_schema_version` and this line together.
+# (`scramSha256`, `plain`, `mtls`) — record.rs's FORMAT_VERSION_WITH_AUTH_MODES.
+# (PROD-03.0's 1.5.0, `topics[].schema_dependency`, sits between it and
+# PROD-01.4a's; this script signs no 1.5.0 record.)
 CATALOG_AUTH_VERSION="1.4.0"
+# PROD-01.4a (merged after PROD-03.0): the catalog point format whose topics
+# carry the receipt's topic IDs (`topics[].identity`) — record.rs's
+# FORMAT_VERSION_WITH_GENERATIONS, the newest MINOR. A renumber moves that
+# constant, the justfile's `catalog_schema_version` and this line together.
+CATALOG_IDENTITY_VERSION="1.6.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" "$CATALOG_PIN_VERSION" "$CATALOG_MODEL_VERSION" "$CATALOG_AUTH_VERSION" "$CATALOG_IDENTITY_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -638,6 +823,7 @@ coverage_version = sys.argv[4]
 pin_version = sys.argv[5]
 model_version = sys.argv[6]
 auth_version = sys.argv[7]
+identity_version = sys.argv[8]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -750,6 +936,27 @@ modes["source"]["auth_mode"] = "mtls"
 modes_payload = json.dumps(modes, indent=2).encode() + b"\n"
 (out / "auth14.json").write_bytes(modes_payload)
 (out / "auth14.sig").write_text(sign(modes_payload))
+# PROD-01.4a: the record this build writes — format 1.6.0, its topic rows
+# carrying the receipt's topic IDs before and after the engine. Signature-only
+# like the rest: both readers must ACCEPT it; its facts are the Rust catalog
+# reader's rule-3 cross-check (`reader::cross_check`, `unbacked_identity`).
+identity = json.loads(json.dumps(modes))
+identity["format_version"] = identity_version
+identity["topics"][0]["identity"] = {
+    "topic_id": "gtOq2VXiTCK1QM2UtERijA",
+    "topic_id_after": "tpWwuKExQo2lN9NziDMpYg",
+    "topic_id_source": "describeTopics",
+}
+identity_payload = json.dumps(identity, indent=2).encode() + b"\n"
+(out / "identity16.json").write_bytes(identity_payload)
+(out / "identity16.sig").write_text(sign(identity_payload))
+# PROD-01.4a review M1: the same record copying Kafka's reserved (0, 1) topic
+# ID. Both readers must REFUSE it, with the same text.
+reserved = json.loads(json.dumps(identity))
+reserved["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+reserved_payload = json.dumps(reserved, indent=2).encode() + b"\n"
+(out / "identity16reserved.json").write_bytes(reserved_payload)
+(out / "identity16reserved.sig").write_text(sign(reserved_payload))
 PYEOF
 
 catalog_case() {
@@ -791,6 +998,29 @@ grep -q "manifest_version_id=fx7-manifest-version-0001" "$tmp/py.out" \
     || fail "verify_scorecard.py does not print the pinned manifest version a $CATALOG_PIN_VERSION catalog point carries (FX-7)"
 catalog_case modelled catalog-point 0 0
 catalog_case auth14 catalog-point 0 0
+catalog_case identity16 catalog-point 0 0
+grep -q '"topic_id_after": "tpWwuKExQo2lN9NziDMpYg"' "$tmp/catalog/identity16.json" \
+    || fail "the $CATALOG_IDENTITY_VERSION catalog point case no longer carries a topic's IDs, so it proves nothing about PROD-01.4a's identity"
+# PROD-01.4a review M1: a record copying Kafka's reserved topic ID is refused
+# by both readers (drill verify 4, the script 1), with the SAME text.
+catalog_case identity16reserved catalog-point 4 1
+set +e
+"$BIN" drill verify --payload-type catalog-point --scorecard "$tmp/catalog/identity16reserved.json" \
+    --signature "$tmp/catalog/identity16reserved.sig" --public-key "$FIX/public.pem" >"$tmp/rust.out" 2>"$tmp/rust.err"
+set -e
+set +e
+"$PY" "$VERIFIER" --payload-type catalog-point "$tmp/catalog/identity16reserved.json" \
+    "$tmp/catalog/identity16reserved.sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+set -e
+rust_msg="$(sed -n 's/^SIGNATURE VALID but the document is self-contradicting: //p' "$tmp/rust.err")"
+py_msg="$(sed -n 's/^INVALID: //p' "$tmp/py.err")"
+want_msg='topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic ID this format defines: 22 characters of URL-safe base64 without padding over the ID'"'"'s 16 bytes, and never one of Kafka'"'"'s reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)'
+[ "$rust_msg" = "$want_msg" ] || fail "catalog-point/identity16reserved: drill verify's refusal is not the expected text.
+  got:  $rust_msg
+  want: $want_msg"
+[ "$py_msg" = "$want_msg" ] || fail "catalog-point/identity16reserved: the two readers refuse with DIFFERENT text.
+  rust:   $rust_msg
+  python: $py_msg"
 grep -q '"auth_mode": "mtls"' "$tmp/catalog/auth14.json" \
     || fail "the $CATALOG_AUTH_VERSION catalog point case no longer names an mTLS source, so it proves nothing about PROD-01.3's modes"
 
@@ -817,14 +1047,16 @@ cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
 # reader has its own arm and its own sentence. Each is asserted against the
 # reader that produces it, which is what makes this a claim about both readers
 # rather than about one of them twice.
-grep -q "the SIGNATURE only" "$tmp/rust.all" \
-    || fail "drill verify stopped saying that a catalog point is checked SIGNATURE-ONLY.
+grep -q "the SIGNATURE, and one check of this document type" "$tmp/rust.all" \
+    || fail "drill verify stopped saying that a catalog point is checked by its SIGNATURE and one check of its copied topic IDs only.
 An exit 0 for this document type must never read like an exit 0 for a scorecard:
 the record's facts are recomputed from the backup receipt it names, and this
 command does not fetch it."
 grep -q "This signature covers the record only" "$tmp/py.all" \
     || fail "docs/verify_scorecard.py stopped saying that a catalog point is checked
 SIGNATURE-ONLY. See the sentence in its catalog-point arm."
+grep -q "One check of this document type is evaluated by this build" "$tmp/py.all" \
+    || fail "docs/verify_scorecard.py stopped saying which one check of a catalog point it makes (PROD-01.4a review M1)"
 grep -q "$CATALOG_PT" "$tmp/rust.all" \
     || fail "drill verify does not name the catalog-point media type it verified"
 grep -q "$CATALOG_PT" "$tmp/py.all" \
@@ -840,7 +1072,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all six catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION and $CATALOG_AUTH_VERSION), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all eight catalog-point documents (1.0.0, $CATALOG_COVERAGE_VERSION, $CATALOG_PIN_VERSION, $CATALOG_MODEL_VERSION, $CATALOG_AUTH_VERSION and $CATALOG_IDENTITY_VERSION, and one copying a reserved topic ID, refused by both in the same words); both check the signature and the copied topic IDs only"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says
@@ -1797,3 +2029,219 @@ for name in sel1-under-1.6.0 sel2-start-at-end sel3-window; do
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (selection refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"
+
+# ---------------------------------------------------------------------------
+# SUBSET LOOP (PROD-11.1b, the owner's decision OD-9 (a)): scorecard format
+# 2.0.0, a partition-subset restore's document, and what an exit 0 says about
+# it.
+# ---------------------------------------------------------------------------
+#
+# Four documents both readers ACCEPT, and the `replay selection:` and
+# `sample coverage:` lines each must print — the SAME lines from both,
+# compared WHOLE:
+#
+#   floor-sampled     orders [0, 2] from the archive's floor, a sampled pass:
+#                     the subset line (the other partitions proved empty) and
+#                     the sampled-pass line QUALIFIED by the subset
+#   start-sampled     the same from a stated start: both lines also say the
+#                     sampled check does not prove no record before the start
+#                     was restored
+#   start-complete    orders [0, 1] from a start, a complete pass: the subset
+#                     line, "restored or expected" for both clauses
+#   start-complete-fail  the same complete block under fail-integrity: both
+#                     clauses say only "expected"
+#
+# and seven both readers REFUSE: PS-1 twice (a 2.0.0 document with a
+# start-only block, and with none) and PS-2 to PS-5 once each, with the same
+# full text; plus a 3.0.0 document each reader refuses as newer than it reads
+# (their sentences differ by one word, "build" and "script", so each is
+# pinned on its own). Generated and signed here with the throwaway fixture key,
+# like the loops above.
+#
+# The format of a partition-subset restore —
+# `FORMAT_VERSION_WITH_PARTITION_SUBSETS`; a renumber moves both.
+SCORECARD_SUBSET_VERSION="2.0.0"
+mkdir -p "$tmp/scorecard-subset"
+"$PY" - "$ROOT" "$tmp/scorecard-subset" "$SC_PT" "$SCORECARD_SUBSET_VERSION" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+sampled = {"coverage": "sampled", "comparison_basis": "archive",
+           "header_order": "notVerified", "application": "notAttempted",
+           "gaps": [], "pruned": []}
+complete = json.loads(
+    (root / "e2e" / "fixtures" / "invariants" / "verification_1_4_complete_pass.json")
+    .read_text())["integrity"]["verification"]
+END = complete["complete"]["window"]["end_ms"]
+START = END - 55_200_000
+
+
+def subset(parts=(("orders", [0, 2]),), runs=1, start=None):
+    s = {"window_end_ms": END,
+         "partitions": [{"topic": t, "partitions": list(ps)} for t, ps in parts],
+         "engine_runs": runs}
+    if start is not None:
+        s["window_start_ms"] = start
+    return s
+
+
+def doc(selection, version=current, block=None):
+    d = json.loads(json.dumps(base))
+    d["format_version"] = version
+    d["integrity"]["verification"] = json.loads(json.dumps(block or sampled))
+    if selection is not None:
+        d["source"]["selection"] = selection
+    return d
+
+
+def not_a_pass(d):
+    d["outcome"] = "fail-integrity"
+    d["integrity"]["result"] = "fail"
+    d["integrity"]["partial_reason"] = "not a pass"
+    d["engine"]["matrix_verdict"] = "pass-degraded"
+    return d
+
+
+def windowed(start):
+    b = json.loads(json.dumps(complete))
+    b["complete"]["window"] = {"end_ms": END} if start is None else {"start_ms": start, "end_ms": END}
+    return b
+
+
+whole = (("orders", [0, 1]),)
+
+
+def mixed_block():
+    # Review L2: orders/0 narrowed, payments/0 a topic with no subset.
+    b = windowed(None)
+    rows = b["complete"]["partitions"]
+    rows[1]["topic"], rows[1]["partition"] = "payments", 0
+    rows[1]["target_topic"] = "drill-payments"
+    return b
+
+
+cases = {
+    "floor-sampled": doc(subset()),
+    "start-sampled": doc(subset(start=START)),
+    "start-complete": doc(subset(whole, start=START), block=windowed(START)),
+    "start-complete-fail": not_a_pass(doc(subset(whole, start=START), block=windowed(START))),
+    "mixed-complete": doc(subset((("orders", [0]),), runs=2), block=mixed_block()),
+    "ps1-start-only": doc({"window_start_ms": START, "window_end_ms": END}),
+    "ps1-no-block": doc(None),
+    "ps2-subset-under-1.7.0": doc(subset(start=START), version="1.7.0"),
+    "ps3-unsorted": doc(subset((("orders", [2, 0]),))),
+    "ps4-runs": doc(subset((("orders", [0, 2]), ("payments", [1])), runs=1)),
+    "ps5-unselected": doc(subset((("orders", [0]),)), block=windowed(None)),
+    "newer-major": doc(subset(), version="3.0.0"),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+(out / "window.txt").write_text(f"{START} {END}\n")
+PYEOF
+read -r SUB_START SUB_END <"$tmp/scorecard-subset/window.txt"
+
+for name in floor-sampled start-sampled start-complete start-complete-fail mixed-complete; do
+    doc="$tmp/scorecard-subset/$name.json"
+    sig="$tmp/scorecard-subset/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE '(replay selection|sample coverage): .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/$name: the two readers say different things about the subset.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    proved="no record of another partition of these topics was restored or expected"
+    expected="no record of another partition of these topics was expected"
+    held="every selected partition was held to its own count bound over that window, every other partition of a narrowed topic was held empty, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a selected partition with records in that window was refused"
+    started="from epoch-ms $SUB_START (the plan's stated window start, inclusive) to epoch-ms $SUB_END (inclusive), in 1 engine run(s); "
+    case "$name" in
+        floor-sampled) want="sample coverage: a sampled pass over a partition subset from the archive's floor to epoch-ms $SUB_END: $held
+replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), from the archive's floor to epoch-ms $SUB_END (inclusive), in 1 engine run(s); $proved" ;;
+        start-sampled) want="sample coverage: a sampled pass over a partition subset from epoch-ms $SUB_START to epoch-ms $SUB_END: $held; no record before the start was expected, and a sampled check does not prove that none was restored
+replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), ${started}${proved}; no record before the start was expected; a sampled check does not prove that none was restored" ;;
+        start-complete) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${proved}; no record before the start was restored or expected" ;;
+        start-complete-fail) want="replay selection: ONLY orders partitions [0, 1] (every partition of any other restored topic), ${started}${expected}; no record before the start was expected" ;;
+        mixed-complete) want="replay selection: ONLY orders partitions [0] (every partition of any other restored topic), from the archive's floor to epoch-ms $SUB_END (inclusive), in 2 engine run(s); $proved" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/$name: expected the subset and sample coverage lines to be
+$want
+got:
+$rust_lines"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (partition subset, $SCORECARD_SUBSET_VERSION)"
+done
+
+for name in ps1-start-only ps1-no-block ps2-subset-under-1.7.0 ps3-unsorted ps4-runs ps5-unselected newer-major; do
+    doc="$tmp/scorecard-subset/$name.json"
+    sig="$tmp/scorecard-subset/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    ps1="format_version $SCORECARD_SUBSET_VERSION is the format of a partition-subset restore, and this document carries no source.selection.partitions; a reader reads major 2 only for that shape"
+    case "$name" in
+        ps1-start-only|ps1-no-block) want_msg="$ps1" ;;
+        ps2-subset-under-1.7.0) want_msg="source.selection under major 1 is a stated window start and its end, and nothing else: a block without window_start_ms, or with partitions or engine_runs, is a partition-subset selection, which is format 2.0.0" ;;
+        ps3-unsorted) want_msg="source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative" ;;
+        ps4-runs) want_msg="source.selection.engine_runs is not one run per distinct partition subset, or one more for the topics without one" ;;
+        ps5-unselected) want_msg="integrity.verification.complete.partitions expects records from a partition source.selection does not select" ;;
+        newer-major) want_msg="format_version 3.0.0 has a major version newer than this reader understands (this build knows $SCORECARD_SUBSET_VERSION)" ;;
+    esac
+    if [ "$name" = newer-major ]; then
+        py_want="format_version 3.0.0 has a major version newer than this reader understands (this script knows $SCORECARD_SUBSET_VERSION)"
+        if [ "$rust_msg" != "$want_msg" ] || [ "$py_msg" != "$py_want" ]; then
+            fail "scorecard/$name: a reader did not refuse the newer major in its own words.
+  rust:   $rust_msg
+  python: $py_msg"
+        fi
+    elif [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (partition subset refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_SUBSET_VERSION partition-subset scorecards, say the same about the subset, what a narrowed sampled pass proves and what each verdict proves of the other partitions and before a start, read major 2 only for that shape, and refuse each of PS-1 to PS-5 with the same words"

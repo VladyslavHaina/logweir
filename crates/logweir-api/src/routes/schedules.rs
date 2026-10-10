@@ -229,6 +229,10 @@ pub fn build(
             // still the documented default: UTC, a one-hour starting deadline,
             // no catch-up, no retries and a 3600 s run deadline.
             all_user_topics,
+            // PROD-04.1: the console's create form selects no consumer group;
+            // `kubectl` sets `spec.consumerGroups`, and an edit through this
+            // API is a merge patch that leaves it as it is.
+            consumer_groups: None,
             time_zone: request.time_zone.clone(),
             starting_deadline_seconds: request.starting_deadline_seconds,
             catch_up_policy: request.catch_up_policy.map(|c| match c {

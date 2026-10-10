@@ -376,6 +376,11 @@ pub struct Ran {
     /// archive handle. Never fatal: a segment it cannot judge makes its topic
     /// `notAssessed`.
     pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
+    /// **PROD-04.1.** Per NAMED topic, per partition with at least one
+    /// segment, the lowest and highest offsets the manifest records
+    /// (inclusive): what a consumer position is judged against. A partition
+    /// with no segment is ABSENT: nothing archived, never `[0, 0]`.
+    pub manifest_ranges: crate::backup::consumer_positions::ArchivedRanges,
 }
 
 pub fn run(
@@ -473,10 +478,15 @@ pub fn run(
         BTreeMap::new();
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
+    let mut manifest_ranges = crate::backup::consumer_positions::ArchivedRanges::new();
     for topic in &archive.topics {
         let Some(entry) = records_per_topic.get_mut(&topic.name) else {
             continue;
         };
+        manifest_ranges.insert(
+            topic.name.clone(),
+            crate::backup::consumer_positions::archived_ranges(&topic.partitions),
+        );
         manifest_configurations.insert(topic.name.clone(), topic.configurations.clone());
         manifest_layouts.insert(
             topic.name.clone(),
@@ -553,6 +563,7 @@ pub fn run(
         manifest_configurations,
         manifest_layouts,
         schema_dependency,
+        manifest_ranges,
     })
 }
 
@@ -568,6 +579,11 @@ pub struct Persisted {
     pub receipt_key: String,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`
     pub sidecar_key: String,
+    /// `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`, when
+    /// the run selected consumer groups (PROD-04.1): the positions document
+    /// the receipt binds by digest, put BEFORE the receipt so a receipt never
+    /// names a document that is not there.
+    pub positions_key: Option<String>,
     /// `sha256:<lowercase hex>` over the exact receipt bytes uploaded above.
     /// Public capture metadata; it says nothing about whether a controller has
     /// verified the receipt's signature.
@@ -596,6 +612,7 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
     Persisted {
         receipt_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.json"),
         sidecar_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.sig"),
+        positions_key: None,
         receipt_sha256: String::new(),
         // Not knowable from the two ids: the point id is derived from the
         // receipt's BYTES (D3 §5.1), which do not exist yet at this call.
@@ -607,11 +624,11 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (`1.5.0`,
-/// PROD-03.0) of THIS document type (independent of the scorecard's), because
-/// this build writes `schema_dependency` on every receipt, beside
-/// `topic_configuration`, pinned or not and for every auth mode (1.5.0 defines
-/// PROD-01.3's modes too) — by
+/// `format_version` is `FORMAT_VERSION_WITH_GENERATIONS` (`1.6.0`,
+/// PROD-01.4a) of THIS document type (independent of the scorecard's), because
+/// this build writes `generations` and PROD-03.0's `schema_dependency` (1.5.0)
+/// on every receipt, beside `topic_configuration`, pinned or not and for every
+/// auth mode (1.6.0 defines PROD-01.3's modes too) — by
 /// `logweir_core::backup_receipt::format_version_for`, the one place that
 /// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
 /// two strings `ReceiptAuth` holds — **never a password, and no field that
@@ -630,10 +647,18 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
         // PROD-03.0: every receipt this build signs carries
-        // `schema_dependency`, so every one is 1.5.0 — which defines
-        // PROD-01.3's auth modes and PROD-05.1's block as well.
+        // `schema_dependency` (1.5.0), and since PROD-01.4a `generations` too,
+        // so every one is at least 1.6.0 — which defines PROD-01.3's auth modes and
+        // PROD-05.1's block as well.
+        // PROD-04.1: the version that defines `consumer_positions` (1.7.0)
+        // when the run selected consumer groups.
         format_version: logweir_core::backup_receipt::format_version_for(
-            &archive, true, true, &auth,
+            &archive,
+            true,
+            true,
+            &auth,
+            true,
+            outcome.consumer_positions.is_some(),
         )
         .to_string(),
         run_id: outcome.run_id.clone(),
@@ -667,8 +692,9 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         config_coverage: Some(outcome.config_coverage.clone()),
         // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
         // this build signs carries its topics' configuration model (and is
-        // 1.5.0, for PROD-03.0's block below) — a receipt never leaves it to
-        // be read as NOT RECORDED by omission when it was observed.
+        // 1.6.0, for PROD-03.0's and PROD-01.4a's blocks below) — a receipt
+        // never leaves it to be read as NOT RECORDED by omission when it was
+        // observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
         // PROD-05.1: where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is
@@ -679,6 +705,12 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // registry — never left to be read as NOT ASSESSED by omission when it
         // was judged.
         schema_dependency: Some(outcome.schema_dependency.clone()),
+        // PROD-01.4a: ALWAYS written, one entry per named topic, so a receipt
+        // never leaves a topic's ID to be read as unknown by omission when it
+        // was read — and a null ID always says why.
+        generations: Some(outcome.generations.clone()),
+        // PROD-04.1: present exactly when the run selected consumer groups.
+        consumer_positions: outcome.consumer_positions.clone(),
     }
 }
 
@@ -807,6 +839,41 @@ pub(crate) fn persist_receipt(
              logweir, not in the spec — please report it with this line."
         ))
     })?;
+    // 1b. PROD-04.1: the positions document the receipt binds holds against
+    //     it, through the same arms a reader runs (CP-1 to CP-14) — over the
+    //     exact bytes that will be put.
+    let positions = match (
+        &receipt.consumer_positions,
+        &outcome.consumer_positions_document,
+    ) {
+        (None, None) => None,
+        (Some(_), Some(bytes)) => {
+            let doc: logweir_core::consumer_positions::PositionsDocument =
+                serde_json::from_slice(bytes).map_err(|e| {
+                    sig(format!(
+                        "the consumer positions document does not parse: {e}"
+                    ))
+                })?;
+            receipt
+                .validate_consumer_positions_document(bytes, &doc)
+                .map_err(|e| {
+                    sig(format!(
+                        "the consumer positions document this run measured violates its own \
+                         invariants and NOTHING was signed: {e}. The archive may exist; the \
+                         evidence does not. This is a bug in logweir — please report it with \
+                         this line."
+                    ))
+                })?;
+            Some(bytes.as_slice())
+        }
+        _ => {
+            return Err(sig(
+                "the consumer positions block and its document are not both present; nothing \
+                 was signed. This is a bug in logweir."
+                    .to_string(),
+            ))
+        }
+    };
 
     // 2. The EXACT bytes.
     let bytes = logweir_core::det_json::to_deterministic_json(&receipt)
@@ -829,6 +896,14 @@ pub(crate) fn persist_receipt(
     let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
     keys.receipt_sha256 = receipt_sha256;
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_UPLOAD);
+    // PROD-04.1: the positions document FIRST, at the key the receipt names:
+    // a receipt is never put that names a document that is not there.
+    if let (Some(cp), Some(doc)) = (&receipt.consumer_positions, positions) {
+        store
+            .put_create_only(&cp.document.key, doc)
+            .map_err(|e| sig(e.to_string()))?;
+        keys.positions_key = Some(cp.document.key.clone());
+    }
     store
         .put_create_only(&keys.receipt_key, &bytes)
         .map_err(|e| sig(e.to_string()))?;
@@ -885,9 +960,30 @@ pub(crate) fn persist_receipt(
                 keys.sidecar_key
             ))
         })?;
+        // PROD-04.1: the positions document beside them, as
+        // `<receipt-out stem>.consumer-positions.json`.
+        if let Some(doc) = positions {
+            let doc_path = positions_out(path);
+            std::fs::write(&doc_path, doc).map_err(|e| {
+                BackupError::Operational(format!(
+                    "{}: {e} — the positions document IS in the evidence bucket at {}; only \
+                     the local copy could not be written",
+                    doc_path.display(),
+                    keys.positions_key.as_deref().unwrap_or_default()
+                ))
+            })?;
+        }
     }
 
     Ok(keys)
+}
+
+/// Where `--receipt-out <path>` writes the positions document: beside the
+/// receipt, `<path stem>.consumer-positions.json` (`r.json` →
+/// `r.consumer-positions.json`), as the sidecar is `<path stem>.sig`.
+#[must_use]
+pub fn positions_out(receipt_out: &Path) -> std::path::PathBuf {
+    receipt_out.with_extension("consumer-positions.json")
 }
 
 /// **PLAT-15.1, D3 §5.2** — the catalog point record for this run, written as

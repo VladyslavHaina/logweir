@@ -59,6 +59,8 @@ import {
   coverageWords,
   notCovered,
   renderCompleteCoverage,
+  selectionIn,
+  selectionWords,
   COMPLETE_COVERAGE_COST,
   messageText,
   table,
@@ -167,12 +169,27 @@ export function coverageOf(object) {
   };
 }
 
-/** The list row's coverage line, under the RESULT. */
+/** PROD-11.1b: one Restore's signed selection, from whichever document this
+ *  page is looking at -- the product API's `verificationScope.selection` on a
+ *  console detail, else the custom resource's (or a console list row's)
+ *  `status.integrity.selection`. `null` when none is recorded: every partition
+ *  of every restored topic, from the archive's floor. */
+export function selectionOf(object) {
+  const status = (object && object.status) || {};
+  return selectionIn(status.verificationScope || {}) || selectionIn(status.integrity || {});
+}
+
+/** The list row's coverage line, under the RESULT -- and, for a narrowed
+ *  restore, the line that says so (PROD-11.1b). */
 function coverageLine(object) {
   const c = coverageOf(object);
+  const narrowed = selectionWords(selectionOf(object));
   return "<span class=\"cell-sub\" data-coverage=\"" + esc(c.recorded || "not-recorded") +
     "\"" + (notCovered(c.complete) ? " data-covered=\"false\"" : "") + ">coverage: " +
-    esc(coverageWords(c.recorded, c.requested, c.complete)) + "</span>";
+    esc(coverageWords(c.recorded, c.requested, c.complete)) + "</span>" +
+    (narrowed === ""
+      ? ""
+      : "<span class=\"cell-sub\" data-selection=\"partial\">" + esc(narrowed) + "</span>");
 }
 
 /** HOW MUCH OF ONE RESTORE WAS COMPARED, from whichever document this page
@@ -210,6 +227,7 @@ export function scopeOf(object) {
     coverage: integrity.coverage,
     complete: integrity.complete,
     unsampledTopics: integrity.unsampledTopics,
+    selection: integrity.selection,
   };
 }
 
@@ -452,6 +470,7 @@ export function renderRestoreDetail(object, operation) {
   const verified = validVerification(status) !== null;
   const claim = (value) => scorecardClaim(cell(value), verified);
   const coverage = coverageOf(object);
+  const selection = selectionOf(object);
 
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
@@ -498,6 +517,12 @@ export function renderRestoreDetail(object, operation) {
         (notCovered(coverage.complete) ? " data-covered=\"false\"" : "") + ">" +
         claim(coverageWords(coverage.recorded, coverage.requested, coverage.complete)) +
         "</span>"],
+      // PROD-11.1b: WHAT WAS RESTORED, when the signed scorecard says it was
+      // a selection; a restore of everything shows no row, as before.
+      ...(selection === null
+        ? []
+        : [["restored (signed)", "<span id=\"restore-selection-signed\" data-selection=\"partial\">" +
+          claim(selectionWords(selection)) + "</span>"]]),
     ]) +
     (verified
       ? ""
@@ -518,7 +543,9 @@ export function renderRestoreDetail(object, operation) {
     // PROD-08.1a: A RECORDED COMPLETE VERIFICATION, IN FULL -- covered or not,
     // the reason, and every partition's exact counts. A sampled run renders
     // nothing here.
-    (coverage.recorded === "complete" ? renderCompleteCoverage(coverage.complete, claim) : "") +
+    (coverage.recorded === "complete"
+      ? renderCompleteCoverage(coverage.complete, claim, selection)
+      : "") +
     (coverage.requested === "complete" && coverage.recorded === null
       ? "<p class=\"note\" id=\"restore-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
         "</p>"

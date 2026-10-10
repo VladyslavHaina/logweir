@@ -27,7 +27,7 @@ use logweir_core::check_contract::{
 };
 use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
 
-use super::access::{destination_checks, DestinationProbe};
+use super::access::{credential_bound_row, destination_checks, DestinationProbe};
 use super::{execution_only, from_broker_failure, ready, remedy_for, runner_contract, Wiring};
 use crate::check::{catalogue, Deadline, Emission};
 
@@ -282,6 +282,12 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     }
 
     if let Some(destination) = req.destination.as_ref() {
+        // FX-20c: every grant the run presents, compared with no request —
+        // a separated `evidenceWrite` Secret included, which no row probes
+        // unless the destination opted in to the marker.
+        if let Some(row) = credential_bound_row(&[destination], wiring) {
+            push(row, &skip, &mut checks);
+        }
         let mut rows = Vec::new();
         destination_checks(
             &DestinationProbe {

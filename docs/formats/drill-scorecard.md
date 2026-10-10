@@ -3,9 +3,19 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.6.0.json`](../../schemas/logweir-drill-scorecard-1.6.0.json)
+[`schemas/logweir-drill-scorecard-2.0.0.json`](../../schemas/logweir-drill-scorecard-2.0.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. Format **1.6.0** (FX-23) adds the nested
+schema cannot drift apart silently. Format **2.0.0** (PROD-11.1b, the owner's
+decision OD-9 (a)) is the format's first MAJOR and is written ONLY for a
+restore that states a partition subset: 1.7.0's fields with
+[`source.selection.partitions`](#sourceselection-format-170-and-200) required,
+and `integrity.verification.complete.partitions[]` and the sampled lane's
+fields naming the SELECTED partitions. Every reader before it refuses a 2.0.0
+document as an unsupported major. Every other document this build writes is
+1.x, described by the frozen
+[`schemas/logweir-drill-scorecard-1.7.0.json`](../../schemas/logweir-drill-scorecard-1.7.0.json)
+(format **1.7.0**, PROD-11.1: a restore from a stated window start) and the
+older files beside it. Format **1.6.0** (FX-23) adds the nested
 optional [`sample.unsampled_topics`](#sampleunsampled_topics-format-160): the
 topics a sampled drill's `max_partitions` left without a sampled partition.
 Every SAMPLED-lane scorecard a build with FX-23's checks signs declares 1.6.0,
@@ -181,7 +191,7 @@ their refusal text, so the agreement is checked rather than asserted.
 | `source.manifest_version_id` | string \| null | The store's version id for the manifest object, when the backend returned one. |
 | `source.captured_by_logweir` | bool | `true` **exactly when** phase −1 ran. `validate_invariants` enforces the pairing in **both** directions with `last_phase_completed` and the two `rpo_source_relative_*` fields, so it cannot be forged into a signed document. **Always `false` in v0.1.0.** |
 | `source.time_basis` | object, **optional** (1.3.0) | Which source topics the restore's time selection read by **producer time**, and which it selected by time with no recorded timestamp type. See [below](#sourcetime_basis-format-130). ABSENT means not recorded. |
-| `source.selection` | object, **optional** (1.7.0) | The plan's **replay selection**: its stated inclusive window start and the window's end, for a restore narrowed by a start. See [below](#sourceselection-format-170). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
+| `source.selection` | object, **optional** (1.7.0); **required** in 2.0.0 | The plan's **replay selection**: its stated inclusive window start and the window's end (1.7.0, a restore narrowed by a start), and (2.0.0) its per-topic partition subsets and engine runs. See [below](#sourceselection-format-170-and-200). ABSENT means the restore selected every partition of every restored topic from the archive's floor. |
 | `target.cluster_id` | string | The target cluster's own id, read from it. |
 | `target.mode` | string, optional | Which of the two target modes the run was in: `scratch` or `newTopic`. **Absent means `scratch`**, which is what every document written before this field existed carries, so the three checked-in signed fixtures keep their bytes. |
 | `target.marker_topic` | string, optional | The **scratch** segregation proof: the cluster is in `allowedClusterIds` **and** this topic exists, both verified at phase 0, whose failure refuses the drill with exit 3 before anything runs. **Absent in `newTopic` mode**, because that mode skips both checks — a reader that saw the field there would be reading a verification that never ran. Both readers REFUSE a document that is `scratch` and omits it. |
@@ -252,7 +262,7 @@ name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
 `crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
 corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
 
-### `source.selection` (format 1.7.0)
+### `source.selection` (format 1.7.0 and 2.0.0)
 
 ```json
 "selection": {
@@ -266,16 +276,15 @@ A plan may state an inclusive window START, written
 ([the plan field](drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
 A restore from a stated start is format 1.7.0 and carries this block; the
 contract is [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
-A partition subset (`restore.partitions`) is refused before anything runs
-until the owner decides OD-9, so no document narrowed by a subset exists.
+A restore of a partition SUBSET (`restore.partitions`) is format 2.0.0, below.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `window_start_ms` | integer | The plan's stated inclusive start, epoch milliseconds, never earlier than the archive set's floor (guard G-WIN; a start before it is refused, never moved). |
+| `window_start_ms` | integer | The plan's stated inclusive start, epoch milliseconds, never earlier than the archive set's floor (guard G-WIN; a start before it is refused, never moved). Required under major 1 (arm PS-2). |
 | `window_end_ms` | integer | The inclusive end: the end of `restore.point_in_time`. |
 
-Every partition of every restored topic was restored from the start, so the
-block names no partition.
+Every partition of every restored topic was restored from the start, so a
+1.7.0 block names no partition (arm PS-2 refuses one that does).
 
 **Every verdict of such a document is judged over the window only:** samples
 are drawn from the stated start; the count bound and the per-partition
@@ -318,33 +327,132 @@ document carrying the block:
 | Arm | Refuses |
 |---|---|
 | SEL-1 | the block under a `format_version` before 1.7.0 |
-| SEL-2 | a start at or after the end |
-| SEL-3 | a complete block whose `window` is not the block's start and end |
+| SEL-2 | a stated start at or after the end |
+| SEL-3 | a complete block whose `window` is not the block's start (absent for a 2.0.0 subset from the floor) and end |
 
-A block that is not an object with both fields as integers is refused when
-the document is read; an unknown key in it is ignored, as everywhere in the
-document (which is why a partition subset cannot be added to this block as a
-MINOR: a 1.23.0 reader would ignore it and read the restore as every
-partition — OD-9). Each arm reads only the new block, or
-judges an existing field against it, and can only refuse: MINOR under OD-7
-(a). Both readers print one `replay selection:` coverage line for a document
-carrying the block (above), and for a sampled `pass` the `sample coverage:`
-line is QUALIFIED by the window (`a sampled pass over a replay selection from
-epoch-ms S to epoch-ms E: …; no record before the start was expected, and a
-sampled check does not prove that none was restored`); `logweir drill show`
-shows `sample.coverage_note`, which opens with the writer's sentence.
+A block that is not an object of the types below is refused when the
+document is read; an unknown key in it is ignored, as everywhere in the
+document. That is why a partition subset could not be added to the 1.7.0
+block as a MINOR: a 1.23.0 reader would ignore it and read the restore as
+every partition (OD-9). Each arm reads only the new block, or judges an
+existing field against it, and can only refuse: MINOR under OD-7 (a). Both
+readers print one `replay selection:` coverage line for a document carrying
+the block (above), and for a sampled `pass` the `sample coverage:` line is
+QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms
+S to epoch-ms E: …; no record before the start was expected, and a sampled
+check does not prove that none was restored`); `logweir drill show` shows
+`sample.coverage_note`, which opens with the writer's sentence.
 
 **The version only rises.** A restore that states a start AND is sampled
 (FX-23's 1.6.0) is 1.7.0; each step that raises the version keeps the newer
-of the two minors (`scorecard::newer_format_version`), so no step can lower a
-version an earlier step chose.
+of the two (`scorecard::newer_format_version`, by major and then minor), so no
+step can lower a version an earlier step chose.
 
 **The number.** 1.7.0; 1.6.0 is FX-23's. A renumber moves
 `scorecard::FORMAT_VERSION_WITH_SELECTION` and `scorecard::SELECTION_SINCE_MINOR`
-together, the justfile's `scorecard_schema_version` and this schema file's
-name, `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR`, the parity
-script's `SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json`
-(their `format_version` and SEL-1's reason).
+together, the frozen schema file's name, `docs/verify_scorecard.py`'s
+`SCORECARD_SELECTION_SINCE_MINOR`, the parity script's
+`SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json` (their
+`format_version` and SEL-1's reason).
+
+#### Format 2.0.0: a partition subset (PROD-11.1b, OD-9 (a))
+
+```json
+"selection": {
+  "window_end_ms": 1788055200000,
+  "partitions": [
+    {"topic": "orders", "partitions": [0, 2]},
+    {"topic": "payments", "partitions": [1]}
+  ],
+  "engine_runs": 2
+}
+```
+
+The owner decided OD-9 (a) on 2026-10-09: a restore that states a partition
+subset (`restore.partitions`,
+[the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b))
+signs format **2.0.0**, and only then; every other document stays 1.x, byte
+for byte. It is the format's first MAJOR
+([stability](../stability.md#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)):
+2.0.0 is 1.7.0's fields with a different meaning for two existing ones, which
+a 1.x reader would read as every partition restored —
+
+- **`integrity.verification.complete.partitions[]`** lists every SELECTED
+  partition of every restored topic (and, with nothing expected, any other
+  partition the target holds a record in, which is `unexpected` and fails the
+  verification), never every partition of the topic;
+- **the sampled lane's fields** — `sample.partitions`, the per-partition count
+  bound, the engine-report check — are the selected partitions'.
+
+So every reader before it (`verify_scorecard.py` before 1.27.0, `logweir drill
+verify` and `drill show` before PROD-11.1b) refuses a 2.0.0 document as an
+unsupported major instead of reading it. The media type keeps `version=1.0.0`,
+so an older reader reaches that refusal rather than a payload-type mismatch.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `window_start_ms` | integer, optional | The plan's stated inclusive start; ABSENT means the window started at the archive set's floor (the plan wrote `point_in_time: "../<end>"`). |
+| `window_end_ms` | integer | The inclusive end. |
+| `partitions` | object[], **required**, non-empty | One entry per narrowed SOURCE topic, in ascending order: `topic` and `partitions`, a non-empty ascending list of distinct partition numbers. A restored topic not listed was restored on every partition. |
+| `engine_runs` | integer ≥ 1, **required** | How many engine runs restored the selection: the engine's partition filter applies to every topic of one run, so one run per distinct subset, and one more when a restored topic has none. |
+
+**Every verdict is the selection's.** Samples come only from selected
+partitions (and from the stated start); the count bound and the per-partition
+presence check are the selected partitions'; every other partition of a
+narrowed topic must be EMPTY on the target — a record there fails the run on
+both coverages (the sampled lane's per-partition check, and `unexpected` in
+the complete lane, which IV-6 refuses as a pass); a complete verification
+expects nothing from an unselected partition.
+
+**The coverage note.** `sample.coverage_note` opens with `replay selection:
+ONLY orders partitions [0, 2]; payments partitions [1] (every partition of any
+other restored topic), from the archive's floor to epoch-ms E (inclusive), in
+2 engine run(s); no record of another partition of these topics was
+expected` (with a start: `from epoch-ms S (the plan's stated window start,
+inclusive)`, and the start clauses above).
+
+**Five arms**, in both readers and words:
+
+| Arm | Refuses |
+|---|---|
+| PS-1 | a document of major 2 that carries no `source.selection.partitions` (no block, a start-only block, or an empty list): major 2 is read for this shape only. It is `refuse_unreadable_major`'s, before every other arm |
+| PS-2 | a format-1 block that is not a start and its end only: no `window_start_ms`, or a `partitions` or `engine_runs` key — a subset never rides in a document an older reader accepts |
+| PS-3 | a subset list that does not name each topic once, in order, not blank, with a non-empty, ascending list of distinct partitions that are not negative |
+| PS-4 | `engine_runs` absent, or not the number of distinct subsets or one more |
+| PS-5 | a complete block that expects records from a partition the block does not select |
+
+Every arm of major 1 holds for a 2.0.0 document (the evidence-zeroing arms,
+IV-1 to IV-7, US-1 to US-3, SEL-1 to SEL-3 among them). Both readers print the
+subset in their `replay selection:` line — `ONLY … (every partition of any
+other restored topic), from … to …, in N engine run(s); no record of another
+partition of these topics was restored or expected` over a verdict that
+PASSED (either lane proves it: the sampled lane held those partitions empty;
+the complete lane counts a record there as unexpected), and `… was expected`
+otherwise — followed by the start clause when one is stated; and for a
+sampled `pass` the line `sample coverage: a sampled pass over a partition
+subset from <the archive's floor | epoch-ms S> to epoch-ms E: every selected
+partition was held to its own count bound over that window, every other
+partition of a narrowed topic was held empty, …`.
+
+**Every other surface says partial.** The signed block is copied, never
+recomputed, to the surfaces that do not print the document: the `Restore`
+status' `integrity.selection` (with `scope: partial` and the `SELECTION`
+printer column, [kubernetes.md](../kubernetes.md)), the product API's
+`selection` on both restore reads and the operation view's
+`verificationScope` ([api.md](../api.md)), the console's History list, detail
+and operation view (`partial: partitions 0, 2 of topic orders`, and a
+complete-coverage sentence over every SELECTED partition), and the runner's
+notification body (`selection` with `scope: "partial"`, `format_version`; the
+PagerDuty incident title appends `(partial: …)`). An unnarrowed restore shows
+none of these, exactly as before.
+
+**The number.** 2.0.0. A renumber moves
+`scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and
+`scorecard::PARTITION_SUBSETS_MAJOR` together, the justfile's
+`scorecard_schema_version` and the current schema file's name,
+`docs/verify_scorecard.py`'s `SCORECARD_PARTITION_SUBSETS_VERSION` and
+`SCORECARD_PARTITION_SUBSETS_MAJOR`, the parity script's
+`SCORECARD_SUBSET_VERSION`, and the corpus cases `subsets_*.json`.
 
 ## `approval`
 
@@ -865,7 +973,7 @@ transformations do to it — is
 | `complete.replay.duplicates` | integer | Restored records that repeat an `x-original-offset` already read. |
 | `complete.replay.out_of_order` | integer | Restored records whose `x-original-offset` is below one read before them. |
 | `complete.replay.mismatched` | integer | Expected records whose first restored copy differs from the archive. |
-| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted (unchanged in 1.7.0: a restore from a stated start restores every partition, so its `replay` counts are each partition's over `[window.start_ms, window.end_ms]`): `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
+| `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted (unchanged in 1.7.0: a restore from a stated start restores every partition, so its `replay` counts are each partition's over `[window.start_ms, window.end_ms]`; **in 2.0.0, one entry per SELECTED partition** of every restored topic, plus any other partition the target holds a record in, with nothing expected — [the subset format](#format-200-a-partition-subset-prod-111b-od-9-a)): `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
 
 **Absent means not recorded.** Every document before 1.4.0 — and one whose
 phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every

@@ -4,13 +4,14 @@
 //! 1. **Plan construction** binds a stated window start (the interval form of
 //!    `restore.point_in_time`) as the plan's own start (`InheritedFromSpec`)
 //!    and refuses it before the archive's floor (never moves it there).
-//! 2. **Partition subsets are refused by name** (`PartitionSubsetsAwaitOwnerDecision`,
-//!    OD-9) on every path that turns a plan into a selection.
+//! 2. **Partition subsets** (PROD-11.1b, the owner's OD-9 (a)) are bound on
+//!    every path that turns a plan into a selection — resolution, plan
+//!    construction, phase 5, phase 4 and the signed block (format 2.0.0) —
+//!    and their shapes no archive can satisfy are refused (exit 3).
 //! 3. **Phase 5** re-derives the start and the engine runs from the SPEC and
 //!    the manifest — never from the plan's claim — and refuses a rendered
 //!    document that disagrees: a start moved to the floor (a silent widening),
-//!    and (for a plan built by hand, the only way a subset reaches it) a
-//!    subset the spec does not state.
+//!    and a subset the spec does not state, dropped, merged or swapped.
 //! 4. **Resolution before phase 2**: a window no segment overlaps is exit 3.
 //!
 //! No dial token: a filesystem archive URL and `kafka-broker-1:9094` only. No
@@ -182,30 +183,152 @@ fn no_selection_is_the_archive_floor_as_before() {
     assert_eq!(exit_of(&check(&plan, &s)), ExitCode::Ok);
 }
 
-/// **A partition subset is refused BY NAME on every path** (the review's H1,
-/// OD-9): resolution, plan construction and phase 0's shape check all go
-/// through `ReplaySelection::from_spec`, which refuses `restore.partitions`
-/// with or without a start. KILLS: the refusal deleted (a subset would be
-/// restored and signed under a format a verifier that predates it misreads).
+/// `orders` [0, 2] and `payments` [1] (audit restored whole), from `start`
+/// or from the archive's floor (`"../<end>"`).
+fn subsets(start: Option<i64>) -> DrillSpec {
+    let point = match start {
+        Some(s) => format!("{}/{}", rfc3339(s), rfc3339(END_MS)),
+        None => format!("../{}", rfc3339(END_MS)),
+    };
+    spec(&format!(
+        "restore:\n  point_in_time: \"{point}\"\n  partitions:\n    orders: [2, 0]\n    payments: [1]\n"
+    ))
+}
+
+/// **A partition subset is bound on every path** (PROD-11.1b, OD-9 (a)),
+/// with and without a start: resolution keeps exactly the selected
+/// partitions and puts the two DIFFERENT subsets in two engine runs beside
+/// the unfiltered one, plan construction carries the subsets
+/// (`source_partitions`, sorted), phase 5 accepts the plan built from the
+/// spec it checks, and the signed block names the subsets and the runs and is
+/// written as format 2.0.0. KILLS: the old refusal left in place; a subset
+/// dropped between the spec and the plan; one run for both subsets; a 1.x
+/// version for a subset document.
 #[test]
-fn a_partition_subset_is_refused_by_name_on_every_path() {
-    for restore in [
-        "restore:\n  partitions:\n    orders: [0, 2]\n".to_string(),
-        format!(
-            "{}  partitions:\n    orders: [1]\n",
-            window(START_MS, END_MS)
+fn a_partition_subset_is_bound_on_every_path() {
+    for start in [None, Some(START_MS)] {
+        let s = subsets(start);
+        let r = resolve_selection(&s, &mapping(), &facts())
+            .expect("a subset resolves")
+            .expect("a selection");
+        let picked: Vec<(String, i32)> = r
+            .partitions
+            .iter()
+            .map(|p| (p.topic.clone(), p.partition))
+            .collect();
+        assert_eq!(
+            picked,
+            vec![
+                ("audit".to_string(), 0),
+                ("audit".to_string(), 1),
+                ("audit".to_string(), 2),
+                ("orders".to_string(), 0),
+                ("orders".to_string(), 2),
+                ("payments".to_string(), 1),
+            ],
+            "{start:?}"
+        );
+        assert_eq!(
+            r.runs.len(),
+            3,
+            "audit unfiltered, [0, 2] and [1]: {:?}",
+            r.runs
+        );
+        assert_eq!(
+            r.start_source,
+            if start.is_some() {
+                WindowFloorSource::InheritedFromSpec
+            } else {
+                WindowFloorSource::ArchiveManifest
+            }
+        );
+        let plan = build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None).expect("builds");
+        let want: BTreeMap<String, Vec<i32>> = [
+            ("orders".to_string(), vec![0, 2]),
+            ("payments".to_string(), vec![1]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(plan.source_partitions, want, "{start:?}");
+        assert_eq!(logweir_engine_oso::render_restore::runs(&plan).len(), 3);
+        assert_eq!(exit_of(&check(&plan, &s)), ExitCode::Ok, "{start:?}");
+
+        let label = logweir::drill::selection_label(&r).expect("a subset is signed");
+        assert_eq!(label.window_start_ms, start);
+        assert_eq!(label.window_end_ms, END_MS);
+        assert_eq!(label.engine_runs, Some(3));
+        assert_eq!(
+            label.partitions,
+            Some(vec![
+                logweir_core::scorecard::TopicPartitions {
+                    topic: "orders".into(),
+                    partitions: vec![0, 2],
+                },
+                logweir_core::scorecard::TopicPartitions {
+                    topic: "payments".into(),
+                    partitions: vec![1],
+                },
+            ])
+        );
+        for current in ["1.4.0", "1.6.0"] {
+            assert_eq!(
+                logweir_core::scorecard::format_version_with_selection(current, Some(&label)),
+                "2.0.0"
+            );
+        }
+    }
+    // The control: a start only is 1.7.0's block, with no subset.
+    let r = resolve_selection(&selecting(), &mapping(), &facts())
+        .unwrap()
+        .unwrap();
+    let label = logweir::drill::selection_label(&r).unwrap();
+    assert_eq!((&label.partitions, label.engine_runs), (&None, None));
+    assert_eq!(
+        logweir_core::scorecard::format_version_with_selection("1.6.0", Some(&label)),
+        "1.7.0"
+    );
+}
+
+/// **The shapes no archive can satisfy are refused, exit 3, before anything
+/// runs**: a subset for a topic the plan does not select, an empty subset, a
+/// repeated or a negative partition, and a partition the archive does not
+/// list — on resolution and at plan construction alike. KILLS: any one of the
+/// shape refusals deleted (a narrowed restore would widen or empty).
+#[test]
+fn a_partition_subset_no_archive_can_satisfy_is_refused() {
+    let end = rfc3339(END_MS);
+    for (partitions, want) in [
+        (
+            "ledger: [0]",
+            "restore.partitions names `ledger`, which source.topics does not select",
+        ),
+        ("orders: []", "restore.partitions.orders is empty"),
+        (
+            "orders: [1, 1]",
+            "restore.partitions.orders names partition 1 more than once",
+        ),
+        (
+            "orders: [-1]",
+            "restore.partitions.orders names partition -1; a partition number is never negative",
+        ),
+        (
+            "orders: [0, 7]",
+            "restore.partitions.orders names partition 7, which the archive set's manifest does \
+             not list for `orders`",
         ),
     ] {
-        let s = spec(&restore);
-        let resolved = resolve_selection(&s, &mapping(), &facts());
-        assert_eq!(exit_of(&resolved), ExitCode::GuardRefused, "{restore}");
-        let msg = guard_message(&resolved.unwrap_err());
-        assert!(
-            msg.starts_with("PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of orders"),
-            "{msg}"
+        let s = spec(&format!(
+            "restore:\n  point_in_time: \"../{end}\"\n  partitions:\n    {partitions}\n"
+        ));
+        let r = resolve_selection(&s, &mapping(), &facts());
+        assert_eq!(exit_of(&r), ExitCode::GuardRefused, "{partitions}");
+        let msg = guard_message(&r.unwrap_err());
+        assert!(msg.starts_with(want), "{partitions}: {msg}");
+        assert_eq!(
+            exit_of(&build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None)),
+            ExitCode::GuardRefused,
+            "{partitions}"
         );
-        let built = build_plan(&s, &set(), &mapping(), &facts(), "01J9X", None);
-        assert_eq!(exit_of(&built), ExitCode::GuardRefused, "{restore}");
     }
 }
 
@@ -305,13 +428,12 @@ fn phase5_refuses_a_rendered_start_that_is_not_the_approved_one() {
     assert!(guard_message(&r.unwrap_err()).contains("is not the archive floor"));
 }
 
-/// **A subset only a hand-built plan can carry is refused at phase 5 too.**
-/// No spec can state one (refused by name), so phase 5's per-run check is the
-/// second wall: a plan whose `source_partitions` the approved spec does not
-/// state — added, or merged across topics, or swapped — is refused before the
-/// engine is handed it; and a stated subset (`StatedSelection` built by hand,
-/// the shape OD-9's decision would reach) is checked run by run. KILLS: phase
-/// 5 checking the start only; checking the count of runs only.
+/// **Phase 5 checks every engine run against the subsets the APPROVED SPEC
+/// states** (PROD-11.1b): a plan whose `source_partitions` the spec does not
+/// state — a subset added, dropped, merged across topics or swapped — is
+/// refused before the engine is handed it, and the plan built from the spec
+/// is admitted. KILLS: phase 5 checking the start only; checking the count of
+/// runs only; reading the plan's own subsets as the expected value.
 #[test]
 fn phase5_refuses_a_rendered_partition_selection_that_is_not_the_approved_one() {
     let s = selecting();
@@ -325,23 +447,10 @@ fn phase5_refuses_a_rendered_partition_selection_that_is_not_the_approved_one() 
         "a subset the spec does not state"
     );
 
-    let mut stated = phase5_preflight::StatedSelection::of(&s);
-    stated.partitions = [
-        ("orders".to_string(), vec![2, 0]),
-        ("payments".to_string(), vec![1]),
-    ]
-    .into_iter()
-    .collect();
-    let check_stated = |plan: &logweir_core::engine::RestorePlan| {
-        phase5_preflight::check_rendered_selection(plan, &facts(), &stated)
-    };
-    let mut hand = good.clone();
-    hand.source_partitions = [
-        ("orders".to_string(), vec![0, 2]),
-        ("payments".to_string(), vec![1]),
-    ]
-    .into_iter()
-    .collect();
+    // The spec states the subsets; the plan built from it is admitted.
+    let narrowed = subsets(Some(START_MS));
+    let check_stated = |plan: &logweir_core::engine::RestorePlan| check(plan, &narrowed);
+    let hand = build_plan(&narrowed, &set(), &mapping(), &facts(), "01J9X", None).unwrap();
     assert_eq!(logweir_engine_oso::render_restore::runs(&hand).len(), 3);
     assert_eq!(exit_of(&check_stated(&hand)), ExitCode::Ok);
 
@@ -414,9 +523,8 @@ fn a_start_at_a_segments_last_record_still_selects_it() {
     );
 }
 
-/// **Phase 4 samples from the stated start, and (for a hand-built subset
-/// selection, the shape OD-9's decision would reach) only from selected
-/// partitions.** The sample window starts at the stated start when the spec's
+/// **Phase 4 samples from the stated start, and (PROD-11.1b) only from
+/// selected partitions.** The sample window starts at the stated start when the spec's
 /// sample window starts earlier — the window the scorecard signs as
 /// `sample.window_start`. The control is the same archive with no selection.
 /// KILLS: the archive's or the spec's start signed for a narrowed restore; a

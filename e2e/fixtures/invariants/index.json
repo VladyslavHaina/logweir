@@ -793,5 +793,66 @@
   "python_exit": 1,
   "reason": "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end",
   "arm": "integrity.verification.complete.window is not source.selection's window; "
+ },
+ {
+  "id": "subsets_2_0_sampled",
+  "file": "subsets_2_0_sampled.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "subsets_2_0_complete_pass",
+  "file": "subsets_2_0_complete_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "subsets_2_0_complete_mixed_pass",
+  "file": "subsets_2_0_complete_mixed_pass.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "subsets_under_format_1_7_0",
+  "file": "subsets_under_format_1_7_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection under major 1 is a stated window start and its end, and nothing else: a block without window_start_ms, or with partitions or engine_runs, is a partition-subset selection, which is format 2.0.0",
+  "arm": "source.selection under major 1 is a stated window start and its end, and "
+ },
+ {
+  "id": "selection_1_7_without_a_start",
+  "file": "selection_1_7_without_a_start.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection under major 1 is a stated window start and its end, and nothing else: a block without window_start_ms, or with partitions or engine_runs, is a partition-subset selection, which is format 2.0.0",
+  "arm": "source.selection under major 1 is a stated window start and its end, and "
+ },
+ {
+  "id": "subsets_list_unsorted",
+  "file": "subsets_list_unsorted.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative",
+  "arm": "source.selection.partitions does not name each topic once, in order, "
+ },
+ {
+  "id": "subsets_engine_runs_short",
+  "file": "subsets_engine_runs_short.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "source.selection.engine_runs is not one run per distinct partition subset, or one more for the topics without one",
+  "arm": "source.selection.engine_runs is not one run per distinct partition "
+ },
+ {
+  "id": "subsets_complete_expects_an_unselected_partition",
+  "file": "subsets_complete_expects_an_unselected_partition.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "integrity.verification.complete.partitions expects records from a partition source.selection does not select",
+  "arm": "integrity.verification.complete.partitions expects records from a "
  }
 ]

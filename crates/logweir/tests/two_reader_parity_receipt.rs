@@ -330,6 +330,157 @@ fn two_reader_parity_over_the_backup_receipt_corpus() {
     );
 }
 
+/// **PROD-04.1.** The Rust reader's prefix in front of a positions document
+/// that does not hold against its receipt (`logweir::verify::POSITIONS_REFUSED`).
+const RUST_POSITIONS_PREFIX: &str = logweir::verify::POSITIONS_REFUSED;
+
+/// The `consumer_positions:` and `consumer_positions[` lines a reader
+/// printed, from where they start (the readers' own "checked" prose, which
+/// names the block in each reader's words, is not one).
+fn positions_lines(out: &std::process::Output) -> Vec<String> {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let i = l
+                .find("consumer_positions[")
+                .or_else(|| l.find("consumer_positions:"))?;
+            Some(l[i..].to_string())
+        })
+        .collect()
+}
+
+/// **PROD-04.1: two-reader parity over the positions document corpus**
+/// (`e2e/fixtures/invariants/consumer-positions-index.json`). Each case is a
+/// receipt and the positions document it binds, handed to both readers with
+/// `--consumer-positions`: both reach the recorded exit codes and refuse with
+/// the recorded text, byte for byte, once each reader's prefix is stripped; on
+/// the accepted case both print the SAME `consumer_positions` lines, each
+/// position among them. The arm arithmetic is
+/// `scripts/check-invariant-corpus.sh`'s; the per-arm messages are
+/// `crates/logweir-core/tests/backup_receipt.rs`'s.
+#[test]
+fn two_reader_parity_over_the_positions_document_corpus() {
+    let py = require_python();
+    let root = root();
+    let key = SigningKey::from_pem_file(&root.join("e2e/fixtures/signed/signing.pem"))
+        .expect("the checked-in throwaway fixture signing key");
+    let entries = read_json(&corpus().join("consumer-positions-index.json"))
+        .as_array()
+        .expect("consumer-positions-index.json is a JSON array")
+        .clone();
+    assert!(!entries.is_empty(), "a walker over nothing proves nothing");
+    let mut failures: Vec<String> = Vec::new();
+    let mut accepted = 0;
+    for entry in &entries {
+        let id = s(entry, "id");
+        let want_reason = s(entry, "reason");
+        let receipt = std::fs::read(corpus().join(s(entry, "receipt"))).expect("the receipt");
+        let positions = std::fs::read(corpus().join(s(entry, "document"))).expect("the document");
+        let sidecar = sign_detached(&key, PAYLOAD_TYPE_BACKUP_RECEIPT, &receipt).expect("sign");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (doc, sig, pos) = (
+            dir.path().join("case.json"),
+            dir.path().join("case.sig"),
+            dir.path().join("case.positions.json"),
+        );
+        std::fs::write(&doc, &receipt).unwrap();
+        std::fs::write(&sig, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        std::fs::write(&pos, &positions).unwrap();
+        let pubkey = root.join("e2e/fixtures/signed/public.pem");
+        let rust = Command::new(env!("CARGO_BIN_EXE_logweir"))
+            .current_dir(&root)
+            .args([
+                "drill",
+                "verify",
+                "--payload-type",
+                "backup-receipt",
+                "--scorecard",
+            ])
+            .arg(&doc)
+            .arg("--signature")
+            .arg(&sig)
+            .arg("--public-key")
+            .arg(&pubkey)
+            .arg("--consumer-positions")
+            .arg(&pos)
+            .output()
+            .expect("run drill verify");
+        let python = Command::new(&py)
+            .current_dir(&root)
+            .arg("docs/verify_scorecard.py")
+            .args(["--payload-type", "backup-receipt", "--consumer-positions"])
+            .arg(&pos)
+            .arg(&doc)
+            .arg(&sig)
+            .arg(&pubkey)
+            .output()
+            .expect("run docs/verify_scorecard.py");
+        let (rust_code, python_code) = (rust.status.code(), python.status.code());
+        if rust_code != Some(i(entry, "rust_exit") as i32) {
+            failures.push(format!(
+                "{id}: drill verify exited {rust_code:?}: {}",
+                String::from_utf8_lossy(&rust.stderr).trim()
+            ));
+        }
+        if python_code != Some(i(entry, "python_exit") as i32) {
+            failures.push(format!(
+                "{id}: verify_scorecard.py exited {python_code:?}: {}",
+                String::from_utf8_lossy(&python.stderr).trim()
+            ));
+        }
+        let rust_reason = strip(
+            &String::from_utf8_lossy(&rust.stderr),
+            RUST_POSITIONS_PREFIX,
+        )
+        .or_else(|| strip(&String::from_utf8_lossy(&rust.stderr), RUST_PREFIX));
+        let python_reason = strip(&String::from_utf8_lossy(&python.stderr), PYTHON_PREFIX);
+        if want_reason.is_empty() {
+            accepted += 1;
+            if rust_reason.is_some() || python_reason.is_some() {
+                failures.push(format!(
+                    "{id}: ACCEPTED in the index, refused: {rust_reason:?} / {python_reason:?}"
+                ));
+            }
+            let (r, p) = (positions_lines(&rust), positions_lines(&python));
+            if r.is_empty() || r != p {
+                failures.push(format!(
+                    "{id}: the two readers print different consumer_positions lines\n        \
+                     rust:   {r:#?}\n        python: {p:#?}"
+                ));
+            }
+            if !r
+                .iter()
+                .any(|l| l.contains("verified against this receipt"))
+                || !r
+                    .iter()
+                    .any(|l| l.contains("[\"orders\":0]: position 12, withinArchive"))
+            {
+                failures.push(format!(
+                    "{id}: the readers did not say the document was verified and print its \
+                     positions: {r:#?}"
+                ));
+            }
+            continue;
+        }
+        match (&rust_reason, &python_reason) {
+            (Some(r), Some(p)) if r == p && r == want_reason => {}
+            _ => failures.push(format!(
+                "{id}: the refusals differ from each other or from the index\n        rust:   \
+                 {rust_reason:?}\n        python: {python_reason:?}\n        want:   \
+                 {want_reason:?}"
+            )),
+        }
+    }
+    assert_eq!(accepted, 1, "exactly one accept-control");
+    assert!(
+        failures.is_empty(),
+        "the two readers disagree on {} point(s) over {} positions document case(s):\n  - {}",
+        failures.len(),
+        entries.len(),
+        failures.join("\n  - ")
+    );
+}
+
 /// `PAYLOAD_TYPES` as `docs/verify_scorecard.py` declares it, read out of the
 /// SOURCE TEXT rather than by importing the module.
 ///

@@ -41,6 +41,9 @@ pub mod approval_policy;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;
+/// PROD-04.1: the receipt's consumer position evidence (format 1.7.0), its
+/// closed vocabularies and the rules its arms re-derive.
+pub mod consumer_positions;
 /// FX-20: the credential binding for every credential reference — object
 /// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
 pub mod credential_binding;
@@ -68,6 +71,9 @@ pub mod time_basis;
 /// PROD-05.1: the topic configuration model's portability table, the capture
 /// rule and the detection of declarative owners.
 pub mod topic_configuration;
+/// PROD-01.4a: the topic ID's canonical text, its closed sets, and the
+/// generation rule two points' IDs are read by.
+pub mod topic_identity;
 /// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,
 /// `may_sign_new` and `claimed_signing_time`, with `now` always an argument.
 pub mod trust;
