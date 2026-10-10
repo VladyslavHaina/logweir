@@ -48,7 +48,7 @@ use axum::response::Response;
 use http::{StatusCode, Uri};
 use kube::ResourceExt as _;
 use logweir_core::approval_policy::{
-    self as policy, ApprovalPolicy, ApproverSignature, AuthorizationRefusal, ExpectedSubject,
+    self as policy, ApprovalPolicy, ApprovalRoute, AuthorizationRefusal, ExpectedSubject,
     Requester, RestoreAuthorization,
 };
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
@@ -95,8 +95,13 @@ async fn console_policy(
             .audit
             .set_policy_digest(&format!("{}@{digest}", effective.name()));
     }
+    // BY THE TABLE: the one row whose approval the console signs.
+    let console_route = match effective.bound() {
+        Some(bound) => approval::route_of(bound)? == ApprovalRoute::SecondPersonInConsole,
+        None => false,
+    };
     match effective.bound() {
-        Some(bound) if bound.approver_signature == ApproverSignature::Console => Ok(bound.clone()),
+        Some(bound) if console_route => Ok(bound.clone()),
         _ => {
             actor.audit.set_failure("not_a_console_approval_policy");
             Err(ApiError::new(
@@ -294,7 +299,7 @@ fn offer(state: &AppState, actor: &Actor, ns: &str, requester: &Requester) -> Ap
         refusal: Some(refusal),
         sentence,
     };
-    if state.shared().is_none() {
+    if !ApprovalRoute::SecondPersonInConsole.console_may_approve(state.console_kind()) {
         return refuse(
             ApproveRefusal::LocalAdmin,
             "This is the in-cluster administrator console, whose one identity cannot be two \
@@ -479,10 +484,11 @@ pub async fn request(
             "The request has expired and can no longer be approved.".to_string();
     } else {
         view.state = ApprovalRequestState::Pending;
+        // A SENTENCE CARRIES NO PRINCIPAL: `requester` is its own field, which
+        // the page renders as text.
         view.state_sentence = format!(
-            "The console confirmed this request for {} and it waits for a second person's \
-             approval until {}.",
-            doc.requester.principal_id(),
+            "The console confirmed this request and it waits for a second person's approval \
+             until {}.",
             doc.expires_at.to_rfc3339()
         );
         view.approve = offer(&state, &actor, &ns, &doc.requester);
@@ -546,7 +552,8 @@ pub async fn approve(
     }
     actor.audit.note("approverPrincipal", &actor.id());
     // ---- 2. the console's mode, and the namespace's ------------------------
-    if state.shared().is_none() || policy::fold_issuer(&actor.issuer) == policy::LOCAL_ADMIN_ISSUER
+    if !ApprovalRoute::SecondPersonInConsole.console_may_approve(state.console_kind())
+        || policy::fold_issuer(&actor.issuer) == policy::LOCAL_ADMIN_ISSUER
     {
         return Err(refused(
             &actor,

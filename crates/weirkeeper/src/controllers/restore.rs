@@ -145,8 +145,8 @@ use crate::verification::{
     EvidenceRef, VerifyOracle,
 };
 use logweir_core::approval_policy::{
-    self as approval_policy, ApprovalMode, ApprovalPolicySet, AuthorizationRefusal,
-    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as approval_policy, ApprovalPolicySet, AuthorizationRefusal, EffectivePolicy,
+    ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
@@ -2053,17 +2053,24 @@ pub fn approval_bundle_config_map_with_policy(
     // a governed approver's, or the console's — under `Ordinary`, and
     // (PROD-16.2) under a `Governed` policy whose approval the console signs.
     let bound = policy.bound().filter(|_| is_authorization_v2(approval));
-    let console_approved = bound.is_some_and(|p| {
-        p.approver_signature == logweir_core::approval_policy::ApproverSignature::Console
-    });
-    let authorising_usage = match bound.map(|p| (p.mode, console_approved)) {
-        Some((ApprovalMode::Ordinary, _) | (ApprovalMode::Governed, true)) => {
-            logweir_core::trust::KeyUsage::ConsoleConfirmation
-        }
-        Some((ApprovalMode::Governed, false)) | None => {
-            logweir_core::trust::KeyUsage::GovernedApproval
-        }
-    };
+    // BY THE TABLE (PROD-16.2): the bound policy's row says which usage
+    // authorises, and the pair that is not a row materialises nothing.
+    let route = bound
+        .map(logweir_core::approval_policy::ApprovalPolicy::route)
+        .transpose()
+        .map_err(|refusal| {
+            RestoreError::Materialization(format!(
+                "the Approval {} is under a policy this build runs nothing under ({refusal}); no \
+                 bundle is written",
+                approval.name_any()
+            ))
+        })?;
+    let console_approved =
+        route == Some(logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole);
+    let authorising_usage = route.map_or(
+        logweir_core::trust::KeyUsage::GovernedApproval,
+        logweir_core::approval_policy::ApprovalRoute::authorising_usage,
+    );
     if let Err(refusal) = trust.may_sign_new_for(matched_key_id, authorising_usage, now) {
         return Err(RestoreError::Materialization(format!(
             "the Approval {} verified under key {matched_key_id}, which {} no longer accepts for \

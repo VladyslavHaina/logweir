@@ -1,13 +1,13 @@
 use crate::drill::DrillError;
 use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
-    self as approval_policy, ApprovalMode, ApprovalPolicy, ApproverSignature, ExpectedSubject,
-    RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as approval_policy, ApprovalPolicy, ApprovalRoute, ExpectedSubject, RestoreAuthorization,
+    PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::guard::GuardRefusal;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::original_name::ApprovalSubject;
-use logweir_core::scorecard::ApprovalInfo;
+use logweir_core::scorecard::{ApprovalInfo, ConsoleApprovalInfo, ConsolePrincipal};
 use logweir_core::spec::ApprovalDoc;
 use logweir_evidence::{
     keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
@@ -134,24 +134,28 @@ pub struct Approved {
     pub original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 }
 
+// THE VOCABULARY IS `logweir_core::scorecard`'s, AND ONLY ITS (PROD-16.2).
+// These are the same constants under the names this module has always used:
+// the word a scorecard signs is defined once, and the writer cannot spell a
+// member the readers do not hold.
+
 /// [`Approved::approval_mode`] for a per-run approval document v1.
-pub const APPROVAL_MODE_V1: &str = "v1Approval";
+pub const APPROVAL_MODE_V1: &str = logweir_core::scorecard::APPROVAL_MODE_V1;
 /// [`Approved::approval_mode`] for a standing rehearsal authorization.
-pub const APPROVAL_MODE_STANDING: &str = "standing";
+pub const APPROVAL_MODE_STANDING: &str = logweir_core::scorecard::APPROVAL_MODE_STANDING;
 /// [`Approved::approval_mode`] for an authorization document v2 under a
 /// `Governed` policy: the console's confirmation plus an approver's key.
-pub const APPROVAL_MODE_GOVERNED: &str = "governed";
+pub const APPROVAL_MODE_GOVERNED: &str = logweir_core::scorecard::APPROVAL_MODE_GOVERNED;
 /// [`Approved::approval_mode`] for an authorization document v2 under an
 /// `Ordinary` policy: a one-person confirmation (OD-10).
-pub const APPROVAL_MODE_ORDINARY: &str = "ordinary";
+pub const APPROVAL_MODE_ORDINARY: &str = logweir_core::scorecard::APPROVAL_MODE_ORDINARY;
 /// **PROD-16.2.** [`Approved::approval_mode`] for an authorization document
 /// v2 under a `Governed` policy whose `approverSignature` is `Console`: the
 /// console's confirmation of the requester, and a SECOND PERSON who signed in
 /// and approved, named inside the bytes the console signed. Not
 /// [`APPROVAL_MODE_GOVERNED`]: no personal key countersigned, and a reader
-/// must not be told one did
-/// (`logweir_core::scorecard::ORIGINAL_NAME_APPROVAL_MODE_CONSOLE`).
-pub const APPROVAL_MODE_CONSOLE: &str = "consoleApproval";
+/// must not be told one did.
+pub const APPROVAL_MODE_CONSOLE: &str = logweir_core::scorecard::APPROVAL_MODE_CONSOLE;
 
 /// The approval subject a signed document carries, as a refusal when it is
 /// one this build does not know.
@@ -282,6 +286,8 @@ pub fn verify_bytes(
             approved_at: doc.approved_at,
             key_id,
             self_attested,
+            // A v1 approval is a personal key's: no console approver.
+            console: None,
         },
     })
 }
@@ -398,79 +404,106 @@ pub fn verify_authorization_v2_bytes(
 
     let confirmation_id = confirmation.key_id();
     let approver_id = approver.key_id();
-    let approver_label = match policy.mode {
-        ApprovalMode::Ordinary => {
+    let guard = |text: String| DrillError::Guard(GuardRefusal(text));
+    // **THE RUNNER DECIDES FROM THE TABLE** (PROD-16.2):
+    // `ApprovalPolicy::route` reads the snapshot's `(mode, approverSignature)`
+    // pair once, and each row below says which key may be the approver, whose
+    // name the evidence carries, and which instant is the approval's. A pair
+    // that is not a row is refused here by name — after
+    // `ApprovalPolicy::from_snapshot_bytes` and `check_binding` have each
+    // refused it too: this function does not rely on either having run.
+    let route = policy
+        .route()
+        .map_err(|e| guard(format!("{e}; no data operation was started")))?;
+    // What the evidence records, PER ROW, and never one row's field under
+    // another row's name: (who approved, when, the console approval if any).
+    let (approver_label, approved_at, console) = match route {
+        ApprovalRoute::RequesterConfirms => {
             if approver_id != confirmation_id {
-                return Err(GuardRefusal(format!(
+                return Err(guard(format!(
                     "policy {} is Ordinary, so the console's confirmation is the whole \
                      authorization, but the bundle names approver key {approver_id} and \
                      confirmation key {confirmation_id}; no data operation was started",
                     policy.name
-                ))
-                .into());
+                )));
             }
-            doc.requester.principal_id()
+            // As before: the requester confirmed, when the console signed.
+            (doc.requester.principal_id(), doc.issued_at, None)
         }
-        // PROD-16.2: THE ONE RELAXATION, AND WHAT DECIDES IT IS THE SNAPSHOT.
-        ApprovalMode::Governed if policy.approver_signature == ApproverSignature::Console => {
+        // THE ONE RELAXATION, AND WHAT DECIDES IT IS THE SNAPSHOT'S ROW: the
+        // console key is the approver's key here, and under no other row.
+        ApprovalRoute::SecondPersonInConsole => {
             if approver_id != confirmation_id {
-                return Err(GuardRefusal(format!(
+                return Err(guard(format!(
                     "policy {} takes its approval from the console (approverSignature: Console), \
                      so the console's signature over a document naming the approver is the whole \
                      authorization, but the bundle names approver key {approver_id} and \
                      confirmation key {confirmation_id}; a personal-key countersignature is not \
                      accepted under this policy; no data operation was started",
                     policy.name
-                ))
-                .into());
+                )));
             }
-            // `check_binding` required the approver; a document without one
-            // never reaches here. Stated, not assumed.
-            doc.approver
-                .as_ref()
-                .map(approval_policy::Approver::principal_id)
-                .ok_or_else(|| {
-                    DrillError::Guard(GuardRefusal(format!(
-                        "policy {} takes its approval from the console and the document names \
-                         no approver; no data operation was started",
-                        policy.name
-                    )))
-                })?
+            // WHO APPROVED AND WHEN COME FROM THE DOCUMENT OR FROM NOWHERE.
+            // `check_binding` required both fields; a document that reached
+            // here without `approvedAt` is refused BY NAME, never given the
+            // request's time.
+            let approval = approval_policy::console_approval_of(&doc, &policy)
+                .map_err(|e| guard(format!("{e}; no data operation was started")))?;
+            let console = ConsoleApprovalInfo {
+                mode: route.approval_mode().to_string(),
+                requester: ConsolePrincipal {
+                    issuer: approval.requester.issuer.clone(),
+                    subject: approval.requester.subject.clone(),
+                },
+                approver: ConsolePrincipal {
+                    issuer: approval.approver.issuer.clone(),
+                    subject: approval.approver.subject.clone(),
+                },
+                requested_at: approval.requested_at,
+                approved_at: approval.approved_at,
+                request_expires_at: approval.request_expires_at,
+                confirmation_key_id: confirmation_id.clone(),
+            };
+            (
+                approval.approver.principal_id(),
+                approval.approved_at,
+                Some(console),
+            )
         }
-        ApprovalMode::Governed => {
+        ApprovalRoute::PersonalKey => {
             if approver_id == confirmation_id {
-                return Err(GuardRefusal(format!(
+                return Err(guard(format!(
                     "policy {} is Governed, and the bundle names the console key \
                      {confirmation_id} as the approver; a governed run needs a separate approver \
                      signature; no data operation was started",
                     policy.name
-                ))
-                .into());
+                )));
             }
             verify_under(&approver, bytes, &sidecar, "governed approver")?;
-            format!("governed approver key {approver_id}")
+            // As before: the document records when the console signed the
+            // request and no countersigning time, and that is what is kept.
+            (
+                format!("governed approver key {approver_id}"),
+                doc.issued_at,
+                None,
+            )
         }
     };
     let self_attested = approver_id == signing_key.key_id();
     let approval_subject = signed_subject(doc.approval_subject.as_deref())?;
     Ok(Approved {
         approval_subject,
-        approval_mode: match (policy.mode, policy.approver_signature) {
-            (ApprovalMode::Governed, ApproverSignature::Console) => APPROVAL_MODE_CONSOLE,
-            (ApprovalMode::Governed, ApproverSignature::PersonalKey) => APPROVAL_MODE_GOVERNED,
-            (ApprovalMode::Ordinary, _) => APPROVAL_MODE_ORDINARY,
-        },
+        approval_mode: route.approval_mode(),
         original_name_confirmation: doc.original_name_confirmation.clone(),
         validated_at: Utc::now(),
         approval: ApprovalInfo {
             approver: approver_label,
             ticket: doc.ticket.clone().unwrap_or_default(),
             plan_hash: doc.plan_hash.clone(),
-            // PROD-16.2: when the second person approved, where the document
-            // says so; otherwise when the console signed, as before.
-            approved_at: doc.approved_at.unwrap_or(doc.issued_at),
+            approved_at,
             key_id: approver_id,
             self_attested,
+            console,
         },
     })
 }

@@ -763,8 +763,12 @@ fn refuse_before_create(
         }
         return Ok(());
     };
-    let operator_mode = OperatorMode::of(effective);
-    if state.shared().is_none() && !operator_mode.allowed_in_local_admin() {
+    // PROD-16.2: THE ROW OF THE APPROVAL TABLE, and what THIS console may do
+    // under it. Nothing below reads the policy's mode or its approver
+    // signature on its own.
+    let route = approval::route_of(policy)?;
+    let operator_mode = route.operator_mode();
+    if !route.console_may_request(state.console_kind()) {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
@@ -796,9 +800,9 @@ fn refuse_before_create(
     // people every reader compares. An identity that cannot be compared (or
     // is a machine's) could never be told apart from an approver's, so no
     // request is made for it: nothing would ever be able to approve it.
-    if operator_mode == OperatorMode::TwoPerson {
+    if route == logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole {
         if let Err(reason) = logweir_core::approval_policy::console_principal(
-            "requester",
+            logweir_core::approval_policy::Party::Requester,
             &actor.issuer,
             &actor.subject,
         ) {
@@ -953,7 +957,9 @@ async fn authorize_submission(
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     };
-    let governed = approval::awaits_approver(policy.mode);
+    // By the table: `confirm` is authorised by the console's signature
+    // alone; `two-person` and `strict` leave a REQUEST and wait.
+    let governed = approval::route_of(policy)?.awaits_an_approver();
     let target = if governed {
         approval::confirmation_name(approval_name)
     } else {
@@ -1198,11 +1204,8 @@ pub async fn submit_approval(
              signed; submit only the countersigned sidecar",
         )]));
     }
-    let Some(policy) = effective
-        .bound()
-        .filter(|p| p.mode == ApprovalMode::Governed)
-    else {
-        return Err(ApiError::new(
+    let not_governed = || {
+        ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
                 "Namespace {ns} is bound to {} ({}), not an explicit Governed policy, so there is \
@@ -1210,24 +1213,36 @@ pub async fn submit_approval(
                 effective.name(),
                 effective.mode()
             ),
-        ));
+        )
     };
-    // PROD-16.2: A TWO-PERSON NAMESPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE.
-    // Its policy snapshot says the console signs the approval, and a request
-    // made under one setting is not approved under the other: accepting a
-    // countersignature here would keep the personal-key roster as a second,
-    // standing way in. The controller and the runner refuse it too.
-    if policy.approver_signature == logweir_core::approval_policy::ApproverSignature::Console {
-        actor.audit.set_failure("countersignature_not_accepted");
-        return Err(ApiError::new(
-            ProblemCode::PolicyMismatch,
-            format!(
-                "Namespace {ns} is bound to {} (two-person): a second person approves in the \
-                 console, and a personal-key countersignature is not accepted here. Nothing was \
-                 stored.",
-                policy.name
-            ),
-        ));
+    let Some(policy) = effective.bound() else {
+        return Err(not_governed());
+    };
+    // BY THE TABLE (PROD-16.2): only the personal-key row takes a
+    // countersignature.
+    match approval::route_of(policy)? {
+        logweir_core::approval_policy::ApprovalRoute::PersonalKey => {}
+        logweir_core::approval_policy::ApprovalRoute::RequesterConfirms => {
+            return Err(not_governed())
+        }
+        // A TWO-PERSON NAMESPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE. Its
+        // policy snapshot says the console signs the approval, and a request
+        // made under one setting is not approved under the other: accepting a
+        // countersignature here would keep the personal-key roster as a
+        // second, standing way in. The controller and the runner refuse it
+        // too.
+        logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole => {
+            actor.audit.set_failure("countersignature_not_accepted");
+            return Err(ApiError::new(
+                ProblemCode::PolicyMismatch,
+                format!(
+                    "Namespace {ns} is bound to {} (two-person): a second person approves in \
+                     the console, and a personal-key countersignature is not accepted here. \
+                     Nothing was stored.",
+                    policy.name
+                ),
+            ));
+        }
     }
     let approval_name = restore.spec.approval_ref_name().to_string();
     let confirmation_name = approval::confirmation_name(&approval_name);

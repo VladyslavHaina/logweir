@@ -283,8 +283,10 @@ pub const KUBERNETES_SYSTEM_SUBJECT_PREFIX: &str = "system:";
 /// bound on `sub` ("MUST NOT exceed 255 ASCII characters").
 pub const MAX_COMPARABLE_SUBJECT_LEN: usize = 255;
 
-/// The longest issuer a console approval compares.
-pub const MAX_COMPARABLE_ISSUER_LEN: usize = 2048;
+/// The longest issuer a console approval compares: the bound `sub` has. An
+/// issuer is a short https URL; one longer than this is not something two
+/// principals can be held to, or a sentence can carry.
+pub const MAX_COMPARABLE_ISSUER_LEN: usize = 255;
 
 /// The document's `kind`.
 pub const RESTORE_AUTHORIZATION_KIND: &str = "RestoreAuthorization";
@@ -378,6 +380,128 @@ enum ConsoleWord {
     Console,
 }
 
+/// **PROD-16.2 — HOW A POLICY'S APPROVAL IS MADE: THE CLOSED TABLE.**
+///
+/// A policy is a `(mode, approverSignature)` pair, and exactly three pairs
+/// are policies. [`ApprovalPolicy::route`] is the ONE place the pair is read;
+/// the console, the Approval controller, Restore admission, the bundle and
+/// the runner each call it and decide from the row, so none of them can take
+/// a pair for something another does not.
+///
+/// | `mode` | `approverSignature` | route | operator's word | who approves | the signature that authorises | scorecard `approval_mode` |
+/// |---|---|---|---|---|---|---|
+/// | `Ordinary` | absent | [`Self::RequesterConfirms`] | `confirm` | the requester, in the console | the console's (`ConsoleConfirmation`) | `ordinary` |
+/// | `Governed` | `Console` | [`Self::SecondPersonInConsole`] | `two-person` | a second person, in the SHARED console | the console's, over a document naming the approver | `consoleApproval` |
+/// | `Governed` | absent | [`Self::PersonalKey`] | `strict` | an approver's personal key | a `GovernedApproval` key's countersignature | `governed` |
+/// | `Ordinary` | `Console` | **not a row** | — | — | — | — |
+///
+/// And by the console that serves the request ([`ConsoleKind`]):
+///
+/// | route | shared console | administrator console (`localAdmin`) |
+/// |---|---|---|
+/// | `RequesterConfirms` | requests and confirms | requests and confirms (as its one identity) |
+/// | `SecondPersonInConsole` | requests; a second person approves | NEITHER requests nor approves |
+/// | `PersonalKey` | requests; takes a countersignature | requests; takes a countersignature |
+///
+/// **The pair that is not a row** (`Ordinary` with `approverSignature:
+/// Console`) is refused wherever a policy is read:
+/// [`ApprovalPolicySet::parse`] refuses the installation document (so the
+/// controller and the console do not start), [`ApprovalPolicy::from_snapshot_bytes`]
+/// refuses the frozen snapshot (so a runner stops, exit 3), and
+/// [`ApprovalPolicy::route`] refuses the pair itself for any caller that
+/// built a policy another way. A snapshot edited after the controller froze
+/// it is refused before any of that by its digest, which the Job template
+/// pins and the signed document names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ApprovalRoute {
+    /// `confirm`: the requester's own confirmation in the console is the
+    /// whole authorisation.
+    RequesterConfirms,
+    /// `two-person`: a second person signs in to the shared console and
+    /// approves; the console signs who and when.
+    SecondPersonInConsole,
+    /// `strict`: a personal `GovernedApproval` key countersigns the console's
+    /// confirmation.
+    PersonalKey,
+}
+
+/// Which console is serving a request: the shared one (OIDC sessions, many
+/// identities) or the in-cluster administrator one (`localAdmin`, one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConsoleKind {
+    /// `api.console.mode: shared`.
+    Shared,
+    /// `api.console.mode: localAdmin`.
+    LocalAdmin,
+}
+
+impl ApprovalRoute {
+    /// The operator's word for the route.
+    #[must_use]
+    pub const fn operator_mode(self) -> OperatorMode {
+        match self {
+            Self::RequesterConfirms => OperatorMode::Confirm,
+            Self::SecondPersonInConsole => OperatorMode::TwoPerson,
+            Self::PersonalKey => OperatorMode::Strict,
+        }
+    }
+
+    /// The key usage whose signature AUTHORISES a run under the route — the
+    /// usage the authorising key must still hold when a bundle is written.
+    #[must_use]
+    pub const fn authorising_usage(self) -> KeyUsage {
+        match self {
+            Self::RequesterConfirms | Self::SecondPersonInConsole => KeyUsage::ConsoleConfirmation,
+            Self::PersonalKey => KeyUsage::GovernedApproval,
+        }
+    }
+
+    /// Whether the console's first signature is only a REQUEST under the
+    /// route (stored as `<approvalRef>-confirmation`), with the approval
+    /// still to come.
+    #[must_use]
+    pub const fn awaits_an_approver(self) -> bool {
+        !matches!(self, Self::RequesterConfirms)
+    }
+
+    /// Whether `console` may take a REQUEST under the route.
+    #[must_use]
+    pub const fn console_may_request(self, console: ConsoleKind) -> bool {
+        !matches!(
+            (self, console),
+            (Self::SecondPersonInConsole, ConsoleKind::LocalAdmin)
+        )
+    }
+
+    /// Whether `console` may sign the APPROVAL of a request under the route:
+    /// the shared console under `two-person`, and nothing else.
+    #[must_use]
+    pub const fn console_may_approve(self, console: ConsoleKind) -> bool {
+        matches!(
+            (self, console),
+            (Self::SecondPersonInConsole, ConsoleKind::Shared)
+        )
+    }
+
+    /// Whether the route's approval is a personal-key countersignature.
+    #[must_use]
+    pub const fn takes_a_countersignature(self) -> bool {
+        matches!(self, Self::PersonalKey)
+    }
+
+    /// The word a scorecard signs for the route
+    /// (`crate::scorecard::APPROVAL_MODE_ORDINARY` and its siblings: the one
+    /// definition of that vocabulary).
+    #[must_use]
+    pub const fn approval_mode(self) -> &'static str {
+        match self {
+            Self::RequesterConfirms => crate::scorecard::APPROVAL_MODE_ORDINARY,
+            Self::SecondPersonInConsole => crate::scorecard::APPROVAL_MODE_CONSOLE,
+            Self::PersonalKey => crate::scorecard::APPROVAL_MODE_GOVERNED,
+        }
+    }
+}
+
 /// PROD-16.1 — the three approval modes an OPERATOR sees, and the one place
 /// they are mapped onto the internal names.
 ///
@@ -429,11 +553,13 @@ impl OperatorMode {
     pub fn of(effective: &EffectivePolicy) -> Self {
         match effective {
             EffectivePolicy::Legacy => Self::Strict,
-            EffectivePolicy::Bound(policy) => match (policy.mode, policy.approver_signature) {
-                (ApprovalMode::Ordinary, _) => Self::Confirm,
-                (ApprovalMode::Governed, ApproverSignature::Console) => Self::TwoPerson,
-                (ApprovalMode::Governed, ApproverSignature::PersonalKey) => Self::Strict,
-            },
+            // THROUGH THE TABLE. The pair that is not a row cannot come out of
+            // a parsed document or a snapshot; shown as `strict`, the mode
+            // that asks for the most, and refused by `route()` at every layer
+            // that would act on it.
+            EffectivePolicy::Bound(policy) => policy
+                .route()
+                .map_or(Self::Strict, ApprovalRoute::operator_mode),
         }
     }
 
@@ -760,6 +886,36 @@ struct Snapshot {
 }
 
 impl ApprovalPolicy {
+    /// **The row of [`ApprovalRoute`]'s table this policy is** — the one
+    /// place the `(mode, approverSignature)` pair is read.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorizationRefusal::PolicyMismatch`] for the pair that is not a
+    /// row: `Ordinary` with `approverSignature: Console`. Nothing is
+    /// confirmed, approved, admitted or run under it.
+    pub fn route(&self) -> Result<ApprovalRoute, AuthorizationRefusal> {
+        match (self.mode, self.approver_signature) {
+            (ApprovalMode::Ordinary, ApproverSignature::PersonalKey) => {
+                Ok(ApprovalRoute::RequesterConfirms)
+            }
+            (ApprovalMode::Governed, ApproverSignature::Console) => {
+                Ok(ApprovalRoute::SecondPersonInConsole)
+            }
+            (ApprovalMode::Governed, ApproverSignature::PersonalKey) => {
+                Ok(ApprovalRoute::PersonalKey)
+            }
+            (ApprovalMode::Ordinary, ApproverSignature::Console) => {
+                Err(AuthorizationRefusal::PolicyMismatch(format!(
+                    "policy {} is Ordinary (one person confirms) and says approverSignature: \
+                     Console; a policy with no approver has no approver's signature, so this is \
+                     not a policy anything is confirmed, approved or run under",
+                    shown(&self.name)
+                )))
+            }
+        }
+    }
+
     /// The exact snapshot bytes a run freezes into its bundle.
     #[must_use]
     pub fn snapshot_bytes(&self) -> Vec<u8> {
@@ -816,16 +972,12 @@ impl ApprovalPolicy {
                 Some(ConsoleWord::Console) => ApproverSignature::Console,
             },
         };
-        // PROD-16.2: only a Governed policy has an approver, so only it can
-        // say who signs for one. A snapshot that says so of an Ordinary
-        // policy was not rendered by `ApprovalPolicySet::parse`.
-        if policy.approver_signature == ApproverSignature::Console
-            && policy.mode != ApprovalMode::Governed
-        {
+        // PROD-16.2: a snapshot is one of the table's rows, or it is not a
+        // snapshot `ApprovalPolicySet::parse` rendered: only a Governed
+        // policy has an approver, so only it can say who signs for one.
+        if let Err(not_a_row) = policy.route() {
             return Err(format!(
-                "the approval-policy snapshot says approverSignature: Console on a {} policy; \
-                 only a Governed policy has an approver",
-                policy.mode
+                "the approval-policy snapshot is not one this build runs: {not_a_row}"
             ));
         }
         if policy.snapshot_bytes() != bytes {
@@ -1773,6 +1925,9 @@ fn check_document_binding(
     doc.check_subject_fields_version()?;
     // PROD-16.2: and the 2.2.0 fields under 2.0.0 or 2.1.0, the same way.
     doc.check_approver_fields()?;
+    // PROD-16.2: THE POLICY IS ONE OF THE TABLE'S ROWS, or nothing is judged
+    // under it. Every reader reaches this, whatever else it calls.
+    let route = policy.route()?;
     let subject = &doc.subject;
     let mismatch = if subject.api_version != SUBJECT_API_VERSION {
         Some(format!("apiVersion {}", subject.api_version))
@@ -1848,7 +2003,7 @@ fn check_document_binding(
     // other. AFTER the policy comparison above, so a document for another
     // policy is named as that; this arm is what is left when the digest
     // matches and the fields are there all the same.
-    if doc.carries_approver_fields() && policy.approver_signature != ApproverSignature::Console {
+    if doc.carries_approver_fields() && route != ApprovalRoute::SecondPersonInConsole {
         return Err(AuthorizationRefusal::PolicyMismatch(format!(
             "the authorization document names a console approver, and policy {} ({}) takes its \
              approval from {}; a console approval is accepted only under a policy whose \
@@ -1882,7 +2037,7 @@ pub fn check_request_binding(
     policy: &ApprovalPolicy,
     now: DateTime<Utc>,
 ) -> Result<(), AuthorizationRefusal> {
-    if policy.approver_signature != ApproverSignature::Console {
+    if policy.route()? != ApprovalRoute::SecondPersonInConsole {
         return Err(AuthorizationRefusal::PolicyMismatch(format!(
             "policy {} ({}) takes its approval from {}; there is no request to approve in the \
              console under it",
@@ -1903,16 +2058,137 @@ pub fn check_request_binding(
     check_clock(doc, now)
 }
 
-/// The identity a console approval compares: the issuer and the subject, as
-/// the console attested them.
+/// The most characters of one requester-chosen string a sentence carries.
+pub const MAX_SHOWN_CHARS: usize = 96;
+
+/// **A string someone else chose, as a refusal sentence, a status condition
+/// or a log line may carry it** (PROD-16.2; the rule PROD-15.1 made for the
+/// runner's own lines, applied where a principal is named).
+///
+/// An issuer and a subject come from an identity provider's token, and a
+/// document's `requester` and `approver` from whoever wrote the document: to
+/// this code they are attacker-chosen text. So, before one reaches a sentence:
+///
+/// * it is BOUNDED: at most [`MAX_SHOWN_CHARS`] characters are shown, and the
+///   rest are counted, never copied;
+/// * it is CLEANED: only visible ASCII (0x21 to 0x7E) is copied as it is.
+///   Every other character — a space, a line break, a control character,
+///   anything outside ASCII, and `"` and `\` themselves — is written as an
+///   escape, so the text cannot start a line, end a quotation, hide a
+///   character or pass for another;
+/// * it is QUOTED, so where it starts and ends is never in doubt.
+#[must_use]
+pub fn shown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(MAX_SHOWN_CHARS) + 2);
+    out.push('"');
+    let mut chars = text.chars();
+    for c in chars.by_ref().take(MAX_SHOWN_CHARS) {
+        if matches!(c, '!'..='~') && c != '"' && c != '\\' {
+            out.push(c);
+        } else {
+            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        }
+    }
+    out.push('"');
+    let rest = chars.count();
+    if rest > 0 {
+        out.push_str(&format!(" (and {rest} more characters)"));
+    }
+    out
+}
+
+/// The identity a console approval compares, as a sentence may carry it: the
+/// issuer and the subject, each [`shown`].
 fn principal_words(issuer: &str, subject: &str) -> String {
-    format!("{issuer:?}#{subject:?}")
+    format!("{}#{}", shown(issuer), shown(subject))
 }
 
 /// Whether every character is visible ASCII (0x21 to 0x7E): no space, no
 /// control character, no code point outside ASCII.
 fn is_visible_ascii(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// Which of the two people of a console approval a fault is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Party {
+    /// The principal the console attested as having asked.
+    Requester,
+    /// The principal the console attested as having approved.
+    Approver,
+}
+
+impl Party {
+    /// The word a sentence uses.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requester => "requester",
+            Self::Approver => "approver",
+        }
+    }
+}
+
+/// **Why two principals are not two people** — the closed set of faults the
+/// identity rule finds, each with ONE FIXED CLAUSE ([`Self::clause`]) that no
+/// reader of a document can influence. The authorization refusals add the
+/// principals (bounded and cleaned, [`shown`]); the scorecard's arms and
+/// `docs/verify_scorecard.py` print the clause alone, in the same words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SeparationFault {
+    /// A principal is not in the form a console approval can compare.
+    NotComparable(Party),
+    /// A principal is the in-cluster administrator console's one identity.
+    LocalAdmin(Party),
+    /// A principal is a Kubernetes system identity.
+    SystemIdentity(Party),
+    /// The two principals come from two issuers.
+    TwoIssuers,
+    /// The approver is the requester.
+    SamePerson,
+}
+
+impl SeparationFault {
+    /// Which person the fault is about, when it is about one.
+    #[must_use]
+    pub const fn party(self) -> Option<Party> {
+        match self {
+            Self::NotComparable(p) | Self::LocalAdmin(p) | Self::SystemIdentity(p) => Some(p),
+            Self::TwoIssuers | Self::SamePerson => None,
+        }
+    }
+
+    /// The fixed clause: what follows "the requester …", "the approver …" or
+    /// "the approver and the requester …".
+    #[must_use]
+    pub const fn clause(self) -> &'static str {
+        match self {
+            Self::NotComparable(_) => {
+                "is not in a form that can be compared: a console approval compares an issuer \
+                 and a subject made of visible ASCII characters only (no space, no control \
+                 character, nothing outside ASCII; the issuer without `#`; each at most 255 \
+                 characters, as OpenID Connect bounds `sub`), and an identity it cannot compare \
+                 cannot be shown to be a second person"
+            }
+            Self::LocalAdmin(_) => {
+                "is the in-cluster administrator console's one identity, which cannot be one of \
+                 two people; a console approval needs two people the same identity provider \
+                 vouches for"
+            }
+            Self::SystemIdentity(_) => {
+                "is a Kubernetes system identity (a service account, a node or a system user), \
+                 not a person; a console approval is between two people"
+            }
+            Self::TwoIssuers => {
+                "come from two issuers; whether a subject of one is a subject of the other \
+                 cannot be known, so a principal of another issuer is never a second person"
+            }
+            Self::SamePerson => {
+                "is the requester (the issuer and the subject are compared without case); a \
+                 two-person approval needs a second person, and no role changes that"
+            }
+        }
+    }
 }
 
 /// **PROD-16.2: whether a principal can take part in a console approval at
@@ -1932,43 +2208,44 @@ fn is_visible_ascii(text: &str) -> bool {
 ///    Kubernetes machine identity ([`KUBERNETES_SYSTEM_SUBJECT_PREFIX`],
 ///    without case): a service account is not a requester a human can be
 ///    told apart from.
-///
-/// # Errors
-///
-/// A sentence naming what is wrong, for the refusal that carries it.
-pub fn console_principal(role: &str, issuer: &str, subject: &str) -> Result<(), String> {
-    let shown = principal_words(issuer, subject);
+#[must_use]
+pub fn principal_fault(party: Party, issuer: &str, subject: &str) -> Option<SeparationFault> {
     if !is_visible_ascii(issuer)
         || !is_visible_ascii(subject)
         || issuer.contains('#')
         || issuer.len() > MAX_COMPARABLE_ISSUER_LEN
         || subject.len() > MAX_COMPARABLE_SUBJECT_LEN
     {
-        return Err(format!(
-            "the {role} {shown} is not in a form that can be compared: a console approval \
-             compares an issuer and a subject made of visible ASCII characters only (no space, \
-             no control character, nothing outside ASCII; the issuer without `#`, the subject at \
-             most {MAX_COMPARABLE_SUBJECT_LEN} characters, as OpenID Connect defines `sub`), and \
-             an identity it cannot compare cannot be shown to be a second person"
-        ));
+        return Some(SeparationFault::NotComparable(party));
     }
     if fold_issuer(issuer) == LOCAL_ADMIN_ISSUER {
-        return Err(format!(
-            "the {role} {shown} is the in-cluster administrator console's one identity, which \
-             cannot be one of two people; a console approval needs two people the same identity \
-             provider vouches for"
-        ));
+        return Some(SeparationFault::LocalAdmin(party));
     }
     if subject
         .to_ascii_lowercase()
         .starts_with(KUBERNETES_SYSTEM_SUBJECT_PREFIX)
     {
-        return Err(format!(
-            "the {role} {shown} is a Kubernetes system identity (a service account, a node or a \
-             system user), not a person; a console approval is between two people"
-        ));
+        return Some(SeparationFault::SystemIdentity(party));
     }
-    Ok(())
+    None
+}
+
+/// [`principal_fault`] as the sentence a refusal carries: the principal,
+/// bounded and cleaned ([`shown`]), then the fault's fixed clause.
+///
+/// # Errors
+///
+/// The sentence.
+pub fn console_principal(party: Party, issuer: &str, subject: &str) -> Result<(), String> {
+    match principal_fault(party, issuer, subject) {
+        None => Ok(()),
+        Some(fault) => Err(format!(
+            "the {} {} {}",
+            party.as_str(),
+            principal_words(issuer, subject),
+            fault.clause()
+        )),
+    }
 }
 
 /// An issuer as a console approval compares it: ASCII lower case, with
@@ -1988,13 +2265,13 @@ pub fn fold_subject(subject: &str) -> String {
     subject.to_ascii_lowercase()
 }
 
-/// **PROD-16.2 — SEPARATION OF DUTIES FOR A CONSOLE APPROVAL: THE ONE RULE
-/// the console (before it signs), the Approval controller, Restore admission
-/// and the runner all apply**, over the requester the console attested and
-/// the approver it attested.
+/// **PROD-16.2 — SEPARATION OF DUTIES FOR A CONSOLE APPROVAL: THE ONE RULE**
+/// the console (before it signs), the Approval controller, Restore admission,
+/// the runner and both scorecard readers apply, over the requester the
+/// console attested and the approver it attested.
 ///
 /// 1. Each is a principal a console approval can compare, and a person
-///    ([`console_principal`]).
+///    ([`principal_fault`]) — the requester first.
 /// 2. **The same issuer** ([`fold_issuer`]). Two issuers are two namespaces
 ///    of subjects; whether `alice` at one is `alice` at the other cannot be
 ///    known from here, so a principal of another issuer never establishes a
@@ -2004,49 +2281,146 @@ pub fn fold_subject(subject: &str) -> String {
 /// It compares the issuer and the subject and nothing else: never a display
 /// name, an email claim, a group, a role or a key id. Two sessions of one
 /// user are one issuer and one subject, so they are one person. Every arm can
-/// only refuse.
+/// only refuse. `None` is two people.
+#[must_use]
+pub fn separation_fault(
+    requester_issuer: &str,
+    requester_subject: &str,
+    approver_issuer: &str,
+    approver_subject: &str,
+) -> Option<SeparationFault> {
+    if let Some(fault) = principal_fault(Party::Requester, requester_issuer, requester_subject) {
+        return Some(fault);
+    }
+    if let Some(fault) = principal_fault(Party::Approver, approver_issuer, approver_subject) {
+        return Some(fault);
+    }
+    if fold_issuer(requester_issuer) != fold_issuer(approver_issuer) {
+        return Some(SeparationFault::TwoIssuers);
+    }
+    if fold_subject(requester_subject) == fold_subject(approver_subject) {
+        return Some(SeparationFault::SamePerson);
+    }
+    None
+}
+
+/// [`separation_fault`] as the refusal a signed document earns: the fault's
+/// fixed clause, with the principals it is about bounded and cleaned.
 ///
 /// # Errors
 ///
-/// [`AuthorizationRefusal::SelfApproval`], naming both principals.
+/// [`AuthorizationRefusal::SelfApproval`].
 pub fn console_separation(
     requester: &Requester,
     approver: &Approver,
 ) -> Result<(), AuthorizationRefusal> {
-    console_principal("requester", &requester.issuer, &requester.subject)
-        .map_err(AuthorizationRefusal::SelfApproval)?;
-    console_principal("approver", &approver.issuer, &approver.subject)
-        .map_err(AuthorizationRefusal::SelfApproval)?;
+    let Some(fault) = separation_fault(
+        &requester.issuer,
+        &requester.subject,
+        &approver.issuer,
+        &approver.subject,
+    ) else {
+        return Ok(());
+    };
     let requester_words = principal_words(&requester.issuer, &requester.subject);
     let approver_words = principal_words(&approver.issuer, &approver.subject);
-    if fold_issuer(&requester.issuer) != fold_issuer(&approver.issuer) {
-        return Err(AuthorizationRefusal::SelfApproval(format!(
-            "the approver {approver_words} and the requester {requester_words} come from two \
-             issuers; whether a subject of one is a subject of the other cannot be known, so a \
-             principal of another issuer is never a second person"
-        )));
+    Err(AuthorizationRefusal::SelfApproval(match fault {
+        SeparationFault::NotComparable(party)
+        | SeparationFault::LocalAdmin(party)
+        | SeparationFault::SystemIdentity(party) => format!(
+            "the {} {} {}",
+            party.as_str(),
+            match party {
+                Party::Requester => &requester_words,
+                Party::Approver => &approver_words,
+            },
+            fault.clause()
+        ),
+        SeparationFault::TwoIssuers => format!(
+            "the approver {approver_words} and the requester {requester_words} {}",
+            fault.clause()
+        ),
+        SeparationFault::SamePerson => format!(
+            "the approver {approver_words} {} (the requester is {requester_words})",
+            fault.clause()
+        ),
+    }))
+}
+
+/// **What a console approval says**: who asked, who approved, and the three
+/// instants, read out of ONE signed document — and never made up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsoleApproval {
+    /// Who asked.
+    pub requester: Requester,
+    /// Who approved.
+    pub approver: Approver,
+    /// `issuedAt`: when the console signed the request.
+    pub requested_at: DateTime<Utc>,
+    /// `approvedAt`: when the second person clicked.
+    pub approved_at: DateTime<Utc>,
+    /// `expiresAt`: when the request stopped being approvable.
+    pub request_expires_at: DateTime<Utc>,
+}
+
+/// **The console approval a document carries under a policy whose approval
+/// the console signs — or the refusal, BY NAME, when it carries none.**
+///
+/// THE ONE PLACE `approver` AND `approvedAt` ARE TAKEN OUT OF A DOCUMENT. No
+/// caller substitutes one instant for another: a document without
+/// `approvedAt` has no approval time, and is refused, not given the
+/// request's.
+///
+/// # Errors
+///
+/// * [`AuthorizationRefusal::ApprovalRequired`]: neither field, the request;
+/// * [`AuthorizationRefusal::DocumentInvalid`]: one without the other.
+pub fn console_approval_of(
+    doc: &RestoreAuthorization,
+    policy: &ApprovalPolicy,
+) -> Result<ConsoleApproval, AuthorizationRefusal> {
+    match (doc.approver.as_ref(), doc.approved_at) {
+        (Some(approver), Some(approved_at)) => Ok(ConsoleApproval {
+            requester: doc.requester.clone(),
+            approver: approver.clone(),
+            requested_at: doc.issued_at,
+            approved_at,
+            request_expires_at: doc.expires_at,
+        }),
+        (None, None) => Err(AuthorizationRefusal::ApprovalRequired(format!(
+            "the console confirmed requester {} under policy {}, which takes its approval from \
+             the console, and nobody has approved: a second person signs in to the console and \
+             clicks Approve. A personal-key countersignature is not accepted under this policy. \
+             This document authorises nothing",
+            principal_words(&doc.requester.issuer, &doc.requester.subject),
+            shown(&policy.name)
+        ))),
+        (Some(_), None) => Err(AuthorizationRefusal::DocumentInvalid(
+            "the document names an approver and no `approvedAt`: a console approval names who \
+             approved AND when, and an approval time is never taken from another field (one of \
+             `approver` and `approvedAt` without the other)"
+                .to_string(),
+        )),
+        (None, Some(_)) => Err(AuthorizationRefusal::DocumentInvalid(
+            "the document carries `approvedAt` and names no approver: a console approval names \
+             who approved AND when (one of `approver` and `approvedAt` without the other)"
+                .to_string(),
+        )),
     }
-    if fold_subject(&requester.subject) == fold_subject(&approver.subject) {
-        return Err(AuthorizationRefusal::SelfApproval(format!(
-            "the approver {approver_words} is the requester {requester_words} (the issuer and \
-             the subject are compared without case); a two-person approval needs a second \
-             person, and no role changes that"
-        )));
-    }
-    Ok(())
 }
 
 /// **PROD-16.2 — the console approval, as every reader judges it** on top of
 /// the binding: who approved, and when.
 ///
-/// * A policy that takes its approval from a PERSONAL key: nothing to judge
-///   here (`Ok`). Its documents carry no approver —
-///   [`check_document_binding`] refused one that does — and its second
-///   signature is the caller's to verify, exactly as before.
-/// * A `Console` policy and a document with NO approver: the request, which
-///   authorises nothing ([`AuthorizationRefusal::ApprovalRequired`]).
-/// * A `Console` policy and an approver: [`console_separation`] between the
-///   requester and the approver, and **the clock rule**: `issuedAt <=
+/// * [`ApprovalRoute::RequesterConfirms`] and [`ApprovalRoute::PersonalKey`]:
+///   nothing to judge here (`Ok`). Their documents carry no approver —
+///   [`check_document_binding`] refused one that does — and a personal-key
+///   policy's second signature is the caller's to verify, exactly as before.
+/// * [`ApprovalRoute::SecondPersonInConsole`] and a document with NO
+///   approver: the request, which authorises nothing
+///   ([`AuthorizationRefusal::ApprovalRequired`]).
+/// * `SecondPersonInConsole` and an approver: [`console_separation`] between
+///   the requester and the approver, and **the clock rule**: `issuedAt <=
 ///   approvedAt < expiresAt`, exactly, with no tolerance — the three instants
 ///   are inside the same signed bytes and were stamped by the same clock (the
 ///   console's), so they are compared with each other and not with the
@@ -2057,52 +2431,37 @@ pub fn console_separation(
 ///
 /// # Errors
 ///
-/// `ApprovalRequired`, `SelfApproval`, `WindowInvalid` or `DocumentInvalid`.
+/// `PolicyMismatch` (a pair that is not a row), `ApprovalRequired`,
+/// `SelfApproval`, `WindowInvalid` or `DocumentInvalid`.
 pub fn check_console_approval(
     doc: &RestoreAuthorization,
     policy: &ApprovalPolicy,
     now: Option<DateTime<Utc>>,
 ) -> Result<(), AuthorizationRefusal> {
-    if policy.approver_signature != ApproverSignature::Console {
-        return Ok(());
+    match policy.route()? {
+        ApprovalRoute::RequesterConfirms | ApprovalRoute::PersonalKey => return Ok(()),
+        ApprovalRoute::SecondPersonInConsole => {}
     }
-    let (approver, approved_at) = match (doc.approver.as_ref(), doc.approved_at) {
-        (Some(approver), Some(approved_at)) => (approver, approved_at),
-        (None, None) => {
-            return Err(AuthorizationRefusal::ApprovalRequired(format!(
-                "the console confirmed requester {} under policy {}, which takes its approval \
-                 from the console, and nobody has approved: a second person signs in to the \
-                 console and clicks Approve. A personal-key countersignature is not accepted \
-                 under this policy. This document authorises nothing",
-                doc.requester.principal_id(),
-                policy.name
-            )))
-        }
-        _ => {
-            return Err(AuthorizationRefusal::DocumentInvalid(
-                "the document carries one of `approver` and `approvedAt` without the other; a \
-                 console approval names who approved AND when"
-                    .to_string(),
-            ))
-        }
-    };
-    console_separation(&doc.requester, approver)?;
-    if approved_at < doc.issued_at || approved_at >= doc.expires_at {
+    let approval = console_approval_of(doc, policy)?;
+    console_separation(&approval.requester, &approval.approver)?;
+    if approval.approved_at < approval.requested_at
+        || approval.approved_at >= approval.request_expires_at
+    {
         return Err(AuthorizationRefusal::WindowInvalid(format!(
             "the approval was given at {}, outside the request's own window {}..{}; an approval \
              is given after the request was made and before it expires",
-            approved_at.to_rfc3339(),
-            doc.issued_at.to_rfc3339(),
-            doc.expires_at.to_rfc3339()
+            approval.approved_at.to_rfc3339(),
+            approval.requested_at.to_rfc3339(),
+            approval.request_expires_at.to_rfc3339()
         )));
     }
     if now.is_some_and(|now| {
-        approved_at > now + chrono::Duration::seconds(MAX_ISSUED_AT_SKEW_SECONDS)
+        approval.approved_at > now + chrono::Duration::seconds(MAX_ISSUED_AT_SKEW_SECONDS)
     }) {
         return Err(AuthorizationRefusal::WindowInvalid(format!(
             "the approval was given at {}, more than {MAX_ISSUED_AT_SKEW_SECONDS}s ahead of this \
              verifier's clock",
-            approved_at.to_rfc3339(),
+            approval.approved_at.to_rfc3339(),
         )));
     }
     Ok(())
@@ -4190,6 +4549,280 @@ namespaces:
             check_request_binding(&doc(&strict), &expected(), &strict, now).map_err(|r| r.reason()),
             Err("ApprovalPolicyMismatch")
         );
+    }
+
+    /// **THE APPROVAL TABLE, ROW BY ROW** (the coordinator's addition 4).
+    /// Every `(mode, approverSignature)` pair is one of three routes or is
+    /// refused; every route says which usage authorises, whether an approver
+    /// is still awaited, which console may request and which may approve,
+    /// whether it takes a countersignature, and the word a scorecard signs.
+    ///
+    /// KILLS, one per row: `(Ordinary, Console)` read as confirm (a policy
+    /// with no approver taken as one-person confirmation whatever it says);
+    /// `(Governed, Console)` read as strict or as confirm; the console key's
+    /// usage asked of a strict policy; the administrator console allowed to
+    /// request or approve under two-person; a console approval offered under
+    /// confirm or strict; a countersignature taken under two-person.
+    #[test]
+    fn the_approval_table_has_three_rows_and_refuses_the_fourth_pair() {
+        let policy = |mode, approver_signature| ApprovalPolicy {
+            name: "p".into(),
+            mode,
+            max_age_seconds: 900,
+            require_distinct_principal: mode == ApprovalMode::Governed,
+            approver_signature,
+        };
+        use ApprovalRoute::{PersonalKey, RequesterConfirms, SecondPersonInConsole};
+        use ConsoleKind::{LocalAdmin, Shared};
+        // (mode, signature) -> route
+        assert_eq!(
+            policy(ApprovalMode::Ordinary, ApproverSignature::PersonalKey).route(),
+            Ok(RequesterConfirms)
+        );
+        assert_eq!(
+            policy(ApprovalMode::Governed, ApproverSignature::Console).route(),
+            Ok(SecondPersonInConsole)
+        );
+        assert_eq!(
+            policy(ApprovalMode::Governed, ApproverSignature::PersonalKey).route(),
+            Ok(PersonalKey)
+        );
+        let not_a_row = policy(ApprovalMode::Ordinary, ApproverSignature::Console);
+        let refused = not_a_row.route().expect_err("not a row");
+        assert_eq!(refused.reason(), "ApprovalPolicyMismatch");
+        assert!(
+            refused
+                .to_string()
+                .contains("not a policy anything is confirmed, approved or run under"),
+            "{refused}"
+        );
+        // ... and nothing judges a document under it: the binding check, the
+        // whole verdict, the request check, the console rule, the snapshot.
+        let mut d = doc(&not_a_row);
+        d.policy = PolicyRef {
+            name: not_a_row.name.clone(),
+            digest: not_a_row.digest(),
+        };
+        let now = at("2026-09-22T10:05:00Z");
+        for verdict in [
+            check_binding(&d, &expected(), &not_a_row),
+            check_restore_authorization(&d, &expected(), &not_a_row, now),
+            check_request_binding(&d, &expected(), &not_a_row, now),
+            check_console_approval(&d, &not_a_row, Some(now)),
+        ] {
+            assert_eq!(
+                verdict.map_err(|r| r.reason()),
+                Err("ApprovalPolicyMismatch")
+            );
+        }
+        assert!(ApprovalPolicy::from_snapshot_bytes(&not_a_row.snapshot_bytes()).is_err());
+        // Shown as the mode that asks for the most, never as confirm.
+        assert_eq!(
+            OperatorMode::of(&EffectivePolicy::Bound(not_a_row)),
+            OperatorMode::Strict
+        );
+
+        // route -> (operator word, authorising usage, awaits an approver,
+        //           takes a countersignature, scorecard word)
+        for (route, word, usage, awaits, countersign, signed) in [
+            (
+                RequesterConfirms,
+                OperatorMode::Confirm,
+                KeyUsage::ConsoleConfirmation,
+                false,
+                false,
+                "ordinary",
+            ),
+            (
+                SecondPersonInConsole,
+                OperatorMode::TwoPerson,
+                KeyUsage::ConsoleConfirmation,
+                true,
+                false,
+                "consoleApproval",
+            ),
+            (
+                PersonalKey,
+                OperatorMode::Strict,
+                KeyUsage::GovernedApproval,
+                true,
+                true,
+                "governed",
+            ),
+        ] {
+            assert_eq!(route.operator_mode(), word, "{route:?}");
+            assert_eq!(route.authorising_usage(), usage, "{route:?}");
+            assert_eq!(route.awaits_an_approver(), awaits, "{route:?}");
+            assert_eq!(route.takes_a_countersignature(), countersign, "{route:?}");
+            assert_eq!(route.approval_mode(), signed, "{route:?}");
+        }
+        // (route, console) -> may request, may approve
+        for (route, console, request, approve) in [
+            (RequesterConfirms, Shared, true, false),
+            (RequesterConfirms, LocalAdmin, true, false),
+            (SecondPersonInConsole, Shared, true, true),
+            (SecondPersonInConsole, LocalAdmin, false, false),
+            (PersonalKey, Shared, true, false),
+            (PersonalKey, LocalAdmin, true, false),
+        ] {
+            assert_eq!(
+                route.console_may_request(console),
+                request,
+                "{route:?} {console:?}"
+            );
+            assert_eq!(
+                route.console_may_approve(console),
+                approve,
+                "{route:?} {console:?}"
+            );
+            // The older predicate agrees with the table.
+            assert_eq!(
+                route.operator_mode().allowed_in_local_admin() || console == Shared,
+                request,
+                "{route:?} {console:?}"
+            );
+        }
+    }
+
+    /// **NO FABRICATED TIME** (the coordinator's addition 3). The approver
+    /// and the instant they approved are taken out of a document by ONE
+    /// function, which refuses by name when either is missing: an approval
+    /// time is never the request's time under another name.
+    ///
+    /// KILLS: `approved_at.unwrap_or(issued_at)` anywhere a reader fills
+    /// evidence from a console-approved document.
+    #[test]
+    fn a_console_approvals_time_comes_from_the_document_or_from_nowhere() {
+        let p = pair();
+        let a = approved(&p);
+        let facts = console_approval_of(&a, &p).expect("an approval");
+        assert_eq!(facts.requested_at, a.issued_at);
+        assert_eq!(facts.approved_at, at("2026-09-22T10:04:00Z"));
+        assert_ne!(facts.approved_at, facts.requested_at);
+        assert_eq!(facts.request_expires_at, a.expires_at);
+        assert_eq!(facts.approver.principal_id(), "https://idp.example#bob");
+        assert_eq!(facts.requester.principal_id(), "https://idp.example#alice");
+
+        let mut no_instant = a.clone();
+        no_instant.approved_at = None;
+        let refused = console_approval_of(&no_instant, &p).expect_err("no instant");
+        assert_eq!(refused.reason(), "AuthorizationDocumentInvalid");
+        assert!(
+            refused.to_string().contains("no `approvedAt`")
+                && refused
+                    .to_string()
+                    .contains("never taken from another field"),
+            "{refused}"
+        );
+        let mut no_approver = a.clone();
+        no_approver.approver = None;
+        assert_eq!(
+            console_approval_of(&no_approver, &p).map_err(|r| r.reason()),
+            Err("AuthorizationDocumentInvalid")
+        );
+        let pending = console_approval_of(&request(&p), &p).expect_err("the request");
+        assert_eq!(pending.reason(), "GovernedApprovalRequired");
+    }
+
+    /// **REFUSAL TEXT CARRIES NOTHING A REQUESTER CHOSE, UNBOUNDED OR AS IT
+    /// IS** (the coordinator's addition 5). An issuer and a subject are
+    /// attacker-chosen strings: in a sentence they are quoted, cut at
+    /// [`MAX_SHOWN_CHARS`] and written in visible ASCII, so they cannot start
+    /// a line, end a quotation, hide a character or grow a message.
+    #[test]
+    fn a_principal_in_a_refusal_is_bounded_and_cleaned() {
+        assert_eq!(shown("alice"), "\"alice\"");
+        assert_eq!(shown(""), "\"\"");
+        // A line break, a carriage return, a tab, a space: escapes.
+        assert_eq!(
+            shown("a\nfailure-reason=X\r\tb c"),
+            "\"a\\u{a}failure-reason=X\\u{d}\\u{9}b\\u{20}c\""
+        );
+        // The quotation and the escape character themselves.
+        assert_eq!(shown("a\"b\\c"), "\"a\\u{22}b\\u{5c}c\"");
+        // Nothing outside ASCII is copied: a line separator, a right-to-left
+        // override, a zero-width joiner, a look-alike.
+        assert_eq!(
+            shown("x\u{2028}\u{202e}\u{200d}\u{ff41}\u{e9}"),
+            "\"x\\u{2028}\\u{202e}\\u{200d}\\u{ff41}\\u{e9}\""
+        );
+        // Bounded: the rest is counted, never copied.
+        let long = "a".repeat(MAX_SHOWN_CHARS + 500);
+        let cut = shown(&long);
+        assert_eq!(
+            cut,
+            format!(
+                "\"{}\" (and 500 more characters)",
+                "a".repeat(MAX_SHOWN_CHARS)
+            )
+        );
+        assert!(shown(&"\u{e9}".repeat(10_000)).len() < 1_000);
+
+        // In the refusals themselves: a hostile subject on either side, in
+        // every message that names a principal.
+        let hostile = "bob\nfailure-reason=CreatedTopicsLeft\n\u{202e}<script>";
+        let idp = "https://idp.example";
+        let p = pair();
+        let mut messages = vec![
+            console_separation(&requester(idp, "alice"), &approver(idp, hostile))
+                .expect_err("not comparable")
+                .to_string(),
+            console_separation(&requester(idp, hostile), &approver(idp, "bob"))
+                .expect_err("not comparable")
+                .to_string(),
+            console_separation(
+                &requester(idp, "alice"),
+                &approver("https://other.example\n", "alice"),
+            )
+            .expect_err("not comparable")
+            .to_string(),
+            console_principal(Party::Requester, idp, hostile).expect_err("not comparable"),
+        ];
+        let mut pending = request(&p);
+        pending.requester = requester(idp, hostile);
+        messages.push(
+            console_approval_of(&pending, &p)
+                .expect_err("pending")
+                .to_string(),
+        );
+        // A subject the rule accepts as comparable, of the longest length it
+        // accepts, in the one message that names two comparable principals.
+        let long_subject = "b".repeat(MAX_COMPARABLE_SUBJECT_LEN);
+        let same = console_separation(
+            &requester(idp, &long_subject),
+            &approver(idp, &long_subject.to_uppercase()),
+        )
+        .expect_err("the same person")
+        .to_string();
+        assert!(same.len() < 1_100, "{}", same.len());
+        messages.push(same);
+        for message in messages {
+            assert!(
+                !message.contains('\n') && !message.contains('\r'),
+                "{message:?}"
+            );
+            assert!(
+                message.chars().all(|c| matches!(c, ' '..='~')),
+                "only printable ASCII reaches a sentence: {message:?}"
+            );
+            assert!(
+                !message.contains("<script>")
+                    || message.contains("\"<script>")
+                    || message.contains("<script>\""),
+                "{message}"
+            );
+            assert!(message.len() < 1_300, "{}: {message}", message.len());
+        }
+        // The fixed clauses carry no principal at all.
+        for fault in [
+            SeparationFault::NotComparable(Party::Requester),
+            SeparationFault::LocalAdmin(Party::Approver),
+            SeparationFault::SystemIdentity(Party::Requester),
+            SeparationFault::TwoIssuers,
+            SeparationFault::SamePerson,
+        ] {
+            assert!(fault.clause().chars().all(|c| matches!(c, ' '..='~')));
+        }
     }
 
     #[test]

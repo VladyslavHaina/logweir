@@ -88,10 +88,9 @@ use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
-    ApprovalMode, ApprovalPolicy, ApprovalPolicySet, Approver, AuthorizedSubject,
-    InstallationMarker, PolicyRef, Requester, RestoreAuthorization,
-    PAYLOAD_TYPE_RESTORE_AUTHORIZATION, RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION,
-    SUBJECT_KIND_RESTORE,
+    ApprovalPolicy, ApprovalPolicySet, Approver, AuthorizedSubject, InstallationMarker, PolicyRef,
+    Requester, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION, SUBJECT_KIND_RESTORE,
 };
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
@@ -609,10 +608,25 @@ pub fn merge_countersignature(
     Ok(merged)
 }
 
-/// Whether `mode` needs an approver after the console's confirmation.
-#[must_use]
-pub const fn awaits_approver(mode: ApprovalMode) -> bool {
-    matches!(mode, ApprovalMode::Governed)
+/// **The row of the approval table a bound policy is**
+/// (`logweir_core::approval_policy::ApprovalRoute`), as a problem when the
+/// pair is not a row. Every route of this service that acts on a policy
+/// decides from this, and from nothing else about the policy.
+///
+/// # Errors
+///
+/// `policy_mismatch` (409). A parsed installation document never carries
+/// such a pair (`ApprovalPolicySet::parse` refuses it at start); this is the
+/// console's own refusal all the same.
+pub fn route_of(
+    policy: &ApprovalPolicy,
+) -> Result<logweir_core::approval_policy::ApprovalRoute, crate::problem::ApiError> {
+    policy.route().map_err(|refusal| {
+        crate::problem::ApiError::new(
+            crate::problem::ProblemCode::PolicyMismatch,
+            format!("{refusal}. Nothing was created or approved."),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -680,7 +694,10 @@ mod tests {
             chrono::Duration::seconds(policy.max_age_seconds)
         );
         assert_eq!(doc.policy.digest, policy.digest());
-        assert_eq!(doc.authorization_mode, ApprovalMode::Ordinary);
+        assert_eq!(
+            doc.authorization_mode,
+            logweir_core::approval_policy::ApprovalMode::Ordinary
+        );
     }
 
     #[test]

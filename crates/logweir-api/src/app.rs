@@ -207,6 +207,18 @@ impl AppState {
         self.inner.settings.shared.as_ref()
     }
 
+    /// Which console this process is, in the words the approval table uses
+    /// (`logweir_core::approval_policy::ApprovalRoute`): the shared one, or
+    /// the in-cluster administrator one.
+    #[must_use]
+    pub fn console_kind(&self) -> logweir_core::approval_policy::ConsoleKind {
+        if self.shared().is_some() {
+            logweir_core::approval_policy::ConsoleKind::Shared
+        } else {
+            logweir_core::approval_policy::ConsoleKind::LocalAdmin
+        }
+    }
+
     /// The Kubernetes identity this process writes as.
     #[must_use]
     pub fn kubernetes_principal(&self) -> &str {

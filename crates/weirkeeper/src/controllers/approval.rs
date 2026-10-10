@@ -58,8 +58,8 @@ use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{reflector, watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
 use logweir_core::approval_policy::{
-    self as policy, ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizationRefusal,
-    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as policy, ApprovalPolicy, ApprovalPolicySet, AuthorizationRefusal, EffectivePolicy,
+    ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::trust::{KeyUsage, SigningRefusal};
@@ -1243,39 +1243,32 @@ pub fn evaluate_authorization_v2(
     let requester = doc.requester.principal_id();
 
     // ---- 5. the governed approver, and separation of duties ----------------
-    let (matched_key_id, usage, approver) = match bound.mode {
-        ApprovalMode::Ordinary => (
+    //
+    // BY THE TABLE (PROD-16.2). `ApprovalPolicy::route` reads the policy's
+    // `(mode, approverSignature)` pair once; each row says whose signature
+    // authorises and whose name the verdict records, and the pair that is not
+    // a row is refused here, by name, whatever step 4 already said of it.
+    let route = bound.route()?;
+    let (matched_key_id, usage, approver) = match route {
+        policy::ApprovalRoute::RequesterConfirms => (
             confirmation_key_id.clone(),
-            KeyUsage::ConsoleConfirmation,
+            route.authorising_usage(),
             requester.clone(),
         ),
-        // PROD-16.2: THE CONSOLE SIGNS THE APPROVAL. Step 4 required the
-        // approver and judged it; what is left is to say whose approval the
-        // verdict records. `ok_or_else` and not an unwrap: an admission path
-        // never aborts on an invariant it merely believes, and a document
-        // that somehow reached here without an approver is the pending
-        // request, which authorises nothing.
-        ApprovalMode::Governed
-            if bound.approver_signature == policy::ApproverSignature::Console =>
-        {
-            let approver = doc
+        // THE CONSOLE SIGNS THE APPROVAL. Step 4 required the approver and
+        // judged it; what is left is to say whose approval the verdict
+        // records, taken from the document by the one function that takes it
+        // (`console_approval_of`) — which refuses, by name, a document with no
+        // approver or no `approvedAt`, so nothing here is ever made up. An
+        // admission path never aborts on an invariant it merely believes.
+        policy::ApprovalRoute::SecondPersonInConsole => (
+            confirmation_key_id.clone(),
+            route.authorising_usage(),
+            policy::console_approval_of(&doc, bound)?
                 .approver
-                .as_ref()
-                .map(policy::Approver::principal_id)
-                .ok_or_else(|| ApprovalRefusal::GovernedApprovalRequired {
-                    detail: format!(
-                        "the console confirmed requester {requester} under policy {}, which takes \
-                         its approval from the console, and nobody has approved",
-                        bound.name
-                    ),
-                })?;
-            (
-                confirmation_key_id.clone(),
-                KeyUsage::ConsoleConfirmation,
-                approver,
-            )
-        }
-        ApprovalMode::Governed => {
+                .principal_id(),
+        ),
+        policy::ApprovalRoute::PersonalKey => {
             let countersigned = sidecar
                 .signatures
                 .iter()

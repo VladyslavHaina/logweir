@@ -38,11 +38,11 @@ fn justfile_schema_version(name: &str) -> String {
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
     );
     assert_eq!(
         justfile_schema_version("scorecard_format_1"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
     );
     assert_eq!(
         justfile_schema_version("receipt"),
@@ -57,7 +57,7 @@ fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL,
     );
     assert_eq!(
         generated.trim_end(),
@@ -65,7 +65,7 @@ fn checked_in_schema_matches_the_types() {
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
     );
 }
 
@@ -102,7 +102,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -367,7 +367,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -778,7 +778,7 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
     assert_eq!(
         current["$id"],
-        "https://logweir.dev/schemas/logweir-drill-scorecard-2.0.0.json"
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
     );
     assert_eq!(
         current["properties"]["format_version"]["pattern"],
@@ -863,44 +863,76 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name() {
 const FROZEN_1_7_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-1.7.0.json");
 
-/// What `just schema` writes as format 1's newest minor (the 1.8.0 file).
+/// The text of the frozen 1.8.0 scorecard schema (PROD-15.1's), format 1's
+/// last file before PROD-16.2's block.
+const FROZEN_1_8_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-1.8.0.json");
+
+/// The text of the frozen 2.0.0 scorecard schema (PROD-11.1b's), format 2's
+/// last file before PROD-16.2's block.
+const FROZEN_2_0_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-2.0.0.json");
+
+/// What `just schema` writes as format 1's newest minor (the 1.9.0 file).
 fn format_1_scorecard_schema() -> String {
-    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_7_0_SCORECARD_SCHEMA)
+    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_8_0_SCORECARD_SCHEMA)
 }
 
-/// **PROD-15.1 after PROD-11.1b: the scorecard has two generated files, and
-/// the 1.8.0 one is checked in as the generator writes it.** The type reads
-/// both majors, so the 1.8.0 file is built from the frozen 1.7.0 file plus
-/// the block the type derives. KILLS: a change to `OriginalNameInfo` without
-/// `just schema`; a hand edit of the 1.8.0 file.
+/// The two definitions PROD-16.2's `approval.console` brings with it.
+const CONSOLE_APPROVAL_DEFINITIONS: [&str; 2] = ["ConsoleApprovalInfo", "ConsolePrincipal"];
+
+/// `schema` with PROD-16.2's block set aside and its `$id` replaced: what is
+/// left must be the file the block was added to.
+fn without_the_console_approval(
+    mut schema: serde_json::Value,
+    id: &serde_json::Value,
+) -> serde_json::Value {
+    schema["$id"] = id.clone();
+    let definitions = schema["definitions"].as_object_mut().unwrap();
+    for name in CONSOLE_APPROVAL_DEFINITIONS {
+        assert!(definitions.remove(name).is_some(), "it defines {name}");
+    }
+    assert!(schema["definitions"]["ApprovalInfo"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("console")
+        .is_some());
+    schema
+}
+
+/// **The scorecard has two generated files, and format 1's is checked in as
+/// the generator writes it.** The type reads both majors, so the 1.9.0 file is
+/// built from the frozen 1.8.0 file plus the block the type derives. KILLS: a
+/// change to `ConsoleApprovalInfo` without `just schema`; a hand edit of the
+/// 1.9.0 file.
 #[test]
 fn checked_in_format_1_scorecard_schema_matches_the_types() {
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL,
     );
     assert_eq!(
         format_1_scorecard_schema().trim_end(),
         checked_in.trim_end(),
         "schemas/logweir-drill-scorecard-{}.json is stale. Run `just schema` and review the \
-         diff: only `target.original_name` and its two definitions may move.",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+         diff: only `approval.console` and its two definitions may move.",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
     );
 }
 
-/// **A MINOR adds optional fields only, and this one adds exactly one
-/// block.** The 1.8.0 file is the frozen 1.7.0 file, value for value, once
-/// its `$id`, `target.original_name` and the block's two definitions are set
-/// aside; it still pins major 1 and its selection block is still a start and
-/// an end. KILLS: a generator that derives format 1's file from the type
-/// (which would describe 2.0.0's partition subsets in a 1.x file), or that
-/// moves anything else of format 1.
+/// **PROD-15.1's 1.8.0 file is FROZEN, and it is still what that row
+/// published**: the frozen 1.7.0 file, value for value, once its `$id`,
+/// `target.original_name` and the block's two definitions are set aside; it
+/// pins major 1, its selection block is a start and an end, and it does not
+/// describe PROD-16.2's `approval.console`. `just schema` no longer
+/// regenerates it, so this is the gate that it stays that file. KILLS: a hand
+/// edit of the 1.8.0 file; a generator that writes the console block into it.
 #[test]
-fn the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block() {
+fn the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block() {
     let frozen: serde_json::Value =
         serde_json::from_str(FROZEN_1_7_0_SCORECARD_SCHEMA).expect("the frozen 1.7.0 parses");
     let mut format_1: serde_json::Value =
-        serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+        serde_json::from_str(FROZEN_1_8_0_SCORECARD_SCHEMA).expect("the frozen 1.8.0 parses");
     assert_eq!(
         format_1["$id"],
         "https://logweir.dev/schemas/logweir-drill-scorecard-1.8.0.json"
@@ -916,6 +948,15 @@ fn the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_bloc
     );
     assert!(label["properties"].get("partitions").is_none());
     assert!(format_1["definitions"].get("TopicPartitions").is_none());
+    assert!(
+        format_1["definitions"]["ApprovalInfo"]["properties"]
+            .get("console")
+            .is_none(),
+        "the frozen 1.8.0 schema must not describe the 1.9.0 block"
+    );
+    for name in CONSOLE_APPROVAL_DEFINITIONS {
+        assert!(format_1["definitions"].get(name).is_none(), "{name}");
+    }
 
     // Set the block aside; what is left is the frozen file.
     format_1["$id"] = frozen["$id"].clone();
@@ -931,18 +972,148 @@ fn the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_bloc
     assert_eq!(format_1, frozen);
 }
 
-/// **The block never appears in a 2.x document, so the 2.0.0 file does not
-/// describe it** (an original-name restore restores whole topics:
-/// `OriginalNameNeedsWholeTopics`, arm ON-14). The 2.0.0 file therefore stays
-/// the one PROD-11.1b published. KILLS: a 2.0.0 generator that lets the block
-/// through.
+/// **PROD-16.2: a MINOR adds optional fields only, and this one adds exactly
+/// one block.** The 1.9.0 file is the frozen 1.8.0 file, value for value,
+/// once its `$id`, `approval.console` and the block's two definitions are set
+/// aside; it still pins major 1, its selection block is still a start and an
+/// end, and the block is OPTIONAL. KILLS: a generator that derives format 1's
+/// file from the type (which would describe format 2's partition subsets in
+/// a 1.x file), or that moves anything else of format 1; a block made
+/// required, which every document before 1.9.0 would fail.
 #[test]
-fn the_2_0_0_scorecard_schema_does_not_describe_the_original_name() {
+fn the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block() {
+    let frozen: serde_json::Value =
+        serde_json::from_str(FROZEN_1_8_0_SCORECARD_SCHEMA).expect("the frozen 1.8.0 parses");
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_eq!(
+        format_1["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.9.0.json"
+    );
+    assert_eq!(
+        format_1["properties"]["format_version"]["pattern"],
+        r"^1\.[0-9]+\.[0-9]+$"
+    );
+    let label = &format_1["definitions"]["SelectionLabel"];
+    assert_eq!(
+        label["required"],
+        serde_json::json!(["window_end_ms", "window_start_ms"])
+    );
+    assert!(label["properties"].get("partitions").is_none());
+    assert!(format_1["definitions"].get("TopicPartitions").is_none());
+    assert!(format_1["definitions"]["ApprovalInfo"]["properties"]["console"].is_object());
+    assert!(
+        !format_1["definitions"]["ApprovalInfo"]["required"]
+            .as_array()
+            .expect("ApprovalInfo has required fields")
+            .iter()
+            .any(|r| r == "console"),
+        "approval.console is OPTIONAL: absent on every document a second person did not \
+         approve in the console"
+    );
+    assert_eq!(
+        format_1["definitions"]["ConsoleApprovalInfo"]["required"],
+        serde_json::json!([
+            "approved_at",
+            "approver",
+            "confirmation_key_id",
+            "mode",
+            "request_expires_at",
+            "requested_at",
+            "requester"
+        ]),
+        "a console approval that leaves out who or when is not one"
+    );
+    assert_eq!(
+        format_1["definitions"]["ConsolePrincipal"]["required"],
+        serde_json::json!(["issuer", "subject"])
+    );
+    assert_eq!(
+        without_the_console_approval(format_1, &frozen["$id"]),
+        frozen
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL,
+        "1.9.0"
+    );
+    assert_eq!(logweir_core::scorecard::CONSOLE_APPROVAL_SINCE_MINOR, 9);
+}
+
+/// **PROD-16.2: PROD-11.1b's 2.0.0 file is FROZEN beside 2.1.0, and 2.1.0 is
+/// that file plus the one block.** A partition-subset restore may be approved
+/// in the console like any other, so format 2 gains the same optional block
+/// in its first MINOR. The generated 2.1.0 file, once its `$id`,
+/// `approval.console` and the block's two definitions are set aside, is the
+/// frozen 2.0.0 file value for value; the 2.0.0 file does not describe the
+/// block. KILLS: a hand edit of the 2.0.0 file; a 2.1.0 generator that moves
+/// anything else of format 2 (a description included); a block made required.
+#[test]
+fn the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval() {
+    let frozen: serde_json::Value =
+        serde_json::from_str(FROZEN_2_0_0_SCORECARD_SCHEMA).expect("the frozen 2.0.0 parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.0.0.json"
+    );
+    assert!(
+        frozen["definitions"]["ApprovalInfo"]["properties"]
+            .get("console")
+            .is_none(),
+        "the frozen 2.0.0 schema must not describe the 2.1.0 block"
+    );
+    for name in CONSOLE_APPROVAL_DEFINITIONS {
+        assert!(frozen["definitions"].get(name).is_none(), "{name}");
+    }
     let current: serde_json::Value =
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
     assert_eq!(
         current["$id"],
-        "https://logweir.dev/schemas/logweir-drill-scorecard-2.0.0.json"
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
+    );
+    assert!(
+        !current["definitions"]["ApprovalInfo"]["required"]
+            .as_array()
+            .expect("ApprovalInfo has required fields")
+            .iter()
+            .any(|r| r == "console"),
+        "approval.console is OPTIONAL in format 2 as well"
+    );
+    // The block is the SAME in both lines: one type derives both.
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_eq!(
+        current["definitions"]["ApprovalInfo"]["properties"]["console"],
+        format_1["definitions"]["ApprovalInfo"]["properties"]["console"]
+    );
+    for name in CONSOLE_APPROVAL_DEFINITIONS {
+        assert_eq!(
+            current["definitions"][name], format_1["definitions"][name],
+            "{name}"
+        );
+    }
+    assert_eq!(
+        without_the_console_approval(current, &frozen["$id"]),
+        frozen
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL,
+        "2.1.0"
+    );
+    assert_eq!(
+        logweir_core::scorecard::CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2,
+        1
+    );
+}
+
+/// **PROD-15.1's block never appears in a 2.x document, so format 2's file
+/// does not describe it** (an original-name restore restores whole topics:
+/// `OriginalNameNeedsWholeTopics`, arm ON-14). KILLS: a format 2 generator
+/// that lets the block through.
+#[test]
+fn the_format_2_scorecard_schema_does_not_describe_the_original_name() {
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        current["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
     );
     assert!(current["definitions"]["TargetInfo"]["properties"]
         .get("original_name")
@@ -950,8 +1121,8 @@ fn the_2_0_0_scorecard_schema_does_not_describe_the_original_name() {
     for name in ["OriginalNameInfo", "OriginalNameOwner"] {
         assert!(current["definitions"].get(name).is_none(), "{name}");
     }
-    // The type itself still derives the block: the 2.0.0 file leaves it out,
-    // the 1.8.0 file carries it.
+    // The type itself still derives the block: format 2's file leaves it out,
+    // format 1's carries it.
     let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
     assert!(format_1["definitions"]["OriginalNameInfo"].is_object());
 }

@@ -6901,7 +6901,10 @@ fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared
     let document = map.value["data"]["approval-policy.yaml"]
         .as_str()
         .expect("the document");
-    assert!(document.contains("approverSignature: Console"), "{document}");
+    assert!(
+        document.contains("approverSignature: Console"),
+        "{document}"
+    );
     assert!(
         !document.contains("mode: two-person") && document.contains("mode: Governed"),
         "the internal words: {document}"
@@ -6926,9 +6929,10 @@ fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared
         Some(ApproverSignature::PersonalKey)
     );
     // The operator's words are the same set.
-    let example: Value =
-        serde_yaml::from_str(&read("charts/logweir/examples/console-two-person.values.yaml"))
-            .expect("the example");
+    let example: Value = serde_yaml::from_str(&read(
+        "charts/logweir/examples/console-two-person.values.yaml",
+    ))
+    .expect("the example");
     assert_eq!(
         ApprovalPolicySet::parse(&approval_policy_document(&example))
             .expect("the example's own document"),

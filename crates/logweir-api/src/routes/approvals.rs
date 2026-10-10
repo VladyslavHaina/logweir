@@ -21,7 +21,7 @@ use crate::contract::{
 use crate::http::RequestId;
 use crate::problem::ApiError;
 use crate::projection;
-use logweir_core::approval_policy::{ApprovalMode, OperatorMode};
+use logweir_core::approval_policy::{ApprovalMode, ApprovalRoute, OperatorMode};
 
 /// The list route identifier.
 pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/approvals";
@@ -118,7 +118,9 @@ pub async fn policy(
     let key = settings
         .confirmation_key()
         .map_err(|reason| ApiError::new(crate::problem::ProblemCode::InternalError, reason))?;
-    let ordinary = bound.is_some_and(|p| p.mode == ApprovalMode::Ordinary);
+    // PROD-16.2: by the table. A bound policy is one of its rows.
+    let route = bound.map(crate::approval::route_of).transpose()?;
+    let ordinary = route == Some(ApprovalRoute::RequesterConfirms);
     let operator_mode = OperatorMode::of(&effective);
     Ok(json(
         StatusCode::OK,
@@ -138,13 +140,12 @@ pub async fn policy(
                 confirmation_key_id: key.map(|k| k.key_id().to_string()),
                 ordinary_confirmation_available: ordinary
                     && key.is_some()
-                    && (state.shared().is_some() || operator_mode.allowed_in_local_admin()),
+                    && route.is_some_and(|r| r.console_may_request(state.console_kind())),
                 ticket_required: bound.is_some_and(|p| p.mode == ApprovalMode::Governed),
                 // PROD-16.2: a second person approves here only through the
                 // shared console, and only once the console holds its key.
-                console_approval_available: operator_mode == OperatorMode::TwoPerson
-                    && key.is_some()
-                    && state.shared().is_some(),
+                console_approval_available: key.is_some()
+                    && route.is_some_and(|r| r.console_may_approve(state.console_kind())),
             },
         },
     ))
