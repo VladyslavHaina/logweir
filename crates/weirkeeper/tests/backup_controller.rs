@@ -13352,6 +13352,11 @@ mod evidence_fetch_job {
             "the sentence names the receipt and the receipt cap: {detail}"
         );
         assert!(
+            !detail.contains("bytes relayed"),
+            "it was refused as the frames ARRIVED, before the stream was held or decoded — \
+             the decoder's cap, not only the reader's measurement afterwards: {detail}"
+        );
+        assert!(
             last["evidence"]["observation"]["retryAfter"].is_null(),
             "the object will not shrink: no retry is scheduled: {last}"
         );

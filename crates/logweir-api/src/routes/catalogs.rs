@@ -723,7 +723,11 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
         verification: entry.verification.as_str().to_string(),
         selectable: evidence && entry.selectable && backup_verdict.is_none(),
         backup_verdict,
-        signer_key_id: entry.signer_key_id.as_deref().map(|k| bounded(k, 64)),
+        signer_key_id: entry
+            .signer_key_id
+            .as_deref()
+            .filter(|_| evidence)
+            .map(|k| bounded(k, 64)),
         // NOTHING A PLAN COULD BE BOUND TO leaves here for such an entry,
         // whatever it carries.
         receipt_key: if evidence {
@@ -756,7 +760,7 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
         locations: entry
             .locations
             .iter()
-            .take(16)
+            .take(if evidence { 16 } else { 0 })
             .map(|l| PointLocationView {
                 location_id: bounded(&l.location_id, 512),
                 availability: l.availability.as_str().to_string(),
@@ -767,7 +771,7 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
         topics: entry
             .topics
             .iter()
-            .take(64)
+            .take(if evidence { 64 } else { 0 })
             .map(|t| PointTopicView {
                 name: bounded(&t.name, MAX_TOPIC_NAME),
                 partitions: t.partitions,
@@ -801,14 +805,16 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
                 }),
             })
             .collect(),
-        topics_omitted: entry.topics_omitted,
+        topics_omitted: entry.topics_omitted.filter(|_| evidence),
         owner_detection: entry
             .owner_detection
             .as_ref()
+            .filter(|_| evidence)
             .map(|d| d.iter().take(2).map(|w| bounded(w, 32)).collect()),
         consumer_positions: entry
             .consumer_positions
             .as_ref()
+            .filter(|_| evidence)
             .map(|c| PointConsumerPositionsView {
                 observed_from: instant(c.observed_from_ms),
                 observed_to: instant(c.observed_to_ms),
@@ -1547,4 +1553,86 @@ fn verify_page(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use weirkeeper::catalog_view::{Availability, FactsFrom, ResolvedLocation, Verification};
+
+    /// A view entry carrying everything a selectable point carries.
+    fn whole() -> ViewEntry {
+        ViewEntry {
+            point_id: "lwp1-0123456789abcdef0123456789abcdef".to_string(),
+            backup_id: "set-a".to_string(),
+            run_id: "run-a".to_string(),
+            recovery_point_at_ms: 1_790_000_000_000,
+            covered_from_ms: 1_789_996_400_000,
+            covered_to_ms: 1_790_000_000_000,
+            locations: vec![ResolvedLocation {
+                location_id: "s3://lw-archive/team-a".to_string(),
+                availability: Availability::Available,
+            }],
+            receipt_key: "logweir/backups/set-a/run-a.receipt.json".to_string(),
+            receipt_sha256: format!("sha256:{}", "a".repeat(64)),
+            manifest_key: Some("team-a/set-a/manifest.json".to_string()),
+            manifest_sha256: Some(format!("sha256:{}", "b".repeat(64))),
+            format_version: Some("1.7.0".to_string()),
+            availability: Availability::Available,
+            verification: Verification::Verified,
+            signer_key_id: Some("c".repeat(64)),
+            selectable: true,
+            remedy: None,
+            topics: Vec::new(),
+            topics_omitted: Some(70),
+            owner_detection: Some(vec!["declared".to_string()]),
+            consumer_positions: None,
+            cause: None,
+            facts_from: None,
+        }
+    }
+
+    /// **FX-33 — the point route publishes nothing a restore could be bound
+    /// to for an entry with no record behind it, WHATEVER the entry carries.**
+    /// A page line can never be both a claim and a binding (`ViewEntry`
+    /// refuses to parse one), so this row hands `point_view` an entry no
+    /// parser would: every field of a selectable point, and `facts_from`. The
+    /// projection decides from `facts_from` itself.
+    ///
+    /// KILLS: a consumer that takes the receipt key from a `factsFrom` entry;
+    /// `selectable` published from the entry's own flag for one.
+    #[test]
+    fn fx33_a_claim_is_published_with_no_binding_whatever_it_carries() {
+        let refusals = ControllerRefusals::default();
+        let real = point_view(&whole(), &refusals);
+        assert!(
+            real.selectable,
+            "CONTROL: with a record behind it, it is offered"
+        );
+        assert!(!real.receipt_key.is_empty() && real.manifest_sha256.is_some());
+        assert!(real.covered_to.is_some() && real.facts_from.is_none());
+
+        for from in [FactsFrom::IndexRow, FactsFrom::Key] {
+            let mut claim = whole();
+            claim.facts_from = Some(from);
+            let view = point_view(&claim, &refusals);
+            assert!(!view.selectable, "{from:?}");
+            assert_eq!(view.facts_from.as_deref(), Some(from.as_str()));
+            assert_eq!(
+                (view.receipt_key.as_str(), view.receipt_sha256.as_str()),
+                ("", "")
+            );
+            assert!(view.manifest_key.is_none() && view.manifest_sha256.is_none());
+            assert!(view.covered_from.is_none() && view.covered_to.is_none());
+            assert!(view.backup_verdict.is_none());
+            assert!(view.locations.is_empty() && view.signer_key_id.is_none());
+            assert!(view.topics.is_empty() && view.topics_omitted.is_none());
+            assert!(view.owner_detection.is_none() && view.consumer_positions.is_none());
+        }
+        // An instant of 0 is "the key carried none", never 1970.
+        let mut undated = whole();
+        undated.facts_from = Some(FactsFrom::Key);
+        undated.recovery_point_at_ms = 0;
+        assert!(point_view(&undated, &refusals).recovery_point_at.is_none());
+    }
 }

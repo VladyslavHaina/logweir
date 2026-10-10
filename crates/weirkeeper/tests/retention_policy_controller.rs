@@ -7768,6 +7768,15 @@ fn fx33_a_point_that_is_only_a_claim_keeps_more_and_never_less() {
     assert_eq!(with.points_evaluated, 3);
     assert_eq!(with.kept[0], "p1");
     assert_eq!(candidate_ids(&with), vec!["p2", "p3"]);
+    // …and it still KEEPS the set it names: a claim that carries a location
+    // is retained exactly as one that carries none.
+    let mut naming_p2 = forged.clone();
+    naming_p2.backup_id = "set-p2".to_string();
+    let mut points = real();
+    points.push(naming_p2);
+    let with = evaluate(&points, rules(Some(1), None, 1));
+    assert_eq!(protected_reason(&with, "p2"), Some("SharedSegment"));
+    assert_eq!(candidate_ids(&with), vec!["p3"]);
     // An old forged claim is never planned either, whatever the rules want.
     let mut old = forged.clone();
     old.recovery_point_at_ms = now_ms() - 400 * DAY_MS;
