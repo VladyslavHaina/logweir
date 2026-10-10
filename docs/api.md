@@ -1492,18 +1492,27 @@ accept to its close.**
   keep-alive connection; past that the server closes it, whether it sent part
   of a head or nothing at all (R4; FX-24 extended it to a connection that
   sends no byte). A head larger than 32 KiB is refused.
-- **A stall, after the head (FX-24b).** A connection may wait on its client
-  for thirty seconds with no progress at all: an answer the client has stopped
-  reading, or a request body it has stopped sending. Past that the write or
-  the read fails and the connection ends. The clock runs only while the
-  server is waiting on the client and restarts on every byte, so a slow but
-  steady reader keeps its connection for as long as its answer takes, and an
-  operation event stream that is being read is never cut by it: between
-  heartbeats it has nothing to write. A body that stops is answered `400 malformed_request`
-  ("stopped arriving") before the connection closes.
+- **A stall, on the answer (FX-24b).** A connection may wait on its client
+  for thirty seconds with no progress at all on an answer the client has
+  stopped reading. Past that the write fails and the connection ends. The
+  clock runs only while the server is waiting on the client and restarts on
+  every byte the kernel takes, so a slow but steady reader keeps its
+  connection for as long as its answer takes, and an operation event stream
+  that is being read is never cut by it: between heartbeats it has nothing to
+  write. It also ends a client that reads a byte at a time: the kernel stops
+  taking bytes for a client that takes almost none, so one that reads a byte,
+  or 16 KiB, every twenty seconds is ended at 35.1 s on macOS, the same as one
+  that reads nothing (measured on the built binary, FX-24c).
+- **A window, on a request body (FX-24b; its floor, FX-24c).** A body the
+  server is reading must bring at least 32 KiB in every thirty-second window
+  while it is still arriving: one that stops, or trickles below that (a byte
+  every twenty seconds, say), is answered `400 malformed_request` ("stopped
+  arriving, or arrived too slowly") at the end of the window and the
+  connection closes after the answer. A body that ends inside its window is
+  never cut, however small.
 - **A JSON body's total (FX-24b).** A mutation body must also arrive whole
-  within sixty seconds of the server starting to read it, so one that trickles
-  a byte at a time cannot hold a connection either: it is answered
+  within sixty seconds of the server starting to read it, so one that keeps
+  just above the floor cannot hold a connection either: it is answered
   `400 malformed_request` ("not received within 60 seconds") and the
   connection is closed after the answer.
 - **The ceiling.** At most 256 connections are served at once, and further
@@ -1513,22 +1522,64 @@ accept to its close.**
   thirty-second stall: the kernel still accepts a stopped reader's bytes for a
   few seconds, so a connection is held until the stall clock, which starts at
   the last byte the kernel took, runs out (about 35 s measured on macOS).
+- **One peer's share (FX-24c).** In shared mode with a trusted proxy
+  configured (`trustedProxyService` or `trustedProxyCidrs`), a peer outside it
+  — a pod dialling the pod IP, a kubelet probe, a `kubectl port-forward` — may
+  hold at most 32 connections at once. Its next one is closed as soon as it is
+  accepted, before anything is read, and the console logs `closed a
+  connection at once` (at most once every ten seconds). The trusted proxy is
+  never capped, because every browser behind the ingress arrives from its
+  address; and **with no trusted proxy configured nobody is capped**, because
+  the console cannot then tell its ingress from any other peer. Trust is
+  decided when a connection is accepted: while a `trustedProxyService` set is
+  stale (*The ingress controller by its Service*, below) it trusts nobody, so
+  the ingress is capped like any peer — and `/readyz` is false then, which
+  takes the pod out of its Service. localAdmin mode has no cap: every peer it
+  serves is the administrator's own machine. The start line `logweir-api
+  started` carries `per_peer_cap` (32, or 0 when off), and a shared console
+  with no trusted proxy also warns at start that the cap is off. The chart
+  refuses to publish a shared console through its Ingress without
+  `trustedProxyService` or `trustedProxyCidrs`, unless `api.console.trustedProxy:
+  none` opts out by name ([chart README](../charts/logweir/README.md)).
+  Who shares one share, or escapes it:
+  - **A service-mesh sidecar** that re-originates inbound connections (Istio's
+    from `127.0.0.6`, Linkerd's from `127.0.0.1`) makes every client, the
+    ingress included, one peer at that address, and the console is then capped
+    at 32 connections in all — the refusal warning names that address. Either
+    name it in `trustedProxyCidrs` (a `/32`), which turns the cap off for every
+    client behind the sidecar and leaves the mesh's own policy as the bound, or
+    opt out with `trustedProxy: none`.
+  - **A wide `trustedProxyCidrs` range** trusts, and so never caps, every
+    address in it. Without `requireTrustedProxy` the ranges have no width floor,
+    so a pod range turns the cap off for every pod in it: keep the range to the
+    ingress controller's own pods, or name its Service instead.
+  - **Kubelet probes** come from the node's address, which hostNetwork pods
+    and node processes on that node share: one of them holding 32 connections
+    would fail the console's probes on that node. That needs node-level access
+    already.
 - **An event stream whose client stops reading** is the exception. Its
   heartbeats are too small to fill the kernel's buffers, so no write is ever
   pending and the stall clock never starts: the stream is held to its own
   300-second ceiling, then the ten-second idle deadline, up to 310 s. An actor
   may hold at most four streams per namespace.
 
-**What these bounds do not stop (open: FX-24c).** They end abandoned and
-stalled clients, not slow ones. The stall clock restarts on every byte, so a
-client that reads, or sends, as little as one byte every thirty seconds keeps
-its connection for as long as it keeps that up, and 256 such clients hold every
-connection the console has. In shared mode only an enforcing NetworkPolicy
-keeps such peers away from the API pod, and `api.console.networkPolicy.enabled`
-is off by default (Docker Desktop accepts a NetworkPolicy without enforcing it).
-A client that comes through the ingress can do far less, because the ingress
-does not relay pipelined requests to the pod. FX-24c is the open row for a
-per-peer cap or a minimum rate.
+**What these bounds do not stop.** A client that reads fast enough to keep
+the kernel taking its answer keeps each connection for as long as its
+pipelined requests last: on macOS one reading a steady 16 KiB/s kept its
+connection for the whole 82 s of its answers, while one reading 16 KiB every
+twenty seconds was ended at 35.1 s. No window on the answer can tell such a
+client from an honest slow reader: the server sees a reader's progress only
+when the kernel lets it write again, in bursts the size of a send buffer, and
+a 32 KiB window on the answer cut that steady 16 KiB/s reader at 32.5 s
+(FX-24c measured both). What bounds it is the per-peer share above: one
+address outside the trusted proxy holds 32 connections at most, so holding all
+256 takes eight addresses. With no trusted proxy configured, or in localAdmin
+mode (where every peer is the local machine), one client can still hold every
+connection that way. In shared mode only an enforcing NetworkPolicy keeps such
+peers away from the API pod, and `api.console.networkPolicy.enabled` is off by
+default (Docker Desktop accepts a NetworkPolicy without enforcing it). A
+client that comes through the ingress can do far less, because the ingress
+does not relay pipelined requests to the pod (the FX-24b review).
 HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
 knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
 connections ten seconds to finish, then drops them and exits 0.
