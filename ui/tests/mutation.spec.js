@@ -21,6 +21,7 @@ import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { decoded } from "./console-fixture.js";
 
 import { apiError } from "../api.js";
 import { createRouteLifecycle } from "../app.js";
@@ -894,7 +895,7 @@ test("a_saved_destination_recreated_after_review_is_refused_before_create", asyn
   const ns = "wizard-destination-race-ns";
   const k8s = wizardKubernetes(ns);
   const point = k8s.objects.get(k8s.key(ns, "backups", k8s.point.backup));
-  const exact = fixture("console/destination.json").item;
+  const exact = decoded("destination.json").item;
   point.spec.destinationRef = { name: exact.name, uid: exact.uid };
   point.spec.archive = { url: "logweir-destination://" + exact.name };
   point.status.locationDigest = exact.locationDigest;
@@ -1792,7 +1793,7 @@ function savedWizardApi(ns, destinations, preflightAnswers) {
 }
 
 function destinationItem(name, uid, over) {
-  const base = clone(fixture("console/destination.json").item);
+  const base = clone(decoded("destination.json").item);
   base.name = name;
   base.uid = uid;
   base.default = false;

@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   ARCHIVED_SCHEDULE_SENTENCE,
@@ -628,7 +629,7 @@ test("the_catalog_fixture_the_console_ships_renders_through_these_columns", () =
   // point documents `ui/tests/fixtures/console/catalog-points-states.json`
   // carries for the catalog page, so the two surfaces cannot disagree about
   // what `Missing` or `NotAttempted` looks like.
-  const points = fixture("console/catalog-points-states.json").items;
+  const points = decoded("catalog-points-states.json").items;
   assert.ok(points.length > 0);
   const runs = points.map((point, i) =>
     run("fixture-" + String(i), "Succeeded", { backupId: point.backupId }));

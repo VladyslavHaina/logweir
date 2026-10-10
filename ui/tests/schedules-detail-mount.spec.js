@@ -14,6 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   CATALOG_VIEW_EXPIRED,
@@ -84,7 +85,7 @@ function detailPage(ns, state, overrides, catalog) {
     // box, as it always did beside a non-empty list without it.
     destinations() {
       return Promise.resolve({
-        items: [Object.assign(fixture("console/destination.json").item, { name: "dest" })],
+        items: [Object.assign(decoded("destination.json").item, { name: "dest" })],
       });
     },
     detailReaders: {

@@ -197,7 +197,8 @@ test("r2_14_the_route_gate_asks_the_chosen_namespace_and_not_the_union", async (
   // wizard in team-a, because the gate asked "in any namespace".
   const session = con("session-viewer.json");
   const viewer = session.namespaces[0];
-  const operator = JSON.parse(JSON.stringify(con("session.json").namespaces[0]));
+  const full = con("session.json");
+  const operator = full.namespaces[0];
   operator.name = "team-b";
   operator.roles = ["operator"];
   session.namespaces = [viewer, operator];

@@ -20,6 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import { renderIdentity } from "../app.js";
 import { resetMode, selectMode, sessionIdentity } from "../client.js";
@@ -52,7 +53,7 @@ function savedState() {
   const backups = fixture("wizard-backups.json");
   const newest = recoveryPoints(backups)[0];
   const point = backups.items.find((item) => item.metadata.uid === newest.metadata.uid);
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   point.spec.destinationRef = { name: "primary", uid: destination.uid };
   point.spec.archive = { url: "logweir-destination://primary" };
   point.status.locationDigest = destination.locationDigest;

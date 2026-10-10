@@ -36,12 +36,9 @@ import {
   isContractFailure,
 } from "../contract.js";
 import { TARGET_MODES } from "../plan.js";
+import { CONSOLE_FIXTURES, DEFINITIONS, schemaFindings } from "./console-fixture.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
-const SCHEMA = JSON.parse(
-  readFileSync(fileURLToPath(new URL("../../schemas/logweir-api-v1.openapi.json", import.meta.url)), "utf8"),
-);
-const DEFINITIONS = SCHEMA.components.schemas;
 
 function fixture(name) {
   return JSON.parse(readFileSync(FIXTURES + name, "utf8"));
@@ -51,200 +48,26 @@ function console_(name) {
   return fixture("console/" + name);
 }
 
-// A `$ref` NODE MAY CARRY ITS OWN `nullable`, AND IT DOES ALL OVER THIS
-// DOCUMENT: `{"$ref": "#/…/VisibilityView", "nullable": true}` is how the
-// generator spells an optional nested object. Resolving the reference and
-// throwing the referencing node away lost that flag, so every fixture with an
-// explicit `null` in such a field read as a schema violation -- which is a
-// validator that refuses documents the server is allowed to send.
-function resolve(node) {
-  if (node.$ref === undefined) {
-    return node;
-  }
-  const target = DEFINITIONS[node.$ref.split("/").pop()];
-  return node.nullable === true && target !== undefined && target.nullable !== true
-    ? Object.assign({}, target, { nullable: true })
-    : target;
-}
-
-/** A small validator over the published document: required fields present,
- *  declared types, closed enumerations, and NO PROPERTY THE SCHEMA DOES NOT
- *  NAME. The last one is stricter than OpenAPI requires and is what makes a
- *  fixture that invented a field fail here rather than teach a decoder a
- *  field the server never sends. */
-function validate(node, value, path, findings) {
-  const schema = resolve(node);
-  if (schema.oneOf !== undefined) {
-    const members = [];
-    for (const option of schema.oneOf) {
-      if (Array.isArray(option.enum)) {
-        members.push(...option.enum);
-      }
-    }
-    if (members.length > 0) {
-      if (members.indexOf(value) === -1) {
-        findings.push(path + ": " + JSON.stringify(value) + " is not one of " + members.join(", "));
-      }
-      return;
-    }
-  }
-  if (value === null) {
-    if (schema.nullable !== true) {
-      findings.push(path + ": null, and the schema does not allow it");
-    }
-    return;
-  }
-  if (schema.type === "object") {
-    if (typeof value !== "object" || Array.isArray(value)) {
-      findings.push(path + ": expected an object");
-      return;
-    }
-    for (const key of schema.required || []) {
-      if (!Object.prototype.hasOwnProperty.call(value, key)) {
-        findings.push((path === "" ? key : path + "." + key) + ": required and absent");
-      }
-    }
-    const properties = schema.properties || {};
-    for (const key of Object.keys(value)) {
-      const child = path === "" ? key : path + "." + key;
-      if (properties[key] === undefined) {
-        findings.push(child + ": the schema names no such field");
-        continue;
-      }
-      validate(properties[key], value[key], child, findings);
-    }
-    return;
-  }
-  if (schema.type === "array") {
-    if (!Array.isArray(value)) {
-      findings.push(path + ": expected an array");
-      return;
-    }
-    value.forEach((item, i) => validate(schema.items, item, path + "[" + String(i) + "]", findings));
-    return;
-  }
-  if (schema.type === "string" && typeof value !== "string") {
-    findings.push(path + ": expected a string, got " + typeof value);
-  }
-  if (schema.type === "boolean" && typeof value !== "boolean") {
-    findings.push(path + ": expected a boolean, got " + typeof value);
-  }
-  if ((schema.type === "integer" || schema.type === "number") && typeof value !== "number") {
-    findings.push(path + ": expected a number, got " + typeof value);
-  }
-}
-
-/** Every console fixture, with the schema it claims to be an instance of. */
-const CONSOLE_FIXTURES = [
-  ["session.json", "SessionResponse"],
-  ["connection.json", "ConnectionResponse"],
-  ["connections-list.json", "ConnectionList"],
-  ["schedule.json", "ScheduleResponse"],
-  ["schedules-list.json", "ScheduleList"],
-  ["backup.json", "BackupResponse"],
-  ["backups-list.json", "BackupList"],
-  ["restore.json", "RestoreResponse"],
-  ["restores-list.json", "RestoreList"],
-  ["approval.json", "ApprovalResponse"],
-  ["approvals-list.json", "ApprovalList"],
-  ["approval-packet.json", "ApprovalPacketResponse"],
-  ["operation-backup.json", "OperationResponse"],
-  ["problem-validation.json", "Problem"],
-  ["problem-conflict.json", "Problem"],
-
-  // D2 W13: destinations, topic discoveries and operation readiness. Every
-  // state the pages render has a fixture here, and every fixture is held to
-  // the published schema by the arm below -- so a page cannot be written
-  // against a shape the server does not send.
-  ["session-viewer.json", "SessionResponse"],
-  ["destination.json", "DestinationResponse"],
-  ["destination-unjudged.json", "DestinationResponse"],
-  ["destinations-list.json", "DestinationList"],
-  ["destination-usage.json", "DestinationUsageResponse"],
-  ["discovery-unknown.json", "TopicDiscoveryResponse"],
-  ["discovery-limited.json", "TopicDiscoveryResponse"],
-  ["discovery-attested.json", "TopicDiscoveryResponse"],
-  ["discovery-empty.json", "TopicDiscoveryResponse"],
-  ["discovery-running.json", "TopicDiscoveryResponse"],
-  ["discovery-cancelled.json", "TopicDiscoveryResponse"],
-  ["discovery-failed.json", "TopicDiscoveryResponse"],
-  ["discovery-stale.json", "TopicDiscoveryResponse"],
-  ["discovery-truncated.json", "TopicDiscoveryResponse"],
-  ["discovery-latest.json", "DiscoveryLatestResponse"],
-  // FX-5: the TARGET connection's latest discovery, with the broker count the
-  // restore wizard caps its replication factor at. Read by both sides:
-  // `crates/logweir-api/tests/topic_discoveries.rs` holds the projection to it.
-  ["discovery-target-latest.json", "DiscoveryLatestResponse"],
-  ["topics-page.json", "TopicPageResponse"],
-  ["topics-page-last.json", "TopicPageResponse"],
-  ["preflight-ready.json", "PreflightResponse"],
-  ["preflight-pending.json", "PreflightResponse"],
-  ["preflight-not-ready.json", "PreflightResponse"],
-  ["preflight-skipped.json", "PreflightResponse"],
-  ["preflight-stale.json", "PreflightResponse"],
-  ["preflight-cancelled.json", "PreflightResponse"],
-  ["check-operation-discovery.json", "CheckOperationResponse"],
-  ["cancel-discovery.json", "CancelResponse"],
-  ["cancel-already-terminal.json", "CancelResponse"],
-  ["detail-page.json", "DetailPageResponse"],
-  ["problem-legacy-unknown.json", "Problem"],
-  ["problem-rotation-conflict.json", "Problem"],
-
-  // D1 W7: the cadence policy, its previews and a manual run. The five
-  // console answers here are the BYTES `logweir-api` returned in D1 W6's live
-  // smoke (`artifacts/d1w6/s1`, `s1b`, `s2`, `s3`, `s6`); the two schedules
-  // are the live `BackupSchedule` from D1 W8's run projected into the shape
-  // this document publishes. See `ui/tests/fixtures/README.md`.
-  ["session-manual-backups.json", "SessionResponse"],
-  ["schedule-policy.json", "ScheduleResponse"],
-  ["schedule-preset.json", "ScheduleResponse"],
-  ["cadence-preview-repeated.json", "CadencePreviewResponse"],
-  ["cadence-preview-gap.json", "CadencePreviewResponse"],
-  ["manual-backup.json", "ManualBackupResponse"],
-  ["manual-backup-replayed.json", "ManualBackupResponse"],
-  ["problem-policy-changed.json", "Problem"],
-
-  // D3 W12, reconciled against the API branch. These WERE this client's own
-  // assumption about shapes the document did not publish yet; they are now
-  // instances of the published schemas, held to them by the arm below like
-  // every other console fixture. That is what closed the reconciliation: there
-  // is no bucket of assumed names left to be quietly wrong in.
-  ["operation-backup-preparing.json", "OperationViewResponse"],
-  ["operation-unknown.json", "OperationViewResponse"],
-  ["operation-restore-completed.json", "OperationViewResponse"],
-  ["operation-restore-scratch.json", "OperationViewResponse"],
-  ["operation-restore-no-record-check.json", "OperationViewResponse"],
-  ["operation-restore-untrusted.json", "OperationViewResponse"],
-  ["protection-policy.json", "ProtectionPolicyResponse"],
-  ["protection-policy-unknown.json", "ProtectionPolicyResponse"],
-  ["protection-policies-list.json", "ProtectionPolicyList"],
-  ["catalog.json", "CatalogResponse"],
-  ["catalogs-list.json", "CatalogList"],
-  ["catalog-points.json", "PointPageResponse"],
-  ["catalog-points-states.json", "PointPageResponse"],
-  ["catalog-signers.json", "SignerPageResponse"],
-  ["retention-policy-enforce.json", "RetentionPolicyResponse"],
-  ["retention-policies-list.json", "RetentionPolicyList"],
-  ["trust-policy.json", "TrustPolicyResponse"],
-  ["trust-policies-list.json", "TrustPolicyList"],
-
-  // The PoC round (`claude/console-shared-fix`): the live `GET .../backups/{name}`
-  // answer the shared console's restore wizard misread (POC-P2), byte for byte.
-  ["backup-poc.json", "BackupResponse"],
-];
+// THE VALIDATOR AND THE FIXTURE TABLE LIVE IN `console-fixture.js` (FX-48). The
+// table used to be written out here, by hand, and eleven of the eighty-three
+// files under `fixtures/console/` were in it nowhere -- so nothing held them
+// to the published schema, and one of them was not an instance of it. It is
+// now ONE table, `ui/tests/contract-coverage.spec.js` holds it to the
+// directory listing, and this arm reads it rather than keeping a second copy.
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 72,
+  const documents = Object.keys(CONSOLE_FIXTURES)
+    .filter((name) => CONSOLE_FIXTURES[name].schema !== null);
+  assert.equal(documents.length, 82,
     "the console fixture set covers PLAT-17.1, D1, D2 and D3");
-  for (const [name, schema] of CONSOLE_FIXTURES) {
+  for (const name of documents) {
+    const schema = CONSOLE_FIXTURES[name].schema;
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
-    const findings = [];
-    validate({ $ref: "#/components/schemas/" + schema }, console_(name), "", findings);
     assert.deepEqual(
-      findings,
+      schemaFindings(schema, console_(name)),
       [],
       "ui/tests/fixtures/console/" + name + " is not an instance of " + schema +
         ". The fixtures and the contract cannot drift: regenerate the fixture or fix the shape.",

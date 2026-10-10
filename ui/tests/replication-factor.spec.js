@@ -29,6 +29,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   BROKERS_NOT_READ,
@@ -783,7 +784,7 @@ function catalogObject(ns) {
   return {
     apiVersion: "logweir.dev/v1alpha1", kind: "RecoveryCatalog",
     metadata: { name: "archive", namespace: ns, uid: "cat-uid" },
-    spec: { destinationRef: { name: fixture("console/destination.json").item.name } },
+    spec: { destinationRef: { name: decoded("destination.json").item.name } },
     status: {},
   };
 }
@@ -804,7 +805,7 @@ function catalogPointEntry() {
 
 /** A catalog point the wizard restores from, with no Backup behind it. */
 function catalogPointState(ns) {
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   const point = catalogRecoveryPoint(catalogObject(ns), catalogPointEntry(), destination, null);
   return initialState(ns, clusters(), { items: [] },
     { catalog: "archive", point: catalogPointId() }, destination, undefined, { point: point });
@@ -820,7 +821,7 @@ test("fx5_a_catalog_point_mount_reads_the_targets_discovery_before_the_first_pai
   const view = fakeView();
   const ns = "team-fx5-cat-mount";
   const api = Object.assign(mountApi({ "orders-scratch": DISCOVERY() }, asked), {
-    destination: async () => ({ item: fixture("console/destination.json").item }),
+    destination: async () => ({ item: decoded("destination.json").item }),
     catalogReaders: {
       listCatalogs: async () => ({ items: [catalogObject(ns)] }),
       readCatalog: async () => catalogObject(ns),
@@ -927,7 +928,7 @@ function catalogPointEntryWithTopics() {
 /** A catalog-point state whose row lists its topics, `orders` and `payments`
  *  typed, the source facts read the way the mount reads them. */
 async function catalogStateWithTopics(ns, entry) {
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   const point = catalogRecoveryPoint(catalogObject(ns), entry || catalogPointEntryWithTopics(),
     destination, null);
   const state = initialState(ns, clusters(), { items: [] },

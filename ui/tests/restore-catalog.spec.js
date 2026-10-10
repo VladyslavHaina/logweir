@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   applyWizardDraft,
@@ -108,7 +109,7 @@ function catalogObject(over) {
 }
 
 function destination() {
-  return fixture("console/destination.json").item;
+  return decoded("destination.json").item;
 }
 
 /** A run the controller verified NOTHING for: Succeeded, a set, no window. */

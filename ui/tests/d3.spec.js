@@ -35,6 +35,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { wireItem } from "./console-fixture.js";
 
 import { SERVER_TIME_MAX_AGE_MS, problemError } from "../api.js";
 import { fieldErrors } from "../lifecycle.js";
@@ -1579,7 +1580,7 @@ const fakeParse = (html) => [{ html: html }];
  *  fake create answers the shape the real route does. A stub that answered
  *  less would make these rows pass over a body the client would refuse. */
 function fakeCatalogView(ns, body, uid) {
-  const item = JSON.parse(JSON.stringify(con("catalog.json").item));
+  const item = wireItem("catalog.json");
   item.name = body.name;
   item.namespace = ns;
   item.uid = uid;
@@ -1922,7 +1923,7 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
         // envelope bug live: the suite asserted a close, and a close happens
         // for a document that decodes to `undefined` too.
         made.state.handlers.operation({
-          data: JSON.stringify(con("operation-restore-completed.json").item),
+          data: JSON.stringify(wireItem("operation-restore-completed.json")),
         });
       });
     }
@@ -2123,7 +2124,7 @@ test("the_end_frame_is_a_reason_and_only_two_of_the_three_end_anything", async (
       return { terminal: true, verification: { state: "valid" } };
     },
   });
-  const running = JSON.parse(JSON.stringify(con("operation-backup-preparing.json").item));
+  const running = wireItem("operation-backup-preparing.json");
   for (let i = 0; i < CONNECTS_BEFORE_POLLING + 2; i += 1) {
     healthy.state.handlers.operation({ data: JSON.stringify(running) });
     healthy.state.handlers.end({ data: "{\"reason\":\"maxDuration\"}" });
