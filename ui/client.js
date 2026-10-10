@@ -73,8 +73,6 @@ import {
   decodeLegacyObject,
   decodeManualBackup,
   decodeOperation,
-  decodeOperationScope,
-  decodeOperationTrust,
   decodePolicyChanged,
   decodeRequest,
   decodeSession,
@@ -794,8 +792,26 @@ const ABSENT_IN_CONSOLE = Object.freeze({
     "status.exitCode",
     "status.evidence",
   ]),
+  // A RESTORE'S SCORECARD FACTS, NAMED ONE BY ONE (FX-48, PoC batch 6 F-4).
+  // This used to say `status.integrity` as a whole, which the projection half
+  // supplies (the coverage and the selection), so a row with either was not
+  // said to lack anything -- and the Restore detail printed "-" for an
+  // integrity level, a result and a partial reason, which is what "the
+  // controller recorded none" looks like. What the product API publishes of
+  // the block is `integrity.level`, on the operation route a DETAIL reads
+  // (`completion.integrityLevel`; `mergeOperation` takes it off this list when
+  // it supplies it). `integrity.result`, `integrity.partialReason`, the
+  // objectives, the measured values, the target topic preflight and the old
+  // topics are published by NO route; the page says so for each and points at
+  // the signed scorecard, which carries them.
   restores: Object.freeze([
-    "status.integrity",
+    "status.integrity.level",
+    "status.integrity.result",
+    "status.integrity.partialReason",
+    "status.objectives",
+    "status.measured",
+    "status.topicPreflight",
+    "status.oldTopics",
     "status.jobRef",
     "status.outcome",
     "status.evidence",
@@ -1369,9 +1385,17 @@ const PROJECT = Object.freeze({
  *  keeps the pre-existing rule (D3 sections 7.4 and 12). Without it a `Valid`
  *  on a compromise-revoked key read green, and so did every scorecard fact
  *  captioned by the same rule. The basis only ever refines a recorded
- *  `result`, so it is not written where no result was recorded. */
-function mergeOperation(object, operation, trust, scope) {
+ *  `result`, so it is not written where no result was recorded.
+ *
+ *  `operation` IS THE WHOLE PUBLISHED VIEW (FX-48): `decodeOperation` reads
+ *  `OperationViewResponse` with every member D3 added, so `trust`,
+ *  `verificationScope` and `completion` arrive on the one decoded item, each
+ *  `null` when the body carried none. Before, the item was the frozen sixteen
+ *  and the first two were recovered by decoders of their own. */
+function mergeOperation(object, operation) {
   const status = object.status;
+  const trust = operation.trust;
+  const scope = operation.verificationScope;
   // HOW MUCH OF A RESTORE WAS COMPARED TRAVELS WITH THE DETAIL (console class
   // sweep). `scope` is the route's decoded `VerificationScopeView`, or `null`
   // when the body carried none. It is written under the name the History
@@ -1397,6 +1421,21 @@ function mergeOperation(object, operation, trust, scope) {
       copied.selection = copySelection(scope.selection);
     }
     status.verificationScope = copied;
+  }
+  // THE INTEGRITY LEVEL TRAVELS WITH THE DETAIL TOO (FX-48, PoC batch 6 F-4).
+  // `completion.integrityLevel` is the signed scorecard's own word --
+  // `byte-fingerprint`, `consume-only` or `not-attempted`, verbatim -- and it
+  // is written where the custom resource keeps it, `status.integrity.level`,
+  // so the Restore detail's Integrity table reads one field in both modes. It
+  // is copied and never derived: a view that publishes no completion block
+  // leaves the level absent, and the page then says the API published none
+  // rather than printing an empty cell. The block's result and partial reason
+  // are published by no route; see `ABSENT_IN_CONSOLE`.
+  const completion = operation.completion;
+  if (operation.kind === "restore" && completion !== null && completion !== undefined &&
+    typeof completion.integrityLevel === "string" && completion.integrityLevel.length > 0) {
+    status.integrity = status.integrity || {};
+    status.integrity.level = completion.integrityLevel;
   }
   status.phase = PHASE_OF[operation.state];
   if (operation.stateReason !== null) {
@@ -1458,7 +1497,8 @@ function mergeOperation(object, operation, trust, scope) {
   const contract = object.__contract;
   if (contract && Array.isArray(contract.absent)) {
     const now = { "status.exitCode": status.exitCode, "status.outcome": status.outcome,
-      "status.evidence": status.evidence };
+      "status.evidence": status.evidence,
+      "status.integrity.level": (status.integrity || {}).level };
     contract.absent = contract.absent.filter((field) =>
       !(field in now) || now[field] === undefined);
   }
@@ -2955,10 +2995,9 @@ async function enrich(ns, plural, name, object, options) {
       const body = await consoleOperation(
         ns, plural === "backups" ? "backup" : "restore", name, options,
       );
-      const decoded = decodeOperation(body);
-      return mergeOperation(
-        object, decoded.value.item, decodeOperationTrust(body), decodeOperationScope(body),
-      );
+      // ONE DECODE OF THE DOCUMENT THE ROUTE PUBLISHES (FX-48): the frozen
+      // sixteen and every member D3 added, by the view's own shape.
+      return mergeOperation(object, decodeOperation(body).value.item);
     } catch (unread) {
       if (isMissingExtra(unread)) {
         return object;

@@ -776,8 +776,15 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
             })
         })
         .collect();
+    // The members `PointView` REQUIRES travel with the point, from the record
+    // itself: the console's render decodes the point with the console's own
+    // decoder before any page function sees it (FX-48), and that decoder
+    // refuses a point without its identity and its receipt binding.
     let point = json!({
-        "pointId": record["point_id"], "availability": "Available", "verification": "Verified",
+        "pointId": record["point_id"], "backupId": record["backup_id"],
+        "runId": record["run_id"], "receiptKey": record["receipt"]["key"],
+        "receiptSha256": record["receipt"]["sha256"],
+        "availability": "Available", "verification": "Verified",
         "selectable": true, "topics": point_topics, "locations": [],
     });
     let dir = demo_dir().join("schema-dependency");

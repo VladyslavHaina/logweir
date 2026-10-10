@@ -33,7 +33,7 @@
 // state -- read from the objects themselves and never remembered by the page.
 // A refresh reads them again and creates nothing.
 
-import { apiClient, granted } from "../client.js";
+import { CONSOLE, apiClient, granted } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   ENGINE_SUBREPORT_LINE,
@@ -213,6 +213,17 @@ export function scopeOf(object) {
   const status = (object && object.status) || {};
   if (status.verificationScope !== null && status.verificationScope !== undefined) {
     return status.verificationScope;
+  }
+  // A CONSOLE PROJECTION'S SCOPE IS THE API'S OWN BLOCK, OR NONE (FX-48). The
+  // table below is the custom resource's vocabulary, for the mode that has no
+  // `logweir-api` to do the mapping. A console detail now carries the
+  // scorecard's integrity level too (`status.integrity.level`, from the
+  // operation route's `completion`), and reading a scope out of it here would
+  // be this page computing what the API is there to compute -- and printing a
+  // sampled-check sentence with no counts for a run whose route published no
+  // scope at all.
+  if (((object || {}).__contract || {}).mode === CONSOLE) {
+    return null;
   }
   const level = SCOPE_LEVEL_OF_INTEGRITY[String((status.integrity || {}).level)];
   if (level === undefined) {
@@ -530,6 +541,32 @@ export function unrecordedTimeBasisWarning(timeBasis) {
       "point, records it.") + "</p>";
 }
 
+/** What a Restore detail's cell says for a value the controller keeps on the
+ *  Restore object and the product API serving this console does not publish
+ *  (FX-48, PoC batch 6 F-4). */
+export const NOT_PUBLISHED = "not published by the product API";
+
+/** Said once, under the Integrity table, when any cell of the view reads
+ *  [`NOT_PUBLISHED`]. */
+export const NOT_PUBLISHED_SENTENCE =
+  "A cell that reads \"" + NOT_PUBLISHED + "\" is not an empty one. It is a value the " +
+  "controller keeps on the Restore object's status and the product API serving this console " +
+  "does not publish, so this page cannot say whether one is recorded. The integrity result " +
+  "and partial reason, the objectives and the measured values are also in the run's signed " +
+  "scorecard, which the commands under Check it yourself fetch and verify.";
+
+/** Whether a console projection names `path`, or a block that holds it, among
+ *  the fields it could not supply (`__contract.absent`, `ui/client.js`). False
+ *  for a custom resource: in legacy mode an absent field is one the controller
+ *  did not record, and the cell says "-" as it always has. */
+export function notPublishedIn(object, path) {
+  const absent = ((object || {}).__contract || {}).absent;
+  if (!Array.isArray(absent)) {
+    return false;
+  }
+  return absent.some((named) => path === named || path.indexOf(named + ".") === 0);
+}
+
 /** One Restore, in full. With `operation`, the view opens with where the
  *  operation stands (see [`renderRestoreOperation`]). */
 export function renderRestoreDetail(object, operation) {
@@ -554,6 +591,49 @@ export function renderRestoreDetail(object, operation) {
   const claim = (value) => scorecardClaim(cell(value), verified);
   const coverage = coverageOf(object);
   const selection = selectionOf(object);
+  // A VALUE THIS VIEW WAS NOT GIVEN IS ONE OF TWO THINGS, AND THE CELL SAYS
+  // WHICH (FX-48, PoC batch 6 F-4). On a custom resource an absent field is
+  // one the controller did not record: "-". On a console projection that
+  // NAMES the field among what it could not supply, "-" would say the same
+  // thing about a value the product API simply does not publish -- which is
+  // how a shared console came to show an empty Integrity table for a restore
+  // whose status read `byte-fingerprint` / `pass`. `shown` renders the value
+  // when there is one and the not-published cell when the projection named
+  // its absence; the sentence under the Integrity table is printed once.
+  let unpublished = false;
+  const shown = (path, value, render) => {
+    if ((value === undefined || value === null) && notPublishedIn(object, path)) {
+      unpublished = true;
+      return "<span class=\"note\" data-not-published=\"" + esc(path) + "\">" +
+        esc(NOT_PUBLISHED) + "</span>";
+    }
+    return render(value);
+  };
+  const integrityFacts = facts([
+    ["level", shown("status.integrity.level", integrity.level, claim)],
+    ["result", shown("status.integrity.result", integrity.result, claim)],
+    ["partial reason", shown("status.integrity.partialReason", integrity.partialReason, claim)],
+  ]);
+  const objectiveFacts = facts([
+    ["objectives.rtoSeconds", shown("status.objectives.rtoSeconds", objectives.rtoSeconds, cell)],
+    ["objectives.rpoSeconds", shown("status.objectives.rpoSeconds", objectives.rpoSeconds, cell)],
+    ["objectives.passRate", shown("status.objectives.passRate", objectives.passRate, cell)],
+    ["objectives.met", shown("status.objectives.met", objectives.met, claim)],
+    ["measured.rtoSeconds", shown("status.measured.rtoSeconds", measured.rtoSeconds, claim)],
+    ["measured.rpoSeconds", shown("status.measured.rpoSeconds", measured.rpoSeconds, claim)],
+  ]);
+  const preflightFacts = facts([
+    ["timestampType", shown("status.topicPreflight.timestampType", preflight.timestampType, cell)],
+    ["retentionMs", shown("status.topicPreflight.retentionMs", preflight.retentionMs, cell)],
+    ["timestampBound", shown("status.topicPreflight.timestampBound", preflight.timestampBound,
+      cell)],
+  ]);
+  const oldTopicsCell = oldTopics.length === 0
+    ? shown("status.oldTopics", undefined, cell)
+    : esc(oldTopics.join(", "));
+  const notPublishedNote = unpublished
+    ? "<p class=\"note\" id=\"restore-not-published\">" + esc(NOT_PUBLISHED_SENTENCE) + "</p>"
+    : "";
 
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
@@ -616,11 +696,8 @@ export function renderRestoreDetail(object, operation) {
         "</p>") +
     unrecordedTimeBasisWarning(status.timeBasis) +
     "<h3>Integrity</h3>" +
-    facts([
-      ["level", claim(integrity.level)],
-      ["result", claim(integrity.result)],
-      ["partial reason", claim(integrity.partialReason)],
-    ]) +
+    integrityFacts +
+    notPublishedNote +
     // HOW MUCH OF THIS RESTORE WAS ACTUALLY COMPARED, BESIDE THE RESULT AND
     // NEVER AWAY FROM IT (D3 section 2.5, section 3.5). A pass is a pass over a SAMPLE, and
     // a result printed without its scope reads as an exhaustive comparison --
@@ -637,20 +714,9 @@ export function renderRestoreDetail(object, operation) {
         "</p>"
       : "") +
     "<h3>Objectives asked for, and what the run achieved</h3>" +
-    facts([
-      ["objectives.rtoSeconds", cell(objectives.rtoSeconds)],
-      ["objectives.rpoSeconds", cell(objectives.rpoSeconds)],
-      ["objectives.passRate", cell(objectives.passRate)],
-      ["objectives.met", claim(objectives.met)],
-      ["measured.rtoSeconds", claim(measured.rtoSeconds)],
-      ["measured.rpoSeconds", claim(measured.rpoSeconds)],
-    ]) +
+    objectiveFacts +
     "<h3>Target topic preflight</h3>" +
-    facts([
-      ["timestampType", cell(preflight.timestampType)],
-      ["retentionMs", cell(preflight.retentionMs)],
-      ["timestampBound", cell(preflight.timestampBound)],
-    ]) +
+    preflightFacts +
     "<h3>Topics</h3>" +
     facts([
       // PROD-15.1: for a run whose creation step stopped, the row says what
@@ -663,8 +729,7 @@ export function renderRestoreDetail(object, operation) {
         : esc(createdTopics.join(", ") + (stoppedLeftMore === 0
           ? ""
           : " and " + stoppedLeftMore + " more"))],
-      ["old topics -- written to by nothing, in any tag",
-        oldTopics.length === 0 ? cell(null) : esc(oldTopics.join(", "))],
+      ["old topics -- written to by nothing, in any tag", oldTopicsCell],
     ]) +
     evidenceBlock(evidence) +
     "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +

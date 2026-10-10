@@ -185,6 +185,10 @@ export function oneOf(members) {
 export function listOf(member) {
   return {
     what: "an array of " + member.what,
+    // The member's own decoder, named so a reader of the DECLARATION -- the
+    // coverage walk in `ui/tests/contract-coverage.spec.js` -- can follow a
+    // list into the shape it carries. `read` never looks at it.
+    member: member,
     read(value, ctx, dto, path) {
       if (!Array.isArray(value)) {
         throw contractFailure(dto, path, "expected an array, got " + typeName(value));
@@ -203,6 +207,8 @@ export function listOf(member) {
 export function objectOf(shape) {
   return {
     what: "an object",
+    // The nested shape, named for the same reader `listOf`'s `member` is.
+    shape: shape,
     read(value, ctx, dto, path) {
       return readShape(shape, value, ctx, shape.name, path);
     },
@@ -225,6 +231,8 @@ export function objectOf(shape) {
 export function objectOfLater(later) {
   return {
     what: "an object",
+    // The thunk itself, for the same reader: resolved when it is walked.
+    later: later,
     read(value, ctx, dto, path) {
       const shape = later();
       return readShape(shape, value, ctx, shape.name, path);
@@ -239,12 +247,34 @@ export function objectOfLater(later) {
  *
  *  Every field NOT named in either bag is tolerated and recorded. */
 export function shapeOf(name, required, optional) {
-  return Object.freeze({
+  const shape = Object.freeze({
     name: name,
     required: Object.freeze(Object.assign({}, required)),
     optional: Object.freeze(Object.assign({}, optional || {})),
   });
+  if (declaring) {
+    DECLARED.push(shape);
+  }
+  return shape;
 }
+
+// EVERY SHAPE THIS FILE DECLARES, IN DECLARATION ORDER (FX-48).
+//
+// WHY A REGISTRY AND NOT ONLY THE TWO MAPS BELOW. `CONSOLE_SHAPES` and
+// `D3_SHAPES` are written by hand, and a shape nobody added to either was
+// compared with nothing: `PointTopicView` was in neither, it did not declare
+// `schemaDependency`, and the catalog page dropped what the API sent for it
+// while every row in the suite stayed green. A shape cannot be declared
+// without passing through `shapeOf`, so this list cannot miss one;
+// `ui/tests/contract-coverage.spec.js` walks it against
+// `schemas/logweir-api-v1.openapi.json` and names every member the document
+// publishes and a shape omits.
+//
+// ONLY DECLARATIONS ARE RECORDED. `decodeLegacyObject` builds a throwaway
+// shape per call; `declaring` is false by then, so reading a document never
+// grows this list.
+const DECLARED = [];
+let declaring = true;
 
 function readShape(shape, value, ctx, dto, path) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -285,7 +315,46 @@ function readShape(shape, value, ctx, dto, path) {
 export function decodeWith(shape, value) {
   const ctx = { unknown: [] };
   const decoded = readShape(shape, value, ctx, shape.name, "");
+  observed(shape, null, value, ctx.unknown);
   return { value: decoded, unknown: ctx.unknown };
+}
+
+// THE SUITE'S SEAM (FX-48), AND NOTHING IN THE SHIPPED TREE CALLS IT -- the
+// same kind of seam `resetMode` is in `ui/client.js`.
+//
+// WHY IT EXISTS. Rule 2 above says an unknown field is RECORDED, "so a test
+// and a reviewer can see exactly which fields this client is ignoring". Half
+// of the callers threw that record away on the way to the page, so nothing
+// could ask the one question that matters about a console read: WHICH SHAPE
+// DECODED THIS ROUTE'S ANSWER, AND WHAT DID IT DROP. The restore detail read
+// the operation route -- which answers `OperationViewResponse` -- through the
+// narrower `OperationResponse`, and lost the integrity level without a trace.
+// With a listener set, every decode reports the shape it used, the document
+// it was handed and the paths it ignored; `ui/tests/contract-coverage.spec.js`
+// drives the real client over the real transport seam and compares each
+// report with the schema the OpenAPI document publishes for the route.
+//
+// WITH NO LISTENER -- which is every page load -- a decode does exactly what
+// it did before: rule 3 stands, and no decoder reads this to decide anything.
+let observer = null;
+
+/** Sets, or with anything but a function clears, the one decode listener. It
+ *  is called with `{shape, item, value, unknown}`: the name of the shape that
+ *  read the document (and, for a list, of the shape that read each item), the
+ *  document as it was handed in, and a copy of the ignored paths. */
+export function observeDecodes(listener) {
+  observer = typeof listener === "function" ? listener : null;
+}
+
+function observed(shape, itemShape, value, unknown) {
+  if (observer !== null) {
+    observer({
+      shape: shape.name,
+      item: itemShape === null ? null : itemShape.name,
+      value: value,
+      unknown: unknown.slice(),
+    });
+  }
 }
 
 /** Decodes an envelope `{items: [...], page, requestId}`. The page and the
@@ -300,6 +369,7 @@ export function decodeListWith(shape, itemShape, value) {
     items.push(readShape(itemShape, raw[i], ctx, itemShape.name, "items[" + String(i) + "]"));
   }
   envelope.items = items;
+  observed(shape, itemShape, value, ctx.unknown);
   return { value: envelope, unknown: ctx.unknown };
 }
 
@@ -363,13 +433,21 @@ const SESSION = shapeOf(
 
 const FIELD_ERROR = shapeOf("FieldError", { field: str, code: str, message: str });
 
+// `policy` IS THE ONE EXTENSION MEMBER THE DOCUMENT PUBLISHES ON A PROBLEM
+// (`409 policy_changed`, see `POLICY_CHANGED_DETAIL` below, which is declared
+// 600 lines on -- hence the thunk). It was not declared here until FX-48, so
+// `decodeProblem` dropped it; the page was unaffected only because
+// `decodePolicyChanged` reads the raw document `ui/api.js` attaches.
 const PROBLEM = shapeOf(
   "Problem",
   {
     type: str, title: str, status: int, code: str, detail: str,
     requestId: str, retryable: bool,
   },
-  { errors: listOf(objectOf(FIELD_ERROR)) },
+  {
+    errors: listOf(objectOf(FIELD_ERROR)),
+    policy: objectOfLater(() => POLICY_CHANGED_DETAIL),
+  },
 );
 
 const PAGE = shapeOf("Page", { limit: int }, { nextCursor: str, snapshot: str });
@@ -939,7 +1017,10 @@ const RESTORE_RESPONSE = shapeOf(
 );
 const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
 const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
-const OPERATION_RESPONSE = readOnlyItem("OperationResponse", OPERATION);
+// NO `OperationResponse` SHAPE ANY MORE (FX-48). The operation route answers
+// `OperationViewResponse`; the shape a DETAIL view reads it with is declared
+// beside the view itself, as `OPERATION_DETAIL_RESPONSE`. `Operation` -- the
+// frozen sixteen -- stays declared above: it is that shape's required floor.
 const APPROVAL_POLICY_RESPONSE = readOnlyItem("ApprovalPolicyResponse", APPROVAL_POLICY);
 
 // ------------------------------------------- D1 W7: the three W6 answers
@@ -1093,6 +1174,24 @@ const RESTORE_TARGET_REQUEST = shapeOf(
   },
 );
 
+/** PLAT-11.2: one row of the mapping a create declares beside its plan -- a
+ *  source topic and the target name the page previewed for it. */
+const TOPIC_MAPPING_ROW = shapeOf("TopicMappingRow", { source: str, target: str });
+
+/** PROD-15.1: the mapped names an operator typed to confirm a restore under
+ *  the ORIGINAL topic names, where the namespace's policy takes typed names. */
+const ORIGINAL_NAME_CONFIRMATION_REQUEST = shapeOf(
+  "OriginalNameConfirmationRequest",
+  { typedTopics: listOf(str) },
+);
+
+// FOUR MEMBERS THE DOCUMENT PUBLISHES WERE NOT DECLARED HERE UNTIL FX-48:
+// `coverage` and `completeMaxRecords` (PROD-08.1a), `topicMapping` (PLAT-11.2)
+// and `originalNameConfirmation` (PROD-15.1). `ui/client.js` builds three of
+// them into the body it sends -- unchecked, because a Restore create is the
+// one body it does not pass through `decodeRequest` -- so a member renamed on
+// the server would have been a 422 in front of an operator rather than a red
+// row, which is the failure this section's header names.
 const CREATE_RESTORE_REQUEST = shapeOf(
   "CreateRestoreRequest",
   {
@@ -1111,6 +1210,12 @@ const CREATE_RESTORE_REQUEST = shapeOf(
     // PLAT-19.2: the change ticket the console signs; required under a
     // Governed policy (D0).
     ticket: str,
+    // PROD-08.1a: the coverage the plan asks for, and its record bound.
+    coverage: oneOf(COVERAGE_VALUES), completeMaxRecords: int,
+    // PLAT-11.2: the declared mapping the API recomputes row by row.
+    topicMapping: listOf(objectOf(TOPIC_MAPPING_ROW)),
+    // PROD-15.1: the typed names of an original-name restore.
+    originalNameConfirmation: objectOf(ORIGINAL_NAME_CONFIRMATION_REQUEST),
   },
 );
 
@@ -1742,7 +1847,6 @@ export const CONSOLE_SHAPES = Object.freeze({
   SubmitApprovalRequest: SUBMIT_APPROVAL_REQUEST,
   ApprovalResponse: APPROVAL_RESPONSE,
   ApprovalPacketResponse: APPROVAL_PACKET_RESPONSE,
-  OperationResponse: OPERATION_RESPONSE,
   ArchiveRequest: ARCHIVE_REQUEST,
   ConnectionAuthRequest: CONNECTION_AUTH_REQUEST,
   NewConnectionCredentialRequest: NEW_CONNECTION_CREDENTIAL_REQUEST,
@@ -1836,6 +1940,16 @@ export const CONSOLE_SHAPES = Object.freeze({
   DestinationAccessPreflightRequest: DESTINATION_ACCESS_PREFLIGHT_REQUEST,
   SourceConnectionPreflightRequest: SOURCE_CONNECTION_PREFLIGHT_REQUEST,
   CreatePreflightRequest: CREATE_PREFLIGHT_REQUEST,
+
+  // FX-48: SIX SHAPES THAT WERE DECLARED AND IN NO MAP, so no drift arm
+  // compared them with the document. `ui/tests/contract-coverage.spec.js` now
+  // fails when a declared shape is in neither map.
+  BackupDestinationRefView: BACKUP_DESTINATION_REF,
+  RunQueueView: RUN_QUEUE,
+  RestoreTimeBasisView: RESTORE_TIME_BASIS,
+  CreationStopView: CREATION_STOP,
+  TopicMappingRow: TOPIC_MAPPING_ROW,
+  OriginalNameConfirmationRequest: ORIGINAL_NAME_CONFIRMATION_REQUEST,
 });
 
 /** EVERY CLOSED SET THIS CLIENT HOLDS, by the name the OpenAPI document gives
@@ -1955,17 +2069,11 @@ export function decodeApprovalPacket(value) {
   return decodeWith(APPROVAL_PACKET_RESPONSE, value);
 }
 
-/** A durable run's normalized status: a `Backup` or a `Restore`.
- *  @returns {Decoded} */
-export function decodeOperation(value) {
-  return decodeWith(OPERATION_RESPONSE, value);
-}
-
 /** A TRANSIENT CHECK's normalized status: a `TopicDiscovery` or a `Preflight`.
  *
  *  A SEPARATE DECODER BECAUSE IT IS A SEPARATE DOCUMENT. `GET
- *  .../operations/{kind}/{name}` answers `OperationResponse` for `backup` and
- *  `restore` and `CheckOperationResponse` for `discovery` and `preflight`, and
+ *  .../operations/{kind}/{name}` answers `OperationViewResponse` for `backup`
+ *  and `restore` and `CheckOperationResponse` for `discovery` and `preflight`, and
  *  the second carries no `result`, no `evidence`, no `verification` and no
  *  `verifiedSuccess`. Reading one as the other would either fail on four
  *  required fields or -- with a tolerant reader -- put "verification: pending"
@@ -2553,6 +2661,71 @@ const D3_OPERATION = shapeOf(
 
 const D3_OPERATION_RESPONSE = readOnlyItem("OperationViewResponse", D3_OPERATION);
 
+// THE SAME DOCUMENT, AS A DETAIL VIEW READS IT (FX-48).
+//
+// ONE ROUTE, ONE PUBLISHED DOCUMENT, AND UNTIL NOW TWO SHAPES THAT DISAGREED
+// ABOUT IT. `GET .../operations/{kind}/{name}` answers `OperationViewResponse`.
+// The operation page read it with the shape above; the Backup and Restore
+// DETAIL views read it with `OperationResponse` -- the frozen sixteen of
+// PLAT-17.1 -- and every member D3 added was dropped on the way through. The
+// trust basis was recovered by a second, partial decoder
+// (CONSOLE-DETAIL-TRUST-BASIS-DROPPED), the verification scope by a third (the
+// PoC round's class sweep), and the fourth loss was found on a live install:
+// `completion.integrityLevel`, so the Restore detail's Integrity table read
+// "-" for a level the API had published (PoC batch 6, F-4). Three patches for
+// one cause is the cause not being fixed.
+//
+// SO THE DETAIL READ DECLARES EVERY MEMBER THE VIEW DECLARES, BY CONSTRUCTION:
+// the loop below takes each member of `OperationView` the frozen sixteen do
+// not carry, with the view's own decoder for it. A member added to the view is
+// in the detail read the moment it is declared, and cannot be forgotten here.
+//
+// WHAT STAYS DIFFERENT IS WHICH MEMBERS ARE REQUIRED, AND THAT IS DELIBERATE.
+// The five D3 members the document requires (`trust`, `verificationScope`,
+// `readiness`, `awaitingApproval`, `stale`) are OPTIONAL here: D3 section 12's
+// rule is "`trust` absent -> the pre-existing rule", an answer of the frozen
+// sixteen alone still renders the detail it always rendered, and a block that
+// is absent is `null` -- never a default. A block that is present and
+// malformed is a contract failure, like any other.
+const D3_ADDITIONS = {};
+for (const bag of [D3_OPERATION.required, D3_OPERATION.optional]) {
+  for (const key of Object.keys(bag)) {
+    if (
+      !Object.prototype.hasOwnProperty.call(OPERATION.required, key) &&
+      !Object.prototype.hasOwnProperty.call(OPERATION.optional, key)
+    ) {
+      D3_ADDITIONS[key] = bag[key];
+    }
+  }
+}
+
+const OPERATION_DETAIL = shapeOf(
+  "OperationView",
+  OPERATION.required,
+  Object.assign({}, OPERATION.optional, D3_ADDITIONS),
+);
+
+const OPERATION_DETAIL_RESPONSE = readOnlyItem("OperationViewResponse", OPERATION_DETAIL);
+
+/** The shapes that read a published schema a SECOND time, beside the one in
+ *  the maps below, with why: the detail read's view, whose `required` set is
+ *  deliberately narrower than the document's, and the envelope around it.
+ *  `ui/tests/contract-coverage.spec.js` holds every other declared shape to
+ *  the document's own set and to a place in a map. */
+export const TOLERANT_SHAPES = Object.freeze([
+  Object.freeze({
+    shape: OPERATION_DETAIL,
+    why: "a Backup or Restore detail reads the operation route with the five members the " +
+      "view requires beyond the first sixteen optional: an absent block keeps the rule that " +
+      "held before the block existed",
+  }),
+  Object.freeze({
+    shape: OPERATION_DETAIL_RESPONSE,
+    why: "the envelope around that view: the same two required members as the document's, " +
+      "declared a second time because it carries the detail read's view and not the strict one",
+  }),
+]);
+
 // ------------------------------------------------------- protection policies
 
 const D3_LAST_POINT = shapeOf(
@@ -2717,12 +2890,42 @@ const D3_LOCATION = shapeOf("PointLocationView", { locationId: str, availability
  *  `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, and
  *  a link that could not name them would be an offer to build a plan out of
  *  nothing. */
+/** PROD-03.0: one topic's schema dependency, as the catalog's view lists it
+ *  -- whether its archived keys or values carry Confluent wire-format framing,
+ *  judged by the backup run from the archived bytes and never from a registry.
+ *
+ *  `verdict` IS PUBLISHED AS A STRING AND READ AS ONE: `schemaDependent`,
+ *  `notDetected` or `notAssessed` today, and a word a newer runner adds still
+ *  decodes -- `ui/pages/restore-wizard.js`'s `schemaDependencyOf` reads any
+ *  word outside the three as NOT ASSESSED, never as "no registry needed".
+ *  `sides`, `schemaIds` and `schemaIdsOmitted` are omitted by the API when
+ *  empty or false, so all three are optional and absent is "none listed". */
+const D3_POINT_SCHEMA_DEPENDENCY = shapeOf(
+  "PointSchemaDependencyView",
+  { verdict: str },
+  {
+    basis: str, reason: str, sides: listOf(str), schemaIds: listOf(int),
+    schemaIdsOmitted: bool,
+  },
+);
+
 /** PROD-05.1: one topic of a point, as the catalog's view lists it -- the
- *  recorded layout and how its configuration is held, never a value. */
+ *  recorded layout and how its configuration is held, never a value.
+ *
+ *  `schemaDependency` WAS NOT DECLARED HERE UNTIL FX-48, AND THAT WAS THE WHOLE
+ *  DEFECT. `readShape` copies declared fields only, so what the API sent for a
+ *  topic was dropped on the way to the page: the catalog page rendered no
+ *  "Schema-dependent topics" section and the restore review said "not
+ *  assessed" for a point whose receipt, catalog record and API view all said
+ *  `schemaDependent`. ABSENT stays NOT ASSESSED -- a receipt before format
+ *  1.5.0, or a catalog synced by an older runner. */
 const D3_POINT_TOPIC = shapeOf(
   "PointTopicView",
   { name: str, applyRoute: str },
-  { partitions: int, replicationFactor: int, configCoverage: str, owner: str },
+  {
+    partitions: int, replicationFactor: int, configCoverage: str, owner: str,
+    schemaDependency: objectOf(D3_POINT_SCHEMA_DEPENDENCY),
+  },
 );
 
 /** PROD-04.1: a point's consumer position evidence, as the catalog's view
@@ -3020,6 +3223,13 @@ export const D3_SHAPES = Object.freeze({
   SignerPageResponse: D3_SIGNER_PAGE,
   PointView: D3_POINT,
   PointLocationView: D3_LOCATION,
+  // FX-48: the five shapes a point NESTS were in no map, so `PointTopicView`
+  // could omit a published member and stay green.
+  PointTopicView: D3_POINT_TOPIC,
+  PointSchemaDependencyView: D3_POINT_SCHEMA_DEPENDENCY,
+  PointConsumerPositionsView: D3_POINT_CONSUMER_POSITIONS,
+  PointGroupView: D3_POINT_GROUP,
+  PointPositionCountsView: D3_POINT_POSITION_COUNTS,
   PointPageResponse: D3_POINT_PAGE,
   ConnectArchiveRequest: CONNECT_ARCHIVE_REQUEST,
   RetentionPolicyView: D3_RETENTION,
@@ -3144,49 +3354,18 @@ export function decodeD3OperationFrame(value) {
   return decodeWith(D3_OPERATION, value);
 }
 
-/** Decodes the `trust` block of `GET .../operations/{kind}/{name}`'s envelope,
- *  or answers `null` when the body carries none.
+/** A durable run's normalized status, as a Backup or Restore DETAIL view reads
+ *  it: `GET .../operations/{kind}/{name}`'s envelope, decoded by the published
+ *  `OperationViewResponse` with D3's additions optional (see
+ *  `OPERATION_DETAIL` above).
  *
- *  WHY A DETAIL VIEW NEEDS IT (CONSOLE-DETAIL-TRUST-BASIS-DROPPED). A console
- *  DETAIL view reads that route through [`decodeOperation`], which keeps the
- *  frozen sixteen fields of `Operation` and nothing else, so the verdict's
- *  `trust.basis` never reached the page: a `Valid` verdict on
- *  `RecordedBeforeRevocation` read green, as if the key were still trusted.
- *  The block is read here, by the same `OperationTrust` shape the operation
- *  view decodes, and an ABSENT block is `null` -- D3 section 12's "`trust`
- *  absent -> the pre-existing rule", which is what a server that predates D3
- *  and answers the frozen sixteen gets. A block that is present and malformed
- *  is a contract failure, like any other. */
-export function decodeOperationTrust(value) {
-  const item = (value !== null && typeof value === "object") ? value.item : undefined;
-  if (item === null || typeof item !== "object" || item.trust === undefined ||
-    item.trust === null) {
-    return null;
-  }
-  return readShape(D3_TRUST, item.trust, { unknown: [] }, "OperationViewResponse", "item.trust");
-}
-
-/** Decodes the `verificationScope` block of `GET .../operations/{kind}/{name}`'s
- *  envelope, or answers `null` when the body carries none.
- *
- *  THE SAME GAP AS THE TRUST BLOCK ABOVE, ONE FIELD OVER (console class
- *  sweep, POC round). A console Restore DETAIL reads the operation route
- *  through [`decodeOperation`], which keeps the frozen sixteen fields and
- *  drops D3's additions -- so the History detail, which reads a Restore's
- *  scope from `status.verificationScope` or from the custom resource's
- *  `status.integrity`, found neither in the shared console and said "No
- *  verification scope was recorded for this run" beside an API that had
- *  published one. The block is read here by the operation view's own
- *  `VerificationScopeView` shape; absent is `null`, and present-but-malformed
- *  is a contract failure. */
-export function decodeOperationScope(value) {
-  const item = (value !== null && typeof value === "object") ? value.item : undefined;
-  if (item === null || typeof item !== "object" || item.verificationScope === undefined ||
-    item.verificationScope === null) {
-    return null;
-  }
-  return readShape(D3_VERIFICATION_SCOPE, item.verificationScope, { unknown: [] },
-    "OperationViewResponse", "item.verificationScope");
+ *  ONE DECODE, AND NOTHING THE ROUTE PUBLISHES IS LEFT BEHIND (FX-48). This
+ *  replaces three: the frozen-sixteen decode and the two partial decoders that
+ *  recovered `trust` and `verificationScope` after it had dropped them. An
+ *  absent D3 block is `null` here, exactly as each of those answered `null`.
+ *  @returns {Decoded} */
+export function decodeOperation(value) {
+  return decodeWith(OPERATION_DETAIL_RESPONSE, value);
 }
 
 /** Decodes one page of a catalog's points. */
@@ -3204,3 +3383,13 @@ export function decodeCatalogSigners(value) {
 export function decodeCatalogRequest(value) {
   return decodeWith(CONNECT_ARCHIVE_REQUEST, value);
 }
+
+// ===========================================================================
+// the registry closes
+// ===========================================================================
+
+declaring = false;
+
+/** Every shape this module declares, in declaration order -- see the note at
+ *  `shapeOf`. Frozen: a document read later declares nothing. */
+export const DECLARED_SHAPES = Object.freeze(DECLARED.slice());
