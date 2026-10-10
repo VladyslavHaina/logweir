@@ -72,7 +72,24 @@
 //! present. ABSENT means NOT ASSESSED for every topic, never "not
 //! schema-dependent" ([`SchemaDependency::of`]). Every receipt this build signs
 //! carries it, so every one is written as
-//! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`].
+//! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] or later.
+//!
+//! # 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+//!
+//! `generations` records, per named topic, the topic ID (KIP-516) Logweir's
+//! own DescribeTopics read returned immediately before the engine
+//! (`topic_id`) and immediately after it (`topic_id_after`), in Kafka's text
+//! form, or `null` with the reason ([`TopicIdentity`]). It is what tells a
+//! topic deleted and recreated under the same name — a NEW generation, whose
+//! offsets mean other records — from the same topic
+//! (`crate::topic_identity`). ABSENT (every receipt before 1.6.0) means the
+//! generation is UNKNOWN for every topic, never "the same". Arms 36-40 read
+//! it, and only when it is present. Every receipt this build signs carries
+//! it, so every one is written as [`FORMAT_VERSION_WITH_GENERATIONS`] or,
+//! when its backup selected consumer groups,
+//! [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`].
+//! PROD-02.1 extends the same block with the offset observation and the
+//! lineage of decision §3.2.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -214,6 +231,85 @@ pub struct BackupReceipt {
     /// absent, so an older document round-trips byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<BTreeMap<String, TopicSchemaDependency>>,
+    /// **Format 1.6.0 (PROD-01.4a).** Per named topic, the topic ID Logweir's
+    /// own DescribeTopics read returned before the engine and after it, or
+    /// why there is none ([`TopicIdentity`]). One entry per `source.topics`
+    /// entry and no others (arm 37).
+    ///
+    /// ABSENT means the generation of every topic is UNKNOWN — every receipt
+    /// before 1.6.0 — and never "the same as the previous point":
+    /// `crate::topic_identity::between` reads an absent block as
+    /// `NotEstablished`. Appended LAST and skipped when absent, so an older
+    /// document round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generations: Option<BTreeMap<String, TopicIdentity>>,
+    /// **Format 1.7.0 (PROD-04.1).** The consumer position evidence of the
+    /// groups the backup SELECTED: one outcome per group with its position
+    /// counts, the observation window, and the positions DOCUMENT beside this
+    /// receipt that holds the positions, bound by its SHA-256 and length
+    /// ([`crate::consumer_positions`]). Its size depends on the selection
+    /// only, never on partitions. Arms 30-35 read it, and only when it is
+    /// present; a reader given the document checks it with
+    /// [`BackupReceipt::validate_consumer_positions_document`].
+    ///
+    /// ABSENT means the backup selected no group — every receipt before 1.7.0,
+    /// and every later one whose plan names none — and never "the groups had
+    /// no positions". Appended LAST and skipped when absent, so a backup that
+    /// selects no group writes the document it wrote before, byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<crate::consumer_positions::ConsumerPositions>,
+}
+
+/// **PROD-01.4a, receipt 1.6.0.** What one run observed about one topic's
+/// identity: the topic ID (KIP-516) before the engine and after it.
+///
+/// # Where each part comes from
+///
+/// Logweir's OWN DescribeTopics read of the source (`logweir-rdkafka-ffi`,
+/// OD-6 (a2)), through the engine's principal: once immediately before the
+/// engine starts, once immediately after it exits. The text is Kafka's, the
+/// one `kafka-topics.sh --describe` prints, derived from the ID's two halves
+/// (`crate::topic_identity::topic_id_text`). Kafka's two reserved IDs, which
+/// no topic is ever given, are never written: the all-zero ID — Kafka's "no
+/// ID", a cluster below inter-broker protocol 2.8 — becomes `null` with
+/// `noTopicId`, and `AAAAAAAAAAAAAAAAAAAAAQ` (`Uuid.ONE_UUID`,
+/// `METADATA_TOPIC_ID`) `null` with `reservedTopicId`.
+///
+/// | field | present | meaning |
+/// |---|---|---|
+/// | `topic_id` | always, possibly `null` | the ID before the engine |
+/// | `topic_id_after` | always, possibly `null` | the ID after it; a different non-null value means the topic was recreated WHILE the engine ran |
+/// | `topic_id_source` | exactly when an ID is recorded (arm 40) | `describeTopics` (this build), or `engineManifest` (decision §6.3, not written by this build) |
+/// | `topic_id_reason` | exactly when `topic_id` is `null` (arm 39) | why: `noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead` or `reservedTopicId` |
+/// | `topic_id_after_reason` | exactly when `topic_id_after` is `null` (arm 39) | the same, for the read after the engine |
+///
+/// `null` means UNKNOWN, never "the same" (decision §3.1): a reason says why,
+/// so a refused read (`notAuthorized`) is never mistaken for a broker that has
+/// no IDs (`noTopicId`). A reader reads an absent `topic_id` or
+/// `topic_id_after` as `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicIdentity {
+    /// The topic ID before the engine, or `null`. Kafka's text: 22 URL-safe
+    /// base64 characters, the last of which carries two bits (arm 38 also
+    /// refuses Kafka's reserved IDs, which the pattern cannot).
+    #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
+    pub topic_id: Option<String>,
+    /// The topic ID after the engine, or `null`; the same form.
+    #[serde(default)]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_-]{21}[AQgw]$"))]
+    pub topic_id_after: Option<String>,
+    /// Where the recorded IDs came from: `describeTopics` or
+    /// `engineManifest` (`crate::topic_identity::TOPIC_ID_SOURCES`). Present
+    /// exactly when at least one ID is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_source: Option<String>,
+    /// Why `topic_id` is `null` (`crate::topic_identity::TOPIC_ID_REASONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_reason: Option<String>,
+    /// Why `topic_id_after` is `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id_after_reason: Option<String>,
 }
 
 /// **PROD-03.0, receipt 1.5.0.** What the archived bytes of ONE topic say
@@ -322,7 +418,7 @@ impl SchemaDependency {
 
 /// **PROD-03.0.** The `format_version` of a receipt that carries
 /// `schema_dependency` — the MINOR after PROD-01.3's 1.4.0. Every receipt this
-/// build signs carries the block, so every one is 1.5.0
+/// build signs carries the block, so every one is 1.5.0 or later
 /// ([`format_version_for`]); 1.5.0 defines every earlier minor's fields and
 /// values. An older reader ignores the field inside major 1 and reads the
 /// document under it.
@@ -334,6 +430,21 @@ pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 /// together; `tests/backup_receipt.rs::the_written_version_defines_schema_dependency`
 /// keeps them coherent.
 pub const SCHEMA_DEPENDENCY_SINCE_MINOR: u64 = 5;
+
+/// **PROD-04.1.** The `format_version` of a receipt that carries
+/// `consumer_positions` — a MINOR bump over [`FORMAT_VERSION_WITH_GENERATIONS`]
+/// (PROD-01.4a's 1.6.0) under OD-7 (a): arms 30-35 read only the new optional
+/// block, so every document without it is decided exactly as before, and an
+/// older reader ignores the field inside major 1. Written only for a backup
+/// that selects consumer groups; it includes every earlier minor.
+pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
+
+/// The first minor of format 1 that defines `consumer_positions` (arm 30). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR`
+/// together; `tests/backup_receipt.rs::the_written_version_defines_consumer_positions`
+/// keeps them coherent.
+pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = 7;
 
 /// The `format_version` this build WRITES for a receipt that pins no manifest
 /// version (a pinned one is [`FORMAT_VERSION_WITH_MANIFEST_VERSION`]; see
@@ -379,9 +490,11 @@ pub const CONFIG_SOURCES: [&str; 6] = [
 
 /// **PROD-05.1.** The `format_version` of a receipt that carries
 /// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
-/// build signs carries the block, pinned or not, so every one is 1.3.0
-/// ([`format_version_for`]); a 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
-/// inside major 1 and reads the document under it.
+/// build signs carries the block, pinned or not; until PROD-01.4a that made
+/// every one 1.3.0, and since then every one is
+/// [`FORMAT_VERSION_WITH_GENERATIONS`] ([`format_version_for`]). A 1.0.0,
+/// 1.1.0 or 1.2.0 reader ignores the field inside major 1 and reads the
+/// document under it.
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// The first minor of format 1 that defines `topic_configuration` (arm 12). A
@@ -770,6 +883,22 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// `docs/verify_scorecard.py`'s `RECEIPT_AUTH_MODES_SINCE_MINOR` follows it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 4;
 
+/// **PROD-01.4a.** The `format_version` of a receipt that carries
+/// `generations` — a MINOR bump over [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`]
+/// (PROD-03.0's 1.5.0) under OD-7 (a): arms 36-40 read only the new optional
+/// block, so every document without it is decided exactly as before, and an
+/// older reader ignores the field inside major 1. Every receipt this build
+/// signs carries the block, so every one is at least 1.6.0; it includes every
+/// earlier minor.
+pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
+
+/// The first minor of format 1 that defines `generations` (arm 36). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_GENERATIONS`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_GENERATIONS_SINCE_MINOR` together;
+/// `tests/backup_receipt.rs::the_written_version_defines_generations` keeps
+/// them coherent.
+pub const GENERATIONS_SINCE_MINOR: u64 = 6;
+
 /// The version id a reader may PIN, out of what a store answered.
 ///
 /// `None` for no answer, for a blank one, and for S3's literal `"null"` — the
@@ -796,14 +925,27 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
 /// writer decides it.
+///
+/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] (PROD-04.1) comes first: a
+/// receipt carrying `consumer_positions` is 1.7.0, which defines every earlier
+/// minor's fields. [`FORMAT_VERSION_WITH_GENERATIONS`] (PROD-01.4a) comes
+/// next: a receipt carrying `generations` is 1.6.0, which defines every
+/// earlier minor's fields. Every receipt this build signs carries
+/// `generations`, so every one is at least 1.6.0.
 #[must_use]
 pub fn format_version_for(
     archive: &ReceiptArchive,
     topic_configuration: bool,
     schema_dependency: bool,
     auth: &ReceiptAuth,
+    generations: bool,
+    consumer_positions: bool,
 ) -> &'static str {
-    if schema_dependency {
+    if consumer_positions {
+        FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+    } else if generations {
+        FORMAT_VERSION_WITH_GENERATIONS
+    } else if schema_dependency {
         FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
     } else if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
         FORMAT_VERSION_WITH_AUTH_MODES
@@ -971,6 +1113,45 @@ impl BackupReceipt {
     ///     `crate::schema_dependency::dependent_by_share(framed, unframed)`.
     /// 29. a judged topic is `schemaDependent` exactly when a side is
     ///     dependent.
+    ///
+    /// Arms 30-35 (format 1.7.0, PROD-04.1) read `consumer_positions` and run
+    /// only when it is present ([`crate::consumer_positions`]); the positions
+    /// document it binds is checked by
+    /// [`BackupReceipt::validate_consumer_positions_document`] (CP-1 to
+    /// CP-14) when a reader is given it:
+    ///
+    /// 30. `consumer_positions` is present only under a minor of at least 7.
+    /// 31. the capture ends at or after it starts, `listing` is from its
+    ///     closed set, and at least one group is recorded.
+    /// 32. `document` names this run's positions document, by a well-formed
+    ///     digest over at least one byte.
+    /// 33. each group's outcome is from the closed set, with a reason exactly
+    ///     when it is not `captured`, from that outcome's set.
+    /// 34. a captured group records its type, both states, its members,
+    ///     `active` and counts over at least one partition, and is never
+    ///     `Dead` with no member; a `GroupTypeNotCaptured` group only
+    ///     `group_type: other`; any other group none of them.
+    /// 35. `active` is what the two states say.
+    ///
+    /// Arms 36-40 (format 1.6.0, PROD-01.4a) read `generations` — with
+    /// `source.topics` as its context — and run only when it is present, so
+    /// every document without it is decided exactly as before. Topics in name
+    /// order; per topic, arms 38, 39 and 40, each over `topic_id` then
+    /// `topic_id_after`:
+    ///
+    /// 36. `generations` is present only under a minor of at least 6.
+    /// 37. it covers exactly `source.topics`.
+    /// 38. every recorded ID is canonical (`crate::topic_identity::is_canonical`):
+    ///     22 URL-safe base64 characters over 16 bytes, never one of Kafka's
+    ///     reserved IDs (zero, `AAAAAAAAAAAAAAAAAAAAAQ`).
+    /// 39. a reason is present exactly when its ID is `null`, from the closed
+    ///     set.
+    /// 40. `topic_id_source` is present exactly when an ID is recorded, from
+    ///     the closed set.
+    ///
+    /// Two different recorded IDs are NOT refused: they are a fact the run
+    /// observed (the topic was recreated while the engine ran), which a reader
+    /// reports (`crate::topic_identity::within_capture`).
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -1556,6 +1737,571 @@ impl BackupReceipt {
                         ));
                     }
                 }
+            }
+        }
+        // ARMS 30-35 (format 1.7.0, PROD-04.1): the `consumer_positions`
+        // block, and only when it is present. Every earlier receipt, and every
+        // later one whose backup selected no group, is decided exactly as
+        // before. Groups in id order. The positions themselves are in the
+        // document the block binds, checked by
+        // `validate_consumer_positions_document` (arms CP-1 to CP-14).
+        if let Some(cp) = &self.consumer_positions {
+            use crate::consumer_positions as model;
+            // ARM 30. A document that declares a minor before 7 cannot carry
+            // a 1.7 field.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < CONSUMER_POSITIONS_SINCE_MINOR {
+                return Err(format!(
+                    "consumer_positions is present but format_version {:?} predates it: the \
+                     field is defined from 1.{CONSUMER_POSITIONS_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 31. The capture ends at or after it starts, the listing word
+            // is closed, and a block records at least one group: a backup that
+            // selects none carries no block.
+            let window_fits = cp.observed_to >= cp.observed_from;
+            if !window_fits
+                || !model::LISTING_VALUES.contains(&cp.listing.as_str())
+                || cp.groups.is_empty()
+            {
+                return Err(format!(
+                    "consumer_positions records listing {:?}, {} group(s) and a capture that {}: \
+                     the capture ends at or after it starts, the listing is \"complete\" or \
+                     \"notComplete\", and at least one group is recorded",
+                    cp.listing,
+                    cp.groups.len(),
+                    if window_fits {
+                        "ends at or after it starts"
+                    } else {
+                        "ends before it starts"
+                    }
+                ));
+            }
+            // ARM 32. The positions document is the one beside this receipt,
+            // named by a well-formed digest over at least one byte.
+            let key = model::document_key(&self.backup_id, &self.run_id);
+            let digest_fits = cp
+                .document
+                .sha256
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                });
+            if cp.document.key != key || !digest_fits || cp.document.bytes == 0 {
+                return Err(format!(
+                    "consumer_positions.document is {:?} with sha256 {:?} over {} bytes: the \
+                     positions document is {key:?}, its digest \"sha256:\" and 64 lowercase hex \
+                     digits, over at least one byte",
+                    cp.document.key, cp.document.sha256, cp.document.bytes
+                ));
+            }
+            let shown = |s: Option<&String>| s.map_or("absent".to_string(), |s| format!("{s:?}"));
+            for (id, group) in &cp.groups {
+                // ARM 33. The outcome, and a reason exactly when it is not
+                // `captured`, from that outcome's set.
+                let reason_fits = match (group.outcome.as_str(), group.reason.as_deref()) {
+                    ("captured", None) => true,
+                    ("excluded", Some(r)) => model::EXCLUDED_REASONS.contains(&r),
+                    ("failed", Some(r)) => model::FAILED_REASONS.contains(&r),
+                    _ => false,
+                };
+                if !reason_fits {
+                    return Err(format!(
+                        "consumer_positions.groups[{id:?}] has outcome {:?} and reason {}: the \
+                         outcome is \"captured\", \"excluded\" or \"failed\", a reason is \
+                         present exactly when it is not \"captured\", and it is one this format \
+                         defines for that outcome",
+                        group.outcome,
+                        shown(group.reason.as_ref())
+                    ));
+                }
+                // ARM 34. What a group records follows from its outcome; a
+                // captured group's counts cover at least one partition, and a
+                // group described `Dead` with no member is never captured.
+                let captured = group.outcome == "captured";
+                let other = group.reason.as_deref() == Some(model::GROUP_TYPE_NOT_CAPTURED);
+                let state_ok = |s: Option<&String>| {
+                    s.is_some_and(|s| model::GROUP_STATES.contains(&s.as_str()))
+                };
+                let fields_fit = if captured {
+                    group
+                        .group_type
+                        .as_deref()
+                        .is_some_and(|t| model::CAPTURED_TYPES.contains(&t))
+                        && state_ok(group.state.as_ref())
+                        && state_ok(group.listed_state.as_ref())
+                        && group.members.is_some()
+                        && group.active.is_some()
+                        && group.counts.is_some_and(|c| c.total() >= 1)
+                        && !matches!(
+                            (group.state.as_deref(), group.members),
+                            (Some(state), Some(members)) if model::vanished(state, members)
+                        )
+                } else {
+                    let only_type = group.state.is_none()
+                        && group.listed_state.is_none()
+                        && group.members.is_none()
+                        && group.active.is_none()
+                        && group.counts.is_none();
+                    let ty = if other {
+                        group.group_type.as_deref() == Some(model::OTHER_TYPE)
+                    } else {
+                        group.group_type.is_none()
+                    };
+                    only_type && ty
+                };
+                if !fields_fit {
+                    return Err(format!(
+                        "consumer_positions.groups[{id:?}] is {:?} with group_type {}, state {}, \
+                         listed_state {}, members {}, active {} and counts {}: a captured group \
+                         records a type of \"classic\" or \"consumer\", both states from the \
+                         closed set, its members, active and counts over at least one \
+                         partition, and is never \"Dead\" with no member; a \
+                         GroupTypeNotCaptured group records group_type \"other\" and nothing \
+                         else; any other group records none of them",
+                        group.outcome,
+                        shown(group.group_type.as_ref()),
+                        shown(group.state.as_ref()),
+                        shown(group.listed_state.as_ref()),
+                        group
+                            .members
+                            .map_or("absent".to_string(), |n| n.to_string()),
+                        group.active.map_or("absent".to_string(), |a| a.to_string()),
+                        group.counts.map_or("absent".to_string(), |c| format!(
+                            "over {} partition(s)",
+                            c.total()
+                        ))
+                    ));
+                }
+                if let (Some(state), Some(listed), Some(active)) =
+                    (&group.state, &group.listed_state, group.active)
+                {
+                    // ARM 35. `active` is what the two states say.
+                    let derived = model::active(state, listed);
+                    if active != derived {
+                        return Err(format!(
+                            "consumer_positions.groups[{id:?}].active is {active} but its states \
+                             {state:?} and {listed:?} say {derived}: a group is active unless \
+                             both its states are \"Empty\" or \"Dead\""
+                        ));
+                    }
+                }
+            }
+        }
+        // ARMS 36-40 (format 1.6.0, PROD-01.4a): the `generations` block, and
+        // only when it is present. Every earlier receipt is decided exactly as
+        // before. Topics in name order (the map's own).
+        if let Some(generations) = &self.generations {
+            // ARM 36. A document that declares a minor before 6 cannot carry
+            // a 1.6 field.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < GENERATIONS_SINCE_MINOR {
+                return Err(format!(
+                    "generations is present but format_version {:?} predates it: the field \
+                     is defined from 1.{GENERATIONS_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 37. The observed set and the named set are the same set —
+            // the twin of arms 3, 7 and 14.
+            let observed: std::collections::BTreeSet<&str> =
+                generations.keys().map(String::as_str).collect();
+            if observed != named_topics {
+                return Err(format!(
+                    "generations covers {} but the named topic set is {}",
+                    render_set(&observed),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, entry) in generations {
+                let reads = [
+                    ("topic_id", &entry.topic_id, &entry.topic_id_reason),
+                    (
+                        "topic_id_after",
+                        &entry.topic_id_after,
+                        &entry.topic_id_after_reason,
+                    ),
+                ];
+                // ARM 38. A recorded ID is Kafka's text form of a real ID.
+                for (field, id, _) in reads {
+                    if let Some(id) = id {
+                        if !crate::topic_identity::is_canonical(id) {
+                            return Err(format!(
+                                "generations[{topic:?}].{field} {id:?} is not a topic ID this \
+                                 format defines: 22 characters of URL-safe base64 without \
+                                 padding over the ID's 16 bytes, and never one of Kafka's \
+                                 reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+                            ));
+                        }
+                    }
+                }
+                // ARM 39. A reason exactly when the ID is null, from the
+                // closed set: null is UNKNOWN, and the reason says why.
+                for (field, id, reason) in reads {
+                    let fits = match (id, reason) {
+                        (Some(_), None) => true,
+                        (None, Some(reason)) => {
+                            crate::topic_identity::TOPIC_ID_REASONS.contains(&reason.as_str())
+                        }
+                        _ => false,
+                    };
+                    if !fits {
+                        let rendered = match reason {
+                            Some(reason) => format!("{reason:?}"),
+                            None => "absent".to_string(),
+                        };
+                        let state = if id.is_some() { "recorded" } else { "null" };
+                        return Err(format!(
+                            "generations[{topic:?}].{field}_reason {rendered} does not fit a \
+                             {state} {field}: a reason is present exactly when the ID is null, \
+                             and is \"noTopicId\", \"notAuthorized\", \"topicNotFound\", \
+                             \"readFailed\", \"notRead\" or \"reservedTopicId\""
+                        ));
+                    }
+                }
+                // ARM 40. A source exactly when an ID is recorded, from the
+                // closed set.
+                let recorded = entry.topic_id.is_some() || entry.topic_id_after.is_some();
+                let fits = match &entry.topic_id_source {
+                    Some(source) => {
+                        recorded
+                            && crate::topic_identity::TOPIC_ID_SOURCES.contains(&source.as_str())
+                    }
+                    None => !recorded,
+                };
+                if !fits {
+                    let rendered = match &entry.topic_id_source {
+                        Some(source) => format!("{source:?}"),
+                        None => "absent".to_string(),
+                    };
+                    return Err(format!(
+                        "generations[{topic:?}].topic_id_source {rendered} does not fit its \
+                         IDs: a source is present exactly when an ID is recorded, and is \
+                         \"describeTopics\" or \"engineManifest\""
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **PROD-04.1: the positions document, checked against THIS receipt**
+    /// — arms CP-1 to CP-14, run by a reader that was given the document
+    /// (`logweir drill verify --consumer-positions`, `verify_scorecard.py
+    /// --consumer-positions`) after `validate_invariants` accepted the
+    /// receipt. `bytes` are the document's exact bytes and `doc` their parse.
+    /// `docs/verify_scorecard.py::check_consumer_positions_document` mirrors
+    /// every arm, in order, with the same text.
+    ///
+    /// CP-1. the receipt carries a `consumer_positions` block.
+    /// CP-2. the bytes' SHA-256 and length are the ones the block binds.
+    /// CP-3. the document is format 1 for the receipt's backup and run.
+    /// CP-4. its topics are exactly `source.topics`.
+    /// CP-5. each topic lists its partitions from 0, once each, in order.
+    /// CP-6. every mark pair and the archived range are whole, non-negative
+    ///       and ordered, and an unobserved partition has no group-capture
+    ///       marks.
+    /// CP-7. `changed_during_capture` is what the marks say.
+    /// CP-8. it records positions for exactly the receipt's captured groups.
+    /// CP-9. no group holds a kept position on a topic that changed during
+    ///       the capture, and none fails `GenerationChangedDuringCapture` when
+    ///       no topic changed.
+    /// CP-10. a group is captured only when every named topic's partitions
+    ///        were read, and none fails `PartitionsNotRead` when all were.
+    /// CP-11. a captured group's entries name partitions of the named
+    ///        topics in order, once each, every unobserved one among them,
+    ///        and `no_committed_position` counts every other partition:
+    ///        absence is never offset 0.
+    /// CP-12. each entry's status, value and reason fit one another, and
+    ///        `notObserved` is exactly an unobserved partition.
+    /// CP-13. a coverage word exactly on a captured position, and every kept
+    ///        position's verdict is what its partition's facts derive.
+    /// CP-14. the receipt's counts are what the document's positions say.
+    ///
+    /// # Errors
+    ///
+    /// The first arm the document breaks, as its message.
+    pub fn validate_consumer_positions_document(
+        &self,
+        bytes: &[u8],
+        doc: &crate::consumer_positions::PositionsDocument,
+    ) -> Result<(), String> {
+        use crate::consumer_positions as model;
+        // ARM CP-1. Only a receipt that selected groups binds a document.
+        let Some(cp) = &self.consumer_positions else {
+            return Err(format!(
+                "the receipt of run {:?} records no consumer_positions block, so it binds no \
+                 positions document: only a backup that selected consumer groups writes one",
+                self.run_id
+            ));
+        };
+        // ARM CP-2. The exact bytes the receipt's signature covers.
+        let digest = crate::ids::sha256_prefixed(bytes);
+        if digest != cp.document.sha256 || bytes.len() as u64 != cp.document.bytes {
+            return Err(format!(
+                "the positions document is {digest} over {} bytes but the receipt binds {} over \
+                 {} bytes: it is not the document this receipt signed",
+                bytes.len(),
+                cp.document.sha256,
+                cp.document.bytes
+            ));
+        }
+        // ARM CP-3. Format 1, for this receipt's own backup and run.
+        let major = parse_semver(&doc.format_version).map(|(major, _, _)| major);
+        if major != Some(1) || doc.backup_id != self.backup_id || doc.run_id != self.run_id {
+            return Err(format!(
+                "the positions document is format {:?} for backup {:?} run {:?} but the \
+                 receipt is backup {:?} run {:?}: a format-1 positions document names its \
+                 receipt's own backup and run",
+                doc.format_version, doc.backup_id, doc.run_id, self.backup_id, self.run_id
+            ));
+        }
+        // ARM CP-4. The observed topics are the named topics — the twin of
+        // arms 3, 7 and 14.
+        let named_topics: std::collections::BTreeSet<&str> =
+            self.source.topics.iter().map(String::as_str).collect();
+        let observed: std::collections::BTreeSet<&str> =
+            doc.topics.keys().map(String::as_str).collect();
+        if observed != named_topics {
+            return Err(format!(
+                "the positions document's topics cover {} but the named topic set is {}",
+                render_set(&observed),
+                render_set(&named_topics)
+            ));
+        }
+        let mut changed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut unread: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (topic, entry) in &doc.topics {
+            for (i, p) in entry.partitions.iter().enumerate() {
+                // ARM CP-5. Every partition once, from 0, in order.
+                if u64::from(p.partition) != i as u64 {
+                    return Err(format!(
+                        "the positions document's topics[{topic:?}].partitions[{i}] is \
+                         partition {}: each topic lists its partitions from 0, one entry each, \
+                         in order",
+                        p.partition
+                    ));
+                }
+                // ARM CP-6. Marks and ranges are well formed: a pair is
+                // recorded whole, never negative and never inverted, and a
+                // partition the capture did not observe has no group-capture
+                // marks.
+                let pair = |a: Option<i64>, b: Option<i64>| match (a, b) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => 0 <= a && a <= b,
+                    _ => false,
+                };
+                let fits = pair(p.log_start, p.high_watermark)
+                    && pair(p.log_start_after, p.high_watermark_after)
+                    && pair(p.archived_first, p.archived_last)
+                    && (p.observed || (p.log_start.is_none() && p.high_watermark.is_none()));
+                if !fits {
+                    return Err(format!(
+                        "the positions document's topics[{topic:?}].partitions[{i}] records \
+                         marks that are not well formed: a log start and its high watermark \
+                         are recorded together with 0 <= log start <= high watermark, the \
+                         archived range is recorded whole with 0 <= first <= last, and a \
+                         partition the capture did not observe has no group-capture marks"
+                    ));
+                }
+            }
+            // ARM CP-7. `changed_during_capture` is what the marks say.
+            let derived = model::changed_during_capture(&entry.partitions);
+            if entry.changed_during_capture != derived {
+                return Err(format!(
+                    "the positions document's topics[{topic:?}].changed_during_capture is {} \
+                     but its marks say {}: a topic changed during the capture exactly when a \
+                     mark read after the engine is below the one read at group capture",
+                    entry.changed_during_capture, derived
+                ));
+            }
+            if derived {
+                changed.insert(topic.as_str());
+            }
+            if entry.partitions.is_empty() {
+                unread.insert(topic.as_str());
+            }
+        }
+        // ARM CP-8. Positions for exactly the captured groups.
+        let captured: std::collections::BTreeSet<&str> =
+            cp.captured().map(|(id, _)| id.as_str()).collect();
+        let positioned: std::collections::BTreeSet<&str> =
+            doc.groups.keys().map(String::as_str).collect();
+        if positioned != captured {
+            return Err(format!(
+                "the positions document records positions for the groups {} but the receipt's \
+                 captured groups are {}: it records exactly the captured groups",
+                render_set(&positioned),
+                render_set(&captured)
+            ));
+        }
+        // The (topic, partition) of every named partition, in order, with its
+        // facts.
+        let facts_at: std::collections::BTreeMap<(&str, u32), &model::PartitionFacts> = doc
+            .topics
+            .iter()
+            .flat_map(|(t, e)| {
+                e.partitions
+                    .iter()
+                    .map(move |p| ((t.as_str(), p.partition), p))
+            })
+            .collect();
+        let shown = |s: Option<&String>| s.map_or("absent".to_string(), |s| format!("{s:?}"));
+        for (id, group) in &cp.groups {
+            let positions = doc.groups.get(id);
+            // ARM CP-9. No group claims a position on a topic that changed
+            // during the capture, and no group fails
+            // GenerationChangedDuringCapture when none changed.
+            let on_changed = positions
+                .iter()
+                .flat_map(|g| g.positions.iter())
+                .any(|e| e.position.is_some() && changed.contains(e.topic.as_str()));
+            let blamed = group.reason.as_deref() == Some(model::GENERATION_CHANGED);
+            if on_changed || (blamed && changed.is_empty()) {
+                return Err(format!(
+                    "consumer_positions.groups[{id:?}] is {:?} with reason {} while the topics \
+                     that changed during the capture are {}: a group holding a position on such \
+                     a topic fails GenerationChangedDuringCapture, and no group fails so when \
+                     none changed",
+                    group.outcome,
+                    shown(group.reason.as_ref()),
+                    render_set(&changed)
+                ));
+            }
+            // ARM CP-10. A group is captured only over topics whose
+            // partitions were read.
+            let not_read = group.reason.as_deref() == Some(model::PARTITIONS_NOT_READ);
+            if (group.outcome == "captured" && !unread.is_empty())
+                || (not_read && unread.is_empty())
+            {
+                return Err(format!(
+                    "consumer_positions.groups[{id:?}] is {:?} with reason {} while the topics \
+                     whose partitions were never read are {}: a group is captured only when \
+                     every named topic's partitions were read, and fails PartitionsNotRead only \
+                     when one was not",
+                    group.outcome,
+                    shown(group.reason.as_ref()),
+                    render_set(&unread)
+                ));
+            }
+            let Some(positions) = positions else {
+                continue;
+            };
+            // ARM CP-11. The entries name partitions of the named topics, in
+            // order, once each, every unobserved one among them; every other
+            // partition is counted as having no committed position. Absence
+            // is never offset 0, and a partition is never silently missing.
+            let entries = &positions.positions;
+            let out_of_place = (0..entries.len()).find(|&i| {
+                let here = (entries[i].topic.as_str(), entries[i].partition);
+                !facts_at.contains_key(&here)
+                    || (i > 0 && (entries[i - 1].topic.as_str(), entries[i - 1].partition) >= here)
+            });
+            let listed: std::collections::BTreeSet<(&str, u32)> = entries
+                .iter()
+                .map(|e| (e.topic.as_str(), e.partition))
+                .collect();
+            let unobserved_missing = facts_at
+                .iter()
+                .filter(|(at, f)| !f.observed && !listed.contains(at))
+                .count();
+            let total = facts_at.len() as u64;
+            if out_of_place.is_some()
+                || unobserved_missing > 0
+                || entries.len() as u64 + u64::from(positions.no_committed_position) != total
+            {
+                return Err(format!(
+                    "the positions document's groups[{id:?}] lists {} position(s) (first out of \
+                     place: {}), leaves {unobserved_missing} unobserved partition(s) out and \
+                     counts {} without a committed position over {total} partition(s): a \
+                     captured group lists, topics in name order and partitions in order, each \
+                     partition of a named topic at most once and every one the capture did not \
+                     observe, and counts every other partition as without a committed position",
+                    entries.len(),
+                    out_of_place.map_or("none".to_string(), |i| format!(
+                        "{i}, {:?}:{}",
+                        entries[i].topic, entries[i].partition
+                    )),
+                    positions.no_committed_position
+                ));
+            }
+            for (i, entry) in entries.iter().enumerate() {
+                let facts = facts_at[&(entry.topic.as_str(), entry.partition)];
+                // ARM CP-12. The status, a position exactly where one was
+                // committed and kept, a reason from the status's own set, and
+                // `notObserved` exactly where the capture did not look.
+                let status = entry.status.as_str();
+                let reason = entry.reason.as_deref();
+                let fits = model::POSITION_STATUSES.contains(&status)
+                    && entry.position.is_some() == matches!(status, "captured" | "excluded")
+                    && entry.position.is_none_or(|p| p >= 0)
+                    && match status {
+                        "excluded" => reason == Some(model::POSITION_BEYOND_END),
+                        "failed" => {
+                            reason.is_some_and(|r| model::POSITION_FAILED_REASONS.contains(&r))
+                        }
+                        "notObserved" => {
+                            reason.is_some_and(|r| model::NOT_OBSERVED_REASONS.contains(&r))
+                        }
+                        _ => reason.is_none(),
+                    }
+                    && (status == "notObserved") != facts.observed;
+                if !fits {
+                    return Err(format!(
+                        "the positions document's groups[{id:?}].positions[{i}] has status {:?}, \
+                         position {} and reason {}: the status is \"captured\", \"excluded\", \
+                         \"failed\" or \"notObserved\", a position is present exactly when it is \
+                         \"captured\" or \"excluded\" and is never negative, a reason exactly \
+                         when it is not \"captured\" and from that status's set, and \
+                         \"notObserved\" is exactly a partition the capture did not observe",
+                        entry.status,
+                        entry
+                            .position
+                            .map_or("absent".to_string(), |p| p.to_string()),
+                        shown(entry.reason.as_ref())
+                    ));
+                }
+                // ARM CP-13. A coverage word exactly on a captured position,
+                // and what a kept position records follows from its
+                // partition's facts: the coverage word of a captured one,
+                // PositionBeyondEnd of an excluded one.
+                let derived = entry.position.map(|p| match model::relation(p, facts) {
+                    model::Relation::MarksNotRead => model::MARKS_NOT_READ,
+                    model::Relation::BeyondEnd => model::POSITION_BEYOND_END,
+                    model::Relation::Coverage(word) => word,
+                });
+                let recorded = match status {
+                    "excluded" => Some(model::POSITION_BEYOND_END),
+                    "captured" => entry.coverage.as_deref(),
+                    _ => None,
+                };
+                let coverage_fits = entry.coverage.is_some() == (status == "captured");
+                if !coverage_fits || recorded != derived {
+                    return Err(format!(
+                        "the positions document's groups[{id:?}].positions[{i}] is {:?} with \
+                         coverage {} at position {}, but its partition's facts make it {}: a \
+                         coverage word is recorded exactly on a captured position, and a kept \
+                         position's coverage, or its PositionBeyondEnd, follows from the marks \
+                         and the archived range",
+                        entry.status,
+                        shown(entry.coverage.as_ref()),
+                        entry
+                            .position
+                            .map_or("absent".to_string(), |p| p.to_string()),
+                        derived.unwrap_or("unjudged")
+                    ));
+                }
+            }
+            // ARM CP-14. The receipt's counts are the document's.
+            let derived = model::PositionCounts::of(positions);
+            if group.counts != Some(derived) {
+                return Err(format!(
+                    "consumer_positions.groups[{id:?}].counts are {} but its positions count {}: \
+                     the receipt counts what the positions document records",
+                    group.counts.map_or("absent".to_string(), |c| c.render()),
+                    derived.render()
+                ));
             }
         }
         Ok(())

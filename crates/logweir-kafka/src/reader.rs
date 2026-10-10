@@ -692,6 +692,26 @@ pub trait ClusterReader: Send + Sync {
         let _ = topics;
         Ok(BTreeMap::new())
     }
+    /// **PROD-01.4a.** Per named topic, its topic ID (KIP-516) through
+    /// DescribeTopics — one verdict per name, in the order given
+    /// ([`crate::topic_ids`]): the ID in Kafka's text, `NoId` from a broker
+    /// that has none, `NotFound`, `NotAuthorized` (named, never "absent"), or
+    /// `Failed`. The outer `Err` is the call itself failing; a transport
+    /// failure is [`KafkaError::Unreachable`], never `NotFound`.
+    ///
+    /// The DEFAULT reads none: every name is
+    /// [`crate::topic_ids::TopicIdRead::NotRead`], so a reader that does not
+    /// implement it — every test double — can only leave an ID `null` with
+    /// the reason `notRead`, never record a guessed one.
+    fn topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::topic_ids::TopicIdRead)>, KafkaError> {
+        Ok(topics
+            .iter()
+            .map(|t| (t.clone(), crate::topic_ids::TopicIdRead::NotRead))
+            .collect())
+    }
     /// **FX-18.** Wait, at most `within`, until `topic` — which the caller has
     /// just CREATED with `partitions` partitions — is SERVED: its metadata
     /// lists every partition with a leader, and every leader answers a
@@ -756,6 +776,46 @@ pub trait ClusterReader: Send + Sync {
         from: i64,
         max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError>;
+    /// **PROD-04.1.** One capture of the `selected` consumer groups over the
+    /// partitions of `topics`: classification, descriptions, positions, and
+    /// the partitions' marks read after them (`crate::capture`'s module doc
+    /// says the order and why). Never fails: every failed read is a value.
+    ///
+    /// The DEFAULT observes nothing and says so, so a reader that does not
+    /// implement it — every test double — can only record each selected group
+    /// as failed `CaptureUnavailable`, never as captured and never as absent.
+    fn observe_consumer_groups(
+        &self,
+        selected: &[String],
+        topics: &[String],
+    ) -> crate::capture::GroupsObservation {
+        let _ = selected;
+        crate::capture::GroupsObservation::unavailable(
+            topics,
+            "this ClusterReader cannot read consumer groups",
+        )
+    }
+    /// **PROD-04.1.** Per named topic, its partitions (metadata) and each
+    /// one's log start offset and high watermark, read READ_UNCOMMITTED: the
+    /// marks a backup reads again after the engine, to see whether a topic
+    /// changed during the capture.
+    ///
+    /// The DEFAULT reads nothing, so a reader that does not implement it can
+    /// only leave the marks after the engine NOT READ, which decides nothing.
+    fn partition_marks(
+        &self,
+        topics: &[String],
+    ) -> std::collections::BTreeMap<String, crate::capture::TopicMarks> {
+        topics
+            .iter()
+            .map(|t| {
+                (
+                    t.clone(),
+                    Err("this ClusterReader cannot read partition marks".to_string()),
+                )
+            })
+            .collect()
+    }
 }
 
 /// The SECOND write seam this crate exposes (the first is TopicDeleter,

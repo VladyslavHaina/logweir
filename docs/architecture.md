@@ -204,10 +204,12 @@ lint`) enforces the perimeter, the lint table and the attribute, and scans
 the tree for `unsafe` outside the perimeter as a second layer.
 
 The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
-DescribeCluster and DescribeAcls, and the legacy group listing
+DescribeCluster and DescribeAcls, the legacy group listing
 (`rd_kafka_list_groups`, for the names of every group type: rust-rdkafka
 0.36.2's wrapper builds a member slice from a NULL pointer for a group without
-members and hides each group's error). PROD-01.4a adds DescribeTopics. It
+members and hides each group's error), and DescribeTopics (PROD-01.4a: each
+topic's ID as its two 64-bit halves, never through librdkafka's
+standard-alphabet text helper; the backup receipt records it). It
 wraps ListConsumerGroupOffsets, AlterConsumerGroupOffsets and CreateAcls only
 once a row needs them. It reads error codes and C enums as integers, and
 reports every value librdkafka clamps to Unknown as not representable.
@@ -215,7 +217,9 @@ Consumer positions are read and committed through the safe consumer API, from
 a consumer that never subscribes, which needs no exception.
 
 A wrapper leaves the perimeter once a released rust-rdkafka offers its call
-safely. When none is left, the perimeter is deleted with its crate.
+safely (for DescribeTopics, PROD-01.4b: rust-rdkafka PR #721 or a successor,
+released, with Kafka's URL-safe text form). When none is left, the perimeter
+is deleted with its crate.
 
 The rule against a custom protocol path for operations an existing client
 provides stands. Operations no linked client provides (share-group and

@@ -318,6 +318,9 @@ fn build(
                 },
                 topics,
                 all_user_topics,
+                // PROD-04.1: an ad-hoc run from the API selects no consumer
+                // group; a run copied from a schedule carries the schedule's.
+                consumer_groups: None,
                 archive,
                 destination_ref,
                 schedule_ref: None,

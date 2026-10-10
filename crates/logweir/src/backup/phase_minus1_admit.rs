@@ -139,6 +139,21 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
+    // PROD-04.1: the consumer groups whose positions the receipt records —
+    // the plan's `source.consumer_groups` and `--consumer-group` together. A
+    // selection the receipt could not record one outcome per id for is
+    // refused before anything runs, never trimmed.
+    if let Some(why) = logweir_core::consumer_positions::refuse_selection(
+        &crate::backup::selected_groups(args, spec),
+    ) {
+        return Err(GuardRefusal(format!(
+            "{why} (source.consumer_groups and --consumer-group together); every selected \
+             group gets exactly one outcome in the receipt, so a selection this build cannot \
+             record is refused rather than trimmed"
+        ))
+        .into());
+    }
+
     // 4. Interface **I6**'s refusal, LAST among the local checks.
     //
     //    Task 4's placeholder refused `--out`/`--receipt-out` outright,

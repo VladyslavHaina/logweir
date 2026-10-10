@@ -451,7 +451,21 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
         ],
     };
     let (outcome, receipt) = sign_backup(&engine, &archive, &evidence);
-    assert_eq!(receipt.format_version, "1.5.0");
+    // At least the version that defines `schema_dependency` (an exact pin
+    // breaks when a later block, PROD-01.4a's `generations`, moves the minor).
+    let (major, minor) = {
+        let mut it = receipt
+            .format_version
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap());
+        (it.next().unwrap(), it.next().unwrap())
+    };
+    assert_eq!(major, 1, "{}", receipt.format_version);
+    assert!(
+        minor >= logweir_core::backup_receipt::SCHEMA_DEPENDENCY_SINCE_MINOR,
+        "{} predates schema_dependency",
+        receipt.format_version
+    );
     receipt.validate_invariants().unwrap();
     let block = receipt
         .schema_dependency
@@ -519,6 +533,7 @@ fn sign_backup(
         backup_id_override: None,
         kafka_topic_resources: None,
         strimzi_cluster: None,
+        consumer_groups: Vec::new(),
     };
     let outcome = execute_with(&args, "01JRUN", &Reader, engine, archive, evidence)
         .unwrap_or_else(|e| panic!("the run failed: {e}"));

@@ -16,6 +16,7 @@
 //! | group description, and the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | [`groups::describe_consumer_groups`] |
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
 //! | the broker's ACL bindings | `rd_kafka_DescribeAcls` | [`acls::describe_acls`] |
+//! | topic IDs (KIP-516) of named topics (PROD-01.4a) | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
 //!
 //! # The obligations every call keeps
 //!
@@ -35,8 +36,10 @@
 //!    `raw::run` must return `T: Send + 'static`, which no raw pointer is, so
 //!    the compiler refuses a pointer escaping the event.
 //! 3. **Inputs carry no NUL, and are refused before anything is sent** when
-//!    they cannot mean what they say (empty, repeated): librdkafka would answer
-//!    a repeated group id with an error for the whole call.
+//!    they cannot mean what they say (empty, repeated, a topic name longer
+//!    than Kafka's 249 bytes) or are too many for one call: librdkafka would
+//!    answer a repeated group id or topic name with an error for the whole
+//!    call.
 //! 4. **Every wait is bounded.** Each call takes a request timeout
 //!    ([`MIN_TIMEOUT`]..=[`MAX_TIMEOUT`]) that librdkafka enforces itself, and
 //!    the poll for its result waits that plus [`POLL_MARGIN`], never longer.
@@ -77,7 +80,9 @@
 //!
 //! A call leaves this crate once a released rust-rdkafka offers it safely;
 //! when none is left, the crate is deleted and `check-unsafe-scope.sh` loses
-//! its perimeter lines. PROD-01.4a adds `rd_kafka_DescribeTopics` here.
+//! its perimeter lines. `rd_kafka_DescribeTopics` ([`topics`], PROD-01.4a)
+//! leaves through PROD-01.4b: rust-rdkafka PR #721 or a successor, released,
+//! with the URL-safe text form derived from the two halves.
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(missing_docs)]
@@ -87,6 +92,7 @@ pub mod cluster;
 pub mod groups;
 mod raw;
 mod sys;
+pub mod topics;
 
 use std::time::Duration;
 
@@ -225,6 +231,9 @@ impl std::error::Error for CallError {}
 pub(crate) mod test_support {
     use rdkafka::config::ClientConfig;
     use rdkafka::producer::BaseProducer;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     /// A client with NO bootstrap servers: librdkafka builds the handle and
     /// dials nothing, so a call made with it exercises the whole FFI path
@@ -236,6 +245,36 @@ pub(crate) mod test_support {
             .set("log_level", "0")
             .create()
             .expect("a handle with no brokers builds")
+    }
+
+    /// This process's resident set in KiB, from `ps`, bounded at 10 s.
+    pub(crate) fn rss_kib() -> u64 {
+        let mut child = Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("ps runs");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match child.try_wait().expect("ps can be waited on") {
+                Some(_) => break,
+                None if Instant::now() > deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("ps did not answer within 10 s");
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("piped")
+            .read_to_string(&mut out)
+            .expect("ps output");
+        out.trim().parse().expect("a number of KiB")
     }
 }
 

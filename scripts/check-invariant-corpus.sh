@@ -811,3 +811,223 @@ if [ "$receipt_count" -eq 0 ]; then
     fail "walked zero backup-receipt cases; e2e/fixtures/invariants/backup-receipt-index.json is empty or unreadable"
 fi
 echo "check-invariant-corpus: the auditor's verifier agrees with backup-receipt-index.json on all $receipt_count cases"
+
+# ---------------------------------------------------------------------------
+# THE CONSUMER POSITIONS DOCUMENT CORPUS (PROD-04.1), with the second reader
+# alone: `consumer-positions-index.json`, each case a receipt and the positions
+# document it binds, handed to the verifier with `--consumer-positions`.
+#
+# The same closed arithmetic as the receipt's, over the document's own pair of
+# functions — `BackupReceipt::validate_consumer_positions_document` and
+# `docs/verify_scorecard.py::check_consumer_positions_document` — so an arm
+# deleted from one reader with its case and its pytest cannot balance. The
+# two-reader claim is `crates/logweir/tests/two_reader_parity_positions.rs`'s.
+# ---------------------------------------------------------------------------
+set +e
+"$PY" - "$ROOT" <<'PYEOF'
+import json, pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+corpus = root / "e2e/fixtures/invariants"
+rust_src = (root / "crates/logweir-core/src/backup_receipt.rs").read_text()
+py_src = (root / "docs/verify_scorecard.py").read_text()
+
+
+def normalise(literal):
+    return re.sub(r"\{[^{}]*\}", "{}", literal)
+
+
+def rust_body(text, signature):
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if signature in l)
+    end = next(i for i, l in enumerate(lines[start + 1:], start + 1) if l == "    }")
+    return "\n".join(lines[start:end + 1])
+
+
+def read_rust_literal(text, i):
+    i += 1
+    out = []
+    escapes = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+    while True:
+        c = text[i]
+        if c == '"':
+            return "".join(out), i + 1
+        if c == "\\":
+            nxt = text[i + 1]
+            if nxt == "\n":
+                i += 2
+                while i < len(text) and text[i] in " \t":
+                    i += 1
+                continue
+            out.append(escapes.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+
+
+def rust_arms(body):
+    arms, i = [], 0
+    while True:
+        j = body.find("return Err(format!(", i)
+        if j < 0:
+            return arms
+        lit, i = read_rust_literal(body, body.index('"', j))
+        arms.append(normalise(lit))
+
+
+PY_LIT = re.compile(r'(?:f|r|rf|fr)?"((?:[^"\\]|\\.)*)"')
+
+
+def py_arms(body):
+    lines = body.splitlines()
+    arms, i = [], 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("return ") and stripped != "return":
+            chunk, depth = [], 0
+            while i < len(lines):
+                chunk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+                if depth <= 0:
+                    break
+            pieces = [m.group(1) for m in PY_LIT.finditer("\n".join(chunk))]
+            joined = normalise("".join(pieces).replace('\\"', '"'))
+            if joined:
+                arms.append(joined)
+            continue
+        i += 1
+    return arms
+
+
+rust = rust_arms(rust_body(rust_src, "pub fn validate_consumer_positions_document"))
+python = py_arms(
+    py_src.split("def check_consumer_positions_document(", 1)[1].split("\ndef ", 1)[0])
+if len(rust) != 14:
+    raise SystemExit(
+        f"validate_consumer_positions_document has {len(rust)} `return Err(format!(` "
+        "statements, not the fourteen arms CP-1 to CP-14")
+if rust != python:
+    raise SystemExit(
+        "the two readers do not implement the same positions document arms.\n"
+        f"  rust   ({len(rust)}): {json.dumps(rust, indent=4)}\n"
+        f"  python ({len(python)}): {json.dumps(python, indent=4)}")
+
+entries = json.loads((corpus / "consumer-positions-index.json").read_text())
+SEVEN = {"id", "receipt", "document", "rust_exit", "python_exit", "reason", "arm"}
+for e in entries:
+    if set(e) != SEVEN:
+        raise SystemExit(
+            f"consumer-positions-index.json entry {e.get('id')!r} has fields {sorted(e)}, "
+            f"not {sorted(SEVEN)}")
+    if e["arm"] != e["reason"]:
+        raise SystemExit(f"{e['id']}: `arm` and `reason` differ")
+
+
+def matches(skeleton, message):
+    parts = [re.escape(p) for p in skeleton.split("{}")]
+    return re.fullmatch(".*?".join(parts), message, re.S) is not None
+
+
+covered = {s: 0 for s in rust}
+for e in entries:
+    if not e["reason"]:
+        continue
+    hits = [s for s in rust if matches(s, e["reason"])]
+    if len(hits) != 1:
+        raise SystemExit(
+            f"{e['id']}: its reason matches {len(hits)} of the positions document's "
+            f"{len(rust)} arms; every refusing case must name exactly one.\n"
+            f"  reason: {e['reason']!r}")
+    covered[hits[0]] += 1
+missing = [s for s, n in covered.items() if n == 0]
+if missing:
+    raise SystemExit(
+        "the positions document corpus does not account for every arm.\n"
+        f"  uncovered ({len(missing)}): {json.dumps(missing, indent=4)}")
+if not any(not e["reason"] for e in entries):
+    raise SystemExit("consumer-positions-index.json has no ACCEPT case")
+
+ids = []
+for name in ("index.json", "shape-index.json", "backup-receipt-index.json",
+             "consumer-positions-index.json"):
+    ids += [e["id"] for e in json.loads((corpus / name).read_text())]
+dupes = sorted({i for i in ids if ids.count(i) > 1})
+if dupes:
+    raise SystemExit(f"the corpus indexes have duplicate id(s): {dupes}")
+print(f"check-invariant-corpus: {len(rust)} positions document arms in both readers, "
+      f"{len(entries) - 1} refusing case(s) covering all of them, {len(ids)} unique case ids "
+      "across four indexes — closed")
+PYEOF
+positions_arith_rc=$?
+set -e
+if [ "$positions_arith_rc" -ne 0 ]; then
+    fail "the positions document corpus arithmetic does not close (see above)"
+fi
+
+mkdir -p "$tmp/positions"
+"$PY" - "$CORPUS" "$tmp/positions" > "$tmp/positions-cases.tsv" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+PT = "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+key = serialization.load_pem_private_key(
+    (corpus.parent / "signed" / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+entries = json.loads((corpus / "consumer-positions-index.json").read_text())
+if not entries:
+    raise SystemExit("consumer-positions-index.json is empty; a walk over nothing proves nothing")
+for e in entries:
+    payload = (corpus / e["receipt"]).read_bytes()
+    t = PT.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{e['id']}.json").write_bytes(payload)
+    (out / f"{e['id']}.sig").write_text(json.dumps(
+        {"payloadType": PT,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+    (out / f"{e['id']}.positions.json").write_bytes((corpus / e["document"]).read_bytes())
+    if "\t" in e["reason"] or "\n" in e["reason"]:
+        raise SystemExit(f"{e['id']}: `reason` must be a single TAB-free line")
+    print(f"{e['id']}\t{e['python_exit']}\t{e['reason']}")
+PYEOF
+
+positions_count=0
+while IFS=$'\t' read -r id want_py reason; do
+    [ -n "$id" ] || continue
+    positions_count=$((positions_count + 1))
+    set +e
+    "$PY" "$VERIFIER" --payload-type backup-receipt \
+        --consumer-positions "$tmp/positions/$id.positions.json" \
+        "$tmp/positions/$id.json" "$tmp/positions/$id.sig" \
+        "$ROOT/e2e/fixtures/signed/public.pem" >"$tmp/out" 2>"$tmp/err"
+    py_rc=$?
+    set -e
+    if [ "$py_rc" -ne "$want_py" ]; then
+        cat "$tmp/err" >&2
+        fail "$id: verify_scorecard.py exited $py_rc, consumer-positions-index.json expects $want_py"
+    fi
+    got=""
+    while IFS= read -r line; do
+        case "$line" in
+            "INVALID: "*) got="${line#INVALID: }"; break ;;
+        esac
+    done < "$tmp/err"
+    if [ "$got" != "$reason" ]; then
+        fail "$id: the refusal text is not the one consumer-positions-index.json records.
+  got:  $got
+  want: $reason"
+    fi
+    echo "check-invariant-corpus: $id  python=$py_rc  ok  (positions document)"
+done <<< "$(cat "$tmp/positions-cases.tsv")"
+
+if [ "$positions_count" -eq 0 ]; then
+    fail "walked zero positions document cases; e2e/fixtures/invariants/consumer-positions-index.json is empty or unreadable"
+fi
+echo "check-invariant-corpus: the auditor's verifier agrees with consumer-positions-index.json on all $positions_count cases"

@@ -14783,3 +14783,145 @@ fn fx20_an_inline_archive_secret_is_bound_to_the_location_the_backup_writes() {
         .iter()
         .all(|(n, _)| n != cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV));
 }
+
+// ---------------------------------------------------------------------------
+// PROD-04.1: `spec.consumerGroups` reaches the frozen plan, and nothing else
+// ---------------------------------------------------------------------------
+
+mod prod_04_1 {
+    use super::*;
+    use weirkeeper::controllers::backup::{desired_execution_inputs, plan_config_map, BackupError};
+    use weirkeeper::crds::kafka_cluster::KafkaCluster;
+
+    fn cluster() -> KafkaCluster {
+        serde_json::from_str(&kafka_cluster_json()).expect("the fixture is a KafkaCluster")
+    }
+
+    fn with_groups(groups: Option<Vec<&str>>) -> Backup {
+        let mut b = backup();
+        b.spec.consumer_groups = groups.map(|g| g.into_iter().map(str::to_string).collect());
+        b
+    }
+
+    fn documents(b: &Backup) -> (String, String) {
+        let cm = serde_json::to_value(plan_config_map(b, &cluster()).expect("the plan renders"))
+            .expect("a ConfigMap serialises");
+        (
+            cm["data"]["backup.yaml"].as_str().unwrap().to_string(),
+            cm["data"]["execution-inputs.json"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        )
+    }
+
+    /// **An absent selection keeps every existing plan's bytes and hash**: a
+    /// `Backup` with no `consumerGroups`, and one with `[]`, freeze the same
+    /// two documents and the same run-policy digest, neither naming the field;
+    /// a selection reaches both documents in the spec's order and changes the
+    /// digest, which ignores the order. KILLS: serialising an empty or absent
+    /// selection; dropping the selection on the way to `backup.yaml`.
+    #[test]
+    fn a_selection_reaches_the_frozen_plan_and_an_absent_one_changes_nothing() {
+        let plain = backup();
+        let (yaml, inputs) = documents(&plain);
+        assert!(!yaml.contains("consumer_groups"), "{yaml}");
+        assert!(!inputs.contains("consumerGroups"), "{inputs}");
+        assert_eq!(
+            documents(&with_groups(Some(vec![]))),
+            (yaml.clone(), inputs.clone())
+        );
+        let digest = weirkeeper::policy::run_policy_sha256(&plain.spec);
+        assert_eq!(
+            weirkeeper::policy::run_policy_sha256(&with_groups(Some(vec![])).spec),
+            digest
+        );
+
+        let selected = with_groups(Some(vec!["billing", "audit"]));
+        let (yaml, inputs) = documents(&selected);
+        let spec: logweir_core::spec::BackupSpec =
+            serde_yaml::from_str(&yaml).expect("the runner's own parse");
+        assert_eq!(
+            spec.source.consumer_groups,
+            Some(vec!["billing".to_string(), "audit".to_string()])
+        );
+        let frozen: Value = serde_json::from_str(&inputs).unwrap();
+        assert_eq!(
+            frozen["consumerGroups"],
+            serde_json::json!(["billing", "audit"])
+        );
+        let with = weirkeeper::policy::run_policy_sha256(&selected.spec);
+        assert_ne!(with, digest, "what a run records is part of what it does");
+        assert_eq!(
+            weirkeeper::policy::run_policy_sha256(
+                &with_groups(Some(vec!["audit", "billing"])).spec
+            ),
+            with,
+            "the digest canonicalises the order"
+        );
+        // A frozen v1 view of a selecting snapshot carries no v2 block.
+        let view = desired_execution_inputs(&selected, &cluster())
+            .expect("it resolves")
+            .inputs
+            .as_version_v1();
+        assert_eq!(view.consumer_groups, None);
+    }
+
+    /// A selection the runner would refuse (exit 3) is refused before any Job:
+    /// `ExecutionSpecInvalid`, and the run policy says which field.
+    #[test]
+    fn a_selection_the_runner_would_refuse_is_refused_before_any_job() {
+        for groups in [vec!["billing", "billing"], vec![" "], vec!["a\nb"]] {
+            let b = with_groups(Some(groups.clone()));
+            match desired_execution_inputs(&b, &cluster()) {
+                Err(BackupError::Refused(state, message)) => {
+                    assert_eq!(state, "ExecutionSpecInvalid", "{groups:?}: {message}");
+                    assert!(message.contains("spec.consumerGroups"), "{message}");
+                }
+                other => panic!("{groups:?} must be refused: {:?}", other.map(|f| f.sha256)),
+            }
+            let errs = weirkeeper::policy::validate_run_policy(&b.spec).unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.field == "spec.consumerGroups"),
+                "{groups:?}: {errs:?}"
+            );
+        }
+        assert!(desired_execution_inputs(&with_groups(Some(vec!["billing"])), &cluster()).is_ok());
+    }
+
+    /// **PROD-04.1 review N1: the 80 KiB summary cap is the ENCODED size, at
+    /// and over it, in the controller.** 84 ids of 255 bytes made of `"` —
+    /// each byte two when the receipt encodes it — are the largest such
+    /// selection the cap admits: the plan renders. The 85th is refused before
+    /// any Job, by name (`ExecutionSpecInvalid`, `ConsumerGroupSelectionTooLarge`,
+    /// the encoded size in the message), never truncated. KILLS: a cap on the
+    /// ids' raw lengths (85 x 255 raw bytes are far under 80 KiB).
+    #[test]
+    fn an_escape_heavy_selection_is_refused_past_the_encoded_cap_and_admitted_at_it() {
+        let ids: Vec<String> = (0..85)
+            .map(|i| format!("{i:03}{}", "\"".repeat(252)))
+            .collect();
+        let at = with_groups(Some(ids[..84].iter().map(String::as_str).collect()));
+        assert!(desired_execution_inputs(&at, &cluster()).is_ok(), "84 fit");
+        assert!(weirkeeper::policy::validate_run_policy(&at.spec).is_ok());
+        let over = with_groups(Some(ids.iter().map(String::as_str).collect()));
+        match desired_execution_inputs(&over, &cluster()) {
+            Err(BackupError::Refused(state, message)) => {
+                assert_eq!(state, "ExecutionSpecInvalid", "{message}");
+                assert!(message.contains("spec.consumerGroups"), "{message}");
+                assert!(
+                    message.contains("ConsumerGroupSelectionTooLarge")
+                        && message.contains("bytes as JSON writes it"),
+                    "{message}"
+                );
+            }
+            other => panic!("85 must be refused: {:?}", other.map(|f| f.sha256)),
+        }
+        let errs = weirkeeper::policy::validate_run_policy(&over.spec).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.field == "spec.consumerGroups"
+                && e.message.contains("ConsumerGroupSelectionTooLarge")),
+            "{errs:?}"
+        );
+    }
+}

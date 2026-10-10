@@ -67,6 +67,8 @@ import {
   coverageWords,
   notCovered,
   renderCompleteCoverage,
+  selectionIn,
+  selectionWords,
   flagBadge,
   when,
 } from "../render.js";
@@ -591,11 +593,16 @@ export function renderCoverage(v) {
   const green = evidenceGreen(v);
   const claim = (value) => scorecardClaim(cell(value), green);
   const known = recorded === "sampled" || recorded === "complete" ? recorded : null;
+  // PROD-11.1b: a narrowed restore says so beside its coverage.
+  const selection = selectionIn(scope) || selectionIn(integrity);
+  const narrowed = selectionWords(selection);
   return (
     "<section class=\"coverage\" id=\"operation-coverage\"" +
-      (notCovered(complete) ? " data-covered=\"false\"" : "") + "><h3>Verification coverage</h3>" +
-    facts([["coverage (signed)", claim(coverageWords(known, null, complete))]]) +
-    (known === "complete" ? renderCompleteCoverage(complete, claim) : "") +
+      (notCovered(complete) ? " data-covered=\"false\"" : "") +
+      (narrowed === "" ? "" : " data-selection=\"partial\"") + "><h3>Verification coverage</h3>" +
+    facts([["coverage (signed)", claim(coverageWords(known, null, complete))]].concat(
+      narrowed === "" ? [] : [["restored (signed)", claim(narrowed)]])) +
+    (known === "complete" ? renderCompleteCoverage(complete, claim, selection) : "") +
     "</section>"
   );
 }

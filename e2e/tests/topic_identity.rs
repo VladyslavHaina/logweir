@@ -36,6 +36,9 @@
 //!   (`archived_fingerprints`). Two captures of an unchanged offset are equal
 //!   whatever the engine loses at capture (a `LogAppendTime` batch's append
 //!   time, a repeated header key). A live read is not (rows c17 and c18).
+//! * The PRODUCT's own DescribeTopics read (PROD-01.4a, `ClusterReader::
+//!   topic_ids`) must return the same ID as the CLI every time the ground
+//!   truth is read, so every row also proves the product reads Kafka's ID.
 //! * It records four verdicts side by side:
 //!   - the rule (archive against archive);
 //!   - offsets only;
@@ -1398,6 +1401,23 @@ mod live {
             id.len(),
             22,
             "a Kafka topic ID prints as 22 base64url characters: {id:?}"
+        );
+        // PROD-01.4a: the PRODUCT reads the same ID, through DescribeTopics
+        // in `logweir-rdkafka-ffi`, on every oracle row and every broker line
+        // this file runs on (decision §9's acceptance for 01.4a). The CLI
+        // stays the ground truth; the product must equal it, character for
+        // character (an ID with `-` or `_` keeps it, decision §1.3 C4).
+        let product = RdKafkaReader::connect(&[broker_address(Side::Host)], AuthConfig::Plaintext)
+            .expect("a reader")
+            .topic_ids(&[topic.to_string()])
+            .unwrap_or_else(|e| panic!("DescribeTopics of {topic}: {e}"));
+        assert_eq!(
+            product,
+            vec![(
+                topic.to_string(),
+                logweir_kafka::topic_ids::TopicIdRead::Id(id.to_string())
+            )],
+            "the product's DescribeTopics ID for {topic} is not the broker CLI's"
         );
         id.to_string()
     }

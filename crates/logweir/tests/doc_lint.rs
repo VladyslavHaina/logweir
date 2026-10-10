@@ -2046,7 +2046,8 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "replication_factor (notRecorded)",
         ),
         // PROD-11.1 (2026-10-08): a plan may select a window start (partition
-        // subsets are refused until OD-9), and the scorecard signs it.
+        // subsets were refused until OD-9; item 51), and the scorecard signs
+        // it.
         ("a restore can select a window start", "source.selection"),
         // PROD-08.1a (2026-10-08, item 43): complete coverage requested
         // through the CRDs, the API and the console, and a standing scope
@@ -2088,6 +2089,23 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "Test access compares every grant's binding",
             "destination.credentialBound",
+        ),
+        // PROD-01.4a (2026-10-09, item 49): every receipt records each
+        // topic's ID before and after the engine, and a recreated topic is a
+        // new generation.
+        ("each topic's ID before and after the engine", "generations"),
+        // PROD-04.1 (2026-10-09, item 50): a backup records the committed
+        // positions of the groups it names, one outcome each, never offset 0
+        // for absence.
+        (
+            "consumer position evidence for selected groups",
+            "consumer_positions",
+        ),
+        // PROD-11.1b (2026-10-09, item 51, OD-9 (a)): a partition subset,
+        // and the scorecard's first MAJOR it signs.
+        (
+            "a partition subset signs scorecard format 2.0.0",
+            "logweir-drill-scorecard-2.0.0.json",
         ),
     ];
     assert_eq!(

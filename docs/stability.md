@@ -30,6 +30,10 @@ adopter's evidence bucket is a document some reader may already parse, so:
     follow-up ruling, the same day), because it can only weaken an older
     reader's verdict.
 
+  The first MAJOR the owner has decided is [OD-9](to-do/product-expansion.md#owner-decisions)
+  (a), 2026-10-09: a partition-subset restore's scorecard is format **2.0.0**
+  ([below](#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)).
+
   On 2026-10-07 the owner added a third, general case (FX-7's review V3 and
   FX-3):
   - **A new cause for an existing value, or new content in an existing field,
@@ -351,7 +355,8 @@ documents — the backup receipt's `source.auth.mode` and the scorecard's
 `target.auth.mode` — and the catalog point record copies the receipt's.
 
 - **The value set is versioned, and only a document that names a new value
-  moves.** A receipt or catalog point naming one of the three is **1.4.0**, a
+  moves.** A receipt or catalog point naming one of the three is **1.4.0** (on
+  builds before PROD-03.0, which writes every receipt as 1.5.0), a
   scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
   written at the version it always was, byte for byte. Each new schema file
   differs from the frozen one beside it in that field's description only.
@@ -571,19 +576,80 @@ manifest, and is signed
   straddling the start counts all of its records into the per-partition
   bound. The writer's coverage note never says none was restored, and both
   readers say it only over a complete pass
-  ([the format](formats/drill-scorecard.md#sourceselection-format-170)).
-- **Partition subsets are refused** (`restore.partitions`,
-  `PartitionSubsetsAwaitOwnerDecision`, exit 3 before anything runs) until the
-  owner decides OD-9. A subset-narrowed document would be misread by every
-  reader before it (its unselected partitions read as restored), so it is a
-  MAJOR change under OD-7; the proposal is a 2.0.0 document written only when a
-  subset is stated.
+  ([the format](formats/drill-scorecard.md#sourceselection-format-170-and-200)).
+- **Partition subsets are format 2.0.0** (PROD-11.1b, below). PROD-11.1
+  refused them by name (`PartitionSubsetsAwaitOwnerDecision`): a
+  subset-narrowed 1.7.0 document would be misread by every reader before it
+  (its unselected partitions read as restored), so it is a MAJOR change under
+  OD-7, which the owner decided as OD-9.
 - **A runner built before PROD-11.1 refuses a plan stating a start**: it reads
   `point_in_time` as one instant, so the interval form does not parse
   (`drill spec does not parse`, exit 1), and it creates and signs nothing. It
   never restores from the floor what the plan said to restore from a start.
-  That older runner ignores a `restore.partitions` key and restores every
-  partition; no Logweir writer emits that key, and this release refuses it.
+
+### Scorecard format 2.0.0: a partition-subset restore (PROD-11.1b), the first MAJOR
+
+**The owner's decision.** [OD-9](to-do/product-expansion.md#owner-decisions),
+decided (a) on 2026-10-09: a scorecard for a partition-subset restore is
+written as format **2.0.0**, and only then; every other scorecard stays 1.x.
+Older verifiers refuse a 2.0.0 document instead of reading it as a full
+restore. This is the format's first MAJOR, and it carries the owner's recorded
+decision the rule above requires.
+
+**Why MAJOR.** A restore that states `restore.partitions`
+([the plan field](formats/drill-spec.md#a-partition-subset-restorepartitions-prod-111b))
+restores only the selected partitions of each narrowed topic, and two EXISTING
+fields then name the selection, not the topic: `integrity.verification.complete.partitions[]`
+lists the selected partitions (1.4.0 defined it as "one entry per partition
+of every restored topic"), and the sampled lane's count bound, presence check
+and engine-report check are the selected partitions'. A 1.x reader would
+read the narrowed restore as every partition restored and verified (the
+PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
+`source.selection` is ignored by a 1.x reader, so no MINOR could carry it.
+
+**What 2.0.0 is.** 1.7.0's fields, with `source.selection` required and its
+`partitions` (non-empty) and `engine_runs` required in it; `window_start_ms`
+is optional there (absent: the window started at the archive's floor). The
+schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
+which pins `format_version` to `2.x.y`; every 1.x schema is frozen beside it,
+and `schemas/logweir-drill-scorecard-1.7.0.json` still describes every other
+document this build writes. The media type keeps `version=1.0.0`, so an older
+reader reaches its major refusal rather than a payload-type mismatch
+([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
+
+- **Written for a subset, and only then.** `format_version_with_selection`
+  writes 2.0.0 exactly when the signed block names a subset; a start-only
+  restore is 1.7.0 and an unnarrowed one the 1.4.0, 1.5.0 or 1.6.0 document it
+  was, byte for byte. Every version step keeps the newer version, by major and
+  then minor, so no later step lowers 2.0.0.
+- **The readers.** `logweir drill verify`, `drill show` and
+  `verify_scorecard.py` 1.27.0 read major 2 for that shape alone (arm PS-1: a
+  2.x document without `source.selection.partitions` is refused before any
+  arm), apply every major-1 arm to it, and add PS-2 (a 1.x block is a start
+  only) to PS-5 ([the arms](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
+  A major above 2 is refused, naming 2.0.0.
+- **Every older reader refuses it**, never prints it `VALID`:
+  `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1
+  as a newer major; a `logweir` built between PROD-11.1 and PROD-11.1b as a
+  newer major, or (a subset from the archive's floor, whose block has no
+  start) at deserialisation, one step earlier
+  ([measured](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
+  An adopter who verifies subset restores upgrades the verifier first.
+- **Older runners refuse a subset plan.** A subset is written only beside an
+  interval form of `point_in_time` (`"<start>/<end>"`, or `"../<end>"` from the
+  archive's floor). A runner built before PROD-11.1 cannot parse either and
+  refuses the plan (`drill spec does not parse`, exit 1) instead of ignoring
+  the unknown `partitions` key and restoring every partition — the residual the
+  PROD-11.1 record's §6 left; a runner built between PROD-11.1 and PROD-11.1b
+  refuses it too (`"../<end>"` does not parse; beside `"<start>/<end>"` it
+  refuses the key by name). A subset beside a plain instant does not parse in
+  this release, so no Logweir plan carries one.
+- **Standing authorizations still refuse any selection**: a rehearsal
+  restores every partition from the archive's floor (`plan_within_scope`).
+- **Rollback.** An older runner refuses subset plans (above) and an older
+  reader refuses 2.0.0 documents; 2.0.0 scorecards already written stay
+  verifiable with this release's readers and later. Start-only and
+  unnarrowed documents are unchanged in both directions.
 
 ### Receipt and catalog-point format 1.5.0: `schema_dependency` (PROD-03.0)
 
@@ -634,6 +700,111 @@ the schema ids seen (the 16 smallest and a count) and how much was judged
 - **Rollback** is safe in both directions: an older runner writes 1.3.0/1.4.0
   receipts and records with no block (their topics then read not assessed), and
   the 1.5.0 documents already written stay valid under every reader.
+
+### Receipt and catalog-point format 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+
+PROD-01.4a adds one optional block to the backup receipt, `generations`, and
+its per-topic copy to the catalog point record, `topics[].identity`, and moves
+both documents to **1.6.0** (`schemas/logweir-backup-receipt-1.6.0.json` and
+`schemas/logweir-catalog-point-1.6.0.json`, PROD-03.0's 1.5.0 files frozen
+beside them). Per named topic it records the topic ID (KIP-516) Logweir's own
+DescribeTopics read returned immediately before the engine and immediately
+after it — through `logweir-rdkafka-ffi`, the one crate OD-6 (a2) lets call
+librdkafka directly — in Kafka's text form, or `null` with the reason
+([the receipt format](formats/backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-160);
+[the decision record](to-do/decisions/PROD-01.4-topic-identity.md)).
+
+- **`null` means unknown, never "the same".** A null ID says why
+  (`noTopicId` from a broker below inter-broker protocol 2.8, `notAuthorized`,
+  `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`), and the
+  generation rule (`logweir_core::topic_identity`) never reads two unknown IDs
+  as one generation: two different pre-capture IDs are a new generation, two
+  equal ones the same generation only when the later capture's own after-read
+  recorded the same ID too, anything else not established. Kafka's reserved
+  IDs (`AAAAAAAAAAAAAAAAAAAAAA`, `AAAAAAAAAAAAAAAAAAAAAQ`), which no topic is
+  ever given, are never recorded (arm 38) and never accepted from a catalog
+  record by either verifier, so no two points read as one generation through a
+  sentinel. A receipt without
+  the block — every receipt before 1.6.0 — has every topic's generation
+  unknown.
+- **Every receipt this build signs carries the block**, so every one is at
+  least 1.6.0 (1.7.0 when its backup selected consumer groups, PROD-04.1),
+  whatever its auth mode or pin; 1.6.0 includes every earlier minor. The
+  statements above that a receipt is 1.3.0 (PROD-05.1), 1.4.0 (PROD-01.3) or
+  1.5.0 (PROD-03.0) hold for builds before PROD-01.4a.
+- **Five arms, 36 to 40, are MINOR under OD-7 (a).** Each fires only on a
+  document carrying the block, and judges it against `source.topics` the way
+  arm 7 judges `config_coverage`. No document without the block changes
+  verdict; the corpus (`e2e/fixtures/invariants/`, a case per refusing arm and
+  three accepted shapes) and the parity gate re-prove that on every `just
+  lint`; `verify_scorecard.py` is 1.25.0. Two different recorded IDs are not
+  refused — they are what the run observed — and both readers say so.
+- **Readers built before PROD-01.4a** accept every 1.6.0 document — the major
+  is unchanged and the block is an optional field they ignore — print no topic
+  ID, and do not run arms 36 to 40. A 1.6.0 receipt naming one of PROD-01.3's
+  modes is refused by a reader before PROD-01.3, exactly as a 1.4.0 one.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0,
+  1.4.0 or 1.5.0 receipts and records again, with no IDs; the 1.6.0 documents
+  already written stay valid under both readers.
+- **The `unsafe` perimeter grows by one call.** `rd_kafka_DescribeTopics` joins
+  the group and ACL calls in `logweir-rdkafka-ffi` under the same rules (owned
+  values, every object destroyed once, bounded, inputs refused before
+  sending); every other crate keeps `forbid(unsafe_code)`
+  (`scripts/check-unsafe-scope.sh`). Its exit is PROD-01.4b: a released
+  rust-rdkafka that wraps DescribeTopics safely.
+
+### Receipt and catalog-point format 1.7.0: `consumer_positions` (PROD-04.1)
+
+PROD-04.1 adds one optional block to the backup receipt, `consumer_positions`,
+a new document beside the receipt that the block binds by digest — the
+positions document, format 1.0.0
+(`schemas/logweir-consumer-positions-1.0.0.json`) — and the block's
+digest-bound summary to the catalog point record, and moves the receipt and the
+record to **1.7.0** (`schemas/logweir-backup-receipt-1.7.0.json` and
+`schemas/logweir-catalog-point-1.7.0.json`, PROD-01.4a's 1.6.0 files frozen
+beside them). It records, for every consumer group a backup selected, exactly
+one outcome — captured, excluded with a reason, or failed — and for a captured
+group its position counts in the receipt and every position in the document,
+each judged against the partition's marks and the archive's offsets
+([the receipt format](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170)).
+
+- **Absent means no group was selected**, never "no positions": every receipt
+  before 1.7.0, and every later one whose backup selects none, which is
+  written as the document it was before PROD-04.1, byte for byte, with no
+  positions document. A partition with no committed offset is counted, never
+  offset 0, and a group that is not captured carries no position at all.
+- **The receipt stays bounded.** Its block depends on the selection only —
+  at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
+  selection whose summary could exceed it as JSON writes it (escapes
+  counted) is refused by name before anything runs — never on partitions, so
+  the catalog's 256 KiB read and the evidence fetch's 1 MiB hold; the
+  positions grow in their own document, which neither reads.
+- **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
+  MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
+  document without it changes verdict; the document's run only when a reader
+  is given it. The corpus (`e2e/fixtures/invariants/`, a case per arm in
+  `backup-receipt-index.json` and `consumer-positions-index.json`) and the
+  parity gate re-prove both on every `just lint`; `verify_scorecard.py` is
+  1.26.0.
+- **The plan grammar gains `source.consumer_groups`**, and the CLI
+  `--consumer-group`, both omitted when empty; a runner built before PROD-04.1
+  ignores the plan key and refuses the flag. The `Backup` and `BackupSchedule`
+  CRDs gain `spec.consumerGroups`; the frozen execution inputs carry it only
+  when present, and the run-policy digest only when non-empty, so every
+  existing plan keeps its bytes and its digest. More than 100 ids, a blank,
+  repeated or control-character id, or one over 255 bytes is refused by name.
+- **Positions are not atomic with the records.** The receipt says when they
+  were observed and which groups were active, and never claims a consistent
+  cut; a topic whose marks regressed during the capture fails the groups
+  holding a position on it.
+- **Kafka 3.7.x types no group**, so every selected group is
+  `GroupTypeNotCaptured` there (PROD-04.0 §14.1): a stated limit, not a guess.
+- **Readers built before PROD-04.1** (`verify_scorecard.py` 1.25.0 and earlier)
+  accept every 1.7.0 document and say nothing about the positions; reading
+  positions needs 1.26.0 or a `logweir` from PROD-04.1 on. **Rollback** is safe
+  for documents: the 1.7.0 receipts, their positions documents and the records
+  already written stay valid. An older controller refuses a frozen run that
+  carries `consumerGroups` (`PlanConfigMapConflict`).
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -1716,7 +1887,7 @@ What changes for an operator:
   Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
   bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
   merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), and an unpinned one still has no `manifest_version_id` key.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), from PROD-01.4a `1.6.0` (it carries `generations` too), and an unpinned one still has no `manifest_version_id` key.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and

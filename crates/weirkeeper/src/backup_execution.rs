@@ -958,6 +958,17 @@ pub struct BackupExecutionInputs {
     /// and compares it — not in a second freeze.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<ResolvedDestinationSnapshot>,
+    /// **PROD-04.1.** The consumer groups this run records positions for,
+    /// copied from `Backup.spec.consumerGroups` in the spec's order. `v2`,
+    /// optional and LAST among the optional blocks: ABSENT when the run
+    /// selects none, so every snapshot frozen before this field — and every
+    /// one that selects no group — re-encodes to the bytes it was stored as.
+    ///
+    /// A controller older than this field refuses a snapshot that carries it
+    /// (`deny_unknown_fields`: `PlanConfigMapConflict`), which is the rollback
+    /// cost, and only for runs that select groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// The archive. `v1`.
     pub archive: ArchiveInputs,
     /// The container argv, deadline and tunables. `v1`.
@@ -999,6 +1010,7 @@ impl BackupExecutionInputs {
         view.run_policy_sha256 = None;
         view.selection = None;
         view.destination = None;
+        view.consumer_groups = None;
         view
     }
 }
@@ -1145,6 +1157,18 @@ pub fn resolve_inputs(
         ));
     }
 
+    // PROD-04.1: a consumer group selection the runner would refuse at phase
+    // −1 (exit 3) is refused HERE, before anything is frozen or created.
+    if let Some(why) = crate::policy::selected_groups(&backup.spec)
+        .and_then(logweir_core::consumer_positions::refuse_selection)
+    {
+        return Err(ExecutionRefusal::spec(format!(
+            "spec.consumerGroups on {name}: {why}; every selected group gets exactly one \
+             outcome in the receipt, so a selection the runner cannot record is refused \
+             before any Job exists"
+        )));
+    }
+
     let args = match destination {
         Some(_) => runner_argv_with_store_contract(identity.trigger, &identity.id),
         None => runner_argv(identity.trigger, &identity.id),
@@ -1156,6 +1180,7 @@ pub fn resolve_inputs(
         run_policy_sha256: Some(crate::policy::run_policy_sha256(&backup.spec)),
         selection: Some(selection.selection.clone()),
         destination: destination.cloned(),
+        consumer_groups: crate::policy::selected_groups(&backup.spec).map(<[String]>::to_vec),
         source: SourceInputs {
             cluster: ObjectIdentity {
                 namespace: cluster
@@ -1366,6 +1391,9 @@ impl FrozenInputs {
                 auth: inputs.source.auth.clone(),
                 topics: inputs.topics.clone(),
                 topic_owners: None,
+                // PROD-04.1: from the frozen snapshot, so a re-created Job
+                // records the groups the run was admitted with.
+                consumer_groups: inputs.consumer_groups.clone(),
             },
             storage: inputs.archive.storage.clone(),
             backup_id: inputs.execution.id.clone(),
