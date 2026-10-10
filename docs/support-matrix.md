@@ -207,6 +207,65 @@ version instead of a downgrade. So do the table's DescribeAcls, CreateAcls and
 DeleteAcls entries (v1, the 4.x floor), which 0.21.0 never sends. That route
 (negotiate, or pin higher) belongs to PROD-00.1's capability table.
 
+### Record semantics and topic identity on each line
+
+The table above is the drill, G-PITR and the receipt path. Two suites state
+finer contracts, and both were first measured on 3.7.1: PROD-01.1's record and
+transaction semantics (`e2e/tests/record_semantics.rs`,
+[decision record](to-do/decisions/PROD-01.1-record-semantics.md)) and
+PROD-01.4's topic identity (`e2e/tests/topic_identity.rs`,
+[decision record](to-do/decisions/PROD-01.4-topic-identity.md)). PROD-01.5c ran
+both on every line on 2026-10-10 (UTC), with the suites and the product code as
+at main `64b66a15` (branch commit `fa7a9b0b`), one line at a time on compose
+slot 2 (`stack-env.sh --slot 2 --kafka LINE --profiles auth`: the digest-pinned
+images above, each version read back from the running broker), single-node
+KRaft, plaintext, MinIO.
+
+The engine was the one the images ship, `0.23.3+logweir.2`, run from the
+published linux/arm64 runner image
+(`vladyslavhaina/logweir@sha256:4f082ae8a1ee22c89bbcc8518e9c95027e8ecdacd0c1b915e8aed2a6aec42844`,
+built from main `739f17c5`; its `/etc/logweir/engine-identity` names build inputs
+`sha256:2bca49d7…`). That is the record-semantics suite's `CONTRACT_ENGINE`, so
+every row asserted its contract, and the outcome files name that engine. On any
+other engine those rows record an outcome and assert nothing.
+
+| Broker | Record semantics, default set | Topic identity, `--include-ignored` | Lost acknowledgement (`--ignored`, one sample) | Killed restore (`--ignored`, one sample) |
+|---|---|---|---|---|
+| 3.7.1 (the baseline, same session) | 12 passed, 0 failed | 53 passed, 0 failed | 2 batches resent: 2,000 duplicates, 1,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 3.9.2 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 4,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 4.1.2 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 10,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 4.3.1 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 8,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+
+**No line diverges from 3.7.1.**
+
+- **Record semantics.** The 12 rows are PROD-01.1's eight (transactions, the
+  three non-monotonic `CreateTime` rows, `LogAppendTime`, record shapes,
+  compaction, topic recreation) and the four complete-coverage rows of PROD-08.1
+  and 08.1a, which share the file. Each of the eight asserts its exact set of
+  divergences and Logweir's own verdict, as PROD-01.1 stated them from 3.7.1,
+  and proves its check can fail on a mutated output. The 13 outcome files also
+  compare the same in semantics between 3.7.1 and each other line: record
+  counts, the configurations the manifest recorded, every divergence class and
+  count, and Logweir's exit, outcome and count bound.
+- **Topic identity.** 33 pure tests, the 19 live rows (the retention row c10
+  included) and the engine-deadline row. Every live row's four verdicts with
+  their signals, its classification and its ground truth (whether the
+  broker's own topic ID changed) are equal on all four lines and equal to
+  PROD-01.4's measurement:
+  6 of 8 recreations detected, c13 and c14 the known misses, c19 the known
+  false positive, and no false `break`.
+- **The two fault rows are samples, not deterministic fixtures** (PROD-01.1
+  §5), so their numbers differ run to run by design. On every line the same
+  thing happened: a 75 s broker freeze made produce requests time out at 60 s
+  and be resent, which duplicated one 1,000-record batch each; the thawed
+  broker answered `NOT_LEADER_FOR_PARTITION`, the engine gave up on leader −1
+  and exited 1 over a partial target, and Logweir exited 1 and signed nothing.
+  A killed `logweir` left its engine container running, and the engine
+  completed the restore with nobody to verify it.
+
+Not run: either suite with authentication or on more than one broker, and the
+4.0 and 4.2 lines.
+
 ## Object stores: conditional create is required
 
 Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a
@@ -271,6 +330,17 @@ broker differs from its declaration fails. Rows below the full-drill floor seed
 with segment digests optional, because those engines write none. They record
 `unsupported(lever-absent)` only when Logweir is seen refusing the engine
 ("below the declared floor") in both the reduced row and the control.
+
+**The `broker-lines` job (PROD-01.5c).** The same workflow also runs PROD-01.1's
+record-semantics suite and PROD-01.4's topic-identity suite on every supported
+broker line (3.9, 4.1 and 4.3; `stack-env.sh --kafka LINE`, the digest-pinned
+images), one job per line, with Logweir's engine build compiled as the CI e2e
+job compiles it. The rows above run OSO's releases, and on those the
+record-semantics rows record an outcome and assert nothing; the CI e2e job
+asserts their contract on the default broker only. This job asserts it on the
+other lines. It runs each suite's default set, publishes no row (a red line is a
+red job), and has not yet run on GitHub (added 2026-10-10); the runs made by
+hand are under [Broker versions](#record-semantics-and-topic-identity-on-each-line).
 
 The job renders its rows between the two markers below and changes nothing else
 in this file. It publishes the page as the `support-matrix` artifact and in the
