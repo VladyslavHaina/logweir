@@ -502,6 +502,24 @@ pub async fn request(
     ))
 }
 
+/// **Who, in the audit record, without ambiguity** (PROD-16.2; the
+/// coordinator's addition 5). A principal is text somebody else chose: the
+/// audit record bounds every note (200 bytes) and passes it through
+/// [`crate::audit::redact`], which is right for free text and can shorten or
+/// rewrite a long or URL-shaped identity. So a principal is recorded THREE
+/// ways under `who` (`requester`, `approver`): its issuer and its subject as
+/// two separate notes (each bounded and cleaned by the record), and the
+/// SHA-256 of the whole `<issuer>#<subject>`, which is what tells two
+/// principals apart when their notes were cut at the same place.
+fn note_principal(actor: &Actor, who: &str, issuer: &str, subject: &str) {
+    actor.audit.note(&format!("{who}Issuer"), issuer);
+    actor.audit.note(&format!("{who}Subject"), subject);
+    actor.audit.note(
+        &format!("{who}Sha256"),
+        &logweir_core::ids::sha256_hex(format!("{issuer}#{subject}").as_bytes()),
+    );
+}
+
 /// A refusal of the click, attributed in the audit record under its own
 /// stable reason.
 fn refused(actor: &Actor, code: &'static str, problem: ProblemCode, detail: String) -> ApiError {
@@ -551,6 +569,7 @@ pub async fn approve(
         )]));
     }
     actor.audit.note("approverPrincipal", &actor.id());
+    note_principal(&actor, "approver", &actor.issuer, &actor.subject);
     // ---- 2. the console's mode, and the namespace's ------------------------
     if !ApprovalRoute::SecondPersonInConsole.console_may_approve(state.console_kind())
         || policy::fold_issuer(&actor.issuer) == policy::LOCAL_ADMIN_ISSUER
@@ -573,6 +592,12 @@ pub async fn approve(
             actor
                 .audit
                 .note("requester", &verified.document.requester.principal_id());
+            note_principal(
+                &actor,
+                "requester",
+                &verified.document.requester.issuer,
+                &verified.document.requester.subject,
+            );
             return Err(refused(
                 &actor,
                 "request_expired",
@@ -598,6 +623,12 @@ pub async fn approve(
     let doc = &verified.document;
     let requester = doc.requester.principal_id();
     actor.audit.note("requester", &requester);
+    note_principal(
+        &actor,
+        "requester",
+        &doc.requester.issuer,
+        &doc.requester.subject,
+    );
     actor.audit.set_plan_hash(&doc.plan_hash);
     actor.audit.note("expiresAt", &doc.expires_at.to_rfc3339());
     // ---- 5. what was shown is what is approved -----------------------------

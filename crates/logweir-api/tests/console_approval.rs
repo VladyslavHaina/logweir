@@ -1976,3 +1976,297 @@ async fn the_request_names_the_two_person_policys_own_digest() {
     personal.approver_signature = ApproverSignature::PersonalKey;
     assert_ne!(request.policy.digest, personal.digest());
 }
+
+// ---------------------------------------------------------------------------
+// The coordinator's addition 5: text somebody else chose
+// ---------------------------------------------------------------------------
+
+/// **A principal reaches the audit record unambiguously, and a refusal
+/// sentence only bounded and cleaned.** An issuer and a subject come from an
+/// identity provider's token: to the console they are text somebody else
+/// chose.
+///
+/// 1. An email-shaped subject (visible ASCII, so comparable; and the shape
+///    the record's own redaction treats as URL userinfo) is recorded as its
+///    issuer, its subject and the SHA-256 of the whole `<issuer>#<subject>`,
+///    for the requester and for the approver.
+/// 2. Two requesters whose 255-character subjects differ only in their last
+///    character have the SAME bounded subject note and DIFFERENT digests: the
+///    record tells them apart.
+/// 3. A session whose subject carries a line break, a control character and
+///    markup is refused (it cannot be compared), and the sentence the caller
+///    gets and the record's notes carry it only escaped and bounded.
+///
+/// KILLS: a principal recorded only as one bounded note (rows 1 and 2); a
+/// refusal that copies a principal raw (row 3).
+#[tokio::test]
+async fn a_principal_reaches_the_audit_record_unambiguously_and_a_refusal_only_cleaned() {
+    let (log, _guard) = capture();
+    let (app, _console) = pair_app();
+    let digest =
+        |subject: &str| logweir_core::ids::sha256_hex(format!("{ISSUER}#{subject}").as_bytes());
+
+    // ---- 1. an email-shaped pair ------------------------------------------
+    let alice = "alice@example.com";
+    let bob = "bob@example.com";
+    let created = request_as(
+        &app,
+        &session_as(&app, "sid-email-alice", ISSUER, alice, &["ops"]),
+        "email",
+        restore_request("approval-email"),
+    )
+    .await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
+    let approver = session_as(&app, "sid-email-bob", ISSUER, bob, &["approvers"]);
+    let sha = shown(&app, &approver, &restore).await;
+    let clicked = click(&app, &approver, &restore, &sha).await;
+    assert_eq!(clicked.status, 201, "{}", clicked.text());
+    let (record, notes) = log.audit(&clicked);
+    assert_eq!(record["decision"], "allow");
+    assert_eq!(notes["requesterIssuer"], ISSUER);
+    assert_eq!(notes["requesterSubject"], alice);
+    assert_eq!(notes["requesterSha256"], digest(alice));
+    assert_eq!(notes["approverIssuer"], ISSUER);
+    assert_eq!(notes["approverSubject"], bob);
+    assert_eq!(notes["approverSha256"], digest(bob));
+    assert_ne!(notes["requesterSha256"], notes["approverSha256"]);
+
+    // ---- 2. two long subjects that share their first 254 characters -------
+    let long = |last: char| format!("{}{last}", "u".repeat(254));
+    let mut seen = Vec::new();
+    for (tag, last) in [("long-a", 'a'), ("long-b", 'b')] {
+        let subject = long(last);
+        assert_eq!(subject.len(), 255, "the longest subject the rule compares");
+        let created = request_as(
+            &app,
+            &session_as(&app, &format!("sid-{tag}"), ISSUER, &subject, &["ops"]),
+            tag,
+            restore_request(&format!("approval-{tag}")),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", created.text());
+        let restore = created.json()["item"]["name"]
+            .as_str()
+            .expect("a name")
+            .to_string();
+        let sha = shown(&app, &approver, &restore).await;
+        let clicked = click(&app, &approver, &restore, &sha).await;
+        assert_eq!(clicked.status, 201, "{}", clicked.text());
+        let (_, notes) = log.audit(&clicked);
+        let note = notes["requesterSubject"]
+            .as_str()
+            .expect("a note")
+            .to_string();
+        assert!(note.len() < 255, "the note is bounded: {}", note.len());
+        assert_eq!(notes["requesterSha256"], digest(&subject));
+        seen.push((
+            note,
+            notes["requesterSha256"].as_str().expect("hex").to_string(),
+        ));
+    }
+    assert_eq!(seen[0].0, seen[1].0, "the bounded notes are the same text");
+    assert_ne!(seen[0].1, seen[1].1, "and the digests tell the two apart");
+
+    // ---- 3. a subject nobody can compare, on the approver's side ----------
+    let created = request_as(
+        &app,
+        &session_as(&app, "sid-hostile-requester", ISSUER, "carol", &["ops"]),
+        "hostile",
+        restore_request("approval-hostile"),
+    )
+    .await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
+    let hostile = "dave\nfailure-reason=Approved\u{1b}[2K\u{202e}<script>alert(1)</script>";
+    let dave = session_as(&app, "sid-hostile", ISSUER, hostile, &["approvers"]);
+    let sha = stored_sha(&app, "approval-hostile-confirmation");
+    let refused = click(&app, &dave, &restore, &sha).await;
+    refused.assert_problem(403, "forbidden");
+    let text = refused.text();
+    // The body is JSON, so a raw line break could not be in it anyway; what
+    // matters is what the SENTENCE holds once decoded.
+    let detail = refused.json()["detail"]
+        .as_str()
+        .expect("a sentence")
+        .to_string();
+    assert!(
+        detail.chars().all(|c| matches!(c, ' '..='~')),
+        "only printable ASCII reaches the sentence: {detail:?}"
+    );
+    assert!(
+        detail.contains("\\u{a}") && detail.contains("\\u{1b}") && detail.contains("\\u{202e}"),
+        "{detail}"
+    );
+    assert!(!detail.contains("<script>alert(1)</script>\n"), "{detail}");
+    assert!(detail.len() < 1_500, "{}: {text}", detail.len());
+    let (record, notes) = log.audit(&refused);
+    assert_eq!(record["decision"], "deny");
+    assert_eq!(record["failureCode"], "self_approval_forbidden");
+    assert_eq!(notes["separation"], "refused");
+    assert_eq!(notes["approverSha256"], digest(hostile));
+    assert!(app
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-hostile")
+        .is_none());
+    // And the same subject can make no REQUEST under this policy at all.
+    let asked = request_as(
+        &app,
+        &session_as(&app, "sid-hostile-ops", ISSUER, hostile, &["ops"]),
+        "hostile-request",
+        restore_request("approval-hostile-request"),
+    )
+    .await;
+    asked.assert_problem(409, "policy_mismatch");
+    let detail = asked.json()["detail"]
+        .as_str()
+        .expect("a sentence")
+        .to_string();
+    assert!(
+        detail.chars().all(|c| matches!(c, ' '..='~')),
+        "only printable ASCII reaches the sentence: {detail:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The coordinator's addition 4: the console decides from the table
+// ---------------------------------------------------------------------------
+
+/// **The console decides from `ApprovalPolicy::route`, and refuses the pair
+/// that is no row.** Every route of this service that acts on a policy asks
+/// `logweir_api::approval::route_of`, which is the core's table and nothing
+/// else about the policy:
+///
+/// | the bound policy | the row | this console (shared) may request | may approve |
+/// |---|---|---|---|
+/// | `Ordinary` | the requester confirms | yes | no |
+/// | `Governed` + `Console` | a second person in the console | yes | yes |
+/// | `Governed`, personal key | a personal key | yes | no |
+/// | `Ordinary` + `Console` | NOT A ROW | refused, `policy_mismatch` | refused |
+///
+/// The fourth pair cannot be loaded: an installation document that says so
+/// (written with `kubectl`, in the operator's words or the internal ones) is
+/// refused when the console reads its policy file, naming the file, so the
+/// console does not start on it. Built in memory, it is the console's own
+/// `policy_mismatch` (409) all the same.
+///
+/// KILLS: a `route_of` that maps the fourth pair to a row; a console that
+/// loads it.
+#[test]
+fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
+    use logweir_api::approval::route_of;
+    use logweir_api::problem::ProblemCode;
+    use logweir_core::approval_policy::{
+        ApprovalMode, ApprovalRoute, ApproverSignature, ConsoleKind,
+    };
+    let policy = |mode, approver_signature| ApprovalPolicy {
+        name: "p".into(),
+        mode,
+        max_age_seconds: 900,
+        require_distinct_principal: mode == ApprovalMode::Governed,
+        approver_signature,
+    };
+    let row = |mode, signature| route_of(&policy(mode, signature)).map_err(|e| (e.code, e.detail));
+    assert_eq!(
+        row(ApprovalMode::Ordinary, ApproverSignature::PersonalKey),
+        Ok(ApprovalRoute::RequesterConfirms)
+    );
+    assert_eq!(
+        row(ApprovalMode::Governed, ApproverSignature::Console),
+        Ok(ApprovalRoute::SecondPersonInConsole)
+    );
+    assert_eq!(
+        row(ApprovalMode::Governed, ApproverSignature::PersonalKey),
+        Ok(ApprovalRoute::PersonalKey)
+    );
+    let (code, detail) =
+        row(ApprovalMode::Ordinary, ApproverSignature::Console).expect_err("not a row");
+    assert_eq!(code, ProblemCode::PolicyMismatch);
+    assert_eq!(code.status().as_u16(), 409);
+    assert!(
+        detail.contains("not a policy anything is confirmed, approved or run under")
+            && detail.ends_with("Nothing was created or approved."),
+        "{detail}"
+    );
+    // What each row lets each console do: the click exists under one row and
+    // in one console.
+    for route in [
+        ApprovalRoute::RequesterConfirms,
+        ApprovalRoute::SecondPersonInConsole,
+        ApprovalRoute::PersonalKey,
+    ] {
+        for console in [ConsoleKind::Shared, ConsoleKind::LocalAdmin] {
+            assert_eq!(
+                route.console_may_approve(console),
+                route == ApprovalRoute::SecondPersonInConsole && console == ConsoleKind::Shared,
+                "{route:?} in {console:?}"
+            );
+            assert_eq!(
+                route.console_may_request(console),
+                !(route == ApprovalRoute::SecondPersonInConsole
+                    && console == ConsoleKind::LocalAdmin),
+                "{route:?} in {console:?}"
+            );
+        }
+    }
+
+    // An installation document that carries the fourth pair is refused where
+    // the console reads it.
+    // The crate's own convention for a scratch directory (no temp-file
+    // dependency here): unique per process, removed at the end.
+    let dir = std::env::temp_dir().join(format!("logweir-prod162-table-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory");
+    for (name, document) in [
+        (
+            "internal-words.yaml",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+        ),
+        (
+            "operator-words.yaml",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+        ),
+    ] {
+        let file = dir.join(name);
+        std::fs::write(&file, document).expect("written");
+        let refused = ApprovalSettings::load(Some(&file), None, false, &[NS_A.to_string()])
+            .err()
+            .unwrap_or_else(|| panic!("{name} is loaded"));
+        assert!(
+            refused.contains(name) && refused.contains("approver"),
+            "{refused}"
+        );
+    }
+    // NEGATIVE CONTROL: the two-person document, in either spelling, loads.
+    for document in [
+        "policies:\n  - name: p\n    mode: two-person\nnamespaces:\n  team-a: p\n",
+        "policies:\n  - name: p\n    mode: Governed\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+    ] {
+        let file = dir.join("two-person.yaml");
+        std::fs::write(&file, document).expect("written");
+        let key = dir.join("console.pem");
+        std::fs::write(
+            &key,
+            SigningKey::generate_ed25519()
+                .to_pkcs8_pem()
+                .expect("a throwaway key"),
+        )
+        .expect("written");
+        let loaded = ApprovalSettings::load(Some(&file), Some(&key), false, &[NS_A.to_string()])
+            .unwrap_or_else(|e| panic!("the two-person document loads: {e}"));
+        let bound = loaded
+            .policies
+            .resolve(NS_A)
+            .bound()
+            .cloned()
+            .expect("bound");
+        assert_eq!(route_of(&bound).ok(), Some(ApprovalRoute::SecondPersonInConsole));
+    }
+    std::fs::remove_dir_all(&dir).expect("removed");
+}

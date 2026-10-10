@@ -979,3 +979,119 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
         .expect("snapshot")
         .contains("approverSignature"));
 }
+
+// ---------------------------------------------------------------------------
+// The coordinator's addition 4: the controller decides from the table
+// ---------------------------------------------------------------------------
+
+/// **The controller decides from `ApprovalPolicy::route`, at the verdict AND
+/// at admission, and refuses the pair that is no row.** A bound policy with
+/// `mode: Ordinary` and `approverSignature: Console` cannot be read from an
+/// installation document (`ApprovalPolicySet::parse` refuses it, so the
+/// controller refuses to start on one written with `kubectl`); built here in
+/// memory, as a later code path might build one, it verifies and admits
+/// NOTHING, whatever document is offered under it — the console-approved one,
+/// the request, a strict request with its countersignature.
+///
+/// And the three rows, each by its own document and no other row's:
+///
+/// | bound policy | the document it admits | every other fixture document |
+/// |---|---|---|
+/// | `Governed` + `Console` | `approved` | refused |
+/// | `Governed` + personal key | `strict-request-countersigned` | refused |
+///
+/// (`Ordinary` + personal key, the one-person confirmation, is PROD-16.1's
+/// and has its own rows in `approval_policy.rs`.)
+///
+/// KILLS: a `route()` that maps the fourth pair to any row; a verdict or an
+/// admission that decides from `mode` alone, or from `approver_signature`
+/// alone.
+#[test]
+fn the_controller_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
+    let f = fixture();
+    let mut not_a_row = f.pair();
+    not_a_row.mode = logweir_core::approval_policy::ApprovalMode::Ordinary;
+    not_a_row.require_distinct_principal = false;
+    assert!(not_a_row.route().is_err(), "the fourth pair");
+    for case in ["approved", "request", "strict-request-countersigned"] {
+        let refused = verdict_with(
+            &f,
+            case,
+            &not_a_row,
+            f.now(),
+            vec![f.console_key(), f.personal_key()],
+        );
+        assert_eq!(
+            reason(&refused),
+            "ApprovalPolicyMismatch",
+            "{case}: {refused:?}"
+        );
+        assert!(
+            words(&refused).contains("not a policy anything is confirmed, approved or run under"),
+            "{case}: {}",
+            words(&refused)
+        );
+        let admission = admit(&f, case, &not_a_row, f.now());
+        assert_eq!(
+            admission.reason(),
+            "ApprovalPolicyMismatch",
+            "{case}: {admission}"
+        );
+        assert!(admission.is_terminal(), "{case}");
+    }
+    // An installation document that says so is refused where it is read.
+    for document in [
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+    ] {
+        let refused = weirkeeper::approval_policy::configured_policy(
+            Ok("/etc/logweir/approval-policy.yaml".to_string()),
+            |_| Ok(document.to_string()),
+        )
+        .expect_err("the controller does not start on it");
+        assert!(
+            refused.contains("/etc/logweir/approval-policy.yaml") && refused.contains("approver"),
+            "{refused}"
+        );
+    }
+
+    // THE ROWS, each admitting its own document and refusing the others'.
+    let mut personal = f.pair();
+    personal.approver_signature = ApproverSignature::PersonalKey;
+    let keys = || vec![f.console_key(), f.personal_key()];
+    let rows: [(&str, ApprovalPolicy, &str); 2] = [
+        ("Governed + Console", f.pair(), "approved"),
+        (
+            "Governed + personal key",
+            f.strict(),
+            "strict-request-countersigned",
+        ),
+    ];
+    let documents = [
+        "approved",
+        "request",
+        "request-countersigned-by-a-personal-key",
+        "strict-request",
+        "strict-request-countersigned",
+        "strict-with-a-console-approver",
+    ];
+    for (label, bound, admitted) in &rows {
+        for case in documents {
+            let result = verdict_with(&f, case, bound, f.now(), keys());
+            assert_eq!(
+                result.is_ok(),
+                case == *admitted,
+                "{label} over {case}: {result:?}"
+            );
+        }
+    }
+    // The same two-person policy with a personal key is another policy (its
+    // digest differs): it admits neither row's document.
+    for case in documents {
+        let result = verdict_with(&f, case, &personal, f.now(), keys());
+        assert!(
+            result.is_err(),
+            "the rebound policy over {case}: {result:?}"
+        );
+    }
+}

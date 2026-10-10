@@ -2103,3 +2103,339 @@ fn the_checked_in_console_approval_fixture_is_judged_the_same_by_the_runner() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// PROD-16.2, the coordinator's additions 3, 4 and 5 at the runner
+// ---------------------------------------------------------------------------
+
+/// **THE RUNNER DECIDES FROM THE FULL TABLE, NOT FROM ONE GUARD.** The
+/// snapshot's `(mode, approverSignature)` pair picks the row
+/// (`ApprovalPolicy::route`), and each row admits ITS document, signed ITS
+/// way, and no other row's:
+///
+/// | snapshot | document | approver key the bundle names | sidecar | result |
+/// |---|---|---|---|---|
+/// | `Ordinary` | its confirmation | the console key | console | admitted, `ordinary` |
+/// | `Governed` + `Console` | request + approver + approvedAt | the console key | console | admitted, `consoleApproval` |
+/// | `Governed` (personal key) | its request | a personal key | console + personal | admitted, `governed` |
+/// | `Ordinary` + `Console` | anything | anything | anything | REFUSED: not a row |
+///
+/// Every (snapshot, document, key) triple OFF that diagonal is refused with
+/// exit-3 routing before any client exists. The fourth pair is what a
+/// tampered snapshot carries: no installation document can produce it
+/// (`ApprovalPolicySet::parse` refuses it), so the runner meets it only in
+/// bytes somebody edited, and refuses those by name.
+///
+/// KILLS: a route that maps the fourth pair to any row; a row that admits
+/// another row's document (the console key as a strict approver; a personal
+/// key under a console policy; a confirmation under a governed snapshot).
+#[test]
+fn the_runner_decides_from_the_table_and_refuses_every_pair_off_it() {
+    let k = keys();
+    let confirm = policy(ApprovalMode::Ordinary);
+    let pair = pair_policy();
+    let strict = strict_policy();
+
+    // One document per row, each naming ITS policy's digest.
+    let confirmation = document(ApprovalMode::Ordinary);
+    let approved = pair_approved(PLAN);
+    let mut strict_request = pair_request(PLAN);
+    strict_request.policy = PolicyRef {
+        name: strict.name.clone(),
+        digest: strict.digest(),
+    };
+    let documents = [
+        ("the confirmation", &confirmation),
+        ("the console approval", &approved),
+        ("the strict request", &strict_request),
+    ];
+    let snapshots = [
+        ("Ordinary", confirm.snapshot_bytes()),
+        ("Governed + Console", pair.snapshot_bytes()),
+        ("Governed, personal key", strict.snapshot_bytes()),
+    ];
+    // (the approver key the bundle names, whether the sidecar is countersigned)
+    let signings = [("the console key", false), ("a personal key", true)];
+    let admitted = [
+        ("Ordinary", "the confirmation", "the console key"),
+        (
+            "Governed + Console",
+            "the console approval",
+            "the console key",
+        ),
+        (
+            "Governed, personal key",
+            "the strict request",
+            "a personal key",
+        ),
+    ];
+    let mut modes = Vec::new();
+    for (snapshot_name, snapshot) in &snapshots {
+        for (document_name, document) in documents {
+            for (key_name, countersigned) in signings {
+                let bytes = document.to_bytes();
+                let approver_pem = if countersigned {
+                    pem(&k.approver)
+                } else {
+                    pem(&k.console)
+                };
+                let result = verify(
+                    PLAN,
+                    &bytes,
+                    &sidecar(&bytes, &k, countersigned),
+                    &approver_pem,
+                    &pem(&k.console),
+                    snapshot,
+                    &subject(),
+                    &k,
+                );
+                let on_the_diagonal = admitted.contains(&(*snapshot_name, document_name, key_name));
+                let cell = format!("{snapshot_name} / {document_name} / {key_name}");
+                match &result {
+                    Ok(approved) => {
+                        assert!(on_the_diagonal, "{cell} was admitted");
+                        modes.push(approved.approval_mode);
+                    }
+                    Err(_) => {
+                        assert!(!on_the_diagonal, "{cell}: {}", message(&result));
+                        assert!(is_guard(&result), "{cell}: {}", message(&result));
+                        assert!(
+                            message(&result).contains("no data operation was started"),
+                            "{cell}: {}",
+                            message(&result)
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        modes,
+        vec![
+            phase1_approval::APPROVAL_MODE_ORDINARY,
+            phase1_approval::APPROVAL_MODE_CONSOLE,
+            phase1_approval::APPROVAL_MODE_GOVERNED,
+        ],
+        "each row signs its own word, and nothing else was admitted"
+    );
+
+    // THE FOURTH PAIR, as bytes somebody edited: the two-person snapshot with
+    // its mode changed, and the confirm snapshot with the console setting
+    // added. Every document, under either, with either key: refused by name.
+    let mut not_a_row = pair.clone();
+    not_a_row.mode = ApprovalMode::Ordinary;
+    not_a_row.require_distinct_principal = false;
+    assert!(not_a_row.route().is_err());
+    let edited = String::from_utf8(pair.snapshot_bytes())
+        .expect("utf-8")
+        .replace("\"mode\":\"Governed\"", "\"mode\":\"Ordinary\"");
+    assert_ne!(edited.as_bytes(), pair.snapshot_bytes().as_slice());
+    for snapshot in [not_a_row.snapshot_bytes(), edited.into_bytes()] {
+        for (document_name, document) in documents {
+            // Name the tampered policy's own digest, so the digest is not
+            // what refuses it.
+            let mut document = document.clone();
+            document.policy = PolicyRef {
+                name: not_a_row.name.clone(),
+                digest: not_a_row.digest(),
+            };
+            for (key_name, countersigned) in signings {
+                let bytes = document.to_bytes();
+                let approver_pem = if countersigned {
+                    pem(&k.approver)
+                } else {
+                    pem(&k.console)
+                };
+                let result = verify(
+                    PLAN,
+                    &bytes,
+                    &sidecar(&bytes, &k, countersigned),
+                    &approver_pem,
+                    &pem(&k.console),
+                    &snapshot,
+                    &subject(),
+                    &k,
+                );
+                assert!(
+                    is_guard(&result),
+                    "{document_name} / {key_name}: {}",
+                    message(&result)
+                );
+                assert!(
+                    message(&result)
+                        .contains("not a policy anything is confirmed, approved or run under"),
+                    "{document_name} / {key_name}: {}",
+                    message(&result)
+                );
+            }
+        }
+    }
+}
+
+/// **NO FABRICATED TIME (the coordinator's addition 3).** Under a console
+/// policy the approval's instant is the document's `approvedAt` or the run is
+/// refused, exit 3, by name: the runner never records the request's time, or
+/// any other, in its place.
+///
+/// * an approver and no `approvedAt`: refused, naming `approvedAt`;
+/// * `approvedAt` and no approver: refused;
+/// * neither (the request): refused, "nobody has approved";
+/// * THE CONTROL: both, and the evidence carries exactly that instant — which
+///   is NOT the request's `issuedAt`.
+///
+/// And the personal-key and one-person rows keep what main records: the
+/// instant the console signed (`issuedAt`), as before.
+#[test]
+fn a_console_approval_without_its_instant_is_refused_by_name_and_no_time_is_made_up() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let base = pair_approved(PLAN);
+    let stamped = base.approved_at.expect("the approval's instant");
+    assert_ne!(stamped, base.issued_at, "the two instants differ");
+
+    let mut no_instant = base.clone();
+    no_instant.approved_at = None;
+    let refused = verify_console(PLAN, &no_instant, &snapshot, &k);
+    assert!(is_guard(&refused), "{}", message(&refused));
+    // The document's own shape check names both fields, before any other
+    // rule reads them (`RestoreAuthorization::from_bytes`); the function
+    // that takes the instant out refuses the same document again, by name
+    // (`console_approval_of`, held by its own row in `logweir-core`).
+    let by_name = "one of `approver` and `approvedAt` without the other; a console approval \
+                   names who approved AND when";
+    assert!(
+        message(&refused).contains(by_name)
+            && message(&refused).contains("no data operation was started"),
+        "{}",
+        message(&refused)
+    );
+    let mut no_approver = base.clone();
+    no_approver.approver = None;
+    let refused = verify_console(PLAN, &no_approver, &snapshot, &k);
+    assert!(is_guard(&refused), "{}", message(&refused));
+    assert!(message(&refused).contains(by_name), "{}", message(&refused));
+    let refused = verify_console(PLAN, &pair_request(PLAN), &snapshot, &k);
+    assert!(is_guard(&refused), "{}", message(&refused));
+    assert!(
+        message(&refused).contains("nobody has approved"),
+        "{}",
+        message(&refused)
+    );
+
+    // THE CONTROL: the instant in the evidence is the document's, in both
+    // places a scorecard carries it.
+    let approved = verify_console(PLAN, &base, &snapshot, &k).expect("approved");
+    assert_eq!(approved.approval.approved_at, stamped);
+    let console = approved.approval.console.as_ref().expect("the block");
+    assert_eq!(console.approved_at, stamped);
+    assert_eq!(console.requested_at, base.issued_at);
+    assert_eq!(console.request_expires_at, base.expires_at);
+    assert_eq!(console.confirmation_key_id, k.console.key_id());
+    assert_eq!(console.requester.subject, "alice");
+    assert_eq!(console.approver.subject, "bob");
+
+    // What main records for the other two rows is unchanged: `issuedAt`, and
+    // no console block.
+    let confirmation = document(ApprovalMode::Ordinary);
+    let bytes = confirmation.to_bytes();
+    let ordinary = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, false),
+        &pem(&k.console),
+        &pem(&k.console),
+        &policy(ApprovalMode::Ordinary).snapshot_bytes(),
+        &subject(),
+        &k,
+    )
+    .expect("a one-person confirmation");
+    assert_eq!(ordinary.approval.approved_at, confirmation.issued_at);
+    assert!(ordinary.approval.console.is_none());
+    let strict = strict_policy();
+    let mut request = pair_request(PLAN);
+    request.policy = PolicyRef {
+        name: strict.name.clone(),
+        digest: strict.digest(),
+    };
+    let bytes = request.to_bytes();
+    let governed = verify(
+        PLAN,
+        &bytes,
+        &sidecar(&bytes, &k, true),
+        &pem(&k.approver),
+        &pem(&k.console),
+        &strict.snapshot_bytes(),
+        &subject(),
+        &k,
+    )
+    .expect("a personal-key approval");
+    assert_eq!(governed.approval.approved_at, request.issued_at);
+    assert_eq!(
+        governed.approval.approver,
+        format!("governed approver key {}", k.approver.key_id())
+    );
+    assert!(governed.approval.console.is_none());
+}
+
+/// **REFUSAL TEXT (the coordinator's addition 5).** A requester and an
+/// approver are text somebody else chose. Whatever a signed document carries
+/// in them, the runner's refusal is ONE line of printable ASCII of bounded
+/// length: a line break cannot start a second line that reads as another
+/// outcome, a control sequence cannot rewrite the terminal, and a megabyte of
+/// subject is counted, not copied.
+///
+/// THE CONTROL: the same document with an ordinary second person runs.
+#[test]
+fn a_principal_reaches_the_runners_refusal_only_bounded_and_cleaned() {
+    let k = keys();
+    let snapshot = pair_policy().snapshot_bytes();
+    let hostile = [
+        "bob\nlogweir: outcome=pass exit=0",
+        "bob\r\n\u{1b}[2J\u{1b}[H",
+        "bob\u{202e}\u{200b}<script>alert(1)</script>",
+        &"b".repeat(1_000_000),
+    ];
+    for subject in hostile {
+        for approver_side in [true, false] {
+            let mut doc = pair_approved(PLAN);
+            if approver_side {
+                doc.approver = Some(logweir_core::approval_policy::Approver {
+                    issuer: IDP.into(),
+                    subject: subject.into(),
+                });
+            } else {
+                doc.requester = Requester {
+                    issuer: IDP.into(),
+                    subject: subject.into(),
+                };
+            }
+            let result = verify_console(PLAN, &doc, &snapshot, &k);
+            assert!(is_guard(&result), "{approver_side}");
+            let text = message(&result);
+            assert!(
+                text.chars().all(|c| matches!(c, ' '..='~')),
+                "only printable ASCII, on one line: {:?}",
+                &text[..text.len().min(400)]
+            );
+            assert!(text.len() < 2_000, "{}", text.len());
+            assert!(
+                !text.contains("outcome=pass exit=0")
+                    || text.contains("\\u{a}logweir:\\u{20}outcome=pass\\u{20}exit=0"),
+                "{text}"
+            );
+        }
+    }
+    // The request itself (nobody approved), with a hostile requester.
+    let mut pending = pair_request(PLAN);
+    pending.requester = Requester {
+        issuer: IDP.into(),
+        subject: hostile[0].into(),
+    };
+    let result = verify_console(PLAN, &pending, &snapshot, &k);
+    assert!(is_guard(&result));
+    let text = message(&result);
+    assert!(text.chars().all(|c| matches!(c, ' '..='~')), "{text:?}");
+    assert!(text.contains("nobody has approved"), "{text}");
+    // THE CONTROL.
+    assert!(verify_console(PLAN, &pair_approved(PLAN), &snapshot, &k).is_ok());
+}
