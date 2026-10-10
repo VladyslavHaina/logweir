@@ -2317,10 +2317,12 @@ or a signed document changes.
   not read these records after restore."** with each topic, its sides and its
   schema ids, for a point whose API view carries them. A point from before
   receipt 1.5.0 still reads *not assessed*.
-- **A Restore's Integrity table read `-` three times.** `level` now shows the
-  scorecard's own word (`byte-fingerprint`, `consume-only` or
-  `not-attempted`), which the operation route publishes as
-  `completion.integrityLevel` and the detail view dropped. The integrity
+- **A Restore's Integrity table read `-` three times.** For a restore that
+  passed, `level` now shows the scorecard's own word (`byte-fingerprint` or
+  `consume-only`), which the operation route publishes as
+  `completion.integrityLevel` and the detail view dropped. The controller
+  writes a completion only for a restore that passed, so for a failed or
+  partial one the level reads **not published by the product API** too. The integrity
   `result` and `partial reason`, the objectives, the measured values, the
   target topic preflight and the old topics are published by no route of the
   product API: those cells now read **not published by the product API**,
