@@ -6085,11 +6085,13 @@ and cleans it before it is stored:
   ([the line's contract](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
   The reason is shown only when that line carries the Job's own token. This
   is not caution for its own sake: whoever writes a plan can start a line in
-  the runner's log, because the runner prints an error's text as it is and an
-  error may repeat a plan value that holds a line break. A pod log is stdout
-  and stderr merged into one stream, so nothing about where a line stands, or
-  how well-formed it is, tells the runner's line from one the plan's author
-  made it print.
+  the runner pod's log. The runner escapes every line break in the error text
+  it prints itself (PROD-15.1), but the Kafka client inside it writes its own
+  lines to the same stderr, unescaped, and those can repeat a plan value that
+  holds a line break (a bootstrap address, for one). A pod log is stdout and
+  stderr merged into one stream, so nothing about where a line stands, or how
+  well-formed it is, tells the runner's line from one the plan's author got
+  into the log.
 - **What the token is.** Each time the controller builds a `Restore`'s or a
   `Backup`'s Job it makes a fresh random value (160 bits from the operating
   system, written as 40 hex digits) and gives it to the runner as the last
@@ -6146,7 +6148,7 @@ and cleans it before it is stored:
 
 | The message ends with | It means |
 |---|---|
-| *(nothing after `…exitCode`)* | No line in the log carries this Job's line token. The Job has none (a controller older than this release built it), or the runner printed its line without one, or printed none. Any `refusal-detail=` line that IS in the log was not written by this Job's runner with its token, and is not shown. The pod log, while it exists, has the sentence. |
+| *(nothing after `…exitCode`)* | No line in the log carries this Job's line token. The Job has none (a controller from before this change built it, or the operating system gave the controller no random bytes when it built the Job, which the controller logs as one warning), or the runner printed its line without one, or printed none. Any `refusal-detail=` line that IS in the log was not written by this Job's runner with its token, and is not shown. The pod log, while it exists, has the sentence. |
 | ``; the runner gave no readable reason: its `refusal-detail=` line did not validate, so nothing from it is shown`` | A line carried the Job's token, so the runner wrote it, and it was not something this controller can show: a code that is not on that kind's list (a runner newer than the controller), nothing printable in its sentence, or a `refusal-reason=` line after it naming a state it could not have been printed with. |
 | `; the runner's reason could not be read because the pod is gone` | The pod was already collected when the controller read its log (a `404`). The exit code was read before that and is recorded. |
 | `; the runner's reason could not be read: the pod log read answered HTTP 403` (or `500`, …) | The read was refused or failed. The controller logs one warning naming the pod and the status, and does not read again. |
@@ -6173,19 +6175,70 @@ by the platform.
 
 **What the token does not cover.** It separates the runner's line from text
 written before the Job existed, which is every plan. Anyone who can read the
-Job can read its token, so an input that can still change after the Job is
-built, and that a refusal repeats as it is, could in principle carry it: a
-value a broker reports, the text of an error from parsing a mounted file. No
-plan can.
+Job can read its token, so text that is produced after the Job is built, and
+that reaches the pod log with a line break intact, could in principle carry
+it. The runner escapes line breaks in every error text it prints itself
+(PROD-15.1), which leaves what it does not print: the Kafka client's own
+lines on stderr, which can repeat what a broker sends. No plan can.
 
-**Roll the controller and the runner image together.** A runner image older
-than this release does not know `--line-token` and exits 1 while parsing its
-arguments, for every `Restore` and `Backup` Job this controller creates. The
-chart moves both in one upgrade when `image` and `runnerImage` move together;
-a `runnerImage` pinned to an older release must be moved first or with it. A
-Job created before the upgrade has no token and runs as it did. The reverse
-skew is harmless: a newer runner given no token prints its line without one,
-and an older controller ignores the line.
+#### The runner image must be at least as new as the controller
+
+This controller passes `--line-token` to every `Restore` and `Backup` Job it
+creates, and a runner that does not know the flag stops while it parses its
+arguments, before any work. That is **every runner image published before
+this change**, the images published from `main` since `v0.2.0-rc.1` included:
+not only an older release. (No tagged release's runner loses a working run to
+this. Since release-notes item 35, a runner image published before PROD-00.2
+declares no engine, the controller gives it none, and its runs already stop
+at exit 1 before the engine starts.)
+
+**One `helm upgrade` of the packaged chart cannot produce that pair.** The
+chart renders both images into ONE Deployment: `controllerImage` is the
+controller container's image, and `runnerImage` is the `LOGWEIR_RUNNER_IMAGE`
+that controller gives every Job. The packaged chart pins both to one
+publication, so one upgrade moves both in one rollout. A controller with this
+change over a runner without it can still occur in three ways:
+
+- **Two pinned tags, one moved.** `controllerImage` and `runnerImage` are
+  each set to a tag (the `sha-<commit>` tags CI publishes, for example), and
+  an upgrade moves the first and leaves the second.
+- **The source chart's floating defaults.** `charts/logweir/values.yaml`
+  names `…/weirkeeper:latest` and `…/logweir:latest`. They are two tags, moved
+  one after the other and pulled at different moments: the controller's when
+  its pod starts, the runner's when each Job's pod starts, from whatever
+  registry or mirror that node pulls from and under `runnerImagePullPolicy`.
+  CI moves the runner's tag before the controller's, so a direct pull under
+  the default `Always` gets a runner at least as new. A mirror that copies
+  the controller first, or a node that holds an older `logweir:latest` under
+  `IfNotPresent`, gets the mixed pair.
+- **`runnerImage` pinned apart from the controller:** a mirror, an air-gapped
+  registry, a pin left from an earlier incident.
+
+**What it looks like.** Every `Restore` and `Backup` the controller starts
+ends `Failed`, with `exitCode: 1`, `exitReason: operational` and the message
+every failed run carries ("the runner exited 1 (operational); the code was
+read from …"). Nothing on the object names the cause, and a broker outage
+writes the same status. The runner pod's log names it for as long as the pod
+exists. Its first line is
+
+```
+error: unexpected argument '--line-token' found
+```
+
+and the command's usage line follows. A `BackupSchedule` with a retry policy
+retries the slot, because exit 1 is retryable, and each attempt fails the same
+way. Nothing ran, nothing was signed and nothing was written.
+
+**What to do.** Set `runnerImage` to the image published from the same build
+as `controllerImage`, in one `helm upgrade`. The next Job starts. The
+controller does not look for that log line and has no state that names a
+mixed pair.
+
+**Rolling back: both together, or the controller first.** An older controller
+passes no token and ignores the new line, so it runs over this runner as it
+always did; a newer runner given no token prints its line without one. The
+runner image first is the mixed pair above. A Job created before an upgrade
+has no token and runs as it did.
 
 ### What a run says about itself while it is running — `status.progress`
 

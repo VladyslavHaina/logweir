@@ -1967,9 +1967,10 @@ condition, event, annotation, API response or controller log line.
 
 **A reader honours the line only when it carries the Job's token, and that is the whole test of
 whose line it is.** A pod log is stdout and stderr merged into one stream, the sentence repeats
-text from the plan, the broker and the archive, and the plan's author can start a line in the log:
-the human line prints an error's text as it is, and an error may repeat a plan value that holds a
-line break. So neither a line's shape nor its place says who wrote it. The token does: it is made
+text from the plan, the broker and the archive, and the plan's author can start a line in the log.
+The runner escapes every line break in the error text it prints itself (`logweir::exit::one_line`,
+PROD-15.1); the Kafka client's own stderr logging is not escaped, and it can repeat a plan value
+that holds a line break. So neither a line's shape nor its place says who wrote it. The token does: it is made
 when the Job is built, and a plan is older than its Job. `weirkeeper` therefore does NOT read this
 line by key name over a tail, as erratum E4 reads the others. It reads the Job's token off the
 Job, takes the LAST `refusal-detail=` line whose `token` equals it (compared in constant time), and
@@ -1997,10 +1998,23 @@ code (when the code is one of I9's states and the sentence named it with `: `) o
 - *A new runner under an older controller.* The older controller passes no `--line-token`, so the
   line is printed without a token; it scans for `refusal-reason=` by name and ignores a line it
   does not know. The status is what it was.
-- *An older runner under a newer controller.* **Not supported: roll the two together.** The
-  controller passes `--line-token` to every `Restore` and `Backup` Job it creates, and a runner
-  that predates the flag exits 1 while parsing its arguments, before any work. (A Job the older
-  controller had already created has no token and its run is unaffected.)
+- *A runner that does not know the flag, under this controller.* **Not supported: the runner
+  image must be at least as new as the controller.** The controller passes `--line-token` to every
+  `Restore` and `Backup` Job it creates, and such a runner stops while parsing its arguments,
+  before any work: exit 1, stdout empty, and stderr opening with
+  `error: unexpected argument '--line-token' found`. The object says `exitCode: 1`,
+  `exitReason: operational` and names no cause. This is EVERY runner image published before this
+  change, the images published from `main` since `v0.2.0-rc.1` included, and not only an older
+  release. No tagged release's runner loses a working run to it: since PROD-00.2 (release-notes
+  item 35) a runner image published before that change declares no engine, the controller gives it
+  none, and its runs already stop at exit 1 before the engine starts. The execution-contract
+  version is not what refuses anything here: it is `"2"` in `v0.2.0-rc.1` and now. One
+  `helm upgrade` of the packaged chart moves both images in one rollout (`controllerImage` and
+  `runnerImage` are rendered into one Deployment); the three ways the pair can still differ, what
+  it looks like and what to do are in
+  [docs/kubernetes.md](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
+  To roll back, move both together or the controller first. (A Job a controller had created
+  before the upgrade has no token and its run is unaffected.)
 - *A newer runner whose code this controller does not know.* The line is not shown; the state on
   `refusal-reason=` and the exit code are recorded as always.
 - *A Job with no token, read by this controller* (it was created before the upgrade). No line is

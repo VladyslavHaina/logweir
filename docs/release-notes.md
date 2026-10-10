@@ -2322,9 +2322,11 @@ more stdout line at every exit 3,
 `refusal-reason=`, which stays the final line
 ([stability.md](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
 The controller treats the log as untrusted text. Whoever writes a plan can
-start a line in the runner's log (an error's text is printed as it is, and it
-may repeat a plan value that holds a line break), and a pod log is one merged
-stream, so neither the shape of a line nor its place says who wrote it. The
+start a line in the runner pod's log (item 56 escapes the line breaks in the
+error text the runner prints itself; the Kafka client inside it writes to the
+same stderr unescaped, and can repeat a plan value that holds a line break),
+and a pod log is one merged stream, so neither the shape of a line nor its
+place says who wrote it. The
 controller therefore makes a fresh random **line token** each time it builds a
 `Restore`'s or a `Backup`'s Job, gives it to the runner as its last two
 arguments (`--line-token <hex>`), and shows a reason only from a line that
@@ -2354,15 +2356,30 @@ standing (rehearsal) `Restore` waiting for or refused over its approval names
 `spec.authorization.approvalRef`, where it named `spec.approvalRef`, a field
 it does not have. The console shows a bidi control character in any message a
 controller wrote as `U+FFFD`.
-**Do:** roll the controller and the runner image in ONE upgrade. The
+**Do:** move `controllerImage` and `runnerImage` in ONE `helm upgrade`. The
 controller now passes `--line-token` to every `Restore` and `Backup` Job, and
-a runner image older than this release does not know the flag: it exits 1
-while parsing its arguments, before any work, for every such Job. A chart
-upgrade that moves `image` and `runnerImage` together does this; if you pin
-`runnerImage`, move the pin with it. Jobs created before the upgrade are
-unaffected. Also: an alert or a script that compared a refused run's condition
-message for equality should compare its opening text instead: the message is
-longer when the runner states a reason.
+**every runner image published before this change, the images of this same
+unreleased entry included**, does not know the flag: it stops while parsing
+its arguments, before any work, for every such Job. One `helm upgrade` of the
+packaged chart cannot produce that pair: the chart renders both images into
+one Deployment and the package pins both to one publication. It can occur
+three ways: two pinned tags (the `sha-<commit>` tags, for example) of which
+an upgrade moves only `controllerImage`; the source chart's floating
+`:latest` defaults, pulled at different moments through a mirror or a node's
+older cached copy; and a `runnerImage` pinned apart from the controller (a
+mirror, an air gap). **What it looks like:** each `Restore` and `Backup` ends
+`Failed` with `exitCode: 1`, `exitReason: operational` and no cause named on
+the object; the runner pod's log opens with
+`error: unexpected argument '--line-token' found`; a `BackupSchedule` with a
+retry policy retries the slot and fails the same way. Nothing ran and nothing
+was written. Set `runnerImage` to the image published from the controller's
+build ([kubernetes.md](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller)).
+For a tagged release's runner the roll was already required, by item 35: a
+runner image published before it declares no engine and stops at exit 1 under
+this controller. Jobs created before the upgrade are unaffected. Also: an
+alert or a script that compared a refused run's condition message for
+equality should compare its opening text instead: the message is longer when
+the runner states a reason.
 **Scope:** unit rows over the line's grammar, its token, its closed sets, its
 cleaning and its bounds; rows over the shipped runner binary (given a token
 it prints it once, in that line, at the most verbose log level, and never on
@@ -2381,16 +2398,19 @@ message holding markup, an HTML entity and a bidi override. No cluster ran
 it: its live row is the next PoC upgrade's.
 **Known limit.** The token separates the runner's line from text written
 before the Job existed, which is every plan. It is readable by anyone who can
-read the Job, so an input that can still change after the Job is built, and
-that a refusal repeats as it is (a value a broker reports, a mounted file's
-parse error), could carry it. A runner that escapes line breaks in the error
-text it prints removes the way in altogether (PROD-15.1).
+read the Job, so text produced after the Job is built, and reaching the pod
+log with a line break intact, could carry it. Item 56 closes that for the
+error text the runner prints itself; the Kafka client's own stderr lines,
+which can repeat what a broker sends, are not escaped. The other lines a
+controller reads from a pod log (`refusal-reason=`, `failure-reason=`, the
+evidence keys) carry no token yet and are read as they were.
 **Not changed:** the check, notification and retention Jobs. Their exit 3
 still names a code from a closed list and no sentence.
-**Rollback:** roll both back together, or the runner image first. An older
+**Rollback:** roll both back together, or the controller first. An older
 controller passes no token and ignores the new line, and writes the message it
-always wrote. An older RUNNER under this controller does not start (above).
-Statuses already written keep the text they have.
+always wrote, over this runner or an older one. The runner image first leaves
+THIS controller over an older runner, which does not start (above). Statuses
+already written keep the text they have.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2415,11 +2435,15 @@ In addition to the next entry's six, in its order:
   engine, as the next entry's step 6 already orders; a standalone CLI install
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
-  endpoint says `allow_http: true` (item 28). The same roll is what item 57
-  needs: this controller gives every `Restore` and `Backup` Job a
-  `--line-token` argument, and a runner image that predates the flag exits 1
-  on it, so a `runnerImage` pinned to an older release must move with the
-  controller.
+  endpoint says `allow_http: true` (item 28).
+- **Move `controllerImage` and `runnerImage` in one `helm upgrade`, and never
+  the controller alone** (item 57). This controller gives every `Restore` and
+  `Backup` Job a `--line-token` argument, and every runner image published
+  before that change, the images of this same entry included, stops on it:
+  the object says `exitCode: 1`, `exitReason: operational`, and the runner
+  pod's log opens with `error: unexpected argument '--line-token' found`. A
+  `runnerImage` pinned apart from the controller (a mirror, an air gap) must
+  move with it. To roll back, move both together or the controller first.
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
@@ -2518,10 +2542,11 @@ only and needs nothing; item 56
 changes the `Restore` CRD (apply it before the controller rolls), the
 controller, the runner, the product API and the console, and needs nothing
 for any other restore (an older runner refuses an original-name plan); item 57 changes the runner, the
-controller and the console's text, and needs the controller and the runner
-image rolled together, which item 28 already orders: this controller passes
-`--line-token` to every `Restore` and `Backup` Job, and a runner image that
-predates the flag exits 1 on it. To roll back to
+controller and the console's text, and needs `controllerImage` and
+`runnerImage` moved in one upgrade: this controller passes `--line-token` to
+every `Restore` and `Backup` Job, and every runner image published before the
+change exits 1 on it (for a tagged release's runner item 35 already required
+the roll). To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -2560,6 +2585,11 @@ predates the flag exits 1 on it. To roll back to
    `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
    field. Finish or delete any original-name `Restore` first, so none is left
    waiting on a runner that refuses it.
+8. Item 57 needs no rollback step of its own when the controller and the
+   runner go back together (step 2). In two steps, the controller goes first:
+   an older controller passes no `--line-token` and ignores the new line,
+   while this controller over an older runner image starts no `Restore` and
+   no `Backup`.
 
 ---
 
