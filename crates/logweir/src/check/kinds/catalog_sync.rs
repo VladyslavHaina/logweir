@@ -230,10 +230,11 @@ pub const OBJECTS_PER_POINT: i64 = 5;
 /// rather than a position in a page — see [`archive_floor`].
 pub const ARCHIVE_FLOOR_PAGE_KEYS: usize = 8;
 
-/// How many keys one day shard's listing asks for.
+/// How many keys one page of a day shard's listing asks for.
 ///
-/// The shard holds one UTC day of points; a day with more than this many is a
-/// day whose tail is counted through the next page.
+/// The shard holds one UTC day of points; a day with more than this many is
+/// listed page after page until a short page ([`walk_index`]), each page one
+/// object of the walk's budget.
 pub const SHARD_PAGE_KEYS: usize = 1_000;
 
 /// How many keys one `Full` rescan page asks for.
@@ -1387,19 +1388,40 @@ fn walk_index(
             day.month(),
             day.day()
         );
-        walk.objects = walk.objects.saturating_add(1);
-        let keys = match access.list_page(&shard, None, SHARD_PAGE_KEYS) {
-            Ok(k) => k,
-            // A SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT SEE,
-            // not a sync that failed: the days already read are true. The
-            // walk cannot be `complete` with a day missing from it.
-            Err(_) => {
-                walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
-                walk.stop = WalkStop::ShardUnreadable;
-                walk.oldest_day = Some(day);
+        // THE WHOLE SHARD, PAGE AFTER PAGE (FX-33, review finding D4). A day
+        // with more than one page of points (per-minute backups are 1,440 a
+        // day) used to be read to its first page and reported complete. Each
+        // page is one object of the budget; a budget or a clock that stops the
+        // walk inside a shard ends it `ObjectBudget`, so the view says it is
+        // incomplete.
+        let mut keys: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            walk.objects = walk.objects.saturating_add(1);
+            let page = match access.list_page(&shard, after.as_deref(), SHARD_PAGE_KEYS) {
+                Ok(k) => k,
+                // A SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT
+                // SEE, not a sync that failed: the days already read are true.
+                // The walk cannot be `complete` with a day missing from it.
+                Err(_) => {
+                    walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
+                    walk.stop = WalkStop::ShardUnreadable;
+                    walk.oldest_day = Some(day);
+                    return Ok(());
+                }
+            };
+            let last_page = page.len() < SHARD_PAGE_KEYS;
+            after = page.last().cloned();
+            keys.extend(page);
+            if last_page {
                 break;
             }
-        };
+            if !walk.affordable(req.max_objects_per_run, deadline) {
+                walk.stop = WalkStop::ObjectBudget;
+                walk.oldest_day = Some(day);
+                return Ok(());
+            }
+        }
         walk.oldest_day = Some(day);
         // Newest first WITHIN the shard: the log key's fixed-width millisecond
         // makes the largest key the newest one.

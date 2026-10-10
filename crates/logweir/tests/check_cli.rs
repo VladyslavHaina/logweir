@@ -12298,6 +12298,64 @@ fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
     assert_eq!(ids, evidence, "the evidence stays listed: {listed:?}");
 }
 
+/// **A day shard of more than one page is read to its end (review finding
+/// D4).** Per-minute backups write 1,440 points a day; the walk used to read
+/// a day's first page of keys and report the view complete. Here one day
+/// holds 1,005 points (their records absent, so each costs one read): every
+/// one is counted and listed, and the walk is complete. CONTROL: a budget
+/// that runs out after the shard's first page ends the walk incomplete,
+/// naming the object budget.
+///
+/// KILLS: the shard read to its first page only (1,000 counted, complete).
+#[test]
+fn a_day_shard_of_more_than_one_page_is_listed_whole() {
+    use logweir::check::kinds::catalog_sync::SHARD_PAGE_KEYS;
+    let points = SHARD_PAGE_KEYS + 5;
+    let mut objects = FakeObjects::new();
+    let start = catalog_ts("2026-09-16T00:00:00Z");
+    for i in 0..points {
+        let at = start + chrono::Duration::seconds(i64::try_from(i).expect("fits") * 60);
+        let point_id = format!("lwp1-{i:032x}");
+        objects = objects.with_object(&logweir::catalog::record::log_key(at, &point_id), b"{}");
+    }
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], points, "every key of the day is counted");
+    assert_eq!(counts["missing"], points);
+    assert_eq!(entries_of(&body).len(), points, "and listed");
+    assert_eq!(summary_of(&body, "catalog-cursor=")["complete"], true);
+
+    // CONTROL: two objects — the floor listing and the shard's first page.
+    let run = drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            max_objects_per_run: 2,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        summary_of(&body, "catalog-cursor=")["complete"],
+        false,
+        "{body}"
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogStoppedFor"],
+        "objectBudget"
+    );
+    let spent: i64 = run.row(CheckId::DestinationArchiveListable).facts["catalogObjectsRead"]
+        .parse()
+        .expect("an object count");
+    assert!(
+        spent <= 2,
+        "the shard's pages are paid from the budget: {spent} of 2"
+    );
+}
+
 /// **A `Full` rescan lists a point whose record gave no facts, by the point id
 /// its key carries, and an object under the points prefix whose key names no
 /// point id is not a point.**
