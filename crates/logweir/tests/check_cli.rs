@@ -5746,7 +5746,7 @@ fn the_point_bound_preflight_and_the_runners_binding_agree_on_every_pin_case() {
     p.bucket
         .as_ref()
         .expect("versioned")
-        .fail_version_reads("403 Forbidden: AccessDenied");
+        .fail_version_reads(&s3_refusal("403 Forbidden", "AccessDenied"));
     assert_eq!(
         bound_binding(&p)
             .expect_err("the runner cannot tell")
@@ -6536,7 +6536,7 @@ fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stor
     for (case, text, state, code) in [
         (
             "403",
-            format!("Client error with status 403 Forbidden: AccessDenied {tail}"),
+            format!("{} {tail}", s3_refusal("403 Forbidden", "AccessDenied")),
             CheckState::NotReady,
             CheckCode::AccessDenied,
         ),
@@ -6584,7 +6584,10 @@ fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stor
     p.bucket
         .as_ref()
         .expect("versioned")
-        .fail_version_reads(&format!("403 Forbidden: AccessDenied {tail}"));
+        .fail_version_reads(&format!(
+            "{} {tail}",
+            s3_refusal("403 Forbidden", "AccessDenied")
+        ));
     let run = bound_preflight(p.store, Some(&p.binding));
     let row = run.row(CheckId::ArchiveBackupSet);
     assert_eq!(
