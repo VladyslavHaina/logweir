@@ -61,9 +61,13 @@ jobs:
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 50, not 35: PROD-00.2 compiles the engine from the vendored source in
-    # this job (one release build of its own workspace, about 8 minutes cold).
-    timeout-minutes: 50
+    # 80, not 50: the job took 48 minutes on main before PROD-01.4a, PROD-04.1
+    # and PROD-11.1b added about 9 minutes of rows (`replay_selection` alone is
+    # 7), and it was cancelled at 50 with every finished row green. Of the
+    # total, about 7 minutes are setup and 8 are PROD-00.2's engine build from
+    # the vendored source. The headroom is for the rows still to land; the
+    # real fix is to split the suite across two jobs (FX-41).
+    timeout-minutes: 80
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
