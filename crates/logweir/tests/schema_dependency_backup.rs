@@ -476,7 +476,12 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
     assert_eq!(block["audit"].verdict, NOT_DETECTED);
     // The catalog point copies it, topic by topic.
     let point_key = outcome.catalog_key.expect("the catalog point was written");
-    let (point, _) = evidence.get(&point_key).unwrap();
+    let (point, _) = evidence
+        .get_capped(
+            &point_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let point: serde_json::Value = serde_json::from_slice(&point).unwrap();
     let orders = point["topics"]
         .as_array()
@@ -537,7 +542,12 @@ fn sign_backup(
     };
     let outcome = execute_with(&args, "01JRUN", &Reader, engine, archive, evidence)
         .unwrap_or_else(|e| panic!("the run failed: {e}"));
-    let (bytes, _) = evidence.get(&outcome.receipt_key).unwrap();
+    let (bytes, _) = evidence
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     (outcome, serde_json::from_slice(&bytes).unwrap())
 }
 

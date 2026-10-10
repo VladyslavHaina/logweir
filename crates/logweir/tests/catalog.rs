@@ -726,9 +726,23 @@ fn the_three_catalog_objects_are_create_only() {
     // The sidecar verifies over the stored record bytes, under the catalog's
     // own media type — not the receipt's, which would make a record verifiable
     // as a receipt.
-    let stored = store.get(&out.keys.record_key).unwrap().0;
-    let sidecar: logweir_evidence::Sidecar =
-        serde_json::from_slice(&store.get(&out.keys.sidecar_key).unwrap().0).unwrap();
+    let stored = store
+        .get_capped(
+            &out.keys.record_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &store
+            .get_capped(
+                &out.keys.sidecar_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .unwrap()
+            .0,
+    )
+    .unwrap();
     assert_eq!(
         sidecar.payload_type,
         logweir::catalog::PAYLOAD_TYPE_CATALOG_POINT
@@ -753,7 +767,13 @@ fn a_second_write_of_one_point_rewrites_nothing() {
     let point = point_for(&r, "s3://kafka-backups/prod", &key);
     let entry = CatalogLogEntry::of(&point);
     let first = writer::put_point(&point, &entry, &signer, &store).unwrap();
-    let before = store.get(&first.keys.record_key).unwrap().0;
+    let before = store
+        .get_capped(
+            &first.keys.record_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
 
     // A SECOND record for the same point, differing in an informational field
     // — which is what a second installation backfilling the same archive
@@ -773,7 +793,13 @@ fn a_second_write_of_one_point_rewrites_nothing() {
     assert_eq!(second.log, PutState::AlreadyPresent);
     assert!(!second.created_record());
     assert_eq!(
-        store.get(&first.keys.record_key).unwrap().0,
+        store
+            .get_capped(
+                &first.keys.record_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
+            .unwrap()
+            .0,
         before,
         "nothing under logweir/ is ever rewritten (D3 §5.2 rule 4)"
     );
@@ -833,15 +859,35 @@ fn a_successful_backup_writes_its_catalog_point() {
         .expect("a successful backup writes its catalog point");
     assert_eq!(
         catalog_key,
-        record_key(&point_id(&evidence.get(&outcome.receipt_key).unwrap().0))
+        record_key(&point_id(
+            &evidence
+                .get_capped(
+                    &outcome.receipt_key,
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+                )
+                .unwrap()
+                .0
+        ))
     );
 
     // The record is derived from the receipt that was actually PUT — not from
     // a re-serialisation — so its facts and the receipt's agree by
     // construction.
-    let receipt_bytes = evidence.get(&outcome.receipt_key).unwrap().0;
+    let receipt_bytes = evidence
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
     let parsed: BackupReceipt = serde_json::from_slice(&receipt_bytes).unwrap();
-    let record = evidence.get(catalog_key).unwrap().0;
+    let record = evidence
+        .get_capped(
+            catalog_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
     match reader::read_record(&record) {
         RecordVerdict::Point(p) => {
             assert_eq!(
@@ -862,7 +908,13 @@ fn a_successful_backup_writes_its_catalog_point() {
 
             // …and the log entry landed in the shard the record's own
             // recovery point names.
-            let entry_bytes = evidence.get(&p.log_key()).unwrap().0;
+            let entry_bytes = evidence
+                .get_capped(
+                    &p.log_key(),
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+                )
+                .unwrap()
+                .0;
             let entry: CatalogLogEntry = serde_json::from_slice(&entry_bytes).unwrap();
             assert_eq!(entry.point_id, p.point_id);
         }
@@ -946,9 +998,23 @@ fn a_catalog_write_that_fails_leaves_the_run_and_its_receipt_untouched() {
     // still verifies.
     assert!(outcome.receipt_key.starts_with("logweir/backups/"));
     assert!(outcome.sidecar_key.ends_with(".receipt.sig"));
-    let bytes = evidence.get(&outcome.receipt_key).unwrap().0;
-    let sidecar: logweir_evidence::Sidecar =
-        serde_json::from_slice(&evidence.get(&outcome.sidecar_key).unwrap().0).unwrap();
+    let bytes = evidence
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &evidence
+            .get_capped(
+                &outcome.sidecar_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .unwrap()
+            .0,
+    )
+    .unwrap();
     logweir_evidence::verify::verify_detached(
         &f.public_key(),
         logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
@@ -1048,7 +1114,12 @@ fn sync_backfills_a_receipt_that_has_no_record_and_is_idempotent() {
         report.points,
         vec![(receipt_key, point_id(&bytes), PointOutcome::Written)]
     );
-    assert!(store.get(&record_key(&point_id(&bytes))).is_ok());
+    assert!(store
+        .get_capped(
+            &record_key(&point_id(&bytes)),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
+        .is_ok());
 
     // REPEATED IMPORT IS IDEMPOTENT (D3 §5.5 step 2): identity is
     // content-derived, so a second sync produces the same id and reports it as
@@ -1090,7 +1161,12 @@ fn sync_writes_no_record_for_a_receipt_it_cannot_verify() {
     assert_eq!(report.unverified_signer, 1);
     assert_eq!(report.written, 0);
     assert!(
-        store.get(&record_key(&point_id(&bytes))).is_err(),
+        store
+            .get_capped(
+                &record_key(&point_id(&bytes)),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
+            .is_err(),
         "no record may exist for a receipt no configured key verifies"
     );
 
@@ -1109,7 +1185,15 @@ fn sync_writes_no_record_for_a_receipt_it_cannot_verify() {
     assert_eq!(report.written, 1);
     // The installation recorded is the key that verified the RECEIPT, which is
     // not the key that signed the record.
-    match reader::read_record(&store.get(&record_key(&point_id(&bytes))).unwrap().0) {
+    match reader::read_record(
+        &store
+            .get_capped(
+                &record_key(&point_id(&bytes)),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .unwrap()
+            .0,
+    ) {
         RecordVerdict::Point(p) => {
             assert_eq!(
                 p.installation.unwrap().key_id,
@@ -1162,7 +1246,13 @@ fn sync_reports_a_record_that_contradicts_its_receipt_as_a_conflict() {
             &forged.canonical_bytes().unwrap(),
         )
         .unwrap();
-    let before = store.get(&record_key(&point_id(&bytes))).unwrap().0;
+    let before = store
+        .get_capped(
+            &record_key(&point_id(&bytes)),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
 
     let report = logweir::catalog::cli::sync_with(
         &sync_args(100, None),
@@ -1176,7 +1266,13 @@ fn sync_reports_a_record_that_contradicts_its_receipt_as_a_conflict() {
     assert_eq!(report.conflict, 1);
     assert_eq!(report.written, 0);
     assert_eq!(
-        store.get(&record_key(&point_id(&bytes))).unwrap().0,
+        store
+            .get_capped(
+                &record_key(&point_id(&bytes)),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
+            .unwrap()
+            .0,
         before,
         "a conflict is REPORTED, never corrected in place"
     );
@@ -1667,13 +1763,25 @@ fn a_store_failure_on_the_first_point_is_operational_and_never_signing() {
     // The state exit 4 would have denied: two of the three objects ARE in the
     // bucket, and the record verifies.
     assert!(
-        store.get(&record_key(&id)).is_ok(),
+        store
+            .get_capped(
+                &record_key(&id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
+            .is_ok(),
         "the record landed before the index entry was refused, so `nothing was uploaded` \
          is false and exit 4 would have said it"
     );
-    assert!(store.get(&record_sidecar_key(&id)).is_ok());
+    assert!(store
+        .get_capped(
+            &record_sidecar_key(&id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
+        .is_ok());
     assert!(
-        store.get(&log).is_err(),
+        store
+            .get_capped(&log, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+            .is_err(),
         "the index entry is the object that was refused"
     );
 }

@@ -1174,8 +1174,18 @@ fn backup_run_writes_a_signed_receipt() {
     );
 
     // …and the pair verifies, through the shipped reader.
-    let (doc, _v) = store.get(&receipt_key).unwrap();
-    let (sig, _v2) = store.get(&sidecar_key).unwrap();
+    let (doc, _v) = store
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let (sig, _v2) = store
+        .get_capped(
+            &sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let dir = f._dir.path();
     assert_eq!(
         verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
@@ -1288,8 +1298,18 @@ fn backup_ed25519_receipt_is_independently_verified() {
     let outcome = exec(&f.args, "ed25519-run", &reader, &engine, &store, &store)
         .expect("an Ed25519-backed backup succeeds");
 
-    let (document, _) = store.get(&outcome.receipt_key).unwrap();
-    let (sidecar_bytes, _) = store.get(&outcome.sidecar_key).unwrap();
+    let (document, _) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let (sidecar_bytes, _) = store
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&sidecar_bytes).unwrap();
     let verified_key_id = logweir_evidence::verify::verify_detached(
         &public,
@@ -1358,8 +1378,20 @@ fn receipt_out_writes_both_files() {
             && put_sig.starts_with(sidecar_key.trim_end_matches(".receipt.sig")),
         "the keys are under this backup's prefix"
     );
-    assert_eq!(store.get(put_doc).unwrap().0, std::fs::read(&out).unwrap());
-    assert_eq!(store.get(put_sig).unwrap().0, std::fs::read(&sig).unwrap());
+    assert_eq!(
+        store
+            .get_capped(put_doc, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+            .unwrap()
+            .0,
+        std::fs::read(&out).unwrap()
+    );
+    assert_eq!(
+        store
+            .get_capped(put_sig, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
+            .unwrap()
+            .0,
+        std::fs::read(&sig).unwrap()
+    );
 }
 
 /// `--out` is honoured exactly as `--receipt-out` is (they name the one
@@ -1501,8 +1533,18 @@ fn a_rotated_signing_file_does_not_change_the_validated_execution_signer() {
         replacement_pem,
         "the engine double must actually rotate the projected file during the run"
     );
-    let (doc, _) = store.get(&outcome.receipt_key).unwrap();
-    let (sidecar, _) = store.get(&outcome.sidecar_key).unwrap();
+    let (doc, _) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let (sidecar, _) = store
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     assert_eq!(
         verify_receipt(
             f._dir.path(),
@@ -1597,8 +1639,18 @@ fn the_receipt_counts_only_the_topics_the_plan_named() {
 
     // And the receipt that comes out of it satisfies its own arm 3 — asserted
     // through the reader, because that is the claim.
-    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
-    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let (doc, _v) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
+    let (sig, _v2) = store
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let dir = f._dir.path();
     assert_eq!(
         verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
@@ -2101,7 +2153,12 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
     let (store, _k, _b) = archive_for("mvp-demo");
 
     let outcome = exec(&f.args, "run-1", &ConfigReader, &engine, &store, &store).unwrap();
-    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let (doc, _v) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
     let block = receipt
         .config_coverage
@@ -2124,7 +2181,12 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
         },
         "a refused read is captureDenied beside an EMPTY manifest record, never captured"
     );
-    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let (sig, _v2) = store
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let dir = f._dir.path();
     assert_eq!(
         verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
@@ -2290,7 +2352,12 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
         2,
         "one read before, one after"
     );
-    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let (doc, _v) = store
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
     assert_format_at_least(
         &receipt.format_version,
@@ -2332,7 +2399,12 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
         between(None, &receipt, "ledger"),
         Generation::NotEstablished(_)
     ));
-    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let (sig, _v2) = store
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIDECAR,
+        )
+        .unwrap();
     let dir = f._dir.path();
     assert_eq!(
         verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
@@ -2342,7 +2414,12 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
         .catalog_key
         .clone()
         .expect("the run wrote its catalog point");
-    let (record, _) = store.get(&record_key).unwrap();
+    let (record, _) = store
+        .get_capped(
+            &record_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
     assert_format_at_least(
         record["format_version"].as_str().expect("a version"),

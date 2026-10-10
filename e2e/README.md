@@ -122,8 +122,9 @@ a file is missing or stray, or if a service puts `CLUSTER_ID` back in
 | 4.1 | `apache/kafka:4.1.2@sha256:5cc2a2fd…` | supported line |
 | 4.3 | `apache/kafka:4.3.1@sha256:77e3df90…` | supported line |
 
-What each line proved (the demo drill, `just pitr`, the receipt path and the
-engine's fixed protocol versions) is in
+What each line proved (the demo drill, `just pitr`, the receipt path, the
+engine's fixed protocol versions, and PROD-01.1's record-semantics and
+PROD-01.4's topic-identity suites) is in
 [`docs/support-matrix.md`](../docs/support-matrix.md), "Broker versions".
 
 ```sh

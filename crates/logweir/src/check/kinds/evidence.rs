@@ -12,10 +12,16 @@
 //! # Bounds
 //!
 //! `CheckPlan::validate` caps the request at three objects, a 1 MiB payload
-//! and a 64 KiB sidecar. This module enforces the per-object `maxBytes`
-//! again on the bytes it actually read, and reports `truncated: true` when the
-//! object was longer — in which case the relayed digest is the PREFIX's digest
-//! and not the object's, which is exactly why the flag exists.
+//! and a 64 KiB sidecar. **This module never reads past an object's
+//! `maxBytes` (FX-31).** It reads through `ObjectAccess::get` with that cap,
+//! so an object whose size the store reports over it is refused before a
+//! body byte is read, and one whose stream runs past it is cut off at the cap.
+//! Either is reported `present: true, truncated: true` with NO bytes relayed
+//! (no `sha256`, no `bytes`): the controller refuses a truncated object
+//! whatever was relayed (`weirkeeper::evidence_fetch`'s "the cap is a refusal,
+//! not a prefix"), so a prefix was never worth relaying. Before FX-31 the
+//! whole object was read and then truncated, so only the pod's memory limit
+//! bounded what one planted object could cost.
 //!
 //! # The `key` is echoed VERBATIM, and that is deliberate
 //!
@@ -44,6 +50,8 @@ use logweir_core::check_contract::{
     CheckCode, CheckPlanKind, CheckResult, EvidenceFetchRequest, EvidenceObjectResult,
 };
 use logweir_core::destination::DestinationRole;
+
+use logweir_engine_oso::storage::StoreError;
 
 use super::Wiring;
 use crate::check::store;
@@ -101,27 +109,31 @@ pub fn run(req: &EvidenceFetchRequest, wiring: &dyn Wiring, deadline: Deadline) 
             });
             continue;
         }
-        match access.get(&o.key) {
+        match access.get(&o.key, o.max_bytes) {
             Ok(bytes) => {
-                let truncated = bytes.len() as u64 > o.max_bytes;
-                let relayed: Vec<u8> = if truncated {
-                    // A usize cast is safe: `max_bytes` is capped at 1 MiB by
-                    // `CheckPlan::validate`, and the branch is reached only
-                    // when the object is LONGER than it.
-                    bytes[..o.max_bytes as usize].to_vec()
-                } else {
-                    bytes
-                };
                 result.evidence.push(EvidenceObjectResult {
                     key: o.key.clone(),
                     stream: o.stream,
                     present: true,
-                    sha256: Some(logweir_core::ids::sha256_prefixed(&relayed)),
-                    bytes: Some(relayed.len() as u64),
+                    sha256: Some(logweir_core::ids::sha256_prefixed(&bytes)),
+                    bytes: Some(bytes.len() as u64),
                     code: None,
-                    truncated,
+                    truncated: false,
                 });
-                extra.push((o.stream, relayed));
+                extra.push((o.stream, bytes));
+            }
+            // FX-31: over the plan's `maxBytes`. The object is there and was
+            // not read past the cap; nothing is relayed for it.
+            Err(StoreError::TooLarge { .. }) => {
+                result.evidence.push(EvidenceObjectResult {
+                    key: o.key.clone(),
+                    stream: o.stream,
+                    present: true,
+                    sha256: None,
+                    bytes: None,
+                    code: None,
+                    truncated: true,
+                });
             }
             Err(e) => {
                 let code = store::classify(&e);

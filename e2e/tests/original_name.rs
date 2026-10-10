@@ -451,8 +451,13 @@ fn backup(backup_id: &str, source: &Cluster, topic: &str) -> Backup {
     .expect("a storage url");
     let store =
         logweir_engine_oso::storage::Store::read_only_from_url(&url).expect("the archive store");
+    // FX-31: every read names its cap. A receipt read in a CLI-class process
+    // is a `SIGNED_DOCUMENT`; an over-cap answer fails the row here.
     let (receipt_bytes, _) = store
-        .get(&receipt_key)
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
     Backup {

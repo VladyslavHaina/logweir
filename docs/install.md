@@ -1093,7 +1093,11 @@ The migration, in order:
    controller's OWN pod range — no wider than `/16`, containing no other pod —
    and `requireTrustedProxy: true` to refuse any request that did not come
    through it over HTTPS. A wider range would contain the pods it exists to
-   refuse, and is refused.
+   refuse, and is refused. With `api.console.ingress.enabled` the chart
+   REQUIRES a trusted proxy — `trustedProxyService` (the ingress controller's
+   Service, preferred) or `trustedProxyCidrs` — or `api.console.trustedProxy:
+   none` to opt out by name (FX-24c): without one the per-peer connection cap
+   is off and every sign-in through the ingress shares one budget.
 
 Rollback is the same list emptied: `watchNamespaces: []` restores the
 cluster-wide binding (the chart then refuses shared mode again, so disable the

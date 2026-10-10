@@ -60,6 +60,13 @@ jobs:
           - { tag: v0.19.1, kafka: 3.7.1, floor: below, expect: "unsupported(lever-absent)" }
     steps:
       - uses: actions/checkout@v4
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
       - name: free disk space (MinIO refuses writes below its free-space floor)
         run: |
           df -h /
@@ -265,6 +272,86 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v4
         with: { name: "compose-logs-${{ matrix.tag }}-kafka-${{ matrix.kafka }}", path: compose.log }
+      - if: always()
+        run: just e2e-down
+
+  # PROD-01.5c: PROD-01.1's record-semantics suite and PROD-01.4's
+  # topic-identity oracle on every SUPPORTED Apache Kafka line, one entry per
+  # line (`e2e/compose/stack-env.sh --lines`), with the engine Logweir ships.
+  # The `matrix` job above varies OSO's releases, and on any engine but
+  # `CONTRACT_ENGINE` (e2e/tests/record_semantics.rs) the record-semantics rows
+  # record their outcome and assert nothing; CI's e2e job asserts that contract
+  # on the default broker only. So this job builds Logweir's engine exactly as
+  # CI's e2e job does and runs the two suites on each line's digest-pinned
+  # image. They run their default sets, as CI does: the rows that freeze the
+  # broker or kill a restore, and topic identity's seven-minute c10, stay
+  # ignored. docs/support-matrix.md ("Broker versions") records the runs.
+  # crates/logweir/tests/engine_matrix.rs holds the job to the supported lines.
+  broker-lines:
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        line: ["3.9", "4.1", "4.3"]
+    steps:
+      - uses: actions/checkout@v4
+      # As in ci.yml: anonymous Docker Hub pulls are rate-limited per IP.
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
+      - name: free disk space (MinIO refuses writes below its free-space floor)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
+      - run: pip install cryptography
+      - run: cargo fetch --locked
+      - name: Extract the pinned engine
+        run: ./scripts/extract-engine.sh
+      - name: Build Logweir's engine from the vendored source
+        run: bash scripts/engine-source.sh build
+      # The record-semantics rows assert their contract only on the engine it
+      # names, and say nothing when another one runs.
+      - name: The engine is the build the build env names
+        run: |
+          want="kafka-backup $(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)"
+          got=$(.engine/kafka-backup --version)
+          [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
+          echo "$got"
+      # stack-env.sh's digest pin for the line, on the default slot, with the
+      # `auth` profile CI's e2e job runs.
+      - name: Select the broker line
+        env:
+          LINE: ${{ matrix.line }}
+        run: |
+          stack=$(e2e/compose/stack-env.sh --slot 0 --kafka "$LINE" --profiles auth)
+          printf '%s\n' "$stack" | sed -n 's/^export //p' >> "$GITHUB_ENV"
+      - run: just e2e-up
+      - name: Read back the broker the stack runs
+        run: |
+          out=$(./scripts/engine-matrix-broker.sh)
+          printf '%s\n' "$out"
+          [ "$(sed -n 's/^version=//p' <<<"$out")" = "$KAFKA_VERSION" ] || { echo "::error::the broker is not Kafka $KAFKA_VERSION"; exit 1; }
+      - run: cargo build --locked -p logweir
+      - name: PROD-01.1's and PROD-01.4's suites on this line
+        run: cargo test --locked -p e2e --features e2e --test record_semantics --test topic_identity -- --test-threads=1
+      - if: failure()
+        run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > compose.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: "compose-logs-broker-line-${{ matrix.line }}", path: compose.log }
       - if: always()
         run: just e2e-down
 

@@ -454,7 +454,10 @@ fn backup(backup_id: &str, topic: &str) -> Backup {
         .expect("backup run prints receipt-key=");
     let store = archive_store(backup_id);
     let (receipt_bytes, _) = store
-        .get(&receipt_key)
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
     Backup {

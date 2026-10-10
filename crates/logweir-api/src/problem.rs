@@ -29,9 +29,10 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemCode {
-    /// 400 — the body is not JSON or did not arrive in time (nothing arrived
-    /// for 30 s, or it was not whole after 60 s), a query string is malformed
-    /// or carries an unknown or repeated parameter.
+    /// 400 — the body is not JSON or did not arrive in time (a body still
+    /// arriving brought less than 32 KiB in a 30 s window, or it was not whole
+    /// after 60 s), a query string is malformed or carries an unknown or
+    /// repeated parameter.
     MalformedRequest,
     /// 400 — a header this service refuses outright (`Impersonate-*`).
     HeaderNotAllowed,

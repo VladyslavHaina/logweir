@@ -420,7 +420,10 @@ pub(crate) fn run_with_signer(
             // `list_keys` sorts, so this is the lexicographically first key,
             // not whatever the backend happened to stream first.
             let key = &keys[0];
-            let (raw, _vid) = store.get(key).map_err(sig)?; // the EXACT stored bytes
+            // The EXACT stored bytes, under the engine-document cap (FX-31).
+            let (raw, _vid) = store
+                .get_capped(key, logweir_engine_oso::storage::caps::ENGINE_DOCUMENT)
+                .map_err(sig)?;
             let sub = EngineSubreport {
                 retained_verbatim: true,
                 // The exact KEY that was read, not the prefix it sits under.

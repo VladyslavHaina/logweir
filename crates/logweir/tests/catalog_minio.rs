@@ -128,21 +128,45 @@ fn a_backup_writes_its_five_evidence_objects_into_a_real_bucket() {
         .expect("a successful backup writes its catalog point");
 
     // All five, read back off the server — never inferred from the outcome.
-    let receipt_bytes = evidence.get(&outcome.receipt_key).expect("receipt").0;
+    let receipt_bytes = evidence
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("receipt")
+        .0;
     let sidecar_bytes = evidence
-        .get(&outcome.sidecar_key)
+        .get_capped(
+            &outcome.sidecar_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("receipt sidecar")
         .0;
-    let record_bytes = evidence.get(catalog_key).expect("catalog record").0;
+    let record_bytes = evidence
+        .get_capped(
+            catalog_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("catalog record")
+        .0;
     let point = match reader::read_record(&record_bytes) {
         RecordVerdict::Point(p) => p,
         other => panic!("{other:?}"),
     };
     let record_sidecar = evidence
-        .get(&record_sidecar_key(&point.point_id))
+        .get_capped(
+            &record_sidecar_key(&point.point_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("catalog record sidecar")
         .0;
-    let log_bytes = evidence.get(&point.log_key()).expect("catalog log entry").0;
+    let log_bytes = evidence
+        .get_capped(
+            &point.log_key(),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("catalog log entry")
+        .0;
 
     // The identity is the digest of the bytes the SERVER now holds.
     assert_eq!(point.point_id, point_id(&receipt_bytes));
@@ -196,7 +220,13 @@ fn the_real_backend_enforces_create_only_on_every_catalog_key() {
         .execute_as(&evidence, &backup_id, &run_id("B"))
         .expect("the backup succeeds");
     let catalog_key = outcome.catalog_key.as_deref().unwrap();
-    let before = evidence.get(catalog_key).unwrap().0;
+    let before = evidence
+        .get_capped(
+            catalog_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
     let point = match reader::read_record(&before) {
         RecordVerdict::Point(p) => p,
         other => panic!("{other:?}"),
@@ -213,7 +243,13 @@ fn the_real_backend_enforces_create_only_on_every_catalog_key() {
         }
     }
     assert_eq!(
-        evidence.get(catalog_key).unwrap().0,
+        evidence
+            .get_capped(
+                catalog_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
+            .unwrap()
+            .0,
         before,
         "the refused puts left the record byte-identical"
     );
@@ -296,7 +332,13 @@ fn sync_backfills_a_real_bucket_and_a_second_run_writes_nothing() {
     let outcome = f
         .execute_as(&evidence, &backup_id, &run_id("D"))
         .expect("the backup succeeds");
-    let receipt_bytes = evidence.get(&outcome.receipt_key).unwrap().0;
+    let receipt_bytes = evidence
+        .get_capped(
+            &outcome.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap()
+        .0;
     let id = point_id(&receipt_bytes);
 
     let dir = tempfile::tempdir().unwrap();
@@ -382,7 +424,12 @@ fn sync_backfills_a_real_bucket_and_a_second_run_writes_nothing() {
         second_id, id,
         "two receipts under one backup_id are two points (defect RECEIPT-DUP)"
     );
-    assert!(evidence.get(&record_key(&second_id)).is_ok());
+    assert!(evidence
+        .get_capped(
+            &record_key(&second_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
+        .is_ok());
 }
 
 #[test]
@@ -393,7 +440,15 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
     let outcome = f
         .execute_as(&evidence, &backup_id, &run_id("F"))
         .expect("the backup succeeds");
-    let id = point_id(&evidence.get(&outcome.receipt_key).unwrap().0);
+    let id = point_id(
+        &evidence
+            .get_capped(
+                &outcome.receipt_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .unwrap()
+            .0,
+    );
 
     // The DAY SHARD WALK against a real backend (review finding F5): the fixture
     // engine reports a capture on 2026-09-15, so a window anchored on that day
@@ -443,7 +498,16 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
     // Every row names a record that is really there — the index is a pointer,
     // and a pointer nothing follows is worth nothing.
     for e in report.rows.iter().filter(|e| e.point_id == id) {
-        assert!(evidence.get(&e.record_key).is_ok(), "{}", e.record_key);
+        assert!(
+            evidence
+                .get_capped(
+                    &e.record_key,
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+                )
+                .is_ok(),
+            "{}",
+            e.record_key
+        );
     }
 }
 
@@ -474,7 +538,10 @@ fn a_second_run_of_one_execution_is_refused_by_a_real_bucket() {
     }
 
     let claim = evidence
-        .get(&claim_key(&backup_id))
+        .get_capped(
+            &claim_key(&backup_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the claim is in the bucket")
         .0;
     let claim: serde_json::Value = serde_json::from_slice(&claim).unwrap();

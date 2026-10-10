@@ -219,7 +219,11 @@ fn fx20_no_store_is_built_over_an_injected_region_and_a_real_one_dials() {
         allow_http: true,
     };
     let store = Store::from_url_with(&control, &options()).expect("a real region builds");
-    let reader = std::thread::spawn(move || store.get("probe").err());
+    let reader = std::thread::spawn(move || {
+        store
+            .get_capped("probe", logweir_store::caps::SIGNED_DOCUMENT)
+            .err()
+    });
     let seen = connections_within(&listener, Duration::from_secs(3));
     let _ = reader.join();
     assert!(seen >= 1, "the control store never dialled the listener");

@@ -72,6 +72,10 @@ pub struct SharedMode {
     /// through one of those proxies over HTTPS
     /// (`crate::http::boundary_guard`, `requireTrustedProxy`).
     pub require_trusted_proxy: bool,
+    /// FX-13a: the sign-in states THIS process has redeemed, in memory and
+    /// bounded (`crate::auth::login::UsedStates`). Per replica on purpose: the
+    /// provider's single-use code is the backstop across replicas.
+    pub used_states: crate::auth::login::UsedStates,
 }
 
 /// Everything a request handler needs.

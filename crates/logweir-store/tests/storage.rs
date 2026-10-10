@@ -15,7 +15,15 @@ fn a_create_only_put_onto_an_existing_key_is_already_exists() {
         other => panic!("a second create-only put must be AlreadyExists, got {other:?}"),
     }
     // and the first bytes are still there — never clobbered
-    assert_eq!(s.get("logweir/drills/a.json").unwrap().0, b"{}");
+    assert_eq!(
+        s.get_capped(
+            "logweir/drills/a.json",
+            logweir_store::caps::SIGNED_DOCUMENT
+        )
+        .unwrap()
+        .0,
+        b"{}"
+    );
 }
 
 // A1: keys seeded under `logweir/` so they satisfy put_create_only's own
@@ -72,7 +80,15 @@ fn a_second_put_in_fallback_mode_is_refused_not_overwritten() {
         other => panic!("a second fallback put must be AlreadyExists, got {other:?}"),
     }
     // and the first bytes are still there — never clobbered
-    assert_eq!(s.get("logweir/drills/a.json").unwrap().0, b"{}");
+    assert_eq!(
+        s.get_capped(
+            "logweir/drills/a.json",
+            logweir_store::caps::SIGNED_DOCUMENT
+        )
+        .unwrap()
+        .0,
+        b"{}"
+    );
 }
 
 // A2: renamed from `segment_keys_for_filters_by_the_time_window` — this test
@@ -158,7 +174,12 @@ fn fifty_sequential_puts_share_one_runtime() {
     for i in 0..50 {
         s.put_create_only(&format!("logweir/k{i}"), b"x").unwrap();
     }
-    assert_eq!(s.get("logweir/k49").unwrap().0, b"x");
+    assert_eq!(
+        s.get_capped("logweir/k49", logweir_store::caps::SIGNED_DOCUMENT)
+            .unwrap()
+            .0,
+        b"x"
+    );
 }
 
 // A2, corrected after review FIX 1: the Interfaces-block method Task 12's
@@ -198,7 +219,12 @@ fn segment_keys_for_resolves_topic_partition_against_the_manifest() {
         ]
     );
     // Proves the returned key resolves, not just that it string-matches.
-    assert_eq!(s.get(&got[0]).unwrap().0, b"segment-bytes");
+    assert_eq!(
+        s.get_capped(&got[0], logweir_store::caps::SIGNED_DOCUMENT)
+            .unwrap()
+            .0,
+        b"segment-bytes"
+    );
 
     assert!(s
         .segment_keys_for("payments", 0, (50, 300))
@@ -331,7 +357,12 @@ fn manifest_facts_reads_the_window_from_the_body() {
     s.put_create_only("logweir/b1/manifest.json", manifest)
         .unwrap();
 
-    let facts = s.manifest_facts("logweir/b1/manifest.json").unwrap();
+    let facts = s
+        .manifest_facts(
+            "logweir/b1/manifest.json",
+            logweir_store::caps::CONTROLLER_MANIFEST,
+        )
+        .unwrap();
     assert_eq!(
         facts.backup_id, "b1",
         "backup_id is the manifest key's parent directory, derived exactly as \
@@ -353,7 +384,10 @@ fn manifest_facts_reads_the_window_from_the_body() {
     // Second arm: a manifest that declares no segment bounds no window.
     s.put_create_only("logweir/b2/manifest.json", br#"{"topics":[]}"#)
         .unwrap();
-    match s.manifest_facts("logweir/b2/manifest.json") {
+    match s.manifest_facts(
+        "logweir/b2/manifest.json",
+        logweir_store::caps::CONTROLLER_MANIFEST,
+    ) {
         Err(StoreError::Backend(m)) => {
             assert!(
                 m.contains("logweir/b2/manifest.json"),
@@ -390,7 +424,10 @@ fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
 
     s.put_create_only("logweir/n1/manifest.json", br#"{"hello":"world"}"#)
         .unwrap();
-    match s.manifest_facts("logweir/n1/manifest.json") {
+    match s.manifest_facts(
+        "logweir/n1/manifest.json",
+        logweir_store::caps::CONTROLLER_MANIFEST,
+    ) {
         Err(StoreError::NotAManifest(key, why)) => {
             assert_eq!(key, "logweir/n1/manifest.json");
             assert!(
@@ -403,7 +440,10 @@ fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
 
     s.put_create_only("logweir/n2/manifest.json", br#"{"topics":5}"#)
         .unwrap();
-    match s.manifest_facts("logweir/n2/manifest.json") {
+    match s.manifest_facts(
+        "logweir/n2/manifest.json",
+        logweir_store::caps::CONTROLLER_MANIFEST,
+    ) {
         Err(StoreError::NotAManifest(key, why)) => {
             assert_eq!(key, "logweir/n2/manifest.json");
             assert!(
@@ -417,7 +457,10 @@ fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
     // AND THE OLD ERROR STILL MEANS THE OLD THING.
     s.put_create_only("logweir/n3/manifest.json", br#"{"topics":[]}"#)
         .unwrap();
-    match s.manifest_facts("logweir/n3/manifest.json") {
+    match s.manifest_facts(
+        "logweir/n3/manifest.json",
+        logweir_store::caps::CONTROLLER_MANIFEST,
+    ) {
         Err(StoreError::Backend(m)) => assert!(
             m.contains("manifest declares no segment, so it bounds no window"),
             "a manifest-shaped body with no segment keeps the Backend error: {m}"
@@ -473,7 +516,9 @@ fn the_backup_id_derivation_is_one_function() {
             {"key":"s.bin","start_timestamp":1,"end_timestamp":2}]}]}]}"#,
     )
     .unwrap();
-    let facts = s.manifest_facts(key).unwrap();
+    let facts = s
+        .manifest_facts(key, logweir_store::caps::CONTROLLER_MANIFEST)
+        .unwrap();
     let listed = s
         .list_manifests(&logweir_core::engine::StorageUrl::S3 {
             bucket: "irrelevant".to_string(),

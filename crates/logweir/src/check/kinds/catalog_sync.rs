@@ -111,7 +111,7 @@ use logweir_core::check_contract::{
     CheckCode, CheckId, CheckPlanKind, CheckResult, CheckState, Stream,
 };
 use logweir_core::destination::DestinationRole;
-use logweir_engine_oso::storage::StoreError;
+use logweir_engine_oso::storage::{caps, StoreError};
 use logweir_evidence::keys::VerifyingKey;
 use logweir_evidence::{Sidecar, PAYLOAD_TYPE_BACKUP_RECEIPT};
 use serde::{Serialize, Serializer};
@@ -1389,7 +1389,7 @@ fn examine(
     record_key: &str,
 ) -> Observation {
     walk.objects = walk.objects.saturating_add(1);
-    let record_bytes = match access.get(record_key) {
+    let record_bytes = match access.get(record_key, CATALOG_DOCUMENT_READ_CAP) {
         Ok(b) => b,
         Err(StoreError::NotFound(_)) => return Observation::bare(Availability::Missing),
         Err(_) => return Observation::bare(Availability::Unreadable),
@@ -1431,7 +1431,7 @@ fn examine(
     // `Unreadable` too. `a_receipt_that_cannot_be_read_is_never_missing`
     // exercises each with a key-scoped fault.
     walk.objects = walk.objects.saturating_add(1);
-    let receipt_bytes = match access.get(&point.receipt.key) {
+    let receipt_bytes = match access.get(&point.receipt.key, CATALOG_DOCUMENT_READ_CAP) {
         Ok(b) => b,
         Err(StoreError::NotFound(_)) => {
             observation.availability = Availability::Missing;
@@ -1470,7 +1470,7 @@ fn examine(
         && req.deep_check != CatalogDeepCheck::None
     {
         walk.objects = walk.objects.saturating_add(1);
-        match access.get_with_version(&point.archive.manifest_key) {
+        match access.get_with_version(&point.archive.manifest_key, caps::MANIFEST) {
             Ok((bytes, answered)) => {
                 // **FX-7 — the pin, judged in THIS bucket** ([`pin::judge`],
                 // shared with the drill's point binding). The pin is taken from
@@ -1488,7 +1488,7 @@ fn examine(
                     &point.archive.manifest_sha256,
                     |version| {
                         walk.objects = walk.objects.saturating_add(1);
-                        access.get_version(&point.archive.manifest_key, version)
+                        access.get_version(&point.archive.manifest_key, version, caps::MANIFEST)
                     },
                 );
                 match verdict {
@@ -1539,18 +1539,20 @@ fn examine(
 /// reaches. An oversized document is `Unreadable`: "this build could not tell",
 /// which is what it is.
 ///
-/// **What this does NOT do, said plainly.** `ObjectAccess::get` reads an object
-/// whole — `logweir-store` exposes no ranged read — so this bounds what reaches
-/// the BODY and the page `ConfigMap`s, not what reaches memory. A multi-gigabyte
-/// object under `logweir/catalog/v1/points/…` can still exhaust the Job's
-/// memory, which the pod's own limit turns into a kill the controller reports
-/// through D2 §4.3 rather than into a wrong view. Closing that needs a ranged
-/// `get` on the store crate, which is D2 W2's surface and not this kind's; it is
-/// recorded as a gap rather than half-fixed here. The manifest is deliberately
-/// NOT capped: its size is the adopter's backup set, a legitimate manifest is
-/// megabytes, and the read is inherently whole-object because the check IS its
-/// digest.
+/// **It is also the READ cap (FX-31)**, [`CATALOG_DOCUMENT_READ_CAP`]: the walk
+/// reads a record, a receipt and a sidecar through `ObjectAccess::get` with it,
+/// so a planted multi-gigabyte object under `logweir/catalog/v1/points/…` is
+/// refused on the size the store reports, before a body byte is read, and a
+/// store that streams past the cap is cut off at it. Until FX-31 the object
+/// was read whole and only THEN measured, so only the Job's memory limit
+/// bounded it. The manifest is read under `caps::MANIFEST`, a ceiling and not
+/// a refusal of legitimate manifests: its size is the adopter's backup set, a
+/// legitimate manifest is megabytes, and the read is inherently whole-object
+/// because the check IS its digest.
 pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
+
+/// [`MAX_CATALOG_DOCUMENT_BYTES`] as the cap `ObjectAccess::get` takes.
+const CATALOG_DOCUMENT_READ_CAP: u64 = MAX_CATALOG_DOCUMENT_BYTES as u64;
 
 fn oversized(bytes: &[u8]) -> bool {
     bytes.len() > MAX_CATALOG_DOCUMENT_BYTES
@@ -1573,7 +1575,7 @@ fn classify_signature(
     receipt_bytes: &[u8],
     trust: &[VerifyingKey],
 ) -> (SignatureVerdict, Option<String>) {
-    let sidecar_bytes = match access.get(&point.receipt.sidecar_key) {
+    let sidecar_bytes = match access.get(&point.receipt.sidecar_key, caps::SIDECAR) {
         Ok(b) => b,
         // NO SIDECAR IS "no evidence", which is a fact about the archive.
         // Anything else is "could not tell", which is not.

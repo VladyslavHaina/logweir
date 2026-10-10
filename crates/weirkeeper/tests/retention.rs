@@ -930,15 +930,18 @@ const I13_FILES: [&str; 6] = [
 /// a runtime from within a runtime* at the first verification. Same defect
 /// class as `observe_scorecard(`'s, same fix, and measured the same way (see
 /// the task-24 report).
-const STORE_CALL_TOKENS: [&str; 10] = [
+const STORE_CALL_TOKENS: [&str; 12] = [
     "Store::",
     "store.",
     ".manifest_facts(",
     ".list_manifests(",
     ".list_manifest_keys(",
     "retention::evaluate(",
+    // FX-31 review F2: the budgeted twins, which hold the same reads.
+    "evaluate_within(",
     "observe_archive(",
     "observe_scorecard(",
+    "observe_scorecard_within(",
     "verify_evidence(",
     // TRUST-UPGRADE-SIGNEDAT: the same hazard as `verify_evidence(` — it holds
     // a `Store::get` while every caller names no `Store` at all.

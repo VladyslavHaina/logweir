@@ -60,6 +60,119 @@ pub enum StoreError {
     /// AND the reason rather than only one of them.
     #[error("{0} is not a backup manifest: {1}")]
     NotAManifest(String, String),
+    /// **FX-31.** The object is larger than the cap its reader set, so it was
+    /// not read: [`Store::get_capped`] refused it on the size the store
+    /// reported before any body byte was taken, or stopped at the first chunk
+    /// that went past the cap when a store reported a size within it and then
+    /// streamed more.
+    ///
+    /// A fact about the OBJECT, not a failure of the store: the read was
+    /// answered, and the answer is "too big for this reader". It is never
+    /// `NotFound` (the object is there) and never `Io` (nothing is wrong with
+    /// the connection, and a retry reads the same object). The message names
+    /// the key, the cap and what was observed, so the sentence an operator
+    /// reads says which limit to look up.
+    #[error(
+        "{key} is larger than the {cap}-byte read cap ({observed}); nothing past the cap was read"
+    )]
+    TooLarge {
+        key: String,
+        cap: u64,
+        observed: OverCap,
+    },
+}
+
+/// What [`StoreError::TooLarge`] saw of an object over its reader's cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverCap {
+    /// The store's own size for the object — the `Content-Length` /
+    /// `Content-Range` of the answer, or a filesystem's metadata — checked
+    /// BEFORE any body byte was read.
+    Reported(u64),
+    /// The store reported `reported` bytes, within the cap, and its stream
+    /// carried `read` bytes by the chunk that went past the cap. Reading
+    /// stopped there: the chunk that crossed it was dropped, not kept.
+    Streamed { reported: u64, read: u64 },
+}
+
+impl std::fmt::Display for OverCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reported(size) => write!(f, "the store reports {size} bytes"),
+            Self::Streamed { reported, read } => write!(
+                f,
+                "the store reported {reported} bytes and streamed at least {read} before reading \
+                 stopped"
+            ),
+        }
+    }
+}
+
+/// What a `HEAD` of one object says — [`Store::head`], for an existence test
+/// that must not read the body (FX-31).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectHead {
+    /// The object's size, as the store reports it.
+    pub size: u64,
+    /// The version id the store reports, `None` on a store that keeps no
+    /// versions.
+    pub version: Option<String>,
+}
+
+/// **FX-31 — the read cap of every document Logweir reads from an object
+/// store, in one table.**
+///
+/// [`Store::get_capped`] takes a cap and nothing reads without one: the
+/// uncapped `Store::get` is gone, so a new read site has to name which of
+/// these it is (or argue for a new row here). The caps are per DOCUMENT and
+/// per READER: a runner, CLI or check Job reads in its own pod under its own
+/// memory limit, while `weirkeeper` is one process for every namespace, so
+/// the controller's caps are the smaller `CONTROLLER_*` rows and an object a
+/// tenant planted cannot take memory the other namespaces' reconciles need.
+///
+/// | cap | bytes | read by | measured |
+/// |---|---|---|---|
+/// | [`SIDECAR`] | 64 KiB | everyone | one DSSE signature is about 312 bytes; equal to the evidence relay's sidecar cap |
+/// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI, check Jobs | a 1.5.0 receipt is about 3.4 KB per topic (two-space pretty JSON, 14 semantic configuration entries and a schema-dependency block each), so a 5,000-topic run (`MAX_RESOLVED_TOPICS`) is about 16.4 MiB, 20 MiB with five overrides per topic |
+/// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper` | equal to the evidence relay's payload cap, so a document is verifiable by the controller exactly when it is verifiable through a relay; about 300 topics of receipt |
+/// | [`MANIFEST`] | 256 MiB | runner, CLI, check Jobs | about 540 bytes per segment entry, so about 500,000 segments |
+/// | [`CONTROLLER_MANIFEST`] | 64 MiB | `weirkeeper`'s retention report | about 124,000 segments; parsed as a stream, so memory is the bytes and no more |
+/// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. FX-30 owns the decode cap |
+/// | [`ENGINE_DOCUMENT`] | 64 MiB | runner, CLI | the engine's consumer-groups snapshot and validation report |
+/// | [`PROBE`] | 0 | check Jobs, `backup run` | a readiness probe of a key nobody wrote, and the backup set check's "is the manifest there": the answer is the GET's status, and any body is refused unread |
+///
+/// PROD-03.0's schema-dependency detection reads archived segments through
+/// [`Store::get_bounded`] under its own 64 MiB stored cap (a `HEAD`, then a
+/// ranged GET of exactly the reported size), so it is bounded the same way
+/// and is not a row here.
+pub mod caps {
+    use logweir_core::check_contract::{MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES};
+
+    /// A detached DSSE sidecar, whoever reads it: the evidence relay's own
+    /// sidecar cap.
+    pub const SIDECAR: u64 = MAX_EVIDENCE_SIDECAR_BYTES;
+    /// A signed evidence document (receipt, scorecard, catalog point record)
+    /// read in a runner, CLI or check-Job process.
+    pub const SIGNED_DOCUMENT: u64 = 64 << 20;
+    /// A signed evidence document read by the SHARED controller: the evidence
+    /// relay's payload cap, so the controller's own handle and a relay agree
+    /// on which documents can be verified at all. The controller parses two
+    /// such documents into a `serde_json::Value` before any digest check (the
+    /// receipt's window, the scorecard's outcome), and a document of tiny
+    /// values parses into about 37 times its size, so this cap is also what
+    /// bounds that parse: about 40 MB at worst.
+    pub const CONTROLLER_DOCUMENT: u64 = MAX_EVIDENCE_PAYLOAD_BYTES;
+    /// An engine manifest read in a runner, CLI or check-Job process.
+    pub const MANIFEST: u64 = 256 << 20;
+    /// An engine manifest read by the controller's retention report.
+    pub const CONTROLLER_MANIFEST: u64 = 64 << 20;
+    /// One archived segment.
+    pub const SEGMENT: u64 = 1 << 30;
+    /// An engine-written document beside a set or a run: the consumer-groups
+    /// snapshot, the engine's validation report.
+    pub const ENGINE_DOCUMENT: u64 = 64 << 20;
+    /// A readiness probe's GET of a key nobody wrote.
+    pub const PROBE: u64 = 0;
 }
 
 /// The `backup_id` a manifest key belongs to: the key's parent directory.
@@ -87,17 +200,461 @@ pub fn backup_id_from_manifest_key(key: &str) -> String {
         .to_string()
 }
 
-/// The JSON type name of `v`, for an error message that says what was found
-/// rather than only what was expected. The VALUE is never quoted: a manifest
-/// body is an adopter's data and this string reaches a controller log.
-fn kind_of(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
+/// **FX-31 — the covered window ONE manifest body declares, folded while it
+/// is parsed**: `(oldest start_timestamp, newest end_timestamp)` over every
+/// segment of every partition of every topic.
+///
+/// It replaces a walk over a `serde_json::Value` of the whole body and keeps
+/// that walk's answers exactly, because [`Store::manifest_facts`]'s callers
+/// and tests were written against them:
+///
+/// | body | answer |
+/// |---|---|
+/// | not JSON (anywhere, trailing bytes included) | `Io("<key>: <serde_json's error>")` |
+/// | not an object, or an object with no `topics` | `NotAManifest(key, "it declares no `topics` key")` |
+/// | `topics` that is not an array | `NotAManifest(key, "`topics` is <a number / an object / …>, not an array")` |
+/// | a topic that is not an object, or whose `partitions` is absent or not an array (likewise a partition and its `segments`) | that branch contributes nothing |
+/// | a segment that is not an object, or whose `start_timestamp` / `end_timestamp` is absent or not an `i64` | `Backend("<key>: segment entry missing start_timestamp/end_timestamp")` |
+/// | no segment at all | `Backend("<key>: manifest declares no segment, so it bounds no window")` |
+///
+/// **A duplicate key: the LAST occurrence wins**, at every level, as it does
+/// in a `serde_json::Map`. Each level keeps the result of its last occurrence
+/// and drops the earlier one; nothing about an earlier `topics` survives a
+/// later one.
+///
+/// Nothing of the body is kept: keys are compared as they stream past, and
+/// every value this does not need is skipped without being kept.
+fn manifest_window(key: &str, bytes: &[u8]) -> Result<(i64, i64), StoreError> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let top = serde::Deserializer::deserialize_any(&mut de, window::TopVisitor)
+        .and_then(|top| de.end().map(|()| top))
+        .map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
+    let topics = match top {
+        None => {
+            return Err(StoreError::NotAManifest(
+                key.to_string(),
+                "it declares no `topics` key".to_string(),
+            ))
+        }
+        Some(Err(kind)) => {
+            return Err(StoreError::NotAManifest(
+                key.to_string(),
+                format!("`topics` is {kind}, not an array"),
+            ))
+        }
+        Some(Ok(fold)) => fold,
+    };
+    if topics.bad_segment {
+        return Err(StoreError::Backend(format!(
+            "{key}: segment entry missing start_timestamp/end_timestamp"
+        )));
+    }
+    match topics.window {
+        Some(window) => Ok(window),
+        None => Err(StoreError::Backend(format!(
+            "{key}: manifest declares no segment, so it bounds no window"
+        ))),
+    }
+}
+
+/// The visitors behind [`manifest_window`]. Each level answers a [`window::Fold`]
+/// and holds nothing of the body.
+mod window {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+    use std::fmt;
+
+    /// What one subtree contributes: the window of the segments it holds, and
+    /// whether any of them lacked a timestamp.
+    #[derive(Clone, Copy, Default)]
+    pub(super) struct Fold {
+        pub(super) window: Option<(i64, i64)>,
+        pub(super) bad_segment: bool,
+    }
+
+    impl Fold {
+        fn merge(&mut self, other: Fold) {
+            self.bad_segment |= other.bad_segment;
+            self.window = match (self.window, other.window) {
+                (Some((a0, a1)), Some((b0, b1))) => Some((a0.min(b0), a1.max(b1))),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+
+    /// A value this fold does not need, consumed and dropped — and VALIDATED
+    /// exactly as a `serde_json::Value` parse would validate it.
+    ///
+    /// Not `serde::de::IgnoredAny`: serde_json's ignore path does not check a
+    /// string's UTF-8 or its `\u` escapes (`read.rs` `ignore_str` /
+    /// `ignore_escape` in 1.0.151), so a body the `Value` walk refused as `Io`
+    /// would have folded to a window here. `deserialize_any` parses every
+    /// string and number the way `Value` does — with no allocation for a
+    /// string without escapes, and serde_json's one scratch buffer for one
+    /// with them — and nothing is kept.
+    struct Skip;
+
+    impl<'de> DeserializeSeed<'de> for Skip {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(SkipVisitor)
+        }
+    }
+
+    struct SkipVisitor;
+
+    impl<'de> Visitor<'de> for SkipVisitor {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E>(self) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(Skip)?.is_some() {}
+            Ok(())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            skip_map(&mut map)
+        }
+    }
+
+    /// Every remaining entry of `map`, keys and values alike, through [`Skip`].
+    fn skip_map<'de, A: MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
+        while map.next_key_seed(Skip)?.is_some() {
+            map.next_value_seed(Skip)?;
+        }
+        Ok(())
+    }
+
+    /// A map key, compared and dropped.
+    enum Key {
+        Topics,
+        Partitions,
+        Segments,
+        Start,
+        End,
+        Other,
+    }
+
+    struct KeyVisitor;
+
+    impl<'de> Visitor<'de> for KeyVisitor {
+        type Value = Key;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a key")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Key, E> {
+            Ok(match v {
+                "topics" => Key::Topics,
+                "partitions" => Key::Partitions,
+                "segments" => Key::Segments,
+                "start_timestamp" => Key::Start,
+                "end_timestamp" => Key::End,
+                _ => Key::Other,
+            })
+        }
+    }
+
+    impl<'de> DeserializeSeed<'de> for KeyVisitor {
+        type Value = Key;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Key, D::Error> {
+            d.deserialize_str(self)
+        }
+    }
+
+    /// Which level of the manifest a value sits at, which decides what an
+    /// array or an object there means. (`topics` itself is [`TopicsVisitor`]'s,
+    /// because it alone names the kind of a value that is not an array.)
+    #[derive(Clone, Copy)]
+    enum Level {
+        /// One element of `topics`: an object whose `partitions` counts.
+        Topic,
+        /// `partitions`: an array of partitions.
+        Partitions,
+        /// One element of `partitions`: an object whose `segments` counts.
+        Partition,
+        /// `segments`: an array of segments.
+        Segments,
+        /// One element of `segments`: an object with two timestamps.
+        Segment,
+    }
+
+    /// The type name `Value`'s walk reported for a `topics` that is not an
+    /// array (`kind_of`, which this replaces).
+    pub(super) type NotAnArray = &'static str;
+
+    /// The top level: `Some(Ok(fold))` for an object whose LAST `topics` is
+    /// an array, `Some(Err(kind))` when that `topics` is something else, and
+    /// `None` for a non-object or an object with no `topics`.
+    pub(super) struct TopVisitor;
+
+    impl<'de> Visitor<'de> for TopVisitor {
+        type Value = Option<Result<Fold, NotAnArray>>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON document")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut topics = None;
+            while let Some(key) = map.next_key_seed(KeyVisitor)? {
+                if matches!(key, Key::Topics) {
+                    topics = Some(map.next_value_seed(TopicsSeed)?);
+                } else {
+                    map.next_value_seed(Skip)?;
+                }
+            }
+            Ok(topics)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while seq.next_element_seed(Skip)?.is_some() {}
+            Ok(None)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    /// The value of `topics`: an array folds, anything else names its kind.
+    struct TopicsSeed;
+
+    impl<'de> DeserializeSeed<'de> for TopicsSeed {
+        type Value = Result<Fold, NotAnArray>;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_any(TopicsVisitor)
+        }
+    }
+
+    struct TopicsVisitor;
+
+    impl<'de> Visitor<'de> for TopicsVisitor {
+        type Value = Result<Fold, NotAnArray>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            fold_seq(seq, Level::Topic).map(Ok)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            skip_map(&mut map)?;
+            Ok(Err("an object"))
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(Err("a boolean"))
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(Err("a number"))
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(Err("a number"))
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(Err("a number"))
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(Err("a string"))
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(Err("null"))
+        }
+    }
+
+    /// Fold every element of an array whose elements sit at `element`.
+    fn fold_seq<'de, A: SeqAccess<'de>>(mut seq: A, element: Level) -> Result<Fold, A::Error> {
+        let mut fold = Fold::default();
+        while let Some(one) = seq.next_element_seed(LevelSeed(element))? {
+            fold.merge(one);
+        }
+        Ok(fold)
+    }
+
+    /// One value at a known level.
+    struct LevelSeed(Level);
+
+    impl<'de> DeserializeSeed<'de> for LevelSeed {
+        type Value = Fold;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Fold, D::Error> {
+            d.deserialize_any(LevelVisitor(self.0))
+        }
+    }
+
+    struct LevelVisitor(Level);
+
+    impl LevelVisitor {
+        /// What a value that is neither the array nor the object this level
+        /// expects contributes: nothing, except at a SEGMENT, where a value
+        /// that is not an object carries no timestamp and is a bad segment.
+        fn scalar(&self) -> Fold {
+            Fold {
+                window: None,
+                bad_segment: matches!(self.0, Level::Segment),
+            }
+        }
+    }
+
+    impl<'de> Visitor<'de> for LevelVisitor {
+        type Value = Fold;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Fold, A::Error> {
+            let element = match self.0 {
+                Level::Partitions => Level::Partition,
+                Level::Segments => Level::Segment,
+                // An array where an OBJECT belongs: a topic, partition or
+                // segment that is not an object. It carries no key, so it
+                // contributes what any other non-object there does.
+                Level::Topic | Level::Partition | Level::Segment => {
+                    while seq.next_element_seed(Skip)?.is_some() {}
+                    return Ok(self.scalar());
+                }
+            };
+            fold_seq(seq, element)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fold, A::Error> {
+            match self.0 {
+                Level::Topic | Level::Partition => {
+                    // The LAST `partitions` (of a topic) or `segments` (of a
+                    // partition) is the one that counts; an earlier one is
+                    // folded and then replaced, never merged.
+                    let (wanted, inner) = match self.0 {
+                        Level::Topic => (Key::Partitions, Level::Partitions),
+                        _ => (Key::Segments, Level::Segments),
+                    };
+                    let mut last = Fold::default();
+                    while let Some(key) = map.next_key_seed(KeyVisitor)? {
+                        if std::mem::discriminant(&key) == std::mem::discriminant(&wanted) {
+                            last = map.next_value_seed(LevelSeed(inner))?;
+                        } else {
+                            map.next_value_seed(Skip)?;
+                        }
+                    }
+                    Ok(last)
+                }
+                Level::Segment => {
+                    let (mut start, mut end) = (None, None);
+                    while let Some(key) = map.next_key_seed(KeyVisitor)? {
+                        match key {
+                            Key::Start => start = map.next_value_seed(I64Seed)?,
+                            Key::End => end = map.next_value_seed(I64Seed)?,
+                            _ => {
+                                map.next_value_seed(Skip)?;
+                            }
+                        }
+                    }
+                    Ok(match (start, end) {
+                        (Some(t0), Some(t1)) => Fold {
+                            window: Some((t0, t1)),
+                            bad_segment: false,
+                        },
+                        _ => Fold {
+                            window: None,
+                            bad_segment: true,
+                        },
+                    })
+                }
+                // An object where an ARRAY belongs: `partitions` or `segments`
+                // that is not an array contributes nothing.
+                Level::Partitions | Level::Segments => {
+                    skip_map(&mut map)?;
+                    Ok(self.scalar())
+                }
+            }
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+        fn visit_unit<E>(self) -> Result<Fold, E> {
+            Ok(self.scalar())
+        }
+    }
+
+    /// A timestamp, as `serde_json::Value::as_i64` reads one: an integer that
+    /// fits an `i64`, and `None` for anything else (a float, a string, an
+    /// integer above `i64::MAX`, null, an array, an object).
+    struct I64Seed;
+
+    impl<'de> DeserializeSeed<'de> for I64Seed {
+        type Value = Option<i64>;
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Option<i64>, D::Error> {
+            d.deserialize_any(I64Visitor)
+        }
+    }
+
+    struct I64Visitor;
+
+    impl<'de> Visitor<'de> for I64Visitor {
+        type Value = Option<i64>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any JSON value")
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<Option<i64>, E> {
+            Ok(Some(v))
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<Option<i64>, E> {
+            Ok(i64::try_from(v).ok())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Option<i64>, E> {
+            Ok(None)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Option<i64>, E> {
+            Ok(None)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Option<i64>, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Option<i64>, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Option<i64>, A::Error> {
+            while seq.next_element_seed(Skip)?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<i64>, A::Error> {
+            skip_map(&mut map)?;
+            Ok(None)
+        }
     }
 }
 
@@ -187,6 +744,20 @@ pub struct Store {
     /// runner pins the manifest's version id, and readers read by it) has to
     /// be modelled beside it. See [`VersionedBucket`].
     versions: Option<Arc<VersionLog>>,
+    /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_misreporting_size`]
+    /// and `None` for every production constructor (FX-31). Every GET and HEAD
+    /// answer is then rewritten to REPORT a size other than the object's, and
+    /// every body byte a reader takes is counted. Modelled here, beside
+    /// `versions`, rather than as a wrapping `ObjectStore`: that trait cannot
+    /// be implemented without naming its delete, which this crate never does
+    /// (G-RET, `scripts/check-no-archive-write.sh`).
+    misreport: Option<Arc<Misreport>>,
+}
+
+/// What [`Store::in_memory_misreporting_size`] reports, and its meter.
+struct Misreport {
+    reported: u64,
+    streamed: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
@@ -299,6 +870,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -327,6 +899,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -348,6 +921,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -371,6 +945,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         })
     }
 
@@ -567,6 +1142,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: None,
+            misreport: None,
         }
     }
 
@@ -601,6 +1177,59 @@ impl Store {
         }
     }
 
+    /// A TEST DOUBLE of a store that MISREPORTS an object's size (FX-31): every
+    /// GET (and HEAD) answers with `reported` as the object's size and the
+    /// range it covers, and then streams the object's real bytes — a
+    /// misbehaving proxy or endpoint, which is what [`Store::get_capped`]'s
+    /// running cap exists for. Writes and lists are the in-memory backend's.
+    ///
+    /// The [`StreamMeter`] counts every body byte a reader actually took from
+    /// a GET's stream, so a row can show that a refusal on the reported size,
+    /// or a [`Store::head`], took none. No production path builds it.
+    #[doc(hidden)]
+    pub fn in_memory_misreporting_size(prefix: &str, reported: u64) -> (Self, StreamMeter) {
+        let meter = StreamMeter::default();
+        let store = Self {
+            misreport: Some(Arc::new(Misreport {
+                reported,
+                streamed: Arc::clone(&meter.0),
+            })),
+            ..Self::in_memory(prefix)
+        };
+        (store, meter)
+    }
+
+    /// The test double's rewrite of one GET answer (see `misreport`); every
+    /// production store answers `r` unchanged.
+    fn as_answered(&self, mut r: object_store::GetResult) -> object_store::GetResult {
+        use futures::StreamExt as _;
+        use object_store::GetResultPayload;
+        let Some(m) = &self.misreport else {
+            return r;
+        };
+        // THE LIE: the headers say `reported`, the body is whole.
+        r.meta.size = m.reported;
+        r.range = 0..m.reported;
+        // THE METER: every chunk a reader polls out of the body. The double is
+        // built over the in-memory backend, whose body is always a stream.
+        let placeholder = GetResultPayload::Stream(futures::stream::empty().boxed());
+        if let GetResultPayload::Stream(body) = std::mem::replace(&mut r.payload, placeholder) {
+            let streamed = Arc::clone(&m.streamed);
+            r.payload = GetResultPayload::Stream(
+                body.inspect(move |chunk| {
+                    if let Ok(bytes) = chunk {
+                        streamed.fetch_add(
+                            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                    }
+                })
+                .boxed(),
+            );
+        }
+        r
+    }
+
     /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
     /// to act on it the way a writer OTHER than this store would: overwrite a
     /// key unconditionally, as the engine's own manifest put does. No
@@ -608,8 +1237,8 @@ impl Store {
     /// names no object-store delete).
     ///
     /// Every successful put through the STORE, and every write through the
-    /// handle, becomes a new version with a fresh id; [`Store::get`] reports
-    /// the current one, and [`Store::get_version`] reads any retained one —
+    /// handle, becomes a new version with a fresh id; [`Store::get_capped`] reports
+    /// the current one, and [`Store::get_version_capped`] reads any retained one —
     /// which is what S3, MinIO and SeaweedFS do for a bucket with versioning
     /// enabled.
     #[doc(hidden)]
@@ -626,6 +1255,7 @@ impl Store {
             ignores_create_mode: false,
             errors_on_existing_key: false,
             versions: Some(log.clone()),
+            misreport: None,
         };
         (store, VersionedBucket { backend, log, rt })
     }
@@ -648,16 +1278,46 @@ impl Store {
         )
     }
 
-    /// Returns `StoreError::NotFound` specifically when the object genuinely
-    /// does not exist, distinct from every other failure mode (`Io`) — see
+    /// **FX-31 — read one object whole, and never more than `max_bytes` of
+    /// it.** Returns the bytes and the version id the store answered with.
+    ///
+    /// # The two fences, in order
+    ///
+    /// 1. **The size the store reports**, from the GET's own answer (its
+    ///    `Content-Length` / `Content-Range`, or a filesystem's metadata),
+    ///    is checked BEFORE any body byte is taken. An object over the cap is
+    ///    refused there, with [`OverCap::Reported`], and its body is dropped
+    ///    unread.
+    /// 2. **A running cap over the stream.** A store that reports a size
+    ///    within the cap and then streams more — a misbehaving proxy, a
+    ///    compromised endpoint, an object replaced between the headers and
+    ///    the body — is cut off at the first chunk that would take the total
+    ///    past the cap, with [`OverCap::Streamed`]. That chunk is not kept,
+    ///    and the buffer grows by doubling but never past the cap, so the
+    ///    most this read ever holds is the cap plus the one chunk in hand.
+    ///
+    /// So the memory a read can take is the caller's decision, named at the
+    /// call site from [`caps`], and not the size of whatever a bucket holds.
+    /// A shared controller that read whole objects could be OOM-killed by one
+    /// tenant's multi-gigabyte object at a receipt key, for every namespace,
+    /// on every restart.
+    ///
+    /// `StoreError::NotFound` specifically when the object genuinely does not
+    /// exist, distinct from every other failure mode (`Io`) — see
     /// `StoreError::NotFound`'s doc comment for why the distinction exists.
-    /// `EngineError: From<StoreError>` makes every existing `?`-based caller
-    /// of this method (which all want a plain operational failure) unaffected
-    /// by this signature; `describe()`'s sibling-snapshot read is the one
-    /// caller that inspects the variant directly.
-    pub fn get(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
+    /// `EngineError: From<StoreError>` keeps every `?`-based caller a plain
+    /// operational failure, whose message names the cap.
+    pub fn get_capped(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
         let rt = &self.rt;
         rt.block_on(async {
+            // The one whole-body GET outside a version read (clippy.toml
+            // forbids it everywhere else): its body is taken through
+            // `read_within`'s two fences, never collected whole.
+            #[allow(clippy::disallowed_methods)]
             let r = self
                 .inner
                 .get(&OPath::from(key))
@@ -666,16 +1326,48 @@ impl Store {
                     object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
                     other => StoreError::Io(format!("{key}: {other}")),
                 })?;
+            let r = self.as_answered(r);
             let vid = match &self.versions {
                 // The test double's version log: see `versions`.
                 Some(log) => log.current(key),
                 None => r.meta.version.clone(),
             };
-            let b = r
-                .bytes()
+            let bytes = read_within(key, key, r, max_bytes).await?;
+            Ok((bytes, vid))
+        })
+    }
+
+    /// **FX-31 — what the store says about one object, without its body.**
+    ///
+    /// For an existence test: "is the sidecar there" needs no byte of it, and
+    /// reading a whole object to throw it away is exactly the unbounded read
+    /// [`Store::get_capped`] exists to end. `NotFound` exactly as
+    /// [`Store::get_capped`] answers it.
+    ///
+    /// A `HEAD` carries no response body, so an S3 denial arrives without its
+    /// XML `<Code>`: a caller that must CLASSIFY a refusal (the readiness
+    /// probe) keeps a GET with [`caps::PROBE`] instead.
+    pub fn head(&self, key: &str) -> Result<ObjectHead, StoreError> {
+        let rt = &self.rt;
+        rt.block_on(async {
+            let meta = self
+                .inner
+                .head(&OPath::from(key))
                 .await
-                .map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
-            Ok((b.to_vec(), vid))
+                .map_err(|e| match e {
+                    object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+                    other => StoreError::Io(format!("{key}: {other}")),
+                })?;
+            let version = match &self.versions {
+                // The test double's version log: see `versions`.
+                Some(log) => log.current(key),
+                None => meta.version.clone(),
+            };
+            Ok(ObjectHead {
+                // The test double's size claim: see `misreport`.
+                size: self.misreport.as_ref().map_or(meta.size, |m| m.reported),
+                version,
+            })
         })
     }
 
@@ -711,6 +1403,9 @@ impl Store {
                 if size == 0 {
                     return Ok(Some(Vec::new()));
                 }
+                // PROD-03.0's ranged read, to exactly the size the HEAD
+                // reported and only when it is under the caller's cap.
+                #[allow(clippy::disallowed_methods)]
                 let b = self
                     .inner
                     .get_range(&path, 0..size)
@@ -736,8 +1431,9 @@ impl Store {
     }
 
     /// **FX-7 — read ONE VERSION of an object**, by the version id a signed
-    /// document pinned. Returns the bytes and the version id the store
-    /// answered with.
+    /// document pinned, and (FX-31) never more than `max_bytes` of it, by the
+    /// same two fences as [`Store::get_capped`]. Returns the bytes and the
+    /// version id the store answered with.
     ///
     /// `NotFound` when the store holds no such version of the key: never
     /// written, that version expired, or an id this bucket never issued at all
@@ -752,10 +1448,11 @@ impl Store {
     /// refused as [`StoreError::Backend`] rather than handed back as the
     /// pinned bytes. A reader that took the current object for the pinned one
     /// would verify exactly the rewrite the pin exists to detect.
-    pub fn get_version(
+    pub fn get_version_capped(
         &self,
         key: &str,
         version: &str,
+        max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
         if let Some(log) = &self.versions {
             // The test double's version log: see `versions`.
@@ -764,10 +1461,18 @@ impl Store {
                     "{key}?versionId={version}: {fault}"
                 )));
             }
-            return log
+            let bytes = log
                 .read(key, version)
-                .map(|bytes| (bytes, Some(version.to_string())))
-                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")));
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")))?;
+            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if size > max_bytes {
+                return Err(StoreError::TooLarge {
+                    key: format!("{key}?versionId={version}"),
+                    cap: max_bytes,
+                    observed: OverCap::Reported(size),
+                });
+            }
+            return Ok((bytes, Some(version.to_string())));
         }
         let rt = &self.rt;
         rt.block_on(async {
@@ -775,11 +1480,14 @@ impl Store {
                 version: Some(version.to_string()),
                 ..Default::default()
             };
+            // A version read's GET: its body goes through `read_within` too.
+            #[allow(clippy::disallowed_methods)]
             let r = self
                 .inner
                 .get_opts(&OPath::from(key), options)
                 .await
                 .map_err(|e| version_read_error(key, version, e))?;
+            let r = self.as_answered(r);
             let answered = r.meta.version.clone();
             if answered.as_deref() != Some(version) {
                 return Err(StoreError::Backend(format!(
@@ -788,11 +1496,9 @@ impl Store {
                     answered.as_deref().unwrap_or("none")
                 )));
             }
-            let b = r
-                .bytes()
-                .await
-                .map_err(|e| StoreError::Io(format!("{key}?versionId={version}: {e}")))?;
-            Ok((b.to_vec(), answered))
+            let at = format!("{key}?versionId={version}");
+            let bytes = read_within(key, &at, r, max_bytes).await?;
+            Ok((bytes, answered))
         })
     }
 
@@ -1008,54 +1714,23 @@ impl Store {
     ///
     /// A manifest with no segment bounds no window, and saying so is the only
     /// honest answer: an empty min/max would be published as a real window.
-    pub fn manifest_facts(&self, key: &str) -> Result<ManifestFacts, StoreError> {
-        let (bytes, _) = self.get(key)?;
-        let v: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
-        let mut newest: Option<i64> = None;
-        let mut oldest: Option<i64> = None;
-        let Some(topics) = v.get("topics").map(|t| {
-            t.as_array()
-                .map(|a| a.as_slice())
-                .ok_or_else(|| format!("`topics` is {}, not an array", kind_of(t)))
-        }) else {
-            return Err(StoreError::NotAManifest(
-                key.to_string(),
-                "it declares no `topics` key".to_string(),
-            ));
-        };
-        let topics = topics.map_err(|why| StoreError::NotAManifest(key.to_string(), why))?;
-        for t in topics {
-            let parts = t
-                .get("partitions")
-                .and_then(|p| p.as_array())
-                .map(|a| a.as_slice())
-                .unwrap_or(&[]);
-            for p in parts {
-                let ss = p
-                    .get("segments")
-                    .and_then(|s| s.as_array())
-                    .map(|a| a.as_slice())
-                    .unwrap_or(&[]);
-                for s in ss {
-                    let (Some(t0), Some(t1)) = (
-                        s.get("start_timestamp").and_then(|x| x.as_i64()),
-                        s.get("end_timestamp").and_then(|x| x.as_i64()),
-                    ) else {
-                        return Err(StoreError::Backend(format!(
-                            "{key}: segment entry missing start_timestamp/end_timestamp"
-                        )));
-                    };
-                    oldest = Some(oldest.map_or(t0, |o: i64| o.min(t0)));
-                    newest = Some(newest.map_or(t1, |n: i64| n.max(t1)));
-                }
-            }
-        }
-        let (Some(oldest_record_ms), Some(newest_record_ms)) = (oldest, newest) else {
-            return Err(StoreError::Backend(format!(
-                "{key}: manifest declares no segment, so it bounds no window"
-            )));
-        };
+    ///
+    /// # FX-31: read under the caller's cap, and parsed as a STREAM
+    ///
+    /// `max_bytes` is the reader's cap ([`caps::CONTROLLER_MANIFEST`] in the
+    /// controller's retention report); a manifest over it is
+    /// [`StoreError::TooLarge`], which the report lists under `skipped` —
+    /// neither kept nor removable. The window is folded while the body is
+    /// parsed ([`manifest_window`]) and no `serde_json::Value` of the manifest
+    /// is ever built, so the memory this takes is the capped bytes and no
+    /// more: a document of tiny values (`[0,0,0,…]`) costs a `Value` tree
+    /// about 37 times its own size (16 MiB of JSON held 621 MB, measured by
+    /// `crates/weirkeeper/tests/read_caps.rs`), in the one process every
+    /// namespace shares. The answers are the ones the earlier `Value` walk
+    /// gave, byte for byte, including which duplicate key wins (the last).
+    pub fn manifest_facts(&self, key: &str, max_bytes: u64) -> Result<ManifestFacts, StoreError> {
+        let (bytes, _) = self.get_capped(key, max_bytes)?;
+        let (oldest_record_ms, newest_record_ms) = manifest_window(key, &bytes)?;
         Ok(ManifestFacts {
             backup_id: backup_id_from_manifest_key(key),
             newest_record_ms,
@@ -1144,7 +1819,8 @@ impl Store {
         partition: i32,
     ) -> Result<Vec<(String, i64, i64)>, EngineError> {
         let mut segs: Vec<(String, i64, i64)> = Vec::new();
-        let (bytes, _) = self.get(manifest_key)?;
+        // FX-31: a runner-side read, under the manifest cap.
+        let (bytes, _) = self.get_capped(manifest_key, caps::MANIFEST)?;
         let v: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| EngineError::Operational(format!("{manifest_key}: {e}")))?;
         let topics = v
@@ -1463,6 +2139,20 @@ impl VersionedBucket {
             .version_read_fault
             .lock()
             .expect("the version log is never poisoned") = Some(text.to_string());
+    }
+}
+
+/// TEST DOUBLE ONLY (FX-31): how many body bytes readers took from a
+/// [`Store::in_memory_misreporting_size`] store's GET streams, in total.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct StreamMeter(Arc<std::sync::atomic::AtomicU64>);
+
+impl StreamMeter {
+    /// The body bytes taken so far.
+    #[must_use]
+    pub fn streamed(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -2051,7 +2741,69 @@ fn backend_name(u: &StorageUrl) -> &'static str {
     }
 }
 
-/// **FX-7 — what a failed read of ONE VERSION means.** [`Store::get_version`]'s
+/// **FX-31 — the two fences of a capped read**, over one GET's answer:
+/// [`Store::get_capped`] and [`Store::get_version_capped`] both end here.
+///
+/// `key` is what a `TooLarge` names; `at` is how an I/O error names the read
+/// (a version read says which version).
+///
+/// The size the answer reports is the LARGER of the object's size and the
+/// length of the range the answer covers: for a whole-object GET they are
+/// equal, and a store that disagrees with itself is held to the bigger claim.
+async fn read_within(
+    key: &str,
+    at: &str,
+    r: object_store::GetResult,
+    max_bytes: u64,
+) -> Result<Vec<u8>, StoreError> {
+    use futures::StreamExt as _;
+    let reported = r.meta.size.max(r.range.end.saturating_sub(r.range.start));
+    // FENCE 1: the reported size, before a single body byte is taken. The
+    // answer is dropped here with its body unread.
+    if reported > max_bytes {
+        return Err(StoreError::TooLarge {
+            key: key.to_string(),
+            cap: max_bytes,
+            observed: OverCap::Reported(reported),
+        });
+    }
+    // `reported <= max_bytes` here, so the reservation is the caller's cap at
+    // most, never a size the store chose.
+    let mut out: Vec<u8> = Vec::with_capacity(usize::try_from(reported).unwrap_or(0));
+    let mut stream = r.into_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| StoreError::Io(format!("{at}: {e}")))?;
+        // FENCE 2: a running cap, so a store that reported a small size and
+        // streams more is cut off at the cap. The chunk that crosses it is
+        // dropped, not appended.
+        let read = u64::try_from(out.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if read > max_bytes {
+            return Err(StoreError::TooLarge {
+                key: key.to_string(),
+                cap: max_bytes,
+                observed: OverCap::Streamed { reported, read },
+            });
+        }
+        // THE BUFFER NEVER GROWS PAST THE CAP (review F10). A store that
+        // reported less than it streams outgrows the reservation made from
+        // its report, and `Vec`'s own doubling could then take up to twice the
+        // cap. So it grows the way `Vec` would, doubling, but never past the
+        // cap: `read <= max_bytes` here, so the target always holds the chunk.
+        let needed = out.len() + chunk.len();
+        if out.capacity() < needed {
+            let target = needed
+                .max(out.capacity().saturating_mul(2))
+                .min(usize::try_from(max_bytes).unwrap_or(usize::MAX));
+            out.reserve_exact(target - out.len());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// **FX-7 — what a failed read of ONE VERSION means.** [`Store::get_version_capped`]'s
 /// error mapping, kept beside the classifier because it reads the same text.
 ///
 /// A store says "I hold no such version" in TWO ways, and both are measured on
@@ -2174,6 +2926,11 @@ impl StoreErrorClass {
             StoreError::NotFound(_) => Self::ObjectNotFound,
             StoreError::AlreadyExists(_) | StoreError::ReadOnly(_) => Self::StoreErrorUnclassified,
             StoreError::NotAManifest(_, _) => Self::StoreErrorUnclassified,
+            // FX-31: an object over its reader's cap is a fact about the
+            // object, and the closed vocabulary has no code for it. It is
+            // STRUCTURAL, so its text — which names a key an adopter chose —
+            // is never token-scanned into a code it does not mean.
+            StoreError::TooLarge { .. } => Self::StoreErrorUnclassified,
             StoreError::Backend(m) | StoreError::Io(m) => classify_text(m),
         }
     }
