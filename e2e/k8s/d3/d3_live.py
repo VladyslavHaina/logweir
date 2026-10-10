@@ -1429,6 +1429,30 @@ def reports_are_disjoint(ev_a: dict[str, Any], ev_b: dict[str, Any],
     )
 
 
+#: The premise of every row here that reads `kept` as "the points that stay"
+#: and `candidates` as "the points the rules remove" (FX-22). A plan names at
+#: most `maxDeletionsPerRun` points; the ones the rules would remove beyond
+#: that are in NEITHER list, only counted in `truncatedByCap`. So both readings
+#: hold exactly when that count is 0, and a row that takes them without saying
+#: so passes or fails for the wrong reason the day a lab fixture outgrows the
+#: ceiling (50 for a `Report` policy).
+CEILING_PREMISE = (
+    "the per-run ceiling held nothing back (status.lastEvaluation.truncatedByCap == 0), so "
+    "`kept` is every point that stays and `candidates` is every point the rules remove"
+)
+
+
+def ceiling_held_nothing_back(ev: dict[str, Any]) -> bool:
+    """Whether [`CEILING_PREMISE`] holds for this evaluation.
+
+    `truncatedByCap` must be the NUMBER 0, written. Absent is an evaluation
+    that does not record what the ceiling held back (an older controller's,
+    whose `kept` list may hold held-back points), and absent is never zero.
+    """
+    held = ev.get("truncatedByCap")
+    return isinstance(held, int) and not isinstance(held, bool) and held == 0
+
+
 def keep_rule_expectation(points: int, keep_last: int, min_usable: int) -> dict[str, int]:
     """What `keepLast` and `minUsablePoints` together mean for one evaluation.
 
@@ -1436,6 +1460,12 @@ def keep_rule_expectation(points: int, keep_last: int, min_usable: int) -> dict[
     the keep rule is a candidate; and `protected` is only the OVERRIDE — the
     points `minUsablePoints` pulled back out of the keep rule's reach, which is
     what D3 L9 means by "`protected` lists the `minUsablePoints` overrides".
+
+    PREMISE ([`CEILING_PREMISE`]): `candidates = points - kept` is the
+    arithmetic of a plan the per-run ceiling did not cut. With more points
+    beyond the keep rule than `maxDeletionsPerRun`, `candidates` is the ceiling
+    and the rest are in `truncatedByCap`. [`overlapping_keep_rules_ok`] asserts
+    the premise before it compares anything with these numbers.
     """
     kept = max(keep_last, min_usable)
     return {"kept": kept, "candidates": points - kept, "protected": min_usable - keep_last}
@@ -1443,11 +1473,19 @@ def keep_rule_expectation(points: int, keep_last: int, min_usable: int) -> dict[
 
 def overlapping_keep_rules_ok(ev: dict[str, Any], ids: dict[str, set[str]],
                               want: dict[str, int], points: int) -> bool:
+    """The keep rules' arithmetic, over an evaluation the ceiling did not cut.
+
+    THE PREMISE IS THE FIRST CLAUSE, NOT AN ASSUMPTION (FX-22 review L7):
+    `truncatedByCap == 0`. Without it `len(candidates) == want["candidates"]`
+    compares a plan cut at the ceiling with a count of everything the rules
+    remove, and this function would call a correct evaluation wrong.
+    """
     candidates = ev.get("candidates") or []
     kept = ev.get("kept") or []
     protected = ev.get("protected") or []
     return (
-        ev.get("pointsEvaluated") == points
+        ceiling_held_nothing_back(ev)
+        and ev.get("pointsEvaluated") == points
         and len(candidates) == want["candidates"]
         and {c.get("reason") for c in candidates} == {"BeyondKeepLast"}
         and len(kept) == want["kept"]
@@ -1814,7 +1852,9 @@ def retention() -> None:
             f"{sorted({p.get('reason') for p in b_protected})}). `protected` is the subset of "
             f"`kept` a guarantee saved beyond the keep rule, not the retained set; every "
             f"protected id is kept ({b_ids['protected'] <= b_ids['kept']}) and no candidate is "
-            f"({not (b_ids['candidates'] & b_ids['kept'])})"
+            f"({not (b_ids['candidates'] & b_ids['kept'])}). PREMISE "
+            f"({ceiling_held_nothing_back(ev_b)}): {CEILING_PREMISE}; this evaluation reads "
+            f"truncatedByCap={ev_b.get('truncatedByCap')!r}"
             + ("" if ev_b else " — no evaluation was produced at all"),
             evidence,
         )
@@ -2720,7 +2760,14 @@ def awaiting_approval_restore(name: str, backup_id: str, dest: str = "dest-b") -
 
 
 def protection_verdict(ev: dict[str, Any], point_id: str) -> dict[str, Any]:
-    """Where one point landed in an evaluation, as the three buckets say it."""
+    """Where one point landed in an evaluation, as the three buckets say it.
+
+    `isKept` NEEDS NO CEILING PREMISE (FX-22 review L7, checked): it is read
+    only for a point a guard PROTECTED, and every protected point is in `kept`
+    whatever the per-run ceiling held back. A held-back point is in no list,
+    so it reads `isKept: False` and `isCandidate: False`, which
+    [`point_is_protected`] refuses for want of a `protectReason`.
+    """
     protected = {p.get("pointId"): p for p in (ev.get("protected") or [])}
     return {
         "pointId": point_id,
@@ -13447,6 +13494,14 @@ def shared_set_is_protected(entries: list[dict[str, Any]], ev: dict[str, Any],
     `backupId` and both are usable (Available, Verified) — otherwise the
     evaluator never had a shared set to protect.
 
+    AND THE PER-RUN CEILING HELD NOTHING BACK ([`CEILING_PREMISE`], FX-22
+    review L7). This function reads `kept` as "the points that stay in the
+    archive". A point the ceiling held back stays too and is in NO list, only
+    in the `truncatedByCap` count, so with that count above zero a candidate
+    could share its set with a held-back point and `exposed` below would not
+    see it. The row cannot judge such an evaluation; it says so (NOT-REACHED,
+    with the premise named) instead of passing on half the retained set.
+
     `scope_prefix` is the policy's `spec.scope.prefix`: the catalog VIEW spans
     the whole destination, and a set outside the policy's scope is not the
     policy's to evaluate. Measured at lab-refresh-9, where the full chain put
@@ -13472,6 +13527,8 @@ def shared_set_is_protected(entries: list[dict[str, Any]], ev: dict[str, Any],
     premise = {
         "two points (two receipts) name the same backup set": bool(shared),
         "and both are usable — Available and Verified": bool(usable),
+        CEILING_PREMISE + f" (it reads {ev.get('truncatedByCap')!r})":
+            ceiling_held_nothing_back(ev),
     }
     clauses = {
         "the policy evaluated the shared set (both points evaluated)":
@@ -13536,7 +13593,8 @@ def shared_set() -> None:
            f"{manifest_before[:12]} -> {manifest_after[:12]}) is named by the view's points "
            f"{[(e.get('pointId'), e.get('availability'), e.get('verification')) for e in entries if e.get('backupId') == backup_id]}"
            f"; a Report policy keepLast 1 keeps {ev.get('kept')} and plans "
-           f"{[c.get('pointId') for c in (ev.get('candidates') or [])]} "
+           f"{[c.get('pointId') for c in (ev.get('candidates') or [])]} with "
+           f"truncatedByCap={ev.get('truncatedByCap')!r} "
            f"(protected {ev.get('protected')}); plan lines {lines}; guarantees.sharedSegments "
            f"{((policy.get('status') or {}).get('guarantees') or {}).get('sharedSegments')!r}. "
            + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
