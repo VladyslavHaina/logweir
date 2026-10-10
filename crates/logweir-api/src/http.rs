@@ -379,7 +379,7 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
     response
 }
 
-/// The headers that describe the BODY [`rerender`] throws away, or whether
+/// The headers that describe the BODY `rerender` throws away, or whether
 /// that body may be cached. They are dropped with it; every other header a
 /// handler or an inner layer set survives the rendering.
 ///
