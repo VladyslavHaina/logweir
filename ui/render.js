@@ -661,6 +661,30 @@ export function cell(value) {
   return esc(value);
 }
 
+/** WHAT A CELL SAYS FOR A VALUE THE PRODUCT API SERVING THIS CONSOLE DOES NOT
+ *  PUBLISH. Not [`ABSENT`]: "-" says the object carries none, and a page that
+ *  is never sent a member cannot say that of it. */
+export const NOT_PUBLISHED = "not published by the product API";
+
+/** Whether a console projection names `field`, or a block that holds it, among
+ *  the fields it could not supply (`__contract.absent`, `ui/client.js`). False
+ *  for a custom resource: behind `kubectl proxy` the page reads the object
+ *  itself, an absent field is one the object does not carry, and the cell says
+ *  "-" as it always has. */
+export function notPublishedIn(object, field) {
+  const absent = ((object || {}).__contract || {}).absent;
+  if (!Array.isArray(absent)) {
+    return false;
+  }
+  return absent.some((named) => field === named || field.indexOf(named + ".") === 0);
+}
+
+/** The cell for such a member, naming the field it stands for. */
+export function notPublishedCell(field) {
+  return "<span class=\"note\" data-not-published=\"" + esc(field) + "\">" +
+    esc(NOT_PUBLISHED) + "</span>";
+}
+
 /** The sentence an empty table carries when its caller gives it none. */
 export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
 

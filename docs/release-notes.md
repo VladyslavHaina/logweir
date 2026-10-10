@@ -49,8 +49,9 @@ Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
 FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
 restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
-the runner will, and reads only that point's own receipt) and 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
-ceiling held back) so far. Items continue the next entry's
+the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
+ceiling held back) and 59 (FX-48, the shared console shows what the product API publishes and
+sends what its routes require) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -191,6 +192,11 @@ rows over one chain of fixtures; it changes the controller, the
 `RetentionPolicy` CRD (four additive status fields and a printer column), the
 product API and the console, and the PoC upgrade that carries it reads a
 `Report` policy's counts at `keepLast: 300` and at `keepLast: 10`.
+Item 59 is fix-now row FX-48, found by PoC batch 6 and proven by console rows
+over the console's own decoder, projection and request builder; it changes the
+console only, and the PoC upgrade that carries it re-runs batch 6's two failed
+rows (the catalog page's and the restore review's schema note) and item 56's
+console journey, which no install has run.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2524,6 +2530,79 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
 
+#### 59. The shared console shows what the product API publishes and sends what its routes require: the schema note, a restore's integrity level, an original-name restore (FX-48)
+
+**Changed.** Three things the product API publishes never reached a page of
+the shared console, and one request its wizard builds never left it. Each was
+a member the console's own code left out between the API and the page (its
+response decoder, its projection into the custom resource's shape, or its
+request builder), and every row that held the page handed it a document the
+console is never given. Nothing in the API, the controller, the runner, a CRD
+or a signed document changes.
+- **Item 46's note was never shown.** On a live install (PoC batch 6, main
+  `d53da293`) the catalog page rendered no "Schema-dependent topics" section,
+  and the restore review said *not assessed* for a point whose receipt,
+  catalog record and API view said `schemaDependent`. It failed to the
+  cautious side (never "no registry needed"), but the sentence appeared
+  nowhere. Both surfaces now say **"Registry not captured: applications may
+  not read these records after restore."** with each topic, its sides and its
+  schema ids, for a point whose API view carries them. A point from before
+  receipt 1.5.0 still reads *not assessed*.
+- **A Restore's Integrity table read `-` three times.** For a restore that
+  passed, `level` now shows the scorecard's own word (`byte-fingerprint` or
+  `consume-only`), which the operation route publishes as
+  `completion.integrityLevel` and the detail view dropped. The controller
+  writes a completion only for a restore that passed, so for a failed or
+  partial one the level reads **not published by the product API** too. The integrity
+  `result` and `partial reason`, the objectives, the measured values, the
+  target topic preflight and the old topics are published by no route of the
+  product API: those cells now read **not published by the product API**,
+  with one sentence saying the values are on the `Restore` object and (for
+  the scorecard's) in the signed scorecard the page's own commands fetch,
+  where `-` read as "none recorded". Behind `kubectl proxy` the page reads
+  the object itself and shows what it always showed. The detail of a
+  connection that names a credential Secret says the same of the Secret's
+  data key, which the API does not publish either; it read `- (absent means
+  the key every earlier release projected)`, which is a statement about an
+  object the shared console is not sent.
+- **An original-name restore (item 56) could not be submitted from the
+  console.** The page's own check required a non-empty prefix of every
+  `Restore`, so the wizard's request was refused before the network ("this
+  page did not send the request"), behind `kubectl proxy` too; and the shared
+  console sent neither `topicNaming.originalName` nor the typed names
+  (`originalNameConfirmation`). It now sends the request the route requires.
+  The approval page of a shared console said such a `Restore` needed an
+  `ordinary` approval, and an Approval's list row said `unknown`; both now
+  show the subject the API publishes.
+**Do:** nothing. With a console older than this item, read a point's schema
+dependency from the product API (`topics[].schemaDependency` on
+`GET .../catalogs/{name}/points`) or from its receipt with either verifier,
+and create an original-name `Restore` through the product API or as a custom
+resource.
+**Scope:** console rows only, with no cluster. Each of the three is held
+through the console's own client over a stubbed transport: the point page
+through the read both pages use, with the control that the declaration the
+console lacked loses the note while the same bytes handed straight to the
+renderer keep it; the Restore detail through the two routes it reads, with a
+custom resource's cells unchanged; and the wizard's own original-name body
+through the pre-send check and the request builder, held to the published
+request schema. Five mechanical checks now stand between the API's document
+(`schemas/logweir-api-v1.openapi.json`) and a page: every member the document
+publishes is declared by the console or named with why not; every route's
+answer is decoded by the shape the document publishes for it, and every body
+the console sends is an instance of the route's request schema; every console
+fixture is an instance of its schema and survives its decoder; every member a
+projected read decodes reaches what the page is handed, or is named with why
+not; and no test takes a member from an undecoded fixture. 28 mutants of the
+console and the checks are killed. **Not proven on an install:** batch 6's two
+failed rows re-run at the next PoC upgrade, and item 56's console journey has
+run on none; the product API still publishes no integrity result or partial
+reason, which this item says on the page and does not change.
+**Rollback:** an older console shows what it showed: no schema note, `-` in
+the Integrity table, `ordinary` for an original-name `Restore`, and no
+original-name submission. Nothing is stored or signed differently, so there
+is nothing to undo.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2603,7 +2682,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 and 58, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2660,7 +2739,8 @@ a narrow `archiveRead` grant, the two reads above; item 58 changes the controlle
 the `RetentionPolicy` CRD (four additive status fields and a printer column),
 the product API and the console, and needs the CRDs applied before the
 controller rolls, and any script that reads `kubectl get retentionpolicy` by
-column position updated for the new `HELD-BACK` column. To roll back to
+column position updated for the new `HELD-BACK` column; item 59 changes the
+console only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

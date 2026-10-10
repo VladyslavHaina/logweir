@@ -6146,7 +6146,10 @@ rather than `NoExitCode`: on a `Backup` and a `Restore` through the
 diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 `KafkaCluster` probe as `Reachable=Unknown` / `PodCreationForbidden` with
 `reachable` cleared, `observedAt` left alone and the usual TTL, so the next
-probe runs. With no such
+probe runs. So a probe pod the cluster refuses — under a pod quota, for
+example — clears `status.reachable` on that connection until a probe runs
+again, even where the connection answered minutes before, and a `Restore` that
+names it as its target is refused `ClusterNotReachable` meanwhile. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
 

@@ -301,8 +301,27 @@ export function validateRequest(plural, body) {
       fail(errors, "spec.target.mode", "invalid_enum",
         "target mode is one of " + TARGET_MODES.join(", "));
     }
-    text(errors, (target.topicNaming || {}).prefix, "spec.target.topicNaming.prefix",
-      "the prefix every restored topic's name starts with");
+    // PROD-15.1, AS THE PRODUCT API JUDGES IT (found by FX-48's sweep). A
+    // restore under the ORIGINAL topic names declares
+    // `topicNaming.originalName: true` and its prefix is EMPTY -- every topic
+    // maps onto its own name -- and that is the one request whose prefix may
+    // be empty. This check required a non-empty prefix of every Restore, so
+    // the wizard's own original-name body was refused here, before the
+    // network, in both modes, and no row noticed because every row that
+    // submitted one used an API double. The two rules below are the route's
+    // own (`prefix_with_original_name`, `invalid_prefix`); the mode and the
+    // complete coverage the choice also needs are the server's to name.
+    const naming = target.topicNaming || {};
+    if (naming.originalName === true) {
+      if (typeof naming.prefix !== "string" || naming.prefix.length > 0) {
+        fail(errors, "spec.target.topicNaming.prefix", "prefix_with_original_name",
+          "must be empty with originalName: a restore under the original topic names maps " +
+            "every topic onto its own name");
+      }
+    } else {
+      text(errors, naming.prefix, "spec.target.topicNaming.prefix",
+        "the prefix every restored topic's name starts with");
+    }
   } else if (plural === "approvals") {
     const subject = spec.subjectRef || {};
     text(errors, subject.kind, "spec.subjectRef.kind", "the kind this approval is about");

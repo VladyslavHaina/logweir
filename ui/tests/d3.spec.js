@@ -35,6 +35,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { decoded, handedPage, handedPoint, wireItem } from "./console-fixture.js";
 
 import { SERVER_TIME_MAX_AGE_MS, problemError } from "../api.js";
 import { fieldErrors } from "../lifecycle.js";
@@ -1587,7 +1588,7 @@ const fakeParse = (html) => [{ html: html }];
  *  fake create answers the shape the real route does. A stub that answered
  *  less would make these rows pass over a body the client would refuse. */
 function fakeCatalogView(ns, body, uid) {
-  const item = JSON.parse(JSON.stringify(con("catalog.json").item));
+  const item = wireItem("catalog.json");
   item.name = body.name;
   item.namespace = ns;
   item.uid = uid;
@@ -1930,7 +1931,7 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
         // envelope bug live: the suite asserted a close, and a close happens
         // for a document that decodes to `undefined` too.
         made.state.handlers.operation({
-          data: JSON.stringify(con("operation-restore-completed.json").item),
+          data: JSON.stringify(wireItem("operation-restore-completed.json")),
         });
       });
     }
@@ -2131,7 +2132,7 @@ test("the_end_frame_is_a_reason_and_only_two_of_the_three_end_anything", async (
       return { terminal: true, verification: { state: "valid" } };
     },
   });
-  const running = JSON.parse(JSON.stringify(con("operation-backup-preparing.json").item));
+  const running = wireItem("operation-backup-preparing.json");
   for (let i = 0; i < CONNECTS_BEFORE_POLLING + 2; i += 1) {
     healthy.state.handlers.operation({ data: JSON.stringify(running) });
     healthy.state.handlers.end({ data: "{\"reason\":\"maxDuration\"}" });
@@ -2274,12 +2275,17 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
   assert.ok(!isRedacted("archive/0f1c/01M3.receipt.json"));
   assert.ok(!isRedacted(undefined));
 
-  const good = { pointId: "p1", receiptKey: "archive/a/b.receipt.json",
-    receiptSha256: "sha256:aa", manifestSha256: "sha256:bb" };
+  // The point as the API publishes it, read as the page reads it.
+  const published = { pointId: "p1", backupId: "set-1", runId: "r1",
+    receiptKey: "archive/a/b.receipt.json", receiptSha256: "sha256:aa",
+    manifestSha256: "sha256:bb", availability: "Available", verification: "Verified",
+    selectable: true };
+  const good = handedPoint(published);
   assert.match(restorePointRoute("team-a", "c1", good, "dest"),
     /receiptKey=archive%2Fa%2Fb\.receipt\.json/);
 
-  const redacted = Object.assign({}, good, { receiptKey: "[redacted].receipt.json" });
+  const redacted = handedPoint(Object.assign({}, published,
+    { receiptKey: "[redacted].receipt.json" }));
   const link = restorePointRoute("team-a", "c1", redacted, "dest");
   assert.equal(link.indexOf("receiptKey="), -1,
     "THE MUTANT: carry it anyway and the wizard builds `source.point.receipt_key` out of the " +
@@ -2289,7 +2295,7 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
   assert.match(link, /point=p1/);
 
   // THE PAGE SAYS SO, and says it as a complaint rather than a note.
-  const html = decode(renderPoints({ items: [redacted], page: {} }, "team-a", "c1", "dest"));
+  const html = decode(renderPoints(handedPage([redacted]), "team-a", "c1", "dest"));
   assert.match(html, /data-redacted-binding="true"/);
   assert.match(html,
     /published its plan binding -- its backup set id or its receipt key -- as <code>\[redacted\]<\/code>/);
@@ -2298,8 +2304,8 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
 
   // FX-17: a redacted SET ID raises the same complaint with the key whole --
   // the scheduled run's `<schedule uid>-<slot>` that the PoC's runner withheld.
-  const setGone = Object.assign({}, good, { backupId: "[redacted]" });
-  assert.match(decode(renderPoints({ items: [setGone], page: {} }, "team-a", "c1", "dest")),
+  const setGone = handedPoint(Object.assign({}, published, { backupId: "[redacted]" }));
+  assert.match(decode(renderPoints(handedPage([setGone]), "team-a", "c1", "dest")),
     /data-redacted-binding="true"/);
 
   // AND THE SENTENCE NO LONGER PROMISES WHAT THE API DOES NOT DELIVER.
@@ -2307,7 +2313,7 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
     "the page says what the point route delivers, not what a plan needs");
   assert.match(POINT_BINDING_SENTENCE, /what the point route published for this point/);
 
-  const clean = decode(renderPoints({ items: [good], page: {} }, "team-a", "c1", "dest"));
+  const clean = decode(renderPoints(handedPage([good]), "team-a", "c1", "dest"));
   assert.equal(clean.indexOf("data-redacted-binding"), -1,
     "and a catalog whose keys survived says nothing about redaction");
 });
@@ -2870,10 +2876,11 @@ test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async ()
   assert.equal(evaluationAccounting(hollow.status.lastEvaluation), null);
   assert.equal(fact(decode(renderEnforcement({}, hollow)), "kept"), "not recorded");
 
-  // THE OLDER-SHAPE ANSWER, as the API publishes it: the word, and no counts.
-  const older = con("retention-policy-enforce.json").item.lastEvaluation;
+  // THE OLDER-SHAPE ANSWER, as the API publishes it and the console decodes
+  // it: the word, and no counts.
+  const older = decoded("retention-policy-enforce.json").item.lastEvaluation;
   assert.equal(older.accounting, "NotRecorded");
-  assert.equal(older.keptCount, undefined);
+  assert.equal(older.keptCount, null);
   assert.equal(evaluationAccounting(older), null);
 
   // AN API THAT PREDATES THE WORD. The member is optional in the published
