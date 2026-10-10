@@ -34,6 +34,7 @@ import {
   initialState,
   mappingProblems,
   originalNameChosen,
+  preparePlan,
   preparePlanOrProblem,
   recoveryPoints,
   renderOriginalNameChoice,
@@ -53,6 +54,16 @@ import {
 } from "../pages/approvals.js";
 import { renderPlanBytes } from "../plan.js";
 import { decodeConsoleItem } from "../contract.js";
+import { schemaFindings, wire as wireDocument } from "./console-fixture.js";
+
+/** A console fixture's wire document, with `change` applied to it first. */
+function wire(name, change) {
+  const body = wireDocument(name);
+  if (typeof change === "function") {
+    change(body);
+  }
+  return body;
+}
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
@@ -681,5 +692,202 @@ test("the_console_projection_carries_the_topics_a_stopped_creation_step_left", a
   } finally {
     globalThis.fetch = original;
     resetMode();
+  }
+});
+
+// ===========================================================================
+// FX-48: the choice reaches the product API, and the API's answer reaches the
+// page -- through the REAL client
+// ===========================================================================
+//
+// EVERY ROW ABOVE THAT SUBMITS USES AN API DOUBLE, and every row that reads
+// the approval subject hands a page function an object written in the test.
+// So nothing above ever ran the three places in `ui/client.js` and
+// `ui/validate.js` that stand between this wizard and the product API -- and
+// all three dropped the choice (found by FX-48's sweep, the same class as the
+// schema dependency):
+//
+//   * the page's own pre-send check required a non-empty prefix, so an
+//     original-name Restore was refused before the network, in both modes;
+//   * `requestBody` copied `topicNaming.prefix` and nothing else, and never
+//     copied `originalNameConfirmation`, so the request the API requires for
+//     such a restore could not have been built;
+//   * the projection copied neither `approvalSubject` nor
+//     `target.originalName`, so the approval page said an original-name
+//     Restore needed an `ordinary` approval.
+//
+// These rows go through `apiClient()` over the transport seam.
+
+/** The shared console, signed in to the wizard state's namespace with every
+ *  capability, and a transport that answers `answer(url, init)`. */
+async function sharedConsole(ns, answer) {
+  const { apiClient, resetMode, selectMode } = await import("../client.js");
+  const session = wire("session.json");
+  for (const flag of Object.keys(session.capabilities)) {
+    session.capabilities[flag] = true;
+  }
+  for (const grant of session.namespaces) {
+    grant.name = ns;
+    for (const flag of Object.keys(grant.capabilities)) {
+      grant.capabilities[flag] = true;
+    }
+  }
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: session }) });
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    const request = { url: String(url), method: (init || {}).method || "GET",
+      body: (init || {}).body === undefined ? null : JSON.parse(init.body) };
+    seen.push(request);
+    const body = answer(request);
+    return Promise.resolve({
+      ok: body !== null, status: body === null ? 404 : 200,
+      text: () => Promise.resolve(JSON.stringify(body === null
+        ? { type: "about:blank", title: "Not found", status: 404, code: "not_found",
+          detail: "no such object", requestId: "r", retryable: false }
+        : body)),
+    });
+  };
+  return {
+    api: apiClient(), seen: seen,
+    restore: () => { globalThis.fetch = original; resetMode(); },
+  };
+}
+
+/** `restore.json` as the product API answers for a Restore under the original
+ *  topic names: the three members that say so, changed on the wire. */
+function originalNameAnswer() {
+  return wire("restore.json", (body) => {
+    body.item.approvalSubject = "originalName";
+    body.item.target.originalName = true;
+    body.item.target.topicPrefix = "";
+    body.item.target.mode = "newTopic";
+  });
+}
+
+test("fx48_an_original_name_restore_leaves_the_console_as_the_route_requires", async () => {
+  // THE WIZARD'S OWN BODY, through the real client: the page's check, the
+  // request builder and the transport.
+  const state = confirmState(ORDINARY);
+  const topics = selectedTopics(state);
+  state.originalNameTyped = topics.join("\n");
+  const prepared = await preparePlan(state);
+  const body = restoreBody(state, prepared);
+  assert.deepEqual(body.spec.target.topicNaming, { prefix: "", originalName: true });
+
+  const shared = await sharedConsole(state.ns, () => originalNameAnswer());
+  try {
+    await shared.api.create(state.ns, "restores", body);
+    const posts = shared.seen.filter((r) => r.method === "POST");
+    assert.equal(posts.length, 1, "THE DEFECT: the page refused its own body and sent nothing");
+    const sent = posts[0].body;
+    assert.deepEqual(schemaFindings("CreateRestoreRequest", sent), [],
+      "what left the console is a request the published schema accepts");
+    assert.deepEqual(sent.target.topicNaming, { prefix: "", originalName: true },
+      "THE DEFECT: the declaration was dropped and only the empty prefix would have gone");
+    assert.equal(sent.target.mode, "newTopic");
+    assert.equal(sent.coverage, "complete", "the coverage the choice requires travels with it");
+    assert.deepEqual(sent.originalNameConfirmation, { typedTopics: topics },
+      "THE DEFECT: the typed names never left the page");
+    assert.equal(sent.spec, undefined, "a request, not a custom resource");
+  } finally {
+    shared.restore();
+  }
+});
+
+test("fx48_an_ordinary_restore_sends_what_it_did_and_an_empty_prefix_is_refused", async () => {
+  // NEGATIVE CONTROL of the row above: no declaration, no typed names, a
+  // non-empty prefix -- and the page's own check still refuses an empty one.
+  const state = wizardState();
+  const prepared = await preparePlan(state);
+  const body = restoreBody(state, prepared);
+  const shared = await sharedConsole(state.ns, () => wire("restore.json"));
+  try {
+    await shared.api.create(state.ns, "restores", body);
+    const sent = shared.seen.filter((r) => r.method === "POST")[0].body;
+    assert.deepEqual(schemaFindings("CreateRestoreRequest", sent), []);
+    assert.deepEqual(Object.keys(sent.target.topicNaming), ["prefix"]);
+    assert.ok(sent.target.topicNaming.prefix.length > 0);
+    assert.equal(sent.originalNameConfirmation, undefined);
+
+    // An empty prefix WITHOUT the declaration: refused here, by field.
+    const blank = JSON.parse(JSON.stringify(body));
+    blank.spec.planBytes = body.spec.planBytes;
+    blank.spec.target.topicNaming = { prefix: "" };
+    const before = shared.seen.length;
+    await assert.rejects(() => shared.api.create(state.ns, "restores", blank), (error) => {
+      assert.equal(error.reason, "ClientValidation");
+      assert.deepEqual(error.details.causes.map((c) => c.field),
+        ["spec.target.topicNaming.prefix"]);
+      return true;
+    });
+    // And a prefix BESIDE the declaration, which the API refuses too
+    // (`prefix_with_original_name`): one name for a topic, not two.
+    const both = JSON.parse(JSON.stringify(body));
+    both.spec.target.topicNaming = { prefix: "restore-", originalName: true };
+    await assert.rejects(() => shared.api.create(state.ns, "restores", both), (error) => {
+      assert.equal(error.reason, "ClientValidation");
+      assert.deepEqual(error.details.causes.map((c) => [c.field, c.reason]),
+        [["spec.target.topicNaming.prefix", "prefix_with_original_name"]]);
+      return true;
+    });
+    assert.equal(shared.seen.length, before, "neither was sent");
+  } finally {
+    shared.restore();
+  }
+});
+
+test("fx48_the_console_shows_the_approval_subject_the_api_publishes", async () => {
+  const shared = await sharedConsole("team-on", (request) => {
+    const path = request.url.split("?")[0];
+    if (path.indexOf("/operations/") !== -1) {
+      return wire("operation-restore-completed.json");
+    }
+    if (path.endsWith("/approvals")) {
+      return { requestId: "r", page: { limit: 200 },
+        items: [wire("approval.json", (body) => {
+          body.item.approvalSubject = "originalName";
+        }).item] };
+    }
+    return path.indexOf("/restores/") !== -1 ? originalNameAnswer() : null;
+  });
+  try {
+    // THE RESTORE, as the approval page reads it.
+    const restore = await shared.api.get("team-on", "restores", "orders-drill-20260911");
+    assert.equal(restoreApprovalSubject(restore), "originalName",
+      "THE DEFECT: the page said `ordinary` for a Restore the API called originalName");
+    assert.equal(restore.approvalSubject, "originalName", "the API's own word rides with it");
+    assert.equal(restore.spec.target.topicNaming.originalName, true,
+      "and the declaration is where the custom resource keeps it, for both modes' readers");
+    // ... so an edit of that Restore starts from the choice, not from a prefix.
+    const draft = draftFrom(restore, wizardState().fields);
+    assert.equal(draft.target.originalName, true);
+
+    // AN APPROVAL'S LIST ROW carries the signed subject the API read; the
+    // list has no bytes to read it from.
+    const approvals = await shared.api.list("team-on", "approvals");
+    assert.equal(approvals.items[0].spec.approvalBytes, undefined, "a list row has no bytes");
+    assert.equal(approvalSubjectOf(approvals.items[0]), "originalName",
+      "THE DEFECT: a console list row said `unknown`");
+  } finally {
+    shared.restore();
+  }
+
+  // NEGATIVE CONTROL: the unchanged answers are ordinary, and the projection
+  // invents no declaration.
+  const plain = await sharedConsole("team-on", (request) => {
+    const path = request.url.split("?")[0];
+    if (path.indexOf("/operations/") !== -1) {
+      return wire("operation-restore-completed.json");
+    }
+    return path.indexOf("/restores/") !== -1 ? wire("restore.json") : null;
+  });
+  try {
+    const restore = await plain.api.get("team-on", "restores", "orders-drill-20260911");
+    assert.equal(restoreApprovalSubject(restore), "ordinary");
+    assert.deepEqual(Object.keys(restore.spec.target.topicNaming), ["prefix"]);
+  } finally {
+    plain.restore();
   }
 });

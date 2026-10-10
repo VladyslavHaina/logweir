@@ -21,7 +21,7 @@
 // question -- what does the document publish that this client drops? -- and
 // both walk two hand-written maps, which `PointTopicView` was in neither of.
 //
-// FOUR ARMS, EACH MECHANICAL.
+// FIVE ARMS, EACH MECHANICAL.
 //
 //   1. THE DECLARATIONS. Every shape `ui/contract.js` declares (its own
 //      registry: a shape cannot be declared outside it) is compared with the
@@ -36,6 +36,11 @@
 //      with no member lost.
 //   4. THE TESTS. No spec takes a member straight off an undecoded console
 //      fixture: a page function is handed what the page is handed.
+//   5. THE PROJECTIONS. Nine kinds are decoded and then PROJECTED into the
+//      custom resource's vocabulary, by hand, before a page sees them -- a
+//      second place a member can stop. For every projected read, every member
+//      the wire document carries is changed in turn, and what the page is
+//      handed must change with it, unless [`NOT_HANDED_ON`] says why not.
 //
 // NOTHING HERE DIALS. The transport is `globalThis.fetch`, replaced for the
 // length of a row, exactly as `client.spec.js` replaces it.
@@ -466,7 +471,8 @@ const VARIANTS_NOT_READ = Object.freeze({
 const SUCCESS = ["200", "201", "202"];
 
 /** Every operation the document publishes with a JSON success schema:
- *  `{op, template, method, schema, status, pattern, literal}`. */
+ *  `{op, template, method, schema, status, request, pattern, literal}` --
+ *  `request` is the schema of the body the route takes, or `null`. */
 function publishedOperations() {
   const out = [];
   for (const template of Object.keys(OPENAPI.paths)) {
@@ -492,6 +498,8 @@ function publishedOperations() {
       if (schema === null) {
         continue;
       }
+      const sends = referenced(((((operation.requestBody || {}).content || {})[
+        "application/json"]) || {}).schema);
       const literal = template.replace(/\{[^}]+\}/g, "");
       const pattern = new RegExp("^" + template.split(/(\{[^}]+\})/).map((part) =>
         (/^\{[^}]+\}$/.test(part)
@@ -499,7 +507,7 @@ function publishedOperations() {
           : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("") + "$");
       out.push({
         op: method.toUpperCase() + " " + template, template: template,
-        method: method.toUpperCase(), schema: schema, status: status,
+        method: method.toUpperCase(), schema: schema, status: status, request: sends,
         pattern: pattern, literal: literal.length,
       });
     }
@@ -627,6 +635,52 @@ const ACCESS = Object.freeze({
   archiveWrite: { mode: "secretKeys", secret: { existing: { name: "s3" } } },
 });
 
+/** The custom-resource-shaped objects the pages build for the three creates
+ *  that go through `requestBody`, as the pages build them. */
+function clusterObject() {
+  return clusterBody({
+    name: "orders-prod", servers: "kafka-0.orders.svc:9093", role: "source",
+    mode: "scramSha512", username: "logweir-reader", secret: "", tls: true,
+    enteredPassword: "typed-once-ui-fixture",
+  }, { console: true });
+}
+
+function scheduleObject() {
+  return {
+    apiVersion: "logweir.dev/v1alpha1", kind: "BackupSchedule",
+    metadata: { name: "orders-hourly" },
+    spec: {
+      schedule: "0 * * * *", sourceRef: { name: "orders-prod" }, topics: ["orders"],
+      archive: { url: "s3://kafka-backups/orders", secretRef: { name: "logweir-s3" } },
+      suspend: false, concurrencyPolicy: "Forbid", retention: { keepLast: 3 },
+    },
+  };
+}
+
+function restoreObject(reviewed) {
+  return {
+    apiVersion: "logweir.dev/v1alpha1", kind: "Restore",
+    metadata: { name: reviewed.restoreName },
+    spec: {
+      planBytes: reviewed.bytes, approvalRef: { name: reviewed.approvalName },
+      sourceArchive: { url: "s3://kafka-backups/orders" },
+      backupSetRef: "01JB7Z0000000000000000000B", pointInTime: "2026-09-11T12:00:00Z",
+      target: { clusterRef: { name: "orders-scratch" }, mode: "scratch",
+        topicNaming: { prefix: "drill-" } },
+      deadlineSeconds: 3600, coverage: "complete", completeMaxRecords: 1000,
+      sourceDestinationRef: { name: "primary" }, evidenceDestinationRef: { name: "primary" },
+    },
+    // The three members of the REQUEST that are not members of `Restore.spec`.
+    ticket: "CHG-1042",
+    topicMapping: [{ source: "orders", target: "drill-orders" }],
+    originalNameConfirmation: { typedTopics: ["orders"] },
+  };
+}
+
+const CATALOG_REQUEST = Object.freeze({
+  name: "primary", syncMode: "index", destinationRef: { name: "primary" },
+});
+
 /** EVERY CONSOLE READ, AS THE PAGES MAKE IT: the client's own method, with
  *  arguments its own checks accept. Each row is one call; the transport says
  *  which routes it addressed. */
@@ -637,23 +691,11 @@ async function everyRead() {
   return [
     () => api.list(NS, "kafkaclusters"),
     () => api.get(NS, "kafkaclusters", "orders-prod"),
-    () => api.create(NS, "kafkaclusters", clusterBody({
-      name: "orders-prod", servers: "kafka-0.orders.svc:9093", role: "source",
-      mode: "scramSha512", username: "logweir-reader", secret: "", tls: true,
-      enteredPassword: "typed-once-ui-fixture",
-    }, { console: true })),
+    () => api.create(NS, "kafkaclusters", clusterObject()),
     () => api.previewCadence({ schedule: "0 * * * *" }),
     () => api.list(NS, "backupschedules"),
     () => api.get(NS, "backupschedules", "orders-hourly"),
-    () => api.create(NS, "backupschedules", {
-      apiVersion: "logweir.dev/v1alpha1", kind: "BackupSchedule",
-      metadata: { name: "orders-hourly" },
-      spec: {
-        schedule: "0 * * * *", sourceRef: { name: "orders-prod" }, topics: ["orders"],
-        archive: { url: "s3://kafka-backups/orders", secretRef: { name: "logweir-s3" } },
-        suspend: false, concurrencyPolicy: "Forbid", retention: { keepLast: 3 },
-      },
-    }),
+    () => api.create(NS, "backupschedules", scheduleObject()),
     () => api.editSchedulePolicy(NS, "orders-hourly", {
       expectedGeneration: 1, schedule: "0 * * * *", suspended: false,
       topicSelection: { topics: ["orders"] },
@@ -665,18 +707,7 @@ async function everyRead() {
       "intent-0123456789abcdef"),
     () => api.list(NS, "restores"),
     () => api.get(NS, "restores", "orders-drill-20260911"),
-    () => api.create(NS, "restores", {
-      apiVersion: "logweir.dev/v1alpha1", kind: "Restore",
-      metadata: { name: reviewed.restoreName },
-      spec: {
-        planBytes: reviewed.bytes, approvalRef: { name: reviewed.approvalName },
-        sourceArchive: { url: "s3://kafka-backups/orders" },
-        backupSetRef: "01JB7Z0000000000000000000B", pointInTime: "2026-09-11T12:00:00Z",
-        target: { clusterRef: { name: "orders-scratch" }, mode: "scratch",
-          topicNaming: { prefix: "drill-" } },
-        deadlineSeconds: 3600,
-      },
-    }),
+    () => api.create(NS, "restores", restoreObject(reviewed)),
     () => api.submitGovernedApproval(NS, "orders-drill-20260911", "sidecar bytes"),
     () => api.approvalPolicy(NS),
     () => api.list(NS, "approvals"),
@@ -709,9 +740,7 @@ async function everyRead() {
     () => readD3("protection", NS, "orders"),
     () => listD3("catalog", NS),
     () => readD3("catalog", NS, "primary"),
-    () => connectArchive(NS,
-      { name: "primary", syncMode: "index", destinationRef: { name: "primary" } },
-      "intent-fedcba9876543210"),
+    () => connectArchive(NS, CATALOG_REQUEST, "intent-fedcba9876543210"),
     () => readCatalogPoints(NS, "primary", { limit: 200 }),
     () => readCatalogSigners(NS, "primary"),
     () => listD3("retention", NS),
@@ -724,6 +753,8 @@ async function everyRead() {
 test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_nothing", async () => {
   const served = [];
   const unpublished = [];
+  const badRequests = [];
+  let requests = 0;
   const original = globalThis.fetch;
   globalThis.fetch = (url, init) => {
     const method = String((init || {}).method || "GET").toUpperCase();
@@ -737,6 +768,15 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
     if (answer === undefined) {
       unpublished.push("no answer in this row for " + key);
       return Promise.reject(new Error("no answer for " + key));
+    }
+    // WHAT THE CONSOLE SENT IS A REQUEST THE DOCUMENT ACCEPTS: every body is
+    // held to the route's published request schema, member for member.
+    if (operation.request !== null && typeof (init || {}).body === "string") {
+      for (const finding of schemaFindings(operation.request, JSON.parse(init.body))) {
+        badRequests.push(key + " sent a body that is not a " + operation.request + ": " +
+          finding);
+      }
+      requests += 1;
     }
     const body = typeof answer === "string" ? wire(answer) : answer.body();
     const text = JSON.stringify(body);
@@ -765,6 +805,10 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   assert.deepEqual(unpublished, [],
     "the console addressed a route the document does not publish, or this row has no answer " +
       "for one it does");
+  assert.deepEqual(badRequests, [],
+    "a body the console builds must be an instance of the request schema the document " +
+      "publishes for the route it is sent to:\n" + badRequests.join("\n"));
+  assert.equal(requests, 14, "the row held every create and update body the console builds");
 
   // EACH ANSWER, AND THE DECODE THAT READ IT. An answer is matched to its
   // decode by the document itself: the transport served these exact bytes and
@@ -852,6 +896,489 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
         event.shape + " decodes " + answer.key + " and ui/tests/console-fixture.js has no " +
           "reader for it");
     }
+  }
+});
+
+// ===========================================================================
+// 5. the projections
+// ===========================================================================
+//
+// WHY A DECODE THAT LOSES NOTHING IS NOT ENOUGH. The five older kinds
+// (`ui/client.js`) and the four D3 families (`ui/operation-watch.js`) are not
+// handed to a page as decoded: a projection copies them, member by member,
+// into the custom resource's shape, so that one renderer reads both modes.
+// A member the projection does not copy is decoded, declared, in no `unknown`
+// list -- and gone. That is where the retention report's `note` once stopped,
+// and where this sweep found `approvalSubject` and `target.originalName`:
+// both required members of the published `Restore`, both decoded, neither
+// projected, so the approval page of a shared console said an original-name
+// Restore needed an `ordinary` approval.
+//
+// THE CHECK IS DIFFERENTIAL, SO IT NEEDS NO LIST OF MEMBERS. Each projected
+// read is run over its fixtures through the real client; then each leaf of
+// the wire document is changed -- a string lengthened, a number moved, a
+// boolean flipped, a closed word replaced by each other member in turn -- and
+// the read is run again. If what the page is handed is byte for byte what it
+// was, that member did not reach it. A member counts as reaching the page
+// when a change to it shows in ANY fixture that carries it, so a member a
+// projection writes only beside another (a trust basis, beside a recorded
+// result) is not a finding.
+
+/** MEMBERS A PROJECTED READ DECODES AND DELIBERATELY DOES NOT HAND ON, as
+ *  `"Schema: path"` -- the schema of the document the route answers, and the
+ *  member's path in it (a path names everything under it). Each says why, and
+ *  an entry nothing uses fails: it would hide the next member that stops. */
+const DETAIL_IS_NOT_THE_OPERATION_PAGE =
+  "a Backup or Restore DETAIL is a view of the custom resource: it takes the run's state, " +
+  "result, evidence, verification, trust basis, scope and integrity level from the operation " +
+  "route. This member is shown by the operation page, which is handed the view whole";
+const SUMMARY_REPLACED_ON_A_DETAIL =
+  "`BackupResponse` is only ever a DETAIL's answer, and on a detail the operation route's own " +
+  "state replaces the list summary's; a list row is handed the summary's, as a Restore " +
+  "create's answer is (both are held to that here)";
+const NOT_HANDED_ON = Object.freeze({
+  "ApprovalPacketResponse: item.name": "the packet route is read for its two byte members; " +
+    "the identity beside them is the Approval's own, already on the object from its own read",
+  "ApprovalPacketResponse: item.namespace": "as item.name: the identity is the Approval's own",
+  "ApprovalPacketResponse: item.uid": "as item.name: the identity is the Approval's own",
+  "ApprovalPacketResponse: item.planHash": "as item.name: the Approval's own read carries it",
+  "ApprovalPacketResponse: item.subjectRef": "as item.name: the Approval's own read carries it",
+  "BackupResponse: item.schedule": "the older, coarser name of the schedule: where the run " +
+    "also carries `scheduleRef` -- the same name with the revision -- that one is projected, " +
+    "and where it does not this one is (list-verdict.spec.js reads such a run)",
+  "BackupList: items[].schedule": "as BackupResponse: `scheduleRef` is projected when the " +
+    "run carries both",
+  "ManualBackupResponse: item.schedule": "as BackupResponse: a manual run always carries " +
+    "`scheduleRef`, which has the same name with the revision",
+  "BackupResponse: replayed": "`replayed` is a create's answer, and no create answers " +
+    "`BackupResponse`: a manual run is answered `ManualBackupResponse`, whose `replayed` is " +
+    "handed on",
+  "BackupResponse: item.operation.state": SUMMARY_REPLACED_ON_A_DETAIL,
+  "BackupResponse: item.operation.stateReason": SUMMARY_REPLACED_ON_A_DETAIL,
+  "RestoreResponse: item.selection.scope": "always `partial`: the block's presence is the " +
+    "marker, and the projection writes the word itself",
+  "RestoreList: items[].selection.scope": "always `partial`: the block's presence is the " +
+    "marker, and the projection writes the word itself",
+  "RestoreList: items[].targetTopicsAppeared.leftInstruction": "the page prints its own " +
+    "sentence, which original-name.spec.js holds equal to the API's, word for word",
+  "RestoreList: items[].targetTopicsAppeared.unconfirmedInstruction": "the page prints its " +
+    "own sentence, which original-name.spec.js holds equal to the API's, word for word",
+  "OperationViewResponse: item.verificationScope.selection.scope":
+    "always `partial`: the block's presence is the marker, and the projection writes the word",
+  "RestoreResponse: item.targetTopicsAppeared.leftInstruction": "the page prints its own " +
+    "sentence, which original-name.spec.js holds equal to the API's, word for word",
+  "RestoreResponse: item.targetTopicsAppeared.unconfirmedInstruction": "the page prints its " +
+    "own sentence, which original-name.spec.js holds equal to the API's, word for word",
+  "OperationViewResponse: item.name": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.namespace": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.uid": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.resourceVersion": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.createdAt": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.lastUpdatedAt": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.message": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.terminal": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.verifiedSuccess": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.result.status": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.awaitingApproval": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.stale": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.stage": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.progress": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.diagnostics": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.readiness": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.targetMode": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.teardown": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.trust.policy": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.trust.signedAt": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.trust.signingTimeRead": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.capture": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.newTopics": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.recordsExpected": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.recordsRestored": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.recordsSampled": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.recordsSampledMatching":
+    DETAIL_IS_NOT_THE_OPERATION_PAGE,
+  "OperationViewResponse: item.completion.sampleWindow": DETAIL_IS_NOT_THE_OPERATION_PAGE,
+});
+
+/** A request id names one request. A page shows the id of a request that
+ *  FAILED -- it is on the problem document -- and never a successful read's,
+ *  so no projection hands one on: excused once, for every schema. */
+const REQUEST_ID = "requestId";
+
+function memberDecoder(shape, key) {
+  return Object.prototype.hasOwnProperty.call(shape.required, key)
+    ? shape.required[key]
+    : shape.optional[key];
+}
+
+/** The leaves of a wire document, each with how its decoder reads it, walked
+ *  by the SHAPE that decodes it -- so a closed word is known to be one. */
+function leavesOf(shape, value, path, out, itemShape) {
+  for (const key of Object.keys(value)) {
+    const decoder = memberDecoder(shape, key);
+    const at = path.length === 0 ? key : path + "." + key;
+    if (decoder === undefined) {
+      continue;
+    }
+    if (key === "items" && itemShape !== null && Array.isArray(value[key])) {
+      value[key].forEach((item, i) =>
+        leavesOf(itemShape, item, at + "[" + String(i) + "]", out, null));
+      continue;
+    }
+    leafOf(decoder, value[key], at, out, shape.name + "." + key);
+  }
+  return out;
+}
+
+/** A member the document publishes as a STRING and describes as one of a few
+ *  words, which a projection branches on: the words, from the document's own
+ *  description of the member. A lengthened string would take the same branch
+ *  whatever the projection did with the member. */
+const PUBLISHED_WORDS = Object.freeze({
+  // "`configMap` or `secret`."
+  "TlsCaView.kind": ["configMap", "secret"],
+});
+
+function leafOf(decoder, value, at, out, owner) {
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (decoder === opaque) {
+    out.push({ path: at, members: null });
+    return;
+  }
+  if (decoder.member !== undefined) {
+    if (Array.isArray(value)) {
+      value.forEach((item, i) =>
+        leafOf(decoder.member, item, at + "[" + String(i) + "]", out, owner));
+    }
+    return;
+  }
+  const nested = decoder.shape !== undefined
+    ? decoder.shape
+    : (typeof decoder.later === "function" ? decoder.later() : null);
+  if (nested !== null) {
+    leavesOf(nested, value, at, out, null);
+    return;
+  }
+  const words = Array.isArray(decoder.members) ? decoder.members : PUBLISHED_WORDS[owner];
+  out.push({ path: at, members: words === undefined ? null : words });
+}
+
+function valueAt(document, path, replace) {
+  const steps = path.replace(/\[(\d+)\]/g, ".$1").split(".");
+  let at = document;
+  for (let i = 0; i < steps.length - 1; i += 1) {
+    at = at[steps[i]];
+  }
+  const last = steps[steps.length - 1];
+  if (replace !== undefined) {
+    at[last] = replace(at[last]);
+  }
+  return at[last];
+}
+
+/** The one member that is never given a value the fixture does not carry: a
+ *  cursor tells the client another page exists, and it would read one for
+ *  ever. Whether a page's cursor is followed is `client.spec.js`'s row. */
+const NOT_SAMPLED = Object.freeze(["Page.nextCursor"]);
+
+/** A value a decoder accepts, for a member the fixture does not carry. */
+function sampleOf(decoder) {
+  if (decoder === opaque) {
+    return "sample";
+  }
+  if (decoder.member !== undefined) {
+    return [sampleOf(decoder.member)];
+  }
+  const nested = decoder.shape !== undefined
+    ? decoder.shape
+    : (typeof decoder.later === "function" ? decoder.later() : null);
+  if (nested !== null) {
+    return filled(nested, {}, null);
+  }
+  if (Array.isArray(decoder.members)) {
+    return decoder.members[0];
+  }
+  if (decoder === bool) {
+    return true;
+  }
+  return decoder === int ? 1 : "sample";
+}
+
+/** `value` WITH EVERY MEMBER ITS SHAPE DECLARES: what the fixture carries is
+ *  kept, and each member it does not carry is given a value its decoder
+ *  accepts. So the arm below changes every DECLARED member of a projected
+ *  read, not only the ones somebody happened to put in a fixture -- and with
+ *  the first arm (declared is everything published) that is every member the
+ *  document publishes. A fixture that carries no `note` cannot hide a
+ *  projection that drops `note`. */
+function filled(shape, value, itemShape) {
+  const out = {};
+  for (const bag of [shape.required, shape.optional]) {
+    for (const key of Object.keys(bag)) {
+      const decoder = bag[key];
+      const present = value !== null && typeof value === "object" &&
+        value[key] !== undefined && value[key] !== null;
+      if (!present) {
+        if (NOT_SAMPLED.indexOf(shape.name + "." + key) === -1) {
+          out[key] = key === "items" && itemShape !== null ? [] : sampleOf(decoder);
+        }
+        continue;
+      }
+      if (key === "items" && itemShape !== null && Array.isArray(value[key])) {
+        out[key] = value[key].map((item) => filled(itemShape, item, null));
+        continue;
+      }
+      out[key] = filledBy(decoder, value[key]);
+    }
+  }
+  return out;
+}
+
+function filledBy(decoder, value) {
+  if (decoder === opaque || value === null || value === undefined) {
+    return value;
+  }
+  if (decoder.member !== undefined) {
+    return Array.isArray(value) ? value.map((item) => filledBy(decoder.member, item)) : value;
+  }
+  const nested = decoder.shape !== undefined
+    ? decoder.shape
+    : (typeof decoder.later === "function" ? decoder.later() : null);
+  return nested === null ? value : filled(nested, value, null);
+}
+
+/** Every other value a leaf may be changed to. */
+function otherValues(leaf, value) {
+  if (leaf.members !== null) {
+    return leaf.members.filter((member) => member !== value);
+  }
+  if (typeof value === "string") {
+    return [value + "-changed"];
+  }
+  if (typeof value === "number") {
+    return [value + 1];
+  }
+  if (typeof value === "boolean") {
+    return [!value];
+  }
+  return [{ changed: true }];
+}
+
+/** EVERY PROJECTED READ: the fixture, the shape that decodes it (and its
+ *  items), what the other routes of the same read answer, and the read. `"@"`
+ *  is the document under test. */
+function projectedReads(api, reviewed) {
+  const detail = (plural) => () => api.get(NS, plural, "x");
+  const list = (plural) => () => api.list(NS, plural);
+  const operation = (name) => [/\/operations\//, wire(name)];
+  const S = CONSOLE_SHAPES;
+  const D = D3_SHAPES;
+  return [
+    ["connection.json", S.ConnectionResponse, null, [[/\/connections\//, "@"]],
+      detail("kafkaclusters")],
+    ["connections-list.json", S.ConnectionList, S.Connection, [[/\/connections$/, "@"]],
+      list("kafkaclusters")],
+    ["schedule.json", S.ScheduleResponse, null, [[/\/schedules\//, "@"]],
+      detail("backupschedules")],
+    ["schedule-policy.json", S.ScheduleResponse, null, [[/\/schedules\//, "@"]],
+      detail("backupschedules")],
+    ["schedule-preset.json", S.ScheduleResponse, null, [[/\/schedules\//, "@"]],
+      detail("backupschedules")],
+    ["schedule-last-slot.json", S.ScheduleResponse, null, [[/\/schedules\//, "@"]],
+      detail("backupschedules")],
+    ["schedules-list.json", S.ScheduleList, S.Schedule, [[/\/schedules$/, "@"]],
+      list("backupschedules")],
+    ["backup.json", S.BackupResponse, null,
+      [operation("operation-backup-preparing.json"), [/\/backups\//, "@"]], detail("backups")],
+    ["backup-poc.json", S.BackupResponse, null,
+      [operation("operation-backup-preparing.json"), [/\/backups\//, "@"]], detail("backups")],
+    ["backups-list.json", S.BackupList, S.Backup, [[/\/backups$/, "@"]], list("backups")],
+    ["manual-backup.json", S.ManualBackupResponse, null, [[/\/backups$/, "@"]],
+      () => api.runBackupNow(NS, { scheduleRef: { name: "x" } }, "intent-0123456789abcdef")],
+    ["restore.json", S.RestoreResponse, null,
+      [operation("operation-restore-completed.json"), [/\/restores\//, "@"]], detail("restores")],
+    ["restore-time-basis.json", S.RestoreResponse, null,
+      [operation("operation-restore-completed.json"), [/\/restores\//, "@"]], detail("restores")],
+    ["restore-creation-stopped.json", S.RestoreResponse, null,
+      [operation("operation-restore-completed.json"), [/\/restores\//, "@"]], detail("restores")],
+    ["restore-creation-unconfirmed.json", S.RestoreResponse, null,
+      [operation("operation-restore-completed.json"), [/\/restores\//, "@"]], detail("restores")],
+    ["restore-subset-pass.json", S.RestoreResponse, null,
+      [operation("operation-restore-subset-pass.json"), [/\/restores\//, "@"]],
+      detail("restores")],
+    ["restore-complete-uncovered.json", S.RestoreResponse, null,
+      [operation("operation-restore-complete-uncovered.json"), [/\/restores\//, "@"]],
+      detail("restores")],
+    ["restores-list.json", S.RestoreList, S.Restore, [[/\/restores$/, "@"]], list("restores")],
+    ["approval.json", S.ApprovalResponse, null,
+      [[/\/packet$/, wire("approval-packet.json")], [/\/approvals\//, "@"]], detail("approvals")],
+    ["approval-revoked-after-use.json", S.ApprovalResponse, null,
+      [[/\/packet$/, wire("approval-packet.json")], [/\/approvals\//, "@"]], detail("approvals")],
+    ["approvals-list.json", S.ApprovalList, S.Approval, [[/\/approvals$/, "@"]],
+      list("approvals")],
+    ["approval-packet.json", S.ApprovalPacketResponse, null,
+      [[/\/packet$/, "@"], [/\/approvals\//, wire("approval.json")]], detail("approvals")],
+    // THE CREATES, whose answers carry what only a create answers: `replayed`,
+    // and a Restore's frozen approval decision.
+    ["connection.json", S.ConnectionResponse, null, [[/\/connections$/, "@"]],
+      () => api.create(NS, "kafkaclusters", clusterObject())],
+    ["schedule.json", S.ScheduleResponse, null, [[/\/schedules$/, "@"]],
+      () => api.create(NS, "backupschedules", scheduleObject())],
+    ["restore.json", S.RestoreResponse, null, [[/\/restores$/, "@"]],
+      () => api.create(NS, "restores", restoreObject(reviewed))],
+    ["approval.json", S.ApprovalResponse, null, [[/\/approval$/, "@"]],
+      () => api.submitGovernedApproval(NS, "orders-drill-20260911", "sidecar bytes")],
+    ["catalog.json", D.CatalogResponse, null, [[/\/catalogs$/, "@"]],
+      () => connectArchive(NS, CATALOG_REQUEST, "intent-fedcba9876543210")],
+    // The operation route, as a Restore and a Backup DETAIL read it.
+    ["operation-restore-completed.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/restores\//, wire("restore.json")]], detail("restores")],
+    ["operation-restore-scratch.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/restores\//, wire("restore.json")]], detail("restores")],
+    ["operation-restore-untrusted.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/restores\//, wire("restore.json")]], detail("restores")],
+    ["operation-restore-subset-pass.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/restores\//, wire("restore-subset-pass.json")]],
+      detail("restores")],
+    ["operation-restore-complete-uncovered.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/restores\//, wire("restore-complete-uncovered.json")]],
+      detail("restores")],
+    ["operation-backup-preparing.json", D.OperationViewResponse, null,
+      [[/\/operations\//, "@"], [/\/backups\//, wire("backup.json")]], detail("backups")],
+    // The four D3 families.
+    ["protection-policy.json", D.ProtectionPolicyResponse, null,
+      [[/protection-policies\//, "@"]], () => readD3("protection", NS, "x")],
+    ["protection-policy-unknown.json", D.ProtectionPolicyResponse, null,
+      [[/protection-policies\//, "@"]], () => readD3("protection", NS, "x")],
+    ["protection-policies-list.json", D.ProtectionPolicyList, D.ProtectionPolicyView,
+      [[/protection-policies$/, "@"]], () => listD3("protection", NS)],
+    ["catalog.json", D.CatalogResponse, null, [[/catalogs\//, "@"]],
+      () => readD3("catalog", NS, "x")],
+    ["catalogs-list.json", D.CatalogList, D.CatalogView, [[/catalogs$/, "@"]],
+      () => listD3("catalog", NS)],
+    ["retention-policy-enforce.json", D.RetentionPolicyResponse, null,
+      [[/retention-policies\//, "@"]], () => readD3("retention", NS, "x")],
+    ["retention-policies-list.json", D.RetentionPolicyList, D.RetentionPolicyView,
+      [[/retention-policies$/, "@"]], () => listD3("retention", NS)],
+    ["trust-policy.json", D.TrustPolicyResponse, null, [[/trust-policies\//, "@"]],
+      () => readD3("trust", NS, "x")],
+    ["trust-policies-list.json", D.TrustPolicyList, D.TrustPolicyView,
+      [[/trust-policies$/, "@"]], () => listD3("trust", NS)],
+  ];
+}
+
+/** For each `"Schema: path"` a projected read carries: whether a change to it
+ *  ever changed what the page is handed. */
+async function projectionReach() {
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: everythingGranted() }) });
+  const original = globalThis.fetch;
+  const serve = (table) => {
+    globalThis.fetch = (url) => {
+      const path = String(url).split("?")[0];
+      for (const [pattern, body] of table) {
+        if (pattern.test(path)) {
+          return Promise.resolve({
+            ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)),
+          });
+        }
+      }
+      return Promise.reject(new Error("the row has no answer for " + String(url)));
+    };
+  };
+  const reach = new Map();
+  let changes = 0;
+  try {
+    const reviewed = await preparePlanDocument(
+      JSON.parse(readFileSync(FIXTURES + "plan-fields.json", "utf8")));
+    for (const [name, shape, itemShape, table, read] of projectedReads(apiClient(), reviewed)) {
+      const routes = (document) => table.map(([pattern, body]) =>
+        [pattern, body === "@" ? document : body]);
+      // THE FIXTURE, COMPLETED: every member the shape declares is present.
+      const whole = () => filled(shape, wire(name), itemShape);
+      serve(routes(whole()));
+      const baseline = JSON.stringify(await read());
+      for (const leaf of leavesOf(shape, whole(), "", [], itemShape)) {
+        const key = shape.name + ": " + leaf.path.replace(/\[\d+\]/g, "[]");
+        let reached = false;
+        for (const other of otherValues(leaf, valueAt(whole(), leaf.path))) {
+          const document = whole();
+          valueAt(document, leaf.path, () => other);
+          serve(routes(document));
+          changes += 1;
+          let handed;
+          try {
+            handed = JSON.stringify(await read());
+          } catch (refused) {
+            // A change the client REFUSES reached it: it was read.
+            handed = null;
+          }
+          if (handed !== baseline) {
+            reached = true;
+            break;
+          }
+        }
+        reach.set(key, reach.get(key) === true || reached);
+      }
+    }
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
+  return { reach: reach, changes: changes };
+}
+
+/** The `NOT_HANDED_ON` entry that excuses `key`, or `null`. */
+function excusedBy(key) {
+  const [schema, path] = key.split(": ");
+  if (path === REQUEST_ID) {
+    return REQUEST_ID;
+  }
+  for (const entry of Object.keys(NOT_HANDED_ON)) {
+    const [entrySchema, entryPath] = entry.split(": ");
+    if (entrySchema === schema && (path === entryPath || path.indexOf(entryPath + ".") === 0 ||
+      path.indexOf(entryPath + "[") === 0)) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+test("every_member_a_projected_read_decodes_reaches_what_the_page_is_handed", async () => {
+  const { reach, changes } = await projectionReach();
+  assert.ok(reach.size >= 1100 && changes >= 3500,
+    "the row changed every member of every projected read (" + String(reach.size) +
+      " members, " + String(changes) + " changes)");
+  const stopped = [];
+  const used = new Set();
+  for (const [key, reached] of reach) {
+    const excuse = excusedBy(key);
+    if (reached) {
+      // AN EXCUSED MEMBER THAT REACHES THE PAGE IS NOT EXCUSED ANY MORE.
+      if (excuse !== null && excuse !== REQUEST_ID) {
+        stopped.push(key + " reaches the page and NOT_HANDED_ON still excuses it: remove " +
+          "the entry");
+      }
+      continue;
+    }
+    if (excuse === null) {
+      stopped.push(key);
+    } else {
+      used.add(excuse);
+    }
+  }
+  assert.deepEqual(stopped.sort(), [],
+    "these members are decoded and then NOT handed to the page: the projection in " +
+      "ui/client.js or ui/operation-watch.js does not copy them, so a page that reads one " +
+      "renders as if the API had not sent it. Copy it in the projection (under the custom " +
+      "resource's own name where it has one), or name it in NOT_HANDED_ON with why:\n" +
+      stopped.sort().join("\n"));
+  for (const entry of Object.keys(NOT_HANDED_ON)) {
+    assert.ok(used.has(entry), "NOT_HANDED_ON names " + entry + ", and no projected read " +
+      "carries a member it excuses: remove the entry");
+    assert.ok(NOT_HANDED_ON[entry].length >= 40, entry + " says why in a sentence");
   }
 });
 
