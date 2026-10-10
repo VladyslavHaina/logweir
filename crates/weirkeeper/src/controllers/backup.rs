@@ -3706,7 +3706,6 @@ pub fn finished_status_patch(
         exit_code,
         keys,
         refusal,
-        None,
         orphan,
         None,
         covered,
@@ -3723,15 +3722,53 @@ pub fn finished_status_patch(
 /// rather than a bare `operational` / `signing-or-lock` that reads like a
 /// broker or a signing-key problem. The condition's `reason` keeps GC11's
 /// CamelCase code, as it does for exit 3.
-///
-/// **FX-34: `runner_reason`.** What an exit-3 run's pod log said about why
-/// ([`crate::refusal::RunnerReason`]), appended to the terminal condition's
-/// message after the text it always carried. `None` for every other exit code
-/// and for a caller that read no reason, and then the message is byte for
-/// byte what it was; so is `Some(NotStated)`, an older runner's log.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn finished_status_patch_with_failure(
+    backup: &Backup,
+    exit_code: i32,
+    keys: &EvidenceKeys,
+    refusal: Option<&str>,
+    orphan: Option<&str>,
+    failure: Option<&str>,
+    covered: Option<(i64, i64)>,
+    receipt_sha256: Option<&str>,
+    now: DateTime<Utc>,
+) -> Value {
+    finished_status_patch_with_reason(
+        backup,
+        exit_code,
+        keys,
+        refusal,
+        None,
+        orphan,
+        failure,
+        covered,
+        receipt_sha256,
+        now,
+    )
+}
+
+/// [`finished_status_patch_with_failure`] with what an exit-3 run's pod log
+/// said about why ([`crate::refusal::RunnerReason`]) — **FX-34**.
+///
+/// The reason is appended to the terminal condition's message, after the
+/// text it always carried, so `kubectl get backup -o yaml` and the console
+/// say why the plan was refused once the pod and its log are gone.
+/// `status.progress.message` follows, because
+/// [`diagnostics::apply_finished`] copies the terminal condition.
+///
+/// `None` for every other exit code and for a caller that read no reason,
+/// and then the message is byte for byte what it was; so is
+/// `Some(NotStated)`, an older runner's log. `exitReason` is not touched.
+///
+/// A THIRD BUILDER RATHER THAN A TENTH PARAMETER ON THE SECOND:
+/// `finished_status_patch_with_failure` is called from another crate's tests
+/// (`logweir-api/tests/status_mapping.rs`), and its signature is theirs to
+/// rely on.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn finished_status_patch_with_reason(
     backup: &Backup,
     exit_code: i32,
     keys: &EvidenceKeys,
@@ -5539,7 +5576,7 @@ async fn reconcile_backup_inner(
     // PATCH returns, the in-memory `backup` is stale and no longer says what
     // the object says. See `verification::second_patch`.
     let terminal = diagnostics::apply_finished(
-        finished_status_patch_with_failure(
+        finished_status_patch_with_reason(
             &view,
             exit_code,
             &keys,
