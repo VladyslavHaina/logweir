@@ -1827,9 +1827,15 @@ audience (`azp` required when there is more than one), `exp`, `iat` (bounded
 skew, bounded age) and this login's `nonce`. **The browser never receives a
 provider token**: the token response is deserialised into a struct with one
 field, `id_token`, so no access or refresh token exists in the process to
-leak. Every refusal clears the login cookie, and the clear reaches the
+leak. Every `401` refusal clears the login cookie, and the clear reaches the
 browser (FX-32: the problem rendering keeps the handler's `Set-Cookie`;
-before it, only `Allow` survived).
+before it, only `Allow` survived); a `429` from the sign-in limit and a `405`
+do not, and should not, because neither ends the attempt. That clear can be
+forced: a `GET /auth/callback` that carries the login cookie with no query,
+or from a cross-site top-level navigation (the cookie is `SameSite=Lax`), is
+refused and clears it, so a page the operator has open can abort a sign-in in
+flight; nothing server-side is burned (such a request cannot name the
+`state`, so none is redeemed) and starting again at `/auth/login` works.
 
 **A sign-in state is single-use on each replica, and the provider's
 single-use code is the backstop across replicas (FX-13a).** A sealed cookie
@@ -1846,33 +1852,39 @@ store — so the console's RBAC is unchanged.
 |---|---|---|---|
 | the first on this replica to present the state | the sign-in proceeds as before | — | one |
 | any later one on the same replica, at any time in the 600 s, or the loser of two at once | `401 unauthenticated`, "This sign-in was already used. Start again at /auth/login.", login cookie cleared | `login_state_replayed` | none |
-| the first replay on **another** replica, or on this one after its entry was forgotten (below) | `401 unauthenticated`, "The sign-in could not be completed.", login cookie cleared: the provider refuses the code it already exchanged (RFC 6749 §4.1.2: an authorization code is single-use) | `code_exchange_failed` | one, refused |
+| the first replay on **another** replica, or on this one after a restart or after its entry was forgotten (below) | `401 unauthenticated`, "The sign-in could not be completed.", login cookie cleared: the provider refuses the code it already exchanged (RFC 6749 §4.1.2: an authorization code is single-use) | `code_exchange_failed` | one, refused |
 
-So a replay costs at most **one token request per replica**, which the
-provider refuses, and **cannot sign anyone in**: on the replica that redeemed
-the state it is refused before the provider, and anywhere else the provider's
-single-use code refuses it (that callback then records the state there too).
-Two callbacks at once on two replicas both reach the provider, and the
-provider lets one of them sign in. A replay logs the warning `a sign-in state
-was presented again after this replica redeemed it`, never the state.
+So a replay costs **one token request per replica, and again after that
+replica restarts or evicts the entry**, and it **cannot obtain a second
+sign-in from a code the provider has exchanged**: on the replica that
+redeemed the state it is refused before the provider, and anywhere else the
+provider's single-use code refuses it (that callback then records the state
+there too). Two callbacks at once on two replicas both reach the provider,
+and the provider lets one of them sign in. A replay logs the warning `a
+sign-in state was presented again after this replica redeemed it`, never the
+state.
 
-A callback that reached the exchange has used its state even when the
-exchange then fails (a stalled or refusing provider, a session too large):
-starting again at `/auth/login` is the retry.
+A callback that reached the exchange has used its state on that replica even
+when the exchange then fails (a stalled or refusing provider, a session too
+large): starting again at `/auth/login` is the retry. A code the provider has
+not consumed is not covered: when the first callback's exchange fails without
+the provider consuming the code, the same cookie and URL still sign in on
+another replica, exactly as before this change.
 
 **The record is bounded and never refuses a sign-in.** It holds at most
 65,536 states per process (a 128-bit digest and an expiry each, about 4 MiB),
-and each is forgotten once its login state could no longer open (`iat` plus
-600 s). When it is full of live entries, the **oldest is forgotten** to make
-room — never is a new sign-in refused, because a full record that refused
-would let anyone who can mint login cookies (one unauthenticated
-`/auth/login` each) lock every operator out. A replay of a forgotten state is
-the cross-replica case above: one token request, refused by the provider. The
-audit line of a sign-in that forgot a live entry carries the note
-`usedSignInStates: full`, and the console logs `this console's record of
-redeemed sign-in states is full of live ones` once a minute while it lasts.
-The record is per process: a restart forgets it, and the provider's code is
-again the backstop.
+and an entry is forgotten once its login state could no longer open (`iat`
+plus 600 s) and the entries redeemed before it have gone, or earlier when the
+record is full. When it is full, the **oldest is forgotten** to make room —
+never is a new sign-in refused, because a full record that refused would let
+anyone who can mint login cookies (one unauthenticated `/auth/login` each)
+lock every operator out. A replay of a forgotten state is the cross-replica
+case above: one token request, which the provider refuses for a code it has
+exchanged. The audit line of a sign-in that forgot an entry whose login state
+could still open carries the note `usedSignInStates: full`, and the console
+logs `this console's record of redeemed sign-in states is full` once a minute
+while it lasts. The record is per process: a restart forgets it, and the
+provider's code is again the backstop.
 
 JWKS are cached. An unknown `kid` provokes at most one refetch per minute —
 that is what makes a provider's key rotation work without a restart, and what
@@ -2117,8 +2129,9 @@ is amplified. But those requests reach the provider **authenticated as this
 console's client and from its address**, not as the unauthenticated requests
 from many addresses an attacker could send the provider directly. The login
 state is single-use on each replica (FX-13a, *Sign-in* above), so one
-`/auth/login` arms at most one token request per replica, where one cookie
-used to arm a token request on every callback in its 600 s. Still, an
+`/auth/login` arms one token request per replica, and one more after that
+replica restarts or evicts the entry, where one cookie used to arm a token
+request on every callback in its 600 s. Still, an
 attacker with many addresses can spend whatever per-client or per-source
 quota the provider gives this console, and the provider then refuses
 everyone's sign-ins for as long as the attack lasts.

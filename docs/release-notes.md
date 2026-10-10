@@ -1503,13 +1503,19 @@ already used. Start again at /auth/login.") with audit failure
 `login_state_replayed`, a warning, the login cookie cleared and **no token
 request**. Nothing is written to Kubernetes and the console's RBAC is
 unchanged. Across replicas the provider is the backstop: an authorization
-code is single-use (RFC 6749 §4.1.2), so a replay on another replica costs
-one token request that the provider refuses (`code_exchange_failed`), signs
-nobody in, and is then refused by that replica's record too. The record holds
-65,536 states per process, each forgotten when its login could no longer
-open; when it is full the oldest is forgotten, never a sign-in refused
-(audit note `usedSignInStates: full`, one warning a minute), and a replay of
-a forgotten state meets the same backstop. Separately (FX-32), the problem
+code is single-use (RFC 6749 §4.1.2), so a replay cannot obtain a second
+sign-in from a code the provider has exchanged. It costs one token request
+per replica, and again after that replica restarts or evicts the entry: the
+provider refuses it (`code_exchange_failed`), and that replica's record
+refuses it from then on. A code the provider has not consumed is not covered:
+when the first callback's exchange fails without the provider consuming the
+code, the same cookie and URL still sign in on another replica, exactly as
+before this change. The record holds 65,536 states per process; an entry is
+forgotten once its login state could no longer open and the entries redeemed
+before it have gone, or earlier when the record is full: then the oldest is
+forgotten, never a sign-in refused (audit note `usedSignInStates: full`, one
+warning a minute), and a replay of a forgotten state meets the same backstop.
+Separately (FX-32), the problem
 rendering kept only `Allow` from a handler's headers, so the callback's
 `Set-Cookie` clearing `__Host-logweir_login` on a refusal never reached the
 browser; every header now survives except those describing the replaced body
@@ -1528,19 +1534,26 @@ refused by that process's record, and two callbacks at once on two processes
 give exactly one sign-in; a record shrunk to two forgets its oldest entries
 and still signs in every new login, announces it once, and a replay of a
 forgotten state meets the provider's refusal. Each row also asserts the
-callback made no Kubernetes write. `tests/oidc_login.rs` drives seven
+callback made no Kubernetes write, and the replay and refused-exchange rows
+find no `state`, authorization code, nonce or sealed cookie in the console's
+logs. `tests/oidc_login.rs` drives seven
 callback refusals and reads the clearing `Set-Cookie` on the response the
-browser gets; unit rows hold what the rendering keeps and drops, and the
-record's expiry, eviction and bound. Mutants, all killed: the record not
+browser gets; unit rows hold what the rendering keeps and drops (the deny
+list's fifteen names are written out and pinned), the record's expiry,
+eviction and bound, and that of eight threads redeeming one state at once
+exactly one is first, 300 times over. Mutants, all killed: the record not
 consulted, the record written after the exchange, a check-then-write race, a
+check and a mark under two lock acquisitions, a
 full record that refuses, no eviction, eviction of the newest, no expiry, the
 eviction announced every time or not reported, a record keyed on the code or
-on nothing, one record shared by both processes, a refusal without the
-clear, and the rendering dropping `Set-Cookie` again, keeping a short list,
+on nothing, one record shared by both processes, a replay warning that logs
+the authorization code, a refusal without the
+clear, the deny list losing `Cache-Control` or `Content-Length`, and the
+rendering dropping `Set-Cookie` again, keeping a short list,
 carrying the old body's headers or doubling its own.
 [UNVERIFIED — no PoC sign-in has replayed a callback URL against the deployed console yet; the PoC upgrade that carries this item does.]
 **Rollback:** an older console keeps no record (a copied cookie replays
-within its 600 s again, each replay a token request the provider refuses) and
+within its 600 s again, each replay a token request) and
 drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
 converting.
 
