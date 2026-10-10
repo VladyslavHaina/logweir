@@ -2705,7 +2705,10 @@ fn cluster3_rows(addresses: &[String]) -> (CheckOutcome, CheckOutcome) {
 ///    the controller has fenced it and lists two, both of them and the
 ///    bootstrap address nobody answered at.
 /// 3. **It recovers**: with the broker running again the row is `ready`,
-///    `3 of 3`.
+///    `3 of 3`, within two minutes. Until the controller lists the broker
+///    again the row may be `ready` with `2 of 2` (the two listed brokers
+///    answered, and the third answered on the bootstrap connection to its
+///    address) or `unknown`; nothing else.
 ///
 /// What a frozen broker the cluster has stopped listing does to a connection
 /// that names ONLY live addresses is recorded, not required: the cluster then
@@ -2837,23 +2840,46 @@ fn a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all() {
     let (through_live, _) = cluster3_rows(&live);
 
     // --- 3. it recovers --------------------------------------------------------
+    // The broker runs again at once, and the controller lists it again a
+    // little later. In between the row is, rightly, `ready` with `2 of 2`:
+    // the cluster lists two brokers, both answered, and the third answered
+    // too, on the bootstrap connection to its address (so its answer is in
+    // the intersection). Measured: the first run at the merged tip met that
+    // state, and a loop that stopped at the first `ready` failed on it.
+    // Recovery is the row saying THREE again; what it said on the way is
+    // recorded, and every step of it must be a whole view or `unknown`.
     drop(frozen);
+    let mut on_the_way: Vec<Value> = Vec::new();
     let mut recovered = None;
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         let (engine, _) = cluster3_rows(&all);
-        if engine.state == CheckState::Ready {
-            recovered = Some(engine);
-            break;
+        let answered = engine.facts.get("brokersAnswered").cloned();
+        match (engine.state, answered.as_deref()) {
+            (CheckState::Ready, Some("3 of 3")) => {
+                recovered = Some(engine);
+                break;
+            }
+            (CheckState::Ready, Some("2 of 2")) | (CheckState::Unknown, None) => {
+                on_the_way.push(json!({
+                    "state": engine.state, "brokersAnswered": answered,
+                    "message": tail(&engine.message, 220),
+                }));
+            }
+            other => panic!(
+                "while the broker rejoins the row is a whole view of the brokers the cluster \
+                 lists, or `unknown`; it was {other:?}: {engine:?}"
+            ),
         }
         std::thread::sleep(Duration::from_secs(3));
     }
-    let recovered = recovered.expect("with the broker running again the row is ready within 120 s");
-    assert_eq!(
-        recovered.facts.get("brokersAnswered").map(String::as_str),
-        Some("3 of 3"),
-        "{recovered:?}"
-    );
+    let recovered = recovered.unwrap_or_else(|| {
+        panic!(
+            "with the broker running again the row says `3 of 3` within 120 s; on the way: \
+             {on_the_way:?}"
+        )
+    });
+    assert_eq!(recovered.state, CheckState::Ready, "{recovered:?}");
 
     evidence(
         "a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all",
@@ -2877,6 +2903,7 @@ fn a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all() {
                     "brokersAnswered": through_live.facts.get("brokersAnswered"),
                 },
             },
+            "while_it_rejoined": on_the_way,
             "recovered": recovered,
         }),
     );

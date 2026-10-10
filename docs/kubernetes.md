@@ -10196,8 +10196,9 @@ this one is in every `Backup` and `Restore` check.
   not by a run: the rows a result must hold are derived from the request as
   THIS controller renders it, so a check Job the old controller created and
   the new one sees finish is missing the capability rows, which are then
-  reported `unknown`. That one object's verdict is `unknown`, never a `ready`
-  it did not earn. Create a new `Preflight` after the upgrade.
+  reported `unknown` and blocking (`BlockedByPrerequisite`, "the check Job did
+  not report this row"). That one object's verdict is `unknown`, never a
+  `ready` it did not earn. Create a new `Preflight` after the upgrade.
 
 A **newer runner** handed a
 plan from an older controller (no field) emits no capability row, and the

@@ -164,7 +164,8 @@ Profile `cluster3`: three Apache Kafka 3.7.1 nodes, each broker and controller, 
 | One broker's process frozen (`docker compose pause`; its port still accepts), while the cluster still lists it | `unknown`, `ApiVersionsNotObserved`, after the observation's 10 s budget: "2 of 3 broker(s) the cluster lists answered …; no answer from broker 3 (localhost:…)" |
 | The same, after the controller fenced the frozen broker | `unknown`: "2 of 2 broker(s) the cluster lists answered …; no answer from the bootstrap address(es) localhost:…" |
 | The same cluster through its two live addresses only | `ready`, `brokersAnswered: 2 of 2`. Recorded, not required: the stated limit (§5.2) |
-| The broker running again | `ready`, `3 of 3` |
+| The broker running again, before the controller lists it again | `ready`, `2 of 2` (the two listed brokers answered, and the third answered on the bootstrap connection to its address, so its answer is in the intersection), or `unknown`. Recorded on the way; the row requires that it is nothing else |
+| The broker listed again | `ready`, `3 of 3`, within two minutes |
 
 The review had measured the first version on the same cluster: two of three brokers in two runs of three from all three addresses, and one of three from one address, each time `ready`.
 
