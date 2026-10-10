@@ -3,6 +3,7 @@
 Date: 2026-09-28. Row: PROD-01.4 (research, Tier B). Base revision: main `adee0a16`.
 Evidence: `e2e/tests/topic_identity.rs` (this row's oracle), run against Apache Kafka 3.7.1 and 4.3.1 (compose broker, one KRaft node) with the pinned engine v0.21.0 (`sha256:8ff5be71…c317`). The first round made three runs; the fix round (review of `b0f50d0d`) made one run per line at `d22dd170`.
 Status: proposed for review. One owner-level choice (§6.4, TI-OC1) is presented with options and a recommendation, and is not taken here.
+Addendum, 2026-10-10 (PROD-01.5c): the oracle was re-run on Kafka 3.9.2 and 4.1.2, and again on 3.7.1 and 4.3.1, with the engine the images now ship (`0.23.3+logweir.2`). It passed 53 of 53 on each line, and every live row equals this record's measurement (§5). No rule, verdict or limit changes except the broker lines of §10.
 
 Engine paths below are inside the pinned tarball `third_party/kafka-backup-v0.21.0.tar.gz` (sha256 `0252a837…405b`), under `kafka-backup-0.21.0/crates/kafka-backup-core/src/`. librdkafka paths are inside the locked `rdkafka-sys 4.10.0+2.12.1` crate, under `librdkafka/`.
 
@@ -17,7 +18,7 @@ Engine paths below are inside the pinned tarball `third_party/kafka-backup-v0.21
    - partition counts, and log start and end offsets read READ_UNCOMMITTED;
    - the predecessor's archived tail records against the SAME offsets in the current capture's own archive. It never uses a live read, which differs from the archive on `LogAppendTime` topics and on repeated header keys (§4.1).
    With IDs, the same checks still run, so gaps and a same-ID truncation stay visible.
-4. **Measured** (§5): 19 live rows, with identical outcomes on Kafka 3.7.1 and 4.3.1.
+4. **Measured** (§5): 19 live rows, with identical outcomes on Kafka 3.7.1 and 4.3.1, and on 3.9.2 and 4.1.2 since PROD-01.5c.
    - **8 rows make a new topic:** 6 detected (5 `break`, 1 `suspected`) and 2 known misses. The ID path detects all 8.
    - **11 rows keep the topic:** no false `break`. There is one known false positive, a `suspected` after partitions were added and every old tail deleted (c19), and the ID path clears it.
    - **The two rejected variants:** a source read gives false breaks on the `LogAppendTime` and repeated-header rows (c17, c18). Offsets alone give 2 `break` and 2 `suspected` among the 8 new topics, and `suspected` on two same-topic rows (c05, c19).
@@ -273,6 +274,10 @@ Run with `LOGWEIR_TOPIC_IDENTITY_EVIDENCE=<file> cargo test --locked -p e2e --fe
 - **Fix round**, at `d22dd170`, on 2026-09-29 (UTC). The comparison is archive against archive, and every row records four modes.
   - 3.7.1 (image `sha256:ed74d7d1…9b68`): 53 of 53 tests in 518 s — 33 pure tests, 19 live rows and the L9 row.
   - 4.3.1 (image `sha256:77e3df90…2837`): 53 of 53 in 536 s. Every mode of every row, and every classification, is equal to 3.7.1 (`oracle-fix-summary.txt`).
+- **PROD-01.5c**, with the oracle as at main `64b66a15` (branch commit `fa7a9b0b`), on 2026-10-10 (UTC): the same command on compose slot 2, one line at a time, with engine `0.23.3+logweir.2` run natively from the published linux/arm64 runner image (the fix round ran 0.21.0 under emulation).
+  - 3.7.1, 3.9.2, 4.1.2 and 4.3.1 (the digest-pinned images of `stack-env.sh --kafka`): 53 of 53 on each line, in 820, 1,079, 1,153 and 1,041 s on a loaded host.
+  - Every mode of every row, with its signals, and every classification is equal on the four lines and equal to the fix round's 3.7.1 run (`artifacts/prod-01-5c/topic-identity-summary-all-lines.txt`). The engine change moved no verdict.
+  - c10's retention check deleted its segment after 102 to 227 s.
 - **First round**, three runs of c01–c16 (3.7.1 twice, 4.3.1 once). They used the source-read comparison and gave the same rule verdicts; the source and archive reads agree on every row except c17 and c18, which that round did not have (§11).
 
 The offsets-only column is `classify` without the boundary comparison. The ID path is `classify` given the broker's IDs, standing in for PROD-01.4a.
@@ -299,7 +304,7 @@ The offsets-only column is `classify` without the boundary comparison. The ID pa
 | c18 | unchanged topic whose tail repeats a header key | same | unverified | continuous: BoundaryRecordVerified | **break** | continuous | correct; the source read's false break (FP7) |
 | c19 | CreatePartitions 3 → 5, then every old tail deleted | same | suspected | **suspected**: PartitionCountIncreased, CaptureGap ×3, BoundaryDeleted ×3 | suspected | continuous, the same gaps | **known false positive (FP8)**; the ID path clears it |
 
-Totals, identical on both broker lines:
+Totals, identical on both broker lines, and on all four in PROD-01.5c's runs:
 
 - **New-topic rows (8):**
   - the rule detects 6, as 5 `break` and 1 `suspected`, and misses 2 (c13, c14);
@@ -544,8 +549,8 @@ Every negative control below can fail. Fixture row numbers refer to `e2e/tests/t
 ## 10. Limits of this record
 
 - **Fixtures.** One KRaft broker per line: no replication, leader movement, unclean election (FP1, FP9), tiered storage or follower fetching. Rule 6's PROD-01.5 profiles had not landed; the current compose stack was used, with only the broker service.
-- **Broker lines.** Two: 3.7.1, which is past end of life, and 4.3.1. The 3.9 and 4.1 lines are PROD-01.5's to run with this oracle.
-- **Engine.** Linux/amd64, run under emulation on an arm64 host; only its capture path was used.
+- **Broker lines.** Four since PROD-01.5c: 3.7.1, which is past end of life, 3.9.2, 4.1.2 and 4.3.1, each as one KRaft broker. The 4.0 and 4.2 lines are not run.
+- **Engine.** Only its capture path was used. This record's runs used 0.21.0, linux/amd64 under emulation on an arm64 host; PROD-01.5c's used `0.23.3+logweir.2`, linux/arm64, natively.
 - **Comparison read.** The rule reads the capture's own archive. A source read stays excluded, not fixed: it reports false breaks on `LogAppendTime` topics and on repeated header keys (c17, c18) until PROD-00.3c and PROD-00.3e. Incremental runs must therefore overlap their predecessor by a record.
 - **Not measured:**
   - FN3 (recreation during a capture) is from source;

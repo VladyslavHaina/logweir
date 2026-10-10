@@ -55,7 +55,7 @@ on both platforms, and the parity runs against OSO's binary.
 |---|---|---|---|
 | **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version and the version this row was run against; it was also the shipped pin until PROD-00.3f (2026-10-07). [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
 
-| **0.23.3+logweir.2** | build inputs `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8` (not an image digest) | **`pass`** | **Logweir's build 2 of 0.23.3, the engine the images ship since FX-21: patches 0001 and 0002.** On 2026-10-08, on the compose stack (slot 1, Kafka 3.7.1 KRaft + MinIO), built natively for macOS arm64 with `scripts/engine-source.sh build` and run natively: the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, both readers VALID; `full_drill` 15/15, G-PITR 1/1 and PROD-01.1's record-semantics rows 11 (3 ignored) with the contract asserted. The suites and record-semantics files compared SAME against build 1 run the same way, and the demo, suites and record-semantics files SAME against OSO's 0.23.3 binary (container route) in the same session. FX-21's three-topic `cluster3` row: the manifest records every topic's replication factor (3 of 3; OSO's 0.23.3 and build 1 record 1 of 3). Not yet run: the runner image of this build, on either platform (the next PoC refresh). |
+| **0.23.3+logweir.2** | build inputs `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8` (not an image digest) | **`pass`** | **Logweir's build 2 of 0.23.3, the engine the images ship since FX-21: patches 0001 and 0002.** On 2026-10-08, on the compose stack (slot 1, Kafka 3.7.1 KRaft + MinIO), built natively for macOS arm64 with `scripts/engine-source.sh build` and run natively: the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, both readers VALID; `full_drill` 15/15, G-PITR 1/1 and PROD-01.1's record-semantics rows 11 (3 ignored) with the contract asserted. The suites and record-semantics files compared SAME against build 1 run the same way, and the demo, suites and record-semantics files SAME against OSO's 0.23.3 binary (container route) in the same session. FX-21's three-topic `cluster3` row: the manifest records every topic's replication factor (3 of 3; OSO's 0.23.3 and build 1 record 1 of 3). Since then the runner image's linux/arm64 engine has run both suites on four broker lines (PROD-01.5c, "Record semantics and topic identity on each line" below), and CI's `e2e` job builds this engine from the vendored source for linux/amd64 and runs it on every pull request. Not yet run: the published linux/amd64 runner image as a container. |
 | **0.23.3+logweir.1** | build inputs `sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3` (not an image digest) | **`pass`** | **Logweir's build of 0.23.3, the engine the images shipped from PROD-00.2 until FX-21; `doctor` refuses it since.** On 2026-10-08, on the compose stack (Kafka 3.7.1 KRaft + MinIO), built for linux/arm64 (run natively) and linux/amd64 (run under emulation): the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, `header_preflight: honoured`, objectives met, both readers VALID; `full_drill` 15/15, G-PITR (`pitr_boundary`) 1/1, and PROD-01.1's record-semantics rows 8/8 with the contract asserted. All of it compared SAME against OSO's 0.23.3 binary in the same session, and a deliberately modified build did not ([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5). |
 | **0.23.3** | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | **`pass`** | **OSO's release of the shipped source, and the one-release rollback since PROD-00.2; the pin from PROD-00.3f until then.** Full drill, 2026-10-08, against the compose stack (slot 4, Kafka 3.7.1 KRaft + MinIO, the `linux/amd64` image under emulation), `scripts/demo.sh` steps 4–6: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `header_preflight: honoured`, objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. The same day CI's e2e command passed (177 tests, PROD-01.1's contract asserted on 0.23.3), and the record-semantics, G-PITR, FX-1, FX-7 and full-drill rows passed on Kafka 4.3.1. An archive 0.21.0 wrote drills `pass` with 0.23.3, and the reverse ([decision record](to-do/decisions/PROD-00-engine-route.md) §12.5). |
 
@@ -207,6 +207,65 @@ version instead of a downgrade. So do the table's DescribeAcls, CreateAcls and
 DeleteAcls entries (v1, the 4.x floor), which 0.21.0 never sends. That route
 (negotiate, or pin higher) belongs to PROD-00.1's capability table.
 
+### Record semantics and topic identity on each line
+
+The table above is the drill, G-PITR and the receipt path. Two suites state
+finer contracts, and both were first measured on 3.7.1: PROD-01.1's record and
+transaction semantics (`e2e/tests/record_semantics.rs`,
+[decision record](to-do/decisions/PROD-01.1-record-semantics.md)) and
+PROD-01.4's topic identity (`e2e/tests/topic_identity.rs`,
+[decision record](to-do/decisions/PROD-01.4-topic-identity.md)). PROD-01.5c ran
+both on every line on 2026-10-10 (UTC), with the suites and the product code as
+at main `64b66a15` (branch commit `fa7a9b0b`), one line at a time on compose
+slot 2 (`stack-env.sh --slot 2 --kafka LINE --profiles auth`: the digest-pinned
+images above, each version read back from the running broker), single-node
+KRaft, plaintext, MinIO.
+
+The engine was the one the images ship, `0.23.3+logweir.2`, run from the
+published linux/arm64 runner image
+(`vladyslavhaina/logweir@sha256:4f082ae8a1ee22c89bbcc8518e9c95027e8ecdacd0c1b915e8aed2a6aec42844`,
+built from main `739f17c5`; its `/etc/logweir/engine-identity` names build inputs
+`sha256:2bca49d7…`). That is the record-semantics suite's `CONTRACT_ENGINE`, so
+every row asserted its contract, and the outcome files name that engine. On any
+other engine those rows record an outcome and assert nothing.
+
+| Broker | Record semantics, default set | Topic identity, `--include-ignored` | Lost acknowledgement (`--ignored`, one sample) | Killed restore (`--ignored`, one sample) |
+|---|---|---|---|---|
+| 3.7.1 (the baseline, same session) | 12 passed, 0 failed | 53 passed, 0 failed | 2 batches resent: 2,000 duplicates, 1,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 3.9.2 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 4,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 4.1.2 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 10,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+| 4.3.1 | 12 passed, 0 failed | 53 passed, 0 failed | 3 batches resent: 3,000 duplicates, 8,000 missing; engine exit 1; Logweir exit 1, nothing signed | the engine outlived the kill and wrote all 60,000 |
+
+**No line diverges from 3.7.1.**
+
+- **Record semantics.** The 12 rows are PROD-01.1's eight (transactions, the
+  three non-monotonic `CreateTime` rows, `LogAppendTime`, record shapes,
+  compaction, topic recreation) and the four complete-coverage rows of PROD-08.1
+  and 08.1a, which share the file. Each of the eight asserts its exact set of
+  divergences and Logweir's own verdict, as PROD-01.1 stated them from 3.7.1,
+  and proves its check can fail on a mutated output. The 13 outcome files also
+  compare the same in semantics between 3.7.1 and each other line: record
+  counts, the configurations the manifest recorded, every divergence class and
+  count, and Logweir's exit, outcome and count bound.
+- **Topic identity.** 33 pure tests, the 19 live rows (the retention row c10
+  included) and the engine-deadline row. Every live row's four verdicts with
+  their signals, its classification and its ground truth (whether the
+  broker's own topic ID changed) are equal on all four lines and equal to
+  PROD-01.4's measurement:
+  6 of 8 recreations detected, c13 and c14 the known misses, c19 the known
+  false positive, and no false `break`.
+- **The two fault rows are samples, not deterministic fixtures** (PROD-01.1
+  §5), so their numbers differ run to run by design. On every line the same
+  thing happened: a 75 s broker freeze made produce requests time out at 60 s
+  and be resent, which duplicated one 1,000-record batch each; the thawed
+  broker answered `NOT_LEADER_FOR_PARTITION`, the engine gave up on leader −1
+  and exited 1 over a partial target, and Logweir exited 1 and signed nothing.
+  A killed `logweir` left its engine container running, and the engine
+  completed the restore with nobody to verify it.
+
+Not run: either suite with authentication or on more than one broker, and the
+4.0 and 4.2 lines.
+
 ## Object stores: conditional create is required
 
 Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a
@@ -271,6 +330,17 @@ broker differs from its declaration fails. Rows below the full-drill floor seed
 with segment digests optional, because those engines write none. They record
 `unsupported(lever-absent)` only when Logweir is seen refusing the engine
 ("below the declared floor") in both the reduced row and the control.
+
+**The `broker-lines` job (PROD-01.5c).** The same workflow also runs PROD-01.1's
+record-semantics suite and PROD-01.4's topic-identity suite on every supported
+broker line (3.9, 4.1 and 4.3; `stack-env.sh --kafka LINE`, the digest-pinned
+images), one job per line, with Logweir's engine build compiled as the CI e2e
+job compiles it. The rows above run OSO's releases, and on those the
+record-semantics rows record an outcome and assert nothing; the CI e2e job
+asserts their contract on the default broker only. This job asserts it on the
+other lines. It runs each suite's default set, publishes no row (a red line is a
+red job), and has not yet run on GitHub (added 2026-10-10); the runs made by
+hand are under [Broker versions](#record-semantics-and-topic-identity-on-each-line).
 
 The job renders its rows between the two markers below and changes nothing else
 in this file. It publishes the page as the `support-matrix` artifact and in the
