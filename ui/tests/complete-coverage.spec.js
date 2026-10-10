@@ -21,6 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { wireItem } from "./console-fixture.js";
 
 import {
   COMPLETE_COVERAGE_COST,
@@ -116,7 +117,7 @@ test("prod081a_the_apis_coverage_decodes_and_projects_under_the_crds_names", asy
     text: () => Promise.resolve(JSON.stringify(String(url).includes("/operations")
       ? fixture("console/operation-restore-complete-uncovered.json")
       : String(url).split("?")[0].endsWith("/restores")
-        ? { requestId: "r", items: [fixture("console/restore-complete-uncovered.json").item],
+        ? { requestId: "r", items: [wireItem("restore-complete-uncovered.json")],
           page: { limit: 50, nextCursor: null, snapshot: null } }
         : fixture("console/restore-complete-uncovered.json"))),
   });

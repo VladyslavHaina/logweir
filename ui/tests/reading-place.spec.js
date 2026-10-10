@@ -31,6 +31,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import { resetMode } from "../client.js";
 import { createRouteLifecycle } from "../app.js";
@@ -386,7 +387,7 @@ async function nonTerminalRepaintKeepsThePage(t) {
  *  readiness check whose reads answer `running` until `box.settled`. */
 function wizardApi(ns, g, box) {
   const backups = fixture("wizard-backups.json");
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   for (const b of backups.items) {
     b.metadata.namespace = ns;
     b.spec.destinationRef = { name: destination.name, uid: destination.uid };

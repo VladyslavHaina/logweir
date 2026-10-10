@@ -5704,11 +5704,72 @@ fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
     })
 }
 
-/// The first `POST …/jobs` body, as JSON.
+/// The first `POST …/jobs` body, as JSON, **with its line token taken off**.
+///
+/// FX-34: every RUNNER Job this reconciler creates (`logweir backup run`)
+/// carries a fresh random token as the runner's last two arguments
+/// (`weirkeeper::job::add_line_token`), and two Jobs never share one, so a
+/// POSTed Job cannot be compared whole with a builder's. This helper CHECKS
+/// the pair (the flag, then forty lower-case hex digits, and nothing after
+/// them), removes it and returns the rest. So every row that compares what it
+/// returns with `runner_job(…)` or with a frozen argv is also a row proving
+/// that the token is the Job's only addition.
+///
+/// A CHECK Job (`logweir check run`, a topic discovery) is returned as it
+/// was POSTed, after asserting it carries NO token: the token is the refusal
+/// line's and that Job prints none.
 fn posted_job(seen: &[SeenBody]) -> Option<Value> {
-    seen.iter()
+    let job: Value = seen
+        .iter()
         .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))
+        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))?;
+    let args = &job["spec"]["template"]["spec"]["containers"][0]["args"];
+    if args[0] == "backup" {
+        return posted_job_and_line_token(seen).map(|(job, _)| job);
+    }
+    assert!(
+        !args
+            .as_array()
+            .expect("an argv")
+            .iter()
+            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG),
+        "only a runner Job is given a line token: {args}"
+    );
+    Some(job)
+}
+
+/// A runner Job as [`posted_job`] returns it, and the token it took off.
+fn posted_job_and_line_token(seen: &[SeenBody]) -> Option<(Value, String)> {
+    let mut job: Value = seen
+        .iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))?;
+    let args = job["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array_mut()
+        .expect("the runner has an argv");
+    let token = args.pop().expect("the line token");
+    let flag = args.pop().expect("its flag");
+    assert_eq!(
+        flag,
+        logweir_core::refusal_detail::LINE_TOKEN_ARG,
+        "the last two arguments of a created runner Job are the line token's"
+    );
+    let token = token.as_str().expect("a string").to_string();
+    assert!(
+        token.len() == 40
+            && token
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "160 bits as lower-case hex: {} characters",
+        token.len()
+    );
+    assert!(
+        !args
+            .iter()
+            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG),
+        "the flag is given once"
+    );
+    Some((job, token))
 }
 
 /// A condition of `type` on a status value, as `(status, reason, message)`.
@@ -14922,6 +14983,814 @@ mod prod_04_1 {
             errs.iter().any(|e| e.field == "spec.consumerGroups"
                 && e.message.contains("ConsumerGroupSelectionTooLarge")),
             "{errs:?}"
+        );
+    }
+}
+
+// ===========================================================================
+// FX-34 — a guard-refused Backup says WHY, and a pod log is untrusted text
+// ===========================================================================
+//
+// The `Backup` twins of `tests/restore_controller.rs`'s FX-34 rows. The line
+// format, its validation and its cleaning are one implementation
+// (`logweir_core::refusal_detail`, read through `weirkeeper::refusal`), so
+// the hostile-line table is carried in full on the `Restore` side and in the
+// arms that could differ here: the builder, the gate on exit 3, the read and
+// the two guards against a second read or write.
+
+use logweir_core::refusal_detail::{
+    refusal_detail_line, LineToken, RefusingRun, BACKUP_REASON_CODES, LINE_TOKEN_ARG,
+    REFUSAL_DETAIL_PREFIX, REPLACEMENT,
+};
+use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
+
+/// What a refused `Backup`'s terminal condition said before FX-34, and still
+/// says for a runner that prints no detail line.
+const FX34_OLD_MESSAGE: &str = "the runner exited 3 (guard-refused); the code was read from \
+     status.containerStatuses[name=runner].state.terminated.exitCode";
+
+/// What every stated reason follows in the message.
+const FX34_STATED: &str = "; the runner's own reason, cleaned and bounded: ";
+
+/// A refusal the backup runner really makes (`phase_minus1_admit::local`).
+const FX34_SENTENCE: &str = "a backup spec must name at least one topic; GC18(c) requires a \
+     mandatory named-topic allowlist";
+
+fn fx34_fixture(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fx-34")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The line token of the Job these rows' passes read, and another Job's.
+/// Assembled at run time, so no source line holds a secret-shaped literal.
+fn fx34_token() -> LineToken {
+    LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+fn fx34_another_jobs_token() -> LineToken {
+    LineToken::parse(&"3c".repeat(20)).expect("forty hex digits")
+}
+
+/// One `refusal-detail=` line carrying THIS Job's token.
+fn fx34_detail(code: &str, message: &str) -> String {
+    let value = serde_json::json!({
+        "token": fx34_token().expose_token(), "code": code, "message": message
+    });
+    format!("{REFUSAL_DETAIL_PREFIX}{value}")
+}
+
+/// `detail` and the plain state line a runner writes after it.
+fn fx34_with_state(detail: &str) -> String {
+    format!("{detail}\nrefusal-reason=GuardRefused\n")
+}
+
+/// The two lines `logweir backup run`, given THIS Job's token, prints last
+/// for `message`, built by its own formatters.
+fn fx34_runner_pair(message: &str) -> String {
+    fx34_runner_pair_with(Some(&fx34_token()), message)
+}
+
+/// [`fx34_runner_pair`] for a runner given `token`, or none.
+fn fx34_runner_pair_with(token: Option<&LineToken>, message: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        refusal_detail_line(RefusingRun::Backup, token, message),
+        logweir_core::guard::refusal_reason_line(message)
+    )
+}
+
+/// [`job_body`] as the Job this controller creates: with a `runner`
+/// container whose last two arguments are the line token, or with a runner
+/// container and no token (a Job an older controller built).
+fn fx34_job_body(condition: &str, token: Option<&LineToken>) -> String {
+    let mut job: Value = serde_json::from_str(&job_body(condition)).expect("the fixture is JSON");
+    let mut args = vec![
+        "backup".to_string(),
+        "run".to_string(),
+        "--spec".to_string(),
+        "/plan/backup.yaml".to_string(),
+    ];
+    if let Some(token) = token {
+        args.push(LINE_TOKEN_ARG.to_string());
+        args.push(token.expose_token().to_string());
+    }
+    job["spec"]["template"]["spec"]["containers"] =
+        serde_json::json!([{ "name": "runner", "image": "x", "args": args }]);
+    job.to_string()
+}
+
+fn fx34_log_failure(code: u16, reason: &str) -> String {
+    format!(
+        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
+  "message":"pods \"{POD}\" log: {reason}","reason":"{reason}","code":{code}}}"#
+    )
+}
+
+fn fx34_routes(exit_code: i32, log_status: u16, log: String) -> Vec<Route> {
+    fx34_routes_for(exit_code, log_status, log, Some(&fx34_token()))
+}
+
+/// [`fx34_routes`] with the Job's token as a parameter: `None` is a Job that
+/// carries none.
+fn fx34_routes_for(
+    exit_code: i32,
+    log_status: u16,
+    log: String,
+    token: Option<&LineToken>,
+) -> Vec<Route> {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let mut routes = finished_routes(&pod_list_terminated(exit_code), log, 200, condition);
+    for route in &mut routes {
+        if route.path_suffix == "/log" {
+            route.status = log_status;
+        }
+        if route.path_suffix.ends_with(&format!("/jobs/{NAME}")) {
+            route.body = fx34_job_body(condition, token);
+        }
+    }
+    routes
+}
+
+/// A verify oracle whose verdict carries a FIXED instant.
+/// `unverified_evidence` reads the clock for `verifiedAt`, and a golden cannot
+/// hold a clock read.
+fn fx34_not_attempted(
+    r: weirkeeper::verification::EvidenceRef,
+) -> BoxFuture<'static, weirkeeper::verification::VerificationResult> {
+    Box::pin(async move {
+        let mut verdict = weirkeeper::verification::VerificationResult::not_attempted(
+            r.payload_type,
+            "no evidence credential is configured in this row",
+        );
+        verdict.verified_at = utc(2026, 11, 9, 3, 20);
+        verdict
+    })
+}
+
+/// One pass over a finished Job: the reconcile's answer and every request the
+/// double saw, bodies included, in order.
+async fn fx34_pass(
+    backup: &Backup,
+    exit_code: i32,
+    log_status: u16,
+    log: String,
+) -> (
+    Result<weirkeeper::controllers::backup::BackupOutcome, String>,
+    Vec<SeenBody>,
+) {
+    fx34_pass_over(backup, fx34_routes(exit_code, log_status, log)).await
+}
+
+/// [`fx34_pass`] over a route table the row built.
+async fn fx34_pass_over(
+    backup: &Backup,
+    routes: Vec<Route>,
+) -> (
+    Result<weirkeeper::controllers::backup::BackupOutcome, String>,
+    Vec<SeenBody>,
+) {
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    // BOXED: the reconcile's future is large, and a row that awaits this
+    // helper from several places would otherwise carry it on its own stack.
+    let outcome = Box::pin(reconcile_backup(
+        backup,
+        &client,
+        &unobserved_archive,
+        &fx34_not_attempted,
+        utc(2026, 11, 9, 3, 20),
+    ))
+    .await
+    .map_err(|e| e.to_string());
+    let seen = bodies.lock().expect("readable").clone();
+    (outcome, seen)
+}
+
+/// The terminal status of an exit-3 pass over `log`, over a Job that carries
+/// THIS Job's line token.
+async fn fx34_refused(log: String) -> (Value, Vec<SeenBody>) {
+    fx34_refused_for(log, Some(&fx34_token())).await
+}
+
+/// [`fx34_refused`] with the Job's token as a parameter.
+async fn fx34_refused_for(log: String, token: Option<&LineToken>) -> (Value, Vec<SeenBody>) {
+    let (outcome, seen) =
+        fx34_pass_over(&frozen_backup(), fx34_routes_for(3, 200, log, token)).await;
+    let outcome = outcome.expect("an exit 3 never fails the pass");
+    assert_eq!(outcome.exit_code, Some(3));
+    let mut statuses = patched_statuses(&seen);
+    assert_eq!(
+        statuses.len(),
+        1,
+        "one status write: a refusal has no evidence"
+    );
+    (statuses.remove(0), seen)
+}
+
+fn fx34_message(status: &Value) -> &str {
+    status["conditions"][0]["message"]
+        .as_str()
+        .expect("the terminal condition has a message")
+}
+
+fn fx34_log_reads(seen: &[SeenBody]) -> Vec<&SeenBody> {
+    seen.iter()
+        .filter(|r| r.method == "GET" && path(&r.uri).ends_with("/log"))
+        .collect()
+}
+
+/// **The row.** The CONTROL first: a runner that prints no detail line gives
+/// the message a refused `Backup` always had. With the line, the message gains
+/// the runner's reason code and sentence and nothing else in the status moves.
+#[tokio::test]
+async fn a_refused_backup_says_why_in_its_terminal_condition() {
+    let old_log = log_body(&format!(
+        "guard: plan refused by the admission guard: {FX34_SENTENCE}\n\
+         refusal-reason=GuardRefused\n"
+    ));
+    let (old, _) = fx34_refused(old_log.clone()).await;
+    assert_eq!(fx34_message(&old), FX34_OLD_MESSAGE);
+    assert_eq!(old["progress"]["message"], FX34_OLD_MESSAGE);
+    assert_eq!(old["exitReason"], "GuardRefused");
+
+    let detail = refusal_detail_line(RefusingRun::Backup, Some(&fx34_token()), FX34_SENTENCE);
+    let new_log = old_log.replace(
+        "refusal-reason=GuardRefused\n",
+        &format!("{detail}\nrefusal-reason=GuardRefused\n"),
+    );
+    let (status, seen) = fx34_refused(new_log).await;
+    let expected = format!("{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: {FX34_SENTENCE}");
+    assert_eq!(fx34_message(&status), expected);
+    assert_eq!(status["progress"]["message"], expected);
+    assert_eq!(
+        conditions_of(&status),
+        vec![(
+            "Failed".to_string(),
+            "True".to_string(),
+            "GuardRefused".to_string()
+        )]
+    );
+    let mut same = status.clone();
+    same["conditions"][0]["message"] = old["conditions"][0]["message"].clone();
+    same["progress"]["message"] = old["progress"]["message"].clone();
+    assert_eq!(same, old, "nothing but the two messages moved");
+
+    // A NAMED reason: the code is the name, and `exitReason` is the closed
+    // state it always was.
+    let named = "CredentialNotRenderable: LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID is unset or empty";
+    let (status, _) = fx34_refused(log_body(&fx34_runner_pair(named))).await;
+    assert_eq!(
+        fx34_message(&status),
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}{named}")
+    );
+    assert_eq!(status["exitReason"], "CredentialNotRenderable");
+    // And every member of a backup's closed set arrives as the code.
+    for code in BACKUP_REASON_CODES {
+        let message = format!("{code}: a sentence that says what to change");
+        let (status, _) = fx34_refused(log_body(&fx34_runner_pair(&message))).await;
+        assert_eq!(
+            fx34_message(&status),
+            format!("{FX34_OLD_MESSAGE}{FX34_STATED}{message}"),
+            "{code}"
+        );
+    }
+
+    // ONE READ, BOUNDED IN LINES AND IN BYTES, OF THE `runner` CONTAINER.
+    let reads = fx34_log_reads(&seen);
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
+    for want in [
+        "container=runner".to_string(),
+        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+    ] {
+        assert!(
+            query.split('&').any(|p| p == want),
+            "the exit-3 read carries `{want}`: {query}"
+        );
+    }
+}
+
+/// The log tails of the passes FX-34 must not change, each carrying a VALID
+/// detail line: only an exit 3 may lift one.
+///
+/// An exit 0 whose runner printed the two keys and no `receipt-sha256=` is
+/// not a case: the reconciler itself answers that one `NotAttempted` with a
+/// clock read for `verifiedAt`, which a golden cannot hold.
+fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
+    // A line with THIS Job's token: at exit 3 it would be shown.
+    let detail = refusal_detail_line(
+        RefusingRun::Backup,
+        Some(&fx34_token()),
+        "StorageRegionInvalid: a sentence only an exit 3 may carry",
+    );
+    vec![
+        (
+            "exit-0-with-keys",
+            0,
+            format!("{detail}\n{}", i7_tail_with_digest()),
+        ),
+        ("exit-0-without-keys", 0, format!("{detail}\n")),
+        (
+            "exit-1",
+            1,
+            format!("operational: boom\n{detail}\nrefusal-reason=GuardRefused\n"),
+        ),
+        (
+            "exit-1-claimed",
+            1,
+            format!("{detail}\nfailure-reason=ExecutionAlreadyClaimed\n"),
+        ),
+        ("exit-2", 2, format!("{detail}\n")),
+        ("exit-4", 4, format!("signing: x\n{detail}\n")),
+        (
+            "exit-4-unproven",
+            4,
+            format!("{detail}\nfailure-reason=ExecutionClaimUnproven\n"),
+        ),
+        ("exit-137", 137, format!("{detail}\n")),
+        // Exit 3 from a runner that prints NO detail line: the status is the
+        // one it always was. Only the log request's query differs.
+        (
+            "exit-3-old-runner-named-state",
+            3,
+            "refusal-reason=CredentialNotRenderable\n".to_string(),
+        ),
+        (
+            "exit-3-old-runner-no-line",
+            3,
+            "{\"level\":\"ERROR\",\"message\":\"refused\"}\n".to_string(),
+        ),
+        ("exit-3-old-runner-k3", 3, fx34_fixture("k3-runner.log")),
+    ]
+}
+
+/// What one pass did, as the golden stores it.
+async fn fx34_observe(exit_code: i32, tail: &str) -> Value {
+    let (outcome, seen) = fx34_pass(&frozen_backup(), exit_code, 200, log_body(tail)).await;
+    let outcome = outcome.expect("the pass completes");
+    serde_json::json!({
+        "exitCode": outcome.exit_code,
+        "terminalState": outcome.terminal_state,
+        "requests": seen
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.uri))
+            .collect::<Vec<_>>(),
+        "writes": seen
+            .iter()
+            .filter(|r| r.method != "GET")
+            .map(|r| serde_json::json!({
+                "method": r.method,
+                "uri": r.uri,
+                "body": serde_json::from_str::<Value>(&r.body).expect("a write carries JSON"),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Where the goldens were captured. A golden regenerated from the build it is
+/// supposed to constrain proves nothing, so the provenance is asserted.
+const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
+
+/// **A successful run, an exit 1, an exit 2, an exit 4 (and 137) are
+/// unchanged, byte for byte**, and so is an exit 3 from a runner that prints
+/// no detail line — the `Restore` twin carries the reasoning.
+///
+/// KILLS: the gate widened to exit 1 (`exit-1` and `exit-1-claimed` gain a
+/// suffix); the bounded read used for every exit code; a suffix for
+/// `NotStated`.
+#[tokio::test]
+async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
+    let golden: Value =
+        serde_json::from_str(&fx34_fixture("unchanged-backup.json")).expect("the golden is JSON");
+    assert_eq!(golden["capturedFrom"], FX34_CAPTURED_FROM);
+    let cases = fx34_unchanged_cases();
+    assert_eq!(
+        golden["cases"].as_object().map(serde_json::Map::len),
+        Some(cases.len()),
+        "every case has a golden and every golden a case"
+    );
+    for (name, exit_code, tail) in cases {
+        let got = fx34_observe(exit_code, &tail).await;
+        let want = &golden["cases"][name];
+        assert!(want.is_object(), "[{name}] no golden");
+        assert_eq!(got["writes"], want["writes"], "[{name}] the writes");
+        assert_eq!(got["exitCode"], want["exitCode"], "[{name}]");
+        assert_eq!(got["terminalState"], want["terminalState"], "[{name}]");
+        if exit_code == 3 {
+            let without_log_query = |v: &Value| -> Vec<String> {
+                v["requests"]
+                    .as_array()
+                    .expect("requests")
+                    .iter()
+                    .map(|r| r.as_str().expect("a request line").to_string())
+                    .map(|r| match r.split_once("/log?") {
+                        Some((head, _)) => format!("{head}/log?"),
+                        None => r,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                without_log_query(&got),
+                without_log_query(want),
+                "[{name}] the same requests, the log read's query aside"
+            );
+        } else {
+            assert_eq!(got["requests"], want["requests"], "[{name}] the requests");
+        }
+    }
+}
+
+/// Hostile and forged lines on the `Backup` path. The full table of what a
+/// line may HOLD is the `Restore` twin's; this one holds the arms the kind
+/// decides (a `Backup` has its own closed set of codes) and the second
+/// review's two logs, through `reconcile_backup`.
+///
+/// KILLS: one closed set for both kinds (the restore-only codes); the token
+/// comparison removed; "the pair that ends the log is the runner's".
+#[tokio::test]
+async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
+    let unreadable = format!(
+        "{FX34_OLD_MESSAGE}; the runner gave no readable reason: its `refusal-detail=` line did \
+         not validate, so nothing from it is shown"
+    );
+    let stated = |text: &str| format!("{FX34_OLD_MESSAGE}{FX34_STATED}{text}");
+    let r = REPLACEMENT;
+    let here = fx34_with_state;
+    const FORGED: &str = "Contact the address in this message to release your data";
+    let forged_message = format!("CredentialNotRenderable: {FORGED}");
+    let genuine = fx34_runner_pair(FX34_SENTENCE);
+    let genuine_shown = stated(&format!("GuardRefused: {FX34_SENTENCE}"));
+    let human = format!("guard: plan refused by the admission guard: {FX34_SENTENCE}\n");
+
+    // NEGATIVE CONTROL: the forged pair IS what a Job shows when the pair
+    // carries that Job's token, so below it is the token that keeps it out.
+    let (control, _) = fx34_refused(log_body(&fx34_runner_pair(&forged_message))).await;
+    assert_eq!(fx34_message(&control), stated(&forged_message));
+
+    let mut arms: Vec<(String, String, String)> = vec![
+        (
+            "a reason code that is not a code".to_string(),
+            here(&fx34_detail("Bad Code", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a well-formed word that is in no closed set".to_string(),
+            here(&fx34_detail("Succeeded", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "PER KIND: a restore-only code in a backup's log".to_string(),
+            here(&fx34_detail("TargetTopicConfigRefused", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "PER KIND: another".to_string(),
+            here(&fx34_detail("PointUntrusted", "a sentence")),
+            unreadable.clone(),
+        ),
+        (
+            "a detail whose state line names a state it was not printed with".to_string(),
+            format!(
+                "{}\nrefusal-reason=PlainWithoutTls\n",
+                fx34_detail("CredentialNotRenderable", "a sentence")
+            ),
+            unreadable.clone(),
+        ),
+        (
+            "control characters, an ANSI escape, a line break and a bidi override".to_string(),
+            here(&fx34_detail(
+                "GuardRefused",
+                "a\u{001B}[2Jb\nc \u{202E}d<script>",
+            )),
+            stated(&format!("GuardRefused: a [2Jb c {r}d<script>")),
+        ),
+        (
+            "a detail line of 100 KiB: over the line bound, so not read at all".to_string(),
+            here(&fx34_detail("GuardRefused", &"lorem ".repeat(17_000))),
+            FX34_OLD_MESSAGE.to_string(),
+        ),
+        (
+            "the runner's line with the human line copied after it".to_string(),
+            format!("{genuine}{human}"),
+            genuine_shown.clone(),
+        ),
+    ];
+    for (whose, forged_token) in [
+        ("no token", None),
+        ("another Job's token", Some(fx34_another_jobs_token())),
+    ] {
+        let forged_pair = fx34_runner_pair_with(forged_token.as_ref(), &forged_message);
+        let forged_detail = forged_pair
+            .lines()
+            .next()
+            .expect("the detail line")
+            .to_string();
+        arms.extend([
+            (
+                format!("{whose}: LOG 1, the runner's pair, then a forged pair that ENDS THE LOG"),
+                format!("{genuine}guard: … backup id `x\n{forged_pair}"),
+                genuine_shown.clone(),
+            ),
+            (
+                format!(
+                    "{whose}: LOG 2, an older runner, a forged detail line directly before its \
+                     state line, ending the log"
+                ),
+                format!("guard: … backup id `x\n{forged_detail}\nrefusal-reason=GuardRefused\n"),
+                FX34_OLD_MESSAGE.to_string(),
+            ),
+            (
+                format!("{whose}: forged lines around the runner's pair"),
+                format!("{forged_pair}{genuine}{human}{forged_pair}"),
+                genuine_shown.clone(),
+            ),
+            (
+                format!("{whose}: the forged pair alone"),
+                forged_pair.clone(),
+                FX34_OLD_MESSAGE.to_string(),
+            ),
+        ]);
+    }
+    for (label, tail, expected) in arms {
+        let (status, seen) = fx34_refused(log_body(&tail)).await;
+        assert_eq!(fx34_message(&status), expected, "[{label}]");
+        assert_eq!(status["progress"]["message"], expected, "[{label}]");
+        assert!(
+            !status.to_string().contains(FORGED),
+            "[{label}] the forged sentence is nowhere in the status"
+        );
+        assert_eq!(fx34_log_reads(&seen).len(), 1, "[{label}]");
+        for write in seen.iter().filter(|w| w.method != "GET") {
+            assert!(
+                !write.body.contains("\\u001b") && !write.body.contains('\u{202E}'),
+                "[{label}] nothing raw is written: {}",
+                write.body
+            );
+            assert!(
+                !write.body.contains(fx34_token().expose_token()),
+                "[{label}] the token is in no write: {} {}",
+                write.method,
+                write.uri
+            );
+        }
+    }
+
+    // A JOB WITH NO TOKEN, OR A LINE WITH NONE: the old status, byte for byte.
+    let plain = "guard: plan refused by the admission guard: x\nrefusal-reason=GuardRefused\n";
+    let own = fx34_token();
+    for (label, job_token, line_token) in [
+        ("no token on the Job, none on the line", None, None),
+        ("no token on the Job, one on the line", None, Some(&own)),
+        ("a token on the Job, none on the line", Some(&own), None),
+    ] {
+        let with_line = format!(
+            "guard: plan refused by the admission guard: x\n{}\nrefusal-reason=GuardRefused\n",
+            refusal_detail_line(RefusingRun::Backup, line_token, FX34_SENTENCE)
+        );
+        let (old, _) = fx34_refused_for(log_body(plain), job_token).await;
+        let (got, _) = fx34_refused_for(log_body(&with_line), job_token).await;
+        assert_eq!(got, old, "[{label}] the whole status, byte for byte");
+        assert_eq!(fx34_message(&got), FX34_OLD_MESSAGE, "[{label}]");
+    }
+    // A state that is not a state name never reaches `exitReason`.
+    let (status, _) = fx34_refused(log_body("refusal-reason=<script>alert(1)</script>\n")).await;
+    assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
+    // One mebibyte: the read stops at its own cap and takes nothing.
+    let (status, seen) = fx34_refused(log_body(&format!(
+        "{}\n{}\nrefusal-reason=CredentialNotRenderable\n",
+        "lorem ".repeat(175_000),
+        fx34_detail("GuardRefused", "a sentence")
+    )))
+    .await;
+    assert_eq!(
+        fx34_message(&status),
+        format!(
+            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of the \
+             pod log are over the 512 KiB this controller reads"
+        )
+    );
+    assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
+    assert_eq!(fx34_log_reads(&seen).len(), 1);
+}
+
+/// **A created Job carries a fresh line token as the runner's last two
+/// arguments, and nothing else of the pass holds it.** Two create passes of
+/// the same `Backup` give two tokens. The token is an ARGUMENT: it is not in
+/// the container's environment, not in the Job's metadata, not in the plan
+/// ConfigMap that freezes the argv, and not in any status write.
+///
+/// That the Job is otherwise what the builder renders is held by every row
+/// that compares [`posted_job`] with `runner_job(…)`: that helper takes the
+/// token off and asserts it was the last two arguments.
+///
+/// KILLS: a constant token; a token derived from the run's identity; the
+/// token frozen with the argv, or copied to an annotation or a status.
+#[tokio::test]
+async fn a_created_job_carries_a_fresh_line_token_and_nothing_else_does() {
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let (_, bodies) = create_pass(create_routes(201, existing_plan_config_map(UID))).await;
+        let (job, token) = posted_job_and_line_token(&bodies).expect("the create pass POSTs a Job");
+        // The controller reads back exactly what it wrote, off the Job.
+        let posted: k8s_openapi::api::batch::v1::Job = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+                .expect("the POST")
+                .body,
+        )
+        .expect("a Job");
+        assert_eq!(
+            weirkeeper::job::line_token(&posted).map(|t| t.expose_token().to_string()),
+            Some(token.clone())
+        );
+        // With the two arguments off, the Job holds it nowhere: not the
+        // environment, not an annotation, not a label.
+        assert!(!job.to_string().contains(&token), "{job}");
+        // And no other request of the pass holds it.
+        for request in bodies
+            .iter()
+            .filter(|b| !(b.method == "POST" && path(&b.uri).ends_with("/jobs")))
+        {
+            assert!(
+                !request.body.contains(&token),
+                "the token reached {} {}",
+                request.method,
+                request.uri
+            );
+        }
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status")),
+            "the control: the pass did write a status"
+        );
+        tokens.push(token);
+    }
+    assert_ne!(tokens[0], tokens[1], "two Jobs, two tokens");
+    // Not derived from anything the run is named by.
+    for token in &tokens {
+        for known in [UID, NAME, NS] {
+            assert!(!token.contains(&known.replace('-', "")) && !known.contains(token.as_str()));
+        }
+    }
+}
+
+/// **(b) A forged refusal pair as the last lines of a log whose exit code is
+/// not 3 is ignored**: the pass writes byte for byte what it writes without
+/// it. The CONTROL is the same pair at the end of an exit-3 log, where it is
+/// shown.
+///
+/// KILLS: the gate widened to any other exit code.
+#[tokio::test]
+async fn a_forged_refusal_pair_at_the_end_of_another_exit_codes_log_is_ignored() {
+    const FORGED: &str = "CredentialNotRenderable: forged, and well-formed";
+    let forged = fx34_runner_pair(FORGED);
+    for (label, exit_code, tail) in [
+        ("exit 1", 1, "operational: boom\n".to_string()),
+        ("exit 2", 2, "a result that is not a pass\n".to_string()),
+        ("exit 0 with its keys", 0, i7_tail_with_digest()),
+        ("exit 4", 4, "signing: x\n".to_string()),
+        ("exit 137", 137, "killed\n".to_string()),
+    ] {
+        let plain = fx34_observe(exit_code, &tail).await;
+        for (place, log) in [
+            ("last", format!("{tail}{forged}")),
+            ("first", format!("{forged}{tail}")),
+        ] {
+            let got = fx34_observe(exit_code, &log).await;
+            assert_eq!(got, plain, "[{label}, the pair {place}]");
+            assert!(
+                !got.to_string().contains("forged, and well-formed"),
+                "[{label}, the pair {place}]"
+            );
+        }
+    }
+    let (shown, _) = fx34_refused(log_body(&format!("operational: boom\n{forged}"))).await;
+    assert_eq!(
+        fx34_message(&shown),
+        format!("{FX34_OLD_MESSAGE}{FX34_STATED}{FORGED}"),
+        "the control: at exit 3 the same lines are the runner's"
+    );
+    assert_eq!(shown["exitReason"], "CredentialNotRenderable");
+}
+
+/// **The pod gone; the log unreadable.** An honest message, the exit code
+/// recorded, the TTL armed, and the pass does not fail. The CONTROL is exit 0
+/// over the same 404, which still fails the pass as it always did.
+#[tokio::test]
+async fn a_refusal_whose_pod_or_log_is_gone_is_recorded_once_and_says_so() {
+    for (label, code, reason, suffix) in [
+        (
+            "the pod is gone",
+            404,
+            "NotFound",
+            "; the runner's reason could not be read because the pod is gone",
+        ),
+        (
+            "the read is forbidden",
+            403,
+            "Forbidden",
+            "; the runner's reason could not be read: the pod log read answered HTTP 403",
+        ),
+        (
+            "the API server failed",
+            500,
+            "InternalError",
+            "; the runner's reason could not be read: the pod log read answered HTTP 500",
+        ),
+    ] {
+        let (outcome, seen) =
+            fx34_pass(&frozen_backup(), 3, code, fx34_log_failure(code, reason)).await;
+        let outcome = outcome.unwrap_or_else(|e| panic!("[{label}] the pass must not fail: {e}"));
+        assert_eq!(outcome.exit_code, Some(3), "[{label}]");
+        assert!(outcome.ttl_patched, "[{label}] the Job is still collected");
+        let status = patched_statuses(&seen).remove(0);
+        assert_eq!(
+            fx34_message(&status),
+            format!("{FX34_OLD_MESSAGE}{suffix}"),
+            "[{label}]"
+        );
+        assert_eq!(status["phase"], "Failed", "[{label}]");
+        assert_eq!(status["exitCode"], 3, "[{label}]");
+        assert_eq!(
+            status["exitReason"], "GuardRefusedUnknownReason",
+            "[{label}]"
+        );
+        assert_eq!(
+            fx34_log_reads(&seen).len(),
+            1,
+            "[{label}] one read, not a retry loop"
+        );
+        assert!(
+            !fx34_message(&status).contains(reason),
+            "[{label}] the API server's own text is not copied"
+        );
+    }
+
+    let (outcome, seen) =
+        fx34_pass(&frozen_backup(), 0, 404, fx34_log_failure(404, "NotFound")).await;
+    assert!(
+        outcome.is_err(),
+        "exit 0 is unchanged: its log read failing still fails the pass"
+    );
+    assert!(patched_statuses(&seen).is_empty());
+}
+
+/// **A second reconcile of the same finished Job: no log read, no status
+/// write.** Every route is present, so both are assertions over the request
+/// log.
+///
+/// The one write a later pass may make is the Job's own TTL repair (D3 §2.7):
+/// this fixture's Job carries no `ttlSecondsAfterFinished`, and the
+/// already-terminal branch repairs that from the Job's spec alone, reading no
+/// pod and writing no status.
+///
+/// KILLS: reading the log before the already-terminal guard, or removing it.
+#[tokio::test]
+async fn a_second_pass_over_a_refused_backup_reads_and_writes_nothing() {
+    let log = log_body(&fx34_runner_pair(FX34_SENTENCE));
+    let (status, _) = fx34_refused(log.clone()).await;
+    let mut settled: Value = serde_json::to_value(frozen_backup()).expect("serialises");
+    let mut stored = settled["status"].clone();
+    apply_merge_patch(&mut stored, &status);
+    settled["status"] = stored;
+    let settled: Backup = serde_json::from_value(settled).expect("the settled object is a Backup");
+    assert!(settled
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|c| c[0].message.as_deref())
+        .is_some_and(|m| m.ends_with(FX34_SENTENCE)));
+
+    for pass in 2..=4 {
+        let (outcome, seen) = fx34_pass(&settled, 3, 200, log.clone()).await;
+        let outcome = outcome.expect("the pass completes");
+        assert_eq!(
+            outcome.exit_code,
+            Some(3),
+            "pass {pass}: the code on the object"
+        );
+        let requests: Vec<(String, String)> = seen
+            .iter()
+            .map(|r| (r.method.clone(), path(&r.uri).to_string()))
+            .collect();
+        assert!(
+            fx34_log_reads(&seen).is_empty() && !requests.iter().any(|(_, p)| p.ends_with("/pods")),
+            "pass {pass}: the pod and its log are not read again: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|(m, p)| m != "GET" && p.ends_with("/status")),
+            "pass {pass}: no status write: {requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, p)| p.ends_with(&format!("/jobs/{NAME}"))),
+            "pass {pass}: the Job is the only object touched: {requests:?}"
         );
     }
 }

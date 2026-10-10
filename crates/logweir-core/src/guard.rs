@@ -437,7 +437,7 @@ pub fn terminal_state(message: &str) -> &'static str {
 ///
 /// Pure, and here rather than in the binary, because `logweir-core` does no
 /// I/O (`crate` doc, `lib.rs:1`): this crate produces the LINE and
-/// `crates/logweir/src/exit.rs::print_refusal_reason` prints it. Splitting it
+/// `crates/logweir/src/exit.rs::print_refusal` prints it. Splitting it
 /// that way is what lets the line's format be unit-tested without a process,
 /// and what stops a `println!` appearing in the pure layer.
 pub fn refusal_reason_line(message: &str) -> String {

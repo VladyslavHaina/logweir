@@ -5041,7 +5041,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
 | **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line, or `TargetTopicAppeared` / `CreatedTopicsLeft` off a restore runner's (a stopped creation step: §12, "Restoring under the original topic names") | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
-| **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
+| **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. The condition's message ends with the runner's own reason: see "What a refused run says about why" below. |
 | **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create, or (FX-7) the archive could not be read to prove the backup set is new for a reason no retry changes (a 401/403, a wrong bucket, region or CA); the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
@@ -5527,7 +5527,7 @@ receipt's size depends on the number of groups, never on partitions**, so the
 catalog reads a point that selects 100 groups over many partitions as
 `Available`. A partition with no committed offset is counted, **never offset
 0**, and nothing is ever dropped
-([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150)).
+([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170)).
 
 - **What it costs the source.** Read-only: the group listings, one
   DescribeConsumerGroups, one RequireStable OffsetFetch per captured group (each
@@ -6146,7 +6146,10 @@ rather than `NoExitCode`: on a `Backup` and a `Restore` through the
 diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 `KafkaCluster` probe as `Reachable=Unknown` / `PodCreationForbidden` with
 `reachable` cleared, `observedAt` left alone and the usual TTL, so the next
-probe runs. With no such
+probe runs. So a probe pod the cluster refuses — under a pod quota, for
+example — clears `status.reachable` on that connection until a probe runs
+again, even where the connection answered minutes before, and a `Restore` that
+names it as its target is refused `ClusterNotReachable` meanwhile. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
 
@@ -6240,6 +6243,192 @@ and takes the **last** occurrence of each prefix, a wider window can only find
 a key it would otherwise have missed — never a different one. Two tests keep
 the two halves honest: `progress_channel.rs` measures what the runner actually
 prints, and `backup_controller.rs` checks the window still fits.
+
+### What a refused run says about why (FX-34)
+
+A guard refusal used to leave one sentence on the object: "the runner exited 3
+(guard-refused); the code was read from …". Which guard, and what to change,
+was only in the pod log, and the pod goes with its Job. The terminal
+condition's message now ends with the runner's own reason code and sentence.
+Take a restore whose plan names a plain `http://` archive endpoint without
+`allow_http: true`:
+
+```
+kubectl -n team-a get restore r1 -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode; the runner's own reason, cleaned and bounded: GuardRefused: source.storage.endpoint is a plain http:// endpoint but source.storage.allow_http is false. The pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so it would dial the archive in the clear although the spec asked for no plaintext. Set allow_http: true to state plaintext explicitly, or use an https:// endpoint.
+```
+
+`status.progress.message` carries the same text, and the console's operation
+page shows both. `status.exitReason` is unchanged: it stays the terminal state
+off `refusal-reason=`. Both a `Restore` (a rehearsal's included) and a `Backup`
+(a scheduled one included) do this.
+
+**It is the runner's own words, and a pod log is untrusted text.** The runner
+pod runs in the tenant's namespace, and its sentence repeats what the plan, the
+broker and the archive said. So the controller takes one line, validates it,
+and cleans it before it is stored:
+
+- **One line, and only when it carries this Job's line token.** At every exit
+  3 the runner's last two lines are
+  `refusal-detail={"token":"…","code":"…","message":"…"}` and then
+  `refusal-reason=`
+  ([the line's contract](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
+  The reason is shown only when that line carries the Job's own token. This
+  is not caution for its own sake: whoever writes a plan can start a line in
+  the runner pod's log. The runner escapes every line break in the error text
+  it prints itself (PROD-15.1), but the Kafka client inside it writes its own
+  lines to the same stderr, unescaped, and those can repeat a plan value that
+  holds a line break (a bootstrap address, for one). A pod log is stdout and
+  stderr merged into one stream, so nothing about where a line stands, or how
+  well-formed it is, tells the runner's line from one the plan's author got
+  into the log.
+- **What the token is.** Each time the controller builds a `Restore`'s or a
+  `Backup`'s Job it makes a fresh random value (160 bits from the operating
+  system, written as 40 hex digits) and gives it to the runner as the last
+  two arguments of the `runner` container, `--line-token <hex>`. It is made
+  when the Job is built, from nothing the plan could know, and a plan is older
+  than its Job, so text the plan chose cannot contain it. The controller reads
+  it back off the Job's own pod template and compares it with the line's in
+  constant time. A `refusal-detail=` line with no token, or with another
+  one, is not read at all, wherever it stands; the last line that carries the
+  Job's token is the runner's. It is an argument and not an environment
+  variable because the engine the runner starts inherits the runner's
+  environment and expands `${NAME}` in its configuration, and neither reaches
+  an argument.
+- **The token is not a credential, and it is still never shown.** Anyone who
+  can read the Job can read it (`kubectl get job -o yaml`). It is in that
+  pod template and in the runner's own log line and nowhere else: not in a
+  status, a condition, an event, an annotation, the product API, the console,
+  or a line the controller logs.
+- **The code is one of a closed list, per kind.** It must be a code that kind
+  of run can print; any other word is not shown, however code-shaped. For a
+  `Restore`: `GuardRefused`, `CredentialNotRenderable`,
+  `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`,
+  `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`,
+  `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`,
+  `PointUntrusted`, `RehearsalScopeViolation`. For a `Backup`: `GuardRefused`,
+  `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`,
+  `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`,
+  `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
+  `WorkloadIdentityNotInjected`. A refusal with no name of its own carries
+  `GuardRefused`, and so does one whose sentence opens with a word that is
+  not on its kind's list: the word stays in the sentence.
+- **The two lines agree.** The state on the `refusal-reason=` line the runner
+  wrote with the detail (the next one after it) is the detail's code or
+  `GuardRefused`; a detail line whose state line says anything else is not
+  shown.
+- **The sentence** keeps printable ASCII and `§ – — … →`. A run of whitespace
+  or control characters (a line break, a tab, an ANSI escape's `ESC`) becomes
+  one space, and a run of anything else (a bidi override, a zero-width
+  character, a letter of another script) becomes one `U+FFFD`. A URL loses its
+  query string and its userinfo, and the credential shapes every relayed
+  message is checked for are replaced by `[redacted]`. That check errs towards
+  removing: a long unbroken name or path in the sentence can read `[redacted]`
+  too. The sentence is then cut to 760 bytes, on a character boundary, and a
+  cut sentence ends with `…`. That is the most that keeps the whole message
+  inside the 1024 bytes `status.progress.message` and the product API allow
+  it.
+- **The read is bounded and made once.** For exit 3 the controller asks for
+  the `runner` container's last 32 lines and at most 512 KiB, and stops reading
+  at that many bytes whatever arrives. It reads on the pass that writes the
+  terminal status; a terminal object's pod is never read again. No permission
+  was added: it is the `pods/log` `get` the controller already holds.
+
+**What you see when there is no reason to show:**
+
+| The message ends with | It means |
+|---|---|
+| *(nothing after `…exitCode`)* | No line in the log carries this Job's line token. The Job has none (a controller from before this change built it, or the operating system gave the controller no random bytes when it built the Job, which the controller logs as one warning), or the runner printed its line without one, or printed none. Any `refusal-detail=` line that IS in the log was not written by this Job's runner with its token, and is not shown. The pod log, while it exists, has the sentence. |
+| ``; the runner gave no readable reason: its `refusal-detail=` line did not validate, so nothing from it is shown`` | A line carried the Job's token, so the runner wrote it, and it was not something this controller can show: a code that is not on that kind's list (a runner newer than the controller), nothing printable in its sentence, or a `refusal-reason=` line after it naming a state it could not have been printed with. |
+| `; the runner's reason could not be read because the pod is gone` | The pod was already collected when the controller read its log (a `404`). The exit code was read before that and is recorded. |
+| `; the runner's reason could not be read: the pod log read answered HTTP 403` (or `500`, …) | The read was refused or failed. The controller logs one warning naming the pod and the status, and does not read again. |
+| `; the runner's reason could not be read: the last 32 lines of the pod log are over the 512 KiB this controller reads` | Possible only on a runtime that stores log lines longer than CRI's default 16 KiB. Nothing is taken from a log that was cut, the terminal state included (`exitReason: GuardRefusedUnknownReason`). |
+
+In the last three cases the object is still terminal with `exitCode: 3`: a log
+that cannot be read no longer leaves a refused run in `Running` with the
+reconcile failing, which is what a `403` on `pods/log` used to do. Only exit 3
+changed. Every other exit code reads the log as it always did, and a failure
+of that read is still a reconcile error.
+
+`refusal-reason=`'s own value reaches `status.exitReason` only when it is
+shaped like a state name (ASCII letters and digits, 64 bytes); anything else is
+`GuardRefusedUnknownReason`. It is still read the way it always was, as the
+last such line in the final sixteen non-empty lines, and its list of states is
+not closed, so a newer runner's state arrives.
+
+**What the sentence can still hold.** It is the runner's sentence, and a
+refusal names what it refused: a topic, a field, a cluster id. Those are words
+the plan's author chose, and they are in the message, cleaned and inside the
+760 bytes. Treat the text after "the runner's own reason" as a description of
+that one object written partly by whoever wrote its plan, not as a statement
+by the platform.
+
+**What the token does not cover.** It separates the runner's line from text
+written before the Job existed, which is every plan. Anyone who can read the
+Job can read its token, so text that is produced after the Job is built, and
+that reaches the pod log with a line break intact, could in principle carry
+it. The runner escapes line breaks in every error text it prints itself
+(PROD-15.1), which leaves what it does not print: the Kafka client's own
+lines on stderr, which can repeat what a broker sends. No plan can.
+
+#### The runner image must be at least as new as the controller
+
+This controller passes `--line-token` to every `Restore` and `Backup` Job it
+creates, and a runner that does not know the flag stops while it parses its
+arguments, before any work. That is **every runner image published before
+this change**, the images published from `main` since `v0.2.0-rc.1` included:
+not only an older release. (No tagged release's runner loses a working run to
+this. Since release-notes item 35, a runner image published before PROD-00.2
+declares no engine, the controller gives it none, and its runs already stop
+at exit 1 before the engine starts.)
+
+**One `helm upgrade` of the packaged chart cannot produce that pair.** The
+chart renders both images into ONE Deployment: `controllerImage` is the
+controller container's image, and `runnerImage` is the `LOGWEIR_RUNNER_IMAGE`
+that controller gives every Job. The packaged chart pins both to one
+publication, so one upgrade moves both in one rollout. A controller with this
+change over a runner without it can still occur in three ways:
+
+- **Two pinned tags, one moved.** `controllerImage` and `runnerImage` are
+  each set to a tag (the `sha-<commit>` tags CI publishes, for example), and
+  an upgrade moves the first and leaves the second.
+- **The source chart's floating defaults.** `charts/logweir/values.yaml`
+  names `…/weirkeeper:latest` and `…/logweir:latest`. They are two tags, moved
+  one after the other and pulled at different moments: the controller's when
+  its pod starts, the runner's when each Job's pod starts, from whatever
+  registry or mirror that node pulls from and under `runnerImagePullPolicy`.
+  CI moves the runner's tag before the controller's, so a direct pull under
+  the default `Always` gets a runner at least as new. A mirror that copies
+  the controller first, or a node that holds an older `logweir:latest` under
+  `IfNotPresent`, gets the mixed pair.
+- **`runnerImage` pinned apart from the controller:** a mirror, an air-gapped
+  registry, a pin left from an earlier incident.
+
+**What it looks like.** Every `Restore` and `Backup` the controller starts
+ends `Failed`, with `exitCode: 1`, `exitReason: operational` and the message
+every failed run carries ("the runner exited 1 (operational); the code was
+read from …"). Nothing on the object names the cause, and a broker outage
+writes the same status. The runner pod's log names it for as long as the pod
+exists. Its first line is
+
+```
+error: unexpected argument '--line-token' found
+```
+
+and the command's usage line follows. A `BackupSchedule` with a retry policy
+retries the slot, because exit 1 is retryable, and each attempt fails the same
+way. Nothing ran, nothing was signed and nothing was written.
+
+**What to do.** Set `runnerImage` to the image published from the same build
+as `controllerImage`, in one `helm upgrade`. The next Job starts. The
+controller does not look for that log line and has no state that names a
+mixed pair.
+
+**Rolling back: both together, or the controller first.** An older controller
+passes no token and ignores the new line, so it runs over this runner as it
+always did; a newer runner given no token prints its line without one. The
+runner image first is the mixed pair above. A Job created before an upgrade
+has no token and runs as it did.
 
 ### What a run says about itself while it is running — `status.progress`
 
@@ -7246,7 +7435,9 @@ point's own set ([the plan field](formats/drill-spec.md#sourcepoint-execution-co
 — are exit 3 too, but they are not terminal states: the line reads
 `refusal-reason=GuardRefused`, so the `Restore` records `exitReason:
 GuardRefused`, and the name is the first token of the refusal message in the
-pod log.
+pod log. Since FX-34 that name and its sentence are also the end of the
+`Failed` condition's message (§10, "What a refused run says about why"), so
+they outlive the pod.
 **Read §10's note on `refusal-reason=` before writing any reader of it**
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod
@@ -9121,7 +9312,12 @@ without `tls: true` is refused — never dialled — with the named reason
 Job exists, by every runner entry point (`refusal-reason=PlainWithoutTls`,
 exit 3) before any client exists, and by both clients' builders as a backstop.
 Confluent Cloud API keys and Azure Event Hubs connection strings
-(`username: $ConnectionString`) use this mode.
+(`username: $ConnectionString`) are presented in this mode. **Neither provider
+has been run against**: both are `untested` in
+[the compatibility contract](support-matrix.md#managed-kafka-providers), and
+whether either serves the request versions the engine sends is not known. A
+`Backup` `Preflight` answers that on first contact (§21.6c,
+`connection.engineProtocol`).
 
 **mTLS** presents the client certificate in the TLS handshake. Create the
 Secret with `kubectl create secret tls <name> --cert=client.pem --key=client.key`
@@ -9142,7 +9338,10 @@ record that name `scramSha256`, `plain` or `mtls` are format **1.4.0**, a
 scorecard **1.5.0**; every `plaintext`/`scramSha512` run writes exactly the
 document it always did ([stability.md](stability.md)).
 
-Example (SASL/PLAIN to Confluent Cloud, public CA):
+Example (SASL/PLAIN in the shape Confluent Cloud documents, public CA). It
+shows the mode, and it is not a tested row: no Confluent Cloud cluster has
+been dialled
+([the compatibility contract](support-matrix.md#managed-kafka-providers)).
 
 ```yaml
 apiVersion: logweir.dev/v1alpha1
@@ -9576,8 +9775,8 @@ exactly one block to it.
 
 | `operation` | Block | What it needs | What it runs |
 |---|---|---|---|
-| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
-| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows |
+| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue, and the three capability rows of the source (§21.6c) |
+| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows, and the target's capability row (§21.6c) |
 | `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles, and `destination.credentialBound` over every `SecretKeys` grant the destination declares (§20.10) |
 | `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
@@ -9685,7 +9884,7 @@ server refusal.
 | `Queued` | a concurrency ceiling is holding it back (`ConcurrencyLimited`) |
 | `Running` | the Job exists and has not finished |
 | `Completed` | **a result exists.** The verdict is `status.result.state` |
-| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`, `Stalled` |
+| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `CheckContractMismatch`, `DeadlineExceeded`, `Stalled`. Terminal for this object: it is not run again. Fix the cause and create a new `Preflight` |
 | `Cancelled` | `spec.cancelRequested` was set and the Job's deadline was collapsed |
 
 `status.result.state` is `ready`, `notReady` or `unknown`, aggregated exactly
@@ -10065,6 +10264,84 @@ schema ids in record headers, Apicurio's 8-byte ids and other registries'
 framing read `notDetected`
 ([the stated limits](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
+### 21.6c Capability rows: what the endpoint itself can do (PROD-01.2)
+
+The rows above ask what this **principal** may do. Four more ask what this
+**endpoint** can do. A Kafka-compatible endpoint is not always Apache Kafka,
+and a connection test passing says nothing about a restore
+([the compatibility contract](support-matrix.md#the-compatibility-contract)).
+
+| Row | Operation | Gating | `notReady` means | What to do |
+|---|---|---|---|---|
+| `connection.engineProtocol` | `Backup` | blocking | `EngineProtocolUnsupported`: the source does not serve a request version the engine sends to read from it. The message names each request and the range the endpoint serves. | Back up from an endpoint that serves them. Every supported Apache Kafka line does. |
+| `target.engineProtocol` | `Restore` | blocking | `EngineProtocolUnsupported`: the target does not serve a request version the engine sends to write to it. Redpanda v26.2.4 answers this way: the engine sends Produce v8 and it serves Produce v0–v7. | Restore the archive into a cluster that serves them. An endpoint that cannot be a target can still be a source. |
+| `connection.topicConfigsReadable` | `Backup` | advisory | `TopicConfigsNotReadable`: this principal may not read the configuration of the topics the detail names. The backup still runs. | Grant DescribeConfigs on the topic, or accept a point whose configuration is `captureDenied` and whose timestamp type is not recorded (§21.6b). |
+| `connection.groupTypes` | `Backup` | advisory | `GroupTypesNotListed`: the endpoint's group listing names no group type (it serves ListGroups below v5; Apache Kafka 3.7 and Redpanda v26.2.4 do). The backup of the topics is unaffected. | A backup that selects consumer groups records each as excluded (`GroupTypeNotCaptured`), never as captured. Back up from an endpoint that serves ListGroups v5, or select no group. |
+
+**The engine sends fixed versions and never negotiates**, so an endpoint that
+does not serve one closes the connection, and the run fails with only
+`kafka-backup backup exited 1` or `restore exited 1`. The two blocking rows
+say which request it would be, before the run. The SASL pair (SaslHandshake
+v1, SaslAuthenticate v2) is asked for only on a SASL connection.
+
+**Each row reads the endpoint's own answer**: the ApiVersions response on a
+real connection made with the operation's credential, and for the
+configuration row one DescribeConfigs per selected topic. When the answer
+could not be read the row is `unknown` (`ApiVersionsNotObserved`, or the
+read's own timeout code), never `ready`. When the connection did not
+authenticate, or a selected topic is not describable, the rows are `unknown`
+with `BlockedByPrerequisite`.
+
+**The three ApiVersions rows answer for the cluster only when EVERY broker
+answered.** The engine may be sent to any broker, so the check reads the
+cluster's broker list from metadata and waits for an ApiVersions answer from
+every broker on it, and from every bootstrap address the `KafkaCluster`
+names, inside one budget of at most 10 s (less when little of
+`timeoutSeconds` is left; with under 2 s left it does not dial and says so).
+
+- `ready` or `notReady` carries the fact `brokersAnswered: 3 of 3`: distinct
+  brokers of how many the cluster lists, never a count of connections. When
+  the brokers' answers differ (a rolling upgrade), the row is judged on the
+  versions every one of them serves, and its message says they differ.
+- A broker that did not answer in time makes the row `unknown`
+  (`ApiVersionsNotObserved`), with a message such as "2 of 3 broker(s) the
+  cluster lists answered ApiVersions within the check's budget; no answer from
+  broker 3 (kafka-3.example:9092)". So does a bootstrap address nobody
+  answered at. Bring the broker back, or take a decommissioned address out of
+  `spec.bootstrapServers`, and create a new `Preflight`.
+- **A broker the cluster no longer lists is not asked.** A cluster that has
+  dropped a stopped broker lists the others, and through bootstrap addresses
+  that all answer the row says `2 of 2`. The row is about the brokers the
+  cluster says it has.
+- **What it opens.** For the length of the observation, one connection to each
+  bootstrap address and one to each listed broker: six on a three-broker
+  cluster with three bootstrap addresses. A cluster that caps connections per
+  principal below that answers `unknown`. Builds before the fix round of
+  PROD-01.2 read whichever one to three brokers a sparse client had dialled
+  and called the result the endpoint's.
+
+**An advisory row never changes the verdict.** On Apache Kafka 3.7 every
+`Backup` check carries `connection.groupTypes` as a warning beside a `ready`
+verdict. It matters only to a backup that selects consumer groups.
+
+**The target's record-timestamp bound.** `target.timestampBound` is `unknown`
+with `TimestampBoundNotReported` when the target's broker configuration
+answers without either bound key (Redpanda keeps the bound per topic); under
+an older controller the code is `BrokerConfigsNotReadable` (§21.9). Builds
+before PROD-01.2 answered `ready`, "declares no record-timestamp bound", for
+an endpoint that had declared nothing. The same builds published
+`status.topicPreflight.timestampType: CreateTime` on a `Restore` whose target
+had not reported its timestamp type; the field is now absent in that case.
+
+**An unreachable advertised address.** When the bootstrap address answers and
+the brokers the cluster advertises do not, `connection.authenticated` (or
+`target.authenticated`) is `notReady` with `BrokerUnreachable`, and its
+message says exactly that: the bootstrap answered and named the cluster, and
+the advertised listeners are not reachable from the runner. Check
+`advertised.listeners` for the listener the bootstrap address belongs to. A
+`SourceConnection` check, and `logweir cluster-probe`, read only the cluster
+id and pass against such a cluster.
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -10360,6 +10637,42 @@ answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
 older one answered `ready` (§21.6b). No code, field or plan shape is new, so
 the controller and runner may be upgraded in either order. Rolling back the
 runner brings back the old `ready` answer.
+
+**Capability rows (PROD-01.2).** A controller from this build lists the
+capability rows of §21.6c in every `Backup` and `Restore` check plan
+(`request.{operationReadiness,restorePreflight}.capabilityChecks`). An **older
+runner** refuses such a plan at startup (exit 3): the `Preflight` lands
+`phase: Failed`, `CheckContractMismatch`, naming `capabilityChecks`. **Upgrade
+the runner image with the controller**; unlike the conditional fields above,
+this one is in every `Backup` and `Restore` check.
+
+- **Which setting moves.** The chart has two image values, `controllerImage`
+  and `runnerImage`. Its defaults move together, but a release installed with
+  `runnerImage` pinned (a private registry, the ECR example of
+  [install.md](install.md)) keeps the old runner through
+  `helm upgrade --reuse-values` unless `--set runnerImage=…` moves it. An
+  install from `logweir.yaml` has no chart value: the controller reads
+  `LOGWEIR_RUNNER_IMAGE` from its own Deployment, so set it to the new runner
+  image in the same change that rolls the controller.
+- **A `Preflight` that failed this way stays `Failed`.** The phase is terminal
+  (§21.2): the object is not run again when the runner image is corrected.
+  Create a new `Preflight`.
+- **A `Preflight` in flight across the upgrade.** By reading the controller,
+  not by a run: the rows a result must hold are derived from the request as
+  THIS controller renders it, so a check Job the old controller created and
+  the new one sees finish is missing the capability rows, which are then
+  reported `unknown` and blocking (`BlockedByPrerequisite`, "the check Job did
+  not report this row"). That one object's verdict is `unknown`, never a
+  `ready` it did not earn. Create a new `Preflight` after the upgrade.
+
+A **newer runner** handed a
+plan from an older controller (no field) emits no capability row, and the
+older controller reads its result as before. The new answer of
+`target.timestampBound` follows the same rule: a plan from this build's
+controller gets the code `TimestampBoundNotReported`, and a plan from an older
+controller gets the same `unknown`, message and remedy under
+`BrokerConfigsNotReadable`, a code that controller already reads. Rolling the
+runner back brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

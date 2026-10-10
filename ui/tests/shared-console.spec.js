@@ -27,6 +27,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded, wireItem } from "./console-fixture.js";
 
 import { CONSOLE, LEGACY, apiClient, resetMode, selectMode, sessionToken } from "../client.js";
 import { connectArchive, listD3 } from "../operation-watch.js";
@@ -304,7 +305,7 @@ function argumentsAt(text, open) {
 /** The live PoC Backup, as the shared console lists it: the product API's
  *  bytes, projected by `ui/client.js`. */
 async function pocPointsFromTheApi(mutate) {
-  const item = con("backup-poc.json").item;
+  const item = wireItem("backup-poc.json");
   if (typeof mutate === "function") {
     mutate(item);
   }
@@ -497,16 +498,18 @@ test("poc_p1_the_shell_writes_the_decided_mode_s_sentence_when_the_probe_answers
 test("a_failed_restore_has_no_completion_section_in_either_mode", () => {
   const HEADING = "What this restore produced";
   // Console: the operation view's own document for a run that ended failed --
-  // with no completion, and with one an older controller copied anyway.
-  const base = con("operation-restore-completed.json").item;
+  // with no completion, and with one an older controller copied anyway. Each
+  // is changed ON THE WIRE and then read as the operation page reads it
+  // (`readOperation`'s decoder), so the page is handed what it is handed.
+  const base = decoded("operation-restore-completed.json").item;
   for (const [what, change] of [
     ["failed, no completion", (o) => { o.state = "failed"; delete o.completion; }],
     ["failed, a stale completion", (o) => { o.state = "failed"; }],
     ["refused", (o) => { o.state = "refused"; delete o.completion; }],
     ["cancelled", (o) => { o.state = "cancelled"; }],
   ]) {
-    const document = JSON.parse(JSON.stringify(base));
-    change(document);
+    const document = decoded("operation-restore-completed.json",
+      (body) => change(body.item)).item;
     const page = decode(renderOperation({ ns: "team-a", name: document.name, console: true,
       document: document }));
     assert.equal(page.indexOf(HEADING), -1, "console, " + what + ": no completion heading");
@@ -522,8 +525,8 @@ test("a_failed_restore_has_no_completion_section_in_either_mode", () => {
   // CONTROL: a succeeded run keeps its panel, with and without counts.
   assert.ok(decode(renderCompletion(operationFacts(base, true))).indexOf(HEADING) !== -1,
     "a succeeded run with a completion shows it");
-  const noCounts = JSON.parse(JSON.stringify(base));
-  delete noCounts.completion;
+  const noCounts = decoded("operation-restore-completed.json",
+    (body) => { delete body.item.completion; }).item;
   assert.match(decode(renderCompletion(operationFacts(noCounts, true))),
     /data-completion="unverified"/, "and a succeeded run without one says it is not yet verified");
 });
@@ -532,12 +535,16 @@ test("a_failed_restore_has_no_completion_section_in_either_mode", () => {
 // the class sweep's other rows (item b)
 // ===========================================================================
 
+/** The name `restore.json`'s Restore answers to. */
+const RESTORE_NAME = decoded("restore.json").item.name;
+
 test("sweep_a_shared_console_restore_detail_shows_the_scope_the_api_published", async () => {
   // `history.js` `scopeOf` reads `status.verificationScope`, else the custom
   // resource's `status.integrity`. The console detail carried neither --
-  // `decodeOperation` keeps the frozen sixteen fields and drops D3's
+  // `decodeOperation` kept the frozen sixteen fields and dropped D3's
   // `verificationScope` -- so the page said "No verification scope was
-  // recorded" about a run the API had scoped.
+  // recorded" about a run the API had scoped. (Since FX-48 the detail decode
+  // reads the whole published view, and the scope is one member of it.)
   await sharedConsole();
   const wire = transport((u) => {
     if (u.indexOf("/api/v1/namespaces/team-a/operations/restore/") === 0) {
@@ -548,7 +555,7 @@ test("sweep_a_shared_console_restore_detail_shows_the_scope_the_api_published", 
       : undefined;
   });
   try {
-    const restore = await apiClient().get("team-a", "restores", con("restore.json").item.name);
+    const restore = await apiClient().get("team-a", "restores", RESTORE_NAME);
     assert.deepEqual(restore.status.verificationScope,
       { level: "sampled", recordsSampled: 64, recordsSampledMatching: 64, recordsExpected: 200 });
     const html = decode(renderRestoreDetail(restore));
@@ -570,7 +577,7 @@ test("sweep_a_shared_console_restore_detail_shows_the_scope_the_api_published", 
       : undefined;
   });
   try {
-    const restore = await apiClient().get("team-a", "restores", con("restore.json").item.name);
+    const restore = await apiClient().get("team-a", "restores", RESTORE_NAME);
     assert.equal(restore.status.verificationScope, undefined);
     assert.match(decode(renderRestoreDetail(restore)), /No verification scope was recorded/);
   } finally {

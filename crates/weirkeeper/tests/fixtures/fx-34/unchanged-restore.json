@@ -1,0 +1,788 @@
+{
+  "capturedFrom": "claude/integrate-5 7e415dbb (pre-FX-34)",
+  "cases": {
+    "exit-0-with-keys": {
+      "exitCode": 0,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Succeeded",
+              "exitCode": 0,
+              "exitReason": "ok",
+              "reason": "Ok",
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "both `scorecard-key=` and `sidecar-key=` were read off the pod log by name and are on status.evidence; `offset-report-key=` is printed only when the engine wrote an offset report, so its absence is a fact about the run"
+                }
+              ],
+              "evidence": {
+                "scorecardKey": "logweir/drills/01JB7Z0000000000000000000A.json",
+                "sidecarKey": "logweir/drills/01JB7Z0000000000000000000A.json.sig",
+                "offsetReportKey": "logweir/drills/01JB7Z0000000000000000000A.offsets.json",
+                "scorecardSha256": "sha256:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d"
+              },
+              "outcome": "pass",
+              "lastPhaseCompleted": 7,
+              "integrity": {
+                "level": "byte-fingerprint"
+              },
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Ok",
+                "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "evidence": {
+                "verification": {
+                  "result": "Valid",
+                  "matchedKeyId": "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd",
+                  "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+                  "verifiedAt": "2026-09-10T12:00:00Z",
+                  "detail": null,
+                  "signedAt": null,
+                  "trust": null
+                }
+              },
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "both `scorecard-key=` and `sidecar-key=` were read off the pod log by name and are on status.evidence; `offset-report-key=` is printed only when the engine wrote an offset report, so its absence is a fact about the run"
+                },
+                {
+                  "type": "Verified",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Verified",
+                  "message": "verified by weirkeeper at 2026-09-10T12:00:00Z against key 917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd"
+                }
+              ],
+              "completion": {
+                "recordsExpected": 100,
+                "recordsRestored": 100,
+                "recordsSampled": 10,
+                "recordsSampledMatching": 7,
+                "integrityLevel": "byte-fingerprint"
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4072"
+            }
+          }
+        }
+      ]
+    },
+    "exit-0-without-keys": {
+      "exitCode": 0,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Succeeded",
+              "exitCode": 0,
+              "exitReason": "ok",
+              "reason": "Ok",
+              "conditions": [
+                {
+                  "type": "Complete",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Ok",
+                  "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "False",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "EvidenceKeysUnreadable",
+                  "message": "the pod log did not carry both `scorecard-key=` and `sidecar-key=`; neither mandatory evidence key is set, and none was guessed from the run id"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Ok",
+                "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-1": {
+      "exitCode": 1,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 1,
+              "exitReason": "operational",
+              "reason": "Operational",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Operational",
+                  "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Operational",
+                "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-2-with-keys": {
+      "exitCode": 2,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 2,
+              "exitReason": "drill-not-pass",
+              "reason": "DrillNotPass",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "DrillNotPass",
+                  "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "the drill did not pass (exit 2) and signed its result; both `scorecard-key=` and `sidecar-key=` were read off the pod log by name and are on status.evidence, so the signed failure is verified like any other scorecard"
+                }
+              ],
+              "evidence": {
+                "scorecardKey": "logweir/drills/01JB7Z0000000000000000000A.json",
+                "sidecarKey": "logweir/drills/01JB7Z0000000000000000000A.json.sig",
+                "offsetReportKey": "logweir/drills/01JB7Z0000000000000000000A.offsets.json",
+                "scorecardSha256": "sha256:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d"
+              },
+              "outcome": "pass",
+              "lastPhaseCompleted": 7,
+              "integrity": {
+                "level": "byte-fingerprint"
+              },
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "DrillNotPass",
+                "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "evidence": {
+                "verification": {
+                  "result": "Valid",
+                  "matchedKeyId": "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd",
+                  "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+                  "verifiedAt": "2026-09-10T12:00:00Z",
+                  "detail": null,
+                  "signedAt": null,
+                  "trust": null
+                }
+              },
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "DrillNotPass",
+                  "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                },
+                {
+                  "type": "EvidenceRecorded",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "EvidenceKeysRecorded",
+                  "message": "the drill did not pass (exit 2) and signed its result; both `scorecard-key=` and `sidecar-key=` were read off the pod log by name and are on status.evidence, so the signed failure is verified like any other scorecard"
+                },
+                {
+                  "type": "Verified",
+                  "status": "False",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "ExitCodeNotZero",
+                  "message": "unverified"
+                }
+              ]
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4072"
+            }
+          }
+        }
+      ]
+    },
+    "exit-2-without-keys": {
+      "exitCode": 2,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 2,
+              "exitReason": "drill-not-pass",
+              "reason": "DrillNotPass",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "DrillNotPass",
+                  "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "DrillNotPass",
+                "message": "the runner exited 2 (drill-not-pass); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-4": {
+      "exitCode": 4,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 4,
+              "exitReason": "signing-or-lock",
+              "reason": "SigningOrLock",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "SigningOrLock",
+                  "message": "the runner exited 4 (signing-or-lock); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "SigningOrLock",
+                "message": "the runner exited 4 (signing-or-lock); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-137": {
+      "exitCode": 137,
+      "terminalState": null,
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 137,
+              "exitReason": "operational",
+              "reason": "Operational",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "Operational",
+                  "message": "the runner exited 137 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "Operational",
+                "message": "the runner exited 137 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-k3": {
+      "exitCode": 3,
+      "terminalState": "GuardRefused",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "GuardRefused",
+              "reason": "GuardRefused",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-named-state": {
+      "exitCode": 3,
+      "terminalState": "TargetTopicConfigRefused",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "TargetTopicConfigRefused",
+              "reason": "GuardRefused",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    },
+    "exit-3-old-runner-no-line": {
+      "exitCode": 3,
+      "terminalState": "GuardRefusedUnknownReason",
+      "requests": [
+        "GET /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods?&labelSelector=batch.kubernetes.io%2Fjob-name%3Dlogweir-restore-incident-4471",
+        "GET /api/v1/namespaces/logweir-t20/pods/logweir-restore-incident-4471-abcde/log?",
+        "PATCH /apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+        "PATCH /apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?"
+      ],
+      "writes": [
+        {
+          "method": "PATCH",
+          "uri": "/apis/logweir.dev/v1alpha1/namespaces/logweir-t20/restores/logweir-restore-incident-4471/status?",
+          "body": {
+            "status": {
+              "phase": "Failed",
+              "exitCode": 3,
+              "exitReason": "GuardRefusedUnknownReason",
+              "reason": "GuardRefused",
+              "conditions": [
+                {
+                  "type": "Failed",
+                  "status": "True",
+                  "observedGeneration": 2,
+                  "lastTransitionTime": "2026-09-10T12:00:00Z",
+                  "reason": "GuardRefused",
+                  "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode"
+                }
+              ],
+              "oldTopics": [
+                "orders",
+                "payments"
+              ],
+              "newTopics": [
+                "drill-orders",
+                "drill-payments"
+              ],
+              "progress": {
+                "stage": "Finished",
+                "reason": "GuardRefused",
+                "message": "the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+                "lastTransitionTime": "2026-09-10T12:00:00Z",
+                "lastObservedTime": null
+              }
+            },
+            "metadata": {
+              "name": "logweir-restore-incident-4471",
+              "resourceVersion": "4071"
+            }
+          }
+        },
+        {
+          "method": "PATCH",
+          "uri": "/apis/batch/v1/namespaces/logweir-t20/jobs/logweir-restore-incident-4471?",
+          "body": {
+            "spec": {
+              "ttlSecondsAfterFinished": 604800
+            }
+          }
+        }
+      ]
+    }
+  }
+}

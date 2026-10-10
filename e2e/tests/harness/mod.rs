@@ -95,7 +95,8 @@ pub mod stack;
 #[allow(unused_imports)]
 pub use stack::{
     bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_autocreate, bootstrap_c3,
-    bootstrap_cluster2, bootstrap_k8s, bootstrap_sasl, s3_endpoint,
+    bootstrap_cluster2, bootstrap_confluent, bootstrap_confluent_offnet, bootstrap_k8s,
+    bootstrap_redpanda, bootstrap_redpanda_sasl, bootstrap_sasl, objectstore_endpoint, s3_endpoint,
 };
 
 /// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,
