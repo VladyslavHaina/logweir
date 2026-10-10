@@ -469,6 +469,45 @@ was deleted, and its `at` is when those findings were first reached, not when
 the controller last looked (FX-29). The enforcement record is create-only and **unsigned**, verified by
 the digest beside it; no surface calls it signed.
 
+**A retention evaluation's four counts add up, and a point the per-run ceiling
+held back is never published as kept** (FX-22). `lastEvaluation.pointsEvaluated`
+= `keptCount` + `candidateCount` + `truncatedByCap` + the skipped points.
+`candidateCount` is **this plan**, at most `maxDeletionsPerRun`;
+`truncatedByCap` is how many more points the rules would remove and the ceiling
+left out of it, and those points are in none of the lists. The counts are the
+`RetentionPolicy` status's own and not the number of rows: each list is still
+cut at 200 rows, with `truncated: true`.
+
+**`lastEvaluation.accounting` says whether those counts are published, and it
+is on every answer**: `Recorded` or `NotRecorded`. Read it before `kept`. The
+schema declares the member optional, with the default `NotRecorded`: this
+build always writes it, and an answer without it comes from a build that
+predates the member and reads as `NotRecorded`.
+
+| `accounting` | `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` | `kept` |
+|---|---|---|
+| `Recorded` | the status's own; `0` is an answer | the points that stay (at most 200 rows). Absent means none is kept, and `keptCount` is `0` |
+| `NotRecorded` | absent, never `0` | absent, and it says **nothing**: not "nothing is kept" |
+
+It is `NotRecorded` when the status does not record an accounting that closes:
+an evaluation an older controller wrote, one whose members an older CRD pruned,
+or one where two controllers' numbers stand in one block after a rollback of
+the controller image alone (the counts do not add up, or the status's `kept`
+list is not `keptCount` long). That controller's `kept` list holds the points
+the ceiling held back, so the API does not pass it on as kept and derives no
+count from it. `candidateCount` and `candidates` are this plan in both cases.
+
+`viewIncomplete: true` says the catalog view the evaluation read was not the
+whole archive (the catalog cut its view, or its walk had not finished), so
+points outside it were not evaluated and are in none of the counts. One rule,
+the console's too: **`true` is published whether or not the accounting is
+recorded**, because a warning is never withheld; `false` (the catalog said its
+view is the whole archive) is published only with `accounting: Recorded`; and
+an absent member means not recorded, never `false`. A run's
+`lastEnforcement.failed` is cut at 200 rows like `deleted`, and
+`failedTruncated: true` is present when it was; `deleted` has always carried
+`deletedTruncated`.
+
 **A catalog's view is a window, and the response says so.** The durable truth is
 in object storage; Kubernetes holds the newest `sync.viewLimit` points in
 immutable `ConfigMap` pages owned by the sync Job, and when that Job's TTL

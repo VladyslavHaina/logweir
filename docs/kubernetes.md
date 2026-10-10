@@ -476,11 +476,11 @@ The `Harness row` column names the phase that measured the line; the
 | Role | Minimal actions, each at the resource scope shown | Proved by | Harness row |
 |---|---|---|---|
 | `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-045` | `U6/archive-write` |
-| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*` | Preflight `u6-da-010+u6-rp-011` | `U6/archive-read` |
+| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`. **For a restore of a catalog point (a plan bound to a recovery point) and its preflight, also:** `s3:GetObject` on `<bucket>/logweir/backups/*` and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | Preflight `u6-da-010+u6-rp-011` (the first two actions); the point-bound additions were exercised on MinIO, not bisected (FX-14 `live-tip/grants/`) | `U6/archive-read` |
 | `evidenceWrite` | `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-033` | `U6/evidence-write` |
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
 | write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | Preflight `u6-bp-019` | `U6/write-probe` |
-| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-052` | `U6/catalog-sync` |
+| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*`; on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | RecoveryCatalog `u6-cat-052` (the first three actions) | `U6/catalog-sync` |
 | retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` — **SUPERSEDED: this build also needs `s3:GetObject` on `<bucket>/<prefix>/*`**, see the note below the bisection | Job `u6-ret-060` (measured before OBJECT-LOCK-DELETE-MARKER) | `U6/retention-enforcer` |
 
 | Role | Action removed | Verdict, and the product's own answer | Harness object |
@@ -592,17 +592,52 @@ listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
-**A pinned point's read BY VERSION (FX-7) is one action the rows above do not
-name.** A point whose receipt pins its manifest's version is checked, wherever
-the manifest's current version is not the pin — on every copy of the archive,
-and after a set was written again — by reading the pinned version by id
-(`GET ?versionId=`). AWS S3 authorises that read as `s3:GetObjectVersion` on
-`<bucket>/<prefix>/*`, for the `catalogSync` reader and for a point-bound
-restore's runner alike
-[UNVERIFIED — needs a real AWS S3 bucket and a credential source]; the rows
-above were measured before FX-7. Without it such a point is `Unreadable` in the
-catalog and its point-bound restore exits 1 ("could not tell"), never a silent
-pass ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`, and what
+was measured.** A point whose receipt pins its manifest's version is checked,
+wherever the manifest's current version is not the pin — on every copy of the
+archive, and after a set was written again — by reading the pinned version by
+id (`GET ?versionId=`). Three readers make that read, each with the
+destination's `archiveRead` grant: the `catalogSync` deep check, a point-bound
+restore's runner, and (since FX-14) the restore preflight of a point-bound
+plan. The two rows above name the action for them.
+
+- **AWS S3** authorises a read that names a version as `s3:GetObjectVersion`,
+  a different action from `s3:GetObject`, on `<bucket>/<prefix>/*`
+  [UNVERIFIED — needs a real AWS S3 bucket and a credential source]. Without it
+  the read is a 403: the point is `Unreadable` in the catalog, its point-bound
+  restore exits 1, and its preflight answers `archive.backupSet` `AccessDenied`
+  with a remedy that names the action — "could not tell", never a silent pass
+  ([the pin](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+- **MinIO does not ask for it separately. Measured** (2026-10-09, FX-14,
+  compose, the stack's MinIO `RELEASE.2025-09-07T16-13-09Z` rebuild, one
+  deny-by-default principal, the manifest written again so the pin is not
+  current): with `s3:ListBucket` alone both the current read and the read by
+  version are refused and the preflight answers `AccessDenied`; with
+  `s3:GetObject` added, and no `s3:GetObjectVersion`, the read by version is
+  served and the preflight answers `ManifestSuperseded`; with
+  `s3:GetObjectVersion` and no `s3:GetObject`, MinIO serves both reads. So on
+  MinIO the grant is already inside `s3:GetObject`, and naming
+  `s3:GetObjectVersion` as well costs nothing and is what moves to AWS S3
+  unchanged.
+- **The read is made only when the current version is not the pin.** Measured
+  in the same run: over an unchanged manifest the preflight of a point-bound
+  plan is `ready` for the principal without `s3:GetObjectVersion`. A bucket
+  that is not versioned issues no pin, so its points never ask for the read; a
+  COPY of a pinned point in such a bucket does (the read answers "no such
+  version" and the digest decides).
+
+**A plan bound to a recovery point reads its receipt through `archiveRead`
+too.** The runner's binding, and since FX-14 the restore preflight, read the
+bound receipt at `logweir/backups/<backupId>/<run id>.receipt.json` (the runner
+also reads its signature beside it) with the source destination's `archiveRead`
+grant, which is why that row adds `s3:GetObject` on `<bucket>/logweir/backups/*`
+for such a restore. The `catalogSync` reader row already grants it under
+`logweir/*`, and a destination whose catalog you sync carries that row on the
+same grant, so a point picked from a synced catalog needs nothing more
+[UNVERIFIED — the receipt read was not bisected on a restricted principal; the
+reads are `drill::binding` and `check::kinds::restore`]. The docs lint
+`the_documented_grants_name_the_version_read_of_every_role_that_makes_one`
+holds the two tables (here and `install.md`) to the readers that make the read.
 
 **SUPERSEDED — the retention enforcer now needs `s3:GetObject`.** When this
 row was measured the worker listed a set's objects and deleted them by the key
@@ -971,6 +1006,7 @@ a pass:
 | The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
 | A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
 | `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
+| `Preflight` restore check of a plan bound to a recovery point, the bound receipt (`archive.backupSet`) | Not ready, `PointBindingMismatch`: the answer of a receipt that is absent or has other bytes, because a preflight runs before any approval and must not say whether an object exists at a key the plan chose (§21.8). The message gives the three causes together, `…it is absent, its bytes do not hash to the bound digest, or it is larger than the 67108864-byte read cap for a receipt`, and never the object's size. The runner's binding, after approval, fails operationally (exit 1) and names the cap. |
 | Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
 
 **The limit this sets, measured.** A receipt is two-space pretty JSON. With
@@ -1692,10 +1728,14 @@ no configuration is reconstructed by hand.**
    same rule the wizard applies to a Backup's `windowCovered`
    (WIZARD-DEFAULT-PIT-EXCLUSIVE). The approver signs those bytes, so the approval covers WHICH
    archive object is recovered.
-6. **Readiness re-reads the row.** Step 5 starts a `Preflight` with
-   `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most one of
-   it and `recoveryPointRef`, CEL rule P10). §21.8 lists what
-   `recoveryPoint.state` answers.
+6. **Readiness re-reads the row, and the archive.** Step 5 starts a `Preflight`
+   with `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most
+   one of it and `recoveryPointRef`, CEL rule P10). §21.8 lists what
+   `recoveryPoint.state` answers from the catalog. The check Job then judges
+   the archive itself as the runner will in step 7 (FX-14): `archive.backupSet`
+   reads the bound receipt and the manifest with the receipt's pin, so a set
+   that was written again after the point was signed is `ManifestSuperseded`
+   here and not a `ready` preview of a run the runner refuses (§21.8).
 7. **Approve and run.** The `Restore` is the ordinary one — `backupSetRef` is
    the point's set, `sourceDestinationRef`/`evidenceDestinationRef` the
    catalog's destination — and waits for its `Approval`. The runner, before it
@@ -2382,6 +2422,153 @@ pass for as long as it existed. The `EVALUATED` printer column therefore reads
 "how long these findings have stood"; whether the controller is alive is the
 `Ready` and `Evaluated` conditions' business, and a new plan digest still moves
 `at` the moment it is rendered.
+
+**`status.lastEvaluation` counts every point once, and a point the per-run
+ceiling held back is not "kept"** (FX-22). Four numbers add up:
+
+| field | what it counts |
+|---|---|
+| `pointsEvaluated` | every point of this destination in the catalog view the evaluation read |
+| `keptCount` | the points that stay: the rules keep them, or something protects them (those are in `protected` too) |
+| `candidateCount` | the points **this plan** would remove, at most the ceiling |
+| `truncatedByCap` | the points the rules would remove, that nothing protects, and that the ceiling left out of this plan |
+
+`pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` + the
+points in `skipped`. `maxDeletionsPerRun` beside them is the ceiling the
+evaluation applied: `spec.enforcement.maxDeletionsPerRun`, or the default of 50
+for a policy with no `spec.enforcement`, because a `Report` preview is bounded
+as a run would be. A held-back point is **due, not kept**. It is in no list
+(`kept` names only what stays, `candidates` only this plan), and no run deletes
+it until a later plan names it. A plan takes the due points newest first, so the
+ones held back are usually the oldest, but not always: a backup set is planned
+whole or not at all, so a set that does not fit the room left under the ceiling
+is held back while older single points behind it are planned. The `Evaluated`
+message says it in words, and `kubectl get retentionpolicy` prints a `HELD-BACK`
+column between `CANDIDATES` and `EVALUATED` (a script that reads that output by
+column position must skip one more column):
+
+```text
+371 point(s) evaluated at this destination: 10 kept, 50 candidate(s), 0 protected,
+0 skipped. 311 more point(s) are due under the rules and held back by the per-run
+ceiling (maxDeletionsPerRun 50): they are not kept and not in this plan, and they
+stay due until a later plan names them. …
+```
+
+Until this build those points were listed under `kept` and nothing published
+their number: with 371 points a policy read "321 kept, 50 candidate(s)" for
+`keepLast: 300` and for `keepLast: 10` alike. `truncatedByCap: 0` means the plan
+is everything the rules would remove. An **absent** `truncatedByCap` or
+`keptCount` means an older controller wrote the block: its `kept` list may hold
+held-back points, so the product API and the console publish no kept count and
+no `kept` rows for it, and never derive a count from that list. The product API
+says which case it is on every answer: `lastEvaluation.accounting` is
+`Recorded` or `NotRecorded`, so an absent `kept` is never the only signal
+([api.md](api.md)). The plan document, `planSha256` and what a run deletes are
+unchanged, so an approved digest stays approved. To clear a backlog in fewer
+runs, raise `spec.enforcement.maxDeletionsPerRun` (1–500).
+
+**When no due point fits the ceiling, the plan is empty and the object says
+why.** A backup set that more due points name than `maxDeletionsPerRun` is
+never selected: a set goes whole or not at all ("Plans over re-run receipts
+change", below). When every due point is in such a set, `candidateCount` is
+`0`, `truncatedByCap` is every due point, and no later plan names them either:
+the next evaluation finds the same sets over the same ceiling. The object does
+not call that "nothing to remove":
+
+```text
+Evaluated: … 2 point(s) are due under the rules and held back by the per-run ceiling
+(maxDeletionsPerRun 1): they are not kept, and this plan is empty because not one of
+them fits. Each is in a backup set that more due points name than the ceiling (sets that
+share objects count as one), a set is planned whole or not at all, and no plan names
+them until maxDeletionsPerRun is raised.
+
+Enforced=False/NothingFitsCeiling: 2 point(s) are due under the rules and the plan is
+empty: not one of them fits the per-run ceiling (spec.enforcement.maxDeletionsPerRun 1).
+… Raise spec.enforcement.maxDeletionsPerRun to at least the number of points that name
+the smallest of those sets; 2 fits all of them.
+```
+
+`NothingFitsCeiling` is a closed `Enforced=False` reason, written only for an
+`Enforce` policy whose plan is empty while `truncatedByCap` is above 0. An empty
+plan with nothing due is still `Enforced=False/NothingToDo`. A `Report` policy
+is `RecommendationOnly` either way and says it on `Evaluated` alone; its ceiling
+is `spec.enforcement.maxDeletionsPerRun` when it carries that block and the
+default of 50 when it does not. Neither condition changes what is planned: the
+plan is empty in both cases, and its digest is the empty plan's.
+
+**`status.lastEvaluation.viewIncomplete: true` says the evaluation did not see
+the whole archive.** The evaluation reads the catalog's view (§7d), and the
+catalog says when that view is not every point: `status.truncated` (the view is
+a window of the newest `spec.sync.viewLimit` points), or
+`status.cursor.complete: false` (the sync's object budget ran out and its pages
+were published anyway, `Synced=False/ScanIncomplete`). Points outside the view
+are not evaluated, are in none of the four counts, and are **never candidates
+while they stay outside it**. In a window those are the oldest points, the ones
+an age rule is for, so a policy over an archive larger than its catalog's
+`viewLimit` does not expire them: raise `viewLimit` (100–5000), or let the sync
+finish. **Raising `viewLimit` helps only when the limit is what cut the view.**
+The catalog also sets `status.truncated` when it left entries out for page
+space, when an entry was too large for one page, and when its walk counted rows
+it then merged as duplicates; the `Evaluated` message says so beside the
+catalog's own numbers, and the catalog's `Synced` message counts the entries it
+refused as too large. `false` means the catalog said its walk finished and its
+view holds every point it counted; absent means the catalog did not say. The
+evaluation of the points that are in the view is unchanged, and so is the plan.
+
+The product API and the console apply one rule to this member: **a warning is
+never hidden, and completeness is never asserted when it is not recorded.**
+`viewIncomplete: true` is published and shown whether or not the four counts
+are recorded. `false` ("the whole archive, the catalog said") is published and
+shown only beside counts that are recorded (`accounting: Recorded`). Absent, or
+`false` beside counts that are not recorded, reads "not recorded".
+
+**Upgrade and rollback of these four members.** They are additive `status`
+fields: **apply the CRDs before rolling the controller**, as for every upgrade.
+The first evaluation after the upgrade rewrites each policy's status once:
+`kept` loses the held-back points and the four members appear
+(`lastEvaluation.at` moves only when `kept` changed). A controller rolled out
+ahead of its CRD has the four members pruned by the API server on every write;
+it leaves `lastEvaluation.at` where it was and sends one patch per pass that
+changes nothing, until the CRD is applied. While that lasts the product API
+answers `accounting: NotRecorded` for every policy (the stored block has no
+counts), and the console's panel reads "not recorded" in both cells.
+
+After a rollback of the controller image alone, the older controller rewrites
+`pointsEvaluated`, `candidateCount` and the lists and cannot remove the four
+members (a merge patch leaves the keys it does not name), which then describe
+the newer controller's last evaluation. What the product API and the console
+show depends on whether the ceiling had cut that policy's plan:
+
+- **`truncatedByCap` was above 0.** The older controller's first write puts the
+  held-back points back under `kept`: 321 ids beside a `keptCount` of 10. From
+  that write on, the API answers `accounting: NotRecorded` and publishes no
+  `keptCount`, no `truncatedByCap`, no `maxDeletionsPerRun` and no `kept` rows
+  for the policy, and the console prints "not recorded" for "kept" and "held
+  back by the per-run ceiling". This holds **between the rollback and the next
+  archive change too**, when the stale counts still add up: a `kept` list that
+  is not `keptCount` long is refused before the sum is read. `candidateCount`,
+  `candidates` and the plan are the older controller's own and are published as
+  before.
+- **`truncatedByCap` was 0.** The older controller's `kept` list is the same
+  list, so it leaves `lastEvaluation` as it is, and the API and the console go
+  on showing the newer controller's counts. They stay `Recorded` for as long
+  as the older controller's `kept` list is `keptCount` long and the counts add
+  up, which is while the policy keeps the same number of points and its plans
+  stay under the ceiling; the counts shown are then still true. The first plan
+  the ceiling cuts puts held-back points under `kept` again, the list is
+  longer than `keptCount`, and the block reads `NotRecorded`, as above. **One
+  block reads as recorded and is not**: if the number of points the policy
+  keeps falls by exactly the number the ceiling newly holds back (a hold
+  expires over a plan already at the ceiling), the list has its old length and
+  the stored `truncatedByCap: 0` is stale. The check compares lengths and sums
+  and cannot see that; pruning the members (below) removes the doubt.
+
+`viewIncomplete: true`, if the newer controller's last evaluation wrote it,
+stays visible on both surfaces until the members are pruned (a warning is never
+withheld); a stale `false` is not shown once the counts read as not recorded.
+`kubectl get` goes on printing the stale `HELD-BACK` value. With `kubectl`,
+re-apply the older CRDs to prune the four members, or ignore them while the
+older controller runs.
 
 **A retention run is recorded on the object BEFORE its Job exists.** The order
 is: the run record (`status.lastEnforcement.runId`, `startedAt`, `planSha256`,
@@ -10168,6 +10355,81 @@ readiness check holds the submit*).
   The signer row uses the recovery point as the claimed signing time, because
   the view carries no receipt `finished_at`: a key retired between the two
   instants passes here and is refused by the runner, which reads the real one.
+- **A plan bound to a recovery point has its archive judged as the runner will
+  judge it (FX-14).** A plan that carries `source.point` is restored only if
+  the runner's binding proves the point against the archive, and before FX-14
+  the check Job read the set's CURRENT manifest alone: it could answer `ready`
+  over a set written again after the point was signed, which the runner then
+  refused (exit 3). `archive.backupSet` now makes the binding's own
+  comparisons, in its order, and `archive.coverage` and `archive.segments` are
+  `unknown`, `BlockedByPrerequisite` behind every refusal, because they would
+  describe a manifest the run will not accept.
+
+  **What the plan may make the check read is decided first, from the plan
+  alone.** A preflight runs before any approval, for whoever can create one,
+  with the namespace's archive-read credential, and `source.point.receipt_key`
+  is that person's text. So nothing is opened or read unless the binding is
+  well-formed, the plan's `source.backup` is the set the check reads
+  (`backupSetRef`; never `latestCompleted`), and the receipt key is the key a
+  backup of that set writes — `logweir/backups/<backupId>/<run id>.receipt.json`,
+  compared byte for byte, each id one path segment. A key under another
+  prefix, of another set, with a relative or nested path, or naming any object
+  that is not a receipt, is refused by name and not fetched. The receipt is
+  then read only after that set's manifest was read under the destination's
+  own prefix.
+
+  **Which ids the check can confine.** Each of the two ids must be one path
+  segment that the store addresses exactly as written: printable ASCII, and a
+  space is allowed, so a set named `nightly 7` is checked like any other. An
+  id that is empty, is `.` or `..`, or holds a `/`, a control character (a tab,
+  a line break), a character that is not ASCII, or one of the
+  characters an object-store path rewrites (`\ % ? # * ~ | ^ { } [ ] < > "` and
+  the backtick) is read by the store at another key than its text says. A plan
+  that names such an id is `notReady`, `PointBindingMismatch`, with nothing
+  read. The comparison is of bytes: for the set `nightly 7`, neither
+  `nightly%207` nor the id with a tab, a no-break space, or a space before or
+  after it is that set.
+
+  **The confinement is by set id, not by archive prefix.** The receipt
+  namespace `logweir/backups/<set id>/` is bucket-wide: it does not sit under
+  a destination's prefix, so two destinations in one bucket share it. What
+  keeps them apart is the manifest-first read above (a set this destination's
+  prefix does not hold is `BackupSetNotFound`, and its receipt is never
+  fetched) and
+  [the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id),
+  which admits one engine run per set id per bucket. The shape of the key
+  alone does not.
+
+  | What the check found | `archive.backupSet` |
+  |---|---|
+  | the binding is malformed, names another set than the one the check reads, or names a receipt key outside that set's receipts | `notReady`, `PointBindingMismatch`; nothing was read |
+  | the receipt is not at its key, its bytes are not the bound digest, or the object at its key is larger than the read cap for a receipt (64 MiB, §7b.4) | `notReady`, `PointBindingMismatch` — one answer for all three where the store answers 404 for an absent key (measured on MinIO), so there it does not say whether an object exists at a key the plan chose. An object over the cap is refused on the size the store reports, by the one read an absent receipt costs, and its size is not repeated. On AWS S3 an absent receipt can differ from the other two: see *Where an absent receipt is not a 404* below the table |
+  | the receipt does not derive the bound point id, is not a receipt, attests another manifest digest, or describes another set or manifest key than the one this restore reads | `notReady`, `PointBindingMismatch` |
+  | the receipt pins a manifest version the bucket still holds, and it is not the current one | `notReady`, `ManifestSuperseded`: the set was written again after the point was signed; restore from another point |
+  | the pinned version could not be read (a 403, an outage, a version larger than the 256 MiB read cap for a manifest) | the store's own code (`AccessDenied` is `notReady`, `Timeout` is `unknown`; a version over the cap is `notReady`, `StoreErrorUnclassified`), with the remedy that names `s3:GetObjectVersion` |
+  | the receipt could not be read | the store's own code |
+  | the receipt pins a version this bucket does not hold (a copy of the archive, an unversioned bucket, a version expired or deleted) and the manifest hashes to the bound digest | `ready`, `ManifestReadable`; the message says `PointPinUnchecked` and the remedy carries the note the catalog gives such a point |
+  | the manifest does not hash to the bound digest | `notReady`, `PointBindingMismatch` |
+  | otherwise | `ready`, `ManifestReadable`, naming the point |
+
+  **Where an absent receipt is not a 404.** On AWS S3 a principal without a
+  listing grant over a key gets 403, not 404, for an object that is not there.
+  The documented minimal `archiveRead` grant (§7a) is such a principal for the
+  receipt namespace: its `s3:ListBucket` is conditioned on the archive prefix
+  and it holds only `s3:GetObject` on `logweir/backups/*`. With that grant an
+  absent receipt reads as `AccessDenied` ("could not be read") and a receipt
+  with other bytes as `PointBindingMismatch`, so the two are told apart. The
+  difference is confined to the receipt keys of the plan's own set, and it has
+  a cost for the operator: a deleted receipt can look like a missing grant.
+  [UNVERIFIED — needs a real AWS S3 bucket and a credential source]
+
+  No answer repeats anything read from the store — not a digest, not a version
+  id, not a field of the receipt; a message names only what the plan and the
+  request already state. The receipt's SIGNATURE is not checked here: a check
+  Job is given no evidence keyring, `recoveryPoint.state` above judges the
+  signer, and the runner verifies the signature before any data moves. A plan
+  with no `source.point` is judged exactly as before. The grants these reads
+  need are in §7a.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID
@@ -10268,6 +10530,18 @@ answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
 after a rollback, re-run the check or restore without it. The one Restore
 controller row added, the advisory `destination.evidenceReadable`, never
 changes the aggregate.
+
+**A point-bound plan's archive rows (FX-14).** No plan field and no object
+changes: the runner reads `source.point` from the plan bytes it already
+hashes. A runner image from this build answers `archive.backupSet` for such a
+plan as §21.8 says, with two codes that are new to the closed vocabulary,
+`ManifestSuperseded` and `PointBindingMismatch`. A controller OLDER than this
+build cannot parse a result that carries either, so the `Preflight` lands
+`Failed`, `ResultUnreadable` — never `ready`; upgrade the controller with the
+runner image, as for every check code. A runner older than this build reads
+the current manifest alone, as before, and can still answer `ready` over a set
+the runner's binding will refuse. A `Preflight` already stored is not revised;
+create a new one after the upgrade.
 
 **A refused broker-configuration read (FX-4).** A runner image from FX-4 on
 answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an

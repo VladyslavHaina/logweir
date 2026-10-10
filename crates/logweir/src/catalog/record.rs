@@ -103,6 +103,86 @@ pub const LOG_PREFIX: &str = "logweir/catalog/v1/log/";
 /// `the_receipt_prefix_is_the_one_the_backup_runner_writes_under`.
 pub const RECEIPTS_PREFIX: &str = "logweir/backups/";
 
+/// What every backup receipt's key ends with
+/// (`crate::backup::phase_run::receipt_keys`).
+pub const RECEIPT_SUFFIX: &str = ".receipt.json";
+
+/// Whether `segment` is ONE plain object-key path segment.
+///
+/// **The rule is a property, not a list: a segment is plain when the store
+/// addresses it exactly as written.** Every reader in this tree reaches a
+/// bucket through an `object_store` path (`logweir_store::Store` builds one
+/// from each key it is handed), and that path type is not the identity on
+/// text: it splits on `/`, drops an empty segment, and percent-encodes `.`,
+/// `..`, every control character, every non-ASCII byte and a fixed set of
+/// printable ASCII. A key holding any of those is read at ANOTHER key than
+/// its text says. So a segment is plain when the path type keeps it whole and
+/// unchanged — one segment in, the same one segment out — and a key made of
+/// plain segments is, byte for byte, the key the object is stored and read
+/// at.
+///
+/// What that leaves is printable ASCII, less the separator and the bytes the
+/// path type rewrites, **and the space** (`0x20`): the store keeps a space as
+/// it is, a backup set id is free text, and a set named `nightly 7` is a set
+/// the runner restores (FX-14 review M1). No other whitespace is plain: a
+/// tab, a line break and every other control character are rewritten, and a
+/// no-break space is not ASCII.
+///
+/// The row `a_plain_key_segment_is_one_the_store_addresses_as_written` holds
+/// this function to the store's own path type for every ASCII byte in every
+/// position of a segment, and names what the path type does with each
+/// printable byte refused here.
+#[must_use]
+pub fn is_plain_key_segment(segment: &str) -> bool {
+    // The printable ASCII an `object_store` path does not keep: `/` separates
+    // two segments, and each of the others is percent-encoded.
+    const NOT_KEPT: &[u8] = b"/\\%?#*{}^`[]\"<>~|";
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|b| (b == b' ' || b.is_ascii_graphic()) && !NOT_KEPT.contains(&b))
+}
+
+/// **FX-14 — the confinement of a receipt key a PLAN names.** The run id of
+/// `receipt_key` when it is, character for character, the key
+/// `logweir backup run` writes set `backup_id`'s receipt at —
+/// `logweir/backups/<backup_id>/<run_id>.receipt.json`, each id one plain
+/// segment ([`is_plain_key_segment`]) — and `None` for every other key.
+///
+/// The comparison is of BYTES, with the caller's own `backup_id`. An id may
+/// hold a space, so `nightly 7` confines `logweir/backups/nightly 7/…` and
+/// nothing that merely looks like it: not the id with a space before or after
+/// it, not a tab or a no-break space in the space's place, not `nightly%207`.
+///
+/// # Why a reader of plan text needs it
+///
+/// A plan's `source.point.receipt_key` is free text written by whoever
+/// drafted the plan, and a reader that fetched whatever it names would turn
+/// its own archive credential into a probe of the whole bucket: does this
+/// object exist, do its bytes hash to my guess. In a bucket shared by prefix
+/// that reaches other tenants' objects. So the key is never taken on the
+/// plan's word. It is held to the WRITER's derivation
+/// (`crate::backup::phase_run::receipt_keys`, re-derived here and compared
+/// whole, so this function cannot drift from the writer), for the one set
+/// the plan itself restores, and the only free component left is the run id:
+/// one segment, with no separator in it.
+#[must_use]
+pub fn receipt_run_id<'a>(receipt_key: &'a str, backup_id: &str) -> Option<&'a str> {
+    if !is_plain_key_segment(backup_id) {
+        return None;
+    }
+    let run_id = receipt_key
+        .strip_prefix(RECEIPTS_PREFIX)?
+        .strip_prefix(backup_id)?
+        .strip_prefix('/')?
+        .strip_suffix(RECEIPT_SUFFIX)?;
+    (is_plain_key_segment(run_id)
+        && crate::backup::phase_run::receipt_keys(backup_id, run_id).receipt_key == receipt_key)
+        .then_some(run_id)
+}
+
 /// The point identity, D3 §5.1: `"lwp1-" + lowercase_hex(sha256(receipt
 /// bytes))[0..32]`, over the EXACT stored bytes of the signed backup receipt.
 ///
@@ -723,5 +803,314 @@ pub fn location_id(u: &logweir_core::engine::StorageUrl) -> String {
         // `Filesystem` carries only `path` (`StorageUrl::prefix` returns "" for
         // it), so the path IS the location.
         U::Filesystem { path } => format!("file://{}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`RECEIPTS_PREFIX`] and [`RECEIPT_SUFFIX`] are the writer's own: the
+    /// key `logweir backup run` puts a receipt at starts with one and ends
+    /// with the other, and [`receipt_run_id`] reads the run id back out.
+    #[test]
+    fn the_receipt_prefix_is_the_one_the_backup_runner_writes_under() {
+        const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
+        for set in [
+            "nightly-7",
+            "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab-20260915T030000Z-r2",
+        ] {
+            let key = crate::backup::phase_run::receipt_keys(set, RUN).receipt_key;
+            assert!(key.starts_with(RECEIPTS_PREFIX), "{key}");
+            assert!(key.ends_with(RECEIPT_SUFFIX), "{key}");
+            assert_eq!(receipt_run_id(&key, set), Some(RUN), "{key}");
+        }
+    }
+
+    /// **FX-14.** Only the writer's key for THIS set confines: every other
+    /// spelling — another set, another prefix or tenant, a nested or relative
+    /// path, another object of the same run, an id that is not one plain
+    /// segment — is `None`, so a reader refuses it before any read.
+    #[test]
+    fn a_receipt_key_is_confined_to_its_own_sets_receipt_namespace() {
+        const SET: &str = "nightly-7";
+        for key in [
+            // another set's receipt, and a set whose id merely starts the same
+            "logweir/backups/nightly-8/run-1.receipt.json",
+            "logweir/backups/nightly-70/run-1.receipt.json",
+            // another prefix or tenant; an absolute spelling
+            "tenant-b/logweir/backups/nightly-7/run-1.receipt.json",
+            "/logweir/backups/nightly-7/run-1.receipt.json",
+            "logweir/drills/nightly-7/run-1.receipt.json",
+            // relative and nested paths
+            "logweir/backups/nightly-7/../nightly-8/run-1.receipt.json",
+            "logweir/backups/nightly-7/../../../tenant-b/secret.receipt.json",
+            "logweir/backups/nightly-7/sub/run-1.receipt.json",
+            "logweir/backups/nightly-7//run-1.receipt.json",
+            "logweir/backups/nightly-7/..receipt.json",
+            // not a receipt
+            "logweir/backups/nightly-7/run-1.receipt.sig",
+            "logweir/backups/nightly-7/execution.claim.json",
+            "logweir/backups/nightly-7/.receipt.json",
+            "logweir/catalog/v1/points/lwp1-0/record.json",
+            "kafka-backups/nightly-7/manifest.json",
+            // a run id the store would rewrite, or that hides a separator
+            "logweir/backups/nightly-7/run%2F1.receipt.json",
+            "logweir/backups/nightly-7/run\\1.receipt.json",
+            "logweir/backups/nightly-7/run?versionId=1.receipt.json",
+            "logweir/backups/nightly-7/run\t1.receipt.json",
+            "logweir/backups/nightly-7/run\n1.receipt.json",
+            // a run id that is not ASCII: a full-width digit, a combining
+            // accent, a no-break space, a division slash that looks like `/`
+            "logweir/backups/nightly-7/run-\u{ff11}.receipt.json",
+            "logweir/backups/nightly-7/ru\u{0301}n-1.receipt.json",
+            "logweir/backups/nightly-7/run\u{a0}1.receipt.json",
+            "logweir/backups/nightly-7/run\u{2215}1.receipt.json",
+            // whitespace around the whole key
+            " logweir/backups/nightly-7/run-1.receipt.json",
+            "logweir/backups/nightly-7/run-1.receipt.json ",
+            "",
+        ] {
+            assert_eq!(receipt_run_id(key, SET), None, "{key:?} is not confined");
+        }
+        // A set id that is not one plain segment confines nothing at all.
+        for set in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../nightly-7",
+            "nightly-7/",
+            "a%2Fb",
+            "nightly\t7",
+            "nightly\u{a0}7",
+            "nightly\u{ff0d}7",
+        ] {
+            let key = format!("{RECEIPTS_PREFIX}{set}/run-1{RECEIPT_SUFFIX}");
+            assert_eq!(receipt_run_id(&key, set), None, "set {set:?}");
+        }
+        // The control: the writer's own key, for its own set.
+        assert_eq!(
+            receipt_run_id("logweir/backups/nightly-7/run-1.receipt.json", SET),
+            Some("run-1")
+        );
+    }
+
+    /// **FX-14 review M1.** A space is plain, so a set id and a run id may
+    /// hold one, and the confinement is still of BYTES: for the set
+    /// `nightly 7` the one key that confines is the writer's, and nothing
+    /// that only looks like it does — the id with a space before or after it,
+    /// a tab or a no-break space where the space is, the space spelled `%20`
+    /// or `+`, two spaces for one.
+    #[test]
+    fn a_set_id_with_a_space_confines_its_own_key_and_no_look_alike() {
+        const SET: &str = "nightly 7";
+        let key = crate::backup::phase_run::receipt_keys(SET, "run 1").receipt_key;
+        assert_eq!(key, "logweir/backups/nightly 7/run 1.receipt.json");
+        assert_eq!(receipt_run_id(&key, SET), Some("run 1"));
+        assert_eq!(
+            receipt_run_id("logweir/backups/nightly 7/run-1.receipt.json", SET),
+            Some("run-1")
+        );
+        for look_alike in [
+            // the set segment
+            "logweir/backups/nightly 7 /run 1.receipt.json",
+            "logweir/backups/ nightly 7/run 1.receipt.json",
+            "logweir/backups/nightly\t7/run 1.receipt.json",
+            "logweir/backups/nightly\u{a0}7/run 1.receipt.json",
+            "logweir/backups/nightly%207/run 1.receipt.json",
+            "logweir/backups/nightly+7/run 1.receipt.json",
+            "logweir/backups/nightly  7/run 1.receipt.json",
+            "logweir/backups/nightly7/run 1.receipt.json",
+            // the run segment: not a plain segment at all
+            "logweir/backups/nightly 7/run\t1.receipt.json",
+            "logweir/backups/nightly 7/run\u{a0}1.receipt.json",
+            "logweir/backups/nightly 7/run%201.receipt.json",
+            // the key as a whole
+            " logweir/backups/nightly 7/run 1.receipt.json",
+            "logweir/backups/nightly 7/run 1.receipt.json ",
+            "logweir/backups /nightly 7/run 1.receipt.json",
+            "logweir /backups/nightly 7/run 1.receipt.json",
+        ] {
+            assert_eq!(
+                receipt_run_id(look_alike, SET),
+                None,
+                "{look_alike:?} is not set {SET:?}'s receipt"
+            );
+        }
+        // And the other way about: the spaced key is no receipt of the id
+        // that merely looks like it.
+        for other in [
+            "nightly-7",
+            "nightly7",
+            "nightly 7 ",
+            " nightly 7",
+            "nightly  7",
+        ] {
+            assert_eq!(receipt_run_id(&key, other), None, "set {other:?}");
+        }
+    }
+
+    /// What the store's OWN path type makes of `segment`: `true` when it keeps
+    /// it as one segment, unchanged, alone and inside a receipt key — which is
+    /// what "the store addresses it exactly as written" means.
+    fn the_store_addresses_as_written(segment: &str) -> bool {
+        use object_store::path::Path;
+        let alone = Path::from(segment);
+        let key = format!("{RECEIPTS_PREFIX}{segment}/run-1{RECEIPT_SUFFIX}");
+        let in_a_key = Path::from(key.as_str());
+        alone.parts().count() == 1
+            && alone.to_string() == segment
+            && in_a_key.parts().count() == 4
+            && in_a_key.to_string() == key
+    }
+
+    /// The printable ASCII a plain segment may not hold, with what the store's
+    /// path type makes of `a<byte>b`:
+    ///
+    /// | byte | `Path::from("a<byte>b")` | why it is not plain |
+    /// |---|---|---|
+    /// | `/` | `a/b`, two segments | a separator |
+    /// | `"` `#` `%` `*` `<` `>` `?` `[` `\` `]` `^` `` ` `` `{` `\|` `}` `~` | `a%XXb` | rewritten |
+    ///
+    /// The other 33 ASCII bytes refused are the control characters (`0x00` to
+    /// `0x1F`, and `0x7F`), every one rewritten the same way.
+    const REFUSED_PRINTABLE: &[(u8, &str)] = &[
+        (b'"', "a%22b"),
+        (b'#', "a%23b"),
+        (b'%', "a%25b"),
+        (b'*', "a%2Ab"),
+        (b'/', "a/b"),
+        (b'<', "a%3Cb"),
+        (b'>', "a%3Eb"),
+        (b'?', "a%3Fb"),
+        (b'[', "a%5Bb"),
+        (b'\\', "a%5Cb"),
+        (b']', "a%5Db"),
+        (b'^', "a%5Eb"),
+        (b'`', "a%60b"),
+        (b'{', "a%7Bb"),
+        (b'|', "a%7Cb"),
+        (b'}', "a%7Db"),
+        (b'~', "a%7Eb"),
+    ];
+
+    /// **FX-14 review M1 — the rule, held to the store's own path type for
+    /// every ASCII byte.** [`is_plain_key_segment`] accepts a segment exactly
+    /// when `object_store::path::Path::from` keeps it as one segment,
+    /// unchanged: for each of the 128 ASCII bytes, alone, first, inside and
+    /// last in a segment. So no byte is accepted that the store rewrites, and
+    /// no byte is refused that it keeps.
+    ///
+    /// It also pins WHAT is accepted, so widening the rule fails here: the
+    /// space and the 77 printable bytes the path type keeps, 78 of 128; and
+    /// for each printable byte refused it holds the reason in
+    /// [`REFUSED_PRINTABLE`] to what the path type really does.
+    #[test]
+    fn a_plain_key_segment_is_one_the_store_addresses_as_written() {
+        use object_store::path::Path;
+        let mut accepted = Vec::new();
+        let mut refused = Vec::new();
+        for byte in 0u8..=127 {
+            let c = char::from(byte);
+            let inside = format!("a{c}b");
+            for segment in [
+                format!("{c}"),
+                format!("{c}a"),
+                inside.clone(),
+                format!("a{c}"),
+            ] {
+                assert_eq!(
+                    is_plain_key_segment(&segment),
+                    the_store_addresses_as_written(&segment),
+                    "byte 0x{byte:02x} in {segment:?}: the rule and the store's path type disagree"
+                );
+            }
+            if is_plain_key_segment(&inside) {
+                accepted.push(byte);
+            } else {
+                refused.push(byte);
+            }
+        }
+
+        // What is accepted: printable ASCII and the space, nothing else.
+        assert_eq!(accepted.len(), 78, "{accepted:?}");
+        assert_eq!(
+            accepted
+                .iter()
+                .copied()
+                .filter(|b| !b.is_ascii_graphic())
+                .collect::<Vec<_>>(),
+            vec![b' '],
+            "the space is the one accepted byte that is not a printing character"
+        );
+
+        // What is refused, and why: every control character is rewritten, and
+        // each printable byte does what the table says.
+        assert_eq!(refused.len(), 50, "{refused:?}");
+        let printable: Vec<u8> = refused
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_control())
+            .collect();
+        assert_eq!(
+            printable,
+            REFUSED_PRINTABLE
+                .iter()
+                .map(|(b, _)| *b)
+                .collect::<Vec<_>>(),
+            "the table names every printable byte the rule refuses, and no other"
+        );
+        for (byte, in_a_path) in REFUSED_PRINTABLE {
+            let segment = format!("a{}b", char::from(*byte));
+            let path = Path::from(segment.as_str());
+            assert_eq!(path.to_string(), *in_a_path, "{segment:?}");
+            if *byte == b'/' {
+                assert_eq!(path.parts().count(), 2, "a separator: {segment:?}");
+            } else {
+                assert_eq!(path.parts().count(), 1, "{segment:?}");
+                assert_ne!(path.to_string(), segment, "rewritten: {segment:?}");
+            }
+        }
+        for byte in refused.iter().copied().filter(u8::is_ascii_control) {
+            let segment = format!("a{}b", char::from(byte));
+            assert_eq!(
+                Path::from(segment.as_str()).to_string(),
+                format!("a%{byte:02X}b"),
+                "a control character is rewritten: 0x{byte:02x}"
+            );
+        }
+
+        // Whole-segment shapes, and what is not ASCII at all.
+        for (segment, plain) in [
+            ("", false),
+            (".", false),
+            ("..", false),
+            ("...", true),
+            (".a", true),
+            ("nightly 7", true),
+            // A space is kept wherever it stands, so these are addressed as
+            // written too. None of them is `.` or `..` to the store.
+            (" ", true),
+            ("  ", true),
+            (" a", true),
+            ("a ", true),
+            (" ..", true),
+            (".. ", true),
+            // Not ASCII: percent-encoded, every byte.
+            ("nightly\u{a0}7", false),
+            ("run-\u{ff11}", false),
+            ("re\u{0301}sume\u{0301}", false),
+            ("a\u{2215}b", false),
+            ("\u{ff0e}\u{ff0e}", false),
+            ("run-1\u{200b}", false),
+        ] {
+            assert_eq!(is_plain_key_segment(segment), plain, "{segment:?}");
+            assert_eq!(
+                the_store_addresses_as_written(segment),
+                plain,
+                "{segment:?}: the store's path type"
+            );
+        }
     }
 }
