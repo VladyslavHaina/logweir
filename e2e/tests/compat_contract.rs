@@ -1322,6 +1322,23 @@ fn redpanda_backs_up_and_refuses_a_restore_before_it_starts() {
         "a restore that could not write signs NOTHING: {:?}",
         g.scorecard
     );
+    // PHASE 0 RECORDED NO TIMESTAMP TYPE FOR IT. The drill got past phase 0
+    // (it failed in the engine), and phase 0 read this broker's nine keys:
+    // it says the type is not recorded, and nothing in the run's output
+    // claims `CreateTime` was observed.
+    assert!(
+        g.drill_output
+            .contains("does not report log.message.timestamp.type"),
+        "phase 0 says the target did not report its timestamp type:\n{}",
+        tail(&g.drill_output, 3000)
+    );
+    assert!(
+        !g.drill_output.contains("\"timestampType\":\"CreateTime\""),
+        "a timestamp type Redpanda never reported is written down as CreateTime:\n{}",
+        tail(&g.drill_output, 3000)
+    );
+    seen["restore"]["phase_0_timestamp_type"] = json!("not recorded: the broker did not report it");
+
     // The engine's own account names no version: this is why the check does.
     let engine_said = g
         .drill_output
