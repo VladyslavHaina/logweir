@@ -2164,6 +2164,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a restore under the original topic names",
             "--approval-subject original-name",
         ),
+        // FX-48 (2026-10-10, item 57): the shared console shows what the
+        // product API publishes; the sentence a cell carries for a value the
+        // API does not publish, which an operator will read on the Restore
+        // detail.
+        (
+            "the shared console shows what the product API publishes",
+            "not published by the product API",
+        ),
     ];
     assert_eq!(
         items.len(),

@@ -278,3 +278,27 @@ entries, which `crates/logweir-api/tests/d3_reads.rs`
 (`the_point_view_publishes_each_topics_schema_dependency`) seeds and compares; and
 `schema-dependency.spec.js` renders `pointTopics` in the catalog page and the restore wizard. A
 change on any side fails the side that changed.
+
+`pointTopics` is WIRE data, and since FX-48 it reaches a renderer only the way it reaches a page:
+inside a `PointPageResponse` the row builds, holds to the published schema and reads with
+`readCatalogPoints`. Until then the rows handed it straight to the renderers, and the console's
+decoder, which did not declare `schemaDependency`, dropped it on a live install while every row
+passed. The file is the one console fixture that is not one document of the product API, and
+`console-fixture.js` lists it as such.
+
+## Every console fixture is listed, with its schema (`../console-fixture.js`, FX-48)
+
+`console-fixture.js` holds the one table of the files under `console/`: the schema each is an
+instance of, and the decoder the console's own read applies to the route that answers it.
+`contract-coverage.spec.js` fails when a file is in the directory and not in the table (or the
+other way round), when a file is not an instance of its schema, and when a decode loses a member
+of it. Eleven of the eighty-three files were held to no schema before that table existed. Ten were
+instances; `console/preflight-binding-mismatch.json` was not (it carried no `requestId`,
+`item.uid` or `item.resourceVersion`) and now does. The three Rust rows that read it
+(`crates/logweir-api/tests/destinations.rs`, `crates/weirkeeper/tests/preflight_controller.rs`,
+`crates/logweir/tests/check_grant_binding.rs`) read single members of `item`, none of them one of
+those three.
+
+A spec takes `wire(name)` for a transport answer, or to change one fact before the document is
+decoded, and `decoded(name)` for anything a page function is handed. `wireItem(name)` is the
+`item` of a wire document, for composing another one.
