@@ -42,7 +42,9 @@ import {
   CLUSTER_FIELD_PATHS,
   CLUSTER_FORM,
   clusterBody,
+  renderClusterDetail,
 } from "../pages/clusters.js";
+import { NOT_PUBLISHED } from "../render.js";
 import { preparePlanDocument } from "../plan.js";
 import { decodeRequest, isContractFailure } from "../contract.js";
 
@@ -238,6 +240,65 @@ test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_
   } finally {
     wire.restore();
   }
+});
+
+/** The cell beside `label` in a rendered fact list, as its text. */
+function factText(html, label) {
+  const at = html.indexOf("<dt>" + label + "</dt>");
+  assert.notEqual(at, -1, "the detail carries a `" + label + "` fact");
+  const from = html.indexOf("<dd>", at) + 4;
+  return html.slice(from, html.indexOf("</dd>", from)).replace(/<[^>]*>/g, "").trim();
+}
+
+test("fx48_a_shared_console_connection_says_its_credential_key_is_not_published", async () => {
+  // THE SAME CLASS AS THE RESTORE DETAIL'S INTEGRITY TABLE (PoC batch 6, F-4),
+  // on a second page. `ConnectionAuthView` publishes the credential Secret's
+  // NAME and never its data key, and the projection says so on the object
+  // (`__contract.absent`, the row above). The detail read the key off the
+  // projected object, found none, and printed "- (absent means the key every
+  // earlier release projected)": a statement about the KafkaCluster object,
+  // which may well name a key, made from a document that cannot carry one.
+  await console_();
+  const wire = transport(() => ({ status: 200, body: fixture("console/connections-list.json") }));
+  let first;
+  try {
+    first = (await apiClient().list("team-a", "kafkaclusters")).items[0];
+  } finally {
+    wire.restore();
+  }
+  assert.equal(first.spec.auth.secretRef.name, "orders-scram");
+  const shared = renderClusterDetail(first, Date.parse("2026-09-12T00:00:00Z"), 900);
+  assert.equal(factText(shared, "credential Secret"), "orders-scram");
+  assert.equal(factText(shared, "credential key"), NOT_PUBLISHED,
+    "a shared console is never sent the data key: the cell says so, and does not say the " +
+      "object has none");
+  assert.equal(shared.indexOf("absent means the key"), -1);
+  assert.match(shared, /data-not-published="spec\.auth\.secretRef\.passwordKey"/);
+
+  // CONTROL 1: THE CUSTOM RESOURCE ITSELF, behind `kubectl proxy`. There an
+  // absent key IS a fact about the object, and the cell says what it always
+  // said; a key that is set is printed.
+  const resource = fixture("cluster-scram.json");
+  assert.equal(resource.spec.auth.secretRef.passwordKey, undefined);
+  const legacyDetail = renderClusterDetail(resource, Date.parse("2026-09-12T00:00:00Z"), 900);
+  assert.equal(factText(legacyDetail, "credential key"),
+    "- (absent means the key every earlier release projected)");
+  assert.equal(legacyDetail.indexOf(NOT_PUBLISHED), -1);
+  resource.spec.auth.secretRef.passwordKey = "sasl-pw";
+  assert.equal(
+    factText(renderClusterDetail(resource, Date.parse("2026-09-12T00:00:00Z"), 900),
+      "credential key"),
+    "sasl-pw");
+
+  // CONTROL 2: A SHARED-CONSOLE CONNECTION WITH NO CREDENTIAL SECRET has no
+  // key to publish: the cell is the empty one, not the sentence.
+  const bare = JSON.parse(JSON.stringify(first));
+  bare.__contract = first.__contract;
+  delete bare.spec.auth.secretRef;
+  assert.equal(
+    factText(renderClusterDetail(bare, Date.parse("2026-09-12T00:00:00Z"), 900),
+      "credential key"),
+    "-");
 });
 
 test("a_schedule_s_destination_and_its_dynamic_selection_are_projected_and_absence_is_kept", async () => {

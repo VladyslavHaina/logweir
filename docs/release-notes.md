@@ -2327,7 +2327,11 @@ or a signed document changes.
   with one sentence saying the values are on the `Restore` object and (for
   the scorecard's) in the signed scorecard the page's own commands fetch,
   where `-` read as "none recorded". Behind `kubectl proxy` the page reads
-  the object itself and shows what it always showed.
+  the object itself and shows what it always showed. The detail of a
+  connection that names a credential Secret says the same of the Secret's
+  data key, which the API does not publish either; it read `- (absent means
+  the key every earlier release projected)`, which is a statement about an
+  object the shared console is not sent.
 - **An original-name restore (item 56) could not be submitted from the
   console.** The page's own check required a non-empty prefix of every
   `Restore`, so the wizard's request was refused before the network ("this
@@ -2356,7 +2360,7 @@ answer is decoded by the shape the document publishes for it, and every body
 the console sends is an instance of the route's request schema; every console
 fixture is an instance of its schema and survives its decoder; every member a
 projected read decodes reaches what the page is handed, or is named with why
-not; and no test takes a member from an undecoded fixture. 26 mutants of the
+not; and no test takes a member from an undecoded fixture. 28 mutants of the
 console and the checks are killed. **Not proven on an install:** batch 6's two
 failed rows re-run at the next PoC upgrade, and item 56's console journey has
 run on none; the product API still publishes no integrity result or partial

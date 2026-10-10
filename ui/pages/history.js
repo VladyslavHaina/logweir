@@ -74,6 +74,9 @@ import {
   summaryBadge,
   listVerifiedNote,
   when,
+  NOT_PUBLISHED,
+  notPublishedCell,
+  notPublishedIn,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
@@ -541,10 +544,12 @@ export function unrecordedTimeBasisWarning(timeBasis) {
       "point, records it.") + "</p>";
 }
 
-/** What a Restore detail's cell says for a value the controller keeps on the
- *  Restore object and the product API serving this console does not publish
- *  (FX-48, PoC batch 6 F-4). */
-export const NOT_PUBLISHED = "not published by the product API";
+// WHAT A RESTORE DETAIL'S CELL SAYS FOR A VALUE THE CONTROLLER KEEPS ON THE
+// RESTORE OBJECT AND THE PRODUCT API SERVING THIS CONSOLE DOES NOT PUBLISH
+// (FX-48, PoC batch 6 F-4). The words and the test for "not published" are
+// `ui/render.js`'s, shared with the connection detail; they are exported from
+// here too, where the rows of this view read them.
+export { NOT_PUBLISHED, notPublishedIn };
 
 /** Said once, under the Integrity table, when any cell of the view reads
  *  [`NOT_PUBLISHED`]. */
@@ -554,18 +559,6 @@ export const NOT_PUBLISHED_SENTENCE =
   "does not publish, so this page cannot say whether one is recorded. The integrity result " +
   "and partial reason, the objectives and the measured values are also in the run's signed " +
   "scorecard, which the commands under Check it yourself fetch and verify.";
-
-/** Whether a console projection names `field`, or a block that holds it, among
- *  the fields it could not supply (`__contract.absent`, `ui/client.js`). False
- *  for a custom resource: in legacy mode an absent field is one the controller
- *  did not record, and the cell says "-" as it always has. */
-export function notPublishedIn(object, field) {
-  const absent = ((object || {}).__contract || {}).absent;
-  if (!Array.isArray(absent)) {
-    return false;
-  }
-  return absent.some((named) => field === named || field.indexOf(named + ".") === 0);
-}
 
 /** One Restore, in full. With `operation`, the view opens with where the
  *  operation stands (see [`renderRestoreOperation`]). */
@@ -604,8 +597,7 @@ export function renderRestoreDetail(object, operation) {
   const shown = (field, value, render) => {
     if ((value === undefined || value === null) && notPublishedIn(object, field)) {
       unpublished = true;
-      return "<span class=\"note\" data-not-published=\"" + esc(field) + "\">" +
-        esc(NOT_PUBLISHED) + "</span>";
+      return notPublishedCell(field);
     }
     return render(value);
   };

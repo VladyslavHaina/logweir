@@ -557,6 +557,16 @@ page reads the object and `-` keeps meaning "not recorded". A console
 projection's verification scope is the API's own block or none: it is not
 derived from the projected level.
 
+**So does the connection detail, for the credential key (FX-48).** The detail
+of a connection that names a credential Secret read `- (absent means the key
+every earlier release projected)` in a shared console: a statement about the
+`KafkaCluster` object, made from a document that never carries the Secret's
+data key. That cell now reads **not published by the product API** too; behind
+`kubectl proxy`, where the page reads the object, it says what it said. The
+words and the test for "this projection names the field absent" are
+`ui/render.js`'s (`NOT_PUBLISHED`, `notPublishedIn`, `notPublishedCell`), one
+definition for both views.
+
 **A list row's verdict in console mode.** A list item carries the API's
 `OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
 computed with the controller's own green-badge rule -- and no key id, instant
