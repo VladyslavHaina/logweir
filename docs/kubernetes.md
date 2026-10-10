@@ -5941,7 +5941,7 @@ and cleans it before it is stored:
 | The message ends with | It means |
 |---|---|
 | *(nothing after `…exitCode`)* | The runner printed no `refusal-detail=` line: it predates this release. The pod log, while it exists, has the sentence. |
-| `; the runner gave no readable reason: its ``refusal-detail=`` line did not validate, so nothing from it is shown` | The line was there and was not what a runner prints: a bad code, not the two-member JSON object, or longer than 2048 bytes. |
+| ``; the runner gave no readable reason: its `refusal-detail=` line did not validate, so nothing from it is shown`` | The line was there and was not what a runner prints: a bad code, not the two-member JSON object, or longer than 2048 bytes. |
 | `; the runner's reason could not be read because the pod is gone` | The pod was already collected when the controller read its log (a `404`). The exit code was read before that and is recorded. |
 | `; the runner's reason could not be read: the pod log read answered HTTP 403` (or `500`, …) | The read was refused or failed. The controller logs one warning naming the pod and the status, and does not read again. |
 | `; the runner's reason could not be read: the last 32 lines of the pod log are over the 512 KiB this controller reads` | Possible only on a runtime that stores log lines longer than CRI's default 16 KiB. Nothing is taken from a log that was cut, the terminal state included (`exitReason: GuardRefusedUnknownReason`). |
