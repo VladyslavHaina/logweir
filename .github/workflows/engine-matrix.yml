@@ -60,6 +60,13 @@ jobs:
           - { tag: v0.19.1, kafka: 3.7.1, floor: below, expect: "unsupported(lever-absent)" }
     steps:
       - uses: actions/checkout@v4
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
       - name: free disk space (MinIO refuses writes below its free-space floor)
         run: |
           df -h /
