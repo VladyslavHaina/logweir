@@ -211,6 +211,14 @@ pub const REASON_POD_CREATION_FORBIDDEN: &str =
 pub const REASON_UNATTENDED: &str = "UnattendedDeletionEnabled";
 /// `Enforced=False`: there is nothing to delete.
 pub const REASON_NOTHING_TO_DO: &str = "NothingToDo";
+/// `Enforced=False`: points are due and the plan is empty, because not one of
+/// them fits the per-run ceiling (FX-22 review L1). Each is in a backup set
+/// that more due points name than `spec.enforcement.maxDeletionsPerRun`, a set
+/// is planned whole or not at all, and so no plan names them until the ceiling
+/// is raised. NOT [`REASON_NOTHING_TO_DO`]: "the evaluation found nothing to
+/// remove" beside a held-back count above zero is the defect FX-22 is about,
+/// on the one condition an operator reads to learn why nothing is deleted.
+pub const REASON_NOTHING_FITS_CEILING: &str = "NothingFitsCeiling";
 /// `Enforced=False`: a Job of this run's name exists and is not ours.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
 /// `Enforced=False`: the destination has no `spec.access.evidenceWrite` grant
@@ -255,6 +263,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_POD_CREATION_FORBIDDEN,
     REASON_UNATTENDED,
     REASON_NOTHING_TO_DO,
+    REASON_NOTHING_FITS_CEILING,
     REASON_JOB_NAME_CONFLICT,
     REASON_EVIDENCE_GRANT_UNUSABLE,
     REASON_DECLARED_EXPIRY_CONFLICTS,
@@ -1489,10 +1498,11 @@ impl Pass<'_> {
         }
 
         // The catalog view: the pages the `RecoveryCatalog` published.
-        let entries = match self.view_entries().await? {
-            Ok(entries) => entries,
+        let view = match self.view_entries().await? {
+            Ok(view) => view,
             Err(message) => return self.publish_view_failure(&message).await,
         };
+        let entries = &view.entries;
 
         let location_id = resolved.canonical_url.clone();
         let dest = plan::Destination {
@@ -1581,10 +1591,17 @@ impl Pass<'_> {
         // landing published, and the `Evaluated` condition says so.
         self.publish_evaluation(
             &evaluation,
+            &EvaluationBounds {
+                max_deletions_per_run: max_deletions,
+                view_truncated: view.truncated,
+                walk_complete: view.walk_complete,
+                catalog_total: view.total,
+                view_entries: view.entries.len(),
+                segments_visible: points.iter().any(|p| !p.segment_keys.is_empty()),
+            },
             &plan_sha256,
             &window,
             &decision,
-            &points,
             self.policy
                 .spec
                 .enforcement
@@ -1805,8 +1822,10 @@ impl Pass<'_> {
     /// `Ok(Err(message))` is "the view is not readable right now", which is an
     /// `Evaluated=False` status and NOT a reconcile error: a retention
     /// evaluation failure must never block anything, least of all a backup.
-    #[allow(clippy::type_complexity)]
-    async fn view_entries(&self) -> Result<Result<Vec<ViewEntry>, String>, ReconcileError> {
+    ///
+    /// The entries come back WITH what the catalog said about the view's own
+    /// bound ([`CatalogView`]), so the evaluation can say it too (FX-22).
+    async fn view_entries(&self) -> Result<Result<CatalogView, String>, ReconcileError> {
         let catalogs: Api<RecoveryCatalog> =
             Api::namespaced(self.ctx.client.clone(), &self.namespace);
         let name = &self.policy.spec.catalog_ref.name;
@@ -1902,7 +1921,15 @@ impl Pass<'_> {
                 }
             }
         }
-        Ok(Ok(entries))
+        let status = catalog.status.as_ref();
+        Ok(Ok(CatalogView {
+            entries,
+            truncated: status.and_then(|s| s.truncated),
+            walk_complete: status
+                .and_then(|s| s.cursor.as_ref())
+                .and_then(|c| c.complete),
+            total: status.and_then(|s| s.counts).and_then(|c| c.total),
+        }))
     }
 
     /// The controller-supplied protection set: every nonterminal `Restore` that
@@ -2684,6 +2711,26 @@ impl Pass<'_> {
             };
         }
         if evaluation.candidates.is_empty() {
+            // AN EMPTY PLAN BESIDE HELD-BACK POINTS IS NOT "NOTHING TO REMOVE"
+            // (FX-22 review L1). The rules would remove `truncated_by_cap`
+            // points and the ceiling left every one of them out, which only
+            // happens when each is in a group larger than the ceiling (a
+            // backup set, or sets linked by an object they share). This
+            // policy will delete nothing, on any firing, until someone raises
+            // the ceiling, and `Enforced` is where an operator looks to learn
+            // why nothing is deleted. Text and reason only: the plan is the
+            // evaluation's, and it is empty either way.
+            if evaluation.truncated_by_cap > 0 {
+                return EnforcementDecision {
+                    start: false,
+                    enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                    reason: REASON_NOTHING_FITS_CEILING,
+                    message: nothing_fits_ceiling_message(
+                        evaluation.truncated_by_cap,
+                        i64::from(enforcement.max_deletions_per_run),
+                    ),
+                };
+            }
             return EnforcementDecision {
                 start: false,
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
@@ -2829,10 +2876,10 @@ impl Pass<'_> {
     async fn publish_evaluation(
         &self,
         evaluation: &plan::Evaluation,
+        bounds: &EvaluationBounds,
         plan_sha256: &str,
         window: &PlanWindow,
         decision: &EnforcementDecision,
-        points: &[PointFacts],
         credential_binding: Option<String>,
     ) -> Result<PatchOutcome, ReconcileError> {
         let candidates: Vec<Value> = evaluation
@@ -2903,7 +2950,7 @@ impl Pass<'_> {
         // two points share is not removed with one of them" — covers that
         // case. `LogweirEnforced` would claim it; the Evaluated message says
         // exactly which half is in force instead.
-        let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
+        let segments_visible = bounds.segments_visible;
         // FX-20c (the class sweep): a binding refusal the newest run reached
         // STANDS while the decision would enforce again — on the condition AND
         // on the two fields the console reads (review M-1): only a human
@@ -2957,12 +3004,18 @@ impl Pass<'_> {
                 REASON_EVALUATION_COMPLETE,
                 format!(
                     "{} point(s) evaluated at this destination: {} kept, {} candidate(s), {} \
-                     protected, {} skipped.{}{}",
+                     protected, {} skipped.{}{}{}{}",
                     evaluation.points_evaluated,
                     evaluation.kept.len(),
                     evaluation.candidates.len(),
                     evaluation.protected.len(),
                     evaluation.skipped.len(),
+                    // WHAT THE TWO BOUNDS LEFT OUT, SAID ON THE OBJECT (FX-22).
+                    // "N kept, 50 candidate(s)" read as the whole of it while
+                    // the per-run ceiling held back 311 more, and while the
+                    // catalog's view was a window over a larger archive.
+                    bounds.held_back_sentence(evaluation),
+                    bounds.view_sentence(&self.policy.spec.catalog_ref.name),
                     if segments_visible {
                         ""
                     } else {
@@ -2980,8 +3033,15 @@ impl Pass<'_> {
                         format!(
                             " candidates[].objects is omitted rather than guessed, and \
                              `logweir-retention --dry-run` enumerates the real count. \
-                             {} point(s) would be removed.",
-                            evaluation.candidates.len()
+                             {} point(s) would be removed{}.",
+                            evaluation.candidates.len(),
+                            // NOT "N would be removed" ALONE when the ceiling
+                            // cut the plan: N is this plan, not the rules.
+                            if evaluation.truncated_by_cap > 0 {
+                                " by this plan"
+                            } else {
+                                ""
+                            }
                         )
                     }
                 ),
@@ -3057,10 +3117,23 @@ impl Pass<'_> {
         // comes out the same, and moves with the first evaluation that finds
         // something different (`keep_instant_unless_changed`, compared on what
         // the API server will store).
+        //
+        // THE FOUR COUNTS CLOSE (FX-22): `pointsEvaluated` = `keptCount` +
+        // `candidateCount` + `truncatedByCap` + the points in `skipped`. A
+        // point the per-run ceiling held back is in `truncatedByCap` and in
+        // NO list: it is not kept, and it is not in this plan. `0` is written
+        // for "nothing was held back" — an answer, where an absent member is
+        // "an older controller did not say" (D3 §12) — and `viewIncomplete`
+        // is `null`, which a merge patch reads as "remove", when the catalog
+        // did not say whether its view holds every point.
         let mut last_evaluation = json!({
             "at": self.ctx.now,
             "pointsEvaluated": evaluation.points_evaluated,
+            "keptCount": i64::try_from(evaluation.kept.len()).unwrap_or(i64::MAX),
             "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
+            "truncatedByCap": evaluation.truncated_by_cap,
+            "maxDeletionsPerRun": bounds.max_deletions_per_run,
+            "viewIncomplete": bounds.view_incomplete(),
             "kept": evaluation.kept,
             "candidates": candidates,
             "protected": protected,
@@ -3082,13 +3155,24 @@ impl Pass<'_> {
             "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
             "planExpiresAt": window.expires_at,
         });
-        keep_instant_unless_changed(
+        // A MEMBER THE STORED BLOCK DOES NOT CARRY NEVER MOVES THE INSTANT
+        // (FX-22, and FX-29's rule kept under version skew). The four members
+        // above are new. Over a CRD that predates them the API server PRUNES
+        // them from every write, so the stored block never has them, "the
+        // block changed" would be true on every pass, `at` would move on
+        // every pass, and that write — a real one, the instant differs — is
+        // the watch event that starts the next pass: FX-29's hot loop, for
+        // every policy, for as long as the controller is ahead of its CRD.
+        // They are compared as already stored. The patch still carries them,
+        // so a CRD that knows them stores them once; one that does not prunes
+        // them and the write changes nothing.
+        let stored = stored_for_instant(
             self.observed()
                 .as_ref()
                 .and_then(|status| status.get("lastEvaluation")),
-            &mut last_evaluation,
-            "at",
+            &last_evaluation,
         );
+        keep_instant_unless_changed(stored.as_ref(), &mut last_evaluation, "at");
         let mut status = json!({
             "enforcement": enforcement,
             "guarantees": guarantees,
@@ -3614,6 +3698,183 @@ impl Pass<'_> {
     }
 }
 
+/// The catalog view one evaluation read, with what the catalog said about the
+/// view's own bounds (FX-22).
+struct CatalogView {
+    /// Every entry of every published page.
+    entries: Vec<ViewEntry>,
+    /// `RecoveryCatalog.status.truncated`: whether the view is a window over
+    /// an archive that holds more points. `None` when the catalog did not say.
+    truncated: Option<bool>,
+    /// `RecoveryCatalog.status.cursor.complete`: whether the walk that built
+    /// the view finished, or stopped on its object budget
+    /// (`Synced=False/ScanIncomplete`) with the pages published anyway.
+    walk_complete: Option<bool>,
+    /// `RecoveryCatalog.status.counts.total`: every point the walk saw.
+    total: Option<i64>,
+}
+
+/// What bounded one evaluation beside the rules — the facts that make its
+/// counts a complete account, or say why they are not (FX-22).
+///
+/// **A bound that cut a computation is published with the result it cut.**
+/// The per-run ceiling cut the plan at 50 points and the status said "321
+/// kept, 50 candidate(s)" for `keepLast: 300` and `keepLast: 10` alike; the
+/// catalog's view is a window of `spec.sync.viewLimit` points, or the pages of
+/// a walk its object budget stopped, and the evaluation of an archive larger
+/// than either read `EvaluationComplete` with nothing saying that the points
+/// outside the view were never looked at.
+struct EvaluationBounds {
+    /// The per-run point ceiling `plan::evaluate` applied.
+    max_deletions_per_run: i64,
+    /// [`CatalogView::truncated`].
+    view_truncated: Option<bool>,
+    /// [`CatalogView::walk_complete`].
+    walk_complete: Option<bool>,
+    /// [`CatalogView::total`].
+    catalog_total: Option<i64>,
+    /// How many entries the view held.
+    view_entries: usize,
+    /// Whether any point carried its segment keys — see `sharedSegments` in
+    /// [`Pass::publish_evaluation`].
+    segments_visible: bool,
+}
+
+impl EvaluationBounds {
+    /// The `Evaluated` message's sentence about the per-run ceiling. Empty
+    /// when the ceiling held nothing back, so a plan under it reads as it
+    /// always did.
+    ///
+    /// WHEN THE PLAN IS EMPTY THE SENTENCE DOES NOT PROMISE A LATER PLAN (FX-22
+    /// review L1). A plan that names nothing while points are due means not
+    /// one of them fits: each is in a backup set that more due points name
+    /// than the ceiling, and a set is planned whole or not at all. The next
+    /// evaluation finds the same sets over the same ceiling, so "they stay due
+    /// until a later plan names them" was a promise nothing keeps; the remedy
+    /// is the ceiling, and the sentence names it.
+    fn held_back_sentence(&self, evaluation: &plan::Evaluation) -> String {
+        if evaluation.truncated_by_cap <= 0 {
+            return String::new();
+        }
+        if evaluation.candidates.is_empty() {
+            return format!(
+                " {} point(s) are due under the rules and held back by the per-run ceiling \
+                 (maxDeletionsPerRun {}): they are not kept, and this plan is empty because not \
+                 one of them fits. Each is in a backup set that more due points name than the \
+                 ceiling (sets that share objects count as one), a set is planned whole or not \
+                 at all, and no plan names them until maxDeletionsPerRun is raised.",
+                evaluation.truncated_by_cap, self.max_deletions_per_run
+            );
+        }
+        format!(
+            " {} more point(s) are due under the rules and held back by the per-run ceiling \
+             (maxDeletionsPerRun {}): they are not kept and not in this plan, and they stay due \
+             until a later plan names them.",
+            evaluation.truncated_by_cap, self.max_deletions_per_run
+        )
+    }
+
+    /// `status.lastEvaluation.viewIncomplete`: `Some(true)` when the catalog
+    /// said its view does not hold every point — a window, or an unfinished
+    /// walk; `Some(false)` only when it said BOTH that the walk finished and
+    /// that the view is whole; `None` when it did not say. An unknown half
+    /// never reads as "whole".
+    fn view_incomplete(&self) -> Option<bool> {
+        if self.view_truncated == Some(true) || self.walk_complete == Some(false) {
+            return Some(true);
+        }
+        (self.view_truncated == Some(false) && self.walk_complete == Some(true)).then_some(false)
+    }
+
+    /// The `Evaluated` message's sentences about a catalog view that does not
+    /// hold every point. Empty unless the catalog said so.
+    fn view_sentence(&self, catalog: &str) -> String {
+        let mut out = String::new();
+        if self.view_truncated == Some(true) {
+            let counted = match self.catalog_total {
+                Some(total) => format!(
+                    "RecoveryCatalog {catalog} counted {total} point(s) and its view holds {}",
+                    self.view_entries
+                ),
+                None => format!(
+                    "RecoveryCatalog {catalog} reports status.truncated and its view holds {}",
+                    self.view_entries
+                ),
+            };
+            // `status.truncated` HAS MORE THAN ONE CAUSE (FX-22 review L4).
+            // The catalog sets it when the archive holds more points than
+            // `spec.sync.viewLimit`, and also when it left entries out for
+            // page space, when one entry was too large for a page, and when
+            // the walk counted rows it then merged as duplicates
+            // (`catalog_view::materialise`). Raising `viewLimit` helps the
+            // first and none of the others, so the remedy is named with its
+            // condition instead of as the answer.
+            out.push_str(&format!(
+                " The catalog view is a window: {counted}. The points outside it were not \
+                 evaluated, are in none of these counts, and are never candidates while they \
+                 stay outside the view. Raising spec.sync.viewLimit brings them in only when \
+                 the limit is what cut the view: the catalog also reports status.truncated \
+                 when it left entries out for page space or as too large for one page, and \
+                 when it merged duplicate rows."
+            ));
+        }
+        if self.walk_complete == Some(false) {
+            out.push_str(&format!(
+                " The catalog view is incomplete: RecoveryCatalog {catalog}'s walk stopped on \
+                 its object budget before it finished (status.cursor.complete is false) and its \
+                 view holds {} point(s). The points the walk has not reached were not \
+                 evaluated, are in none of these counts, and are never candidates until a sync \
+                 reaches them.",
+                self.view_entries
+            ));
+        }
+        out
+    }
+}
+
+/// The `lastEvaluation` members FX-22 added. Each is additive: a status
+/// written before them does not carry them, and a CRD that predates them
+/// prunes them.
+pub const ADDITIVE_EVALUATION_FIELDS: [&str; 4] = [
+    "keptCount",
+    "truncatedByCap",
+    "maxDeletionsPerRun",
+    "viewIncomplete",
+];
+
+/// `stored` as the "did the findings change?" comparison should see it: with
+/// every [`ADDITIVE_EVALUATION_FIELDS`] member it lacks taken from `next`.
+///
+/// So a block that differs from the stored one ONLY by members the stored one
+/// does not carry keeps its instant — see the call site for why that is the
+/// difference between one write and a hot loop. A member the stored block
+/// does carry is compared as usual, and a `null` in `next` (a merge patch's
+/// "remove") is not copied: there is nothing to remove from a block that
+/// lacks it.
+///
+/// THE COST, STATED: "the stored block lacks it" is also what a newer block
+/// looks like before a catalog first says whether its view is a window, so
+/// `viewIncomplete` appearing does not move `at` on its own. A readable view
+/// always comes with the catalog's `status.truncated` and `status.cursor`
+/// (the catalog writes them with its pages), so that transition does not
+/// arise from a view this controller evaluates; and the member cannot be left
+/// out of the list, because over an older CRD it is pruned like the other
+/// three.
+#[must_use]
+pub fn stored_for_instant(stored: Option<&Value>, next: &Value) -> Option<Value> {
+    let mut stored = stored?.clone();
+    let fields = stored.as_object_mut()?;
+    for key in ADDITIVE_EVALUATION_FIELDS {
+        if fields.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = next.get(key).filter(|v| !v.is_null()) {
+            fields.insert(key.to_string(), value.clone());
+        }
+    }
+    Some(stored)
+}
+
 /// What a finished retention run reported about itself.
 ///
 /// Parsed from the worker's `retention-point=` / `retention-record=` /
@@ -3788,6 +4049,37 @@ pub struct EnforcementDecision {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// `Enforced=False/NothingFitsCeiling`'s message: how many points are due,
+/// the ceiling none of them fits, and what to change (FX-22 review L1).
+///
+/// `due` points in all are held back, so a ceiling of `due` fits every one of
+/// them in one plan; the field's own maximum is 500, and a backlog larger than
+/// that goes set by set.
+#[must_use]
+pub fn nothing_fits_ceiling_message(due: i64, ceiling: i64) -> String {
+    let remedy = if due <= i64::from(MAX_DELETIONS_PER_RUN_LIMIT) {
+        format!(
+            "Raise spec.enforcement.maxDeletionsPerRun to at least the number of points that \
+             name the smallest of those sets; {due} fits all of them"
+        )
+    } else {
+        format!(
+            "Raise spec.enforcement.maxDeletionsPerRun (at most {MAX_DELETIONS_PER_RUN_LIMIT}) \
+             to at least the number of points that name the smallest of those sets"
+        )
+    };
+    format!(
+        "{due} point(s) are due under the rules and the plan is empty: not one of them fits \
+         the per-run ceiling (spec.enforcement.maxDeletionsPerRun {ceiling}). Each is in a \
+         backup set that more due points name than the ceiling (sets that share objects count \
+         as one), and a set is planned whole or not at all, so no run removes them at this \
+         ceiling. {remedy}."
+    )
+}
+
+/// The largest `spec.enforcement.maxDeletionsPerRun` the CRD admits.
+pub const MAX_DELETIONS_PER_RUN_LIMIT: i32 = 500;
 
 /// The three `LOGWEIR_EVIDENCE_AWS_*` references an enforcement Job writes its
 /// intent tombstone and its run record with, or the message that names the

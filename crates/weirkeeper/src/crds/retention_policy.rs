@@ -264,6 +264,7 @@ pub struct Enforcement {
     printcolumn = r#"{"name":"MODE","type":"string","jsonPath":".spec.mode"}"#,
     printcolumn = r#"{"name":"ENFORCEMENT","type":"string","jsonPath":".status.enforcement"}"#,
     printcolumn = r#"{"name":"CANDIDATES","type":"integer","jsonPath":".status.lastEvaluation.candidateCount"}"#,
+    printcolumn = r#"{"name":"HELD-BACK","type":"integer","jsonPath":".status.lastEvaluation.truncatedByCap"}"#,
     printcolumn = r#"{"name":"EVALUATED","type":"date","jsonPath":".status.lastEvaluation.at"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
@@ -350,17 +351,51 @@ pub struct RetentionEvaluation {
     /// changed, not when the controller last looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<Time>,
-    /// How many points were considered.
+    /// How many points were considered: every point of this destination in
+    /// the catalog view the evaluation read. Each is counted once, in
+    /// `keptCount`, `candidateCount`, `truncatedByCap` or `skipped`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub points_evaluated: Option<i64>,
-    /// How many candidates there are, for the printer column.
+    /// How many points stay: the rules keep them, or something protects them.
+    /// Never a point the per-run ceiling held back. Absent on an evaluation
+    /// written by a controller that did not record it; `kept` may then also
+    /// list points the ceiling held back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_count: Option<i64>,
+    /// How many points THIS plan would remove: at most the per-run ceiling,
+    /// and not every point the rules would remove when `truncatedByCap` is
+    /// above 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<i64>,
-    /// The point ids that stay.
+    /// How many more points the rules would remove, that nothing protects and
+    /// that the per-run ceiling (`maxDeletionsPerRun`) left out of this plan.
+    /// They are due, not kept: no run deletes them until a later plan names
+    /// them, and a backup set that more due points name than the ceiling is
+    /// named by no plan until the ceiling is raised. `0` means this plan is
+    /// everything the rules would remove. Absent means not recorded (an older
+    /// controller), never 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_by_cap: Option<i64>,
+    /// The per-run ceiling this evaluation applied:
+    /// `spec.enforcement.maxDeletionsPerRun`, or 50 for a policy with no
+    /// `spec.enforcement` (a preview is bounded as a run would be).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_deletions_per_run: Option<i64>,
+    /// Whether the catalog said the view this evaluation read does not hold
+    /// every point of the archive: the view is a window
+    /// (`RecoveryCatalog.status.truncated`), or the catalog's walk had not
+    /// finished (`status.cursor.complete: false`). The points outside the
+    /// view were not evaluated, are in none of the counts above, and are
+    /// never candidates while they stay outside it. `false` means the catalog
+    /// said its walk finished and its view holds every point it counted.
+    /// Absent means the catalog did not say, never `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_incomplete: Option<bool>,
+    /// The point ids that stay. `keptCount` is their number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub kept: Option<Vec<String>>,
-    /// The points that would go.
+    /// The points this plan would remove.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub candidates: Option<Vec<RetentionCandidate>>,
@@ -382,6 +417,87 @@ pub struct RetentionEvaluation {
     /// When the plan stops being usable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_expires_at: Option<Time>,
+}
+
+/// The closed accounting of one evaluation — [`RetentionEvaluation::accounting`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetentionAccounting {
+    /// `pointsEvaluated`.
+    pub points_evaluated: i64,
+    /// `keptCount`: the points that stay.
+    pub kept: i64,
+    /// `candidateCount`: the points this plan would remove.
+    pub candidates: i64,
+    /// `truncatedByCap`: due, and held back by the per-run ceiling.
+    pub held_back: i64,
+    /// The points in `skipped`.
+    pub skipped: i64,
+}
+
+impl RetentionEvaluation {
+    /// The four counts every surface reads (FX-22), **or `None` when this
+    /// block does not carry an accounting that closes.**
+    ///
+    /// `None` when `pointsEvaluated`, `keptCount`, `candidateCount` or
+    /// `truncatedByCap` is absent — an evaluation written before the
+    /// controller recorded what the per-run ceiling held back, whose `kept`
+    /// list may include such points — and `None` when
+    ///
+    /// ```text
+    /// pointsEvaluated = keptCount + candidateCount + truncatedByCap + |skipped|
+    /// ```
+    ///
+    /// does not hold. Every evaluation this controller writes satisfies it, so
+    /// one that does not is two writers' numbers in one block: a merge patch
+    /// from an OLDER controller (after a rollback of the image alone) rewrites
+    /// `pointsEvaluated`, `candidateCount` and the lists and cannot remove the
+    /// two counts it does not know, which then describe an earlier archive.
+    /// Absent means not recorded, and a stale count is not a count: a reader
+    /// that gets `None` says so, and never derives "kept" from the list.
+    ///
+    /// **And `None` when the `kept` list is not as long as `keptCount`**
+    /// (FX-22 review M2). The sum alone does not catch that rollback while
+    /// the archive stands still: the older controller writes its own `kept`
+    /// list — the kept points AND the ones the ceiling held back, 321 ids for
+    /// `keepLast: 10` over 371 points — beside `keptCount: 10` and
+    /// `truncatedByCap: 311`, which it cannot remove and which still add up
+    /// to an unchanged `pointsEvaluated`. A reader that trusted the sum
+    /// published 311 due points under the name `kept` until the next point
+    /// landed or left. This controller writes the list whole and the count
+    /// from the same vector in one patch, so a list of another length is two
+    /// writers', whatever the sum says.
+    ///
+    /// FX-39 WILL CUT THE STATUS LISTS AT THE CRD'S BOUND (`maxItems`). The
+    /// comparison below must then be `min(keptCount, bound)`, not `keptCount`;
+    /// until then a list is whole or the write was refused.
+    #[must_use]
+    pub fn accounting(&self) -> Option<RetentionAccounting> {
+        let accounting = RetentionAccounting {
+            points_evaluated: self.points_evaluated?,
+            kept: self.kept_count?,
+            candidates: self.candidate_count?,
+            held_back: self.truncated_by_cap?,
+            skipped: i64::try_from(self.skipped.as_ref().map_or(0, Vec::len)).ok()?,
+        };
+        let parts = [
+            accounting.kept,
+            accounting.candidates,
+            accounting.held_back,
+            accounting.skipped,
+        ];
+        if parts.iter().any(|n| *n < 0) {
+            return None;
+        }
+        // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG (review
+        // M2) — see the doc comment for the rollback this refuses, and for
+        // what FX-39 must change here when it cuts the lists.
+        let listed = i64::try_from(self.kept.as_ref().map_or(0, Vec::len)).ok()?;
+        if listed != accounting.kept {
+            return None;
+        }
+        let sum = parts.iter().try_fold(0i64, |acc, n| acc.checked_add(*n))?;
+        (sum == accounting.points_evaluated).then_some(accounting)
+    }
 }
 
 /// One point a run could not delete.

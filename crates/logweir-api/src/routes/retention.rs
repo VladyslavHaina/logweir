@@ -70,6 +70,41 @@ pub enum ApprovedPlanState {
     Unknown,
 }
 
+/// Whether a retention evaluation records its accounting — the member a
+/// client reads BEFORE it reads `kept` (FX-22 review M1).
+///
+/// The response withholds `keptCount`, `truncatedByCap`, `maxDeletionsPerRun`
+/// and the `kept` rows when the status does not record an accounting that
+/// closes. Until this member existed nothing in the response said so: a
+/// client that read `kept`, the one member that predates FX-22, got no
+/// member and `truncated: false`, and read "nothing is kept". A policy that
+/// keeps nothing and records it publishes no `kept` member either, so the
+/// absence of the list never told the two apart.
+///
+/// THE DEFAULT IS `NotRecorded`, AND IT IS THE SCHEMA'S DECLARED DEFAULT. This
+/// build writes the member on every answer. A response WITHOUT it comes from a
+/// build that predates it, which publishes no accounting this reader can
+/// rely on, and "not recorded" is the only reading of an absent word that
+/// asserts nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub enum RetentionAccountingState {
+    /// The status records `keptCount`, `candidateCount` and `truncatedByCap`,
+    /// they add up to `pointsEvaluated` with the skipped points, and its
+    /// `kept` list is `keptCount` long. The counts and the `kept` rows in
+    /// this response are that status's own. `keptCount: 0` with no `kept`
+    /// member then means nothing is kept.
+    Recorded,
+    /// The status does not record that accounting: an older controller wrote
+    /// the evaluation, a newer controller's members were pruned by an older
+    /// CRD, or two controllers' numbers stand in one block after a rollback
+    /// (the counts do not add up, or the `kept` list is not `keptCount`
+    /// long). `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept`
+    /// are ABSENT and say nothing: an absent `kept` is not "nothing is kept".
+    /// `candidateCount` and `candidates` are still this plan.
+    #[default]
+    NotRecorded,
+}
+
 /// One point the evaluation would remove.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -133,18 +168,81 @@ pub struct RetentionEvaluationView {
     /// changed, not when the controller last looked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
-    /// How many points were considered.
+    /// How many points were considered. With the accounting below, each is
+    /// counted once: `pointsEvaluated` = `keptCount` + `candidateCount` +
+    /// `truncatedByCap` + the skipped points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub points_evaluated: Option<i64>,
-    /// How many candidates there are in total, which may exceed the rows
-    /// below.
+    /// Whether `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept`
+    /// below are published. Written on every answer. Read it before `kept`:
+    /// with `NotRecorded` those four members are absent and an absent `kept`
+    /// does NOT mean nothing is kept.
+    ///
+    /// ALWAYS WRITTEN, AND DECLARED OPTIONAL WITH A DEFAULT, ON PURPOSE. No
+    /// answer of this build lacks the member. It is not listed under
+    /// `required` so that a reader built from this document can still read
+    /// the answer of a build that predates it, where it reads the declared
+    /// default, `NotRecorded`.
+    //
+    // WHY NOT `required` (not part of the published description): the field
+    // is not an `Option` and is never skipped, so the promise is kept by the
+    // serializer either way. But a member that became required would make
+    // every reader built from the document refuse the WHOLE retention read
+    // of a build that predates it, and the console's schedules page turns a
+    // failed retention read into an empty policy list, under which it prints
+    // the no-deletion sentence (`ui/pages/schedules.js`,
+    // `readRetentionPolicies`). `docs/stability.md` asks for the same
+    // direction: an added field is optional.
+    #[schemars(default)]
+    pub accounting: RetentionAccountingState,
+    /// How many points stay: the rules keep them, or something protects them.
+    /// Never a point the per-run ceiling held back.
+    ///
+    /// ABSENT MEANS NOT RECORDED, AND THEN `kept` IS ABSENT TOO (FX-22);
+    /// `accounting` says which. The status of a controller that did not
+    /// record what the per-run ceiling held back lists those points under
+    /// `kept`, so its list is not published as kept and no count is derived
+    /// from it. The same holds when the status's counts do not add up to
+    /// `pointsEvaluated`, or its `kept` list is not `keptCount` long, which is
+    /// what an older controller leaves behind after a rollback of its image
+    /// alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_count: Option<i64>,
+    /// How many points THIS plan would remove, which may exceed the rows
+    /// below. At most the per-run ceiling; `truncatedByCap` is what the rules
+    /// would remove beyond it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<i64>,
-    /// The points the rules keep.
+    /// How many more points the rules would remove, that nothing protects and
+    /// that the per-run ceiling left out of this plan. They are due, not
+    /// kept. `0` means this plan is everything the rules would remove; absent
+    /// means not recorded, never 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_by_cap: Option<i64>,
+    /// The per-run ceiling the evaluation applied: the policy's
+    /// `maxDeletionsPerRun`, or the default of 50 for a policy that does not
+    /// enforce. Published with the accounting it explains.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_deletions_per_run: Option<i64>,
+    /// Whether the catalog said the view this evaluation read does not hold
+    /// every point of the archive (the catalog cut its view, or its walk had
+    /// not finished). Points outside it were not evaluated and are in none of
+    /// the counts.
+    ///
+    /// `true` is published whenever the status says it, with or without the
+    /// accounting: a warning is never withheld. `false`, "the catalog said
+    /// its view is the whole archive", is published only with
+    /// `accounting: Recorded`. Absent means not recorded: the catalog did not
+    /// say, or the status says `false` beside an accounting that is not
+    /// recorded. Absent is never `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_incomplete: Option<bool>,
+    /// The points that stay, when `accounting` is `Recorded`. Absent with
+    /// `Recorded` means none is kept; absent with `NotRecorded` says nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub kept: Vec<String>,
-    /// The points the rules would remove.
+    /// The points this plan would remove.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub candidates: Vec<CandidateView>,
@@ -157,7 +255,7 @@ pub struct RetentionEvaluationView {
     #[schemars(default)]
     pub skipped: Vec<SkippedEntryView>,
     /// Whether any of the four lists above was cut short by this route's own
-    /// row bound.
+    /// row bound. The counts are exact either way.
     pub truncated: bool,
     /// The plan `ConfigMap`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,6 +309,13 @@ pub struct EnforcementRunView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub failed: Vec<FailedDeletionView>,
+    /// `true` when `failed` was cut short by this projection's row bound
+    /// (FX-22's class sweep: a run of up to 500 points that the store refuses
+    /// one and all published its first 200 failures and nothing saying there
+    /// were more). Present only when it was cut, so an older client's reading
+    /// of an absent member stays what it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_truncated: Option<bool>,
     /// How many objects went.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub objects_deleted: Option<i64>,
@@ -402,6 +507,27 @@ pub fn approved_plan_state(policy: &RetentionPolicy, now: DateTime<Utc>) -> Appr
     }
 }
 
+/// `lastEvaluation.viewIncomplete` as this API publishes it — ONE RULE, the
+/// console's too (FX-22 review L3 and L5): never hide a warning, and never
+/// assert a completeness that is not recorded.
+///
+/// * `true` is published whether or not the accounting is recorded. It says
+///   points exist that the evaluation did not see, and the worst a stale
+///   `true` does is send an operator to look at the catalog.
+/// * `false` is published only with the accounting. It is an assertion ("the
+///   catalog said its view is the whole archive") about the same evaluation
+///   the counts describe, and beside counts this API will not publish it is
+///   an older writer's word.
+/// * Absent, or `false` without the accounting, is `None`: not recorded.
+#[must_use]
+pub fn published_view_incomplete(stored: Option<bool>, accounting_recorded: bool) -> Option<bool> {
+    match stored {
+        Some(true) => Some(true),
+        Some(false) if accounting_recorded => Some(false),
+        Some(false) | None => None,
+    }
+}
+
 fn condition_is_true(policy: &RetentionPolicy, type_: &str) -> bool {
     policy
         .status
@@ -418,8 +544,18 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
     let spec = &policy.spec;
     let status = policy.status.as_ref();
     let evaluation = status.and_then(|s| s.last_evaluation.as_ref());
+    // THE ACCOUNTING IS READ ONCE, THROUGH THE CRD'S OWN RULE (FX-22):
+    // `Some` only when the block records the four counts, they add up to
+    // `pointsEvaluated`, and its `kept` list is `keptCount` long. Without it
+    // this projection publishes no kept count, no held-back count and NO
+    // `kept` LIST — the list of a controller that did not record the
+    // ceiling's effect holds the held-back points, and a response that passed
+    // it on would be calling them kept. AND IT SAYS SO (review M1):
+    // `lastEvaluation.accounting` is `Recorded` or `NotRecorded` on every
+    // response, so "no `kept` member" is never the only signal.
+    let accounting = evaluation.and_then(|e| e.accounting());
     let truncated = evaluation.is_some_and(|e| {
-        e.kept.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
+        (accounting.is_some() && e.kept.as_ref().is_some_and(|v| v.len() > MAX_ROWS))
             || e.candidates.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
             || e.protected.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
             || e.skipped.as_ref().is_some_and(|v| v.len() > MAX_ROWS)
@@ -477,11 +613,21 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
         last_evaluation: evaluation.map(|e| RetentionEvaluationView {
             at: e.at,
             points_evaluated: e.points_evaluated,
+            accounting: if accounting.is_some() {
+                RetentionAccountingState::Recorded
+            } else {
+                RetentionAccountingState::NotRecorded
+            },
+            kept_count: accounting.map(|a| a.kept),
             candidate_count: e.candidate_count,
+            truncated_by_cap: accounting.map(|a| a.held_back),
+            max_deletions_per_run: accounting.and(e.max_deletions_per_run),
+            view_incomplete: published_view_incomplete(e.view_incomplete, accounting.is_some()),
             kept: e
                 .kept
                 .iter()
                 .flatten()
+                .filter(|_| accounting.is_some())
                 .take(MAX_ROWS)
                 .map(|p| bounded(p, 128))
                 .collect(),
@@ -550,6 +696,11 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
                         code: bounded(&f.code, 64),
                     })
                     .collect(),
+                failed_truncated: r
+                    .failed
+                    .as_ref()
+                    .is_some_and(|f| f.len() > MAX_ROWS)
+                    .then_some(true),
                 objects_deleted: r.objects_deleted,
                 record_key: r.record_key.clone(),
                 record_sha256: r.record_sha256.clone(),
