@@ -1581,8 +1581,7 @@ impl Pass<'_> {
 
         // ENFORCE, OR NOT.
         let view_refusal = view.run_refusal(&self.policy.spec.catalog_ref.name, self.ctx.now);
-        let decision =
-            self.enforcement_decision(&plan_sha256, &evaluation, &window, view_refusal);
+        let decision = self.enforcement_decision(&plan_sha256, &evaluation, &window, view_refusal);
         let mut outcome = Outcome {
             phase: RetentionPhase::Evaluated,
             ready: "True",

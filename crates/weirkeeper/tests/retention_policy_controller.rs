@@ -9533,27 +9533,9 @@ fn fx22_every_held_back_point_stays_in_the_plan_writers_rail() {
 /// The CR-shaped fixture every other surface's FX-22 row starts from.
 const FX22_FIXTURE: &str = "ui/tests/fixtures/retention-held-back.json";
 
-/// **The fixture the API and the console read is this controller's own
-/// output.** Two `Report` policies over the same 371 points — `keep-300` and
-/// `keep-10` — exactly as one reconcile leaves each of them.
-///
-/// THREE SIDES READ IT, so the numbers cannot drift between the surfaces:
-///
-/// * here, the checked-in file must equal what the reconciler writes;
-/// * `crates/logweir-api/tests/retention_accounting.rs` serves the two objects
-///   through the real router and holds
-///   `ui/tests/fixtures/console/retention-policies-held-back.json` to the
-///   answer;
-/// * `ui/tests/d3.spec.js` decodes and renders that console fixture.
-///
-/// Regenerate with:
-///
-/// ```text
-/// LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper \
-///   --test retention_policy_controller fx22_the_shared_fixture
-/// ```
-#[tokio::test]
-async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
+/// The two `Report` policies of [`FX22_FIXTURE`] over the same 371 points,
+/// exactly as one reconcile leaves each of them, as the file's bytes.
+async fn fx22_shared_document() -> String {
     let entries = fx22_entries(371);
     let mut items = Vec::new();
     for (name, uid, keep_last) in [
@@ -9583,10 +9565,34 @@ async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
         "metadata": {"resourceVersion": "4242"},
         "items": items
     });
-    let want = format!(
+    format!(
         "{}\n",
         serde_json::to_string_pretty(&document).expect("the fixture serialises")
-    );
+    )
+}
+
+/// **The fixture the API and the console read is this controller's own
+/// output.** Two `Report` policies over the same 371 points — `keep-300` and
+/// `keep-10` — exactly as one reconcile leaves each of them.
+///
+/// THREE SIDES READ IT, so the numbers cannot drift between the surfaces:
+///
+/// * here, the checked-in file must equal what the reconciler writes;
+/// * `crates/logweir-api/tests/retention_accounting.rs` serves the two objects
+///   through the real router and holds
+///   `ui/tests/fixtures/console/retention-policies-held-back.json` to the
+///   answer;
+/// * `ui/tests/d3.spec.js` decodes and renders that console fixture.
+///
+/// Regenerate with:
+///
+/// ```text
+/// LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper \
+///   --test retention_policy_controller fx22_the_shared_fixture
+/// ```
+#[tokio::test]
+async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
+    let want = fx22_shared_document().await;
     let path = repo_root().join(FX22_FIXTURE);
     if std::env::var_os("LOGWEIR_WRITE_FIXTURES").is_some() {
         std::fs::write(&path, &want).expect("the fixture is writable");
@@ -9618,4 +9624,432 @@ async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
     };
     assert_eq!(counts(0), (Some(371), Some(300), Some(50), Some(21)));
     assert_eq!(counts(1), (Some(371), Some(10), Some(50), Some(311)));
+}
+
+// ===========================================================================
+// FX-39: the status lists are cut at the CRD's bound, with their counts
+// ===========================================================================
+
+/// The generated CRD's schema for `RetentionPolicy.status`.
+fn fx39_status_schema() -> Value {
+    let crd: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+            .expect("the generated CRD"),
+    )
+    .expect("YAML");
+    let crd = serde_json::to_value(crd).expect("the CRD as JSON");
+    crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"].clone()
+}
+
+/// What an API server would refuse in `value` under `schema`, for the
+/// keywords this CRD's status uses. A member the schema does not declare is
+/// reported too: the server would prune it.
+fn fx39_violations(schema: &Value, value: &Value, at: &str, out: &mut Vec<String>) {
+    if value.is_null() {
+        if schema["nullable"] != json!(true) {
+            out.push(format!("{at}: null"));
+        }
+        return;
+    }
+    if let Some(allowed) = schema["enum"].as_array() {
+        if !allowed.contains(value) {
+            out.push(format!("{at}: {value} is not in the enum"));
+        }
+    }
+    match schema["type"].as_str() {
+        Some("object") => {
+            let Some(fields) = value.as_object() else {
+                out.push(format!("{at}: not an object"));
+                return;
+            };
+            for name in schema["required"].as_array().into_iter().flatten() {
+                if !fields.contains_key(name.as_str().unwrap_or_default()) {
+                    out.push(format!("{at}.{name}: required"));
+                }
+            }
+            for (name, member) in fields {
+                let inner = format!("{at}.{name}");
+                match schema["properties"].get(name) {
+                    Some(declared) => fx39_violations(declared, member, &inner, out),
+                    None if schema["additionalProperties"].is_object() => {
+                        fx39_violations(&schema["additionalProperties"], member, &inner, out);
+                    }
+                    None => out.push(format!("{inner}: not in the schema")),
+                }
+            }
+        }
+        Some("array") => {
+            let Some(items) = value.as_array() else {
+                out.push(format!("{at}: not an array"));
+                return;
+            };
+            if let Some(max) = schema["maxItems"].as_u64() {
+                if items.len() as u64 > max {
+                    out.push(format!(
+                        "{at}: Too many: {}: must have at most {max} items",
+                        items.len()
+                    ));
+                }
+            }
+            for (i, item) in items.iter().enumerate() {
+                fx39_violations(&schema["items"], item, &format!("{at}[{i}]"), out);
+            }
+        }
+        Some("string") => match value.as_str() {
+            Some(text)
+                if schema["maxLength"]
+                    .as_u64()
+                    .is_some_and(|max| text.len() as u64 > max) =>
+            {
+                out.push(format!("{at}: longer than maxLength"));
+            }
+            Some(_) => {}
+            None => out.push(format!("{at}: not a string")),
+        },
+        Some("integer") => match value.as_i64() {
+            Some(n)
+                if schema["minimum"].as_i64().is_some_and(|min| n < min)
+                    || schema["maximum"].as_i64().is_some_and(|max| n > max) =>
+            {
+                out.push(format!("{at}: {n} out of range"));
+            }
+            Some(_) => {}
+            None => out.push(format!("{at}: not an integer")),
+        },
+        Some("boolean") if !value.is_boolean() => out.push(format!("{at}: not a boolean")),
+        _ => {}
+    }
+}
+
+/// [`fx39_violations`] over a whole status.
+fn fx39_refused(status: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    fx39_violations(&fx39_status_schema(), status, "status", &mut out);
+    out
+}
+
+/// One `Enforce` policy over `entries`, twice: a first pass that learns the
+/// digest, and a second with that digest approved. Returns both statuses, the
+/// second pass's fixture and its outcome.
+async fn fx39_enforce_twice(
+    entries: &[Value],
+    rules: Value,
+) -> (Value, Value, Fixture, ctrl::Outcome) {
+    let spec = |approved: Option<&str>| json!({"rules": rules, "mode": "Enforce", "enforcement": enforcement(approved)});
+    let first = fixture(happy_routes(entries));
+    run(&first, &policy(spec(None), json!({}))).await;
+    let learned = first.status();
+    let digest = learned["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+    let mut routes = happy_routes(entries);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let second = fixture(routes);
+    let outcome = run(&second, &policy(spec(Some(&digest)), json!({}))).await;
+    let after = second.status();
+    (learned, after, second, outcome)
+}
+
+/// **A policy that keeps 720 points writes a status the CRD accepts, and keeps
+/// enforcing.** Hourly backups under `keepDays: 30` keep 720; the controller
+/// wrote all 720 ids under `kept` (`maxItems: 500`), the API server refused
+/// the whole status write, and since the evaluation is published before a run
+/// starts the policy stopped enforcing. Each list is now its first 500
+/// entries, with the count beside it, and the accounting closes over counts.
+///
+/// CONTROL: the same validator refuses the uncut list by `maxItems`, so it is
+/// the bound that this row holds the status to.
+///
+/// MUTANTS: the list cut removed (the status is refused); `accounting()` back
+/// to list lengths (500 listed beside `keptCount: 720` reads as two writers').
+#[tokio::test]
+async fn fx39_a_policy_that_keeps_720_points_writes_a_status_the_crd_accepts() {
+    let entries = fx22_entries(730);
+    let (learned, after, second, outcome) =
+        fx39_enforce_twice(&entries, json!({"keepLast": 720, "minUsablePoints": 3})).await;
+
+    for status in [&learned, &after] {
+        assert_eq!(fx39_refused(status), Vec::<String>::new(), "{status}");
+        let ev = &status["lastEvaluation"];
+        assert_eq!(ev["keptCount"], 720);
+        assert_eq!(ev["kept"].as_array().expect("kept").len(), 500);
+        assert_eq!(fx22_ids(&ev["kept"]), fx22_names(1..=500), "the first 500");
+        assert_eq!(ev["candidateCount"], 10);
+        assert_eq!(
+            fx22_typed(status).accounting(),
+            Some(RetentionAccounting {
+                points_evaluated: 730,
+                kept: 720,
+                candidates: 10,
+                held_back: 0,
+                skipped: 0,
+            })
+        );
+    }
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Started,
+        "it keeps enforcing"
+    );
+    assert_eq!(second.posted("/jobs").len(), 1);
+
+    // CONTROL: the pre-fix shape, every kept id, is what the server refused.
+    let mut uncut = learned.clone();
+    uncut["lastEvaluation"]["kept"] = json!(fx22_names(1..=720));
+    assert_eq!(
+        fx39_refused(&uncut),
+        vec!["status.lastEvaluation.kept: Too many: 720: must have at most 500 items".to_string()]
+    );
+}
+
+/// **600 skipped points: the same.** A revoked signer skips every point it
+/// signed; 600 of them wrote 600 `skipped` entries, past the bound.
+#[tokio::test]
+async fn fx39_600_skipped_points_write_a_status_the_crd_accepts() {
+    let mut entries = fx22_entries(610);
+    for entry in entries.iter_mut().skip(10) {
+        entry["verification"] = json!("Revoked");
+    }
+    let (learned, after, second, outcome) =
+        fx39_enforce_twice(&entries, json!({"keepLast": 2, "minUsablePoints": 3})).await;
+
+    for status in [&learned, &after] {
+        assert_eq!(fx39_refused(status), Vec::<String>::new(), "{status}");
+        let ev = &status["lastEvaluation"];
+        assert_eq!(ev["skippedCount"], 600);
+        assert_eq!(ev["skipped"].as_array().expect("skipped").len(), 500);
+        assert_eq!(
+            fx22_typed(status).accounting(),
+            Some(RetentionAccounting {
+                points_evaluated: 610,
+                kept: 3,
+                candidates: 7,
+                held_back: 0,
+                skipped: 600,
+            })
+        );
+    }
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Started,
+        "it keeps enforcing"
+    );
+    assert_eq!(second.posted("/jobs").len(), 1);
+}
+
+/// The sha256 of [`FX22_FIXTURE`] as the controller before FX-39 wrote it
+/// (`6d162f6a`).
+const FX39_PRE_FX39_FIXTURE_SHA256: &str =
+    "3d861370bed0bba26e2d9b314274fb6a6a335bd4612e1dff919c45b936274420";
+
+/// **CONTROL: a small policy's status is unchanged byte for byte**, but for
+/// the two counts FX-39 adds. The two policies of the shared fixture (371
+/// points, every list under the bound), as the reconciler writes them now,
+/// with `protectedCount` and `skippedCount` taken out, are the bytes the
+/// controller wrote before.
+#[tokio::test]
+async fn fx39_a_small_policys_status_is_unchanged_but_for_the_two_counts() {
+    let mut document: Value =
+        serde_json::from_str(&fx22_shared_document().await).expect("the document is JSON");
+    for item in document["items"].as_array_mut().expect("items") {
+        let ev = item["status"]["lastEvaluation"]
+            .as_object_mut()
+            .expect("an evaluation");
+        assert_eq!(ev.shift_remove("protectedCount"), Some(json!(0)));
+        assert_eq!(ev.shift_remove("skippedCount"), Some(json!(0)));
+    }
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&document).expect("serialises")
+    );
+    assert_eq!(
+        logweir_core::ids::sha256_hex(bytes.as_bytes()),
+        FX39_PRE_FX39_FIXTURE_SHA256
+    );
+}
+
+// ===========================================================================
+// FX-40, the fail-safe: no run from a view that is not the whole, current
+// archive
+// ===========================================================================
+
+/// The happy routes with the catalog's own statement replaced by `status`
+/// (merged over `status.pages`).
+fn fx40_routes(entries: &[Value], status: Value, approved: Option<&str>) -> Vec<Route> {
+    let mut routes = fx22_routes_with_catalog_status(entries, status);
+    if let Some(digest) = approved {
+        routes.push(plan_config_map_route(digest));
+        routes.push(route("POST", "/configmaps", "{}".to_string()));
+        routes.extend(absent_job_routes(digest, now()));
+        routes.push(route("POST", "/jobs", "{}".to_string()));
+    }
+    routes
+}
+
+/// The digest the happy path publishes for six points under the default
+/// rules, which these rows approve.
+async fn fx40_digest() -> String {
+    let f = fixture(happy_routes(&six_points()));
+    run(&f, &policy(enforcing(None), json!({}))).await;
+    f.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string()
+}
+
+fn fx40_current() -> Value {
+    json!(now() + chrono::Duration::hours(1))
+}
+
+/// One approved `Enforce` pass over a catalog that says `status`. Asserts no
+/// run started, and returns the `Enforced` condition and the status.
+async fn fx40_refused(status: Value) -> (Value, Value) {
+    let digest = fx40_digest().await;
+    let f = fixture(fx40_routes(&six_points(), status, Some(&digest)));
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "no plan ConfigMap and no Job: {:?}",
+        f.seen()
+    );
+    assert!(f
+        .status_patches()
+        .iter()
+        .all(|p| p["status"].get("lease").is_none()));
+    let written = f.status();
+    assert_eq!(
+        written["lastEvaluation"]["planSha256"],
+        json!(digest),
+        "the evaluation is still published"
+    );
+    (f.condition(ctrl::CONDITION_ENFORCED), written)
+}
+
+/// **An incomplete view starts no run, and the condition names it with its
+/// remedy.** A window (`status.truncated`), a walk that did not finish
+/// (`cursor.complete: false`), and a catalog that did not say.
+///
+/// MUTANT: the incomplete-view refusal removed (the approved plan runs).
+#[tokio::test]
+async fn fx40_an_incomplete_view_starts_no_run() {
+    for (status, remedy) in [
+        (
+            json!({"truncated": true, "cursor": {"complete": true}, "viewExpiresAt": fx40_current()}),
+            "raise spec.sync.viewLimit",
+        ),
+        (
+            json!({"truncated": false, "cursor": {"complete": false}, "viewExpiresAt": fx40_current()}),
+            "let the walk finish",
+        ),
+        (
+            json!({"viewExpiresAt": fx40_current()}),
+            "did not say whether its walk finished",
+        ),
+    ] {
+        let (enforced, written) = fx40_refused(status.clone()).await;
+        assert_eq!(enforced["status"], "False", "{status}");
+        assert_eq!(enforced["reason"], ctrl::REASON_VIEW_INCOMPLETE, "{status}");
+        let message = enforced["message"].as_str().expect("a message");
+        assert!(message.contains(remedy), "{status}: {message}");
+        assert!(message.contains("nothing is deleted"), "{message}");
+        assert_eq!(written["lastEvaluation"]["candidateCount"], 3);
+    }
+}
+
+/// **An expired view starts no run, the same way**: past `viewExpiresAt`, or
+/// with none.
+///
+/// MUTANT: the expired-view refusal removed (the approved plan runs).
+#[tokio::test]
+async fn fx40_an_expired_view_starts_no_run() {
+    let whole = |expires: Option<Value>| {
+        let mut status = json!({"truncated": false, "cursor": {"complete": true}});
+        if let Some(at) = expires {
+            status["viewExpiresAt"] = at;
+        }
+        status
+    };
+    for (status, said) in [
+        (
+            whole(Some(json!(now()))),
+            "expired at 2026-09-17T04:17:00+00:00",
+        ),
+        (whole(None), "states no status.viewExpiresAt"),
+    ] {
+        let (enforced, _) = fx40_refused(status.clone()).await;
+        assert_eq!(enforced["reason"], ctrl::REASON_VIEW_EXPIRED, "{status}");
+        let message = enforced["message"].as_str().expect("a message");
+        assert!(message.contains(said), "{message}");
+        assert!(message.contains("Let the catalog sync"), "{message}");
+    }
+}
+
+/// **CONTROL: a complete, current view runs, and its plan is the plan the
+/// evaluation always rendered**: the plan `ConfigMap`'s bytes and the digest
+/// are `plan_document` over the same view, rendered directly.
+#[tokio::test]
+async fn fx40_a_complete_current_view_runs_the_unchanged_plan() {
+    let digest = fx40_digest().await;
+    let status = json!({"truncated": false, "cursor": {"complete": true},
+                        "viewExpiresAt": fx40_current()});
+    let f = fixture(fx40_routes(&six_points(), status, Some(&digest)));
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Started);
+    assert_eq!(f.posted("/jobs").len(), 1);
+
+    let refusals = weirkeeper::catalog_view::ControllerRefusals::default();
+    let points: Vec<plan::PointFacts> = six_points()
+        .into_iter()
+        .map(|e| ctrl::point_facts(&serde_json::from_value(e).expect("an entry"), &refusals))
+        .collect();
+    let direct = plan::evaluate(&plan::Input {
+        destination: &destination(),
+        points: &points,
+        rules: rules(Some(2), None, 3),
+        holds: &[],
+        protection: &plan::Protection::default(),
+        now: now(),
+        max_deletions_per_run: 50,
+    });
+    let document = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(2), None, 3),
+        &direct,
+    )
+    .expect("the plan renders");
+    let (bytes, direct_digest) = plan::plan_bytes(&document).expect("bytes");
+    assert_eq!(direct_digest, digest);
+    let cm = f.posted("/configmaps").remove(0);
+    assert_eq!(
+        cm["data"][plan::PLAN_DATA_KEY]
+            .as_str()
+            .expect("the plan bytes")
+            .as_bytes(),
+        bytes.as_slice()
+    );
+}
+
+/// **`Report` mode is unaffected**: over a window that is also expired it
+/// publishes its evaluation, says `RecommendationOnly`, and creates nothing.
+///
+/// MUTANT: the refusal applied in `Report` mode too.
+#[tokio::test]
+async fn fx40_report_mode_is_unaffected_by_the_view() {
+    let status = json!({"truncated": true, "cursor": {"complete": false},
+                        "viewExpiresAt": json!(now() - chrono::Duration::hours(1))});
+    let f = fixture(fx40_routes(&six_points(), status, None));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_RECOMMENDATION_ONLY);
+    let enforced = f.condition(ctrl::CONDITION_ENFORCED);
+    assert_eq!(enforced["reason"], ctrl::REASON_RECOMMENDATION_ONLY);
+    let written = f.status();
+    assert_eq!(written["lastEvaluation"]["viewIncomplete"], true);
+    assert_eq!(written["lastEvaluation"]["candidateCount"], 3);
+    assert!(f.seen().iter().all(|(m, _)| m != "POST"));
 }
