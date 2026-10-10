@@ -2535,20 +2535,25 @@ controller also writes `Enforced=False/NothingToDo` where this build writes
 **Changed.** The engine archives every transaction commit and abort marker as
 an ordinary record, and a restore wrote each one, with the records of aborted
 transactions beside it, as data every consumer reads. Before it creates
-anything on the target, a restore now reads every segment the engine will
-restore and counts the records shaped like a marker. If there
+anything on the target, a restore now reads the segments its window overlaps
+and every segment after the window's end (a marker there can close a
+transaction with records in the window), and counts the records shaped like a
+marker. If there
 are any, the restore is refused, as a drill or as a `newTopic` restore. It
 exits 3 with `refusal-reason=TransactionMarkersInArchive`; the `Restore`'s
 `exitReason`, the product API's `result.exitReason` and the console show the
 name, and the message names the topics, partitions and count. The plan field
 `restore.allow_transaction_markers: true` restores the archive as before. The
 field is inside `plan_hash`. Under the override the check is skipped, and the
-signed scorecard's `sample.coverage_note` says so. The check reads each
-restored segment once more before the engine runs. It reads the shape only,
+signed scorecard's `sample.coverage_note` says so. A segment after the window
+that cannot be read does not refuse the run (the restore does not read it);
+the runner's output and the same note say how many. The check reads each
+restored segment once more before the engine runs, and a point-in-time restore
+of an old window also reads the archive's tail after it. It reads the shape only,
 so a record of your own with that shape is counted too. A transaction open at
 backup time whose marker is not archived, a transaction opened after the backup
-began, one whose marker is past the restore's window, and a marker of another
-encoding version are not detected
+began, one whose marker is in an unreadable segment after the window, and a
+marker of another encoding version are not detected
 ([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
 **Do:** nothing, unless you restore transactional topics (Kafka Streams or
 Connect exactly-once, Flink): to restore one as it is, add
@@ -2559,12 +2564,16 @@ archive are refused and `lastFailed.reason` names the refusal.
 a user record of the same shape, a 7-byte value and a non-zero key prefix
 not caught); the whole run over doubles, refused in both target modes with no
 target topic and no scorecard, run under the override with the note, the
-override outside the approved plan refused at phase 1, and an unreadable
-segment refused; and live on the compose stack with engine `0.23.3+logweir.2`
-(`e2e/tests/record_semantics.rs`, the transactional row: refused as a drill
-and as a `newTopic` restore with the 7 archived markers named and nothing on
-the target, the non-transactional twin restored and `pass`, the override's
-restore `pass` with the note).
+override outside the approved plan refused at phase 1, an unreadable segment
+in the window refused, a marker in a segment after the window refused, and
+unreadable segments after the window noted and not refused; and live on the
+compose stack with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`:
+the transactional row refused as a drill and as a `newTopic` restore with the
+7 archived markers named and nothing on the target, the non-transactional twin
+restored and `pass`, the override's restore `pass` with the note; a
+point-in-time restore whose marker is in a segment after the point refused;
+and PROD-08.1's omitted segment after the window still `pass` sampled and
+`fail-integrity` complete, now with the note).
 **Rollback:** an older runner ignores the plan field and restores such an
 archive without the check, as before. Plans and approvals are unaffected.
 

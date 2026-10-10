@@ -922,6 +922,14 @@ pub enum Drill {
     /// **PROD-01.1a.** `Passes`, with an archive segment that is not a KBAK
     /// segment, which the marker check cannot read.
     HoldsAnUnreadableSegment,
+    /// **PROD-01.1a.** `Passes`, with a second segment AFTER the window's end
+    /// holding the abort marker of a transaction (the restore does not read
+    /// that segment): refused all the same.
+    HoldsAMarkerAfterTheWindow,
+    /// **PROD-01.1a.** `Passes`, with two segments after the window's end that
+    /// the store does not hold or that are not KBAK segments: the run is not
+    /// refused, and its scorecard says the check could not read them.
+    HoldsUnreadableSegmentsAfterTheWindow,
 }
 
 /// **PROD-01.1a.** The fixture segment's records: one data record and, for
@@ -1622,6 +1630,37 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     } else {
         orchestrator_facts(&segment_bytes)
     };
+    // PROD-01.1a: segments AFTER the window's end, which the restore does not
+    // read and the marker check does.
+    let after_window = |n: i64, key: &str, bytes: &[u8]| SegmentFacts {
+        key: key.into(),
+        start_offset: FIXTURE_WINDOW_RECORDS + n,
+        end_offset: FIXTURE_WINDOW_RECORDS + n,
+        start_timestamp: window_end_ms + 3_600_000 * (n + 1),
+        end_timestamp: window_end_ms + 3_600_000 * (n + 1),
+        record_count: 1,
+        sha256: logweir_core::ids::sha256_prefixed(bytes),
+        uploaded_at: window_end_ms + 3_600_000 * (n + 1),
+    };
+    if shape == Drill::HoldsAMarkerAfterTheWindow {
+        let ts = window_end_ms + 3_600_000;
+        let mut abort = archived_records(Drill::HoldsTransactionMarkers, ts)[2].clone();
+        abort.offset = FIXTURE_WINDOW_RECORDS;
+        let bytes = kbak_segment(&[abort]);
+        let key = "logweir/fixture-archive/orders/0/after-0.kbak";
+        archive.put_create_only(key, &bytes).unwrap();
+        facts.topics[0].partitions[0]
+            .segments
+            .push(after_window(0, key, &bytes));
+    }
+    if shape == Drill::HoldsUnreadableSegmentsAfterTheWindow {
+        let absent = "logweir/fixture-archive/orders/0/after-absent.kbak";
+        let garbage = "logweir/fixture-archive/orders/0/after-garbage.kbak";
+        archive.put_create_only(garbage, b"not a segment").unwrap();
+        let segs = &mut facts.topics[0].partitions[0].segments;
+        segs.push(after_window(0, absent, b""));
+        segs.push(after_window(1, garbage, b"not a segment"));
+    }
     // FX-8: the manifest's topic override, exactly as the engine records it
     // for a source topic that set one (PROD-01.1 §2.3).
     if matches!(
@@ -1816,6 +1855,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::HoldsTransactionMarkersInANewTopicRestore
         | Drill::HoldsTransactionMarkersAndAllowsThem
         | Drill::HoldsAnUnreadableSegment
+        | Drill::HoldsAMarkerAfterTheWindow
+        | Drill::HoldsUnreadableSegmentsAfterTheWindow
         | Drill::LeavesATopicBehind => {}
     }
 

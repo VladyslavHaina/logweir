@@ -6,7 +6,9 @@
 //! with the aborted records before it, as data every consumer reads
 //! (`docs/to-do/decisions/PROD-01.1-record-semantics.md` §2.1). Before phase 2
 //! the runner counts the records with a marker's shape ([`is_control_shaped`])
-//! in the segments the restore reads; a count is refused by name
+//! in the segments the restore reads and every segment after its window (a
+//! marker there can close a transaction with records in the window); a count
+//! is refused by name
 //! ([`refusal`]) unless the approved plan states
 //! `restore.allow_transaction_markers: true`, and a run under that override
 //! says so in its scorecard ([`OVERRIDE_NOTE`]).
@@ -15,8 +17,9 @@
 //! record's offset-gap confirmation (§6.2) is not made, and a user record of
 //! the same shape is counted too. Not seen: a transaction open at capture
 //! whose marker is not in the archive, one opened after the backup began, one
-//! whose marker is in a segment the restore's window does not reach, and a
-//! marker of another encoding version.
+//! whose marker is in a segment after the window that cannot be read (never
+//! silent: [`unread_after_window_note`]), and a marker of another encoding
+//! version.
 
 use std::collections::BTreeMap;
 
@@ -57,6 +60,17 @@ pub type MarkerCounts = BTreeMap<String, BTreeMap<i32, u64>>;
 pub const OVERRIDE_NOTE: &str = "restore.allow_transaction_markers: true: the archive was not \
      checked for transaction markers; any it holds, and the records of aborted transactions \
      beside them, were restored as ordinary data that every consumer reads";
+
+/// What a run adds to its scorecard's `sample.coverage_note`, and prints,
+/// when `n` segments after the window could not be read: they never refuse
+/// the run (the restore does not read them), and they are never silent.
+#[must_use]
+pub fn unread_after_window_note(n: usize) -> String {
+    format!(
+        "the transaction-marker check could not read {n} archive segment(s) after the window; \
+         a transaction closed there is not seen"
+    )
+}
 
 /// The refusal for `counts`, or `None` when it holds no record. The message
 /// opens with [`TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE`], so the

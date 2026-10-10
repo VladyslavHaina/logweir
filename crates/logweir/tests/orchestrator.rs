@@ -2791,3 +2791,53 @@ fn a_segment_the_marker_check_cannot_read_refuses_the_run() {
     );
     assert!(fixtures::created_topics(&f).is_empty());
 }
+
+/// **PROD-01.1a, the coordinator's row 1.** The archive's abort marker is in a
+/// segment AFTER the window's end, which the restore does not read; the
+/// window's segment holds the transaction's record. Refused all the same, by
+/// name, with nothing created. Control 1 is `HoldsTransactionMarkers` above
+/// (the marker inside the window, refused).
+///
+/// KILLS: skipping the segments after the window (the run passes).
+#[test]
+fn a_marker_after_the_window_still_refuses_the_restore() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsAMarkerAfterTheWindow);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=TransactionMarkersInArchive");
+    assert!(message.contains("holds 1 record(s)"), "{message}");
+    assert!(fixtures::created_topics(&f).is_empty());
+}
+
+/// **PROD-01.1a, PROD-08.1's rule kept.** Two segments after the window's
+/// end, one the store does not hold and one that is not a KBAK segment: the
+/// restore never reads them, so the run is NOT refused, and it is never
+/// silent: the signed scorecard's `sample.coverage_note` says the check could
+/// not read 2 segments. The control: a healthy archive carries no such note.
+///
+/// KILLS: an unreadable segment after the window refusing the run (it is
+/// refused); the note dropped (the note is missing).
+#[test]
+fn segments_after_the_window_the_check_cannot_read_are_noted_not_refused() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsUnreadableSegmentsAfterTheWindow);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("not refused");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert!(
+        sc.sample
+            .coverage_note
+            .ends_with(&logweir_core::transaction_markers::unread_after_window_note(2)),
+        "{}",
+        sc.sample.coverage_note
+    );
+    let healthy = fixtures::orchestrator_args_against_fixture_engine();
+    execute_with(&healthy.args, &healthy.run_id, &healthy.ctx).expect("passes");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&healthy)).unwrap();
+    assert!(
+        !sc.sample.coverage_note.contains("transaction-marker"),
+        "{}",
+        sc.sample.coverage_note
+    );
+}

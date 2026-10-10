@@ -1300,6 +1300,7 @@ fn transactional_topic_committed_input_versus_restored_output() {
             "{}",
             note(x)
         );
+        assert!(!note(x).contains("transaction-marker"), "{}", note(x));
     }
     // §6.2 on the main topic: markers, the open-at-probe gap on p0 and p2,
     // and D's records in the uncommitted tail.
@@ -1361,6 +1362,94 @@ fn transactional_topic_committed_input_versus_restored_output() {
         &r.observed,
         &want_e2e,
     );
+}
+
+/// **PROD-01.1a: a marker after the window's end.** One transaction writes
+/// two records on p0 at `T` and `T + 1` and aborts; the backup cuts a segment
+/// every two records, so the abort marker (stamped by the broker, now) is
+/// alone in p0's second segment. A point-in-time restore at `T + 1000` reads
+/// only the first segment, which holds the aborted records: it is refused all
+/// the same, by name, with nothing on the target. Control: the same archive
+/// restored to its end (the marker inside the window) is refused too.
+#[test]
+fn a_marker_after_the_window_refuses_a_point_in_time_restore() {
+    let mut row = Row::new("txn-after");
+    let topic = row.source_topic("txn-after", &[("message.timestamp.type", "CreateTime")]);
+    let mut p = Txn::new(&format!("{topic}-tx")).expect("transactional producer");
+    p.begin().expect("begin");
+    for (i, name) in ["x0", "x1"].into_iter().enumerate() {
+        let o = Out::kv(0, Some(T + i as i64), name, &format!("{name}-value"));
+        p.send(&topic, &o).expect("send");
+    }
+    p.flush().expect("flush");
+    p.abort().expect("abort");
+    let backup_id = row.backup_id("txn-after");
+    backup_ok(&backup_id, &[&topic], 2);
+    let raw = kafka::read_topic(&topic, PARTS, Isolation::Uncommitted).expect("raw");
+    let committed = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("committed");
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let pit = T + 1000;
+    let at_point = restore(&mut row, "pit", &backup_id, &topic, Some(pit), (T, pit));
+    let to_end = restore(
+        &mut row,
+        "end",
+        &backup_id,
+        &topic,
+        None,
+        archive_span(&archive),
+    );
+    let marker_segments: Vec<&kafka::Segment> = archive
+        .segments
+        .iter()
+        .filter(|s| {
+            archive.records.iter().any(|r| {
+                is_control_shaped(r)
+                    && r.partition == s.partition
+                    && (s.start_offset..=s.end_offset).contains(&r.offset)
+            })
+        })
+        .collect();
+    let where_markers: Vec<Value> = marker_segments
+        .iter()
+        .map(|s| json!([s.partition, s.key, s.start_timestamp]))
+        .collect();
+    record_outcome(
+        "txn-after",
+        &raw,
+        &committed,
+        &archive,
+        &[("pit", &at_point, &[], &[]), ("end", &to_end, &[], &[])],
+        &[],
+        json!({"point_in_time": pit, "marker_segments": where_markers}),
+    );
+    if !contract_applies("txn-after") {
+        return;
+    }
+    // The layout the row is about: one marker, in a segment wholly after the
+    // point; the two aborted records in the window.
+    assert_eq!(marker_segments.len(), 1, "{where_markers:?}");
+    assert!(
+        marker_segments[0].start_timestamp > pit,
+        "{where_markers:?}"
+    );
+    assert_eq!(raw.len(), 2, "the two aborted records");
+    assert!(committed.is_empty(), "the transaction aborted");
+    for (what, refused) in [("at the point", &at_point), ("to the end", &to_end)] {
+        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
+        assert_eq!(
+            refused.verdict["refusal_reason"], "refusal-reason=TransactionMarkersInArchive",
+            "{what}: {}",
+            refused.verdict
+        );
+        assert!(
+            refused.verdict["stderr_tail"]
+                .to_string()
+                .contains("holds 1 record(s)"),
+            "{what}: {}",
+            refused.verdict
+        );
+        assert!(!topic_exists(&refused.target), "{what}: {}", refused.target);
+    }
 }
 
 // ======================================================== TIMESTAMPS
@@ -2982,6 +3071,22 @@ fn complete_coverage_hashes_every_segment_outside_the_window() {
     // The sampled lane never reads an out-of-window segment: both faults pass.
     assert_verdict("corrupt sampled", &s1, 0, "pass");
     assert_verdict("omitted sampled", &s2, 0, "pass");
+    // PROD-01.1a: the marker check reads the segments after the window too;
+    // the omitted one does not refuse the run and is never silent. A segment
+    // it can decode (the corrupt one is p0's, well formed) says nothing.
+    let unread = logweir_core::transaction_markers::unread_after_window_note(1);
+    for (what, r, noted) in [
+        ("control sampled", &s0, false),
+        ("control complete", &c0, false),
+        ("corrupt sampled", &s1, false),
+        ("corrupt complete", &c1, false),
+        ("omitted sampled", &s2, true),
+        ("omitted complete", &c2, true),
+    ] {
+        let note = r.verdict["coverage_note"].as_str().unwrap_or("");
+        assert_eq!(note.contains(&unread), noted, "{what}: {note}");
+        assert_eq!(note.contains("transaction-marker"), noted, "{what}: {note}");
+    }
     for (what, c, key, words) in [
         (
             "corrupt complete",

@@ -1370,10 +1370,10 @@ transactional recovery. Measured by
 markers and five aborted or open-transaction records came back as data, and the drill was signed
 `pass`.
 
-Since PROD-01.1a, before it creates anything on the target, a restore reads every segment the
-engine will restore (the selected partitions' segments that its window overlaps) and counts the
-records shaped like a marker:
-key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
+Since PROD-01.1a, before it creates anything on the target, a restore reads the selected
+partitions' segments that its window overlaps and every segment after the window's end (a marker
+there can close a transaction with records in the window; segments wholly before the window's
+start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
 `x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
 or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
 message names the topics, the partitions and the count. To restore such an archive as it is, state
@@ -1381,16 +1381,21 @@ message names the topics, the partitions and the count. To restore such an archi
 changed plan needs a new approval. Under the override the check is skipped, and the signed
 scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
 cannot state the override, so its slots over such an archive are refused and its
-`lastFailed.reason` names the refusal. A segment the check cannot decode refuses the run with
-`GuardRefused`. The check reads each restored segment once more before the engine reads it, so on
-a large archive it adds about one more read of the restored partitions to the restore's time.
+`lastFailed.reason` names the refusal. A segment in the window that the check cannot decode refuses
+the run with `GuardRefused`. A segment after the window that the store does not hold or the check
+cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
+output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
+a transaction closed there is not seen. Cost: the check reads each restored segment once more
+before the engine reads it, plus, for a point-in-time restore, every segment after the point: a
+restore of an old window reads the archive's tail after it. On a large archive that is about one
+more read of the selected partitions.
 
 The record's shape is the only signal: the check does not read the source. A record of your own
 with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, and the override gets
 past it. These cases are not detected, and their records are still restored as data: a
 transaction open at backup time whose marker is not in the archive, a transaction opened after the
-backup began, a transaction whose marker is in a segment the restore's window does not reach, and a
-marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
+backup began, a transaction whose marker is in a segment after the window that could not be read
+(the note above says so), and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
 
 ### Recovery-point selection uses segment first and last timestamps
 
