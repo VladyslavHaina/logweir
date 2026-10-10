@@ -224,7 +224,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Done |
 | 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Done |
 | 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
-| 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
+| 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Done |
 | 3 | PROD-01.5d | A produce-response fault proxy profile: drop or hold one produce response deterministically (oracle for 07.1-R9 and 00.3d's A-C5-1) | P2 | M2 | infra | 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
 | 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Done |
@@ -606,7 +606,7 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
 - **Migration:** none for this row, which is evidence and tests. Each new rail carries its own migration notes.
 - **Artifacts:** `claude/artifacts/prod-01-1/`.
 - **Limits:**
-  - one broker line (3.7.1; PROD-01.5 re-runs the rows on 3.9, 4.1 and 4.3);
+  - four broker lines (3.7.1, 3.9.2, 4.1.2 and 4.3.1; PROD-01.5c, the decision record §12), one single-node topology;
   - one producer library;
   - the deterministic PROD-07 fixtures are named, not built.
 - **Rows added:** FX-8 (also in the fix-now table), PROD-01.1a, PROD-01.1b, and PROD-00.3a–e. The routes for 00.3a–e are PROD-00.1's to propose and OD-3's to decide.
@@ -652,7 +652,7 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
   - **Carried to PROD-02.1's brief** (re-check): line ~414 must not let PROD-02.1 read only each archive's last segment, and a fixture must span segments. Four minor items go to the PROD-02.1 and PROD-00.3c/00.3e briefs.
 - **Migration:** none for this row, which is evidence and tests. The receipt and catalog 1.1.0 field ships with PROD-02.1.
 - **Artifacts:** `claude/artifacts/prod-01-4/`.
-- **Limits:** two broker lines; the byte-identical replay miss (§4.7) stays until IDs exist.
+- **Limits:** four broker lines (PROD-01.5c); the byte-identical replay miss (§4.7) stays until IDs exist.
 - **Rows added:** PROD-01.4a (gated on OD-6), PROD-01.4b, and OD-6.
 
 **Completion record — Done (2026-10-09), PROD-01.4a.**
@@ -696,6 +696,14 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
   - C4, the object-store rows: PROD-01.2.
   - C5: PROD-00.1's ApiVersions row.
   - C6, `logweir-store`'s `StoreErrorClass::classify` mapping versitygw's `404 XAdminUserNotFound` to not-found: PROD-01.2's archive-backend rows.
+
+**Completion record — Done (2026-10-09), PROD-01.5c.**
+- **Ownership:** worker `prod-01-5c` (one run). Tier C: the orchestrator read the report and the diff; no independent review. Merged as `c2eb49ba` (PR #17, CI check and e2e green on Linux; no release note, because no support statement changes).
+- **Result:** PROD-01.1's record-semantics suite (12 passed, 0 failed) and PROD-01.4's topic-identity suite (53 passed, 0 failed) pass on Kafka 3.9.2, 4.1.2 and 4.3.1 with the engine the images ship (`0.23.3+logweir.2`), so the contract was asserted on every line. Against a same-tip 3.7.1 run, 13 of 13 outcome files are the same and 19 of 19 live rows equal. No divergence, so no FX row and no fixture change.
+- **Delivered:** `engine-matrix.yml` gains a weekly `broker-lines` job (both suites on 3.9, 4.1 and 4.3 with the engine built from the vendored source, and a check that the built engine is the one the contract names), with a guard test that fails when a supported line has no job entry. `docs/support-matrix.md`, the PROD-01.1 and PROD-01.4 decision records, `docs/gates.md` and `e2e/README.md` say what ran.
+- **Findings acted on:** on this Mac the default engine route runs OSO's 0.23.3, so record-semantics rows pass WITHOUT asserting the contract (the worker used the published runner image instead); WORKER-RULES now says so. The orchestrator added the Docker Hub mirror step to `engine-matrix`'s `matrix` job, `helm-demo` and `release-drill` in the same PR; `release.yml` is left alone on purpose (it resolves this project's own just-published digests).
+- **Limits:** Kafka 4.0 and 4.2, more than one broker, and authenticated listeners are not run for these two suites; the two fault rows are one sample per line. The `broker-lines` job's first GitHub run is the orchestrator's dispatch of 2026-10-10 (run 38031590744); its result is recorded when it finishes.
+- **Unblocks:** PROD-01.5a (move the default line off 3.7.1) and PROD-01.2 (the compatibility contract, running).
 
 ## PROD-02 — Continuous protection and recoverable history
 
