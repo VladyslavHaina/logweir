@@ -476,7 +476,7 @@ The `Harness row` column names the phase that measured the line; the
 | Role | Minimal actions, each at the resource scope shown | Proved by | Harness row |
 |---|---|---|---|
 | `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-045` | `U6/archive-write` |
-| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`. **For a restore of a catalog point (a plan bound to a recovery point) and its preflight, also:** `s3:GetObject` on `<bucket>/logweir/backups/*` and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | Preflight `u6-da-010+u6-rp-011` (the first two actions); the point-bound additions were exercised on MinIO, not bisected (FX-14 `live/grants/`) | `U6/archive-read` |
+| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`. **For a restore of a catalog point (a plan bound to a recovery point) and its preflight, also:** `s3:GetObject` on `<bucket>/logweir/backups/*` and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*` — see *The read of a pinned version* below | Preflight `u6-da-010+u6-rp-011` (the first two actions); the point-bound additions were exercised on MinIO, not bisected (FX-14 `live-tip/grants/`) | `U6/archive-read` |
 | `evidenceWrite` | `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-033` | `U6/evidence-write` |
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
 | write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | Preflight `u6-bp-019` | `U6/write-probe` |
@@ -9468,15 +9468,38 @@ readiness check holds the submit*).
   well-formed, the plan's `source.backup` is the set the check reads
   (`backupSetRef`; never `latestCompleted`), and the receipt key is the key a
   backup of that set writes — `logweir/backups/<backupId>/<run id>.receipt.json`,
-  each id one path segment. A key under another prefix, of another set, with a
-  relative or nested path, or naming any object that is not a receipt, is
-  refused by name and not fetched. The receipt is then read only after that
-  set's manifest was read under the destination's own prefix.
+  compared byte for byte, each id one path segment. A key under another
+  prefix, of another set, with a relative or nested path, or naming any object
+  that is not a receipt, is refused by name and not fetched. The receipt is
+  then read only after that set's manifest was read under the destination's
+  own prefix.
+
+  **Which ids the check can confine.** Each of the two ids must be one path
+  segment that the store addresses exactly as written: printable ASCII, and a
+  space is allowed, so a set named `nightly 7` is checked like any other. An
+  id that is empty, is `.` or `..`, or holds a `/`, a control character (a tab,
+  a line break), a character that is not ASCII, or one of the
+  characters an object-store path rewrites (`\ % ? # * ~ | ^ { } [ ] < > "` and
+  the backtick) is read by the store at another key than its text says. A plan
+  that names such an id is `notReady`, `PointBindingMismatch`, with nothing
+  read. The comparison is of bytes: for the set `nightly 7`, neither
+  `nightly%207` nor the id with a tab, a no-break space, or a space before or
+  after it is that set.
+
+  **The confinement is by set id, not by archive prefix.** The receipt
+  namespace `logweir/backups/<set id>/` is bucket-wide: it does not sit under
+  a destination's prefix, so two destinations in one bucket share it. What
+  keeps them apart is the manifest-first read above (a set this destination's
+  prefix does not hold is `BackupSetNotFound`, and its receipt is never
+  fetched) and
+  [the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id),
+  which admits one engine run per set id per bucket. The shape of the key
+  alone does not.
 
   | What the check found | `archive.backupSet` |
   |---|---|
   | the binding is malformed, names another set than the one the check reads, or names a receipt key outside that set's receipts | `notReady`, `PointBindingMismatch`; nothing was read |
-  | the receipt is not at its key, or its bytes are not the bound digest | `notReady`, `PointBindingMismatch` — ONE answer for both, so it does not say whether an object exists at a key the plan chose |
+  | the receipt is not at its key, or its bytes are not the bound digest | `notReady`, `PointBindingMismatch` — one answer for both where the store answers 404 for an absent key (measured on MinIO), so there it does not say whether an object exists at a key the plan chose. On AWS S3 the two can differ: see *Where an absent receipt is not a 404* below the table |
   | the receipt does not derive the bound point id, is not a receipt, attests another manifest digest, or describes another set or manifest key than the one this restore reads | `notReady`, `PointBindingMismatch` |
   | the receipt pins a manifest version the bucket still holds, and it is not the current one | `notReady`, `ManifestSuperseded`: the set was written again after the point was signed; restore from another point |
   | the pinned version could not be read (a 403, an outage) | the store's own code (`AccessDenied` is `notReady`, `Timeout` is `unknown`), with the remedy that names `s3:GetObjectVersion` |
@@ -9484,6 +9507,17 @@ readiness check holds the submit*).
   | the receipt pins a version this bucket does not hold (a copy of the archive, an unversioned bucket, a version expired or deleted) and the manifest hashes to the bound digest | `ready`, `ManifestReadable`; the message says `PointPinUnchecked` and the remedy carries the note the catalog gives such a point |
   | the manifest does not hash to the bound digest | `notReady`, `PointBindingMismatch` |
   | otherwise | `ready`, `ManifestReadable`, naming the point |
+
+  **Where an absent receipt is not a 404.** On AWS S3 a principal without a
+  listing grant over a key gets 403, not 404, for an object that is not there.
+  The documented minimal `archiveRead` grant (§7a) is such a principal for the
+  receipt namespace: its `s3:ListBucket` is conditioned on the archive prefix
+  and it holds only `s3:GetObject` on `logweir/backups/*`. With that grant an
+  absent receipt reads as `AccessDenied` ("could not be read") and a receipt
+  with other bytes as `PointBindingMismatch`, so the two are told apart. The
+  difference is confined to the receipt keys of the plan's own set, and it has
+  a cost for the operator: a deleted receipt can look like a missing grant.
+  [UNVERIFIED — needs a real AWS S3 bucket and a credential source]
 
   No answer repeats anything read from the store — not a digest, not a version
   id, not a field of the receipt; a message names only what the plan and the

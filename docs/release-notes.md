@@ -1508,14 +1508,32 @@ store's code (`AccessDenied` for a 403) with a remedy that names
 `s3:GetObjectVersion`; a pin this bucket cannot check (a copy of the archive,
 an unversioned bucket) passes on the digest and says `PointPinUnchecked`.
 `archive.coverage` and `archive.segments` are `BlockedByPrerequisite` behind
-a refusal. **A preflight runs before any approval, so what it may read is
-confined first:** nothing is opened unless the plan's `source.backup` is the
-set the check reads and its receipt key is the key a backup of that set
-writes (`logweir/backups/<backupId>/<run id>.receipt.json`); a key under
-another prefix, of another set, or naming any other object is refused by name
-and not fetched, a receipt that is absent and one with other bytes get one
-answer, and no answer repeats a digest, a version id or a receipt field read
-from the store. A plan with no `source.point` is judged exactly as before.
+a refusal. The preflight does not check the receipt's SIGNATURE (a check Job
+is given no evidence keyring): the runner does, and refuses an unsigned or
+untrusted point with exit 3, `PointUntrusted`, so `ready` here is not yet the
+runner's word on trust. **A preflight runs before any approval, so what it may
+read is confined first:** nothing is opened unless the plan's `source.backup`
+is the set the check reads and its receipt key is, byte for byte, the key a
+backup of that set writes
+(`logweir/backups/<backupId>/<run id>.receipt.json`). The check can confine
+an id that is one path segment the store addresses exactly as written:
+printable ASCII, and a space is allowed (a set named `nightly 7` is checked
+like any other); an id with a `/`, a control character, a character that is
+not ASCII, or a character an object-store path rewrites (`%`, `?`, `#`, `*`,
+`~` and the like) is refused with nothing read. A key under another prefix, of
+another set, or naming any other object is refused by name and not fetched,
+and no answer repeats a digest, a version id or a receipt field read from the
+store. A receipt that is absent and one with other bytes get one answer where
+the store answers 404 for an absent key (measured on MinIO). On AWS S3 a
+principal without a listing grant over the key gets 403 for an absent object,
+so with the documented minimal `archiveRead` grant an absent receipt reads as
+`AccessDenied` and a receipt with other bytes as `PointBindingMismatch`: the
+difference is confined to the plan's own set's receipt keys, and a deleted
+receipt can therefore look like a missing grant.
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]
+The receipt namespace is bucket-wide, so the confinement is by set id and not
+by archive prefix ([kubernetes.md](kubernetes.md) §21.8). A plan with no
+`source.point` is judged exactly as before.
 Three descriptions were also corrected, with no change of behaviour: a
 `RehearsalSchedule`'s `recordsPerPartition` and a scorecard's
 `sample.records_restored` (and the product API's `recordsRestored`) count the
@@ -1532,17 +1550,26 @@ read of a pinned version*; §21.8).
 **Scope:** the preflight and the runner's binding over one archive each, in
 process, required to agree (unchanged, written again, an unversioned copy, a
 copy of another manifest, an unreadable pinned version, an unpinned point,
-five refused receipts, a foreign set); thirteen receipt keys outside the
-plan's own receipts refused with a read-counting store double untouched
+five refused receipts, a foreign set, a receipt naming another manifest key,
+a receipt naming another set, a set and a run id that hold a space); thirteen
+receipt keys outside the plan's own receipts, and fourteen look-alikes of a
+spaced id's key (a tab, a no-break space, `%20`, a leading or trailing space),
+refused with a read-counting store double untouched; the key-segment rule
+held to the store's own path type for every ASCII byte
 (`crates/logweir/tests/check_cli.rs`, `crates/logweir/src/catalog/record.rs`);
-20 planted mutants, all killed. Live on compose (2026-10-09, the stack's
-MinIO, a versioned bucket, the built `logweir check run`): unchanged `ready`,
-written again with identical bytes `ManifestSuperseded`, an unversioned copy
-`ready` with the note. The same run measured the grant on MinIO, which serves
+20 planted mutants, all killed, and in the review round eleven more, all
+killed. Live on compose (2026-10-09, the stack's MinIO, a versioned bucket,
+the built `logweir check run`): unchanged `ready`, written again with
+identical bytes `ManifestSuperseded`, an unversioned copy `ready` with the
+note. The same run measured the grant on MinIO, which serves
 a read by version under `s3:GetObject`; AWS S3's separate
 `s3:GetObjectVersion` is
-[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. A docs lint
-now holds both grant tables to the readers that read by version. The
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. A second
+run put a receipt through the product's own store at
+`logweir/backups/nightly 7/run 1.receipt.json`: MinIO holds the key with its
+spaces as written, and the preflight over it is `ready`. A docs lint
+now holds both grant tables to the readers that read by version and by
+receipt. The
 controller relays these rows unchanged; the next PoC upgrade runs a catalog
 restore's preflight.
 **Rollback:** an older runner reads the current manifest alone again and can
