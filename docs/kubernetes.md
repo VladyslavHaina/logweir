@@ -931,7 +931,6 @@ Every read now names a cap. Nothing in the tree can read an object whole:
 | DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
 | Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
 | Catalog record | the catalog walk | **6,131,072 bytes**: the largest record Logweir writes (§7b.5) |
-| Catalog index row | the catalog walk | 64 KiB |
 | Receipt, scorecard, catalog record | runner, CLI | 64 MiB |
 | Engine manifest | runner, CLI, check Jobs | 256 MiB |
 | Archived segment | runner, CLI | 1 GiB |
@@ -942,21 +941,10 @@ verifiable through the controller's own handle (`ControllerIdentity`, or the
 inline-archive handle) exactly when an evidence-fetch Job can relay it, and a
 backup receipt the catalog lists `Available` is one the controller can verify.
 
-**The cap belongs to the reader, and it is chosen by what the document is.**
-The controller knows what it is about to hold: a `Backup`'s evidence is a
-backup receipt, a `Restore`'s is a scorecard. It takes the cap from that, and
-applies it to the bytes where they arrive:
-
-- its own store read is made under that cap;
-- an evidence relay is refused at the first frame past it, before that frame
-  is kept and before anything is decoded, and the decoded length is checked
-  again against the same cap;
-- the verifier refuses bytes over the cap of their own type, whoever passed
-  them.
-
-What a plan asked a pod for, and what a pod's result says about its own
-relay, bound nothing. A relay carrying 5 MiB where a scorecard is expected is
-`NotAttempted` naming the scorecard's key and the 1 MiB cap, and it is final.
+**The cap is chosen by what the document is.** A `Backup`'s evidence is a
+backup receipt and a `Restore`'s is a scorecard. The controller reads each
+under its own cap, asks an evidence-fetch Job for at most that, and measures
+what is relayed against it.
 
 **A scorecard is parsed; a backup receipt never is.** The controller reads a
 scorecard's outcome before any digest check, and a document of tiny values
@@ -979,17 +967,10 @@ once. So every controller read reserves its worst case out of one
 process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
 it reads, and holds the reservation until its bytes and its parse are freed:
 
-- a scorecard reserves 40 MiB, its 1 MiB cap plus the parse;
-- a backup receipt reserves 12 MiB: twice its cap, plus 2 MiB;
-- one evidence relay of a receipt reserves 40 MiB, from its pod-log read to
-  its verdict. The log is up to 8 MiB, the decoder holds its frames and their
-  joined text, and the decoded receipt is copied once for the verifier and
-  once more while the signature is checked. Before FX-33 a relay was under no
-  budget;
+- a receipt or scorecard reserves 40 MiB: a scorecard's 1 MiB cap plus the
+  parse, and a backup receipt's 5,131,072 bytes, held twice while its
+  signature is checked and never parsed into a tree;
 - a manifest reserves 64 MiB.
-
-So at most three scorecards or three relays, ten receipts, or two manifests
-are held at once.
 
 A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
 - eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
@@ -997,38 +978,22 @@ A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.r
 - sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
 
 And in `crates/weirkeeper/tests/topic_budget.rs`, over a valid receipt of 1,000
-topics and 5,092,802 bytes (within one percent of the cap):
-- the controller's three store reads of it add 9.7 MB of peak memory. With the
-  receipt also parsed into a tree, as before FX-33, they add 25.3 MB;
-- one relay of it, a 6.9 MB pod log, adds 26.9 MB, and 44.0 MB with the tree;
-- the same pod log where a scorecard is expected is refused at the decoder
-  and adds 7.4 MB, little more than the log;
-- 32 verifications started together add 103 MB under the budget and 329 MB
-  without it; 12 relays add 84 MB under the budget and 321 MB without it.
+topics and 5,092,802 bytes (within one percent of the cap): the controller's
+three store reads of it add 9.7 MB of peak memory (25.3 MB with the receipt
+parsed into a tree, as before FX-33), and one evidence relay of it, a 6.9 MB
+pod log, adds 26.9 MB.
 
 **The catalog walk holds one point at a time.** A `catalogSync` check Job
-reads five kinds of document, each under its own cap from the table above: a
-point's record, its receipt, the receipt's sidecar, the manifest, and (only
-for a point whose record gave no facts) its index row. Each read is fenced
-twice by the store, on the size it reports and then on the bytes as they
-arrive. What the walk holds at once is the record of the point it is on, with
-its typed parse, and beside it one of: the receipt and its typed parse; the
-receipt and the signature's copy of it; the manifest. Each is released before
-the next is read, and what is kept when the walk moves on is the point's
-entry, under 1 KB without its topic list. No document is parsed into a tree:
-a record's version is folded from its bytes, where a tree of a planted
-6,131,070-byte record of tiny values cost 223 MB and now costs the walk 4 MB.
-
-Measured by `crates/logweir/tests/check_cli.rs`
+reads a point's record, its receipt, the receipt's sidecar and the manifest,
+each under its own cap from the table above, and releases each before the
+next. Measured by `crates/logweir/tests/check_cli.rs`
 (`the_walks_peak_memory_is_one_points`) over points with a 5.09 MB receipt and
-a 4.2 MB record, each signature verified: a walk of one adds 23.6 MB to a
-walk of small points, a walk of four adds 25.7 MB, and the same four read and
-kept add 85.7 MB. The row's bound for one point is 48 MiB. The manifest is
-read whole to hash it, one at a time, under the runner's 256 MiB cap; a real
-manifest is about 540 bytes a segment. **A check Job states no memory request
-or limit in the chart**, so a namespace `LimitRange` is what applies to it: a
-`catalogSync` Job needs about 50 MiB above its baseline for the largest
-point, plus its largest manifest.
+a 4.2 MB record: a walk of one adds 25 to 37 MB to a walk of small points, a
+walk of four 31 to 41 MB, and the same four read and kept 66 to 80 MB (two
+runs). A check Job states no memory limit in the chart, so a namespace
+`LimitRange` applies: a `catalogSync` Job needs about 64 MiB above its baseline
+for the largest point, plus its largest manifest (read whole to hash it; about
+540 bytes a segment).
 
 A degraded store makes evidence reads for every namespace wait on one another.
 The store's own request timeout bounds that wait, and it is the trade the
@@ -1040,7 +1005,7 @@ a pass:
 | Where | What it says |
 |---|---|
 | `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
-| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. A pod that relays more than the cap anyway is refused by the controller as the frames arrive, with the same sentence, and it is final too: no second Job is started for an object that will not shrink. |
+| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. A pod that relays more than the cap anyway is refused by the controller with the same sentence, and it is final too: no second Job is started for an object that will not shrink. |
 | A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
 | `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
@@ -1458,7 +1423,7 @@ list` still reads the durable catalog.
 |---|---|
 | `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version that was expired or deleted): then the digest decided — which an identical manifest over rewritten segments passes — and the entry's `remedy` says the pin could not be checked in this bucket |
 | `Missing` | a definite `NotFound` |
-| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it) — or a document that is over the bound Logweir reads for one, or is not the document its key names (FX-33; the entry's `cause` says which, and its remedy names no grant). **"Could not tell", never "is not there".** |
+| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it) — or a document that is over the bound Logweir reads for one, or is not the document its key names (FX-33; the entry's remedy says which, and names no grant). **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
 | `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or this bucket holds the manifest version the receipt pins and it is no longer the current one — the set was written again in this bucket after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
@@ -1636,71 +1601,22 @@ and which the controller renders as `PartialScan`.
 
 **Every counted point is listed, and an entry says why it is not available
 (FX-33).** A point whose record could not be read used to be counted and
-listed by no entry, so a backup whose record had outgrown the walk's cap was
-in `counts.unreadable` and nowhere else. Now:
+listed by no entry. Now:
 
-- an entry that is not `Available` because of one document carries `cause`:
-  `document` (`record`, `receipt` or `manifest`) and `reason` (`overReadCap`,
-  `readFailed`, `notFound`, `malformed` or `unsupportedFormat`), with `bytes`
-  and `capBytes` when the reason is a size;
-- its `remedy` fits the cause. A size says the document's bytes against the
-  bound, that no permission or network change lists the point, and that the
+- its `remedy` fits the cause. A size gives the document's bytes against the
+  bound, says no permission or network change lists the point, and says the
   archive is intact and restorable from the command line. A content fault
   says the object is not what its key names. Only a read that did not answer
   names the `archiveRead` grant, the endpoint and the network;
+- a point whose RECORD gave no facts is listed by its point id alone:
+  `backupId`, `runId` and `receiptKey` are empty, the instants are 0, and
+  there is no window, location or topic list. It is never `Available`, so
+  never selectable, and nothing reads anything else for it;
 - `catalog-counts` gains `unreadableOverReadCap` and `unreadableMalformed`,
   the two parts of `unreadable` that are not a permission or transport
-  failure, and the `Synced` condition's message counts each cause by name;
+  failure, and the `Synced` condition's message counts each by name;
 - the body's grammar is still `catalog-format=1`, and a body with no such
   point is byte for byte what it was.
-
-**An entry with no record behind it is information, never evidence.** When
-the RECORD gave no facts — it is over its bound, is not a record, is absent,
-could not be read, or is of another major — the entry carries `factsFrom`:
-
-| `factsFrom` | What the entry holds |
-|---|---|
-| `indexRow` | the point id and the instant its index key carries, and the `backupId` and `runId` its index row names |
-| `key` | the point id, and the instant when the walk found the point through an index key |
-
-The index row is **unsigned**, and whoever can write a key under
-`logweir/catalog/v1/log/` chooses a row's key and its bytes. So such an entry:
-
-- is never `Available` and never selectable, and its verification is
-  `NotAttempted`;
-- carries **no** receipt key, receipt digest, manifest, covered window,
-  location, signer or topic list. There is nothing in it a restore plan could
-  be bound to. A reader that needs the receipt of such a point reads and
-  verifies the signed receipt itself, as `logweir restore` does;
-- shows a `backupId` or `runId` only when the row's value is an identifier
-  (letters, digits, `.`, `_`, `:` and `-`), and its remedy says in words that
-  they are the index row's claim and were not verified;
-- is refused by name wherever the view is read: a restore readiness check
-  answers `CatalogPointNotSelectable`, a rehearsal does not consider it,
-  protection does not count it as a point, as degraded or as a second match
-  for a `Backup`, and the product API publishes it with `selectable: false`
-  and empty `receiptKey` and `receiptSha256`;
-- never takes a real point's place. When the view's window or the body's
-  bytes are full, an entry with no record behind it gives up its place
-  before any entry with one.
-
-**A planted index row cannot change a real point.** A record is a point's
-only at that point's own key, and an index row is a point's only at the key
-its record implies (the day and the millisecond of the record's own
-recovery point). A row for a point whose record reads, under any other key,
-is not counted, dates nothing and lists nothing; the point is found once,
-through its own row, with its own date. The walk reports how many such keys
-it examined (`catalogStrayKeys` on the check result).
-
-**Retention may keep more on an index row's word, and never less** (§7f). A
-point with no record behind it is never counted, never usable, never ranked
-and never a candidate. The backup set its row names is retained: a candidate
-in that set is protected `SharedSegment`, because "the catalog could not read
-this point" must not authorise deleting what the point says it is made of.
-That protection is exactly as good as the row. Someone who can write a key
-under the catalog's log prefix can name any set and so keep it from
-expiring; they cannot make retention delete a set, release a hold or take a
-keep rank from a real point.
 
 **`Deleted` and `Partial` are in the table and this build's sync produces
 neither.** `Partial` needs segment sampling, which does not exist. `Deleted`

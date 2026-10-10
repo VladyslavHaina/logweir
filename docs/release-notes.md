@@ -180,10 +180,10 @@ authorization document (format 2.1.0), the product API and the console, and
 the PoC upgrade that carries it applies the CRD first, creates an
 original-name restore through the console, and reads the Approval's bytes,
 the `Restore`'s status and the scorecard.
-Item 57 is fix-now row FX-33, proven by runner, check, store, controller, API
-and console rows, by child-process peak-RSS measurements, and on the compose
-stack with a backup of 500 topics; it changes the runner, the check Jobs, the
-controller, the product API and the console, signs nothing differently, and
+Item 57 is fix-now row FX-33, proven by runner, check, store and controller
+rows, by child-process peak-RSS measurements, and on the compose stack with a
+backup of 500 topics; it changes the runner, the check Jobs, the controller
+and (one line) the product API, signs nothing differently, and
 the PoC upgrade that carries it takes a backup of several hundred topics and
 reads its catalog entry, its verdict and the controller's memory.
 
@@ -2309,47 +2309,33 @@ under older readers, which ignore the block.
 catalog point record copies it. Both were read under caps nobody had tied to a
 topic count. A backup of about 80 topics wrote a record over the catalog
 walk's 256 KiB, and the point **vanished from the catalog without a line**
-(the entry was dropped, and the remedy shown for the count blamed the
-`archiveRead` grant). A backup of about 300 topics wrote a receipt over the
-controller's 1 MiB and was **never verified** (`NotAttempted`, final). Each
-backup had succeeded. Now one budget bounds what a backup signs, and every
-reader's cap is derived from it ([kubernetes.md](kubernetes.md) §7b.5):
+(the remedy shown for the count blamed the `archiveRead` grant). A backup of
+about 300 topics wrote a receipt over the controller's 1 MiB and was **never
+verified** (`NotAttempted`, final). Each backup had succeeded. Now one budget
+bounds what a backup signs ([kubernetes.md](kubernetes.md) §7b.5):
 
 - **One backup names at most 1,000 topics**, and its receipt has a budget of
-  5,000 bytes a topic. The largest receipt is 5,131,072 bytes and the largest
-  catalog record is 6,131,072 bytes. A topic at broker defaults measures 3,090
-  bytes, and at most 4,003 once the engine has run.
-- **A selection over the budget is refused before the engine runs**, by name
+  5,000 bytes a topic. The largest receipt is 5,131,072 bytes and the
+  largest catalog record 6,131,072 bytes. A topic at broker defaults measures
+  3,090 bytes, and at most 4,003 once the engine has run.
+- **A selection over it is refused before the engine runs**, by name
   (`BackupSelectionTooLarge`): by count at `logweir backup run`'s phase −1, at
   the controller's freeze, in a schedule's run policy (`Ready=False`) and in
   the dynamic selection; and by the bytes the run could sign, after the
   runner's own configuration read. Nothing is left out to make a selection
-  fit, and Logweir no longer writes a backup it could not list and verify.
+  fit.
 - **The catalog walk, the controller and the evidence relay read a receipt
   under the same 5,131,072 bytes**, so a point the catalog lists `Available`
-  is one the controller can verify. A backup of 500 topics (a 1.6 MB receipt)
-  is listed, verified, offered and restorable.
-- **The controller no longer parses a receipt into a tree.** It folds the five
-  facts it needs from the bytes. Three reads of a 5.09 MB receipt add 9.7 MB
-  of peak memory, where the parse added 25.3 MB. A relay of one, from its pod
-  log to its verdict, adds 26.9 MB and is now under the controller's 128 MiB
-  read budget (it was under none): at most three relays or ten receipt reads
-  are held at once.
-- **The cap is the reader's, by what the document is.** A scorecard keeps
-  1 MiB. A relay carrying more than its kind's cap is refused by the
-  controller as the frames arrive, whatever the plan asked the pod for.
+  is one the controller can verify. A scorecard keeps 1 MiB. The controller
+  folds the facts it needs from a receipt and never parses one into a tree:
+  three reads of a 5.09 MB receipt add 9.7 MB of peak memory (25.3 MB as a
+  tree), and one relay of it 26.9 MB.
 - **The catalog lists every point it counts.** A point that is not available
-  because of one document says which and why (`cause`), with the size against
-  the bound when it is a size, and a remedy that names no grant unless a read
-  actually failed. `counts` separate a size and a content fault from a
-  permission or transport failure, and so does the `Synced` message.
-- **An entry with no record behind it is information, never evidence.** It
-  carries `factsFrom`, is never selectable, and publishes no receipt key,
-  digest, window or location. Every reader of the view refuses it by name: a
-  restore readiness check, a rehearsal, protection, the product API and the
-  console. Retention may keep the set such an entry names, and can never
-  delete or release anything on its word. A planted index row for a point
-  whose record reads changes nothing.
+  says why: a size gives the document's bytes against the bound and names no
+  grant. A point whose record could not be read is listed by its point id
+  alone, with nothing a restore could bind to, and is never selectable.
+  `counts` and the `Synced` message separate a size and a content fault from
+  a permission or transport failure.
 
 **The maximum is lower than it was.** A dynamic selection resolved up to
 5,000 names, and a named `spec.topics` list had no bound. Neither was safe: a
@@ -2371,47 +2357,38 @@ the old walk dropped are listed by the new one.
 **Scope:** no signed format, invariant arm or frozen schema changes; both
 verifiers accept the same documents they accepted. Runner rows
 (`crates/logweir/tests/topic_budget.rs`): a topic's measured cost against its
-budget, the projection above real runs' documents, the two refusals through
-the backup seam with no client and no engine call, and receipts of 70, 105,
-113, 300, 500 and 1,000 topics inside their bounds while 5,000 are not. Check
-rows (`crates/logweir/tests/check_cli.rs`): those six sizes listed `Available`
-and signature-verified; a 5,000-topic point listed with its size; nine faults
-each listed with its own reason; planted index rows. Controller rows
-(`crates/weirkeeper/tests/topic_budget.rs`): the same six receipts and one at
-the bound verified `Valid` against committed signatures; the cap by document
-kind at each place bytes arrive; the largest receipt framed into 7,037,746
-bytes of pod log under the 8 MiB the controller reads; and, in child
-processes, the memory figures above with a control beside each. The
-controller's reconcilers verify a relayed 500-topic receipt and refuse a
-5 MiB relay where a scorecard is expected.
+budget, the projection above real runs' documents, and the two refusals
+through the backup seam with no client and no engine call. Check rows
+(`crates/logweir/tests/check_cli.rs`): receipts of 70, 105, 113, 300, 500 and
+1,000 topics listed `Available` and signature-verified; a 5,000-topic point
+listed with its size; nine faults each listed with its own reason. Controller
+rows (`crates/weirkeeper/tests/topic_budget.rs`): the same receipts verified
+`Valid` against committed signatures, the largest framed into 7,037,746 bytes
+of pod log under the 8 MiB the controller reads, and the memory figures above,
+measured in child processes beside a whole-parse control.
 
 Live row (`e2e/tests/topic_budget.rs`, compose stack, Logweir's engine build
 `0.23.3+logweir.2` from the runner image): one `logweir backup run` of 500
-one-partition topics, 188 of them with real overrides, took 16 s and signed a
-receipt of 1,650,142 bytes (3,300 a topic) and a record of 1,691,726 bytes.
-`catalogSync` over the real store listed the point `Available` with its
-signature verified. `evidenceFetch` relayed the receipt whole in 2,234,101
-bytes of log, and relayed nothing when asked under the old 1 MiB. Both
-verifiers accepted the receipt. The controller's verification code, run over
-those bytes outside a cluster
-(`the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller`),
-answered `Valid` through its own handle and through a relay, and
-`NotAttempted` under the old cap. A point-bound `newTopic` restore of all 500
-topics under a prefix passed in 526 s; its scorecard is 133,861 bytes, both
-verifiers accept it, every restored topic holds its source's records, and the
-receipt's recorded configuration was judged for every topic (nothing is
-`not_assessed`). A `newTopic` restore does not apply a source's overrides: it
-signs them as not reconstructed (172 here), as before this item.
+one-partition topics, 188 with real overrides, signed a receipt of 1,650,142
+bytes (3,300 a topic) and a record of 1,691,726 bytes. `catalogSync` over the
+real store listed the point `Available` with its signature verified;
+`evidenceFetch` relayed the receipt whole, and nothing when asked under the
+old 1 MiB; both verifiers accepted it, and so did the controller's
+verification code run over those bytes outside a cluster. A point-bound
+`newTopic` restore of all 500 topics under a prefix passed; its scorecard is
+about 134 KB, both verifiers accept it, every restored topic holds its
+source's records, and every topic was judged against the receipt's recorded
+configuration. A `newTopic` restore does not apply a source's overrides: it
+signs them as not reconstructed, as before this item.
 [UNVERIFIED — no cluster has run this build: the controller, API and console rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
 **Rollback:** an older runner accepts larger selections again and an older
 controller reads a receipt under 1 MiB again; nothing is stored differently.
-An older controller skips a catalog entry that carries `factsFrom` (it has no
-receipt key) and counts it as malformed. Roll the runner and the controller
-together: this controller asks an evidence-fetch Job for a receipt of up to
-5,131,072 bytes, and an OLDER runner image refuses a request over 1 MiB, for
-every receipt however small. Under that pair no backup on a destination the
-controller cannot read itself is verified, and after four attempts each is
-`NotAttempted`. An older controller with this runner works as before.
+Roll the runner and the controller together: this controller asks an
+evidence-fetch Job for a receipt of up to 5,131,072 bytes, and an OLDER
+runner image refuses a request over 1 MiB, for every receipt however small,
+so under that pair no backup on a destination the controller cannot read
+itself is verified (`NotAttempted` after four attempts). An older controller
+with this runner works as before.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2539,8 +2516,8 @@ only and needs nothing; item 56
 changes the `Restore` CRD (apply it before the controller rolls), the
 controller, the runner, the product API and the console, and needs nothing
 for any other restore (an older runner refuses an original-name plan); item 57
-changes the runner, the check Jobs, the controller, the product API and the
-console, and needs every `Backup` and `BackupSchedule` that names or resolves
+changes the runner, the check Jobs, the controller and the product API, and
+needs every `Backup` and `BackupSchedule` that names or resolves
 to more than 1,000 topics split before the upgrade, and each
 `RecoveryCatalog` synced again after the runner image rolls. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
