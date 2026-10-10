@@ -1027,10 +1027,16 @@ fn a_backup_records_each_topics_model_and_its_owner() {
         verified["rust_model_lines"].as_array().unwrap().len(),
         all.len()
     );
-    assert!(verified["rust_checked"]
-        .as_str()
-        .unwrap()
-        .contains("all thirty-four"));
+    // The reader checked the invariants, not the signature alone. The COUNT
+    // is `cli_verify.rs`'s to pin: it moves with every block that adds arms
+    // (twenty-one here, then twenty-nine, then forty), and this row is about
+    // the configuration model.
+    let checked = verified["rust_checked"].as_str().unwrap();
+    assert!(
+        checked.contains("the signature AND all ")
+            && checked.contains(" backup-receipt invariants"),
+        "{checked}"
+    );
     // WHERE THE RUN LOOKED for owners (fix round, M2): the plan's
     // declarations and the `KafkaTopic` resources — so a topic neither owns is
     // "no declarative owner found", applied through the admin API, and an
