@@ -590,8 +590,10 @@ pub async fn create(
         &created.object,
         &request.approval_ref.name,
         &effective,
-        request.ticket.as_deref(),
-        typed_confirmation(&request),
+        SignedBesideThePlan {
+            ticket: request.ticket.as_deref(),
+            confirmation: typed_confirmation(&request),
+        },
     )
     .await?;
     Ok(json(
@@ -679,6 +681,14 @@ fn refuse_typed_confirmation(
         )])),
         (false, None) => Ok(()),
     }
+}
+
+/// What a create request asks the console to sign beside the plan hash: the
+/// change ticket (PLAT-19.2) and, on a one-person confirmation of an
+/// original-name restore, the typed topic names (OD-10).
+struct SignedBesideThePlan<'a> {
+    ticket: Option<&'a str>,
+    confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 }
 
 /// The typed confirmation a request carries, as the console signs it.
@@ -867,9 +877,12 @@ async fn authorize_submission(
     restore: &Restore,
     approval_name: &str,
     effective: &EffectivePolicy,
-    ticket: Option<&str>,
-    confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
+    signed: SignedBesideThePlan<'_>,
 ) -> Result<RestoreRoutingView, ApiError> {
+    let SignedBesideThePlan {
+        ticket,
+        confirmation,
+    } = signed;
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(effective));
