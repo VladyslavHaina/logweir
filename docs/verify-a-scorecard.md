@@ -535,7 +535,12 @@ on the 0.23.3 pin (re-measured: PROD-01.1 record §11):
   transactions' commit and abort markers are archived and restored as ordinary
   records. A consumer of the restored topic sees all of them, even with
   `isolation.level=read_committed`, because the restore does not produce
-  transactionally. The drill passes.
+  transactionally. The drill passes. Since PROD-01.1a, a restore whose archive
+  holds the markers is refused unless its plan states
+  `restore.allow_transaction_markers: true`, and then the scorecard's
+  `sample.coverage_note` says so ([details](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
+  A transaction still open when the backup ran leaves no marker in the
+  archive, so its records alone do not cause a refusal.
 - **`LogAppendTime` topics.** The archive keeps the timestamp each producer set,
   not the time the broker appended the record, and the restore writes it as
   `CreateTime`. Restored timestamps therefore differ from what the source topic

@@ -49,8 +49,9 @@ Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
 FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
 restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
-the runner will, and reads only that point's own receipt) and 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
-ceiling held back) so far. Items continue the next entry's
+the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
+ceiling held back) and 59 (PROD-01.1a, an archive holding transaction markers
+is refused unless the plan allows them) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -191,6 +192,11 @@ rows over one chain of fixtures; it changes the controller, the
 `RetentionPolicy` CRD (four additive status fields and a printer column), the
 product API and the console, and the PoC upgrade that carries it reads a
 `Report` policy's counts at `keepLast: 300` and at `keepLast: 10`.
+Item 59 is row PROD-01.1a, proven by unit and phase-sequence rows and on the
+compose stack with the shipped engine (the PROD-01.1 transactional fixture,
+refused as a drill and as a `newTopic` restore, restored under the override,
+and a non-transactional twin as the control); it changes the runner only, and
+the PoC upgrade that carries it restores one ordinary point unchanged.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2524,6 +2530,43 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
 
+#### 59. An archive holding transaction markers is refused unless the plan allows them (PROD-01.1a)
+
+**Changed.** The engine archives every transaction commit and abort marker as
+an ordinary record, and a restore wrote each one, with the records of aborted
+transactions beside it, as data every consumer reads. Before it creates
+anything on the target, a restore now reads every archived segment of the
+partitions it restores and counts the records shaped like a marker. If there
+are any, the restore is refused, as a drill or as a `newTopic` restore. It
+exits 3 with `refusal-reason=TransactionMarkersInArchive`; the `Restore`'s
+`exitReason`, the product API's `result.exitReason` and the console show the
+name, and the message names the topics, partitions and count. The plan field
+`restore.allow_transaction_markers: true` restores the archive as before. The
+field is inside `plan_hash`. Under the override the check is skipped, and the
+signed scorecard's `sample.coverage_note` says so. The check reads each
+restored segment once more before the engine runs. It reads the shape only,
+so a record of your own with that shape is counted too. A transaction open at
+backup time whose marker is not archived, a transaction opened after the backup
+began, and a marker of another encoding version are not detected
+([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
+**Do:** nothing, unless you restore transactional topics (Kafka Streams or
+Connect exactly-once, Flink): to restore one as it is, add
+`restore.allow_transaction_markers: true` to its plan and approve the changed
+plan. A `RehearsalSchedule` cannot state the field, so its slots over such an
+archive are refused and `lastFailed.reason` names the refusal.
+**Scope:** the shape predicate on hand-built records (a marker of each type,
+a user record of the same shape, a 7-byte value and a non-zero key prefix
+not caught); the whole run over doubles, refused in both target modes with no
+target topic and no scorecard, run under the override with the note, the
+override outside the approved plan refused at phase 1, and an unreadable
+segment refused; and live on the compose stack with engine `0.23.3+logweir.2`
+(`e2e/tests/record_semantics.rs`, the transactional row: refused as a drill
+and as a `newTopic` restore with the 7 archived markers named and nothing on
+the target, the non-transactional twin restored and `pass`, the override's
+restore `pass` with the note).
+**Rollback:** an older runner ignores the plan field and restores such an
+archive without the check, as before. Plans and approvals are unaffected.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2603,7 +2646,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 and 58, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2660,7 +2703,9 @@ a narrow `archiveRead` grant, the two reads above; item 58 changes the controlle
 the `RetentionPolicy` CRD (four additive status fields and a printer column),
 the product API and the console, and needs the CRDs applied before the
 controller rolls, and any script that reads `kubectl get retentionpolicy` by
-column position updated for the new `HELD-BACK` column. To roll back to
+column position updated for the new `HELD-BACK` column; item 59 changes the
+runner only, and needs a plan field for a restore of an archive that holds
+transaction markers. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
