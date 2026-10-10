@@ -304,7 +304,9 @@ writes beside its pages), so both carry `viewIncomplete: false`, and the API's a
 `accounting: "Recorded"` for both. The two hand-kept console answers
 (`console/retention-policy-enforce.json`, `console/retention-policies-list.json`) are of
 statuses an older controller wrote: they carry `accounting: "NotRecorded"` and no counts,
-which is what the API answers for that shape.
+which is what the API answers for that shape. The member is optional in the schema (default
+`NotRecorded`); `d3.spec.js` deletes it from a copy of the held-back answer to read what a
+build of the API that predates it would send.
 
 Regenerate both, in this order, with:
 

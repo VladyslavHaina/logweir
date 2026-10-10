@@ -3457,11 +3457,15 @@ export const ACCOUNTING_NOT_RECORDED_WORD = "NotRecorded";
  *  from a count that happens to be absent: `NotRecorded` -- and any word this
  *  build does not know -- is `null` whatever else the block carries, and
  *  `Recorded` still needs the counts themselves to be whole numbers, because
- *  a word is not a number.
+ *  a word is not a number. AN ANSWER WITHOUT THE WORD, from a build of the
+ *  API that predates it, decodes with `accounting: null` and reads as
+ *  `NotRecorded`, the schema's declared default: nothing is inferred from
+ *  whatever counts such an answer carries.
  *
  *  THE RULE IS THE CONTROLLER'S (`RetentionEvaluation::accounting`). Legacy
  *  mode hands this page the custom resource itself, with no API in between
- *  and so no `accounting` member, and the rule is applied here wherever the
+ *  and so no `accounting` key at all (`undefined`, which is how this function
+ *  tells the two modes apart), and the rule is applied here wherever the
  *  lists in hand are whole -- which is every legacy read, and every console
  *  read whose `truncated` is not `true`:
  *

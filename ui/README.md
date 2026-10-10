@@ -2928,7 +2928,10 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   fits the ceiling); a count is never read off a list, so an evaluation that
   does not record the accounting reads `not recorded` in both cells. **Console
   mode reads the product API's own word**, `lastEvaluation.accounting`
-  (`Recorded` or `NotRecorded`), and never infers it from an absent count.
+  (`Recorded` or `NotRecorded`), and never infers it from an absent count. An
+  answer without the word, from an API that predates it, still decodes (the
+  member is optional in the schema, default `NotRecorded`) and reads as not
+  recorded.
   Legacy mode reads the custom resource, which has no such member, and applies
   the controller's rule itself wherever the lists in hand are whole: the four
   counts add up and the `kept` list is `keptCount` long. A negative number is

@@ -2875,6 +2875,44 @@ test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async ()
   assert.equal(older.accounting, "NotRecorded");
   assert.equal(older.keptCount, undefined);
   assert.equal(evaluationAccounting(older), null);
+
+  // AN API THAT PREDATES THE WORD. The member is optional in the published
+  // schema, with the default `NotRecorded`, so such an answer still DECODES:
+  // the policy list is not lost to a contract failure (which the schedules
+  // page would render as "no RetentionPolicy was read", and print the
+  // no-deletion sentence under). And the counts it carries are not taken for
+  // an accounting nobody declared.
+  const predates = con("retention-policies-held-back.json");
+  for (const item of predates.items) {
+    delete item.lastEvaluation.accounting;
+  }
+  const read = await listD3("retention", "team-a", {}, {
+    modeOf: () => "console",
+    consoleList: async () => predates,
+  });
+  assert.equal(read.items.length, 2, "both policies are still read");
+  const ten = read.items.find((item) => item.metadata.name === "keep-10");
+  assert.equal(ten.status.lastEvaluation.accounting, null,
+    "decoded, and absent: `null`, where legacy mode's custom resource has no key at all");
+  assert.equal(ten.status.lastEvaluation.keptCount, 10,
+    "PREMISE: the counts are there, and they add up");
+  assert.equal(evaluationAccounting(ten.status.lastEvaluation), null);
+  const predatesHtml = decode(renderEnforcement({}, ten));
+  assert.match(predatesHtml, /data-accounting="not-recorded"/);
+  assert.equal(fact(predatesHtml, "kept"), "not recorded");
+  assert.equal(fact(predatesHtml, "held back by the per-run ceiling"), "not recorded");
+  // CONTROL: a member the schema REQUIRES refuses the whole read when it is
+  // absent, which is what a required `accounting` would have done to every
+  // answer of an older build.
+  const broken = con("retention-policies-held-back.json");
+  delete broken.items[0].lastEvaluation.truncated;
+  await assert.rejects(
+    listD3("retention", "team-a", {}, {
+      modeOf: () => "console",
+      consoleList: async () => broken,
+    }),
+    (error) => isContractFailure(error),
+  );
 });
 
 // FX-22 review L3 (mutant R12): a negative number is not a count.

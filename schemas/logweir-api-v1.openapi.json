@@ -12417,7 +12417,7 @@
         ]
       },
       "RetentionAccountingState": {
-        "description": "Whether a retention evaluation records its accounting — the member a client reads BEFORE it reads `kept` (FX-22 review M1).\n\nThe response withholds `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and the `kept` rows when the status does not record an accounting that closes. Until this member existed nothing in the response said so: a client that read `kept`, the one member that predates FX-22, got no member and `truncated: false`, and read \"nothing is kept\". A policy that keeps nothing and records it publishes no `kept` member either, so the absence of the list never told the two apart.",
+        "description": "Whether a retention evaluation records its accounting — the member a client reads BEFORE it reads `kept` (FX-22 review M1).\n\nThe response withholds `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and the `kept` rows when the status does not record an accounting that closes. Until this member existed nothing in the response said so: a client that read `kept`, the one member that predates FX-22, got no member and `truncated: false`, and read \"nothing is kept\". A policy that keeps nothing and records it publishes no `kept` member either, so the absence of the list never told the two apart.\n\nTHE DEFAULT IS `NotRecorded`, AND IT IS THE SCHEMA'S DECLARED DEFAULT. This build writes the member on every answer. A response WITHOUT it comes from a build that predates it, which publishes no accounting this reader can rely on, and \"not recorded\" is the only reading of an absent word that asserts nothing.",
         "oneOf": [
           {
             "description": "The status records `keptCount`, `candidateCount` and `truncatedByCap`, they add up to `pointsEvaluated` with the skipped points, and its `kept` list is `keptCount` long. The counts and the `kept` rows in this response are that status's own. `keptCount: 0` with no `kept` member then means nothing is kept.",
@@ -12439,12 +12439,12 @@
         "description": "What the last evaluation found. **Nothing here was deleted.**\n\nTHE NAME CARRIES ITS DOMAIN BECAUSE THE SCHEMA NAME IS GLOBAL. `schemars` keys `components/schemas` by the type's SHORT name, so two `EvaluationView` types in two route modules silently become one schema and one of the two `$ref`s points at the wrong shape — with no error anywhere. `trust.rs` has its own evaluation view, and `no_two_published_types_share_a_schema_name` in `tests/contract.rs` is what keeps the pair honest.",
         "type": "object",
         "required": [
-          "accounting",
           "truncated"
         ],
         "properties": {
           "accounting": {
-            "description": "Whether `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept` below are published. Always present. Read it before `kept`: with `NotRecorded` those four members are absent and an absent `kept` does NOT mean nothing is kept.",
+            "description": "Whether `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept` below are published. Written on every answer. Read it before `kept`: with `NotRecorded` those four members are absent and an absent `kept` does NOT mean nothing is kept.\n\nALWAYS WRITTEN, AND DECLARED OPTIONAL WITH A DEFAULT, ON PURPOSE. No answer of this build lacks the member. It is not listed under `required` so that a reader built from this document can still read the answer of a build that predates it, where it reads the declared default, `NotRecorded`.",
+            "default": "NotRecorded",
             "$ref": "#/components/schemas/RetentionAccountingState"
           },
           "at": {

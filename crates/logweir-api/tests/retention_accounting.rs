@@ -23,7 +23,9 @@
 
 mod support;
 
-use logweir_api::routes::retention::{published_view_incomplete, view, MAX_ROWS};
+use logweir_api::routes::retention::{
+    published_view_incomplete, view, RetentionAccountingState, MAX_ROWS,
+};
 use serde_json::{json, Value};
 use support::{repo_root, FakeKube, Options, TestApp, NS_A};
 use weirkeeper::crds::retention_policy::RetentionPolicy;
@@ -423,6 +425,41 @@ async fn the_response_says_whether_the_accounting_is_recorded() {
         assert!(matches!(word, "Recorded" | "NotRecorded"), "{word}");
     }
     app.fake.assert_strict();
+
+    // WRITTEN ON EVERY ANSWER, AND DECLARED OPTIONAL WITH THE DEFAULT
+    // `NotRecorded`. A member that became `required` would make every reader
+    // built from the document refuse the whole retention read of a build that
+    // predates it; a reader that meets an answer without the member reads the
+    // declared default instead, and the default asserts nothing.
+    //
+    // MUTANT F1d: make `Recorded` the default.
+    assert_eq!(
+        RetentionAccountingState::default(),
+        RetentionAccountingState::NotRecorded
+    );
+    let document: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/logweir-api-v1.openapi.json"))
+            .expect("the checked-in OpenAPI document"),
+    )
+    .expect("JSON");
+    let schema = &document["components"]["schemas"]["RetentionEvaluationView"];
+    assert_eq!(
+        schema["properties"]["accounting"]["default"], "NotRecorded",
+        "{}",
+        schema["properties"]["accounting"]
+    );
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        vec!["truncated"],
+        "`accounting` is written on every answer and is not a member an older answer is \
+         refused for lacking"
+    );
 }
 
 /// **A `kept` list that is not the recorded count is not published** (review

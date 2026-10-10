@@ -1522,7 +1522,9 @@ alike. Now:
   `maxDeletionsPerRun`) and the console's retention panel ("kept", "in this
   plan", "held back by the per-run ceiling") read the same numbers. The API
   says on every answer whether they are published:
-  `lastEvaluation.accounting` is `Recorded` or `NotRecorded`. For an
+  `lastEvaluation.accounting` is `Recorded` or `NotRecorded` (optional in the
+  schema, with the default `NotRecorded`, which is how an answer from an older
+  build without the member reads). For an
   evaluation that does not record them (an older controller's, counts that do
   not add up, or a `kept` list that is not `keptCount` long) it answers
   `NotRecorded` and publishes no kept count and no `kept` rows, and the console

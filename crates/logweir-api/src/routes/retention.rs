@@ -80,7 +80,13 @@ pub enum ApprovedPlanState {
 /// member and `truncated: false`, and read "nothing is kept". A policy that
 /// keeps nothing and records it publishes no `kept` member either, so the
 /// absence of the list never told the two apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+///
+/// THE DEFAULT IS `NotRecorded`, AND IT IS THE SCHEMA'S DECLARED DEFAULT. This
+/// build writes the member on every answer. A response WITHOUT it comes from a
+/// build that predates it, which publishes no accounting this reader can
+/// rely on, and "not recorded" is the only reading of an absent word that
+/// asserts nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum RetentionAccountingState {
     /// The status records `keptCount`, `candidateCount` and `truncatedByCap`,
     /// they add up to `pointsEvaluated` with the skipped points, and its
@@ -95,6 +101,7 @@ pub enum RetentionAccountingState {
     /// long). `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept`
     /// are ABSENT and say nothing: an absent `kept` is not "nothing is kept".
     /// `candidateCount` and `candidates` are still this plan.
+    #[default]
     NotRecorded,
 }
 
@@ -167,9 +174,26 @@ pub struct RetentionEvaluationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub points_evaluated: Option<i64>,
     /// Whether `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` and `kept`
-    /// below are published. Always present. Read it before `kept`: with
-    /// `NotRecorded` those four members are absent and an absent `kept` does
-    /// NOT mean nothing is kept.
+    /// below are published. Written on every answer. Read it before `kept`:
+    /// with `NotRecorded` those four members are absent and an absent `kept`
+    /// does NOT mean nothing is kept.
+    ///
+    /// ALWAYS WRITTEN, AND DECLARED OPTIONAL WITH A DEFAULT, ON PURPOSE. No
+    /// answer of this build lacks the member. It is not listed under
+    /// `required` so that a reader built from this document can still read
+    /// the answer of a build that predates it, where it reads the declared
+    /// default, `NotRecorded`.
+    //
+    // WHY NOT `required` (not part of the published description): the field
+    // is not an `Option` and is never skipped, so the promise is kept by the
+    // serializer either way. But a member that became required would make
+    // every reader built from the document refuse the WHOLE retention read
+    // of a build that predates it, and the console's schedules page turns a
+    // failed retention read into an empty policy list, under which it prints
+    // the no-deletion sentence (`ui/pages/schedules.js`,
+    // `readRetentionPolicies`). `docs/stability.md` asks for the same
+    // direction: an added field is optional.
+    #[schemars(default)]
     pub accounting: RetentionAccountingState,
     /// How many points stay: the rules keep them, or something protects them.
     /// Never a point the per-run ceiling held back.

@@ -2221,8 +2221,10 @@ export const APPROVED_PLAN_STATES = Object.freeze([
 ]);
 
 /** `RetentionAccountingState` -- whether a retention evaluation's counts and
- *  `kept` rows are published (FX-22 review M1). Always present on
- *  `lastEvaluation`; with `NotRecorded` an absent `kept` says nothing. */
+ *  `kept` rows are published (FX-22 review M1). The API writes it on every
+ *  `lastEvaluation`; with `NotRecorded` an absent `kept` says nothing. The
+ *  schema's declared default for an answer WITHOUT the member (a build that
+ *  predates it) is `NotRecorded`. */
 export const RETENTION_ACCOUNTING_STATES = Object.freeze(["Recorded", "NotRecorded"]);
 
 /** `EvaluationState` -- whether a trust evaluation is believed. The API
@@ -2767,12 +2769,16 @@ const D3_SKIPPED_ENTRY = shapeOf("SkippedEntryView", { reason: str }, { pointId:
 
 const D3_LAST_EVALUATION = shapeOf(
   "RetentionEvaluationView",
-  // `accounting` IS REQUIRED: the API says on every answer whether the three
-  // counts and `kept` below are published, so this client never infers it
-  // from a member that is missing (FX-22 review M1).
-  { truncated: bool, accounting: oneOf(RETENTION_ACCOUNTING_STATES) },
+  { truncated: bool },
   {
     at: str, pointsEvaluated: int, candidateCount: int,
+    // FX-22 review M1: the API says on every answer whether the three counts
+    // and `kept` below are published, so this client does not infer it from a
+    // count that is missing. OPTIONAL HERE AS IN THE SCHEMA, which declares
+    // the default `NotRecorded`: an answer from a build that predates the
+    // member still DECODES (the policy list is not lost to a contract
+    // failure) and reads as not recorded -- `null` after the decode.
+    accounting: oneOf(RETENTION_ACCOUNTING_STATES),
     // FX-22: the closed accounting. Each is ABSENT when `accounting` is
     // `NotRecorded` (an older controller's evaluation, or two controllers'
     // numbers in one block), and then `kept` is absent too.

@@ -479,7 +479,10 @@ left out of it, and those points are in none of the lists. The counts are the
 cut at 200 rows, with `truncated: true`.
 
 **`lastEvaluation.accounting` says whether those counts are published, and it
-is on every answer**: `Recorded` or `NotRecorded`. Read it before `kept`.
+is on every answer**: `Recorded` or `NotRecorded`. Read it before `kept`. The
+schema declares the member optional, with the default `NotRecorded`: this
+build always writes it, and an answer without it comes from a build that
+predates the member and reads as `NotRecorded`.
 
 | `accounting` | `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` | `kept` |
 |---|---|---|
