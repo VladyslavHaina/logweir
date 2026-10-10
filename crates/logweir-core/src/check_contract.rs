@@ -313,11 +313,13 @@ closed_vocabulary! {
         // and that is no longer the current one: the set was written again
         // after the point was signed (FX-7's superseded pin).
         ManifestSuperseded => "ManifestSuperseded",
-        // FX-14: the archive does not hold the point the plan is bound to as
-        // it was approved — a malformed binding, a receipt or manifest whose
-        // digest is not the bound one, a point id the receipt does not derive,
-        // or a receipt that describes another set than the one this restore
-        // reads. The runner refuses each of these with exit 3.
+        // FX-14: the plan's point binding is not this archive's — a malformed
+        // binding, a receipt key outside the plan's own set's receipts (refused
+        // before anything is read), a receipt that is absent or whose bytes are
+        // not the bound digest (ONE answer for both), a point id the receipt
+        // does not derive, a manifest that is not the bound one, or a receipt
+        // that describes another set than the one this restore reads. The
+        // runner refuses each of these before any data moves.
         PointBindingMismatch => "PointBindingMismatch",
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
         PointInTimeAfterCoverage => "PointInTimeAfterCoverage",

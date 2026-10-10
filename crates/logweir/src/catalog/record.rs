@@ -83,6 +83,59 @@ pub const LOG_PREFIX: &str = "logweir/catalog/v1/log/";
 /// `the_receipt_prefix_is_the_one_the_backup_runner_writes_under`.
 pub const RECEIPTS_PREFIX: &str = "logweir/backups/";
 
+/// What every backup receipt's key ends with
+/// (`crate::backup::phase_run::receipt_keys`).
+pub const RECEIPT_SUFFIX: &str = ".receipt.json";
+
+/// Whether `segment` is ONE plain object-key path segment: not empty, not `.`
+/// or `..`, and made only of printable ASCII that neither separates a path
+/// (`/`, `\`) nor is rewritten on its way to a store (`%`, `?`, `#`, `*` and
+/// the bracket, quote and control characters an `object_store` path
+/// percent-encodes). A segment that passes is addressed exactly as written.
+#[must_use]
+pub fn is_plain_key_segment(segment: &str) -> bool {
+    const REWRITTEN: &[u8] = b"/\\%?#*{}^`[]\"<>~|";
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !REWRITTEN.contains(&b))
+}
+
+/// **FX-14 — the confinement of a receipt key a PLAN names.** The run id of
+/// `receipt_key` when it is, character for character, the key
+/// `logweir backup run` writes set `backup_id`'s receipt at —
+/// `logweir/backups/<backup_id>/<run_id>.receipt.json`, each id one plain
+/// segment ([`is_plain_key_segment`]) — and `None` for every other key.
+///
+/// # Why a reader of plan text needs it
+///
+/// A plan's `source.point.receipt_key` is free text written by whoever
+/// drafted the plan, and a reader that fetched whatever it names would turn
+/// its own archive credential into a probe of the whole bucket: does this
+/// object exist, do its bytes hash to my guess. In a bucket shared by prefix
+/// that reaches other tenants' objects. So the key is never taken on the
+/// plan's word. It is held to the WRITER's derivation
+/// (`crate::backup::phase_run::receipt_keys`, re-derived here and compared
+/// whole, so this function cannot drift from the writer), for the one set
+/// the plan itself restores, and the only free component left is the run id:
+/// one segment, with no separator in it.
+#[must_use]
+pub fn receipt_run_id<'a>(receipt_key: &'a str, backup_id: &str) -> Option<&'a str> {
+    if !is_plain_key_segment(backup_id) {
+        return None;
+    }
+    let run_id = receipt_key
+        .strip_prefix(RECEIPTS_PREFIX)?
+        .strip_prefix(backup_id)?
+        .strip_prefix('/')?
+        .strip_suffix(RECEIPT_SUFFIX)?;
+    (is_plain_key_segment(run_id)
+        && crate::backup::phase_run::receipt_keys(backup_id, run_id).receipt_key == receipt_key)
+        .then_some(run_id)
+}
+
 /// The point identity, D3 §5.1: `"lwp1-" + lowercase_hex(sha256(receipt
 /// bytes))[0..32]`, over the EXACT stored bytes of the signed backup receipt.
 ///
@@ -602,5 +655,75 @@ pub fn location_id(u: &logweir_core::engine::StorageUrl) -> String {
         // `Filesystem` carries only `path` (`StorageUrl::prefix` returns "" for
         // it), so the path IS the location.
         U::Filesystem { path } => format!("file://{}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`RECEIPTS_PREFIX`] and [`RECEIPT_SUFFIX`] are the writer's own: the
+    /// key `logweir backup run` puts a receipt at starts with one and ends
+    /// with the other, and [`receipt_run_id`] reads the run id back out.
+    #[test]
+    fn the_receipt_prefix_is_the_one_the_backup_runner_writes_under() {
+        const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
+        for set in [
+            "nightly-7",
+            "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab-20260915T030000Z-r2",
+        ] {
+            let key = crate::backup::phase_run::receipt_keys(set, RUN).receipt_key;
+            assert!(key.starts_with(RECEIPTS_PREFIX), "{key}");
+            assert!(key.ends_with(RECEIPT_SUFFIX), "{key}");
+            assert_eq!(receipt_run_id(&key, set), Some(RUN), "{key}");
+        }
+    }
+
+    /// **FX-14.** Only the writer's key for THIS set confines: every other
+    /// spelling — another set, another prefix or tenant, a nested or relative
+    /// path, another object of the same run, an id that is not one plain
+    /// segment — is `None`, so a reader refuses it before any read.
+    #[test]
+    fn a_receipt_key_is_confined_to_its_own_sets_receipt_namespace() {
+        const SET: &str = "nightly-7";
+        for key in [
+            // another set's receipt, and a set whose id merely starts the same
+            "logweir/backups/nightly-8/run-1.receipt.json",
+            "logweir/backups/nightly-70/run-1.receipt.json",
+            // another prefix or tenant; an absolute spelling
+            "tenant-b/logweir/backups/nightly-7/run-1.receipt.json",
+            "/logweir/backups/nightly-7/run-1.receipt.json",
+            "logweir/drills/nightly-7/run-1.receipt.json",
+            // relative and nested paths
+            "logweir/backups/nightly-7/../nightly-8/run-1.receipt.json",
+            "logweir/backups/nightly-7/../../../tenant-b/secret.receipt.json",
+            "logweir/backups/nightly-7/sub/run-1.receipt.json",
+            "logweir/backups/nightly-7//run-1.receipt.json",
+            "logweir/backups/nightly-7/..receipt.json",
+            // not a receipt
+            "logweir/backups/nightly-7/run-1.receipt.sig",
+            "logweir/backups/nightly-7/execution.claim.json",
+            "logweir/backups/nightly-7/.receipt.json",
+            "logweir/catalog/v1/points/lwp1-0/record.json",
+            "kafka-backups/nightly-7/manifest.json",
+            // a run id the store would rewrite, or that hides a separator
+            "logweir/backups/nightly-7/run%2F1.receipt.json",
+            "logweir/backups/nightly-7/run\\1.receipt.json",
+            "logweir/backups/nightly-7/run 1.receipt.json",
+            "logweir/backups/nightly-7/run?versionId=1.receipt.json",
+            "",
+        ] {
+            assert_eq!(receipt_run_id(key, SET), None, "{key:?} is not confined");
+        }
+        // A set id that is not one plain segment confines nothing at all.
+        for set in ["", ".", "..", "a/b", "../nightly-7", "nightly-7/", "a%2Fb"] {
+            let key = format!("{RECEIPTS_PREFIX}{set}/run-1{RECEIPT_SUFFIX}");
+            assert_eq!(receipt_run_id(&key, set), None, "set {set:?}");
+        }
+        // The control: the writer's own key, for its own set.
+        assert_eq!(
+            receipt_run_id("logweir/backups/nightly-7/run-1.receipt.json", SET),
+            Some("run-1")
+        );
     }
 }
