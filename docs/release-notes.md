@@ -49,8 +49,9 @@ Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
 FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
 restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
-the runner will, and reads only that point's own receipt) and 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
-ceiling held back) so far. Items continue the next entry's
+the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
+ceiling held back) and 59 (FX-35, a restore started from a Backup is bound to
+its recovery point) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -2524,6 +2525,36 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
 
+#### 59. A restore started from a Backup is bound to its recovery point (FX-35)
+
+**Changed.** The console's restore wizard opened on a `Backup` (the *Restore
+this point* link of the History, Backups and Schedules pages) built a plan
+naming `source.backup` only, so the runner read no backup receipt: a 1.3.0
+point restored that way signed each topic's timestamp type NOT RECORDED and
+its configuration `(unknown)`, where the same point restored from the catalog
+recorded both (PoC batch 5, F-3). The wizard now names the run's point by its
+receipt digest, finds it in a catalog over the run's own destination, and
+builds the catalog flow's plan for it: the same `source.point`, with the
+Backup's topics filled in. When no catalog lists the point yet, the plan names
+the set only, as before, and step 2 and the review say it is not bound and
+why. The review's new *recorded by the point* row says where the run reads
+each topic's timestamp type and configuration
+([kubernetes.md](kubernetes.md), *A restore started from a Backup is bound the
+same way*).
+**Do:** nothing. To have a Backup's restore bound, keep a `RecoveryCatalog`
+over its destination synced since the run.
+**Scope:** console rows over the product API's own documents, through the
+console's client and contract decoders (`ui/tests/backups-page-binding.spec.js`):
+the PoC's 1.3.0 point restored from its Backup carries the catalog flow's
+binding byte for byte, with a newer run's point listed first as the wrong
+answer; a run whose point no catalog lists says so and carries no binding.
+Ten mutants, all killed (the binding dropped, the newer run bound, a contract
+declaration removed, the unbound note or the review row wrong). Not proven
+live in this branch: the next PoC upgrade restores a 1.3.0 point from the
+Backups page and reads its review and its scorecard's time basis.
+**Rollback:** the console image; an older console builds the set-only plan
+again. Nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2603,7 +2634,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 and 58, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2660,7 +2691,8 @@ a narrow `archiveRead` grant, the two reads above; item 58 changes the controlle
 the `RetentionPolicy` CRD (four additive status fields and a printer column),
 the product API and the console, and needs the CRDs applied before the
 controller rolls, and any script that reads `kubectl get retentionpolicy` by
-column position updated for the new `HELD-BACK` column. To roll back to
+column position updated for the new `HELD-BACK` column; item 59 changes the
+console only and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

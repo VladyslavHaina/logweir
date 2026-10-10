@@ -209,6 +209,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
 | `tests/complete-coverage.spec.js` | **PROD-08.1a**: complete coverage -- the wizard's closed advanced choice with its cost, unticked by default; the plan line exactly when ticked and the old bytes when not (the golden pair `plan-complete.golden.yaml`, which `ui_lint.rs` also parses into `RestoreSpec`); the review row and cost; the Restore's declaration; the draft; the mounted wizard; the API's coverage decoded and projected; the list row, the detail and the operation view saying sampled or complete with every partition's counts; and `covered: false` never green, even beside a forged pass -- each row with its negative control. |
+| `tests/backups-page-binding.spec.js` | **FX-35**: a restore opened on a Backup is bound to that run's point exactly as the catalog flow binds it (control: the catalog flow's plan for the same point), and one whose point no catalog lists says so and carries no binding (control: the same run with its point listed); both mount the wizard in console mode through the real client and decoders. |
 | `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
 | `tests/schema-dependency.spec.js` | **PROD-03.0**: the restore review, the recovery-point step and the catalog page name the schema-dependent topics with their sides and schema ids and say "Registry not captured: applications may not read these records after restore."; a `notDetected` topic is not named, and a topic without the field (or `notAssessed`) is said to be not assessed, never "no registry needed" -- over the fixture the product API's own row answers, each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
@@ -968,7 +969,7 @@ runner re-reads that receipt and manifest before it contacts a broker and
 refuses a mismatch (exit 3 `PointBindingMismatch`), and refuses a plan or a
 restored set that is not the point's own set (exit 3 `PointBindingSetMismatch`,
 FX-16); this plan pins `source.backup` to the point's set for that reason. A plan built from a
-`Backup` carries no `point` block and is byte-identical to before
+`Backup` whose point no catalog lists carries no `point` block and is byte-identical to before
 (`ui/tests/fixtures/plan-point.golden.yaml` beside `plan.golden.yaml`). Step 5
 sends `restore.catalogPoint {catalog, pointId}` and nothing else, so the
 controller re-reads the row when the check runs. A draft is kept per point: a
@@ -981,6 +982,15 @@ connect an archive when there are none). `#/catalog`'s table links every row
 the rule offers and says why a selectable row is not offered; it shows the
 controller's `backupVerdict` beside the verification word and a banner when
 `backupVerdictsIncomplete` is set.
+
+**A restore started from a Backup is bound to its point (FX-35).** The wizard
+opened on a `Backup` (`#/restore?backup=..&uid=..`, the link the History,
+Backups and Schedules pages give) names the run's point by its receipt digest,
+finds it in a catalog over the run's own destination, and builds the catalog
+flow's plan for it: the same `source.point`, the Backup's topics filled in. When
+no catalog lists the point yet, step 2 and the review say the plan is NOT bound
+and why, and the run's scorecard will report each topic's timestamp type NOT
+RECORDED; the review's *recorded by the point* row says which.
 
 **A run the controller wrote no window for (CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).**
 A `Succeeded` destination-backed run whose own verdict is absent or
