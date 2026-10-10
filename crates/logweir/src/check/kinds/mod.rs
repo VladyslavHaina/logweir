@@ -20,6 +20,7 @@
 //! carrying one answer from the side that can actually establish it.
 
 pub mod access;
+pub mod capability;
 pub mod catalog_sync;
 pub mod evidence;
 pub mod inventory;
@@ -229,6 +230,8 @@ pub fn is_unknown_code(code: CheckCode) -> bool {
             | CheckCode::EvidenceReadNotConfigured
             | CheckCode::ClusterIdentityNotObserved
             | CheckCode::SignerKeyIdNotObserved
+            | CheckCode::ApiVersionsNotObserved
+            | CheckCode::TimestampBoundNotReported
     )
 }
 
@@ -452,6 +455,44 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The principal may not read the target's broker configuration, so the timestamp \
              bound was not checked. Grant it DescribeConfigs on the Cluster resource; \
              Describe does not imply it."
+        }
+        CheckCode::TimestampBoundNotReported => {
+            "The target's broker configuration answered without either record-timestamp bound \
+             key, so the bound was not checked: an endpoint that does not report the bound has \
+             not declared that it has none (Redpanda keeps it per topic, as \
+             message.timestamp.before.max.ms). Compare the target's own setting with the plan's \
+             window yourself. The run is not refused for this: a record the target rejects fails \
+             the restore, which signs nothing."
+        }
+        // -- capability rows (PROD-01.2) ---------------------------------
+        CheckCode::EngineProtocolUnsupported => {
+            "This operation cannot run against this endpoint with this engine: the endpoint \
+             closes the connection on a request version it does not serve. Use an endpoint that \
+             serves the versions named above (every supported Apache Kafka line does; \
+             docs/support-matrix.md lists what each endpoint was measured to serve). An endpoint \
+             that cannot be a restore target can still be a backup source when \
+             connection.engineProtocol is ready: restore its archive into a cluster that serves \
+             them."
+        }
+        CheckCode::ApiVersionsNotObserved => {
+            "The endpoint's ApiVersions answer was not read on this connection, so whether it \
+             serves what the operation needs is not known. Re-run the check; if it persists, \
+             raise the check timeout, and check that the endpoint allows a second connection from \
+             this principal."
+        }
+        CheckCode::TopicConfigsNotReadable => {
+            "Grant this principal DescribeConfigs on the topic (Describe does not imply it). \
+             Without it the backup still runs: the point records the topic's configuration as not \
+             captured (captureDenied) and its timestamp type as not recorded, so a restore of \
+             that point labels its time basis `not recorded` and reports the topic's \
+             configuration as not assessed. Accept the point on those terms, or grant the read."
+        }
+        CheckCode::GroupTypesNotListed => {
+            "The backup of the topics is unaffected. To archive consumer positions, back up from \
+             an endpoint that serves ListGroups v5 or newer (Apache Kafka 3.9 does; 3.7 does \
+             not), or select no consumer group here and export the positions with the endpoint's \
+             own tooling. A group this endpoint cannot type is recorded as excluded, never as \
+             captured and never as offset 0."
         }
         CheckCode::MarkerTopicMissing => {
             "The scratch target's marker topic does not exist. Create it, or point the restore \

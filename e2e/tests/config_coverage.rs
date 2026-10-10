@@ -1419,6 +1419,7 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
             manifest_key: "fx4/manifest.json".into(),
             checks: Vec::new(),
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         })),
     };
     let bytes = serde_json::to_vec(&plan).expect("serialises");

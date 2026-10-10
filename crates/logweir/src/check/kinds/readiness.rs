@@ -28,6 +28,7 @@ use logweir_core::check_contract::{
 use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
 
 use super::access::{credential_bound_row, destination_checks, DestinationProbe};
+use super::capability;
 use super::{execution_only, from_broker_failure, ready, remedy_for, runner_contract, Wiring};
 use crate::check::{catalogue, Deadline, Emission};
 
@@ -228,6 +229,9 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
 
     let (auth_id, topics_id) = connection_ids(req.operation);
     let scope = connection_scope(&req.connection, req.operation);
+    // PROD-01.2: the capability rows the plan lists, and only those. The plan
+    // validation has already refused an id that is not this operation's.
+    let capabilities: Vec<CheckId> = req.capability_checks.clone();
     // The broker half gets half the budget; the destination half gets the
     // rest. Neither can spend the whole check on an unreachable endpoint.
     let broker_budget = deadline.slice(2);
@@ -245,11 +249,24 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                     &mut checks,
                 );
             }
+            for id in &capabilities {
+                push(
+                    capability::blocked(
+                        *id,
+                        "the connection did not authenticate, so this check did not run",
+                        now,
+                    )
+                    .with_scope(scope.clone()),
+                    &skip,
+                    &mut checks,
+                );
+            }
         }
         Ok(probe) => {
             let (row, _) = authenticated(auth_id, probe.as_ref(), Some(scope.clone()), now);
             let authenticated_ok = row.state == CheckState::Ready;
             push(row, &skip, &mut checks);
+            let mut topics_ok = authenticated_ok;
             if let Some(tid) = topics_id {
                 let row = if !authenticated_ok {
                     blocked(tid, now)
@@ -259,6 +276,18 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 } else {
                     topics_describable(tid, probe.as_ref(), &req.topics, deadline, now)
                 };
+                topics_ok = row.state == CheckState::Ready;
+                push(row.with_scope(scope.clone()), &skip, &mut checks);
+            }
+            for row in capability_rows(
+                &capabilities,
+                &req.connection,
+                probe.as_ref(),
+                &req.topics,
+                (authenticated_ok, topics_ok),
+                deadline,
+                now,
+            ) {
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
         }
@@ -313,6 +342,76 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     let mut result = CheckResult::new(CheckPlanKind::OperationReadiness);
     result.checks = checks;
     Emission::of(result)
+}
+
+/// PROD-01.2: the capability rows `listed`, in the plan's order, over one
+/// authenticated connection.
+///
+/// ONE ApiVersions observation serves every row that reads it, and it is
+/// made only when such a row is listed. `passed` is whether the connection
+/// authenticated and whether every selected topic is describable: a
+/// capability row about a connection that did not authenticate, or about
+/// topics the principal cannot even describe, has no honest answer of its own
+/// and says which row to fix first.
+#[must_use]
+pub fn capability_rows(
+    listed: &[CheckId],
+    connection: &ConnectionPlan,
+    probe: &dyn InventoryProbe,
+    topics: &[String],
+    passed: (bool, bool),
+    deadline: Deadline,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<CheckOutcome> {
+    let (authenticated_ok, topics_ok) = passed;
+    if !authenticated_ok {
+        return listed
+            .iter()
+            .map(|id| {
+                capability::blocked(
+                    *id,
+                    "the connection did not authenticate, so this check did not run",
+                    now,
+                )
+            })
+            .collect();
+    }
+    let reads_api_versions = |id: &CheckId| {
+        matches!(
+            id,
+            CheckId::ConnectionEngineProtocol
+                | CheckId::TargetEngineProtocol
+                | CheckId::ConnectionGroupTypes
+        )
+    };
+    let observed = listed
+        .iter()
+        .any(reads_api_versions)
+        .then(|| probe.api_versions());
+    let sasl = capability::engine_uses_sasl(connection);
+    listed
+        .iter()
+        .filter_map(|id| match (id, observed.as_ref()) {
+            (CheckId::ConnectionEngineProtocol | CheckId::TargetEngineProtocol, Some(observed)) => {
+                Some(capability::engine_protocol(*id, observed, sasl, now))
+            }
+            (CheckId::ConnectionGroupTypes, Some(observed)) => {
+                Some(capability::group_types(observed, now))
+            }
+            (CheckId::ConnectionTopicConfigsReadable, _) => Some(if topics_ok {
+                capability::topic_configs_readable(probe, topics, deadline, now)
+            } else {
+                capability::blocked(
+                    *id,
+                    "a selected topic is not describable by this principal, so its \
+                     configuration read was not attempted",
+                    now,
+                )
+            }),
+            // Not a capability row: the plan validation refused it already.
+            _ => None,
+        })
+        .collect()
 }
 
 /// The `KafkaCluster` scope a connection row carries.

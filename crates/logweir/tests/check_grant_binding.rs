@@ -498,6 +498,7 @@ fn fx20c_a_backup_readiness_check_names_a_foreign_evidence_write_secret() {
             evidence_write: None,
             evidence_read: None,
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         }))
     };
     let wiring = Fake::with(
@@ -571,6 +572,7 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
             manifest_key: "bk-1/manifest.json".to_string(),
             checks: Vec::new(),
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         }))
     };
     let wiring = Fake::with(

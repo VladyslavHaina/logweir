@@ -2696,9 +2696,12 @@ async fn a_relayed_backup_readiness_publishes_a_verdict_with_codes_and_scopes() 
     // controller cannot read the signing Secret or dial the broker, so
     // `signer.rostered` and `connection.clusterIdentity` are answered from what
     // the pod reported and from the objects only the controller can see.
-    let relayed = relay_from(&with_binding_row(runner_pinned_ids(
-        "a_readiness_check_reports_every_row_it_owns",
-    )));
+    let relayed = relay_from(&with_capability_rows(
+        with_binding_row(runner_pinned_ids(
+            "a_readiness_check_reports_every_row_it_owns",
+        )),
+        logweir_core::check_contract::CheckOperation::Backup,
+    ));
     let log = relay_log(PLAN_DIGEST, relayed, None);
 
     let mut routes = referent_routes(Some("prod-id"), vec![]);
@@ -5019,6 +5022,7 @@ fn runner_readiness_request() -> CheckRequest {
             evidence_write: None,
             evidence_read: None,
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         },
     ))
 }
@@ -5045,6 +5049,7 @@ fn runner_restore_request(evidence: Option<()>) -> CheckRequest {
             manifest_key: "bk-1/manifest.json".to_string(),
             checks: Vec::new(),
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         },
     ))
 }
@@ -5106,6 +5111,144 @@ fn the_expected_rows_are_the_rows_the_runner_emits() {
          two rows and `connection.topicsDescribable` is deliberately not one of them; a mirror \
          that listed it would pin every connection test at `unknown`."
     );
+}
+
+/// **PROD-01.2: the capability rows are expected exactly when the plan lists
+/// them.** The runner emits a capability row only for an id in
+/// `capabilityChecks`, so the mirror follows the plan: the SAME request with
+/// and without the list differs by exactly those ids, and the listed set is
+/// the one the runner's own fixture pins. A mirror that expected them
+/// unconditionally would pin every Preflight of an older runner at `unknown`
+/// ("the check Job did not report this row"); one that never expected them
+/// would let a runner that dropped the engine row keep a `ready` verdict.
+///
+/// MUTANT: delete the `for id in request.capability_checks()` loop from either
+/// arm of `job_rows` and the matching assertion fails.
+#[test]
+fn the_expected_rows_include_the_capability_rows_a_plan_lists() {
+    use logweir_core::check_contract::{capability_checks_for, CheckOperation};
+    // --- operationReadiness (Backup) ---------------------------------------
+    let CheckRequest::OperationReadiness(mut r) = runner_readiness_request() else {
+        unreachable!()
+    };
+    let without = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
+    r.capability_checks = capability_checks_for(CheckOperation::Backup).to_vec();
+    let with = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
+    assert_eq!(
+        with.difference(&without).copied().collect::<Vec<_>>(),
+        vec![
+            CheckId::ConnectionEngineProtocol,
+            CheckId::ConnectionTopicConfigsReadable,
+            CheckId::ConnectionGroupTypes,
+        ],
+        "listing the capability rows adds exactly them"
+    );
+    assert_eq!(
+        ids_of(&with),
+        runner_pinned_ids("a_readiness_check_with_capability_checks_reports_every_row_it_owns"),
+        "`job_rows` and the runner disagree about a readiness plan that lists capability rows"
+    );
+    // A listed-then-partly-listed plan expects only what is listed.
+    r.capability_checks = vec![CheckId::ConnectionGroupTypes];
+    let one = job_rows(&CheckRequest::OperationReadiness(r), false);
+    assert!(one.contains(&CheckId::ConnectionGroupTypes));
+    assert!(!one.contains(&CheckId::ConnectionEngineProtocol));
+
+    // --- restorePreflight ---------------------------------------------------
+    let CheckRequest::RestorePreflight(mut r) = runner_restore_request(None) else {
+        unreachable!()
+    };
+    let without = job_rows(&CheckRequest::RestorePreflight(r.clone()), true);
+    assert!(!without.contains(&CheckId::TargetEngineProtocol));
+    r.capability_checks = capability_checks_for(CheckOperation::Restore).to_vec();
+    let with = job_rows(&CheckRequest::RestorePreflight(r), true);
+    assert_eq!(
+        with.difference(&without).copied().collect::<Vec<_>>(),
+        vec![CheckId::TargetEngineProtocol]
+    );
+}
+
+/// **PROD-01.2: every Backup and Restore plan this controller renders asks
+/// for its operation's capability rows**, so a `Preflight` names a missing
+/// capability before a run starts; a skipped one is left out of the list (the
+/// plan validation refuses "listed and skipped") and is then reported
+/// `skipped` like any other. The two operations that dial no engine ask for
+/// none.
+///
+/// MUTANT: render `capability_checks: Vec::new()` for the Backup plan and the
+/// first assertion fails; drop the skip filter and the rendered plan no longer
+/// validates.
+#[test]
+fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
+    use logweir_core::check_contract::CheckOperation;
+    let shape = rendered_backup_shape(false);
+    let CheckRequest::OperationReadiness(r) = &shape.plan.request else {
+        panic!("a backup readiness plan")
+    };
+    assert_eq!(
+        r.capability_checks,
+        vec![
+            CheckId::ConnectionEngineProtocol,
+            CheckId::ConnectionTopicConfigsReadable,
+            CheckId::ConnectionGroupTypes,
+        ]
+    );
+    shape
+        .plan
+        .validate()
+        .expect("the rendered plan is one a runner accepts");
+    let rendered = String::from_utf8(shape.documents.check_plan.clone()).expect("utf-8");
+    assert!(
+        rendered.contains(
+            r#""capabilityChecks":["connection.engineProtocol","connection.topicConfigsReadable","connection.groupTypes"]"#
+        ),
+        "{rendered}"
+    );
+
+    // A skipped capability row is not listed, and the plan still validates.
+    let mut inputs = backup_inputs(false);
+    inputs.skip = [CheckId::ConnectionGroupTypes].into_iter().collect();
+    let shape = shape_of(&inputs).expect("the shape renders");
+    let CheckRequest::OperationReadiness(r) = &shape.plan.request else {
+        panic!("a backup readiness plan")
+    };
+    assert_eq!(
+        r.capability_checks,
+        vec![
+            CheckId::ConnectionEngineProtocol,
+            CheckId::ConnectionTopicConfigsReadable,
+        ]
+    );
+    assert_eq!(r.skip_checks, vec![CheckId::ConnectionGroupTypes]);
+    shape
+        .plan
+        .validate()
+        .expect("listed and skipped never meet");
+    // ...and it is reported `skipped`, which keeps the verdict from `ready`.
+    let rows = assemble(
+        Vec::new(),
+        Vec::new(),
+        false,
+        &job_rows(&shape.plan.request, false),
+        &inputs.skip,
+        now(),
+    );
+    let skipped = rows
+        .iter()
+        .find(|c| c.id == CheckId::ConnectionGroupTypes)
+        .expect("a skipped row is still reported");
+    assert_eq!(skipped.state, CheckState::Skipped);
+
+    // The pure function, for the operations with no engine to ask about.
+    assert_eq!(
+        pf::capability_checks(CheckOperation::Restore, &[]),
+        vec![CheckId::TargetEngineProtocol]
+    );
+    assert!(
+        pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]).is_empty()
+    );
+    assert!(pf::capability_checks(CheckOperation::SourceConnection, &[]).is_empty());
+    assert!(pf::capability_checks(CheckOperation::DestinationAccess, &[]).is_empty());
 }
 
 /// The two rows whose presence depends on the plan and not on the operation,
@@ -6540,6 +6683,21 @@ fn with_binding_row(mut ids: BTreeSet<String>) -> BTreeSet<String> {
     ids
 }
 
+/// PROD-01.2: the rows a healthy runner of THIS build reports for a plan this
+/// controller rendered. Every Backup and Restore plan now lists its
+/// operation's capability rows (`pf::capability_checks`), so the runner
+/// answers them; a relay without them is a runner that dropped rows, which the
+/// verdict must not call `ready` (`assemble`, rule 3).
+fn with_capability_rows(
+    mut ids: BTreeSet<String>,
+    operation: logweir_core::check_contract::CheckOperation,
+) -> BTreeSet<String> {
+    for id in logweir_core::check_contract::capability_checks_for(operation) {
+        ids.insert(id.as_str().to_string());
+    }
+    ids
+}
+
 fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
     ids.iter()
         .map(|s| {
@@ -6565,9 +6723,12 @@ fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
 #[tokio::test]
 async fn a_healthy_backup_readiness_reports_ready() {
     let job = job_name(CheckPlanKind::OperationReadiness);
-    let ids = with_binding_row(runner_pinned_ids(
-        "a_readiness_check_reports_every_row_it_owns",
-    ));
+    let ids = with_capability_rows(
+        with_binding_row(runner_pinned_ids(
+            "a_readiness_check_reports_every_row_it_owns",
+        )),
+        logweir_core::check_contract::CheckOperation::Backup,
+    );
     let log = relay_log(PLAN_DIGEST, relay_from(&ids), None);
 
     let mut routes = vec![
@@ -6640,7 +6801,10 @@ async fn a_healthy_backup_readiness_reports_ready() {
 #[tokio::test]
 async fn a_healthy_restore_preflight_reports_ready() {
     let job = job_name(CheckPlanKind::RestorePreflight);
-    let mut ids = runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns");
+    let mut ids = with_capability_rows(
+        runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns"),
+        logweir_core::check_contract::CheckOperation::Restore,
+    );
     // The one id the fixture plan cannot carry: `restore.rs` pushes
     // `destination.evidenceWritable` when — and only when — the request names
     // an evidence destination, which the runner's own fixture leaves `None` and
@@ -7379,9 +7543,12 @@ fn the_restore_allowlist_is_the_governing_policys() {
 #[tokio::test]
 async fn a_governed_namespaces_backup_readiness_judges_the_signer_by_its_policy() {
     let job = job_name(CheckPlanKind::OperationReadiness);
-    let relayed = relay_from(&with_binding_row(runner_pinned_ids(
-        "a_readiness_check_reports_every_row_it_owns",
-    )));
+    let relayed = relay_from(&with_capability_rows(
+        with_binding_row(runner_pinned_ids(
+            "a_readiness_check_reports_every_row_it_owns",
+        )),
+        logweir_core::check_contract::CheckOperation::Backup,
+    ));
     let log = relay_log(PLAN_DIGEST, relayed, None);
     let policy = serde_json::to_value(governing_policy("team-a-trust", json!({})))
         .expect("the policy serialises");
@@ -7896,7 +8063,10 @@ async fn a_legacy_point_readiness_check_creates_the_restore_jobs_own_read() {
 #[tokio::test]
 async fn a_legacy_point_readiness_check_answers_every_blocking_row() {
     let job = job_name(CheckPlanKind::RestorePreflight);
-    let ids = runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns");
+    let ids = with_capability_rows(
+        runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns"),
+        logweir_core::check_contract::CheckOperation::Restore,
+    );
     let relayed: Vec<CheckOutcome> = relay_from(&ids)
         .into_iter()
         .map(|c| {

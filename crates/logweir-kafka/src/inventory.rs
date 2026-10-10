@@ -445,6 +445,25 @@ pub trait InventoryProbe {
         &self,
         specs: &[crate::reader::NewTopicSpec],
     ) -> Result<Vec<TopicCreateOutcome>, CheckFailure>;
+
+    /// **PROD-01.2.** The Kafka API versions this endpoint serves, as its
+    /// brokers answered ApiVersions to this client
+    /// ([`crate::api_versions`]): what a capability row holds the engine's
+    /// fixed request versions against.
+    ///
+    /// The DEFAULT observes nothing and says so, so a probe that does not
+    /// implement it (every test double written before PROD-01.2) can only
+    /// leave a capability row `unknown`, never `ready`.
+    ///
+    /// # Errors
+    /// [`CheckFailure`] with [`CheckCode::ApiVersionsNotObserved`] when no
+    /// answer was read whole. Never an empty answer standing for one.
+    fn api_versions(&self) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+        Err(CheckFailure::new(
+            CheckCode::ApiVersionsNotObserved,
+            "this probe does not observe the endpoint's ApiVersions answer",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1062,10 @@ mod client {
         admin: rdkafka::admin::AdminClient<CapturingContext>,
         faults: Arc<FaultLog>,
         timeouts: ProbeTimeouts,
+        /// The configuration both handles were built from, kept so
+        /// [`InventoryProbe::api_versions`] can build its observing handle
+        /// with the SAME transport, trust anchor and credential.
+        config: ClientConfig,
     }
 
     impl KafkaInventory {
@@ -1091,6 +1114,7 @@ mod client {
                 admin,
                 faults,
                 timeouts: settings.timeouts,
+                config: cfg,
             })
         }
 
@@ -1418,6 +1442,93 @@ mod client {
                 })
                 .collect())
         }
+
+        fn api_versions(&self) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+            observe_api_versions(&self.config, self.timeouts.metadata)
+        }
+    }
+
+    /// How long the observing client's log must stay empty before its
+    /// ApiVersions answers are taken as whole. librdkafka logs one answer in
+    /// one uninterrupted loop, so a quarter of a second of silence is many
+    /// orders of magnitude longer than the gap inside one.
+    pub const API_VERSIONS_QUIET: Duration = Duration::from_millis(250);
+
+    /// The longest one ApiVersions observation waits for its dial, and again
+    /// for its log to go quiet.
+    pub const API_VERSIONS_BUDGET: Duration = Duration::from_secs(10);
+
+    fn not_observed(why: impl AsRef<str>) -> CheckFailure {
+        CheckFailure::new(CheckCode::ApiVersionsNotObserved, why)
+    }
+
+    /// **PROD-01.2: what an endpoint answered ApiVersions, read off a
+    /// dedicated client's own log.**
+    ///
+    /// `base` is the configuration a check's handles are built from
+    /// ([`KafkaInventory`] passes its own), so the observation uses the same
+    /// transport, trust anchor and credential as every other row. It builds
+    /// ONE more consumer handle, with three properties of its own, dials, reads
+    /// the handle's log and drops it:
+    ///
+    /// * `log.queue=true`: librdkafka queues this handle's log lines instead
+    ///   of printing them, so they can be read
+    ///   (`logweir_rdkafka_ffi::logs::drain_logs`);
+    /// * `debug=feature`: the one debug context that prints a broker's
+    ///   ApiVersions answer;
+    /// * log level 7: rust-rdkafka resets a handle's level to the process's
+    ///   after creating it, and debug lines are dropped below 7.
+    ///
+    /// **A dedicated handle, so nothing else changes.** The check's own two
+    /// handles keep printing what they always printed; only this short-lived
+    /// one has its log read, and it is dropped before the function returns. It
+    /// never subscribes, joins a group or commits.
+    ///
+    /// # Errors
+    ///
+    /// [`CheckCode::ApiVersionsNotObserved`], with the reason: no broker
+    /// answered within `budget`, the log could not be read, or it held no
+    /// answer that was read whole. Never an empty answer.
+    pub fn observe_api_versions(
+        base: &ClientConfig,
+        budget: Duration,
+    ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
+        let budget = budget.min(API_VERSIONS_BUDGET);
+        let mut cfg = base.clone();
+        cfg.set("group.id", CHECK_GROUP_ID)
+            .set("enable.auto.commit", "false")
+            .set("log.queue", "true")
+            .set("debug", "feature")
+            .set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
+        let observer: BaseConsumer = cfg
+            .create()
+            .map_err(|e| not_observed(format!("the observing client could not be built: {e}")))?;
+        // THE DIAL. ApiVersions is the first request librdkafka sends on every
+        // connection, so once ANY request has been answered the answer is in
+        // the log. The cluster id is not wanted, the connection is; an
+        // endpoint that names no cluster id still answered, which the log
+        // below shows.
+        let _ = observer.client().fetch_cluster_id(budget);
+        let drained = logweir_rdkafka_ffi::logs::drain_logs(
+            observer.client(),
+            API_VERSIONS_QUIET,
+            budget.max(API_VERSIONS_QUIET),
+        )
+        .map_err(|e| not_observed(format!("the observing client's log could not be read: {e}")))?;
+        let lines: Vec<(&str, &str)> = drained
+            .lines
+            .iter()
+            .filter_map(|l| Some((l.facility.as_str()?, l.message.as_str()?)))
+            .collect();
+        crate::api_versions::fold(lines, drained.quiet).ok_or_else(|| {
+            not_observed(if drained.quiet {
+                "no broker answered ApiVersions on the observing connection within the check's \
+                 budget"
+            } else {
+                "the observing client was still logging when the read reached its bound, so no \
+                 ApiVersions answer was read whole"
+            })
+        })
     }
 
     /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so
@@ -1481,6 +1592,7 @@ mod client {
 #[cfg(feature = "client")]
 pub use client::{
     classification_codes, classify_create_code, classify_error_code, flatten_config_answer,
-    is_certificate_trust_reason, CapturingContext, ClientConfig, ConnectionSettings,
-    KafkaInventory, RDKafkaErrorCode, CHECK_CLIENT_ID, CHECK_GROUP_ID,
+    is_certificate_trust_reason, observe_api_versions, CapturingContext, ClientConfig,
+    ConnectionSettings, KafkaInventory, RDKafkaErrorCode, API_VERSIONS_BUDGET, API_VERSIONS_QUIET,
+    CHECK_CLIENT_ID, CHECK_GROUP_ID,
 };
