@@ -4657,10 +4657,23 @@ fn the_timestamp_bound_is_the_execution_guards_arithmetic() {
 ///
 /// Negative control (mutant): restore the `ready(TimestampWithinBound)` arm
 /// for a missing key and the first assertion fails with `TimestampWithinBound`.
+///
+/// **The code is one the plan's controller can read.** The code vocabulary is
+/// closed on the reading side, and this row is answered for EVERY restore
+/// plan. A plan that lists capability rows came from a controller that knows
+/// `TimestampBoundNotReported`; a plan that lists none came from an older
+/// one, which would refuse the whole result over the new code, so it gets the
+/// same `unknown`, message and remedy under `BrokerConfigsNotReadable`.
+/// Mutant: answer the new code for both and the older-plan assertion fails.
 #[test]
 fn a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound() {
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
-    let m = mount(&restore_plan(&yaml, None));
+    let mut plan = restore_plan(&yaml, None);
+    let CheckRequest::RestorePreflight(r) = &mut plan.request else {
+        unreachable!("restore_plan builds a restorePreflight request")
+    };
+    r.capability_checks = vec![CheckId::TargetEngineProtocol];
+    let m = mount(&plan);
     // Redpanda's nine broker keys, as measured (values abridged).
     let redpanda_like = || {
         let mut p = FakeProbe::new()
@@ -4703,6 +4716,33 @@ fn a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound() {
     assert_eq!(
         logweir_core::check_contract::aggregate(&run.result().checks),
         logweir_core::check_contract::OverallState::Unknown
+    );
+
+    // AN OLDER CONTROLLER'S PLAN (no capability rows listed): the same
+    // finding under the code that controller already reads.
+    let older = mount(&restore_plan(&yaml, None));
+    let older_run = drive(
+        &older,
+        &restore_wiring(&yaml, &manifest_json(), redpanda_like()),
+    );
+    let older_row = older_run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (older_row.state, older_row.code),
+        (CheckState::Unknown, CheckCode::BrokerConfigsNotReadable),
+        "{older_row:?}"
+    );
+    assert_eq!(
+        (&older_row.message, &older_row.remedy),
+        (&row.message, &row.remedy),
+        "the same message and remedy under either code"
+    );
+    assert!(
+        older_run
+            .result()
+            .checks
+            .iter()
+            .all(|c| !c.id.is_capability()),
+        "and no capability row it did not ask for"
     );
 
     // CONTROL: the same answer WITH the key.

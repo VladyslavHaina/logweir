@@ -764,7 +764,13 @@ fn target_checks(
         checks.push(topic_create_row(probe.as_ref(), spec, &mapped, now).with_scope(scope.clone()));
     }
     if want(CheckId::TargetTimestampBound) {
-        checks.push(timestamp_bound_row(probe.as_ref(), spec, now).with_scope(scope.clone()));
+        // A plan that lists capability rows was rendered by a controller of
+        // this build, which knows this build's codes (`timestamp_bound_row`).
+        let controller_knows_the_code = !capabilities.is_empty();
+        checks.push(
+            timestamp_bound_row(probe.as_ref(), spec, controller_knows_the_code, now)
+                .with_scope(scope.clone()),
+        );
     }
     if want(CheckId::TargetLogAppendTime) {
         checks.push(
@@ -969,9 +975,19 @@ fn topic_create_row(
 
 /// `target.timestampBound` — the same arithmetic the execution guard runs
 /// (`phase0_admit.rs`'s `target_topic_preflight`, step 2).
+///
+/// `controller_knows_the_code`: whether the plan's controller can read
+/// `TimestampBoundNotReported` (PROD-01.2). The code vocabulary is closed on
+/// the READING side, so a controller from before that row refuses a whole
+/// result that carries it (`ResultUnreadable`). The row is one this runner
+/// answers for every restore plan, so the code cannot be volunteered: a plan
+/// from an older controller gets the same state, message and remedy under
+/// `BrokerConfigsNotReadable`, the `unknown` code that controller already
+/// has for this row.
 fn timestamp_bound_row(
     probe: &dyn InventoryProbe,
     spec: &DrillSpec,
+    controller_knows_the_code: bool,
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let broker = match probe.broker_configs() {
@@ -1003,15 +1019,26 @@ fn timestamp_bound_row(
         // `message.timestamp.before.max.ms`. This row used to answer `ready`,
         // "the target declares no record-timestamp bound": an empty answer
         // recorded as a fact.
-        let code = CheckCode::TimestampBoundNotReported;
-        return catalogue::outcome(CheckId::TargetTimestampBound, state_for(code), code, now)
-            .with_message(&format!(
-                "the target's broker configuration answered {} key(s) and neither \
+        let code = if controller_knows_the_code {
+            CheckCode::TimestampBoundNotReported
+        } else {
+            CheckCode::BrokerConfigsNotReadable
+        };
+        return catalogue::outcome(
+            CheckId::TargetTimestampBound,
+            CheckState::Unknown,
+            code,
+            now,
+        )
+        .with_message(&format!(
+            "the target's broker configuration answered {} key(s) and neither \
                  {BROKER_TIMESTAMP_BEFORE_MAX_MS} nor {BROKER_TIMESTAMP_DIFFERENCE_MAX_MS}, so \
                  the record-timestamp bound was not checked",
-                broker.len()
-            ))
-            .with_remedy(remedy_for(code));
+            broker.len()
+        ))
+        // The remedy is this finding's under either code:
+        // `BrokerConfigsNotReadable`'s own is about a missing grant.
+        .with_remedy(remedy_for(CheckCode::TimestampBoundNotReported));
     };
     let end_ms = recovery_point(spec).timestamp_millis();
     // `saturating_sub` is load-bearing: the Apache default for both keys is
