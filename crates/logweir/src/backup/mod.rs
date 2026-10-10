@@ -65,6 +65,7 @@ pub mod topic_ids;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
+use logweir_core::guard::{CAPTURE_REASON_EMPTY_CAPTURE, CAPTURE_REASON_PREFIX};
 use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSpec};
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::ClusterReader;
@@ -181,9 +182,16 @@ pub struct BackupOutcome {
     pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     pub covered_from_ms: i64,
-    /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
-    /// which is where the manifest's inclusive bound is converted.
+    /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered`, which
+    /// is where the manifest's inclusive bound is converted. Equal to
+    /// `covered_from_ms` for an EMPTY CAPTURE (PROD-02.1).
     pub covered_to_ms: i64,
+    /// **PROD-02.1.** Per named topic, each partition's `[low, high]`
+    /// watermark from the one marks read before the engine
+    /// (`phase_run::source_watermarks`), or `None` when that read did not
+    /// answer for every named partition: the receipt's 1.8.0
+    /// `source_watermarks` block.
+    pub source_watermarks: Option<BTreeMap<String, Vec<[u64; 2]>>>,
     /// **FX-4.** Per named topic, whether the manifest's configuration record
     /// was captured, and the effective `message.timestamp.type` with its
     /// source — `config_coverage::classify` over Logweir's own read before
@@ -790,8 +798,33 @@ fn execute_with_signer(
         (observed_from, observed_to, observation)
     });
 
+    // PROD-02.1: each named partition's low and high watermark, ONE read, the
+    // last before the engine. Never fatal: a read that does not answer for
+    // every partition leaves the receipt's coverage NOT RECORDED — and an
+    // empty capture unprovable.
+    let source_watermarks =
+        phase_run::source_watermarks(&plan.topics, &reader.partition_marks(&plan.topics));
+    if let Err(why) = &source_watermarks {
+        tracing::warn!(
+            error = %why,
+            "the source's watermarks could not be read before the engine; the receipt records \
+             its coverage as not recorded"
+        );
+    }
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    // PROD-02.1: no segment for any named topic is an EMPTY CAPTURE when the
+    // watermarks say the source held no record, and exit 1 otherwise.
+    let (covered_from_ms, covered_to_ms) = match ran.covered {
+        Some(window) => window,
+        None => phase_run::empty_capture_window(
+            &backup_id,
+            &ran.facts,
+            &ran.records_per_topic,
+            source_watermarks.as_ref(),
+        )?,
+    };
     // ...and again the moment the engine has exited: a topic whose ID differs
     // was deleted and recreated WHILE it ran (decision §4.4).
     let ids_after = topic_ids::observe(reader, &plan.topics, "after the engine");
@@ -851,8 +884,9 @@ fn execute_with_signer(
         manifest_sha256: ran.manifest_sha256,
         manifest_version_id: ran.manifest_version_id,
         records_per_topic: ran.records_per_topic,
-        covered_from_ms: ran.covered_from_ms,
-        covered_to_ms: ran.covered_to_ms,
+        covered_from_ms,
+        covered_to_ms,
+        source_watermarks: source_watermarks.ok(),
         config_coverage: coverage,
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
@@ -946,6 +980,13 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Err(_) => None,
     };
     let receipt_sha256 = outcome.as_ref().ok().map(|o| o.receipt_sha256.clone());
+    // PROD-02.1: an empty capture is named on its own line, read by the
+    // controller into the `Complete` condition's reason.
+    let capture_reason = outcome
+        .as_ref()
+        .ok()
+        .filter(|o| o.source_watermarks.is_some() && o.covered_from_ms == o.covered_to_ms)
+        .map(|_| CAPTURE_REASON_EMPTY_CAPTURE);
     // RECEIPT-DUP: the claim outcome, carried to `exiting` so it is the LAST
     // stdout line — the only place a controller can read it (I9's argument).
     let failure_reason = outcome.as_ref().err().and_then(BackupError::failure_reason);
@@ -982,6 +1023,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         evidence_keys,
         catalog_key,
         receipt_sha256,
+        capture_reason,
     )
 }
 
@@ -989,17 +1031,46 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
 /// values.
 fn summary_line(o: &BackupOutcome) -> String {
     let records: u64 = o.records_per_topic.values().sum();
+    // PROD-02.1: an EMPTY CAPTURE says so, and an ordinary run names the
+    // partitions that held no record at capture (at most ten, then a count);
+    // without the watermarks it says the coverage was not recorded.
+    let coverage = match &o.source_watermarks {
+        None => " (source coverage not recorded)".to_string(),
+        Some(_) if o.covered_from_ms == o.covered_to_ms => format!(
+            " — an EMPTY CAPTURE: every selected partition's low and high watermarks were \
+             equal before the engine, so the source held no record, the archive holds none and \
+             this run is not a recovery point ({CAPTURE_REASON_PREFIX}{CAPTURE_REASON_EMPTY_CAPTURE})"
+        ),
+        Some(block) => {
+            let empty = logweir_core::backup_receipt::empty_partitions(block);
+            if empty.is_empty() {
+                String::new()
+            } else {
+                let mut named: Vec<String> =
+                    empty.iter().take(10).map(|(t, p)| format!("{t}:{p}")).collect();
+                if empty.len() > 10 {
+                    named.push(format!("and {} more", empty.len() - 10));
+                }
+                format!(
+                    "; {} partition(s) held no record at capture (low == high): {}",
+                    empty.len(),
+                    named.join(", ")
+                )
+            }
+        }
+    };
     // ONE LINE whatever the fields hold (PROD-15.1 review 2, M1's sweep):
     // the cluster id is the BROKER's own string and the keys carry the plan's
     // prefix, and this is printed on stdout just before interface I7's keys.
     crate::exit::one_line(&format!(
-        "backup {} captured {} record(s) across {} topic(s) from cluster {} — manifest {} {}",
+        "backup {} captured {} record(s) across {} topic(s) from cluster {} — manifest {} {}{}",
         o.backup_id,
         records,
         o.records_per_topic.len(),
         o.source_cluster_id,
         o.manifest_key,
-        o.manifest_sha256
+        o.manifest_sha256,
+        coverage
     ))
 }
 
@@ -1012,6 +1083,7 @@ fn summary_line(o: &BackupOutcome) -> String {
 /// "the drill passed" / "a drill ran and did not pass" are false on this
 /// command. `drill::exiting` is also inside `drill/mod.rs`'s emitter-closure
 /// gate region, which this task must leave untouched.
+#[allow(clippy::too_many_arguments)]
 fn exiting(
     run_id: &str,
     code: ExitCode,
@@ -1020,6 +1092,7 @@ fn exiting(
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
     receipt_sha256: Option<String>,
+    capture_reason: Option<&str>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => {
@@ -1100,6 +1173,9 @@ fn exiting(
     // conditional: a line naming a key nothing was written to would be the
     // worst possible output. The warning on the log says what to do instead.
     if code == ExitCode::Ok {
+        if let Some(capture_reason) = capture_reason {
+            println!("{CAPTURE_REASON_PREFIX}{capture_reason}");
+        }
         if let Some(catalog_key) = catalog_key {
             println!("catalog-key={catalog_key}");
         }

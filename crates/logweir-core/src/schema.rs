@@ -201,8 +201,9 @@ pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
 /// stop describing the type.
 ///
 /// **The current file is the newest MINOR** (FX-7 fix round, review M-2):
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_CONSUMER_POSITIONS>.json`
-/// (`1.7.0`, PROD-04.1's `consumer_positions`; PROD-01.4a's 1.6.0
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_SOURCE_WATERMARKS>.json`
+/// (`1.8.0`, PROD-02.1's `source_watermarks`; PROD-04.1's 1.7.0
+/// `consumer_positions` file, PROD-01.4a's 1.6.0
 /// `generations` file, PROD-03.0's 1.5.0
 /// `schema_dependency` file, PROD-01.3's 1.4.0 file with its three new
 /// `source.auth.mode` values, PROD-05.1's 1.3.0 `topic_configuration` file and
@@ -227,7 +228,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        crate::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

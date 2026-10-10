@@ -350,19 +350,18 @@ pub struct Ran {
     /// versions (`logweir_core::backup_receipt::pinnable_version_id`).
     pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
-    /// INCLUSIVE start of the covered window, epoch milliseconds: the oldest
-    /// `start_timestamp` any segment of this backup set declares.
-    pub covered_from_ms: i64,
-    /// **EXCLUSIVE** end of the covered window, epoch milliseconds —
-    /// interface **I22**, and the one unit conversion in this module.
+    /// The covered window, epoch milliseconds, or `None` when the set holds
+    /// no segment for any named topic (PROD-02.1: an empty capture, when the
+    /// source's watermarks say so — [`empty_capture_window`]).
     ///
-    /// The manifest's newest `end_timestamp` is INCLUSIVE (a record exists at
-    /// that millisecond); `Backup.status.windowCovered.toMs` and
-    /// `BackupReceipt.covered.to_ms` are the exclusive end of a half-open
-    /// range. So the measured value is that timestamp plus one millisecond,
-    /// converted HERE, once, where the window is measured — see the argument
-    /// in `run` below.
-    pub covered_to_ms: i64,
+    /// The start is INCLUSIVE: the oldest `start_timestamp` any segment of
+    /// this backup set declares. The end is **EXCLUSIVE** — interface
+    /// **I22**, and the one unit conversion in this module: the manifest's
+    /// newest `end_timestamp` is INCLUSIVE (a record exists at that
+    /// millisecond), so the measured end is that timestamp plus one
+    /// millisecond, converted HERE, once, where the window is measured — see
+    /// the argument in `run` below.
+    pub covered: Option<(i64, i64)>,
     /// **FX-4.** The manifest's `configurations` for each NAMED topic the
     /// manifest mentions — read back through the same `describe` as the
     /// counts, so the coverage comparison is against the bytes this run read.
@@ -518,19 +517,13 @@ pub fn run(
             }
         }
     }
-    // A set with no segment FOR ANY NAMED TOPIC bounds no window, and saying so
-    // is the only honest answer — the same refusal `Store::manifest_facts` makes for the same
-    // reason. An empty min/max would be published as a real window, and a
-    // covered range of `[0, 0]` reads as "this archive covers the epoch".
-    let (Some(covered_from_ms), Some(newest_inclusive)) = (oldest, newest) else {
-        return Err(BackupError::Operational(format!(
-            "backup set `{}` declares no segment for any of the named topics, so it bounds no \
-             window: the engine exited 0 having captured nothing. Check that the named topics \
-             hold records.",
-            plan.backup_id
-        )));
-    };
-
+    // A set with no segment FOR ANY NAMED TOPIC bounds no window. An empty
+    // min/max would be published as a real window, and a covered range of
+    // `[0, 0]` reads as "this archive covers the epoch", so it is `None` here
+    // and the caller decides (PROD-02.1, [`empty_capture_window`]): an empty
+    // capture when the source's watermarks say it held no record, the old
+    // exit 1 otherwise.
+    //
     // **THE WINDOW IS HALF-OPEN, AND THIS IS WHERE IT BECOMES SO** (I22, and
     // Task 5's review finding F3).
     //
@@ -551,7 +544,9 @@ pub fn run(
     // an `end_timestamp` of `i64::MAX` is a manifest this build cannot read as
     // a timestamp, and saturating there keeps the arithmetic total rather than
     // panicking in a release build's wrapping.
-    let covered_to_ms = newest_inclusive.saturating_add(1);
+    let covered = oldest
+        .zip(newest)
+        .map(|(from_ms, newest_inclusive)| (from_ms, newest_inclusive.saturating_add(1)));
 
     // **PROD-03.0.** The named topics' schema dependency, from the archived
     // BYTES this run wrote: a bounded sample of each topic's segments, read
@@ -565,13 +560,93 @@ pub fn run(
         manifest_sha256,
         manifest_version_id,
         records_per_topic,
-        covered_from_ms,
-        covered_to_ms,
+        covered,
         manifest_configurations,
         manifest_layouts,
         schema_dependency,
         manifest_ranges,
     })
+}
+
+/// **PROD-02.1.** The receipt's `source_watermarks` from ONE marks read taken
+/// before the engine (`ClusterReader::partition_marks`), or why there is
+/// none. Every named topic must answer with partitions `0..n` (n ≥ 1), each
+/// with its marks; anything else — a failed metadata or marks read, a gap in
+/// the ids — leaves the block absent, which a reader takes as coverage NOT
+/// RECORDED.
+pub fn source_watermarks(
+    topics: &[String],
+    marks: &BTreeMap<String, logweir_kafka::capture::TopicMarks>,
+) -> Result<BTreeMap<String, Vec<[u64; 2]>>, String> {
+    let mut block = BTreeMap::new();
+    for topic in topics {
+        let partitions = match marks.get(topic) {
+            None => return Err(format!("{topic}: no marks were read")),
+            Some(Err(e)) => return Err(e.clone()),
+            Some(Ok(partitions)) => partitions,
+        };
+        let mut sorted: Vec<&(i32, Result<logweir_kafka::capture::Marks, String>)> =
+            partitions.iter().collect();
+        sorted.sort_by_key(|(p, _)| *p);
+        if sorted.is_empty() {
+            return Err(format!("{topic}: the metadata listed no partition"));
+        }
+        let mut pairs = Vec::with_capacity(sorted.len());
+        for (index, (partition, read)) in sorted.into_iter().enumerate() {
+            if usize::try_from(*partition).ok() != Some(index) {
+                return Err(format!(
+                    "{topic}: the metadata's partition ids are not 0..{}",
+                    partitions.len()
+                ));
+            }
+            let m = read.as_ref().map_err(Clone::clone)?;
+            // `marks_of` admits only `0 <= log_start <= high_watermark`.
+            let low =
+                u64::try_from(m.log_start).map_err(|e| format!("{topic}:{partition}: {e}"))?;
+            let high =
+                u64::try_from(m.high_watermark).map_err(|e| format!("{topic}:{partition}: {e}"))?;
+            pairs.push([low, high]);
+        }
+        block.insert(topic.clone(), pairs);
+    }
+    Ok(block)
+}
+
+/// **PROD-02.1 — the EMPTY CAPTURE.** The covered window a run signs when its
+/// backup set holds no segment for any named topic: the empty `[t, t)`, `t`
+/// the engine's start, which covers no record — when the source's
+/// watermarks, read before the engine, say every selected partition held no
+/// record (`low == high`). Otherwise the run is refused exit 1 as before,
+/// naming why: the source held records the engine did not capture, or its
+/// watermarks could not be read, so its emptiness is not known.
+pub fn empty_capture_window(
+    backup_id: &str,
+    facts: &BackupFacts,
+    records: &BTreeMap<String, u64>,
+    watermarks: Result<&BTreeMap<String, Vec<[u64; 2]>>, &String>,
+) -> Result<(i64, i64), BackupError> {
+    let why = match watermarks {
+        Err(e) => format!(
+            "the source's watermarks could not be read before the engine ({e}), so whether it \
+             held any record is not known"
+        ),
+        Ok(block) => {
+            match logweir_core::backup_receipt::empty_capture_contradiction(records, block) {
+                None => {
+                    let t = facts.started_at.timestamp_millis();
+                    return Ok((t, t));
+                }
+                Some(c) => format!(
+                    "the source was not empty before the engine ({c}), so the engine captured \
+                     nothing it held"
+                ),
+            }
+        }
+    };
+    Err(BackupError::Operational(format!(
+        "backup set `{backup_id}` declares no segment for any of the named topics, so it bounds \
+         no window, and {why}. Nothing was signed; run the backup again."
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +741,7 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             &auth,
             true,
             outcome.consumer_positions.is_some(),
+            outcome.source_watermarks.is_some(),
         )
         .to_string(),
         run_id: outcome.run_id.clone(),
@@ -718,6 +794,10 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         generations: Some(outcome.generations.clone()),
         // PROD-04.1: present exactly when the run selected consumer groups.
         consumer_positions: outcome.consumer_positions.clone(),
+        // PROD-02.1: present exactly when the marks read before the engine
+        // answered for every named partition (1.8.0); absent is coverage NOT
+        // RECORDED.
+        source_watermarks: outcome.source_watermarks.clone(),
     }
 }
 
@@ -937,7 +1017,21 @@ pub(crate) fn persist_receipt(
     //    to investigate. `logweir catalog sync` backfills exactly this case,
     //    which is why the backfill exists at all (D3 §5.2, "the scanner
     //    backfills").
-    keys.catalog_key = write_catalog_point(outcome, &receipt, &bytes, &keys, signer, store);
+    //
+    //    **PROD-02.1: an EMPTY CAPTURE is not a recovery point**, so it gets
+    //    no catalog point: nothing in it can be restored, and a point would
+    //    take a retention `keepLast` rank from a real one.
+    keys.catalog_key = if receipt.is_empty_capture() {
+        tracing::info!(
+            run_id = %outcome.run_id,
+            backup_id = %outcome.backup_id,
+            "an empty capture holds no record and is not a recovery point; no catalog point \
+             is written for it"
+        );
+        None
+    } else {
+        write_catalog_point(outcome, &receipt, &bytes, &keys, signer, store)
+    };
 
     // 5. **I6.** The local pair, with the sidecar beside the document under the
     //    extension `.sig` — the pairing `drill run --out` already uses

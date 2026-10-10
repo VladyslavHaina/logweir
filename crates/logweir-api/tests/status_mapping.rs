@@ -1315,6 +1315,7 @@ fn a_claim_outcome_reaches_the_operation_model() {
             Some(state),
             None,
             None,
+            None,
             now(),
         );
         let (_, typed) = patched::<Backup>(running.clone(), &terminal);

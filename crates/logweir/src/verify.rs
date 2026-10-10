@@ -535,6 +535,58 @@ pub fn generation_lines(
         .collect()
 }
 
+/// **PROD-02.1.** The receipt's `source_watermarks`: for an EMPTY CAPTURE
+/// one line that says so, then one line per topic (name order) naming the
+/// partitions that held no record at capture; or the one line that says the
+/// coverage was not recorded, which is never complete.
+/// `docs/verify_scorecard.py` prints the same lines, and
+/// `scripts/check-verifier-parity.sh` compares every line starting
+/// `source_watermarks` between the two readers.
+#[must_use]
+pub fn source_watermark_lines(
+    block: Option<&BTreeMap<String, Vec<[u64; 2]>>>,
+    empty_capture: bool,
+) -> Vec<String> {
+    let Some(block) = block else {
+        return vec![
+            "source_watermarks: coverage not recorded, so this receipt does not say what the \
+             source held at capture and never reads as complete"
+                .to_string(),
+        ];
+    };
+    let mut lines = Vec::new();
+    if empty_capture {
+        lines.push(
+            "source_watermarks: an EMPTY CAPTURE: every partition's low and high watermarks \
+             were equal at capture, so the source held no record and the archive holds none; \
+             not a recovery point"
+                .to_string(),
+        );
+    }
+    for (topic, partitions) in block {
+        let empty: Vec<String> = partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, [low, high])| low == high)
+            .map(|(p, _)| p.to_string())
+            .collect();
+        let said = if empty.is_empty() {
+            "none empty at capture".to_string()
+        } else {
+            format!(
+                "{} empty at capture (low == high): {}",
+                empty.len(),
+                empty.join(", ")
+            )
+        };
+        lines.push(format!(
+            "source_watermarks[{topic:?}]: coverage recorded over {} partition(s), {said}",
+            partitions.len()
+        ));
+    }
+    lines
+}
+
 /// One line per topic of a backup receipt's `topic_configuration`
 /// (PROD-05.1), or the one line that says it is absent.
 /// `docs/verify_scorecard.py` prints the same lines, and
@@ -896,6 +948,11 @@ pub enum Verdict {
         /// it and it held against the receipt (arms CP-1 to CP-14); `None`
         /// when it was not given.
         positions: Option<logweir_core::consumer_positions::PositionsDocument>,
+        /// The 1.8.0 block (PROD-02.1), as read; `None` is coverage NOT
+        /// RECORDED.
+        source_watermarks: Option<BTreeMap<String, Vec<[u64; 2]>>>,
+        /// PROD-02.1: the receipt is an EMPTY CAPTURE (its window is empty).
+        empty_capture: bool,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -1119,6 +1176,7 @@ pub fn verify_scorecard_with(
                 Some(doc)
             }
         };
+        let empty_capture = receipt.is_empty_capture();
         return Ok(Verdict::BackupReceipt {
             payload_type: payload_type.to_string(),
             key_id: matched_key_id,
@@ -1133,6 +1191,8 @@ pub fn verify_scorecard_with(
             generations: receipt.generations,
             consumer_positions: receipt.consumer_positions,
             positions,
+            empty_capture,
+            source_watermarks: receipt.source_watermarks,
         });
     }
     if payload_type == PAYLOAD_TYPE_CATALOG_POINT {
@@ -1339,6 +1399,10 @@ struct ReceiptBlocks<'a> {
     /// The positions document the block binds, verified; `None` when it was
     /// not given.
     positions: Option<&'a logweir_core::consumer_positions::PositionsDocument>,
+    /// PROD-02.1's 1.8.0 block; `None` is coverage NOT RECORDED.
+    source_watermarks: Option<&'a BTreeMap<String, Vec<[u64; 2]>>>,
+    /// PROD-02.1: the receipt is an EMPTY CAPTURE.
+    empty_capture: bool,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -1409,9 +1473,15 @@ fn print_backup_receipt(
     for line in consumer_positions_lines(blocks.consumer_positions, blocks.positions) {
         println!("groups:    {line}");
     }
+    // PROD-02.1: the source's coverage at capture — or the line that says it
+    // was not recorded, which is never complete.
+    for line in source_watermark_lines(blocks.source_watermarks, blocks.empty_capture) {
+        println!("source:    {line}");
+    }
     println!(
-        "checked:   the signature AND all forty backup-receipt invariants \
-         (format_version, exit_code/manifest_key, records/topics, covered window, \
+        "checked:   the signature AND all forty-five backup-receipt invariants \
+         (format_version, exit_code/manifest_key, records/topics, covered window (empty \
+         only beside source_watermarks), \
          source.auth.mode, config_coverage's six: its version, its topic set, \
          coverage, reason, timestamp-after-a-read, timestamp value and source, \
          topic_configuration's eight: its version, beside config_coverage, its topic \
@@ -1425,9 +1495,11 @@ fn print_backup_receipt(
          capture window with a closed listing and at least one group, this run's \
          positions document by a well-formed digest, outcome and reason, fields and \
          counts that fit the outcome with no captured group Dead and memberless, and a \
-         derived active, and the topic IDs' five: their version, their topic set, \
+         derived active, the topic IDs' five: their version, their topic set, \
          Kafka's text and never the zero ID, a reason exactly for a null ID, a source \
-         exactly for a recorded one)"
+         exactly for a recorded one, and the source watermarks' five: their version, their \
+         topic set, at least one partition, low never above high, and an empty window only \
+         over no record and every partition empty)"
     );
     if blocks.positions.is_some() {
         println!(
@@ -1512,6 +1584,8 @@ pub fn run_with(
             generations,
             consumer_positions,
             positions,
+            source_watermarks,
+            empty_capture,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -1528,6 +1602,8 @@ pub fn run_with(
                     generations: generations.as_ref(),
                     consumer_positions: consumer_positions.as_ref(),
                     positions: positions.as_ref(),
+                    source_watermarks: source_watermarks.as_ref(),
+                    empty_capture,
                 },
             );
             ExitCode::Ok

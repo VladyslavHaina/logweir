@@ -168,7 +168,7 @@ golden:
 # `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` the same way.
 scorecard_schema_version := "2.0.0"
 scorecard_format_1_schema_version := "1.8.0"
-receipt_schema_version := "1.7.0"
+receipt_schema_version := "1.8.0"
 catalog_schema_version := "1.7.0"
 
 schema:

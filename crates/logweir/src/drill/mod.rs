@@ -3840,7 +3840,9 @@ pub fn build_plan(
                 "the archive set `{}` records no segment in its manifest for any of the topics \
                  this restore names ({}), so it has no earliest covered timestamp; a Restore's \
                  window start is the archive set's earliest covered timestamp, never the \
-                 spec's, so this plan has no floor to bind and is refused before anything runs",
+                 spec's, so this plan has no floor to bind and is refused before anything runs. \
+                 An empty capture is such a set: its source held no record, so there is \
+                 nothing to restore",
                 set.backup_id,
                 named_topics
                     .iter()

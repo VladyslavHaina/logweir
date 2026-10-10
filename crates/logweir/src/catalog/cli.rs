@@ -277,6 +277,10 @@ pub enum PointOutcome {
     /// sidecar. Never collapsed into any of the above — "could not look" is
     /// not "not there".
     Unreadable,
+    /// **PROD-02.1.** The receipt is an EMPTY CAPTURE: its source held no
+    /// record, so it is not a recovery point and no record is written — as
+    /// `logweir backup run` writes none for it.
+    EmptyCapture,
 }
 
 impl PointOutcome {
@@ -289,6 +293,7 @@ impl PointOutcome {
             Self::UnsupportedFormat => "unsupported-format",
             Self::UnverifiedSigner => "unverified-signer",
             Self::Unreadable => "unreadable",
+            Self::EmptyCapture => "empty-capture",
         }
     }
 }
@@ -303,6 +308,8 @@ pub struct SyncReport {
     pub unsupported_format: usize,
     pub unverified_signer: usize,
     pub unreadable: usize,
+    /// PROD-02.1: receipts of empty captures, which get no record.
+    pub empty_capture: usize,
     /// The cursor that resumes the receipt walk, present only when this run
     /// stopped at its `--max` bound with more to see.
     pub next: Option<String>,
@@ -321,6 +328,7 @@ impl SyncReport {
             PointOutcome::UnsupportedFormat => self.unsupported_format += 1,
             PointOutcome::UnverifiedSigner => self.unverified_signer += 1,
             PointOutcome::Unreadable => self.unreadable += 1,
+            PointOutcome::EmptyCapture => self.empty_capture += 1,
         }
         self.points
             .push((receipt_key.to_string(), point_id.to_string(), outcome));
@@ -413,6 +421,10 @@ pub fn sync_with(
                 report.record(&key, &id, o);
                 continue;
             }
+        }
+        if receipt.is_empty_capture() {
+            report.record(&key, &id, PointOutcome::EmptyCapture);
+            continue;
         }
         let sidecar_key = sidecar_key_of(&key);
         let Some(installation) = verified_signer(evidence, &sidecar_key, &bytes, trust) else {
@@ -793,7 +805,7 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
 /// The summary, as stdout lines a controller or a script can read by prefix.
 ///
 /// Bounded: one `catalog-point=` line per receipt EXAMINED, which `--max`
-/// already bounds, then a fixed eight-line block. `catalog-next=` appears only
+/// already bounds, then eight fixed lines. `catalog-next=` appears only
 /// when there is more to walk, so its absence means "the prefix is exhausted"
 /// rather than "the cursor was empty".
 pub fn print_sync_report(r: &SyncReport) {
@@ -811,6 +823,7 @@ pub fn print_sync_report(r: &SyncReport) {
     println!("catalog-unsupported-format={}", r.unsupported_format);
     println!("catalog-unverified-signer={}", r.unverified_signer);
     println!("catalog-unreadable={}", r.unreadable);
+    println!("catalog-empty-capture={}", r.empty_capture);
     if let Some(next) = &r.next {
         println!("catalog-next={next}");
     }

@@ -88,16 +88,17 @@ use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
-    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
-    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
-    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
-    REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
-    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
-    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_EMPTY_CAPTURE,
+    CONDITION_REASON_GUARD_REFUSED, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED,
+    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
+    REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_OPERATIONAL,
+    REASON_RUNNER_ARGV_ANNOTATION_IGNORED, REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
+    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
+    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use crate::controllers::backup_selection;
 use crate::crds::backup::{Backup, FrozenDestination};
@@ -2860,6 +2861,24 @@ pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
     })
 }
 
+/// **PROD-02.1.** The capture outcome the backup runner named on its
+/// `capture-reason=` line — the last one in the tail — when it is the one
+/// value this build knows ([`CONDITION_REASON_EMPTY_CAPTURE`]) and the run
+/// exited 0; `None` otherwise.
+#[must_use]
+pub fn capture_reason(exit_code: i32, log: &str) -> Option<&'static str> {
+    if exit_code != 0 {
+        return None;
+    }
+    let mut found = None;
+    for line in tail_lines(log) {
+        if let Some(v) = line.strip_prefix(logweir_core::guard::CAPTURE_REASON_PREFIX) {
+            found = Some(v.trim());
+        }
+    }
+    (found == Some(CONDITION_REASON_EMPTY_CAPTURE)).then_some(CONDITION_REASON_EMPTY_CAPTURE)
+}
+
 /// Whether an exit-4 run left a payload without its sidecar.
 ///
 /// Returns the terminal state, or `None` when there is nothing to record —
@@ -3719,6 +3738,7 @@ pub fn finished_status_patch(
         refusal,
         orphan,
         None,
+        None,
         covered,
         receipt_sha256,
         now,
@@ -3742,6 +3762,7 @@ pub fn finished_status_patch_with_failure(
     refusal: Option<&str>,
     orphan: Option<&str>,
     failure: Option<&str>,
+    capture: Option<&str>,
     covered: Option<(i64, i64)>,
     receipt_sha256: Option<&str>,
     now: DateTime<Utc>,
@@ -3754,7 +3775,14 @@ pub fn finished_status_patch_with_failure(
     // the wire string too, so an operator reading `kubectl describe` sees both
     // spellings of the one fact in one place.
     let wire_reason = wire_reason_for_exit(exit_code);
-    let cond_reason = reason_for_exit(exit_code);
+    // PROD-02.1: an exit 0 the runner named an EMPTY CAPTURE (`capture_reason`)
+    // completes with that reason, never `Ok` and never a failure.
+    let empty_capture = exit_code == 0 && capture == Some(CONDITION_REASON_EMPTY_CAPTURE);
+    let cond_reason = if empty_capture {
+        CONDITION_REASON_EMPTY_CAPTURE
+    } else {
+        reason_for_exit(exit_code)
+    };
     let (phase, cond_type) = if exit_code == 0 {
         (PHASE_SUCCEEDED, CONDITION_COMPLETE)
     } else {
@@ -3767,6 +3795,15 @@ pub fn finished_status_patch_with_failure(
         "True",
         cond_reason,
         &match failure {
+            None if empty_capture => format!(
+                "the runner exited {exit_code} ({wire_reason}): an EMPTY CAPTURE. Every selected \
+                 partition's source low and high watermarks were equal before the engine, so \
+                 the source held no record; the signed receipt records none and this run is not \
+                 a recovery point. The code was read from \
+                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode and \
+                 the outcome from the runner's `{}` line",
+                logweir_core::guard::CAPTURE_REASON_PREFIX
+            ),
             Some(state) => format!(
                 "the runner exited {exit_code} ({wire_reason}: {state}); the code was read from \
                  status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode \
@@ -3993,13 +4030,19 @@ pub fn window_covered(from_ms: i64, to_ms: i64) -> Value {
 /// Both keys or nothing: a half-read window is worse than an unread one,
 /// because a consumer cannot tell the difference between "the archive covers
 /// from here to unknown" and "the archive covers nothing".
+///
+/// **PROD-02.1: an EMPTY window is no window.** An empty capture's receipt
+/// covers `[t, t)`, no record at all; written to `windowCovered` it would make
+/// the run a recovery point and give protection a newest record at `t - 1`.
+/// So it is `None`, as an unread window is.
 #[must_use]
 pub fn covered_from_receipt(receipt: &Value) -> Option<(i64, i64)> {
     let covered = receipt.get("covered")?;
-    Some((
+    let (from_ms, to_ms) = (
         covered.get("from_ms")?.as_i64()?,
         covered.get("to_ms")?.as_i64()?,
-    ))
+    );
+    (from_ms < to_ms).then_some((from_ms, to_ms))
 }
 
 /// What one reconcile did.
@@ -5472,6 +5515,8 @@ async fn reconcile_backup_inner(
     // RECEIPT-DUP: the claim outcome the runner named, lifted only beside its
     // own exit code (`failure_state` is closed and paired).
     let failure = failure_state(exit_code, &log);
+    // PROD-02.1: an empty capture the runner named, on an exit 0 only.
+    let capture = capture_reason(exit_code, &log);
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
     let reported_receipt_sha256 = keys.receipt_sha256.as_deref();
@@ -5536,6 +5581,7 @@ async fn reconcile_backup_inner(
             refusal.as_deref(),
             orphan,
             failure,
+            capture,
             covered,
             receipt_sha256.as_deref(),
             now,
