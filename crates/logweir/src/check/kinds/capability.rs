@@ -243,8 +243,23 @@ pub fn topic_configs_readable(
 ) -> CheckOutcome {
     let id = CheckId::ConnectionTopicConfigsReadable;
     if topics.is_empty() {
-        return ready(id, CheckCode::TopicConfigsReadable, now)
-            .with_message("the operation selects no topic by name");
+        // NOTHING WAS READ, so this is not an answer (review L12: it said
+        // `ready`). A Backup Preflight always names a topic; a hand-built
+        // plan that lists this row and names none is told so.
+        return catalogue::outcome(
+            id,
+            CheckState::Unknown,
+            CheckCode::BlockedByPrerequisite,
+            now,
+        )
+        .with_message(
+            "the plan names no topic, so no topic's configuration was read and this row says \
+             nothing about any topic",
+        )
+        .with_remedy(
+            "Name the topics the backup selects in the check's plan; a Backup Preflight always \
+             does.",
+        );
     }
     let mut refused: Vec<String> = Vec::new();
     let mut unanswered: Vec<String> = Vec::new();

@@ -535,6 +535,53 @@ pub fn full_view(
     })
 }
 
+/// One read of the observing client's log: the `(facility, message)` lines
+/// that arrived, and whether the log had GONE QUIET when the read returned
+/// (`logweir_rdkafka_ffi::logs::Drained::quiet`). A read that hit its bound
+/// while lines were still arriving is not quiet.
+pub type LogRead = (Vec<(String, String)>, bool);
+
+/// **The wait for a whole view**: read the log until [`full_view`] holds, or
+/// `deadline` has passed. `read` is given how long it may take and returns
+/// what arrived; `quiet` is its quiet period, the least a read takes.
+///
+/// The LAST READ ALWAYS RUNS, so what did arrive is counted, and its own
+/// `quiet` answer is what [`full_view`] is given: a log still being written
+/// when the budget ran out is "an answer may be cut short", which is no
+/// answer (review L4: nothing showed that a read that never went quiet is
+/// refused through this function).
+///
+/// # Errors
+///
+/// The reason there is no whole view, as a sentence: [`Partial`]'s, or that
+/// the log could not be read.
+pub fn whole_view_within(
+    mut read: impl FnMut(std::time::Duration) -> Result<LogRead, String>,
+    listed: &[Broker],
+    bootstrap: &[String],
+    deadline: std::time::Instant,
+    quiet: std::time::Duration,
+) -> Result<ApiVersions, String> {
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    let mut lines: Vec<(String, String)> = Vec::new();
+    loop {
+        let (arrived, went_quiet) = read(left().max(quiet * 2))
+            .map_err(|e| format!("the observing client's log could not be read: {e}"))?;
+        lines.extend(arrived);
+        let view = full_view(
+            &answers(lines.iter().map(|(f, m)| (f.as_str(), m.as_str()))),
+            went_quiet,
+            listed,
+            bootstrap,
+        );
+        match view {
+            Ok(view) => return Ok(view),
+            Err(partial) if left() < quiet => return Err(partial.to_string()),
+            Err(_) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,6 +1046,121 @@ mod tests {
         assert_eq!(
             full_view(&read(&whole), true, &[], &[]),
             Err(Partial::NoBrokerList)
+        );
+    }
+
+    /// **The wait** ([`whole_view_within`]), driven by a reader the test
+    /// holds.
+    ///
+    /// * A log that NEVER GOES QUIET is not an answer, although every broker's
+    ///   lines are in it: some answer may be cut short (review L4; the mutant
+    ///   is passing `true` where the read's own `quiet` goes).
+    /// * CONTROL: the same lines from a log that went quiet are the answer.
+    /// * Answers that arrive over several reads are waited for.
+    /// * With the budget already spent, exactly one read still runs, and a
+    ///   partial view is the reason, never the answer.
+    /// * A log that cannot be read is a reason too.
+    #[test]
+    fn the_wait_takes_a_whole_quiet_view_or_gives_the_reason() {
+        use std::time::{Duration, Instant};
+        let listed = cluster(&[1, 2, 3]);
+        let owned = |ids: &[i32]| -> Vec<(String, String)> {
+            ids.iter()
+                .flat_map(|id| answer(&node(&format!("b{id}.example"), *id), &KAFKA))
+                .map(|(f, m)| (f.to_string(), m))
+                .collect()
+        };
+        let quiet = Duration::from_millis(20);
+        let soon = || Instant::now() + Duration::from_millis(200);
+
+        // Never quiet.
+        let mut reads = 0;
+        let never_quiet = whole_view_within(
+            |_| {
+                reads += 1;
+                std::thread::sleep(Duration::from_millis(10));
+                Ok((
+                    if reads == 1 {
+                        owned(&[1, 2, 3])
+                    } else {
+                        vec![]
+                    },
+                    false,
+                ))
+            },
+            &listed,
+            &[],
+            soon(),
+            quiet,
+        );
+        assert_eq!(
+            never_quiet,
+            Err(Partial::StillLogging.to_string()),
+            "all three answers are in the log, and it was still being written"
+        );
+        assert!(reads > 1, "it kept reading until its budget was spent");
+
+        // CONTROL: quiet.
+        let v = whole_view_within(
+            |_| Ok((owned(&[1, 2, 3]), true)),
+            &listed,
+            &[],
+            soon(),
+            quiet,
+        )
+        .expect("three answers in a quiet log");
+        assert_eq!(v.brokers(), 3);
+
+        // Arriving over several reads.
+        let mut reads = 0;
+        let v = whole_view_within(
+            |_| {
+                reads += 1;
+                Ok(match reads {
+                    1 => (owned(&[1]), true),
+                    2 => (vec![], true),
+                    _ => (owned(&[2, 3]), true),
+                })
+            },
+            &listed,
+            &[],
+            Instant::now() + Duration::from_secs(5),
+            quiet,
+        )
+        .expect("brokers 2 and 3 answered on the third read");
+        assert_eq!((v.brokers(), reads), (3, 3));
+
+        // The budget already spent: one read, and the partial view's reason.
+        let mut reads = 0;
+        let spent = whole_view_within(
+            |_| {
+                reads += 1;
+                Ok((owned(&[1, 3]), true))
+            },
+            &listed,
+            &[],
+            Instant::now(),
+            quiet,
+        )
+        .expect_err("broker 2 never answered");
+        assert_eq!(reads, 1, "the last read always runs, and only it");
+        assert!(
+            spent.contains("2 of 3 broker(s)") && spent.contains("broker 2 (b2.example:9092)"),
+            "{spent}"
+        );
+
+        // A log that cannot be read.
+        let unread = whole_view_within(
+            |_| Err("the queue refused".to_string()),
+            &listed,
+            &[],
+            soon(),
+            quiet,
+        )
+        .expect_err("no log, no view");
+        assert!(
+            unread.contains("could not be read: the queue refused"),
+            "{unread}"
         );
     }
 

@@ -1534,7 +1534,7 @@ mod client {
         base: &ClientConfig,
         budget: Duration,
     ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
-        use crate::api_versions::{answers, bootstrap_addresses, full_view, Broker};
+        use crate::api_versions::{bootstrap_addresses, whole_view_within, Broker};
         let budget = budget.min(API_VERSIONS_BUDGET);
         if budget < API_VERSIONS_MIN_BUDGET {
             return Err(not_observed(format!(
@@ -1576,33 +1576,23 @@ mod client {
         // connection is up. The log is read until the view is whole, or the
         // budget is spent; the last read always runs, so what did arrive is
         // counted.
-        let mut lines: Vec<(String, String)> = Vec::new();
-        let view = loop {
-            let drained = logweir_rdkafka_ffi::logs::drain_logs(
-                client,
-                API_VERSIONS_QUIET,
-                left().max(API_VERSIONS_QUIET * 2),
-            )
-            .map_err(|e| {
-                not_observed(format!("the observing client's log could not be read: {e}"))
-            })?;
-            lines.extend(drained.lines.iter().filter_map(|l| {
-                Some((
-                    l.facility.as_str()?.to_string(),
-                    l.message.as_str()?.to_string(),
-                ))
-            }));
-            let view = full_view(
-                &answers(lines.iter().map(|(f, m)| (f.as_str(), m.as_str()))),
-                drained.quiet,
-                &listed,
-                &bootstrap,
-            );
-            if view.is_ok() || left() < API_VERSIONS_QUIET {
-                break view;
-            }
+        let read = |within: Duration| {
+            let drained = logweir_rdkafka_ffi::logs::drain_logs(client, API_VERSIONS_QUIET, within)
+                .map_err(|e| e.to_string())?;
+            let lines = drained
+                .lines
+                .iter()
+                .filter_map(|l| {
+                    Some((
+                        l.facility.as_str()?.to_string(),
+                        l.message.as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            Ok((lines, drained.quiet))
         };
-        view.map_err(|partial| not_observed(partial.to_string()))
+        whole_view_within(read, &listed, &bootstrap, deadline, API_VERSIONS_QUIET)
+            .map_err(not_observed)
     }
 
     /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so

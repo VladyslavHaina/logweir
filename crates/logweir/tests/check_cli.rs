@@ -3766,6 +3766,30 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
         "the backup still runs: the row advises"
     );
 
+    // NO TOPIC SELECTED: nothing was read, so the row is not `ready` (review
+    // L12: it was, with the words "the operation selects no topic by name").
+    // It is `unknown` and says no configuration was read. Advisory, so the
+    // verdict is not moved.
+    let none = mount(&capability_plan(vec![], listed.clone()));
+    let probe = both_present();
+    let run = drive(&none, &capability_wiring(probe));
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::Unknown,
+            CheckCode::BlockedByPrerequisite,
+            Gating::Advisory
+        ),
+        "a row that read nothing does not answer `ready`: {row:?}"
+    );
+    assert!(
+        row.message.contains("no topic's configuration was read"),
+        "{}",
+        row.message
+    );
+    assert!(row.remedy.contains("Name the topics"), "{}", row.remedy);
+
     // A read that timed out is "could not tell", never "readable" or "refused".
     let run = drive(
         &m,
