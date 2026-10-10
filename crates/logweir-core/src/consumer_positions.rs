@@ -90,7 +90,8 @@
 //! TI-04.1-3, arm CP-9), never captured. Detection is a REGRESSION of marks
 //! only: a topic recreated and refilled past its old marks before the read
 //! after the engine is not seen, and a read after the engine that failed
-//! decides nothing. Topic identity (PROD-01.4a) is what closes that gap.
+//! decides nothing. Topic identity (PROD-01.4a's `generations` block in the
+//! same receipt) records such a recreation; this module does not read it.
 //!
 //! # A topic whose partitions were never read
 //!
@@ -102,8 +103,9 @@
 //!
 //! # Generation
 //!
-//! The receipt records no topic generation token and no topic ID yet (PROD-02.1
-//! and PROD-01.4a). Until it does, every snapshot relates to "generation
+//! The positions carry no topic generation token and are not bound to the
+//! receipt's topic IDs yet (PROD-02.1; the IDs themselves are PROD-01.4a's
+//! `generations` block). Until they are, every snapshot relates to "generation
 //! unknown" (PROD-01.4 TI-04.1-4): its positions are about THIS point's data
 //! only, through the marks above, and never about another point's.
 

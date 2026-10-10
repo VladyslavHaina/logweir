@@ -686,11 +686,15 @@ position on it — captured or `excluded: PositionBeyondEnd` —
 `GenerationChangedDuringCapture` (CP-9): those offsets may name records of
 another generation. Detection is a REGRESSION of the marks only: a topic
 recreated and refilled past its old marks before the read after the engine is
-not seen, and a read after the engine that failed decides nothing. Topic
-identity (PROD-01.4a) is what closes that gap. **Generation:** the receipt
-records no topic generation token and no topic id yet (PROD-02.1, PROD-01.4a),
-so a snapshot relates to this point's data only, through its marks, and to
-"generation unknown" for every other point (PROD-01.4 TI-04.1-4).
+not seen by this block, and a read after the engine that failed decides
+nothing. The same receipt's
+[`generations`](#generations--the-topics-id-before-and-after-the-engine-format-160)
+block (PROD-01.4a) records each topic's ID before and after the engine, which
+is where a reader sees such a recreation; the position evidence does not read
+it. **Generation:** the positions carry no topic generation token and are not
+bound to the topic IDs yet (PROD-02.1), so a snapshot relates to this point's
+data only, through its marks, and to "generation unknown" for every other
+point (PROD-01.4 TI-04.1-4).
 
 **Engine snapshots.** Logweir's own backups never ask the engine for its
 `consumer-groups-snapshot.json`. One found beside a foreign archive is read only

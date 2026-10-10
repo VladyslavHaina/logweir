@@ -5260,10 +5260,12 @@ catalog reads a point that selects 100 groups over many partitions as
   which groups were active; nothing claims one consistent cut. A topic whose
   marks REGRESSED during the run — its log start or high watermark read after
   the engine below the one read before — fails the groups holding a position
-  on it (`GenerationChangedDuringCapture`). That is the only detection there
-  is until topic identity (PROD-01.4a) lands: a topic recreated and refilled
-  past its old marks before the second read is not seen, and a second read
-  that failed decides nothing.
+  on it (`GenerationChangedDuringCapture`). That is the only detection the
+  position evidence makes: a topic recreated and refilled past its old marks
+  before the second read is not seen by it, and a second read that failed
+  decides nothing. The same receipt's `generations` block records each
+  topic's ID before and after the engine, which is where such a recreation
+  shows.
 - **Kafka 3.7.x.** A broker below ListGroups v5 types no group, so on 3.7.x
   every selected group is `excluded: GroupTypeNotCaptured`: the run says so
   rather than guessing. Use 3.9 or 4.x to capture positions.
