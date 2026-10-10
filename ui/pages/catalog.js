@@ -99,7 +99,6 @@ import {
   SCHEMA_DEPENDENCY_NOTE,
   SCHEMA_REGISTRY_NOT_CAPTURED,
   catalogPointOffer,
-  isIndexClaim,
   isRedacted,
   restoreCatalogPointRoute,
   schemaDependencyOf,
@@ -450,18 +449,10 @@ export function pointRow(entry, ns, catalog, destination, page) {
   const e = entry || {};
   const location = bestLocation(e);
   const offer = catalogPointOffer(e, page || {});
-  // FX-33: A ROW WITH NO RECORD BEHIND IT IS SHOWN AS WHAT IT IS. No restore,
-  // whatever `selectable` says; the words "not verified" beside the id; and
-  // the set and run its index row names printed AS A CLAIM, because they are
-  // how an operator finds the backup -- and nothing checked them.
-  const claim = isIndexClaim(e);
   return [
     // THE ACTION FIRST (MCP-25's rule, the review's class sweep): the eighth of
     // eight columns is the one a narrow window scrolls away.
-    claim
-      ? "<span class=\"note\" data-restore-refused=\"unverified\">not offered: this entry is " +
-        "the catalog index's claim, not a verified recovery point</span>"
-      : e.selectable !== true
+    e.selectable !== true
       ? ABSENT
       : (offer.offer
         // A ROLE THAT CANNOT RESTORE IS NOT OFFERED THE LINK (MCP round 3,
@@ -471,7 +462,7 @@ export function pointRow(entry, ns, catalog, destination, page) {
           " data-restore-point=\"" + esc(e.pointId) + "\"")
         : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
           messageText(offer.reason) + "</span>"),
-    "<code>" + cell(e.pointId) + "</code>" + (claim ? indexClaimNote(e) : ""),
+    "<code>" + cell(e.pointId) + "</code>",
     when(e.recoveryPointAt) + consumerPositionsNote(e),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
@@ -487,43 +478,6 @@ export function pointRow(entry, ns, catalog, destination, page) {
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
   ];
-}
-
-/** What an index claim's identifiers may look like: the alphabet of every
- *  backup id and run id this product writes. The API has bounded them and the
- *  controller has applied the same rule; it is applied again here because
- *  this is the text of an object nobody signed. */
-const INDEX_CLAIM_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-
-/** FX-33: the words beside the id of a row with no record behind it
- *  (`isIndexClaim`): that it was not verified, where its few facts came from,
- *  and -- when the catalog's index row named them -- the backup set and run,
- *  each shown only when it looks like an identifier and always as a claim.
- *  Every value is escaped; nothing here is a link or an action. */
-export function indexClaimNote(entry) {
-  const e = entry || {};
-  const id = (value) => (typeof value === "string" && INDEX_CLAIM_ID.test(value) ? value : "");
-  const backup = id(e.backupId);
-  const run = id(e.runId);
-  const says = [];
-  if (backup.length > 0) {
-    says.push("backup set <code>" + esc(backup) + "</code>");
-  }
-  if (run.length > 0) {
-    says.push("run <code>" + esc(run) + "</code>");
-  }
-  const cause = e.cause !== null && typeof e.cause === "object" ? e.cause : {};
-  const size = Number.isSafeInteger(cause.bytes) && Number.isSafeInteger(cause.capBytes)
-    ? " Its " + esc(String(cause.document || "document")) + " is " + esc(String(cause.bytes)) +
-      " bytes; the bound is " + esc(String(cause.capBytes)) + "."
-    : "";
-  return " " + badge("unverified", "Not verified") +
-    "<span class=\"note\" data-facts-from=\"" + esc(String(e.factsFrom)) + "\"> The catalog " +
-    "could not read this point's record." + size +
-    (says.length > 0
-      ? " Its unsigned index row says: " + says.join(", ") + ". Nothing verified that."
-      : " Only its object key names it.") +
-    "</span>";
 }
 
 /** PROD-04.1: a point's consumer position evidence, as the catalog's view

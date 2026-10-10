@@ -115,7 +115,6 @@ import { renderPreflight, transportCell } from "./destinations.js";
 import {
   backupCatalogOfferFrom,
   catalogReadersOf,
-  isIndexClaim,
   isRecoveryPoint,
   noteCatalogSource,
   readOwnVerdicts,
@@ -4868,21 +4867,13 @@ export function runsOfSchedule(name, uid, backups) {
  *  and both derive from the same run: `status.backupId` on the `Backup` and
  *  `backupId` on the catalog's view entry. NOT on the run's name -- a name is
  *  reusable -- and not on the covered window, which two runs of one schedule
- *  can share exactly.
- *
- *  NEVER A ROW WITH NO RECORD BEHIND IT (FX-33, `isIndexClaim`). Such a row's
- *  `backupId` is what the catalog's unsigned index row says, verified by
- *  nothing; joined here, a row anyone who can write a key under the catalog's
- *  log prefix can plant would put `Unreadable` in a healthy run's verdict
- *  cells and take its restore link away. It is listed on the catalog's own
- *  page, as what it is. */
+ *  can share exactly. */
 export function pointsForRun(backup, points) {
   const id = String((((backup || {}).status) || {}).backupId || "");
   if (id.length === 0 || !Array.isArray(points)) {
     return [];
   }
-  return points.filter((point) => !isIndexClaim(point) &&
-    String((point || {}).backupId || "") === id);
+  return points.filter((point) => String((point || {}).backupId || "") === id);
 }
 
 /** The distinct values of one field across a set's points, in the order the

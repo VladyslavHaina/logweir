@@ -653,114 +653,44 @@ pub struct PointView {
     /// the point is not `Available`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<PointConsumerPositionsView>,
-    /// **FX-33.** The document the catalog's examination of this point
-    /// stopped at, and why — present when the point is not `Available`
-    /// because of one document. A SIZE (`overReadCap`, with the size and the
-    /// bound in bytes) and a CONTENT fault (`malformed`) are named as what
-    /// they are; neither is a permission or network failure.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cause: Option<PointCauseView>,
-    /// **FX-33.** Present when NO RECORD stands behind this entry — the
-    /// catalog counted the point and could not read its record: `indexRow`
-    /// (`backupId` and `runId` are what the catalog's UNSIGNED index row
-    /// says) or `key` (they are empty; only the object key named the point).
-    ///
-    /// **Such an entry is information and never evidence.** It is never
-    /// `selectable`; `receiptKey` and `receiptSha256` are empty strings and
-    /// there is no manifest, window, location, signer or topic list — nothing
-    /// a restore plan could be bound to. `recoveryPointAt`, when present, is
-    /// the instant the index key carries. Nothing in it was verified.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub facts_from: Option<String>,
-}
-
-/// **FX-33.** Why a point's examination stopped at one document.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PointCauseView {
-    /// `record`, `receipt` or `manifest`. An open word: a newer runner may
-    /// name another document.
-    pub document: String,
-    /// `overReadCap`, `readFailed`, `notFound`, `malformed` or
-    /// `unsupportedFormat`. An open word, for the same reason.
-    pub reason: String,
-    /// The document's size in bytes, when the store reported one
-    /// (`overReadCap`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<u64>,
-    /// The bound it was read under, in bytes (`overReadCap`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cap_bytes: Option<u64>,
 }
 
 /// The longest topic name Kafka accepts.
 const MAX_TOPIC_NAME: usize = 249;
 
+/// `None` for 0: a catalog entry whose record could not be read carries no
+/// instant (FX-33), and that is shown as unknown, never as 1970.
 fn instant(ms: i64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp_millis(ms)
+    (ms > 0)
+        .then(|| DateTime::from_timestamp_millis(ms))
+        .flatten()
 }
 
 /// One row, with the controller's own refusal applied. The ONE place the
 /// published `selectable` is computed, so the `selectable=true` filter and the
 /// row can never disagree.
 fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
-    // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS PUBLISHED AS WHAT IT IS.
-    // Asked of `facts_from` itself: never selectable, whatever else the entry
-    // carries; no window (it has none, and `0` is not 1970); and its instant
-    // only when its key carried one.
-    let evidence = entry.is_evidence();
     let backup_verdict = refusals.refusal_for(entry).map(|r| bounded(r, 32));
     PointView {
         point_id: bounded(&entry.point_id, 128),
         backup_id: bounded(&entry.backup_id, 128),
         run_id: bounded(&entry.run_id, 64),
-        recovery_point_at: Some(entry.recovery_point_at_ms)
-            .filter(|ms| evidence || *ms > 0)
-            .and_then(instant),
-        covered_from: evidence.then(|| instant(entry.covered_from_ms)).flatten(),
-        covered_to: evidence.then(|| instant(entry.covered_to_ms)).flatten(),
+        recovery_point_at: instant(entry.recovery_point_at_ms),
+        covered_from: instant(entry.covered_from_ms),
+        covered_to: instant(entry.covered_to_ms),
         availability: entry.availability.as_str().to_string(),
         verification: entry.verification.as_str().to_string(),
-        selectable: evidence && entry.selectable && backup_verdict.is_none(),
+        selectable: entry.selectable && backup_verdict.is_none(),
         backup_verdict,
-        signer_key_id: entry
-            .signer_key_id
-            .as_deref()
-            .filter(|_| evidence)
-            .map(|k| bounded(k, 64)),
-        // NOTHING A PLAN COULD BE BOUND TO leaves here for such an entry,
-        // whatever it carries.
-        receipt_key: if evidence {
-            bounded(&entry.receipt_key, 1024)
-        } else {
-            String::new()
-        },
-        receipt_sha256: if evidence {
-            bounded(&entry.receipt_sha256, 80)
-        } else {
-            String::new()
-        },
-        manifest_key: entry
-            .manifest_key
-            .as_deref()
-            .filter(|_| evidence)
-            .map(|k| bounded(k, 1024)),
-        manifest_sha256: entry
-            .manifest_sha256
-            .as_deref()
-            .filter(|_| evidence)
-            .map(|d| bounded(d, 80)),
-        cause: entry.cause.as_ref().map(|c| PointCauseView {
-            document: bounded(&c.document, 32),
-            reason: bounded(&c.reason, 32),
-            bytes: c.bytes,
-            cap_bytes: c.cap_bytes,
-        }),
-        facts_from: entry.facts_from.map(|f| f.as_str().to_string()),
+        signer_key_id: entry.signer_key_id.as_deref().map(|k| bounded(k, 64)),
+        receipt_key: bounded(&entry.receipt_key, 1024),
+        receipt_sha256: bounded(&entry.receipt_sha256, 80),
+        manifest_key: entry.manifest_key.as_deref().map(|k| bounded(k, 1024)),
+        manifest_sha256: entry.manifest_sha256.as_deref().map(|d| bounded(d, 80)),
         locations: entry
             .locations
             .iter()
-            .take(if evidence { 16 } else { 0 })
+            .take(16)
             .map(|l| PointLocationView {
                 location_id: bounded(&l.location_id, 512),
                 availability: l.availability.as_str().to_string(),
@@ -771,7 +701,7 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
         topics: entry
             .topics
             .iter()
-            .take(if evidence { 64 } else { 0 })
+            .take(64)
             .map(|t| PointTopicView {
                 name: bounded(&t.name, MAX_TOPIC_NAME),
                 partitions: t.partitions,
@@ -805,16 +735,14 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
                 }),
             })
             .collect(),
-        topics_omitted: entry.topics_omitted.filter(|_| evidence),
+        topics_omitted: entry.topics_omitted,
         owner_detection: entry
             .owner_detection
             .as_ref()
-            .filter(|_| evidence)
             .map(|d| d.iter().take(2).map(|w| bounded(w, 32)).collect()),
         consumer_positions: entry
             .consumer_positions
             .as_ref()
-            .filter(|_| evidence)
             .map(|c| PointConsumerPositionsView {
                 observed_from: instant(c.observed_from_ms),
                 observed_to: instant(c.observed_to_ms),
@@ -1553,86 +1481,4 @@ fn verify_page(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use weirkeeper::catalog_view::{Availability, FactsFrom, ResolvedLocation, Verification};
-
-    /// A view entry carrying everything a selectable point carries.
-    fn whole() -> ViewEntry {
-        ViewEntry {
-            point_id: "lwp1-0123456789abcdef0123456789abcdef".to_string(),
-            backup_id: "set-a".to_string(),
-            run_id: "run-a".to_string(),
-            recovery_point_at_ms: 1_790_000_000_000,
-            covered_from_ms: 1_789_996_400_000,
-            covered_to_ms: 1_790_000_000_000,
-            locations: vec![ResolvedLocation {
-                location_id: "s3://lw-archive/team-a".to_string(),
-                availability: Availability::Available,
-            }],
-            receipt_key: "logweir/backups/set-a/run-a.receipt.json".to_string(),
-            receipt_sha256: format!("sha256:{}", "a".repeat(64)),
-            manifest_key: Some("team-a/set-a/manifest.json".to_string()),
-            manifest_sha256: Some(format!("sha256:{}", "b".repeat(64))),
-            format_version: Some("1.7.0".to_string()),
-            availability: Availability::Available,
-            verification: Verification::Verified,
-            signer_key_id: Some("c".repeat(64)),
-            selectable: true,
-            remedy: None,
-            topics: Vec::new(),
-            topics_omitted: Some(70),
-            owner_detection: Some(vec!["declared".to_string()]),
-            consumer_positions: None,
-            cause: None,
-            facts_from: None,
-        }
-    }
-
-    /// **FX-33 — the point route publishes nothing a restore could be bound
-    /// to for an entry with no record behind it, WHATEVER the entry carries.**
-    /// A page line can never be both a claim and a binding (`ViewEntry`
-    /// refuses to parse one), so this row hands `point_view` an entry no
-    /// parser would: every field of a selectable point, and `facts_from`. The
-    /// projection decides from `facts_from` itself.
-    ///
-    /// KILLS: a consumer that takes the receipt key from a `factsFrom` entry;
-    /// `selectable` published from the entry's own flag for one.
-    #[test]
-    fn fx33_a_claim_is_published_with_no_binding_whatever_it_carries() {
-        let refusals = ControllerRefusals::default();
-        let real = point_view(&whole(), &refusals);
-        assert!(
-            real.selectable,
-            "CONTROL: with a record behind it, it is offered"
-        );
-        assert!(!real.receipt_key.is_empty() && real.manifest_sha256.is_some());
-        assert!(real.covered_to.is_some() && real.facts_from.is_none());
-
-        for from in [FactsFrom::IndexRow, FactsFrom::Key] {
-            let mut claim = whole();
-            claim.facts_from = Some(from);
-            let view = point_view(&claim, &refusals);
-            assert!(!view.selectable, "{from:?}");
-            assert_eq!(view.facts_from.as_deref(), Some(from.as_str()));
-            assert_eq!(
-                (view.receipt_key.as_str(), view.receipt_sha256.as_str()),
-                ("", "")
-            );
-            assert!(view.manifest_key.is_none() && view.manifest_sha256.is_none());
-            assert!(view.covered_from.is_none() && view.covered_to.is_none());
-            assert!(view.backup_verdict.is_none());
-            assert!(view.locations.is_empty() && view.signer_key_id.is_none());
-            assert!(view.topics.is_empty() && view.topics_omitted.is_none());
-            assert!(view.owner_detection.is_none() && view.consumer_positions.is_none());
-        }
-        // An instant of 0 is "the key carried none", never 1970.
-        let mut undated = whole();
-        undated.facts_from = Some(FactsFrom::Key);
-        undated.recovery_point_at_ms = 0;
-        assert!(point_view(&undated, &refusals).recovery_point_at.is_none());
-    }
 }

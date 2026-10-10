@@ -1025,28 +1025,6 @@ export function catalogWindow(entry) {
 const POINT_ID_SHAPE = /^lwp1-[0-9a-f]{32}$/;
 const DIGEST_SHAPE = /^sha256:[0-9a-f]{64}$/;
 
-/** FX-33: WHETHER A CATALOG ROW HAS NO RECORD BEHIND IT (`factsFrom` is
- *  present, whatever it says: a word a newer server adds is still one).
- *
- *  The catalog counted such a point and could not read its record -- the
- *  record is over the bound Logweir reads, is not a record, is missing, or is
- *  of another major. What the row shows is the object key's text and, at
- *  best, what the catalog's UNSIGNED index row says: its `backupId` and
- *  `runId` were verified by nothing. So the row is INFORMATION AND NEVER
- *  EVIDENCE. It is never offered as a restore, and it is never one of "this
- *  run's catalog rows": a row anyone who can write a key under the catalog's
- *  log prefix can cause to exist, naming any set, must not take a real run's
- *  restore away or put a word in its verdict cells. */
-export function isIndexClaim(entry) {
-  const from = (entry || {}).factsFrom;
-  return from !== undefined && from !== null;
-}
-
-/** Why a row with no record behind it is not offered ([`isIndexClaim`]). */
-export const INDEX_CLAIM_REFUSAL =
-  "the catalog lists this point without a record it could read, so what is shown is the " +
-  "catalog index's claim and was not verified; a restore is never built from it";
-
 /** WHETHER ONE CATALOG ROW MAY BE OFFERED AS A RESTORE, and if not, why.
  *
  *  `page` is the point page the row came from (its `viewExpired` and
@@ -1060,12 +1038,6 @@ export function catalogPointOffer(entry, page) {
   const no = (reason) => ({ offer: false, reason: reason });
   if (e === null) {
     return no("the catalog's view does not list this point");
-  }
-  // FX-33: FIRST, and asked of `factsFrom` itself -- before `selectable`,
-  // which such a row carries as `false` and which this rule does not rely on.
-  if (isIndexClaim(e)) {
-    return no(INDEX_CLAIM_REFUSAL +
-      (typeof e.remedy === "string" && e.remedy.length > 0 ? " (" + e.remedy + ")" : ""));
   }
   if (p.viewExpired === true) {
     return no("the catalog's view has aged out (viewExpired); sync the catalog again");
@@ -1136,9 +1108,7 @@ export function catalogRowsForBackup(backup, points) {
   const digest = backupReceiptOf(backup);
   return points.filter((point) => {
     const p = point || {};
-    // FX-33: a row with no record behind it is no run's row. Its `backupId`
-    // is an unsigned index row's word ([`isIndexClaim`]).
-    if (isIndexClaim(p) || p.backupId !== id) {
+    if (p.backupId !== id) {
       return false;
     }
     return digest === null || p.receiptSha256 === digest;
@@ -1283,8 +1253,7 @@ export async function readOwnVerdicts(runs, points, readVerdict, lifecycle) {
       typeof status.backupId !== "string" || status.backupId.length === 0) {
       continue;
     }
-    if (!(Array.isArray(points) &&
-      points.some((p) => !isIndexClaim(p) && (p || {}).backupId === status.backupId))) {
+    if (!(Array.isArray(points) && points.some((p) => (p || {}).backupId === status.backupId))) {
       continue;
     }
     if (read >= OWN_VERDICT_READ_BUDGET) {

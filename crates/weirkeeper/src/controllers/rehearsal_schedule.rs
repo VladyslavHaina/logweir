@@ -1972,13 +1972,6 @@ pub fn merge_catalog_entry(
     destination: Option<String>,
     refusals: &crate::catalog_view::ControllerRefusals,
 ) {
-    // FX-33: AN ENTRY WITH NO RECORD BEHIND IT IS NOT A CANDIDATE AND ENRICHES
-    // NONE. Its few facts are an object key's and an unsigned index row's; a
-    // rehearsal selects, dates and binds from signed facts only. Asked of
-    // `facts_from` itself, before anything else of the row is read.
-    if !entry.is_evidence() {
-        return;
-    }
     let refused_elsewhere = refusals.refusal_for(&entry).is_some();
     // An IN-RANGE capture time or none. `0` is what a row that never wrote the
     // field would carry, not a capture in 1970 (the protection join reads it

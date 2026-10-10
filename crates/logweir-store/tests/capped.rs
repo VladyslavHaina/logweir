@@ -294,7 +294,6 @@ fn the_cap_table_holds_its_own_relations() {
     const _: () = assert!(caps::CONTROLLER_DOCUMENT <= caps::SIGNED_DOCUMENT);
     const _: () = assert!(caps::CONTROLLER_RECEIPT <= caps::SIGNED_DOCUMENT);
     const _: () = assert!(caps::CATALOG_RECORD <= caps::SIGNED_DOCUMENT);
-    const _: () = assert!(caps::CATALOG_INDEX_ROW <= caps::SIDECAR);
     const _: () = assert!(caps::CONTROLLER_MANIFEST <= caps::MANIFEST);
     assert_eq!(caps::PROBE, 0);
     // A probe GET of a present, non-empty object is answered and refused

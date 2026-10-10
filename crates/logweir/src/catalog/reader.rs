@@ -39,40 +39,29 @@ pub enum RecordVerdict {
 
 /// **Rules 1 and 2.**
 ///
-/// `format_version` is read FIRST, before the typed deserialisation: a
-/// major-2 record may have any shape at all, and reaching for a typed field
-/// in it would report "not a record" for a document this build merely does
-/// not implement yet.
+/// `format_version` is read out of an untyped `Value` FIRST, before the typed
+/// deserialisation: a major-2 record may have any shape at all, and reaching
+/// for a typed field in it would report "not a record" for a document this
+/// build merely does not implement yet.
 ///
 /// Unknown fields inside major 1 are IGNORED — there is deliberately no
 /// `deny_unknown_fields` on [`CatalogPoint`] — because a minor bump adds
 /// optional fields and a 1.0.0 reader must still read a 1.1.0 record. Absent
 /// optional fields deserialise to `None`, which every consumer must read as
 /// UNKNOWN; nothing in this module substitutes a zero for one.
-///
-/// # No tree is built (FX-33)
-///
-/// This used to parse the bytes into a `serde_json::Value`, read the version
-/// out of it, and deserialise the record from the tree. A tree of a document
-/// of tiny values is about 37 times its bytes, and the catalog walk now reads
-/// a record of up to `caps::CATALOG_RECORD` (6 MB, where it read 256 KiB): an
-/// object planted at a record key would have cost a check Job over 200 MB.
-/// So the version is FOLDED from the bytes ([`declared_format_version`]: one
-/// pass, every other value skipped) and the record is deserialised from the
-/// bytes. What the reader holds is the bytes and the typed record.
-///
-/// One verdict moves, to the safer side: a document that writes one of a
-/// record's own FIELDS twice was read by its last copy and is now
-/// `Unreadable`. No writer of this product produces one.
 pub fn read_record(bytes: &[u8]) -> RecordVerdict {
-    let version = match declared_format_version(bytes) {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
         Err(e) => return RecordVerdict::Unreadable(format!("not valid JSON: {e}")),
-        Ok(None) => {
-            return RecordVerdict::Unreadable(
-                "no `format_version` string, so this object declares no format at all".to_string(),
-            )
-        }
-        Ok(Some(version)) => version,
+    };
+    let Some(version) = value
+        .get("format_version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return RecordVerdict::Unreadable(
+            "no `format_version` string, so this object declares no format at all".to_string(),
+        );
     };
     let Some(major) = major_of(&version) else {
         return RecordVerdict::Unreadable(format!(
@@ -84,133 +73,12 @@ pub fn read_record(bytes: &[u8]) -> RecordVerdict {
             format_version: version,
         };
     }
-    match serde_json::from_slice::<CatalogPoint>(bytes) {
+    match serde_json::from_value::<CatalogPoint>(value) {
         Ok(p) => RecordVerdict::Point(Box::new(p)),
         Err(e) => RecordVerdict::Unreadable(format!(
             "declares format_version {version:?} but is not a major-1 catalog point record: {e}"
         )),
     }
-}
-
-/// The `format_version` a JSON document declares at its top level, WITHOUT
-/// building the document: `Ok(Some(_))` for a string, `Ok(None)` for a
-/// document that is not an object, has no such key, or carries a value that
-/// is not a string.
-///
-/// It answers what `serde_json::from_slice::<Value>(bytes)?.get(
-/// "format_version").and_then(Value::as_str)` answers — the whole input must
-/// be one valid JSON document, and a repeated key is read by its LAST
-/// occurrence — while holding one string.
-/// `the_version_fold_answers_what_the_value_walk_answered` holds it to that.
-///
-/// # Errors
-///
-/// The parse error of bytes that are not one JSON document.
-pub fn declared_format_version(bytes: &[u8]) -> Result<Option<String>, serde_json::Error> {
-    use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
-
-    /// One value: a string kept, anything else skipped unbuilt.
-    enum Version {
-        Text(String),
-        Other,
-    }
-    struct VersionSeed;
-    impl<'de> serde::de::DeserializeSeed<'de> for VersionSeed {
-        type Value = Version;
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Version, D::Error> {
-            struct V;
-            impl<'de> Visitor<'de> for V {
-                type Value = Version;
-                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    f.write_str("any JSON value")
-                }
-                fn visit_str<E>(self, v: &str) -> Result<Version, E> {
-                    Ok(Version::Text(v.to_string()))
-                }
-                fn visit_string<E>(self, v: String) -> Result<Version, E> {
-                    Ok(Version::Text(v))
-                }
-                fn visit_bool<E>(self, _: bool) -> Result<Version, E> {
-                    Ok(Version::Other)
-                }
-                fn visit_i64<E>(self, _: i64) -> Result<Version, E> {
-                    Ok(Version::Other)
-                }
-                fn visit_u64<E>(self, _: u64) -> Result<Version, E> {
-                    Ok(Version::Other)
-                }
-                fn visit_f64<E>(self, _: f64) -> Result<Version, E> {
-                    Ok(Version::Other)
-                }
-                fn visit_unit<E>(self) -> Result<Version, E> {
-                    Ok(Version::Other)
-                }
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                    self,
-                    mut seq: A,
-                ) -> Result<Version, A::Error> {
-                    while seq.next_element::<IgnoredAny>()?.is_some() {}
-                    Ok(Version::Other)
-                }
-                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Version, A::Error> {
-                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                    Ok(Version::Other)
-                }
-            }
-            d.deserialize_any(V)
-        }
-    }
-    struct Top;
-    impl<'de> Visitor<'de> for Top {
-        type Value = Option<String>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("any JSON value")
-        }
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<String>, A::Error> {
-            let mut found = None;
-            while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
-                if key == "format_version" {
-                    // The LAST occurrence decides, as a `Value` map does.
-                    found = match map.next_value_seed(VersionSeed)? {
-                        Version::Text(text) => Some(text),
-                        Version::Other => None,
-                    };
-                } else {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-            Ok(found)
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Option<String>, A::Error> {
-            while seq.next_element::<IgnoredAny>()?.is_some() {}
-            Ok(None)
-        }
-        fn visit_str<E>(self, _: &str) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-        fn visit_bool<E>(self, _: bool) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-        fn visit_unit<E>(self) -> Result<Option<String>, E> {
-            Ok(None)
-        }
-    }
-    let mut de = serde_json::Deserializer::from_slice(bytes);
-    let version = de.deserialize_any(Top)?;
-    de.end()?;
-    Ok(version)
 }
 
 /// The leading integer of a `major.minor.patch` string, or `None`.

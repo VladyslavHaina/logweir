@@ -138,7 +138,6 @@ pub struct ObjectHead {
 /// | [`CONTROLLER_RECEIPT`] | 5,131,072 | `weirkeeper`: a backup receipt | **FX-33.** `logweir_core::topic_budget::MAX_RECEIPT_BYTES`, the largest receipt Logweir writes: 1,000 topics at 5,000 bytes each plus 128 KiB. Equal to the relay's payload cap. Never parsed into a tree: the controller folds the five facts it needs from the bytes |
 /// | [`CATALOG_RECEIPT`] | 5,131,072 | the catalog walk (a check Job) | **FX-33.** Equal to [`CONTROLLER_RECEIPT`], so a point the catalog lists `Available` is one the controller can verify |
 /// | [`CATALOG_RECORD`] | 6,131,072 | the catalog walk | **FX-33.** `topic_budget::MAX_RECORD_BYTES`: the catalog point record copies the receipt's per-topic blocks two levels deeper |
-/// | [`CATALOG_INDEX_ROW`] | 64 KiB | the catalog walk | **FX-33.** One day-shard index row, read only for a point whose record gave no facts; a row is about 600 bytes |
 /// | [`MANIFEST`] | 256 MiB | runner, CLI, check Jobs | about 540 bytes per segment entry, so about 500,000 segments |
 /// | [`CONTROLLER_MANIFEST`] | 64 MiB | `weirkeeper`'s retention report | about 124,000 segments; parsed as a stream, so memory is the bytes and no more |
 /// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. FX-30 owns the decode cap |
@@ -188,9 +187,6 @@ pub mod caps {
     pub const CATALOG_RECEIPT: u64 = logweir_core::topic_budget::MAX_RECEIPT_BYTES;
     /// **FX-33.** A catalog point record read by the catalog walk.
     pub const CATALOG_RECORD: u64 = logweir_core::topic_budget::MAX_RECORD_BYTES;
-    /// **FX-33.** One day-shard index row of the catalog, read by the walk
-    /// for a point whose record gave it no facts.
-    pub const CATALOG_INDEX_ROW: u64 = 64 << 10;
     /// An engine manifest read in a runner, CLI or check-Job process.
     pub const MANIFEST: u64 = 256 << 20;
     /// An engine manifest read by the controller's retention report.

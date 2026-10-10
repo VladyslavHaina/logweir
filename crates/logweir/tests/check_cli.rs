@@ -8196,35 +8196,19 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
         counts["total"], 2,
         "the walk still SAW both points — the shard listing is what establishes that"
     );
-    // FX-33: AND BOTH ARE LISTED. They used to be counted and listed by no
-    // entry. The denial fails every `get`, the index row's too, so what is
-    // known is what each key carries: the point id and the recovery instant.
+    // FX-33: AND BOTH ARE LISTED, by the point id each key carries. They
+    // used to be counted and listed by no entry. A read that did not answer
+    // is the one cause whose remedy names the grant.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "both points are listed: {body}");
     for (entry, f) in entries.iter().zip([&newer, &older]) {
         assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
         assert_eq!(entry["availability"], "Unreadable", "{entry}");
-        assert_eq!(entry["factsFrom"], "key", "{entry}");
-        assert_eq!(
-            entry["recoveryPointAtMs"],
-            f.point.capture.started_at.timestamp_millis(),
-            "{entry}"
-        );
-        for absent in [
-            "backupId",
-            "runId",
-            "receiptKey",
-            "receiptSha256",
-            "coveredFromMs",
-        ] {
-            assert!(
-                entry.get(absent).is_none(),
-                "`{absent}` was not read, so it is ABSENT, never empty or zero: {entry}"
-            );
-        }
-        assert_eq!(
-            entry["cause"],
-            serde_json::json!({"document": "record", "reason": "readFailed"}),
+        assert_eq!(entry["receiptKey"], "", "nothing was read: {entry}");
+        assert!(
+            entry["remedy"]
+                .as_str()
+                .is_some_and(|r| r.contains("archiveRead grant")),
             "{entry}"
         );
     }
@@ -8288,7 +8272,7 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
         "the other point still lists: {body}"
     );
     // FX-33: and the point this build cannot read is listed too, as what it
-    // is, with the version it declares and the facts its index row carries.
+    // is, with the version it declares.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "{body}");
     let unsupported = &entries[0];
@@ -8298,13 +8282,7 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
         "{unsupported}"
     );
     assert_eq!(unsupported["formatVersion"], "2.0.0", "{unsupported}");
-    assert_eq!(
-        unsupported["cause"],
-        serde_json::json!({"document": "record", "reason": "unsupportedFormat"}),
-        "{unsupported}"
-    );
-    assert_eq!(unsupported["factsFrom"], "indexRow", "{unsupported}");
-    assert_eq!(unsupported["backupId"], "set-a", "{unsupported}");
+    assert_eq!(unsupported["backupId"], "", "{unsupported}");
     assert!(
         unsupported["remedy"]
             .as_str()
@@ -8933,8 +8911,9 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             .to_string(),
     );
 
-    // The last column is FX-33's `cause`: the document the examination
-    // stopped at and why, or `None` for a point that is `Available`.
+    // The last column is the cause (FX-33): the document the examination
+    // stopped at and why, or `None` for a point that is `Available`. Only a
+    // read that did not answer has a remedy naming the grant.
     type Cause<'a> = Option<(&'a str, &'a str)>;
     type Case<'a> = (&'a str, String, Fault, &'a str, &'a str, Cause<'a>);
     let cases: Vec<Case<'_>> = vec![
@@ -9024,21 +9003,12 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         );
         assert_eq!(entry["availability"], availability, "{what}: {entry}");
         assert_eq!(entry["signature"], signature, "{what}: {entry}");
-        match cause {
-            Some((document, reason)) => {
-                assert_eq!(entry["cause"]["document"], document, "{what}: {entry}");
-                assert_eq!(entry["cause"]["reason"], reason, "{what}: {entry}");
-                assert!(entry["cause"].get("bytes").is_none(), "{what}: {entry}");
-            }
-            None => assert!(entry.get("cause").is_none(), "{what}: {entry}"),
-        }
-        // A read that did not answer is the ONE cause whose remedy names the
-        // grant, the endpoint and the network.
-        if cause.is_some_and(|(_, reason)| reason == "readFailed") {
-            assert!(
+        if let Some((_, reason)) = cause {
+            assert_eq!(
                 entry["remedy"]
                     .as_str()
                     .is_some_and(|r| r.contains("archiveRead grant")),
+                reason == "readFailed",
                 "{what}: {entry}"
             );
         }
@@ -9117,16 +9087,6 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     let entry = &entries[0];
     assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
     assert_eq!(entry["availability"], "Unreadable", "{entry}");
-    assert_eq!(
-        entry["cause"],
-        serde_json::json!({
-            "document": "record",
-            "reason": "overReadCap",
-            "bytes": huge.len(),
-            "capBytes": caps::CATALOG_RECORD,
-        }),
-        "{entry}"
-    );
     let remedy = entry["remedy"].as_str().expect("a remedy");
     assert!(
         remedy.contains(&format!("{} bytes", huge.len()))
@@ -9185,11 +9145,6 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
         caps::SIDECAR < caps::CATALOG_RECEIPT
             && caps::CATALOG_RECEIPT < caps::CATALOG_RECORD
             && caps::CATALOG_RECORD < caps::MANIFEST
-            && caps::CATALOG_INDEX_ROW <= caps::SIDECAR
-    );
-    assert!(
-        !caps_read.iter().any(|(key, _)| *key == f.log_key),
-        "a point whose record reads spends no read on its index row: {caps_read:?}"
     );
     for (key, cap) in &caps_read {
         assert!(
@@ -9712,60 +9667,6 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     );
     assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
     assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
-    // FX-33: what an entry with no record behind it may say. The controller
-    // applies the runner's own identifier bounds to what it reads, takes
-    // `factsFrom` from a CLOSED vocabulary (a word it does not know is a
-    // malformed entry, never a guess), and knows the two `cause` reasons its
-    // `Synced` message counts by name.
-    assert_eq!(
-        usize_const("MAX_INDEX_BACKUP_ID_CHARS"),
-        cs::MAX_INDEX_BACKUP_ID_CHARS
-    );
-    assert_eq!(
-        usize_const("MAX_INDEX_RUN_ID_CHARS"),
-        cs::MAX_INDEX_RUN_ID_CHARS
-    );
-    let vocabulary = {
-        let open = source
-            .find("    FactsFrom {\n")
-            .expect("the controller declares `FactsFrom`");
-        let rest = &source[open..];
-        &rest[..rest.find("    }\n").expect("the vocabulary closes")]
-    };
-    for word in cs::FactsFrom::ALL {
-        assert!(
-            vocabulary.contains(&format!("=> \"{word}\"")),
-            "the controller does not read `factsFrom: {word}`, which this runner writes"
-        );
-    }
-    assert_eq!(
-        vocabulary.matches("=> \"").count(),
-        cs::FactsFrom::ALL.len(),
-        "the controller reads a `factsFrom` this runner never writes"
-    );
-    assert_eq!(
-        string_const("CAUSE_OVER_READ_CAP"),
-        cs::CauseReason::OverReadCap.as_str()
-    );
-    assert_eq!(
-        string_const("CAUSE_MALFORMED"),
-        cs::CauseReason::Malformed.as_str()
-    );
-    assert_eq!(
-        string_const("CAUSE_READ_FAILED"),
-        cs::CauseReason::ReadFailed.as_str()
-    );
-    let longest_word = usize_const("MAX_CAUSE_WORD_CHARS");
-    for word in cs::CauseDocument::ALL
-        .iter()
-        .map(|d| d.as_str())
-        .chain(cs::CauseReason::ALL.iter().map(|r| r.as_str()))
-    {
-        assert!(
-            word.len() <= longest_word && word.bytes().all(|b| b.is_ascii_alphanumeric()),
-            "`{word}` is not a cause word the controller accepts"
-        );
-    }
     assert!(
         source.contains("pub const BODY_FORMAT_VERSION: u32 = 1;"),
         "the controller reads grammar version 1 and this runner writes {}",
@@ -9814,20 +9715,19 @@ fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
     );
 }
 
-/// **THE CROSS-CRATE GUARD, for an entry with no record behind it (FX-33).**
+/// **THE CROSS-CRATE GUARD, for a point whose record gave no facts (FX-33).**
 /// The EXACT body the emitter produces for the fixture below: one point whose
-/// record reads, one whose record is over its bound (its facts are its index
-/// row's claim), and one whose record is not a record and whose row names
-/// another point (its facts are its key's alone).
+/// record reads, one whose record is over its bound, and one whose record is
+/// not a record. The second and third are listed by their point ids alone.
 ///
 /// `the_runners_pinned_recordless_body_is_one_this_parser_reads` in
 /// `crates/weirkeeper/tests/catalog_controller.rs` extracts this literal and
 /// runs the controller's own `parse_body` and `materialise` over it.
 const PINNED_RECORDLESS_SYNC_BODY: &str = r#"catalog-format=1
-catalog-page=1/1 count=3 sha256=aebfdb97376ae2a347f1d1ca09b13cb2b01e31820cc2780e9138c7782e209273
+catalog-page=1/1 count=3 sha256=be12d1d5c6d06e64ac350b4a6be14b79d4e556aa9216d8d2afb775a5d68dd6d3
 catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.1.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
-catalog-entry={"pointId":"lwp1-08cf9d03519c5c31f573595a8b368b15","backupId":"set-b","runId":"run-b","recoveryPointAtMs":1789441200000,"availability":"Unreadable","signature":"notAttempted","remedy":"The catalog record of this recovery point is larger than the 6131072-byte bound Logweir reads for one (it is 6131073 bytes): its backup named more topics, or recorded more configuration, than one backup may (1000 topics). This is the document's size; no permission or network change lists the point. The archive is intact and can be restored from the command line. The backup id and run id shown are what the catalog's unsigned index row says; they were not verified.","cause":{"document":"record","reason":"overReadCap","bytes":6131073,"capBytes":6131072},"factsFrom":"indexRow"}
-catalog-entry={"pointId":"lwp1-f207be56309520fa5ac69057a3c104e4","recoveryPointAtMs":1789354800000,"availability":"Unreadable","signature":"notAttempted","remedy":"The object at this recovery point's catalog record key is not a catalog point record: it is not JSON, or it is another document. This is the object's content; no permission or network change lists the point. Nothing under logweir/ is rewritten, so find which writer produced the object before relying on this point.","cause":{"document":"record","reason":"malformed"},"factsFrom":"key"}
+catalog-entry={"pointId":"lwp1-08cf9d03519c5c31f573595a8b368b15","backupId":"","runId":"","recoveryPointAtMs":0,"coveredFromMs":0,"coveredToMs":0,"receiptKey":"","receiptSha256":"","availability":"Unreadable","signature":"notAttempted","remedy":"The catalog record of this recovery point is larger than the 6131072-byte bound Logweir reads for one (it is 6131073 bytes): its backup named more topics, or recorded more configuration, than one backup may (1000 topics). This is the document's size; no permission or network change lists the point. The archive is intact and can be restored from the command line."}
+catalog-entry={"pointId":"lwp1-f207be56309520fa5ac69057a3c104e4","backupId":"","runId":"","recoveryPointAtMs":0,"coveredFromMs":0,"coveredToMs":0,"receiptKey":"","receiptSha256":"","availability":"Unreadable","signature":"notAttempted","remedy":"The object at this recovery point's catalog record key is not a catalog point record: it is not JSON, or it is another document. This is the object's content; no permission or network change lists the point. Nothing under logweir/ is rewritten, so find which writer produced the object before relying on this point."}
 catalog-counts={"total":3,"available":1,"missing":0,"unreadable":2,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":3},"byDay":[{"day":"2026-09-16","points":1},{"day":"2026-09-15","points":1},{"day":"2026-09-14","points":1}],"unreadableOverReadCap":1,"unreadableMalformed":1}
 catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
 catalog-cursor={"indexShard":"2026-09-14","complete":true}
@@ -9854,10 +9754,7 @@ fn the_recordless_catalog_sync_body_is_pinned_for_the_controllers_parser() {
         &broken,
     )
     .reporting_size(&oversized.record_key, caps::CATALOG_RECORD + 1)
-    .with_object(&broken.record_key, b"not a record")
-    // A row under `broken`'s key that names ANOTHER point: it contributes
-    // nothing, so the entry is the key's alone.
-    .with_object(&broken.log_key, &reads.log_bytes);
+    .with_object(&broken.record_key, b"not a record");
     assert_eq!(
         body_of(&fx33_sync(&objects)),
         PINNED_RECORDLESS_SYNC_BODY,
@@ -10351,7 +10248,7 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
 
 // ===========================================================================
 // FX-33 — a backup of many topics stays listed; a counted point is never
-// dropped; an entry with no record behind it is information, never evidence
+// dropped
 // ===========================================================================
 
 /// The budget's reference receipt of `topics` topics — each with the 13
@@ -10381,18 +10278,6 @@ fn fx33_receipt(topics: usize, backup_id: &str, started: &str) -> BackupReceipt 
     r
 }
 
-/// The key the writer derives for `point_id`'s index row at `at`.
-fn fx33_log_key(point_id: &str, at: &str) -> String {
-    logweir::catalog::record::log_key(catalog_ts(at), point_id)
-}
-
-/// `of`'s index row with `edit` applied to its JSON.
-fn fx33_row(of: &CatalogFixture, edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
-    let mut row: serde_json::Value = serde_json::from_slice(&of.log_bytes).expect("a row is JSON");
-    edit(&mut row);
-    serde_json::to_vec(&row).expect("JSON")
-}
-
 fn fx33_sync(objects: &FakeObjects) -> Run {
     drive_sync(
         sync_request(),
@@ -10400,33 +10285,31 @@ fn fx33_sync(objects: &FakeObjects) -> Run {
     )
 }
 
-/// What an entry with no record behind it may carry, and nothing else: no
-/// receipt key or digest, no manifest, no window, no location, no signer, no
-/// topics, no positions.
-const FX33_RECORDLESS_FIELDS: [&str; 10] = [
-    "pointId",
-    "backupId",
-    "runId",
-    "recoveryPointAtMs",
-    "formatVersion",
-    "availability",
-    "signature",
-    "remedy",
-    "cause",
-    "factsFrom",
-];
-
-fn fx33_assert_claim_only(entry: &serde_json::Value) {
-    let object = entry.as_object().expect("an entry is an object");
-    for field in object.keys() {
-        assert!(
-            FX33_RECORDLESS_FIELDS.contains(&field.as_str()),
-            "an entry with no record behind it publishes `{field}`: {entry}"
-        );
-    }
-    assert!(object.contains_key("factsFrom"), "{entry}");
+/// An entry for a point whose record gave no facts: listed, not `Available`,
+/// and carrying nothing a restore binds to or a reader joins on.
+fn fx33_assert_recordless(entry: &serde_json::Value) {
     assert_ne!(entry["availability"], "Available", "{entry}");
     assert_eq!(entry["signature"], "notAttempted", "{entry}");
+    for (field, empty) in [
+        ("backupId", serde_json::json!("")),
+        ("runId", serde_json::json!("")),
+        ("recoveryPointAtMs", serde_json::json!(0)),
+        ("coveredFromMs", serde_json::json!(0)),
+        ("coveredToMs", serde_json::json!(0)),
+        ("receiptKey", serde_json::json!("")),
+        ("receiptSha256", serde_json::json!("")),
+    ] {
+        assert_eq!(entry[field], empty, "`{field}`: {entry}");
+    }
+    for absent in [
+        "locations",
+        "manifestKey",
+        "manifestSha256",
+        "signerKeyId",
+        "topics",
+    ] {
+        assert!(entry.get(absent).is_none(), "`{absent}`: {entry}");
+    }
 }
 
 /// **FX-33's acceptance, at the catalog: a backup of 70, 105, 113, 300, 500 or
@@ -10494,12 +10377,7 @@ fn a_backup_of_many_topics_is_listed_available_and_verified() {
             logweir_core::ids::sha256_prefixed(&f.receipt_bytes),
             "{sizes}"
         );
-        for absent in ["cause", "factsFrom", "remedy"] {
-            assert!(
-                entry.get(absent).is_none(),
-                "{sizes}: `{absent}` in {entry}"
-            );
-        }
+        assert!(entry.get("remedy").is_none(), "{sizes}: {entry}");
         // More topics than an entry lists: counted, and the signed record
         // names each (PROD-05.1).
         assert_eq!(entry["topicsOmitted"], topics, "{sizes}: {entry}");
@@ -10517,16 +10395,15 @@ fn a_backup_of_many_topics_is_listed_available_and_verified() {
 }
 
 /// **A backup over the maximum — one an older runner wrote, 5,000 topics — is
-/// LISTED with its size against the bound, and never dropped.** Its facts are
-/// what the index row says, said to be that; nothing a restore binds to is
-/// published; its receipt is not read at all; and the remedy names no grant.
+/// LISTED with its size against the bound, and never dropped.** Nothing but
+/// its point id and the reason is published; nothing else is read for it;
+/// and the remedy names no grant.
 ///
 /// KILLS: `build_entry` drops again (no entry); the remedy names the grant;
 /// the record read under no cap (a 15 MB record parsed, the point
-/// `Available`); the index row's receipt key or digest published.
+/// `Available`).
 #[test]
 fn a_backup_over_the_maximum_is_listed_with_its_size_and_never_dropped() {
-    use logweir::check::kinds::catalog_sync::INDEX_CLAIM_NOTE;
     use logweir_engine_oso::storage::caps;
     let receipt = fx33_receipt(5_000, "set-big", "2026-09-16T03:00:00Z");
     let f = catalog_fixture(
@@ -10551,25 +10428,9 @@ fn a_backup_over_the_maximum_is_listed_with_its_size_and_never_dropped() {
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 1, "a counted point is listed: {counts}");
     let entry = &entries[0];
-    fx33_assert_claim_only(entry);
+    fx33_assert_recordless(entry);
     assert_eq!(entry["pointId"], f.point.point_id.as_str());
     assert_eq!(entry["availability"], "Unreadable");
-    assert_eq!(
-        entry["cause"],
-        serde_json::json!({
-            "document": "record",
-            "reason": "overReadCap",
-            "bytes": record_len,
-            "capBytes": caps::CATALOG_RECORD,
-        })
-    );
-    assert_eq!(entry["factsFrom"], "indexRow");
-    assert_eq!(entry["backupId"], "set-big");
-    assert_eq!(entry["runId"], receipt.run_id.as_str());
-    assert_eq!(
-        entry["recoveryPointAtMs"],
-        receipt.started_at.timestamp_millis()
-    );
     let remedy = entry["remedy"].as_str().expect("a remedy");
     assert!(
         remedy.contains(&format!("{record_len} bytes"))
@@ -10578,35 +10439,26 @@ fn a_backup_over_the_maximum_is_listed_with_its_size_and_never_dropped() {
             && remedy.contains("restored from the command line"),
         "{remedy}"
     );
-    assert!(remedy.ends_with(INDEX_CLAIM_NOTE), "{remedy}");
     for word in ["grant", "archiveRead", "endpoint", "credential"] {
         assert!(!remedy.contains(word), "a size names no `{word}`: {remedy}");
     }
     assert!(remedy.len() <= 512, "{} characters", remedy.len());
-    // THE READS: the record under its own cap, the index row under its own,
-    // and the receipt — 15 MB of it — not at all.
+    // THE READS: the record under its own cap, and nothing else of this
+    // point — not its index row, not its 15 MB receipt.
     let reads = objects.read_caps();
-    assert!(
-        reads.contains(&(f.record_key.clone(), caps::CATALOG_RECORD)),
-        "{reads:?}"
-    );
-    assert!(
-        reads.contains(&(f.log_key.clone(), caps::CATALOG_INDEX_ROW)),
-        "{reads:?}"
-    );
-    assert!(
-        !reads.iter().any(|(key, _)| *key == f.receipt_key),
-        "nothing is read of a point whose record gave no facts: {reads:?}"
+    assert_eq!(
+        reads,
+        vec![(f.record_key.clone(), caps::CATALOG_RECORD)],
+        "nothing else is read of a point whose record gave no facts"
     );
 }
 
 /// **A counted point is always listed, and each way it can fail has its own
 /// reason.** Nine faults, each on one document of one point: the entry is
-/// there, it is not `Available`, `cause` names the document and the reason,
-/// and the sub-count that fits the reason — and only that one — moves. A
-/// point whose RECORD gave no facts says where its few facts came from; a
-/// point whose record read keeps its record's facts and says nothing of the
-/// kind.
+/// there, it is not `Available`, its remedy fits the fault, and the
+/// sub-count that fits the reason — and only that one — moves. A point whose
+/// RECORD gave no facts carries its point id and nothing else; a point whose
+/// record read keeps its record's facts.
 ///
 /// KILLS: `build_entry` drops again, for any one cause; a size or a content
 /// fault counted as a permission or transport failure; a cause's remedy
@@ -10754,8 +10606,6 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
         let entry = &entries[0];
         assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{what}");
         assert_eq!(entry["availability"], availability, "{what}: {entry}");
-        assert_eq!(entry["cause"]["document"], document, "{what}: {entry}");
-        assert_eq!(entry["cause"]["reason"], reason, "{what}: {entry}");
         assert_eq!(
             counts
                 .get("unreadableOverReadCap")
@@ -10773,13 +10623,10 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
             "{what}: {counts}"
         );
         if backed {
-            assert!(entry.get("factsFrom").is_none(), "{what}: {entry}");
             assert_eq!(entry["backupId"], "set-a", "{what}: the record's facts");
             assert_eq!(entry["receiptKey"], f.receipt_key.as_str(), "{what}");
         } else {
-            fx33_assert_claim_only(entry);
-            assert_eq!(entry["factsFrom"], "indexRow", "{what}: {entry}");
-            assert_eq!(entry["backupId"], "set-a", "{what}: the row's claim");
+            fx33_assert_recordless(entry);
         }
         let remedy = entry["remedy"].as_str().unwrap_or_default();
         assert!(!remedy.is_empty(), "{what}: a point not offered says why");
@@ -10790,295 +10637,16 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
         );
         if reason == "overReadCap" {
             assert!(
-                entry["cause"]["capBytes"].as_u64().is_some()
-                    && entry["cause"]["bytes"].as_u64() > entry["cause"]["capBytes"].as_u64(),
-                "{what}: a size states itself against its bound: {entry}"
+                remedy.contains("-byte bound") && remedy.contains(document),
+                "{what}: a size names its document and its bound: {remedy}"
             );
         }
     }
 }
 
-/// **A planted index row for a point whose record READS changes nothing.**
-/// Two real points; then three rows nobody's writer wrote — the older
-/// point's id under TODAY's shard, dated newest of all; the newer point's id
-/// at another instant of its own day; and the newer point's id under
-/// yesterday's shard — each carrying another set's id and another receipt.
-/// The body is the same body, byte for byte: the same entries in the same
-/// order with the same dates, the same counts, the same histogram. The walk
-/// says how many stray keys it examined (the third is passed over: its point
-/// was already listed), and that is all that moved.
-///
-/// KILLS: an index row believed for a point whose record reads (the point
-/// counted on the planted day, listed first, or counted twice).
-#[test]
-fn a_planted_index_row_for_a_point_whose_record_reads_changes_nothing() {
-    let (objects, newer, older) = two_point_objects();
-    let honest = fx33_sync(&objects);
-    let honest_body = body_of(&honest);
-    assert!(
-        !honest
-            .row(CheckId::DestinationArchiveListable)
-            .facts
-            .contains_key("catalogStrayKeys"),
-        "CONTROL: an honest archive has no stray key"
-    );
-
-    let lie = |row: &mut serde_json::Value| {
-        row["backup_id"] = serde_json::json!("someone-elses-set");
-        row["run_id"] = serde_json::json!("someone-elses-run");
-        row["receipt_key"] = serde_json::json!("logweir/backups/x/y.receipt.json");
-        row["receipt_sha256"] = serde_json::json!(format!("sha256:{}", "e".repeat(64)));
-        row["recovery_point_at_ms"] = serde_json::json!(1);
-    };
-    let planted = objects
-        .clone()
-        .with_object(
-            &fx33_log_key(&older.point.point_id, "2026-09-16T11:59:59Z"),
-            &fx33_row(&older, lie),
-        )
-        .with_object(
-            &fx33_log_key(&newer.point.point_id, "2026-09-16T10:00:00Z"),
-            &fx33_row(&newer, lie),
-        )
-        .with_object(
-            &fx33_log_key(&newer.point.point_id, "2026-09-15T00:00:01Z"),
-            &fx33_row(&newer, lie),
-        );
-    let run = fx33_sync(&planted);
-    assert_eq!(
-        body_of(&run),
-        honest_body,
-        "a row for a point whose record reads moved the body"
-    );
-    assert_eq!(
-        run.row(CheckId::DestinationArchiveListable)
-            .facts
-            .get("catalogStrayKeys")
-            .map(String::as_str),
-        Some("2"),
-        "the walk says what it found"
-    );
-    // The same in a `Full` rescan, which never reads the log prefix at all.
-    let full = logweir_core::check_contract::CatalogSyncRequest {
-        mode: logweir_core::check_contract::CatalogSyncMode::Full,
-        ..sync_request()
-    };
-    let wire =
-        |o: &FakeObjects| FakeWiring::default().with_role(DestinationRole::ArchiveRead, o.clone());
-    assert_eq!(
-        body_of(&drive_sync(full.clone(), &wire(&planted))),
-        body_of(&drive_sync(full, &wire(&objects)))
-    );
-}
-
-/// **What a planted row CAN do is make an entry that is information and
-/// nothing else** — for a point id with no record, with a record that cannot
-/// be read, or with another point's record copied under its key. Each case:
-/// the real points are listed exactly as before, once each; the planted
-/// entry is never `Available`; and it carries no receipt key, digest,
-/// manifest, window or location, whatever its row says.
-///
-/// KILLS: the receipt key or digest taken from an index row; a record
-/// believed at a key that is not its own point's (a real point listed
-/// twice); a row's claim taken when the row names another point.
-#[test]
-fn a_planted_row_makes_an_entry_that_is_information_and_nothing_else() {
-    let (objects, newer, older) = two_point_objects();
-    let honest = entries_of(&body_of(&fx33_sync(&objects)));
-    let ghost = format!("lwp1-{}", "c".repeat(32));
-    let ghost_key = fx33_log_key(&ghost, "2026-09-16T09:00:00Z");
-    let ghost_record = logweir::catalog::record::record_key(&ghost);
-    // The row a planter writes for the ghost: a well-formed row, naming the
-    // ghost, pointing at a REAL point's receipt.
-    let ghost_row = fx33_row(&newer, |row| {
-        row["point_id"] = serde_json::json!(ghost);
-        row["record_key"] = serde_json::json!(ghost_record);
-        row["backup_id"] = serde_json::json!("set-b");
-    });
-
-    let listed = |objects: &FakeObjects| {
-        let body = body_of(&fx33_sync(objects));
-        (entries_of(&body), summary_of(&body, "catalog-counts="))
-    };
-    let real_of = |entries: &[serde_json::Value]| -> Vec<serde_json::Value> {
-        entries
-            .iter()
-            .filter(|e| e["pointId"] != ghost.as_str())
-            .cloned()
-            .collect()
-    };
-    let ghost_of = |entries: &[serde_json::Value]| -> serde_json::Value {
-        let found: Vec<_> = entries
-            .iter()
-            .filter(|e| e["pointId"] == ghost.as_str())
-            .collect();
-        assert_eq!(found.len(), 1, "the ghost is listed once: {entries:?}");
-        found[0].clone()
-    };
-
-    // 1. A row for a point with NO record: `Missing`, and only a claim.
-    let (entries, counts) = listed(&objects.clone().with_object(&ghost_key, &ghost_row));
-    assert_eq!(real_of(&entries), honest, "the real points are untouched");
-    assert_eq!(counts["total"], 3);
-    assert_eq!(counts["available"], 2);
-    let entry = ghost_of(&entries);
-    fx33_assert_claim_only(&entry);
-    assert_eq!(entry["availability"], "Missing");
-    assert_eq!(entry["factsFrom"], "indexRow");
-    assert_eq!(
-        entry["backupId"], "set-b",
-        "the claim is shown as one: {entry}"
-    );
-
-    // 2. ANOTHER POINT'S RECORD copied under the ghost's key: the copy is a
-    //    signed, parseable record — of `older`. It is not the ghost's, the
-    //    ghost stays a claim, and `older` is listed once.
-    let copied = objects
-        .clone()
-        .with_object(&ghost_key, &ghost_row)
-        .with_object(&ghost_record, &older.record_bytes);
-    let (entries, counts) = listed(&copied);
-    assert_eq!(
-        real_of(&entries),
-        honest,
-        "a copied record lists nothing twice"
-    );
-    assert_eq!(counts["total"], 3);
-    assert_eq!(counts["available"], 2, "{counts}");
-    let entry = ghost_of(&entries);
-    fx33_assert_claim_only(&entry);
-    assert_eq!(entry["availability"], "Unreadable");
-    assert_eq!(
-        entry["cause"],
-        serde_json::json!({"document": "record", "reason": "malformed"})
-    );
-
-    // 3. A row that NAMES ANOTHER POINT than its key does contributes
-    //    nothing: the entry's facts are the key's alone.
-    let misnamed = fx33_row(&newer, |_| {});
-    let (entries, _) = listed(&objects.clone().with_object(&ghost_key, &misnamed));
-    let entry = ghost_of(&entries);
-    fx33_assert_claim_only(&entry);
-    assert_eq!(entry["factsFrom"], "key", "{entry}");
-    assert!(entry.get("backupId").is_none() && entry.get("runId").is_none());
-    assert_eq!(
-        entry["recoveryPointAtMs"],
-        catalog_ts("2026-09-16T09:00:00Z").timestamp_millis(),
-        "the key's own instant"
-    );
-
-    // 4. A row whose identifiers are NOT identifiers: markup, a path, a
-    //    credential shape, an over-long value. Each is absent — never shown
-    //    cut, never shown redacted — and the planted secret is nowhere.
-    let hostile = fx33_row(&newer, |row| {
-        row["point_id"] = serde_json::json!(ghost);
-        row["record_key"] = serde_json::json!(ghost_record);
-        row["backup_id"] = serde_json::json!("<img src=x onerror=alert(1)>");
-        row["run_id"] = serde_json::json!(PLANTED_SECRET);
-    });
-    let run = fx33_sync(&objects.clone().with_object(&ghost_key, &hostile));
-    let entry = ghost_of(&entries_of(&body_of(&run)));
-    fx33_assert_claim_only(&entry);
-    assert_eq!(entry["factsFrom"], "key", "neither value is an identifier");
-    assert!(entry.get("backupId").is_none() && entry.get("runId").is_none());
-    let everything = run.everything();
-    assert!(!everything.contains("onerror") && !everything.contains("ZZfakefake"));
-
-    // 5. A row OVER ITS OWN BOUND is not read into anything: asked for under
-    //    `caps::CATALOG_INDEX_ROW`, refused on its size, and the entry is the
-    //    key's alone.
-    let fat = fx33_row(&newer, |row| {
-        row["point_id"] = serde_json::json!(ghost);
-        row["record_key"] = serde_json::json!(ghost_record);
-        row["padding"] = serde_json::json!("x".repeat(128 * 1024));
-    });
-    let fat_objects = objects.clone().with_object(&ghost_key, &fat);
-    let (entries, _) = listed(&fat_objects);
-    assert_eq!(ghost_of(&entries)["factsFrom"], "key");
-    assert!(
-        fat_objects.read_caps().contains(&(
-            ghost_key.clone(),
-            logweir_engine_oso::storage::caps::CATALOG_INDEX_ROW
-        )),
-        "{:?}",
-        fat_objects.read_caps()
-    );
-
-    // 6. TWO ROWS FOR ONE POINT whose record cannot be read are one entry.
-    let twice = objects
-        .clone()
-        .with_object(&ghost_key, &ghost_row)
-        .with_object(&fx33_log_key(&ghost, "2026-09-15T09:00:00Z"), &ghost_row);
-    let (entries, counts) = listed(&twice);
-    assert_eq!(counts["total"], 3, "one point, counted once: {counts}");
-    ghost_of(&entries);
-}
-
-/// **Entries with no record behind them never cost a real point its place in
-/// the window.** Three planted rows dated newer than both real points and a
-/// window of two: the window holds the two real points. A rule that filled
-/// the window in walk order would hold two planted entries and neither real
-/// point.
-///
-/// KILLS: a record-less entry holding its place in the window like any other.
-#[test]
-fn planted_rows_never_push_a_real_point_out_of_the_window() {
-    let (mut objects, newer, older) = two_point_objects();
-    for (i, hour) in ["09", "10", "11"].iter().enumerate() {
-        let ghost = format!("lwp1-{}", ["c", "d", "e"][i].repeat(32));
-        objects = objects.with_object(
-            &fx33_log_key(&ghost, &format!("2026-09-16T{hour}:00:00Z")),
-            b"{}",
-        );
-    }
-    let sync = |view_limit: i64| {
-        let request = logweir_core::check_contract::CatalogSyncRequest {
-            view_limit,
-            ..sync_request()
-        };
-        let body = body_of(&drive_sync(
-            request,
-            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
-        ));
-        (entries_of(&body), summary_of(&body, "catalog-counts="))
-    };
-    let (entries, counts) = sync(2);
-    assert_eq!(counts["total"], 5, "every point is counted: {counts}");
-    let ids: Vec<&str> = entries
-        .iter()
-        .filter_map(|e| e["pointId"].as_str())
-        .collect();
-    assert_eq!(
-        ids,
-        vec![newer.point.point_id.as_str(), older.point.point_id.as_str()],
-        "the window holds the real points"
-    );
-    // NEGATIVE CONTROL: with room for all five, all five are listed — the
-    // planted ones are not hidden, they only never displace.
-    let (entries, _) = sync(5);
-    assert_eq!(entries.len(), 5);
-    assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.get("factsFrom").is_some())
-            .count(),
-        3
-    );
-    // A window of three: both real points and ONE planted entry.
-    let (entries, _) = sync(3);
-    assert_eq!(entries.len(), 3);
-    assert_eq!(
-        entries
-            .iter()
-            .filter(|e| e.get("factsFrom").is_none())
-            .count(),
-        2
-    );
-}
-
-/// **A `Full` rescan lists a point whose record gave no facts from its KEY
-/// alone, and an object under the points prefix whose key names no point id
-/// is not a point.**
+/// **A `Full` rescan lists a point whose record gave no facts, by the point id
+/// its key carries, and an object under the points prefix whose key names no
+/// point id is not a point.**
 ///
 /// KILLS: a rescan dropping a record it cannot read; a key's text published
 /// as a point id.
@@ -11105,7 +10673,10 @@ fn a_full_rescan_lists_a_point_without_a_record_from_its_key_alone() {
     );
     let body = body_of(&run);
     let counts = summary_of(&body, "catalog-counts=");
-    assert_eq!(counts["total"], 2, "two points; two strays: {counts}");
+    assert_eq!(
+        counts["total"], 2,
+        "two points; two objects that are not: {counts}"
+    );
     assert_eq!(counts["available"], 1, "{counts}");
     assert_eq!(counts["unreadableMalformed"], 1, "{counts}");
     let entries = entries_of(&body);
@@ -11114,155 +10685,13 @@ fn a_full_rescan_lists_a_point_without_a_record_from_its_key_alone() {
         .iter()
         .find(|e| e["pointId"] == newer.point.point_id.as_str())
         .expect("the point whose record is not a record is listed");
-    fx33_assert_claim_only(broken);
-    assert_eq!(broken["factsFrom"], "key", "{broken}");
-    assert!(
-        broken.get("recoveryPointAtMs").is_none() && broken.get("backupId").is_none(),
-        "a record key carries no instant and no set: {broken}"
-    );
-    assert_eq!(
-        run.row(CheckId::DestinationArchiveListable)
-            .facts
-            .get("catalogStrayKeys")
-            .map(String::as_str),
-        Some("2")
-    );
+    fx33_assert_recordless(broken);
     assert!(
         !run.everything().contains("script"),
         "a key's text is not shown"
     );
 }
 
-/// **Each of the walk's reads is fenced by the cap of the document it is
-/// reading, on the bytes as they arrive — not on what the store says.** A
-/// REAL `Store` that reports ten bytes for every object and then streams the
-/// whole body (`in_memory_misreporting_size`): the reported-size fence
-/// passes everything, so what stops each oversized document is the running
-/// cap of its own kind.
-///
-/// One site at a time, the document is a VALID one padded past its cap, so a
-/// walk that read it would use it:
-///
-/// | document | its cap | read whole it would give | cut off it gives |
-/// |---|---|---|---|
-/// | record | `CATALOG_RECORD` | an `Available` point | `record`/`overReadCap`, facts from the index row |
-/// | receipt | `CATALOG_RECEIPT` | a receipt to judge | `receipt`/`overReadCap` |
-/// | sidecar | `SIDECAR` | the signer it names | no signer at all: nothing of it was parsed |
-/// | index row | `CATALOG_INDEX_ROW` | `factsFrom: indexRow` | `factsFrom: key`: the row contributed nothing |
-///
-/// The cause carries the cap and NO size: the store never reported one over
-/// the bound. (The manifest's read is fenced by the same `Store` under
-/// `caps::MANIFEST`, 256 MiB; `a_counted_point_is_always_listed_with_its_own_reason`
-/// holds its reported-size fence and `a_catalog_walk_reads_every_document_under_its_cap`
-/// the cap it is asked under.)
-///
-/// KILLS: a cap read as `u64::MAX` at any one site; a bound checked on the
-/// reported size only.
-#[test]
-fn a_store_that_reports_small_and_streams_more_is_cut_off_at_each_documents_cap() {
-    use logweir_engine_oso::storage::{caps, Store};
-    #[derive(Clone, Copy, PartialEq, Debug)]
-    enum Site {
-        Record,
-        Receipt,
-        Sidecar,
-        IndexRow,
-    }
-    let padded = |document: &[u8], cap: u64| -> Vec<u8> {
-        let mut doc: serde_json::Value = serde_json::from_slice(document).expect("JSON");
-        doc["e2e_padding"] = serde_json::json!("x".repeat(usize::try_from(cap).unwrap() + 4096));
-        serde_json::to_vec(&doc).expect("JSON")
-    };
-    for (site, cap, over) in [
-        (Site::Record, caps::CATALOG_RECORD, true),
-        (Site::Receipt, caps::CATALOG_RECEIPT, true),
-        (Site::Sidecar, caps::SIDECAR, true),
-        (Site::IndexRow, caps::CATALOG_INDEX_ROW, true),
-        // THE CONTROL: the same store, every document within its cap. The
-        // walk reads through the lie and the point is Available.
-        (Site::Record, caps::CATALOG_RECORD, false),
-    ] {
-        let (store, _meter) = Store::in_memory_misreporting_size("", 10);
-        let mut receipt = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
-        receipt.archive.manifest_key = "logweir/archive/set-a/manifest.json".to_string();
-        let f = catalog_fixture(
-            &receipt,
-            "s3://lw-archive/kafka-backups",
-            &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
-            CATALOG_CLAIMED_KEY_ID,
-        );
-        let big = |this: Site, bytes: &[u8]| -> Vec<u8> {
-            if over && this == site {
-                let fat = padded(bytes, cap);
-                assert!(fat.len() as u64 > cap);
-                fat
-            } else {
-                bytes.to_vec()
-            }
-        };
-        // The index row is read only when the record gives no facts.
-        let record = if over && site == Site::IndexRow {
-            b"not a record".to_vec()
-        } else {
-            big(Site::Record, &f.record_bytes)
-        };
-        for (key, bytes) in [
-            (f.log_key.as_str(), big(Site::IndexRow, &f.log_bytes)),
-            (f.record_key.as_str(), record),
-            (f.receipt_key.as_str(), big(Site::Receipt, &f.receipt_bytes)),
-            (f.sidecar_key.as_str(), big(Site::Sidecar, &f.sidecar_bytes)),
-            (f.manifest_key.as_str(), CATALOG_MANIFEST.to_vec()),
-        ] {
-            store
-                .put_create_only(key, &bytes)
-                .expect("the object is put");
-        }
-        let wiring = FakeWiring {
-            shared_store: Some(Arc::new(store)),
-            ..FakeWiring::default()
-        };
-        let body = body_of(&drive_sync(sync_request(), &wiring));
-        let entries = entries_of(&body);
-        assert_eq!(entries.len(), 1, "{site:?}: a counted point is listed");
-        let entry = &entries[0];
-        let cut = serde_json::json!({"reason": "overReadCap", "capBytes": cap});
-        let cause_of = |document: &str| {
-            let mut want = cut.clone();
-            want["document"] = serde_json::json!(document);
-            want
-        };
-        match (site, over) {
-            (_, false) => {
-                assert_eq!(entry["availability"], "Available", "CONTROL: {entry}");
-                assert_eq!(entry["signerKeyId"], CATALOG_CLAIMED_KEY_ID, "{entry}");
-                assert!(entry.get("cause").is_none(), "{entry}");
-            }
-            (Site::Record, true) => {
-                assert_eq!(entry["availability"], "Unreadable", "{entry}");
-                assert_eq!(entry["cause"], cause_of("record"), "{entry}");
-                assert_eq!(entry["factsFrom"], "indexRow", "{entry}");
-            }
-            (Site::Receipt, true) => {
-                assert_eq!(entry["availability"], "Unreadable", "{entry}");
-                assert_eq!(entry["cause"], cause_of("receipt"), "{entry}");
-                assert!(entry.get("factsFrom").is_none(), "{entry}");
-            }
-            (Site::Sidecar, true) => {
-                assert_eq!(entry["signature"], "notAttempted", "{entry}");
-                assert!(
-                    entry.get("signerKeyId").is_none(),
-                    "a sidecar past its cap is not parsed for the key it names: {entry}"
-                );
-            }
-            (Site::IndexRow, true) => {
-                assert_eq!(entry["factsFrom"], "key", "{entry}");
-                assert!(entry.get("backupId").is_none(), "{entry}");
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // FX-33: the walk's peak memory, measured in child processes
 // ---------------------------------------------------------------------------
 
@@ -11360,38 +10789,6 @@ fn fx33_plant_walk(
     largest
 }
 
-/// One small point whose RECORD object was replaced by a planted document of
-/// tiny values, one byte under the record's read bound: valid JSON, declaring
-/// a major-1 version, and the shape whose `serde_json::Value` is largest for
-/// each byte. Returns its size.
-fn fx33_plant_hostile_record(root: &Path, key: &logweir_evidence::keys::SigningKey) -> u64 {
-    use std::io::Write as _;
-    fx33_plant_walk(root, 1, false, key);
-    let points = root.join("logweir/catalog/v1/points");
-    let record = std::fs::read_dir(&points)
-        .expect("the points directory")
-        .next()
-        .expect("one point")
-        .expect("readable")
-        .path()
-        .join("record.json");
-    let cap = logweir_engine_oso::storage::caps::CATALOG_RECORD;
-    let mut w = std::io::BufWriter::new(std::fs::File::create(&record).expect("the record"));
-    let head = br#"{"format_version":"1.7.0","pad":[0"#;
-    w.write_all(head).unwrap();
-    let mut written = head.len() as u64 + 2;
-    while written + 2 < cap {
-        w.write_all(b",0").unwrap();
-        written += 2;
-    }
-    w.write_all(b"]}").unwrap();
-    w.flush().unwrap();
-    drop(w);
-    let len = std::fs::metadata(&record).expect("the record").len();
-    assert!(len <= cap && len + 4 > cap, "{len} bytes, cap {cap}");
-    len
-}
-
 fn fx33_walk_store(root: &Path) -> Arc<logweir_engine_oso::storage::Store> {
     Arc::new(
         logweir_engine_oso::storage::Store::read_only_from_url(
@@ -11431,20 +10828,6 @@ fn fx33_walk_child(mode: &str, root: &Path) {
                 "every counted point is listed"
             );
             println!("{FX33_WALK_FACT_LINE}{}", counts["available"]);
-        }
-        // THE OTHER CONTROL: the planted record as a tree, which is what
-        // `read_record` built of every record before FX-33.
-        "tree" => {
-            let records = ObjectAccess::list_page(&*store, "logweir/catalog/v1/points/", None, 10)
-                .expect("the points list");
-            let key = records
-                .iter()
-                .find(|k| k.ends_with("/record.json"))
-                .expect("one record");
-            let bytes = ObjectAccess::get(&*store, key, u64::MAX).expect("the record");
-            let tree: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
-            assert!(tree["pad"].is_array());
-            println!("{FX33_WALK_FACT_LINE}0");
         }
         // THE CONTROL: what a walk that accumulated its documents would hold.
         "hold" => {
@@ -11521,20 +10904,16 @@ fn fx33_walk_peak(mode: &str, root: &Path) -> (u64, u64) {
 /// - a walk of [`FX33_WALK_POINTS`] such points adds no more than a walk of
 ///   one, plus a fixed slack;
 /// - a walk of one adds less than [`FX33_WALK_BOUND`];
-/// - the CONTROL — the same documents read and kept — adds at least twice
-///   what the walk of many does, so the meter sees an accumulating walk;
-/// - an object PLANTED at a record key, one byte under the record's read
-///   bound and made of tiny values, costs the walk its bytes and a slack:
-///   `read_record` builds no tree. The same bytes as a `serde_json::Value`
-///   — what it built before FX-33 — cost over ten times as much (the second
-///   control), and at this cap that was over 200 MB in a check Job.
+/// - the CONTROL — the same documents read and kept — adds at least two
+///   points' documents more than the walk of many does, so the meter sees an
+///   accumulating walk.
 ///
 /// Check Jobs state no memory limit in the chart (`check/job.rs`,
 /// `resources: None`), so a namespace `LimitRange` is what applies; the
 /// figure printed here is what a `catalogSync` Job needs above its baseline.
 ///
 /// KILLS: a walk that keeps each point's record or receipt until the body is
-/// rendered; `read_record` parsing into a tree again. (A read cap removed is
+/// rendered. (A read cap removed is
 /// `a_counted_point_is_always_listed_with_its_own_reason`'s and
 /// `a_catalog_walk_reads_every_document_under_its_cap`'s.)
 #[test]
@@ -11547,16 +10926,14 @@ fn the_walks_peak_memory_is_one_points() {
     }
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let key = logweir_evidence::keys::SigningKey::generate_p256();
-    let (small, one, many, hostile) = (
+    let (small, one, many) = (
         scratch.path().join("small"),
         scratch.path().join("one"),
         scratch.path().join("many"),
-        scratch.path().join("hostile"),
     );
     fx33_plant_walk(&small, FX33_WALK_POINTS, false, &key);
     let (receipt_len, record_len) = fx33_plant_walk(&one, 1, true, &key);
     fx33_plant_walk(&many, FX33_WALK_POINTS, true, &key);
-    let planted_len = fx33_plant_hostile_record(&hostile, &key);
 
     let (base, listed) = fx33_walk_peak("walk", &small);
     assert_eq!(
@@ -11566,36 +10943,22 @@ fn the_walks_peak_memory_is_one_points() {
     let (peak_one, listed_one) = fx33_walk_peak("walk", &one);
     let (peak_many, listed_many) = fx33_walk_peak("walk", &many);
     let (peak_held, held) = fx33_walk_peak("hold", &many);
-    let (peak_hostile, hostile_available) = fx33_walk_peak("walk", &hostile);
-    let (peak_tree, _) = fx33_walk_peak("tree", &hostile);
     assert_eq!(listed_one, 1, "the one large point is Available");
     assert_eq!(
         listed_many, FX33_WALK_POINTS as u64,
         "every large point is Available"
     );
     assert_eq!(held, FX33_WALK_POINTS as u64);
-    assert_eq!(
-        hostile_available, 0,
-        "the planted record is not a record, and its point is listed as that"
-    );
     let over = |peak: u64| peak.saturating_sub(base);
-    let (one, many, held, planted, tree) = (
-        over(peak_one),
-        over(peak_many),
-        over(peak_held),
-        over(peak_hostile),
-        over(peak_tree),
-    );
+    let (one, many, held) = (over(peak_one), over(peak_many), over(peak_held));
     eprintln!(
         "[fx33-walk] points of a {receipt_len} B receipt and a {record_len} B record, each \
          signature verified. Baseline walk {base} B. A walk of one adds {one} B; a walk of \
          {FX33_WALK_POINTS} adds {many} B; the same {FX33_WALK_POINTS} read and kept add {held} B \
-         (bound for one point {FX33_WALK_BOUND} B). A planted {planted_len} B record of tiny \
-         values costs the walk {planted} B; the same bytes as a serde_json::Value cost {tree} B \
-         ({}x the bytes)",
-        tree / planted_len.max(1)
+         (bound for one point {FX33_WALK_BOUND} B)"
     );
-    let slack: u64 = 8 << 20;
+    // Allocator noise between two child processes, measured at up to 7 MB.
+    let slack: u64 = 16 << 20;
     assert!(
         many < one + slack,
         "a walk of {FX33_WALK_POINTS} maximum-size points added {many} bytes and a walk of one \
@@ -11605,35 +10968,26 @@ fn the_walks_peak_memory_is_one_points() {
         one < FX33_WALK_BOUND,
         "a walk of one maximum-size point added {one} bytes (bound {FX33_WALK_BOUND})"
     );
+    let documents = u64::try_from(receipt_len + record_len).expect("fits");
     assert!(
-        held > 2 * many,
+        held > many + 2 * documents,
         "the control added only {held} bytes against the walk's {many}; the meter cannot tell \
          a walk that accumulates from one that does not"
-    );
-    assert!(
-        planted < planted_len + slack,
-        "a planted {planted_len}-byte record cost the walk {planted} bytes; it may hold the \
-         bytes it read and nothing for each value in them"
-    );
-    assert!(
-        tree > 10 * planted_len,
-        "the Value control added only {tree} bytes over {planted_len} bytes of JSON; the meter \
-         cannot show what reading a record without a tree saves"
     );
 }
 
 /// The most resident memory the walk of ONE maximum-size point may add to a
-/// baseline walk: 48 MiB.
+/// baseline walk: 64 MiB.
 ///
-/// What it is made of, at the caps: the record's bytes (at most 6,131,072)
-/// and its typed parse, held while the point is examined; and beside them the
-/// larger of the receipt's bytes with their typed parse, and the receipt's
-/// bytes with the signature's pre-authentication copy (at most 5,131,072
-/// each). Measured with a 5.09 MB receipt and a 4.2 MB record: 23.6 MB, and
-/// 41.1 MB before `read_record` stopped building a tree of the record.
+/// What it is made of, at the caps: the record's bytes (at most 6,131,072),
+/// the `serde_json::Value` `read_record` reads its version from, and its
+/// typed parse, held while the point is examined; and beside them the larger
+/// of the receipt's bytes with their typed parse, and the receipt's bytes
+/// with the signature's pre-authentication copy (at most 5,131,072 each).
+/// Measured with a 5.09 MB receipt and a 4.2 MB record: about 41 MB.
 ///
 /// The MANIFEST is not in this number. The walk reads a point's manifest
 /// whole to hash it, one at a time, under the runner's 256 MiB manifest cap
 /// (FX-31); a real manifest is about 540 bytes a segment, and this row's is
 /// 13 bytes.
-const FX33_WALK_BOUND: u64 = 48 << 20;
+const FX33_WALK_BOUND: u64 = 64 << 20;

@@ -38,9 +38,10 @@
 //!    could not be read, is over its read bound, or is not a record at all
 //!    used to be counted and listed by NO entry: the console then offered no
 //!    restore for it and showed no reason. Every counted point now has an
-//!    entry, with the document that stopped the examination and why
-//!    ([`EntryCause`]) and a remedy that fits that cause — a document's SIZE
-//!    never sends an operator to a grant. See [`build_entry`].
+//!    entry: one whose record gave no facts carries its point id and a remedy
+//!    stating which document stopped the examination and why ([`EntryCause`])
+//!    — a document's SIZE never sends an operator to a grant. See
+//!    [`build_entry`].
 //!
 //! # The body is emitted, or it is not emitted at all
 //!
@@ -335,26 +336,6 @@ wire_vocabulary! {
     }
 }
 
-wire_vocabulary! {
-    /// **FX-33.** Where an entry's receipt-derived facts came from, for a
-    /// point whose RECORD gave none. Absent on every entry built from a
-    /// record, which is every entry an older runner wrote.
-    ///
-    /// | value | meaning |
-    /// |---|---|
-    /// | `indexRow` | the object's key (the point id, the recovery instant) and, from the day-shard index row beside the record, `backupId` and `runId`. The row is UNSIGNED: those two are what it says, shown so an operator can find the backup, and nothing verified them |
-    /// | `key` | the object's key alone: the point id, and in an `Index` walk the recovery instant. Every other fact is absent |
-    ///
-    /// **An entry that carries this is information, never evidence.** It is
-    /// never `Available`, never selectable, carries no receipt key and no
-    /// digest, and no reader may bind, restore, rehearse or count a recovery
-    /// objective from it. See [`without_record_entry`].
-    FactsFrom {
-        IndexRow => "indexRow",
-        Key => "key",
-    }
-}
-
 // ===========================================================================
 // The documents
 // ===========================================================================
@@ -547,32 +528,23 @@ pub struct EntryPositionCounts {
 
 /// One point, as this Job reports it.
 ///
-/// **The receipt-derived facts are `Option` since FX-33**, and `Some` on
-/// every entry built from a record — which serialises to the bytes it always
-/// did. They are `None` only on an entry for a point whose record gave no
-/// facts and whose index row did not supply them (`factsFrom: key`): a key
-/// that is absent says "not established", where a zero or an empty string
-/// would have been a value nobody read.
+/// FX-33: a point whose RECORD gave no facts is listed too, with its point id
+/// (from its key), `availability`, `signature: notAttempted` and a remedy
+/// that states why; its receipt-derived fields are empty strings and zeros,
+/// so no reader can take a set, a receipt or a window from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {
     pub point_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recovery_point_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub covered_from_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub covered_to_ms: Option<i64>,
+    pub backup_id: String,
+    pub run_id: String,
+    pub recovery_point_at_ms: i64,
+    pub covered_from_ms: i64,
+    pub covered_to_ms: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locations: Vec<EntryLocation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receipt_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receipt_sha256: Option<String>,
+    pub receipt_key: String,
+    pub receipt_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -616,17 +588,6 @@ pub struct CatalogEntry {
     /// the sync could not stand behind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
-    /// **FX-33.** The document this point's examination stopped at, and why.
-    /// Present exactly when a read or a parse of the record, the receipt or
-    /// the manifest is what decided `availability`; absent on an `Available`
-    /// point and on a `Conflict`, `Deleted` or `Partial` one. Appended LAST
-    /// and skipped when absent, so an entry without one is the line it was.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cause: Option<EntryCause>,
-    /// **FX-33.** Where the facts above came from, for a point whose record
-    /// gave none ([`FactsFrom`]). Absent on every entry built from a record.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub facts_from: Option<FactsFrom>,
 }
 
 /// The signature half of [`CatalogCounts`].
@@ -918,38 +879,6 @@ pub fn cause_remedy(cause: &EntryCause) -> Option<String> {
     }
 }
 
-/// **FX-33.** What an entry says, in words, when its `backupId` and `runId`
-/// came from the catalog's index row: the row is unsigned, so they are its
-/// claim. Appended to the entry's remedy, which is what every surface shows
-/// beside a point it does not offer.
-pub const INDEX_CLAIM_NOTE: &str = "The backup id and run id shown are what the catalog's \
-                                    unsigned index row says; they were not verified.";
-
-/// The longest `backupId` an index row may contribute to an entry.
-pub const MAX_INDEX_BACKUP_ID_CHARS: usize = 128;
-/// The longest `runId` an index row may contribute to an entry.
-pub const MAX_INDEX_RUN_ID_CHARS: usize = 64;
-
-/// **FX-33.** One identifier out of an UNSIGNED index row, or `None` when it
-/// is not fit to show.
-///
-/// The log prefix is create-only, not append-restricted: whoever can write a
-/// new key under it chooses the row's bytes. So a value from a row is shown
-/// only when it is what an identifier looks like — 1 to `max` characters of
-/// `A-Z a-z 0-9 . _ : -`, the alphabet of every backup id and run id this
-/// product writes — and the redactor leaves it whole. Anything else is
-/// ABSENT: never truncated (a cut id names something else), never shown
-/// redacted, and never markup, a path or a credential shape.
-#[must_use]
-pub fn index_claim(value: &str, max: usize) -> Option<String> {
-    let fits = !value.is_empty()
-        && value.len() <= max
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
-    (fits && redact(value) == value).then(|| value.to_string())
-}
-
 // ===========================================================================
 // The walk
 // ===========================================================================
@@ -959,12 +888,9 @@ pub fn index_claim(value: &str, max: usize) -> Option<String> {
 struct Subject<'a> {
     /// `logweir/catalog/v1/points/<pointId>/record.json`.
     record_key: &'a str,
-    /// The point id the key carries. In an `Index` walk it is a well-formed
-    /// `lwp1-` id ([`point_id_of_log_key`]); in a `Full` rescan it is the
-    /// record key's own path component, whatever it is.
+    /// The point id the key carries: a well-formed `lwp1-` id
+    /// ([`point_id_of_log_key`], [`point_id_of_record_key`]).
     point_id: &'a str,
-    /// The day-shard index row's key, in an `Index` walk.
-    log_key: Option<&'a str>,
 }
 
 /// What one point's examination established.
@@ -997,50 +923,19 @@ struct Observation {
     /// **FX-33.** The point id the object's KEY carries — known for every
     /// point, whatever its record said or did not say.
     point_id: String,
-    /// **FX-33.** The recovery instant an index row's key carries
-    /// (`<ms:013>-<pointId>.json`), in an `Index` walk.
-    key_recovery_point_at_ms: Option<i64>,
-    /// **FX-33.** The `backupId` and `runId` an index row CLAIMS for a point
-    /// whose record gave no facts — each already through [`index_claim`], and
-    /// nothing else of the row is kept. An INDEX, not evidence.
-    index_claim: (Option<String>, Option<String>),
 }
 
 impl Observation {
     /// A point whose RECORD gave no facts: could not be read, is over its
     /// bound, is not a record, is absent, or is of another major.
     ///
-    /// **It is still a point, and it is still listed** (FX-33). What is known
-    /// without the record is taken from the key, and from the index row when
-    /// the walk has one — one small read, spent only here, inside the five
-    /// objects every point is afforded before it is begun.
+    /// **It is still a point, and it is still listed** (FX-33), with the point
+    /// id its key carries and nothing else: no other object is read for it.
     fn without_record(
-        access: &dyn ObjectAccess,
-        walk: &mut Walk,
         subject: &Subject<'_>,
         availability: Availability,
         cause: EntryCause,
     ) -> Self {
-        let index_claim = subject
-            .log_key
-            .and_then(|key| {
-                walk.objects = walk.objects.saturating_add(1);
-                let bytes = access.get(key, caps::CATALOG_INDEX_ROW).ok()?;
-                match reader::read_log_entry(&bytes) {
-                    // THE ROW MUST NAME THE POINT ITS OWN KEY NAMES. The log
-                    // prefix is create-only, not append-restricted: a row
-                    // under one point's key that describes another is not
-                    // this point's, and contributes nothing.
-                    reader::LogEntryVerdict::Entry(row) if row.point_id == subject.point_id => {
-                        Some((
-                            index_claim(&row.backup_id, MAX_INDEX_BACKUP_ID_CHARS),
-                            index_claim(&row.run_id, MAX_INDEX_RUN_ID_CHARS),
-                        ))
-                    }
-                    _ => None,
-                }
-            })
-            .unwrap_or((None, None));
         Self {
             availability,
             signature: SignatureVerdict::NotAttempted,
@@ -1052,8 +947,6 @@ impl Observation {
             pin_unreadable: false,
             cause: Some(cause),
             point_id: subject.point_id.to_string(),
-            key_recovery_point_at_ms: subject.log_key.and_then(recovery_point_of_log_key),
-            index_claim,
         }
     }
 }
@@ -1118,10 +1011,6 @@ impl WalkStop {
 /// The state one walk accumulates.
 struct Walk {
     entries: Vec<CatalogEntry>,
-    /// FX-33: where in `entries` the entries WITHOUT a record are, ascending
-    /// — the ones that give up their place when the window is full
-    /// ([`push`]).
-    recordless_at: Vec<usize>,
     counts: CatalogCounts,
     by_day: BTreeMap<String, i64>,
     signers: BTreeMap<String, i64>,
@@ -1134,11 +1023,6 @@ struct Walk {
     last_record_key: Option<String>,
     /// How many index rows could not be read at all.
     unreadable_rows: i64,
-    /// **FX-33.** How many keys the walk found that are NOT A POINT'S: an
-    /// index row that is not the row its point's record implies, or (in a
-    /// rescan) an object under the points prefix whose key names no point
-    /// id. Neither is counted, examined further or listed ([`Strayed`]).
-    stray_keys: i64,
     /// Why the walk ended. The walk's own outcome, and never a point's
     /// (review findings F3 and F5).
     stop: WalkStop,
@@ -1148,7 +1032,6 @@ impl Walk {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
-            recordless_at: Vec::new(),
             counts: CatalogCounts::default(),
             by_day: BTreeMap::new(),
             signers: BTreeMap::new(),
@@ -1157,7 +1040,6 @@ impl Walk {
             oldest_day: None,
             last_record_key: None,
             unreadable_rows: 0,
-            stray_keys: 0,
             stop: WalkStop::Range,
         }
     }
@@ -1258,11 +1140,6 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
             "catalogUnreadableIndexRows",
             &walk.unreadable_rows.to_string(),
         );
-    }
-    if walk.stray_keys > 0 {
-        // FX-33: keys under the catalog that are not a point's — said, so an
-        // operator can find who wrote them; they changed nothing else here.
-        row = row.with_fact("catalogStrayKeys", &walk.stray_keys.to_string());
     }
     // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED (review findings F3 and
     // F5). `catalog-cursor.complete: false` says only THAT the walk did not
@@ -1543,7 +1420,7 @@ fn walk_index(
                 return Ok(());
             }
             let record_key = record::record_key(&point_id);
-            let observation = match examine(
+            let observation = examine(
                 req,
                 access,
                 walk,
@@ -1551,21 +1428,8 @@ fn walk_index(
                 &Subject {
                     record_key: &record_key,
                     point_id: &point_id,
-                    // The row this point was found through: compared with the
-                    // record's own, and read only when the record gives no
-                    // facts (FX-33).
-                    log_key: Some(&key),
                 },
-            ) {
-                Ok(observation) => observation,
-                // NOT THIS POINT'S ROW: not counted, not dated, not listed,
-                // and NOT remembered as seen — the point's own row, in the
-                // shard its record names, is still ahead of the walk.
-                Err(Strayed) => {
-                    walk.stray_keys = walk.stray_keys.saturating_add(1);
-                    continue;
-                }
-            };
+            );
             walk.seen.insert(point_id.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
             *walk
@@ -1591,23 +1455,6 @@ pub fn point_id_of_log_key(key: &str) -> Option<String> {
     let stem = file.strip_suffix(".json")?;
     let (_ms, point_id) = stem.split_once('-')?;
     reader::is_point_id(point_id).then(|| point_id.to_string())
-}
-
-/// **FX-33.** The recovery instant a day-shard key carries, in epoch
-/// milliseconds: the `<ms:013>` of `<ms:013>-<pointId>.json`
-/// (`record::log_key`). `None` for a key that is not ours.
-///
-/// It is what an entry for a point WITHOUT a readable record or index row
-/// still says about when the point is from. The writer clamps a negative
-/// instant to 0 in the key, so this is never negative.
-#[must_use]
-pub fn recovery_point_of_log_key(key: &str) -> Option<i64> {
-    let file = key.rsplit('/').next()?;
-    let stem = file.strip_suffix(".json")?;
-    let (ms, _point_id) = stem.split_once('-')?;
-    (ms.len() == 13 && ms.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| ms.parse().ok())
-        .flatten()
 }
 
 /// **FX-33.** The point id a `Full` rescan's record key carries:
@@ -1665,14 +1512,10 @@ fn walk_full(
             if walk.seen.contains(&key) {
                 continue;
             }
-            // A KEY THAT NAMES NO POINT ID IS NOT A POINT (FX-33). Every
+            // A KEY THAT NAMES NO POINT ID IS NOT A POINT (FX-33): every
             // record this product writes is at `points/lwp1-<32 hex>/
-            // record.json`; anything else under the prefix was put there by
-            // someone else, and its key's text is not shown as a point id.
-            // The same rule an `Index` walk applies to a log key
-            // ([`point_id_of_log_key`]).
+            // record.json`, the rule an `Index` walk applies to a log key.
             if !reader::is_point_id(point_id_of_record_key(&key)) {
-                walk.stray_keys = walk.stray_keys.saturating_add(1);
                 continue;
             }
             // EXAMINATION IS BOUNDED BY THE OBJECT BUDGET AND BY NOTHING ELSE
@@ -1688,16 +1531,12 @@ fn walk_full(
             walk.last_record_key = Some(key.clone());
             walk.seen.insert(key.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
-            // A rescan's keys are content-addressed and carry no instant, so
-            // there is no index row to find — and so nothing to stray from.
             let subject = Subject {
                 record_key: &key,
                 point_id: point_id_of_record_key(&key),
-                log_key: None,
             };
-            if let Ok(observation) = examine(req, access, walk, trust, &subject) {
-                push(req, walk, observation, view_limit);
-            }
+            let observation = examine(req, access, walk, trust, &subject);
+            push(req, walk, observation, view_limit);
         }
         if exhausted {
             return Ok(());
@@ -1748,48 +1587,10 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     }
     // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33). There is no
     // observation `build_entry` has no entry for.
-    //
-    // AND A POINT WITHOUT A RECORD NEVER COSTS A POINT WITH ONE ITS PLACE. The
-    // window is the plan's `viewLimit` entries, filled in walk order, newest
-    // first. An entry built from a key alone can be made to exist by anyone
-    // who can write a key under the log prefix, dated whenever they like; if
-    // it held its place like any other, enough of them would push every real
-    // point out of the view. So when the window is full and a point WITH a
-    // record arrives, the oldest record-less entry gives up its place to it.
-    // Honest unreadable points are listed whenever there is room, which is
-    // always unless the archive holds more record-backed points than the
-    // window — and then the view says `truncated`, as it does for any point
-    // beyond it.
-    let backed = observation.point.is_some();
     if walk.entries.len() < view_limit {
-        if !backed {
-            walk.recordless_at.push(walk.entries.len());
-        }
         walk.entries.push(build_entry(&observation));
-    } else if backed {
-        if let Some(at) = walk.recordless_at.pop() {
-            walk.entries.remove(at);
-            walk.entries.push(build_entry(&observation));
-        }
     }
 }
-
-/// **FX-33 — an index row that is not its point's own.**
-///
-/// The log prefix is create-only, not append-restricted: whoever can write a
-/// new key under it chooses the key, and so chooses the day and the instant
-/// it claims for the point it names. A point's writer writes exactly one row,
-/// at the key its record implies (`CatalogPoint::log_key`, one derivation
-/// since the catalog was introduced). So when a row leads to a record that
-/// READS, and the row's key is not that record's own, the row is nobody's:
-/// it is not counted, it dates nothing, it lists nothing and it is not
-/// remembered as seen — the point is found, once, through its own row, with
-/// its own date. A planted row for a real point therefore changes nothing
-/// but the count of stray keys the walk reports.
-///
-/// (A row leading to a record that does NOT read cannot be judged this way;
-/// its point is listed as what it is, with the row's word marked as a claim.)
-struct Strayed;
 
 /// One point's two axes.
 ///
@@ -1802,17 +1603,13 @@ struct Strayed;
 /// controller reads as `PartialScan`, "a permission or transport failure". A
 /// budget-bounded walk is the designed, normal state the cursor exists for, and
 /// it is now the WALK's outcome and never a point's.
-///
-/// # Errors
-///
-/// [`Strayed`], for an index row that is not its point's own.
 fn examine(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
     walk: &mut Walk,
     trust: &[VerifyingKey],
     subject: &Subject<'_>,
-) -> Result<Observation, Strayed> {
+) -> Observation {
     // -- the record ----------------------------------------------------------
     //
     // FOUR WAYS IT CAN GIVE NO FACTS, AND EACH IS AN ENTRY (FX-33): the read
@@ -1823,13 +1620,11 @@ fn examine(
     let record_bytes = match access.get(subject.record_key, caps::CATALOG_RECORD) {
         Ok(b) => b,
         Err(e) => {
-            return Ok(Observation::without_record(
-                access,
-                walk,
+            return Observation::without_record(
                 subject,
                 availability_of_read(&e),
                 EntryCause::of_read(CauseDocument::Record, &e),
-            ))
+            )
         }
     };
     let point = match reader::read_record(&record_bytes) {
@@ -1841,37 +1636,24 @@ fn examine(
         // one.
         RecordVerdict::Point(p) if p.point_id == subject.point_id => p,
         RecordVerdict::Point(_) | RecordVerdict::Unreadable(_) => {
-            return Ok(Observation::without_record(
-                access,
-                walk,
+            return Observation::without_record(
                 subject,
                 Availability::Unreadable,
                 EntryCause::of(CauseDocument::Record, CauseReason::Malformed),
-            ))
+            )
         }
         RecordVerdict::UnsupportedFormat { format_version } => {
             let mut o = Observation::without_record(
-                access,
-                walk,
                 subject,
                 Availability::UnsupportedFormat,
                 EntryCause::of(CauseDocument::Record, CauseReason::UnsupportedFormat),
             );
             o.format_version = Some(format_version);
-            return Ok(o);
+            return o;
         }
     };
     // The record's bytes are parsed; nothing below reads them again.
     drop(record_bytes);
-    // AND AN INDEX ROW IS A POINT'S ONLY AT THE KEY ITS RECORD IMPLIES
-    // ([`Strayed`]). Decided here, on the record alone, before the receipt or
-    // the manifest is read: a stray row costs one object.
-    if subject
-        .log_key
-        .is_some_and(|log_key| point.log_key() != log_key)
-    {
-        return Err(Strayed);
-    }
 
     // WHAT THIS POINT HOLDS AT ONCE (FX-33), by construction and not by the
     // caps alone: the parsed record, for as long as the point is examined,
@@ -1912,7 +1694,7 @@ fn examine(
                 availability_of_read(&e),
                 EntryCause::of_read(CauseDocument::Receipt, &e),
             );
-            return Ok(found.observed(point, subject));
+            return found.observed(point, subject);
         }
     };
     // The receipt's parse lives for the cross-check and no longer: what the
@@ -1923,7 +1705,7 @@ fn examine(
                 Availability::Unreadable,
                 EntryCause::of(CauseDocument::Receipt, CauseReason::Malformed),
             );
-            return Ok(found.observed(point, subject));
+            return found.observed(point, subject);
         };
         match reader::cross_check(&point, &receipt, &receipt_bytes) {
             CrossCheck::Agrees => {}
@@ -2010,7 +1792,7 @@ fn examine(
         }
     }
 
-    Ok(found.observed(point, subject))
+    found.observed(point, subject)
 }
 
 /// What the examination of a point WITH a parsed record has established so
@@ -2046,8 +1828,6 @@ impl Found {
             pin_unreadable: self.pin_unreadable,
             cause: self.cause,
             point_id: subject.point_id.to_string(),
-            key_recovery_point_at_ms: None,
-            index_claim: (None, None),
         }
     }
 }
@@ -2055,7 +1835,7 @@ impl Found {
 // THE WALK'S READ CAPS ARE ROWS OF `logweir_store::caps` (FX-33), each named
 // at its read: `CATALOG_RECORD` and `CATALOG_RECEIPT` — the largest record
 // and receipt Logweir writes (`logweir_core::topic_budget`), the second equal
-// to the controller's own — `CATALOG_INDEX_ROW`, `SIDECAR` and `MANIFEST`.
+// to the controller's own — `SIDECAR` and `MANIFEST`.
 //
 // There used to be ONE constant here, `MAX_CATALOG_DOCUMENT_BYTES` = 256 KiB,
 // for a record, a receipt and a sidecar alike (review question F12, made the
@@ -2177,11 +1957,11 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
     //                       restore re-checks.
     let mut entry = CatalogEntry {
         point_id: redact(&point.point_id),
-        backup_id: Some(redact(&point.backup_id)),
-        run_id: Some(redact(&point.run_id)),
-        recovery_point_at_ms: Some(point.capture.started_at.timestamp_millis()),
-        covered_from_ms: Some(point.covered.from_ms),
-        covered_to_ms: Some(point.covered.to_ms),
+        backup_id: redact(&point.backup_id),
+        run_id: redact(&point.run_id),
+        recovery_point_at_ms: point.capture.started_at.timestamp_millis(),
+        covered_from_ms: point.covered.from_ms,
+        covered_to_ms: point.covered.to_ms,
         // ONE LOCATION, because one sync reads one destination. The controller
         // merges the same point id seen elsewhere into one entry with two
         // locations; `MAX_ENTRY_LOCATIONS` is the cap that merge must respect
@@ -2190,8 +1970,8 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
             location_id: redact_path(&point.archive.location_id),
             availability,
         }],
-        receipt_key: Some(redact_path(&point.receipt.key)),
-        receipt_sha256: Some(redact_digest(&point.receipt.sha256)),
+        receipt_key: redact_path(&point.receipt.key),
+        receipt_sha256: redact_digest(&point.receipt.sha256),
         manifest_key: Some(redact_path(&point.archive.manifest_key)),
         manifest_sha256: Some(redact_digest(&point.archive.manifest_sha256)),
         recorded_at: Some(point.recorded_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
@@ -2206,8 +1986,6 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
         topics_omitted: None,
         owner_detection: None,
         consumer_positions: None,
-        cause: observation.cause,
-        facts_from: None,
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
@@ -2229,58 +2007,23 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
     entry
 }
 
-/// **FX-33.** The entry of a point whose RECORD gave no facts.
-///
-/// # What it carries, and where each part comes from
-///
-/// - `pointId`: the id the object's KEY carries, always.
-/// - `recoveryPointAtMs`: the instant the day-shard key carries, in an
-///   `Index` walk. Never the index row's own number: the key is what the
-///   listing returned, and a row could say anything.
-/// - `backupId`, `runId`: what the index row CLAIMS, when the walk has a row
-///   that names this point and the values are fit to show ([`index_claim`]);
-///   then `factsFrom: indexRow`, and the remedy ends with
-///   [`INDEX_CLAIM_NOTE`]. Otherwise `factsFrom: key`.
-/// - `availability`, `cause`, `remedy`: what the examination found.
-///
-/// # What it does NOT carry, on purpose
-///
-/// **No receipt key, no receipt digest, no manifest key or digest, no window,
-/// no location, no topics.** Those are what a restore plan binds to, what a
-/// rehearsal selects by and what a recovery objective is measured from, and
-/// the only place this walk could have taken them from is an unsigned row
-/// anyone who can write under the catalog prefix can plant. A reader that
-/// needs them for such a point reads the signed receipt itself, as the
-/// runner's point binding does. The row's two identifiers are shown because
-/// they let an operator find the backup, and because a retention reader may
-/// use the backup set a row names to KEEP more — never to delete, and never
-/// to release a protection (`weirkeeper::retention_plan`).
-///
-/// It is never `Available` ([`Observation::without_record`] is only reached
-/// with `Missing`, `Unreadable` or `UnsupportedFormat`), so it is never
-/// selectable.
-///
-/// The redaction classes are [`build_entry`]'s, field for field.
+/// **FX-33.** The entry of a point whose RECORD gave no facts: the point id
+/// its key carries, what the examination found, and a remedy saying why.
+/// Nothing else — no set, run, instant, window, receipt, manifest or location
+/// (empty strings and zeros), so no reader can bind, select or join on it.
+/// It is never `Available` ([`Observation::without_record`] is reached only
+/// with `Missing`, `Unreadable` or `UnsupportedFormat`), so never selectable.
 fn without_record_entry(observation: &Observation) -> CatalogEntry {
-    let (backup_id, run_id) = observation.index_claim.clone();
-    let from_row = backup_id.is_some() || run_id.is_some();
-    let remedy = entry_remedy(observation).map(|remedy| {
-        if from_row {
-            format!("{remedy} {INDEX_CLAIM_NOTE}")
-        } else {
-            remedy
-        }
-    });
     CatalogEntry {
         point_id: redact(&observation.point_id),
-        backup_id,
-        run_id,
-        recovery_point_at_ms: observation.key_recovery_point_at_ms,
-        covered_from_ms: None,
-        covered_to_ms: None,
+        backup_id: String::new(),
+        run_id: String::new(),
+        recovery_point_at_ms: 0,
+        covered_from_ms: 0,
+        covered_to_ms: 0,
         locations: Vec::new(),
-        receipt_key: None,
-        receipt_sha256: None,
+        receipt_key: String::new(),
+        receipt_sha256: String::new(),
         manifest_key: None,
         manifest_sha256: None,
         recorded_at: None,
@@ -2288,17 +2031,13 @@ fn without_record_entry(observation: &Observation) -> CatalogEntry {
         availability: observation.availability,
         signature: observation.signature,
         signer_key_id: None,
-        remedy: remedy.map(|r| redact(&r)).filter(|r| !r.is_empty()),
+        remedy: entry_remedy(observation)
+            .map(|r| redact(&r))
+            .filter(|r| !r.is_empty()),
         topics: Vec::new(),
         topics_omitted: None,
         owner_detection: None,
         consumer_positions: None,
-        cause: observation.cause,
-        facts_from: Some(if from_row {
-            FactsFrom::IndexRow
-        } else {
-            FactsFrom::Key
-        }),
     }
 }
 
@@ -2475,20 +2214,7 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
     // Each entry in two renderings: with its topics, and SLIM — without them,
     // `topicsOmitted` counting what was left out (PROD-05.1). The topics are an
     // enhancement and never cost a point its place in the view.
-    let rendered: Vec<Rendered> = walk
-        .entries
-        .iter()
-        .map(|entry| {
-            let (full, slim) = entry_renderings(entry);
-            Rendered {
-                full,
-                slim,
-                // FX-33: an entry with no record behind it gives up its line
-                // before any record-backed entry gives up its place.
-                backed: entry.facts_from.is_none(),
-            }
-        })
-        .collect();
+    let rendered: Vec<(String, String)> = walk.entries.iter().map(entry_renderings).collect();
 
     // The summary lines are rendered FIRST so the byte budget is spent on the
     // pages that are left after the numbers that describe them. A body whose
@@ -2553,68 +2279,31 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
     }
 }
 
-/// One entry as [`allocate_entry_lines`] spends the body's bytes on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Rendered {
-    /// The line with its topic and consumer-group lists.
-    full: String,
-    /// The line without them (PROD-05.1); the same line when it has none.
-    slim: String,
-    /// Whether a parsed RECORD is behind the entry. `false` is an entry built
-    /// from a key, or a key and an index row (FX-33).
-    backed: bool,
-}
-
-/// **PROD-05.1: spend the entry budget.** `rendered` is each entry with its
-/// two lines — with its topics, and without them — in body order, newest
-/// first. Returns the lines kept and how many entries were dropped for space.
+/// **PROD-05.1: spend the entry budget.** `rendered` is each entry as `(full,
+/// slim)` — with its topics, and without them — in body order, newest first.
+/// Returns the lines kept and how many entries were dropped for space.
 ///
-/// THREE PRIORITIES, highest first:
-///
-/// 1. **a record-backed point's place** (its slim line);
-/// 2. **a record-less point's place** (FX-33) — it is listed whenever every
-///    LATER record-backed point still fits slim. An entry anyone who can
-///    write a key under the log prefix can cause to exist never costs a real
-///    point its line, however many of them there are and however they are
-///    dated;
-/// 3. **a topic list** — an entry keeps its full line only when every later
-///    entry, record-less ones included, still fits: a list never pushes ANY
-///    point out of the view, and the newest points keep their lists while the
-///    oldest give theirs up first.
-///
-/// Without topics or record-less entries in play this is exactly the old
-/// rule — keep a line while it fits, drop and count it when it does not.
-fn allocate_entry_lines(rendered: Vec<Rendered>, mut budget: usize) -> (Vec<String>, usize) {
+/// An entry keeps its topic list only when every LATER entry still fits
+/// slim, so a topic list never pushes a point out of the view: the newest
+/// points keep their lists and the oldest give theirs up first. Without topics
+/// in play (`full == slim`) this is exactly the old rule — keep a line while
+/// it fits, drop and count it when it does not.
+fn allocate_entry_lines(
+    rendered: Vec<(String, String)>,
+    mut budget: usize,
+) -> (Vec<String>, usize) {
     let cost = |line: &str| ENTRY_LINE_PREFIX.len() + line.len() + 1;
-    // What every LATER entry needs slim, and what the later RECORD-BACKED
-    // ones need.
     let mut slim_after = vec![0usize; rendered.len() + 1];
-    let mut backed_after = vec![0usize; rendered.len() + 1];
     for i in (0..rendered.len()).rev() {
-        let slim = cost(&rendered[i].slim);
-        slim_after[i] = slim_after[i + 1].saturating_add(slim);
-        backed_after[i] =
-            backed_after[i + 1].saturating_add(if rendered[i].backed { slim } else { 0 });
+        slim_after[i] = slim_after[i + 1].saturating_add(cost(&rendered[i].1));
     }
     let mut kept: Vec<String> = Vec::new();
     let mut dropped_for_space = 0usize;
-    for (i, entry) in rendered.into_iter().enumerate() {
-        if !entry.backed {
-            // Priority 2: listed only while every later record-backed point
-            // still has its place.
-            let line_cost = cost(&entry.slim);
-            if line_cost.saturating_add(backed_after[i + 1]) > budget {
-                dropped_for_space += 1;
-                continue;
-            }
-            budget -= line_cost;
-            kept.push(entry.slim);
-            continue;
-        }
-        let line = if cost(&entry.full).saturating_add(slim_after[i + 1]) <= budget {
-            entry.full
+    for (i, (full, slim)) in rendered.into_iter().enumerate() {
+        let line = if cost(&full).saturating_add(slim_after[i + 1]) <= budget {
+            full
         } else {
-            entry.slim
+            slim
         };
         let line_cost = cost(&line);
         if line_cost > budget {
@@ -2743,15 +2432,10 @@ mod tests {
     fn a_topic_list_never_pushes_a_point_out_of_the_view() {
         let line = |c: char, n: usize| c.to_string().repeat(n);
         let cost = |n: usize| ENTRY_LINE_PREFIX.len() + n + 1;
-        let entry = |c: char, full: usize, slim: usize| Rendered {
-            full: line(c, full),
-            slim: line(c, slim),
-            backed: true,
-        };
         let rendered = vec![
-            entry('a', 100, 10),
-            entry('b', 100, 10),
-            entry('c', 100, 10),
+            (line('a', 100), line('a', 10)),
+            (line('b', 100), line('b', 10)),
+            (line('c', 100), line('c', 10)),
         ];
         // Room for one full line and two slim ones, not two full lines.
         let budget = cost(100) + 2 * cost(10) + 5;
@@ -2776,55 +2460,12 @@ mod tests {
         let (kept, dropped) = allocate_entry_lines(rendered, 2 * cost(10));
         assert_eq!((kept.len(), dropped), (2, 1));
         // No topics in play: full == slim, the old rule exactly.
-        let plain = vec![entry('x', 50, 50), entry('y', 50, 50)];
+        let plain = vec![
+            (line('x', 50), line('x', 50)),
+            (line('y', 50), line('y', 50)),
+        ];
         let (kept, dropped) = allocate_entry_lines(plain, cost(50));
         assert_eq!((kept, dropped), (vec![line('x', 50)], 1));
-    }
-
-    /// FX-33: an entry with no record behind it never costs a record-backed
-    /// point its line. Three record-less entries dated NEWER than two real
-    /// points, and room for three lines: both real points are kept, and one
-    /// record-less entry beside them; a rule that kept lines in body order
-    /// would keep the three record-less ones and drop both real points.
-    ///
-    /// KILLS: record-less entries spending the body's bytes in body order
-    /// like any other; a record-less entry outranked by a topic list.
-    #[test]
-    fn an_entry_without_a_record_never_costs_a_record_backed_point_its_line() {
-        let line = |c: char, n: usize| c.to_string().repeat(n);
-        let cost = |n: usize| ENTRY_LINE_PREFIX.len() + n + 1;
-        let planted = |c: char| Rendered {
-            full: line(c, 40),
-            slim: line(c, 40),
-            backed: false,
-        };
-        let real = |c: char, full: usize| Rendered {
-            full: line(c, full),
-            slim: line(c, 40),
-            backed: true,
-        };
-        let body = vec![
-            planted('p'),
-            planted('q'),
-            planted('r'),
-            real('a', 40),
-            real('b', 40),
-        ];
-        let (kept, dropped) = allocate_entry_lines(body.clone(), 3 * cost(40));
-        assert_eq!(
-            (kept, dropped),
-            (vec![line('p', 40), line('a', 40), line('b', 40)], 2),
-            "both real points keep their lines; the record-less ones take what is left"
-        );
-        // NEGATIVE CONTROL: with room for all five, all five are listed.
-        let (kept, dropped) = allocate_entry_lines(body, 5 * cost(40));
-        assert_eq!((kept.len(), dropped), (5, 0));
-        // A record-less point's PLACE outranks a real point's topic LIST: with
-        // room for one slim line beside the list or for both points slim, both
-        // points are listed and the list is given up.
-        let listed = vec![real('a', 100), planted('p')];
-        let (kept, dropped) = allocate_entry_lines(listed, cost(100) + cost(40) - 1);
-        assert_eq!((kept, dropped), (vec![line('a', 40), line('p', 40)], 0));
     }
 
     /// PROD-05.1 fix round (M2): the SLIM rendering drops `ownerDetection`
@@ -2833,14 +2474,14 @@ mod tests {
     fn a_slim_entry_carries_no_topics_and_no_owner_detection() {
         let entry = CatalogEntry {
             point_id: "lwp1-00000000000000000000000000000000".into(),
-            backup_id: Some("set-a".into()),
-            run_id: Some("run-a".into()),
-            recovery_point_at_ms: Some(1),
-            covered_from_ms: Some(0),
-            covered_to_ms: Some(2),
+            backup_id: "set-a".into(),
+            run_id: "run-a".into(),
+            recovery_point_at_ms: 1,
+            covered_from_ms: 0,
+            covered_to_ms: 2,
             locations: Vec::new(),
-            receipt_key: Some("k".into()),
-            receipt_sha256: Some("sha256:00".into()),
+            receipt_key: "k".into(),
+            receipt_sha256: "sha256:00".into(),
             manifest_key: None,
             manifest_sha256: None,
             recorded_at: None,
@@ -2860,8 +2501,6 @@ mod tests {
             topics_omitted: None,
             owner_detection: Some(Vec::new()),
             consumer_positions: None,
-            cause: None,
-            facts_from: None,
         };
         let (full, slim) = entry_renderings(&entry);
         let full: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -2890,14 +2529,14 @@ mod tests {
     fn a_slim_entry_keeps_the_snapshots_freshness_and_counts_its_groups() {
         let mut entry = CatalogEntry {
             point_id: "lwp1-00000000000000000000000000000000".into(),
-            backup_id: Some("set-a".into()),
-            run_id: Some("run-a".into()),
-            recovery_point_at_ms: Some(10),
-            covered_from_ms: Some(0),
-            covered_to_ms: Some(2),
+            backup_id: "set-a".into(),
+            run_id: "run-a".into(),
+            recovery_point_at_ms: 10,
+            covered_from_ms: 0,
+            covered_to_ms: 2,
             locations: Vec::new(),
-            receipt_key: Some("k".into()),
-            receipt_sha256: Some("sha256:00".into()),
+            receipt_key: "k".into(),
+            receipt_sha256: "sha256:00".into(),
             manifest_key: None,
             manifest_sha256: None,
             recorded_at: None,
@@ -2925,8 +2564,6 @@ mod tests {
                 }],
                 groups_omitted: None,
             }),
-            cause: None,
-            facts_from: None,
         };
         let (full, slim) = entry_renderings(&entry);
         let full: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -2980,22 +2617,15 @@ mod tests {
                         "{document}/{reason}: a size or content remedy names `{word}`: {remedy}"
                     );
                 }
-                // WITH THE NOTE an entry from an index row appends, and with the
-                // largest sizes a store can report: still within the 512
-                // characters the API publishes, so the note is never cut off.
+                // With the largest sizes a store can report: still within the
+                // 512 characters the API publishes.
                 let longest = cause_remedy(&EntryCause {
                     bytes: Some(u64::MAX),
                     cap_bytes: Some(u64::MAX),
                     ..cause
                 })
                 .expect("the same cause has the same sentence");
-                let with_note = format!("{longest} {INDEX_CLAIM_NOTE}");
-                assert!(
-                    with_note.len() <= 512,
-                    "{} chars with the index note: {with_note}",
-                    with_note.len()
-                );
-                assert_eq!(redact(&with_note), with_note, "the redactor changes it");
+                assert!(longest.len() <= 512, "{} chars: {longest}", longest.len());
                 assert_eq!(redact(&remedy), remedy, "the redactor changes it: {remedy}");
                 if *reason == CauseReason::OverReadCap {
                     assert!(
@@ -3025,71 +2655,12 @@ mod tests {
         );
     }
 
-    /// FX-33: what an UNSIGNED index row may contribute to an entry is an
-    /// identifier or nothing. Markup, a path, a credential shape, an
-    /// over-long value and an empty one are ABSENT — never truncated, never
-    /// shown redacted.
-    ///
-    /// KILLS: a row's `backupId` published as it was read.
+    /// FX-33: the two keys a walk reads a point's id from.
     #[test]
-    fn an_index_rows_identifier_is_an_identifier_or_absent() {
-        for good in [
-            "set-a",
-            "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260922-140000",
-            "01JB7Z00000000000000000000",
-            "nightly.2026_09:01",
-        ] {
-            assert_eq!(
-                index_claim(good, MAX_INDEX_BACKUP_ID_CHARS).as_deref(),
-                Some(good)
-            );
-        }
-        let long = "a".repeat(MAX_INDEX_BACKUP_ID_CHARS + 1);
-        // A 40-character base64 run is what the redactor takes for a secret.
-        let secret_shaped = "AKIAFAKEFAKEFAKEFAKEwJalrXUtnFEMIK7MDENGbPxRfiCY";
-        for bad in [
-            "",
-            " ",
-            "set a",
-            "<img src=x onerror=alert(1)>",
-            "../../etc/passwd",
-            "set/a",
-            "set\na",
-            "s\u{e9}t",
-            "aws_secret_access_key=ZZfakefakefakefakefakefakefakefake01",
-            secret_shaped,
-            long.as_str(),
-        ] {
-            assert_eq!(
-                index_claim(bad, MAX_INDEX_BACKUP_ID_CHARS),
-                None,
-                "{bad:?} is not an identifier and is shown as nothing"
-            );
-        }
-        // The bound is the caller's: a run id has the shorter one.
-        // (Dots, so the value is no 40-character run the redactor takes.)
-        let run = "run.".repeat(MAX_INDEX_RUN_ID_CHARS / 4);
-        assert_eq!(run.len(), MAX_INDEX_RUN_ID_CHARS);
-        assert!(index_claim(&run, MAX_INDEX_RUN_ID_CHARS).is_some());
-        assert!(index_claim(&format!("{run}r"), MAX_INDEX_RUN_ID_CHARS).is_none());
-        assert!(index_claim(&format!("{run}r"), MAX_INDEX_BACKUP_ID_CHARS).is_some());
-    }
-
-    /// FX-33: the two keys a walk reads a point's identity from.
-    #[test]
-    fn a_log_key_carries_the_recovery_instant_and_a_record_key_its_point_id() {
+    fn a_log_key_and_a_record_key_carry_the_point_id() {
         let id = "lwp1-0123456789abcdef0123456789abcdef";
         let log = format!("logweir/catalog/v1/log/2026/09/16/1757991600000-{id}.json");
-        assert_eq!(recovery_point_of_log_key(&log), Some(1_757_991_600_000));
         assert_eq!(point_id_of_log_key(&log).as_deref(), Some(id));
-        for not_ours in [
-            "logweir/catalog/v1/log/2026/09/16/17579916-x.json",
-            "logweir/catalog/v1/log/2026/09/16/-1757991600000-x.json",
-            "logweir/catalog/v1/log/2026/09/16/175799160000a-x.json",
-            "logweir/catalog/v1/log/2026/09/16/1757991600000.json",
-        ] {
-            assert_eq!(recovery_point_of_log_key(not_ours), None, "{not_ours}");
-        }
         assert_eq!(
             point_id_of_record_key(&format!("logweir/catalog/v1/points/{id}/record.json")),
             id
