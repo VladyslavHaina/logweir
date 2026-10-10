@@ -34,7 +34,9 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
 const con = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
 
 const NS = "team-a";
-const DESTINATION = con("destination.json").item;
+/** The destination's wire document; the Backups below are written against it. */
+const DESTINATION_DOC = con("destination.json");
+const DESTINATION = DESTINATION_DOC.item;
 
 /** The 1.3.0 point, as the PoC's API served it (ids kept, namespace moved). */
 const OLD = {
@@ -119,9 +121,10 @@ function operationOf(run) {
   return doc;
 }
 
+/** The catalog's wire document, moved over destination `primary`. */
 function catalogItem() {
-  const item = con("catalog.json").item;
-  return Object.assign(item, { name: "archive", namespace: NS,
+  const doc = con("catalog.json");
+  return Object.assign(doc.item, { name: "archive", namespace: NS,
     destinationRef: { name: "primary" } });
 }
 
