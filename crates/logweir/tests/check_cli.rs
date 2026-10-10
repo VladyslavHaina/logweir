@@ -6989,7 +6989,7 @@ fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
 /// outcome and counts; the control — a 1.3.0 point — publishes nothing (NOT
 /// PUBLISHED).
 #[test]
-fn an_available_1_5_0_point_publishes_its_consumer_position_summary() {
+fn an_available_1_7_0_point_publishes_its_consumer_position_summary() {
     let receipt = positioned_catalog_receipt(&["billing".into(), "gone".into()]);
     let (objects, _) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
     let entry = only_entry(objects);

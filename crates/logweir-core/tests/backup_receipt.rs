@@ -2773,7 +2773,7 @@ fn pentry<'a>(d: &'a mut PositionsDocument, group: &str, i: usize) -> &'a mut Po
 }
 
 #[test]
-fn a_1_5_0_receipt_and_its_document_satisfy_every_invariant() {
+fn a_1_7_0_receipt_and_its_document_satisfy_every_invariant() {
     assert_eq!(pristine_cp().validate_invariants(), Ok(()));
     assert_eq!(check(pristine_cp(), &pristine_document()), Ok(()));
     // Without the block the document is decided exactly as 1.3.0 was.
