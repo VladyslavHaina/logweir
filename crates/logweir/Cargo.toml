@@ -71,6 +71,14 @@ tempfile = "3"
 # `object_store` — so no package is added; only the `resource` feature.
 zstd = "0.13"
 nix = { version = "0.31", default-features = false, features = ["resource"] }
+# FX-14 (review M1): `catalog::record`'s row
+# `a_plain_key_segment_is_one_the_store_addresses_as_written` holds the
+# key-segment rule to the store's OWN path type, `object_store::path::Path`,
+# for every ASCII byte, so it has to name that type. The crate is already in
+# this package's graph through `logweir-engine-oso` -> `logweir-store`, at the
+# workspace's one version and feature set (Global Constraint 9): no package is
+# added and nothing new is compiled. A test names it; no product code does.
+object_store.workspace = true
 
 # `unsafe_code = "forbid"` for every target of this package, tests and build
 # scripts included (the root Cargo.toml's `[workspace.lints.rust]`).

@@ -4038,13 +4038,27 @@ const BOUND_MANIFEST_KEY: &str = "logweir/nightly-7/manifest.json";
 
 /// [`manifest_json`], for [`BOUND_SET`]: the same window, its own segment keys.
 fn bound_manifest() -> Vec<u8> {
+    bound_manifest_of(BOUND_SET)
+}
+
+/// [`manifest_json`], for set `set`: the same window, its own segment keys.
+/// The id is spliced in as JSON string content, so it may hold any character.
+fn bound_manifest_of(set: &str) -> Vec<u8> {
+    let quoted = serde_json::to_string(set).expect("a string");
     serde_json::to_vec(
         &serde_json::from_str::<serde_json::Value>(
-            &manifest_json().to_string().replace(BACKUP_ID, BOUND_SET),
+            &manifest_json()
+                .to_string()
+                .replace(BACKUP_ID, &quoted[1..quoted.len() - 1]),
         )
         .expect("the fixture stays JSON"),
     )
     .expect("serialises")
+}
+
+/// Where the engine reads set `set`'s manifest under [`BOUND_PREFIX`].
+fn bound_manifest_key_of(set: &str) -> String {
+    format!("{BOUND_PREFIX}/{set}/manifest.json")
 }
 
 /// One SIGNED recovery point in a real in-memory `Store`, the keyring that
@@ -4060,18 +4074,25 @@ struct BoundPoint {
 /// A point whose receipt pins its manifest's version (`pin`, a versioned
 /// bucket), or one written by a build that pinned nothing.
 fn bound_point(pin: bool) -> BoundPoint {
+    bound_point_of(BOUND_SET, "run-1", pin)
+}
+
+/// [`bound_point`], for backup set `set` and run `run`: every key the WRITER
+/// would derive from those two ids, and nothing spelled by hand.
+fn bound_point_of(set: &str, run: &str, pin: bool) -> BoundPoint {
     use logweir_evidence::keys::SigningKey;
     let (store, bucket) = logweir_engine_oso::storage::Store::in_memory_versioned(BOUND_PREFIX);
-    let manifest = bound_manifest();
+    let manifest = bound_manifest_of(set);
+    let manifest_key = bound_manifest_key_of(set);
     let version = store
-        .put_create_only(BOUND_MANIFEST_KEY, &manifest)
+        .put_create_only(&manifest_key, &manifest)
         .expect("the manifest is written")
         .version_id
         .expect("a versioned bucket names the version");
     for i in 0..2 {
         store
             .put_create_only(
-                &format!("{BOUND_PREFIX}/{BOUND_SET}/topics/orders/partition=0/segment-{i}.bin"),
+                &format!("{BOUND_PREFIX}/{set}/topics/orders/partition=0/segment-{i}.bin"),
                 b"segment",
             )
             .expect("a segment is written");
@@ -4079,11 +4100,11 @@ fn bound_point(pin: bool) -> BoundPoint {
     // Instants relative to NOW, so the signer's validity window holds on any
     // date the suite runs (`just test-shifted-clock`).
     let now = Utc::now();
-    let mut receipt = catalog_receipt(BOUND_SET, "run-1", "2026-09-16T03:00:00Z");
+    let mut receipt = catalog_receipt(set, run, "2026-09-16T03:00:00Z");
     receipt.requested_at = now - chrono::Duration::minutes(5);
     receipt.started_at = now - chrono::Duration::minutes(4);
     receipt.finished_at = now - chrono::Duration::minutes(1);
-    receipt.archive.manifest_key = BOUND_MANIFEST_KEY.to_string();
+    receipt.archive.manifest_key = manifest_key;
     receipt.archive.manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
     if pin {
         receipt.format_version =
@@ -4092,7 +4113,7 @@ fn bound_point(pin: bool) -> BoundPoint {
     }
     let receipt_bytes =
         logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
-    let keys = logweir::backup::phase_run::receipt_keys(BOUND_SET, "run-1");
+    let keys = logweir::backup::phase_run::receipt_keys(set, run);
     let signer = SigningKey::generate_ed25519();
     let sidecar = logweir_evidence::sign::sign_detached(
         &signer,
@@ -4189,11 +4210,17 @@ fn bound_preflight(
     store: logweir_engine_oso::storage::Store,
     point: Option<&logweir_core::execution_contract::PointBinding>,
 ) -> Run {
-    let yaml = bound_yaml(point);
-    let mut plan = restore_plan(&yaml, None);
+    bound_preflight_of(BOUND_SET, &bound_yaml(point), store)
+}
+
+/// The restore preflight over `store` for the plan `yaml`, whose request
+/// reads set `set` (the controller renders `backupId` and the manifest key
+/// from the same `backupSetRef` the plan's `source.backup` was written from).
+fn bound_preflight_of(set: &str, yaml: &str, store: logweir_engine_oso::storage::Store) -> Run {
+    let mut plan = restore_plan(yaml, None);
     if let CheckRequest::RestorePreflight(req) = &mut plan.request {
-        req.backup_id = BOUND_SET.to_string();
-        req.manifest_key = format!("{BOUND_SET}/manifest.json");
+        req.backup_id = set.to_string();
+        req.manifest_key = format!("{set}/manifest.json");
     }
     let probe = FakeProbe::new()
         .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
@@ -4211,9 +4238,38 @@ fn bound_preflight(
 fn bound_binding(
     p: &BoundPoint,
 ) -> Result<Option<logweir::drill::binding::VerifiedPoint>, logweir::drill::DrillError> {
-    let plan: logweir_core::spec::DrillSpec =
-        serde_yaml::from_str(&bound_yaml(Some(&p.binding))).expect("the plan parses");
+    bound_binding_of(&bound_yaml(Some(&p.binding)), p)
+}
+
+/// What the RUNNER's binding says about the plan `yaml` over `p`'s archive.
+fn bound_binding_of(
+    yaml: &str,
+    p: &BoundPoint,
+) -> Result<Option<logweir::drill::binding::VerifiedPoint>, logweir::drill::DrillError> {
+    let plan: logweir_core::spec::DrillSpec = serde_yaml::from_str(yaml).expect("the plan parses");
     logweir::drill::binding::verify_point_binding(&plan, &p.store, Some(&p.keys), Utc::now())
+}
+
+/// The restore plan naming set `set` and bound to `point`, with the set id and
+/// the receipt key written as JSON strings — each a valid YAML double-quoted
+/// scalar — so an id or a key may hold a space, a tab or a character that is
+/// not ASCII and reach the reader unchanged.
+fn quoted_point_yaml(set: &str, point: &logweir_core::execution_contract::PointBinding) -> String {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let bound = yaml.replace(
+        &format!("  backup: {BACKUP_ID}\n"),
+        &format!(
+            "  backup: {}\n  point:\n    point_id: {}\n    receipt_key: {}\n    \
+             receipt_sha256: \"{}\"\n    manifest_sha256: \"{}\"\n",
+            serde_json::to_string(set).expect("a string"),
+            point.point_id,
+            serde_json::to_string(&point.receipt_key).expect("a string"),
+            point.receipt_sha256,
+            point.manifest_sha256
+        ),
+    );
+    assert_ne!(bound, yaml, "the fixture names its set");
+    bound
 }
 
 /// The two archive rows a refused `archive.backupSet` holds back.
@@ -4534,6 +4590,83 @@ fn a_point_bound_preflight_refuses_a_set_the_point_does_not_describe() {
     );
 }
 
+/// **FX-14 review M1 — a set id and a run id that hold a SPACE.** A backup
+/// set id is free text (`BackupSpec::backup_id`; `Restore.spec.backupSetRef`
+/// carries no pattern), a space is addressed by the store exactly as written,
+/// and the runner's binding restores such a set. So the preflight judges it
+/// too, and judges it the same: it never refuses a point the binding accepts.
+///
+/// One signed point of set `nightly 7`, run `run 1`, in a real `Store` both
+/// readers read: the binding proves it and the preflight is `ready` on every
+/// archive row. AND THE OTHER WAY, over the same ids: the set written again
+/// after the point was signed is refused by both — so the spaced manifest key
+/// reaches the read by VERSION as written as well, and "they agree" is not
+/// "both say yes to anything".
+///
+/// KILLS: a rule that refuses the space (the preflight then answers
+/// `PointBindingMismatch`, "it was not read", for the writer's own key).
+#[test]
+fn a_set_id_and_a_run_id_with_a_space_are_judged_as_the_runners_binding_judges_them() {
+    const SET: &str = "nightly 7";
+    const RUN: &str = "run 1";
+    let p = bound_point_of(SET, RUN, true);
+    assert_eq!(
+        p.binding.receipt_key, "logweir/backups/nightly 7/run 1.receipt.json",
+        "the writer's own derivation, both spaces as written"
+    );
+    let yaml = quoted_point_yaml(SET, &p.binding);
+    let plan: logweir_core::spec::DrillSpec = serde_yaml::from_str(&yaml).expect("the plan parses");
+    assert_eq!(plan.source.backup, SET);
+    assert_eq!(
+        plan.source.point.as_ref().expect("bound").receipt_key,
+        p.binding.receipt_key
+    );
+
+    let verified = bound_binding_of(&yaml, &p)
+        .expect("the runner's binding accepts a set id with a space")
+        .expect("the plan is bound");
+    assert_eq!(verified.point_id, p.binding.point_id);
+    assert_eq!(verified.set.backup_id, SET);
+    assert!(verified.pin_note.is_none(), "{verified:?}");
+    let run = bound_preflight_of(SET, &yaml, p.store);
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::ManifestReadable),
+        "the binding accepts this point and the preflight refuses it: {row:?}"
+    );
+    assert!(row.message.contains(&p.binding.point_id), "{}", row.message);
+    for id in [CheckId::ArchiveCoverage, CheckId::ArchiveSegments] {
+        assert_eq!(
+            run.row(id).state,
+            CheckState::Ready,
+            "{id}: {:?}",
+            run.row(id)
+        );
+    }
+
+    // The other way: the same set written again after the point was signed.
+    let again = bound_point_of(SET, RUN, true);
+    let bucket = again.bucket.as_ref().expect("versioned");
+    bucket.overwrite(&bound_manifest_key_of(SET), &bound_manifest_of(SET));
+    assert_eq!(bucket.versions(&bound_manifest_key_of(SET)).len(), 2);
+    let yaml = quoted_point_yaml(SET, &again.binding);
+    assert_eq!(
+        bound_binding_of(&yaml, &again)
+            .expect_err("the runner refuses a superseded pin")
+            .exit_code(),
+        ExitCode::GuardRefused
+    );
+    let run = bound_preflight_of(SET, &yaml, again.store);
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::ManifestSuperseded),
+        "{row:?}"
+    );
+    assert_archive_rest_blocked(&run);
+}
+
 // ---------------------------------------------------------------------------
 // FX-14, the orchestrator's security note: a preflight runs BEFORE any
 // approval, with the namespace's archive-read credential, so a plan's receipt
@@ -4549,14 +4682,35 @@ fn a_point_bound_preflight_refuses_a_set_the_point_does_not_describe() {
 fn confined_fixture(
     elsewhere: &[&str],
 ) -> (FakeObjects, logweir_core::execution_contract::PointBinding) {
-    let manifest = serde_json::to_vec(&manifest_json()).expect("serialises");
-    let mut receipt = catalog_receipt(BACKUP_ID, "run-1", "2026-09-15T05:00:00Z");
-    receipt.archive.manifest_key = MANIFEST_OBJECT_KEY.to_string();
+    confined_fixture_of(BACKUP_ID, "run-1", elsewhere)
+}
+
+/// [`confined_fixture`], for set `set` and run `run`: the set's manifest and
+/// segments under [`ARCHIVE_PREFIX`], and its receipt at the key the WRITER
+/// derives from those two ids.
+fn confined_fixture_of(
+    set: &str,
+    run: &str,
+    elsewhere: &[&str],
+) -> (FakeObjects, logweir_core::execution_contract::PointBinding) {
+    let manifest = bound_manifest_of(set);
+    let manifest_key = format!("{ARCHIVE_PREFIX}/{set}/manifest.json");
+    let mut receipt = catalog_receipt(set, run, "2026-09-15T05:00:00Z");
+    receipt.archive.manifest_key = manifest_key.clone();
     receipt.archive.manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
     let receipt_bytes =
         logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
-    let key = logweir::backup::phase_run::receipt_keys(BACKUP_ID, "run-1").receipt_key;
-    let mut objects = archive_objects(&manifest_json()).with_object(&key, &receipt_bytes);
+    let key = logweir::backup::phase_run::receipt_keys(set, run).receipt_key;
+    let mut objects = FakeObjects::new()
+        .with_prefix(ARCHIVE_PREFIX)
+        .with_object(&manifest_key, &manifest)
+        .with_object(&key, &receipt_bytes);
+    for i in 0..2 {
+        objects = objects.with_object(
+            &format!("{ARCHIVE_PREFIX}/{set}/topics/orders/partition=0/segment-{i}.bin"),
+            b"segment",
+        );
+    }
     for other in elsewhere {
         // The archive's own objects keep their bytes: they are in the list as
         // keys a plan might name, not as places to plant a receipt.
@@ -4588,11 +4742,21 @@ fn confined_yaml(point: &logweir_core::execution_contract::PointBinding, backup:
 /// The preflight over the confined fixture; the handle is returned so a row
 /// can count what was read.
 fn confined_preflight(objects: &FakeObjects, yaml: &str) -> Run {
+    confined_preflight_of(BACKUP_ID, objects, yaml)
+}
+
+/// [`confined_preflight`], with the request reading set `set`.
+fn confined_preflight_of(set: &str, objects: &FakeObjects, yaml: &str) -> Run {
+    let mut plan = restore_plan(yaml, None);
+    if let CheckRequest::RestorePreflight(req) = &mut plan.request {
+        req.backup_id = set.to_string();
+        req.manifest_key = format!("{set}/manifest.json");
+    }
     let probe = FakeProbe::new()
         .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
         .default_presence(TopicPresence::NotFound);
     drive(
-        &mount(&restore_plan(yaml, None)),
+        &mount(&plan),
         &FakeWiring::default()
             .with_file(PLAN_FILE, yaml.as_bytes())
             .with_probe(probe)
@@ -4778,6 +4942,120 @@ fn a_bound_receipt_is_read_only_after_its_sets_manifest_was() {
         calls,
         vec![format!("get {ARCHIVE_PREFIX}/{other_set}/manifest.json")],
         "only this destination's own manifest key was asked for"
+    );
+}
+
+/// **FX-14 review M1 — the space is allowed, and the confinement is still of
+/// BYTES.** For a plan that restores set `nightly 7`, the one receipt key
+/// that may be read is `logweir/backups/nightly 7/<run id>.receipt.json`,
+/// byte for byte. Everything that only LOOKS like it is refused with the
+/// archive untouched: the set segment with a space after it, or before it; a
+/// tab or a no-break space where the space is; the space spelled `%20` or
+/// `+`; and the same in the run segment and around the whole key. Each of
+/// those keys holds the bound receipt's bytes in this fixture, so a build
+/// that read one would find the digest it was told to expect.
+///
+/// A look-alike as the plan's OWN set id is no better: a tab, a no-break
+/// space and `%20` are not plain, so such a set is answered from the plan
+/// alone, though its manifest and its receipt are both there to be read.
+///
+/// CONTROL: the writer's own key for `nightly 7` / `run 1` is read, once, and
+/// the row is `ready`.
+///
+/// KILLS: a rule that accepts a tab (the `run<TAB>1` key and the
+/// `nightly<TAB>7` set are then read, and are `ready`).
+#[test]
+fn a_look_alike_of_a_set_id_with_a_space_is_refused_with_no_store_read() {
+    const SET: &str = "nightly 7";
+    const RUN: &str = "run 1";
+    let look_alikes = [
+        // the set segment: the plan's id and a space after it, or before it
+        "logweir/backups/nightly 7 /run 1.receipt.json",
+        "logweir/backups/ nightly 7/run 1.receipt.json",
+        // a tab, and a no-break space, in the space's place
+        "logweir/backups/nightly\t7/run 1.receipt.json",
+        "logweir/backups/nightly\u{a0}7/run 1.receipt.json",
+        // the space as a URL would spell it
+        "logweir/backups/nightly%207/run 1.receipt.json",
+        "logweir/backups/nightly+7/run 1.receipt.json",
+        // two spaces, none, and the usual separator
+        "logweir/backups/nightly  7/run 1.receipt.json",
+        "logweir/backups/nightly7/run 1.receipt.json",
+        "logweir/backups/nightly-7/run 1.receipt.json",
+        // the run segment
+        "logweir/backups/nightly 7/run\t1.receipt.json",
+        "logweir/backups/nightly 7/run\u{a0}1.receipt.json",
+        "logweir/backups/nightly 7/run%201.receipt.json",
+        // the key as a whole
+        " logweir/backups/nightly 7/run 1.receipt.json",
+        "logweir/backups/nightly 7/run 1.receipt.json ",
+    ];
+    let (objects, real) = confined_fixture_of(SET, RUN, &look_alikes);
+    assert_eq!(
+        real.receipt_key,
+        "logweir/backups/nightly 7/run 1.receipt.json"
+    );
+    let assert_refused_unread = |what: &str, run: &Run, calls: &[String]| {
+        let row = run.row(CheckId::ArchiveBackupSet);
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::NotReady, CheckCode::PointBindingMismatch),
+            "{what:?}: {row:?}"
+        );
+        assert!(
+            row.message.contains("it was not read"),
+            "{what:?}: the refusal says so: {}",
+            row.message
+        );
+        assert_archive_rest_blocked(run);
+        assert_eq!(
+            calls,
+            &Vec::<String>::new()[..],
+            "{what:?}: the archive was touched for a key that is not the plan's own set's receipt"
+        );
+    };
+    for key in look_alikes {
+        assert!(
+            objects.get(key).is_ok(),
+            "{key:?} holds the receipt's bytes"
+        );
+        let before = objects.calls().len();
+        let mut binding = real.clone();
+        binding.receipt_key = key.to_string();
+        let run = confined_preflight_of(SET, &objects, &quoted_point_yaml(SET, &binding));
+        assert_refused_unread(key, &run, &objects.calls()[before..]);
+    }
+
+    // A look-alike as the plan's OWN set id, with that set's manifest and
+    // receipt in place at the keys the writer would derive for it.
+    for set in ["nightly\t7", "nightly\u{a0}7", "nightly%207"] {
+        let (objects, binding) = confined_fixture_of(set, RUN, &[]);
+        let before = objects.calls().len();
+        let run = confined_preflight_of(set, &objects, &quoted_point_yaml(set, &binding));
+        assert_refused_unread(set, &run, &objects.calls()[before..]);
+    }
+
+    // CONTROL: the writer's key is read, once, and the point is judged.
+    let before = objects.calls().len();
+    let run = confined_preflight_of(SET, &objects, &quoted_point_yaml(SET, &real));
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::ManifestReadable),
+        "{row:?}"
+    );
+    let gets: Vec<String> = objects.calls()[before..]
+        .iter()
+        .filter(|c| c.starts_with("get "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        gets,
+        vec![
+            format!("get {ARCHIVE_PREFIX}/{SET}/manifest.json"),
+            format!("get {}", real.receipt_key),
+        ],
+        "the set's manifest and its one confined receipt, as written, and no other object"
     );
 }
 
