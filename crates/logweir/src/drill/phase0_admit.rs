@@ -1316,7 +1316,14 @@ impl CreationStop {
             ));
         }
         if let Some(why) = why {
-            parts.push(why);
+            // One sentence among others: a broker's error text carries no
+            // full stop, and the next part names what was left.
+            let why = why.trim_end();
+            parts.push(if why.ends_with('.') {
+                why.to_string()
+            } else {
+                format!("{why}.")
+            });
         }
         if left.is_empty() {
             parts.push("This run created no topic.".to_string());

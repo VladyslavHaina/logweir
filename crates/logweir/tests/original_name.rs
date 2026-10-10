@@ -1058,6 +1058,14 @@ fn a_creation_that_stops_for_another_reason_names_and_leaves_what_it_created() {
         "{}",
         stop.message
     );
+    // The broker's own words end as a sentence before the left topic is named.
+    assert!(
+        stop.message.contains(
+            "PolicyViolation (Broker: Policy violation). `orders`: created by this restore"
+        ),
+        "{}",
+        stop.message
+    );
     assert_eq!(listed(&broker), vec!["orders".to_string()]);
 
     // A short answer: only `orders` is answered for.
