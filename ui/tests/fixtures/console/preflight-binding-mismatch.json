@@ -1,0 +1,103 @@
+{
+  "item": {
+    "applicable": true,
+    "binding": {
+      "inputsDigest": "sha256:fca11eb97038df5ec3e20fbd1199ee3fafd764915aa79005e73d36e6f01126e5",
+      "referents": []
+    },
+    "checks": [
+      {
+        "authority": "controller",
+        "category": "destination",
+        "code": "DestinationValid",
+        "expiresAt": "2026-10-09T13:16:35Z",
+        "gating": "blocking",
+        "id": "destination.resolved",
+        "message": "the destination is Valid at generation 1 for the ArchiveWrite grant",
+        "observedAt": "2026-10-09T13:01:35Z",
+        "scope": {
+          "kind": "BackupDestination",
+          "name": "fx20-thief",
+          "uid": "5d1f0b6e-7c33-4f0e-9a51-2a8c7e0d4b19"
+        },
+        "state": "ready"
+      },
+      {
+        "authority": "podStatus",
+        "category": "destination",
+        "code": "Projected",
+        "expiresAt": "2026-10-09T13:16:35Z",
+        "gating": "blocking",
+        "id": "destination.credentialProjected",
+        "message": "the check pod ran with this projection in place",
+        "observedAt": "2026-10-09T13:01:35Z",
+        "state": "ready"
+      },
+      {
+        "authority": "checkJob",
+        "category": "destination",
+        "code": "ArchivePrefixWriteVerifiedOnlyAtExecution",
+        "gating": "executionOnly",
+        "id": "destination.archivePrefixWritable",
+        "message": "the archive prefix `poc` is not write-probed: a check writes only its own readiness marker under `logweir/readiness/`, which proves nothing about the archive prefix, so the archive-write grant is verified by the run itself",
+        "observedAt": "2026-10-09T13:01:30Z",
+        "remedy": "This permission can only be verified by the run itself; the run's own guards remain authoritative.",
+        "scope": {
+          "kind": "BackupDestination",
+          "name": "fx20-thief",
+          "uid": "5d1f0b6e-7c33-4f0e-9a51-2a8c7e0d4b19"
+        },
+        "state": "unknown"
+      },
+      {
+        "authority": "checkJob",
+        "category": "destination",
+        "code": "CredentialBindingMismatch",
+        "expiresAt": "2026-10-09T13:16:30Z",
+        "gating": "blocking",
+        "id": "destination.credentialBound",
+        "message": "archiveWrite (Secret `lwd-primary-archive-write`: foreign binding): a run that presents it is refused before it builds a store; nothing was dialled [archiveWrite=CredentialBindingMismatch]",
+        "observedAt": "2026-10-09T13:01:30Z",
+        "remedy": "A Secret this destination names carries no `logweir-binding`, or one written for another object or endpoint, so the check presented it nowhere. Give this destination its own Secret: enter the credential through the console, or bind a Secret only it names with scripts/bind-credential.py (which refuses a Secret another object names). A Secret two objects name is an incident to investigate; never bind it to this one (docs/kubernetes.md §20.10).",
+        "scope": {
+          "kind": "BackupDestination",
+          "name": "fx20-thief",
+          "uid": "5d1f0b6e-7c33-4f0e-9a51-2a8c7e0d4b19"
+        },
+        "state": "notReady"
+      },
+      {
+        "authority": "checkJob",
+        "category": "runner",
+        "code": "ContractSupported",
+        "expiresAt": "2026-10-09T13:16:30Z",
+        "gating": "blocking",
+        "id": "runner.contract",
+        "message": "this runner implements check contract version 1",
+        "observedAt": "2026-10-09T13:01:30Z",
+        "state": "ready"
+      }
+    ],
+    "conditions": [],
+    "createdAt": "2026-10-09T13:01:29Z",
+    "detailsAvailable": false,
+    "executionOnly": [
+      {
+        "id": "destination.archivePrefixWritable",
+        "note": "the archive prefix `poc` is not write-probed: a check writes only its own readiness marker under `logweir/readiness/`, which proves nothing about the archive prefix, so the archive-write grant is verified by the run itself"
+      }
+    ],
+    "expiresAt": "2026-10-09T13:16:30Z",
+    "id": "pf-fx20c-thief",
+    "namespace": "team-a",
+    "observedAt": "2026-10-09T13:01:35Z",
+    "operation": "destinationAccess",
+    "reason": "NotReady",
+    "stale": false,
+    "staleBasis": [],
+    "staleReasons": [],
+    "state": "notReady",
+    "terminal": true,
+    "warnings": []
+  }
+}

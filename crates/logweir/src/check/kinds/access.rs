@@ -378,12 +378,144 @@ pub fn destination_checks(
     }
 }
 
+/// The per-grant fact value of a grant whose binding matched.
+pub const GRANT_BOUND: &str = "bound";
+
+/// FX-20c: `destination.credentialBound` — whether EVERY Secret-backed grant
+/// the plan lists ([`DestinationPlan::grant_bindings`]) carries the binding
+/// its destination expects, compared in the pod through
+/// [`logweir_core::credential_binding::check_grant_binding`]: the same
+/// comparison, over the same Secret key, that every runner makes before it
+/// builds a store (`STORE_BINDING_PAIRS`).
+///
+/// # Why a row of its own, and why it is blocking
+///
+/// The per-role rows above answer "may this principal do this" with a
+/// request, and the `archiveWrite` row may not make one at all. Before this
+/// row a destination whose only grant was another destination's
+/// `archiveWrite` Secret tested READY while every backup was refused
+/// (PoC batch 4, FX-20 F6). The binding needs no request: it is a public value
+/// beside the credential, compared here and never presented anywhere. So this
+/// row answers it for every listed grant, probed or not, and a foreign grant
+/// makes the verdict `notReady` — readiness is never READY for a destination
+/// a run would refuse.
+///
+/// # Per grant, by name
+///
+/// The message LEADS with one compact entry per refused grant — its
+/// `spec.access` field, its Secret, and whether the binding was absent or
+/// foreign — so the per-grant answer survives the 512-character cap and the
+/// facts the controller folds in after it (review LOW-1). The destination is
+/// named once, by the row's scope; only a row spanning two destinations (a
+/// restore's source and evidence) names it per grant. The scope is the first
+/// REFUSED grant's destination (review LOW-3). The facts carry one
+/// `<grant>=bound|CredentialBindingMismatch` per listed grant. Neither the
+/// projected nor the expected value is ever written, and the remedy never
+/// suggests binding a refused Secret to this destination (review LOW-2).
+///
+/// `None` when no plan lists a grant (no Secret-backed grant, or a controller
+/// that predates FX-20c): `CheckRequest::compares_grant_bindings` is false and
+/// the controller expects no such row.
+#[must_use]
+pub fn credential_bound_row(
+    plans: &[&DestinationPlan],
+    wiring: &dyn Wiring,
+) -> Option<CheckOutcome> {
+    use logweir_core::credential_binding::{check_grant_binding, grant_field};
+    let now = wiring.now();
+    let get = |name: &str| wiring.env(name);
+    let spans = plans
+        .iter()
+        .filter(|p| !p.grant_bindings.is_empty())
+        .count()
+        > 1;
+    let mut refused: Vec<String> = Vec::new();
+    let mut refused_scope: Option<&DestinationPlan> = None;
+    let mut facts: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut checked = 0usize;
+    for plan in plans {
+        for grant in &plan.grant_bindings {
+            checked += 1;
+            let field = grant_field(grant.role);
+            match check_grant_binding(grant.role, &get) {
+                Ok(()) => facts.push((field, GRANT_BOUND)),
+                Err(refusal) => {
+                    facts.push((field, CheckCode::CredentialBindingMismatch.as_str()));
+                    refused_scope.get_or_insert(plan);
+                    let of = if spans {
+                        format!(" of `{}`", plan.name)
+                    } else {
+                        String::new()
+                    };
+                    refused.push(format!(
+                        "{field}{of} (Secret `{}`: {})",
+                        grant.secret_name,
+                        if refusal.absent {
+                            "no binding"
+                        } else {
+                            "foreign binding"
+                        }
+                    ));
+                }
+            }
+        }
+    }
+    if checked == 0 {
+        return None;
+    }
+    let row = if refused.is_empty() {
+        let row = ready(
+            CheckId::DestinationCredentialBound,
+            CheckCode::CredentialBound,
+            now,
+        )
+        .with_message(&format!(
+            "every Secret-backed grant this check covers carries the binding its destination \
+             expects ({checked} compared in the check pod; nothing was dialled to learn it)"
+        ));
+        // ONE DESTINATION, ONE SCOPE; a row about two names neither and takes
+        // the check Job's, as every row without a better referent does.
+        match plans
+            .iter()
+            .filter(|p| !p.grant_bindings.is_empty())
+            .collect::<Vec<_>>()[..]
+        {
+            [only] => row.with_scope(scope(only)),
+            _ => row,
+        }
+    } else {
+        catalogue::outcome(
+            CheckId::DestinationCredentialBound,
+            logweir_core::check_contract::CheckState::NotReady,
+            CheckCode::CredentialBindingMismatch,
+            now,
+        )
+        .with_message(&format!(
+            "{}: a run that presents {} is refused before it builds a store; nothing was dialled",
+            refused.join("; "),
+            if refused.len() == 1 { "it" } else { "one" },
+        ))
+        .with_remedy(remedy_for(CheckCode::CredentialBindingMismatch))
+        .with_scope(scope(refused_scope?))
+    };
+    let mut row = row;
+    for (field, verdict) in facts {
+        row = row.with_fact(field, verdict);
+    }
+    Some(row)
+}
+
 /// Run one `destinationAccess`.
 #[must_use]
 pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadline) -> Emission {
     let now = wiring.now();
     let mut result = CheckResult::new(CheckPlanKind::DestinationAccess);
     result.checks.push(super::runner_contract(now));
+    // FX-20c: first, and with no request — EVERY grant the destination
+    // configures, whichever roles this check exercises.
+    if let Some(row) = credential_bound_row(&[&req.destination], wiring) {
+        result.checks.push(row);
+    }
     destination_checks(
         &DestinationProbe {
             destination: &req.destination,

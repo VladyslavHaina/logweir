@@ -1546,3 +1546,107 @@ async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
         .await;
     assert_eq!(created.status.as_u16(), 201, "{}", created.text());
 }
+
+/// **FX-20c: the API answers a destination's Test access whose binding row
+/// refused, by grant.** The PoC batch 4 F6 thief, after the fix: every
+/// controller and pod row is ready, `destination.archivePrefixWritable` is
+/// execution-only, and `destination.credentialBound` is `notReady`,
+/// `CredentialBindingMismatch`, naming `archiveWrite` and the Secret. The
+/// preflight read carries that row unchanged under `checks` and the verdict
+/// `notReady`; the destination read's `lastTest` says `notReady`.
+///
+/// BOTH SIDES READ ONE FIXTURE: `ui/tests/fixtures/console/
+/// preflight-binding-mismatch.json` is what `ui/tests/credential-binding.spec.js`
+/// renders, and the runner's own row (`crates/logweir/tests/
+/// check_grant_binding.rs`) is held to its message. The status is seeded from
+/// the fixture's rows (the CRD's `checks[]` keys are the view's), so a field
+/// the projection renames, drops or re-maps fails here.
+#[tokio::test]
+async fn fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+    let fixture: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
+    let item = &fixture["item"];
+    let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "fx20-thief");
+    app.fake.seed(
+        "preflights",
+        NS_A,
+        json!({
+            "metadata": {
+                "name": item["id"],
+                "uid": "uid-pf-fx20c-thief",
+                "labels": {
+                    "logweir.dev/destination": "fx20-thief",
+                    "logweir.dev/destination-test": "fx20-thief"
+                },
+                "creationTimestamp": item["createdAt"]
+            },
+            "spec": {
+                "request": {
+                    "operation": "DestinationAccess",
+                    "destinationAccess": {"destinationRef": {"name": "fx20-thief"}, "roles": ["ArchiveWrite"]},
+                    "timeoutSeconds": 120
+                },
+                "cancelRequested": false
+            },
+            "status": {
+                "phase": "Completed",
+                "reason": item["reason"],
+                "observedAt": item["observedAt"],
+                "binding": {
+                    "operation": "DestinationAccess",
+                    "inputsDigest": item["binding"]["inputsDigest"],
+                    "referents": []
+                },
+                "result": {
+                    "state": "notReady",
+                    "expiresAt": item["expiresAt"],
+                    "checks": item["checks"]
+                }
+            }
+        }),
+    );
+    let read = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/preflights/{}",
+            item["id"].as_str().expect("id")
+        ))
+        .await;
+    assert_eq!(read.status.as_u16(), 200, "{}", read.text());
+    let got = &read.json()["item"];
+    assert_eq!(got["state"], "notReady");
+    assert_eq!(got["operation"], item["operation"]);
+    assert_eq!(
+        got["checks"], item["checks"],
+        "the projection changed a row the console renders"
+    );
+    assert_eq!(got["executionOnly"], item["executionOnly"]);
+    assert_eq!(got["warnings"], item["warnings"]);
+    let bound = got["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["id"] == "destination.credentialBound")
+        .expect("the binding row is answered");
+    assert_eq!(bound["state"], "notReady");
+    assert_eq!(bound["gating"], "blocking");
+    assert_eq!(bound["code"], "CredentialBindingMismatch");
+    let message = bound["message"].as_str().expect("message");
+    assert!(
+        message.starts_with("archiveWrite (Secret `lwd-primary-archive-write`: foreign binding)"),
+        "{message}"
+    );
+
+    let destination = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/destinations/fx20-thief"
+        ))
+        .await;
+    assert_eq!(destination.status.as_u16(), 200, "{}", destination.text());
+    let last = &destination.json()["item"]["lastTest"];
+    assert_eq!(last["preflightId"], item["id"]);
+    assert_eq!(last["state"], "notReady");
+    app.fake.assert_strict();
+}

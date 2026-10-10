@@ -2082,11 +2082,18 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a stalled identity provider meets the provider deadline",
             "provider_timeout",
         ),
-        // FX-13a and FX-32 (2026-10-09, item 48): a sign-in state redeems
-        // once on every replica, and a replay is refused by the audit code an
-        // operator alerts on, before any token request.
+        // FX-20c (2026-10-09, item 48): a destination's Test access compares
+        // every grant's binding on a blocking row, and is never READY for a
+        // destination a backup would refuse.
         (
-            "a sign-in state redeems once on every replica",
+            "Test access compares every grant's binding",
+            "destination.credentialBound",
+        ),
+        // FX-13a and FX-32 (2026-10-09, item 49): a sign-in state is
+        // single-use on each replica, and a replay there is refused under the
+        // audit code an operator alerts on, before any token request.
+        (
+            "a sign-in state is single-use on each replica",
             "login_state_replayed",
         ),
     ];

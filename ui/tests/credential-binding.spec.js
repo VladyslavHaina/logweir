@@ -13,6 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   CREATE_GRANT_SOURCES,
@@ -21,6 +22,7 @@ import {
   GRANT_SOURCES,
   renderDestinationForm,
   renderRotateForm,
+  renderTestPanel,
   validateDestination,
 } from "../pages/destinations.js";
 
@@ -80,4 +82,99 @@ test("fx20_the_inline_archive_secret_field_says_what_the_secret_must_carry", asy
   assert.ok(html.includes("name=\"archiveSecret\""), "the inline Secret field is on the form");
   assert.ok(html.includes("CredentialBindingMismatch"),
     "the field says what the Secret must carry, beside it");
+});
+
+// FX-20c: the destination's Test access renders the binding row a refused
+// grant produces -- the grant by its `spec.access` field, its destination, its
+// Secret, and whether the binding was absent or foreign -- under a verdict
+// that is not ready. The fixture is the one the product API's row
+// (`crates/logweir-api/tests/destinations.rs`,
+// `fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant`) sends
+// and the runner's message (`crates/logweir/tests/check_grant_binding.rs`) is
+// held to.
+const bindingMismatch = () => JSON.parse(readFileSync(
+  new URL("./fixtures/console/preflight-binding-mismatch.json", import.meta.url), "utf8")).item;
+
+function rowOf(html, id) {
+  const at = html.indexOf("<code>" + id + "</code>");
+  assert.notEqual(at, -1, id + " is rendered");
+  return html.slice(at, html.indexOf("</tr>", at));
+}
+
+test("fx20c_test_access_renders_the_refused_grant_by_name_under_a_not_ready_verdict", () => {
+  const item = bindingMismatch();
+  const html = renderTestPanel({ name: "fx20-thief" }, { test: item, mayOperate: true });
+  const headAt = html.indexOf("preflight-head");
+  const head = html.slice(headAt, html.indexOf("</p>", headAt));
+  assert.match(head, /not ready/);
+  assert.doesNotMatch(head, /badge-green/);
+  const row = rowOf(html, "destination.credentialBound");
+  assert.match(row, /CredentialBindingMismatch/);
+  assert.match(row, /badge-unverified">not ready/);
+  assert.match(row, new RegExp(
+    "data-field=\"message\">archiveWrite \\(Secret <code>lwd-primary-archive-write</code>: " +
+    "foreign binding\\)"));
+  // REVIEW LOW-2: the remedy gives this destination its own Secret, and never
+  // tells anyone to bind the refused Secret here.
+  assert.match(row, /remedy: .*its own Secret.*scripts\/bind-credential\.py/);
+  assert.doesNotMatch(row, /status\.credentialBinding/);
+  assert.match(row, /archiveWrite=CredentialBindingMismatch/);
+  assert.match(row, /remedy: .*logweir-binding/);
+  assert.match(row, /scope: BackupDestination\/fx20-thief/);
+  // The archive-write row is still listed as knowable only at execution.
+  assert.match(html, /Only knowable at execution time/);
+
+  // CONTROL: the F6 result as it was BEFORE this row existed -- every other
+  // row ready, the aggregate `ready` -- names no grant and reads green. The
+  // assertions above fail on it.
+  const before = Object.assign({}, item, {
+    state: "ready",
+    reason: "Ready",
+    checks: item.checks.filter((c) => c.id !== "destination.credentialBound"),
+  });
+  const old = renderTestPanel({ name: "fx20-thief" }, { test: before, mayOperate: true });
+  assert.doesNotMatch(old, /credentialBound|lwd-primary-archive-write|CredentialBindingMismatch/);
+  assert.match(old, /badge-green">ready/);
+});
+
+// FX-20c review M-1: a RetentionPolicy whose run was refused on its
+// credential's binding is published `enforcement: RecommendationOnly` and
+// `guarantees.ageExpiry: NotEnforced` (with `Enforced=False/
+// CredentialBindingMismatch`) by the controller
+// (`crates/weirkeeper/tests/retention_policy_controller.rs`,
+// `fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run`). The panel
+// then says nothing is deleted, never "enforced by Logweir", and says why.
+test("fx20c_a_binding_refused_retention_policy_is_not_shown_as_enforced", async () => {
+  const { renderEnforcement, retentionSentenceFor } = await import("../pages/schedules.js");
+  const base = JSON.parse(readFileSync(
+    new URL("./fixtures/d3/retention-enforce.json", import.meta.url), "utf8"));
+  const shaped = (enforcement, ageExpiry, enforced) => {
+    const policy = JSON.parse(JSON.stringify(base));
+    policy.status.enforcement = enforcement;
+    policy.status.guarantees.ageExpiry = ageExpiry;
+    policy.status.conditions = policy.status.conditions
+      .filter((c) => c.type !== "Enforced" && c.type !== "EnforcementDegraded")
+      .concat([enforced]);
+    return policy;
+  };
+  const refusal = {
+    type: "Enforced", status: "False", reason: "CredentialBindingMismatch",
+    message: "retention run r1 REFUSED a credential before building any handle " +
+      "(CredentialBindingMismatch). Nothing was deleted.",
+  };
+  const refused = shaped("RecommendationOnly", "NotEnforced", refusal);
+  const html = renderEnforcement({}, refused) + retentionSentenceFor({}, refused);
+  assert.match(html, /<dt>age expiry<\/dt><dd>not enforced<\/dd>/);
+  assert.match(html, /<dt>what is happening<\/dt><dd>RecommendationOnly<\/dd>/);
+  assert.doesNotMatch(html, /An isolated Logweir retention worker deletes/);
+  assert.match(html, /Logweir never deletes from your archive/);
+  assert.match(html, /data-enforced-refusal="CredentialBindingMismatch"/);
+  assert.match(html, /Not enforcing: Enforced=False CredentialBindingMismatch: retention run r1/);
+
+  // CONTROL: the fields the first landing left behind read "enforced".
+  const before = shaped("LogweirWorker", "LogweirEnforced", refusal);
+  const old = renderEnforcement({}, before) + retentionSentenceFor({}, before);
+  assert.match(old, /<dt>age expiry<\/dt><dd>enforced by Logweir<\/dd>/);
+  assert.match(old, /An isolated Logweir retention worker deletes/);
+  assert.doesNotMatch(old, /data-enforced-refusal/);
 });
