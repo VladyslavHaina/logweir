@@ -469,6 +469,23 @@ was deleted, and its `at` is when those findings were first reached, not when
 the controller last looked (FX-29). The enforcement record is create-only and **unsigned**, verified by
 the digest beside it; no surface calls it signed.
 
+**A retention evaluation's four counts add up, and a point the per-run ceiling
+held back is never published as kept** (FX-22). `lastEvaluation.pointsEvaluated`
+= `keptCount` + `candidateCount` + `truncatedByCap` + the skipped points.
+`candidateCount` is **this plan**, at most `maxDeletionsPerRun`;
+`truncatedByCap` is how many more points the rules would remove and the ceiling
+left out of it, and those points are in none of the lists. The counts are the
+`RetentionPolicy` status's own and not the number of rows: each list is still
+cut at 200 rows, with `truncated: true`. **`keptCount` and `truncatedByCap` are
+absent, never `0`, when the status does not record them** — an evaluation an
+older controller wrote, or one whose counts do not add up — and then `kept`,
+`maxDeletionsPerRun` and `viewIncomplete` are absent too: that controller's
+`kept` list holds the points the ceiling held back, so the API does not pass it
+on as kept and derives no count from it. `viewIncomplete: true` says the catalog
+view the evaluation read was not the whole archive (a window of
+`sync.viewLimit`, or an unfinished walk), so points outside it were not
+evaluated and are in none of the counts.
+
 **A catalog's view is a window, and the response says so.** The durable truth is
 in object storage; Kubernetes holds the newest `sync.viewLimit` points in
 immutable `ConfigMap` pages owned by the sync Job, and when that Job's TTL

@@ -2919,7 +2919,16 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   `Enforced=False` reason as a complaint (`data-enforced-refusal`): a run
   refused on its credential's binding leaves it `RecommendationOnly` with
   `ageExpiry: NotEnforced` until a human gives it its own Secret (FX-20c), and
-  that reason is the only place that says why. **The covering policy is named only by the schedule report's
+  that reason is the only place that says why. **The last evaluation is four
+  numbers that add up** (FX-22): points evaluated, kept, in this plan, and
+  held back by the per-run ceiling, read through `evaluationAccounting`
+  (`render.js`). A point the ceiling held back is due, not kept, and the panel
+  says so in a sentence when the count is above zero; a count is never read
+  off a list, so an evaluation that does not record the accounting (an older
+  controller's, or counts that do not add up) reads `not recorded` in both
+  cells, and `viewIncomplete: true` prints that the catalog view was not the
+  whole archive. Legacy mode reads the custom resource and applies the same
+  sum. **The covering policy is named only by the schedule report's
   `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination

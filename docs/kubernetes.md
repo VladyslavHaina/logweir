@@ -2287,6 +2287,73 @@ pass for as long as it existed. The `EVALUATED` printer column therefore reads
 `Ready` and `Evaluated` conditions' business, and a new plan digest still moves
 `at` the moment it is rendered.
 
+**`status.lastEvaluation` counts every point once, and a point the per-run
+ceiling held back is not "kept"** (FX-22). Four numbers add up:
+
+| field | what it counts |
+|---|---|
+| `pointsEvaluated` | every point of this destination in the catalog view the evaluation read |
+| `keptCount` | the points that stay: the rules keep them, or something protects them (those are in `protected` too) |
+| `candidateCount` | the points **this plan** would remove, at most the ceiling |
+| `truncatedByCap` | the points the rules would remove, that nothing protects, and that the ceiling left out of this plan |
+
+`pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` + the
+points in `skipped`. `maxDeletionsPerRun` beside them is the ceiling the
+evaluation applied: `spec.enforcement.maxDeletionsPerRun`, or the default of 50
+for a policy with no `spec.enforcement`, because a `Report` preview is bounded
+as a run would be. A held-back point is **due, not kept**. It is in no list
+(`kept` names only what stays, `candidates` only this plan), no run deletes it
+until a later plan names it, and a plan takes the due points newest first, so
+the ones held back are the oldest. The `Evaluated` message says it in words, and
+`kubectl get retentionpolicy` prints a `HELD-BACK` column beside `CANDIDATES`:
+
+```text
+371 point(s) evaluated at this destination: 10 kept, 50 candidate(s), 0 protected,
+0 skipped. 311 more point(s) are due under the rules and held back by the per-run
+ceiling (maxDeletionsPerRun 50): they are not kept and not in this plan, and they
+stay due until a later plan names them. …
+```
+
+Until this build those points were listed under `kept` and nothing published
+their number: with 371 points a policy read "321 kept, 50 candidate(s)" for
+`keepLast: 300` and for `keepLast: 10` alike. `truncatedByCap: 0` means the plan
+is everything the rules would remove. An **absent** `truncatedByCap` or
+`keptCount` means an older controller wrote the block: its `kept` list may hold
+held-back points, so the product API and the console publish no kept count and
+no `kept` rows for it, and never derive a count from that list. The plan
+document, `planSha256` and what a run deletes are unchanged, so an approved
+digest stays approved. To clear a backlog in fewer runs, raise
+`spec.enforcement.maxDeletionsPerRun` (1–500).
+
+**`status.lastEvaluation.viewIncomplete: true` says the evaluation did not see
+the whole archive.** The evaluation reads the catalog's view (§7d), and the
+catalog says when that view is not every point: `status.truncated` (the view is
+a window of the newest `spec.sync.viewLimit` points), or
+`status.cursor.complete: false` (the sync's object budget ran out and its pages
+were published anyway, `Synced=False/ScanIncomplete`). Points outside the view
+are not evaluated, are in none of the four counts, and are **never candidates
+while they stay outside it**. In a window those are the oldest points, the ones
+an age rule is for, so a policy over an archive larger than its catalog's
+`viewLimit` does not expire them: raise `viewLimit` (100–5000), or let the sync
+finish. The `Evaluated` message quotes the catalog's own numbers. `false` means
+the catalog said its walk finished and its view holds every point it counted;
+absent means the catalog did not say. The evaluation of the points that are in
+the view is unchanged, and so is the plan.
+
+**Upgrade and rollback of these four members.** They are additive `status`
+fields: **apply the CRDs before rolling the controller**, as for every upgrade.
+The first evaluation after the upgrade rewrites each policy's status once:
+`kept` loses the held-back points and the four members appear
+(`lastEvaluation.at` moves only when `kept` changed). A controller rolled out
+ahead of its CRD has the four members pruned by the API server on every write;
+it leaves `lastEvaluation.at` where it was and sends one patch per pass that
+changes nothing, until the CRD is applied. After a rollback of the controller
+image alone, the older controller rewrites `pointsEvaluated`, `candidateCount`
+and the lists and cannot remove the four members, which then describe the newer
+controller's last evaluation. The product API and the console read the block as
+not recorded once the counts stop adding up; with `kubectl`, re-apply the older
+CRDs to prune them, or ignore the four members while the older controller runs.
+
 **A retention run is recorded on the object BEFORE its Job exists.** The order
 is: the run record (`status.lastEnforcement.runId`, `startedAt`, `planSha256`,
 with every terminal field of the previous run cleared), and only then

@@ -120,6 +120,11 @@ console rows over one shared fixture; it changes the controller and the
 runner (the check plan, a new check row, and a `RetentionPolicy`'s `Enforced`
 after a binding refusal), and the PoC upgrade that carries
 it re-creates PoC batch 4's F6 thief destination, tests it, and deletes it.
+Item 49 is fix-now row FX-22, proven by evaluation, controller, API and console
+rows over one chain of fixtures; it changes the controller, the
+`RetentionPolicy` CRD (four additive status fields and a printer column), the
+product API and the console, and the PoC upgrade that carries it reads a
+`Report` policy's counts at `keepLast: 300` and at `keepLast: 10`.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -1484,6 +1489,77 @@ refused retention run's `Enforced` flips back to `True` on the next pass), and
 every run still refuses a foreign Secret. Nothing is stored, so nothing needs
 converting.
 
+#### 49. A `RetentionPolicy`'s status says what the per-run ceiling held back, and no longer counts it as kept (FX-22)
+
+**Changed.** A retention plan names at most `maxDeletionsPerRun` points: 50 by
+default, and 50 for every `Report` policy. The points the rules would remove
+beyond that were listed under `status.lastEvaluation.kept`, and nothing
+published how many there were. On the PoC, with 371 points, a `Report` policy
+read "321 kept, 50 candidate(s)" for `keepLast: 300` and for `keepLast: 10`
+alike. Now:
+
+- `status.lastEvaluation` carries four counts that add up: `pointsEvaluated` =
+  `keptCount` + `candidateCount` + `truncatedByCap` + the points in `skipped`.
+  `candidateCount` is this plan; `truncatedByCap` is how many more points are
+  due and held back by the ceiling, and `maxDeletionsPerRun` is the ceiling the
+  evaluation applied. A held-back point is in no list, and `kept` names only
+  what the rules or a protection keep. The same 371 points read 300 kept, 50 in
+  the plan and 21 held back, and 10, 50 and 311.
+- The `Evaluated` message says it in words, and `kubectl get retentionpolicy`
+  prints a `HELD-BACK` column beside `CANDIDATES`.
+- The product API (`lastEvaluation.keptCount`, `truncatedByCap`,
+  `maxDeletionsPerRun`) and the console's retention panel ("kept", "in this
+  plan", "held back by the per-run ceiling") read the same numbers. For an
+  evaluation that does not record them (an older controller's, or counts that
+  do not add up) they publish no kept count and no `kept` rows and say "not
+  recorded"; they never count that list.
+- `status.lastEvaluation.viewIncomplete`, and the same field in the API and
+  the console, says when the catalog view the evaluation read was not the whole
+  archive: a window of `sync.viewLimit` points
+  (`RecoveryCatalog.status.truncated`), or the pages of a walk its object
+  budget stopped (`status.cursor.complete: false`). Points outside the view
+  were never evaluated and never candidates, and still are not; the status
+  used to read `EvaluationComplete` with nothing saying so.
+
+What a plan contains, its `planSha256` and what a run deletes are unchanged, so
+an approved digest stays approved ([kubernetes.md](kubernetes.md) §7f,
+[api.md](api.md)).
+**Do:** apply the CRDs before the controller rolls, as for every upgrade (four
+additive `status` fields and one printer column); nothing else is required.
+The first evaluation after the upgrade rewrites each policy's status once. If
+a policy's `HELD-BACK` is above 0 and the backlog should go in fewer runs,
+raise `spec.enforcement.maxDeletionsPerRun` (1–500). If `viewIncomplete` is
+`true`, raise the catalog's `spec.sync.viewLimit` (100–5000) or let its sync
+finish: this policy does not expire a point outside the view.
+**Scope:** the evaluation at the PoC's own size, 371 points under `keepLast:
+300` and `keepLast: 10`, with a plan under the ceiling, one exactly at it and
+one point over as controls, and a held-back point in neither `kept` nor the
+plan; the controller's status and `Evaluated` message for both policies
+through a real reconcile over a fake API, the policy's own ceiling published,
+and `truncatedByCap: 0` written for a plan under the ceiling; the status
+written only when its content changes, over a truncated plan, with a real
+change still written once; a controller ahead of its CRD (the four fields
+pruned) leaving `lastEvaluation.at` alone; an older controller's status
+converted by one write; a windowed view, an unfinished walk, and their
+controls (`crates/weirkeeper/tests/retention_policy_controller.rs`). The
+product API through its router, with the counts that are not the number of
+rows, an evaluation without the accounting, and counts that do not add up
+(`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
+console and legacy mode (`ui/tests/d3.spec.js`). The three read one chain of
+fixtures: the two policies as the reconciler writes them, and the API's answer
+for those two objects, each held to its writer by a test. Each guard has a
+mutant that fails a row. Not proven live in this branch: the PoC upgrade that
+carries it creates a `Report` policy over the PoC's catalog and reads its
+counts at both `keepLast` values. The console cannot show that row live: its
+panel renders a policy only through a schedule report's `supersededBy`, which
+no controller writes yet.
+**Rollback:** an older controller lists the held-back points under `kept`
+again and does not rewrite the four new fields, which keep the newer
+controller's last values beside lists that move. The product API and the
+console read such a block as not recorded once its counts stop adding up; with
+`kubectl`, re-apply the older CRDs, which prunes the four fields, or ignore
+them while the older controller runs. Plans and approvals are unaffected.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -1549,7 +1625,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47 and 48, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48 and 49, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1582,7 +1658,10 @@ and controller), the product API and the console, and needs nothing; item 47
 changes the console only and needs nothing; item 48
 changes the controller and the runner together (the check plan and a check
 row, and the retention controller's `Enforced` after a binding refusal) and
-needs nothing beyond rolling them together. To roll back to
+needs nothing beyond rolling them together; item 49 changes the controller,
+the `RetentionPolicy` CRD (four additive status fields and a printer column),
+the product API and the console, and needs nothing beyond the CRDs applied
+before the controller rolls. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
