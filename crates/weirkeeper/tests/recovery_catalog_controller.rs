@@ -580,6 +580,20 @@ fn harvest_routes(
         route("GET", "/log", log),
         route("POST", "/configmaps", empty_config_map()),
         status_route(),
+        // The Job's own plan `ConfigMap`, read to learn whether its walk began
+        // at the start of the archive (FX-40 review D1). Gone here, so the
+        // view is published as a window: these rows are about the record.
+        Route {
+            method: "GET",
+            path_suffix: leak(format!(
+                "/configmaps/{}",
+                check::plan::plan_config_map_name(stem)
+            )),
+            status: 404,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                         "reason": "NotFound", "code": 404, "message": "not found"})
+            .to_string(),
+        },
     ]
 }
 
