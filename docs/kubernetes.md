@@ -1648,6 +1648,12 @@ listed by no entry. Now:
   `backupId`, `runId` and `receiptKey` are empty, the instants are 0, and
   there is no window, location or topic list. It is never `Available`, so
   never selectable, and nothing reads anything else for it;
+- the view is `viewLimit` entries. When it is full, an `Available` point
+  takes the place of an entry that only failed to be read (`Missing`, a
+  read that did not answer, a document over its bound, `UnsupportedFormat`),
+  never of a signature that did not verify, a `Conflict` or bytes that are
+  not the document their key names. The counts name every point, and
+  `status.truncated` says the view is a window;
 - `catalog-counts` gains `unreadableOverReadCap` and `unreadableMalformed`,
   the two parts of `unreadable` that are not a permission or transport
   failure, and the `Synced` condition's message counts each by name;
