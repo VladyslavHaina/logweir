@@ -267,6 +267,41 @@ refusal of §0.2 and §5.5:
 The evidence (compose rows, mutants, the older-runner and older-reader runs)
 is in the PROD-11.1b report (`claude/prod-11-1b.result.md`).
 
+### 12.1 A restore under the original topic names restores whole topics (PROD-15.1, 2026-10-09)
+
+PROD-15.1 (a restore under the source's ORIGINAL topic names, into absent
+topics) merged after this row, and the orchestrator ruled the one place the
+two meet, to the safer side:
+
+- **A partition subset is refused beside `target.topic_naming.original_name`**,
+  `OriginalNameNeedsWholeTopics`, in `logweir_core::original_name::refuse_shape`,
+  so at every boundary that calls the rule: runner startup and phase 0,
+  `logweir drill approve`, both readiness checks, controller admission and
+  reconcile. There is no CEL rule (the `Restore` CRD declares no partitions).
+  The creation step creates each target topic with the archive's FULL
+  partition count (`phase3_diff::restore_partition_count`), so a subset under
+  an original name would leave a production-named topic with unselected
+  partitions empty, signed as covered (PS-5 makes "covered" mean every
+  SELECTED partition), and never finishable: the name then exists, and a
+  restore into an existing topic stays refused. A subset under a PREFIX is
+  unchanged.
+- **A stated window stays allowed** under an original name, a start
+  (`"<start>/<end>"`) or an end: whole partitions, bounded in time. Such a run
+  signs the 1.x line: a start-only `source.selection` (§5.1) beside
+  `target.original_name`, format 1.8.0.
+- **A 1.x minor after 1.7.0 and the 2.x line.** `defines_format_1_minor` reads
+  every 2.x document as defining format 1's optional blocks up to 1.7.0. The
+  1.8.0 block (`target.original_name`) is NOT carried over: 2.0.0 is a
+  partition-subset restore's document and such a restore is never an
+  original-name one, so the block never appears in a 2.x document. Arm ON-1
+  reads major 1 on purpose, arm ON-14 refuses the block beside
+  `source.selection.partitions` in both readers, and
+  `schemas/logweir-drill-scorecard-2.0.0.json` is byte for byte the file this
+  row published (the 1.8.0 file is format 1's newest minor: the frozen 1.7.0
+  file plus the block). A later optional block that subset restores should
+  also carry must say so and move 2.x with it
+  ([stability.md](../../stability.md#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)).
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).

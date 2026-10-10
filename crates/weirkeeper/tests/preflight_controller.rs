@@ -1031,6 +1031,23 @@ fn the_mapped_names_walk_phase_zeros_four_refusals() {
     assert_ne!(original, sampled_original);
     let row = plan_names_row(&PlanFacts::of(original.as_bytes(), None), now());
     assert_eq!(row.code, CheckCode::MappedNamesLegal, "{}", row.message);
+    // PROD-15.1 after PROD-11.1b: such a restore restores WHOLE topics. The
+    // complete plan with a partition subset is refused in the runner's words;
+    // the same subset under a prefix is legal, as on main. KILLS: readiness
+    // saying legal for a subset plan the runner refuses at phase 0.
+    let subset =
+        "restore:\n  point_in_time: \"../2026-09-14T00:00:00Z\"\n  partitions:\n    orders: [0]\n";
+    let subset_original = format!("{original}{subset}");
+    let row = plan_names_row(&PlanFacts::of(subset_original.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::TopicMappingIdentity, "{}", row.message);
+    assert!(
+        row.message.contains("OriginalNameNeedsWholeTopics"),
+        "{}",
+        row.message
+    );
+    let subset_prefixed = format!("{}{subset}", plan_yaml("restore-", "s3-bucket"));
+    let row = plan_names_row(&PlanFacts::of(subset_prefixed.as_bytes(), None), now());
+    assert_eq!(row.code, CheckCode::MappedNamesLegal, "{}", row.message);
     let in_scratch = PlanFacts::of(
         plan_yaml("drill-", "s3-bucket")
             .replace(

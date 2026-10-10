@@ -518,11 +518,23 @@ archive does not hold as unexpected, by its target offset
 ([`sample.coverage`](#samplecoverage-and-samplecomplete_max_records-prod-081)). `sample.complete_max_records`
 may bound it; a run the bound stops signs `covered: false`, never a pass.
 
+**It restores whole topics.** A plan that carries the block and
+[`restore.partitions`](#a-partition-subset-restorepartitions-prod-111b) is
+refused by name, `OriginalNameNeedsWholeTopics`, at exit 3 before the runner
+dials anything (`logweir drill approve` refuses to sign it). The run would
+create each topic under its own name with every partition the archive lists
+and fill only the selected ones, and the partitions left out could never be
+restored under that name afterwards, because a restore into an existing topic
+is refused. A stated window, a start
+(`point_in_time: "<start>/<end>"`) or an end, stays allowed: it restores every
+partition, bounded in time. To restore a subset, restore it under a prefix.
+
 **What the runner proves at phase 0** (exit 3, `refusal-reason=GuardRefused`,
 each message opening with the condition's name; nothing created): the mode is
 `newTopic` and `prefix` is `""` (`OriginalNameNotNewTopic`,
 `OriginalNamePrefixNotEmpty`); the plan asks for complete verification
-(`OriginalNameNeedsCompleteCoverage`); every restored name is absent on the
+(`OriginalNameNeedsCompleteCoverage`) and states no partition subset
+(`OriginalNameNeedsWholeTopics`); every restored name is absent on the
 target;
 the target is not the source cluster — the source cluster id the bound
 point's VERIFIED receipt measured differs from the target's (the allowlist

@@ -2247,9 +2247,9 @@ done
 echo "check-verifier-parity: both readers accept $SCORECARD_SUBSET_VERSION partition-subset scorecards, say the same about the subset, what a narrowed sampled pass proves and what each verdict proves of the other partitions and before a start, read major 2 only for that shape, and refuse each of PS-1 to PS-5 with the same words"
 
 # ---------------------------------------------------------------------------
-# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-13
+# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-14
 # ---------------------------------------------------------------------------
-# Three documents both readers ACCEPT (each over the COMPLETE verification an
+# Four documents both readers ACCEPT (each over the COMPLETE verification an
 # original-name restore requires), and the two `original name:` lines they
 # print compared line for line:
 #
@@ -2257,11 +2257,14 @@ echo "check-verifier-parity: both readers accept $SCORECARD_SUBSET_VERSION parti
 #   owner-path  autoCreateDisabled with no known source, an owner found in
 #               KafkaTopic resources (named by digest), on the owner path
 #   typed       a one-person confirmation with the names typed (OD-10)
+#   windowed    whole topics from a stated window start (a window is allowed)
 #
-# and fourteen both readers REFUSE with the same full text: one per arm ON-1
-# to ON-12 and two for ON-13 (a sampled verification beside the block, and a
-# pass that records none). Generated and signed here with the throwaway
-# fixture key, like the selection loop above.
+# and fifteen both readers REFUSE with the same full text: one per arm ON-1
+# to ON-12, two for ON-13 (a sampled verification beside the block, and a
+# pass that records none) and one for ON-14 (the block in a 2.0.0
+# partition-subset document: an original-name restore restores whole topics).
+# Generated and signed here with the throwaway fixture key, like the selection
+# loop above.
 #
 # The scorecard format that defines `target.original_name` —
 # `FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; a
@@ -2364,6 +2367,22 @@ cases = {
     "on13-sampled": doc(verification="sampled"),
     "on13-unverified-pass": doc(verification=None),
 }
+
+# A stated window START beside the block: whole partitions, bounded in time.
+END = complete_block()["complete"]["window"]["end_ms"]
+windowed = doc()
+windowed["source"]["selection"] = {"window_start_ms": END - 3_600_000, "window_end_ms": END}
+windowed["integrity"]["verification"]["complete"]["window"]["start_ms"] = END - 3_600_000
+cases["windowed"] = windowed
+# ON-14: the same document as a 2.0.0 partition-subset restore of exactly the
+# partitions its complete block compared. Valid as either; refused as both.
+subset = doc(version="2.0.0")
+subset["source"]["selection"] = {
+    "window_end_ms": END,
+    "partitions": [{"topic": "orders", "partitions": [0, 1]}],
+    "engine_runs": 1,
+}
+cases["on14-subset"] = subset
 for name, d in cases.items():
     payload = (json.dumps(d, indent=2) + "\n").encode()
     t = pt.encode()
@@ -2377,7 +2396,7 @@ for name, d in cases.items():
 PYEOF
 
 on_head="original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by governed; "
-for name in plain owner-path typed; do
+for name in plain owner-path typed windowed; do
     doc="$tmp/scorecard-on/$name.json"
     sig="$tmp/scorecard-on/$name.sig"
     set +e
@@ -2401,7 +2420,7 @@ for name in plain owner-path typed; do
   python: $py_lines"
     fi
     case "$name" in
-        plain) want="${on_head}the target cluster is not the source cluster (SOURCE-CLUSTER)
+        plain|windowed) want="${on_head}the target cluster is not the source cluster (SOURCE-CLUSTER)
 original name: declarative owners looked for in plan: none found" ;;
         owner-path) want="${on_head}no source cluster id was known and every broker reported auto.create.topics.enable=false
 original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path; KafkaTopic resources sha256:0000000000000000000000000000000000000000000000000000000000000000" ;;
@@ -2417,7 +2436,7 @@ $rust_lines"
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name)"
 done
 
-for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest on13-sampled on13-unverified-pass; do
+for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest on13-sampled on13-unverified-pass on14-subset; do
     doc="$tmp/scorecard-on/$name.json"
     sig="$tmp/scorecard-on/$name.sig"
     set +e
@@ -2436,7 +2455,8 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
     rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
     py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
     case "$name" in
-        on1-under-1.7.0) want_msg="target.original_name is present but format_version \"1.7.0\" predates it: the block is defined from $SCORECARD_ORIGINAL_NAME_VERSION" ;;
+        on1-under-1.7.0) want_msg="target.original_name is present but format_version \"1.7.0\" does not define it: the block is format 1's, from $SCORECARD_ORIGINAL_NAME_VERSION, and no other major carries it" ;;
+        on14-subset) want_msg="target.original_name is present beside source.selection.partitions; a restore under the original topic names restores whole topics, never a partition subset" ;;
         on2-scratch) want_msg="target.original_name is present but target.mode is scratch; a scratch drill never restores under the original topic names" ;;
         on3-prefix) want_msg="target.original_name is present but target.topic_mapping_prefix is not empty; an original-name restore maps every topic onto its own name" ;;
         on4-subject) want_msg="target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject" ;;
@@ -2458,4 +2478,4 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the thirteen original-name arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the fourteen original-name arms with the same words"

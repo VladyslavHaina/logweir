@@ -330,6 +330,63 @@ fn a_sampled_original_name_restore_is_refused_before_any_job() {
     assert!(original_name_agrees(&ordinary).is_ok());
 }
 
+/// The original-name plan narrowed to a PARTITION SUBSET, in the one
+/// spelling PROD-11.1b's grammar accepts (the interval form).
+fn subset_original_plan() -> String {
+    let narrowed = ORIGINAL_PLAN.replace(
+        "restore:\n  point_in_time: \"2026-09-07T14:05:00Z\"\n",
+        "restore:\n  point_in_time: \"../2026-09-07T14:05:00Z\"\n  partitions:\n    orders: [0, 2]\n",
+    );
+    assert_ne!(narrowed, ORIGINAL_PLAN);
+    narrowed
+}
+
+/// **An original-name restore restores whole topics, and the controller says
+/// so before any Job** (the orchestrator's ruling of 2026-10-09, once
+/// PROD-11.1b allowed partition subsets). A Restore whose plan carries the
+/// block and `restore.partitions` is refused terminally,
+/// `ExecutionSpecInvalid`, its message opening with the runner's own token.
+/// There is no CEL half (the CRD declares no partitions), so this is the
+/// Kubernetes boundary. CONTROLS: the same plan without the subset agrees;
+/// the same plan from a stated window start agrees; a subset under a PREFIX
+/// agrees, as on main. KILLS: an admission that leaves the subset plan to the
+/// runner; applying the rule to a window or to a prefixed restore.
+#[test]
+fn a_subset_original_name_restore_is_refused_before_any_job() {
+    use weirkeeper::controllers::restore::coverage_agrees;
+
+    let subset = restore(&subset_original_plan(), Some(true), "");
+    assert!(coverage_agrees(&subset).is_ok());
+    match original_name_agrees(&subset) {
+        Err(RestoreError::Refused(state, message)) => {
+            assert_eq!(state, TERMINAL_STATE_EXECUTION_SPEC_INVALID);
+            assert!(
+                message.starts_with("OriginalNameNeedsWholeTopics: "),
+                "{message}"
+            );
+            assert!(message.contains("`orders`"), "{message}");
+            assert!(message.contains("no Job was created"), "{message}");
+        }
+        other => panic!("expected ExecutionSpecInvalid, got {other:?}"),
+    }
+    // CONTROL: the same plan without the subset.
+    assert!(original_name_agrees(&original_restore()).is_ok());
+    // CONTROL: whole topics from a stated window start.
+    let windowed = ORIGINAL_PLAN.replace(
+        "  point_in_time: \"2026-09-07T14:05:00Z\"\n",
+        "  point_in_time: \"2026-09-07T13:00:00Z/2026-09-07T14:05:00Z\"\n",
+    );
+    assert_ne!(windowed, ORIGINAL_PLAN);
+    assert!(original_name_agrees(&restore(&windowed, Some(true), "")).is_ok());
+    // CONTROL: the subset under a prefix is PROD-11.1b's, untouched.
+    let prefixed = subset_original_plan().replace(
+        "    prefix: \"\"\n    original_name:\n      owners: []\n",
+        "    prefix: \"restore-\"\n",
+    );
+    assert_ne!(prefixed, subset_original_plan());
+    assert!(original_name_agrees(&restore(&prefixed, None, "restore-")).is_ok());
+}
+
 /// The CRD's CEL rules keep the declaration beside the only target it
 /// describes and the only verification it may run with. KILLS: a rule that
 /// admits `originalName` in scratch mode, beside a prefix, or without

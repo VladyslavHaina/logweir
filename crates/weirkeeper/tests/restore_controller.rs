@@ -10539,6 +10539,35 @@ async fn a_sampled_original_name_restore_is_refused_before_anything_is_read() {
         "{outcome:?}"
     );
     assert!(read_approval, "the complete plan goes on to its approval");
+
+    // **PROD-15.1 after PROD-11.1b: the same, for a PARTITION SUBSET.** The
+    // complete plan narrowed to two partitions of `orders` ends `Failed`
+    // before anything is read: `ExecutionSpecInvalid`, the condition opening
+    // `OriginalNameNeedsWholeTopics`, no Job, the approval never read. There
+    // is no CEL rule for this (the CRD declares no partitions), so this
+    // reconcile is the Kubernetes boundary. KILLS: the controller leaving a
+    // subset plan under the original names to the runner.
+    let subset_plan = complete_plan.replace(
+        "  point_in_time: \"2026-09-07T14:05:00Z\"\n",
+        "  point_in_time: \"../2026-09-07T14:05:00Z\"\n  partitions:\n    orders: [0, 2]\n",
+    );
+    assert_ne!(subset_plan, complete_plan);
+    let (outcome, bodies, read_approval) = run(object(&subset_plan, true)).await;
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{outcome:?}"
+    );
+    assert_eq!(post_count(&bodies, "/jobs"), 0, "no Job");
+    assert!(!read_approval, "refused before the approval is read");
+    let status = patched_statuses(&bodies).remove(0);
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("OriginalNameNeedsWholeTopics: "),
+        "{message}"
+    );
 }
 
 /// **PROD-15.1 review L5 (R07), the Job builder's call site**: it refuses

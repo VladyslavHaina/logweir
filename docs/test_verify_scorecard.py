@@ -981,12 +981,13 @@ def test_the_version_line_names_the_current_invariant_set():
         ) in r.stdout, r.stdout
         # 1.28.0's addition (PROD-15.1): `target.original_name`'s arms.
         assert (
-            "target.original_name only from 1.8.0, only in a newTopic document with the empty "
+            "target.original_name only from 1.8.0 of format 1 and never beside a partition "
+            "subset, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
             "their closed sets, targetIsNotSource only beside a known other source cluster id, "
             "somewhere looked for an owner, each owner from a place looked in, an owned name "
-            "only on the owner path, a one-person confirmation only with the names typed, and "
-            "the KafkaTopic resources looked in named by digest"
+            "only on the owner path, a one-person confirmation only with the names typed, "
+            "the KafkaTopic resources looked in named by digest, and a complete verification"
         ) in r.stdout, r.stdout
 
 
@@ -2308,8 +2309,8 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # start (PS-2), adds PS-3 to PS-5, the 2.0.0 shape and the subset's lines.
     # Map still five.
     #
-    # 1.28.0 (PROD-15.1) adds the scorecard's thirteen `target.original_name`
-    # arms (ON-1 to ON-13, format 1.8.0), its shape check and the two
+    # 1.28.0 (PROD-15.1) adds the scorecard's fourteen `target.original_name`
+    # arms (ON-1 to ON-14, format 1.8.0), its shape check and the two
     # `original name:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
@@ -4406,7 +4407,7 @@ def test_the_selection_lines_are_the_rust_readers():
     rust_reader = (ROOT / "crates/logweir/src/verify.rs").read_text()
     assert '"sample coverage: a sampled pass over a replay selection from epoch-ms {} to \\' in rust_reader
 
-# ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-13 ----
+# ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-14 ----
 
 
 RESOURCES_DIGEST = "sha256:" + "0" * 64
@@ -4490,8 +4491,8 @@ def test_each_original_name_arm_refuses_with_the_rust_readers_words():
     mod = _verifier_module()
     on1 = _scorecard_1_8(version="1.7.0")
     assert mod.check_invariants(on1) == (
-        'target.original_name is present but format_version "1.7.0" predates it: the block '
-        "is defined from 1.8.0"
+        'target.original_name is present but format_version "1.7.0" does not define it: the '
+        "block is format 1's, from 1.8.0, and no other major carries it"
     )
     on2 = _scorecard_1_8()
     on2["target"]["mode"] = "scratch"
@@ -4550,6 +4551,44 @@ def test_each_original_name_arm_refuses_with_the_rust_readers_words():
                              kafka_topic_resources_sha256="sha256:XYZ"),
     ):
         assert mod.check_invariants(_scorecard_1_8(bad)).startswith(on12), bad
+
+
+def test_on14_the_block_never_sits_beside_a_partition_subset():
+    # An original-name restore restores WHOLE topics (PROD-15.1 after
+    # PROD-11.1b). KILLS: deleting ON-14 (the refusal becomes ON-1's, another
+    # sentence); deleting it and reading major 2 in ON-1 (the document would
+    # be accepted).
+    mod = _verifier_module()
+    on14 = (
+        "target.original_name is present beside source.selection.partitions; a restore under "
+        "the original topic names restores whole topics, never a partition subset"
+    )
+    rust = " ".join(
+        (ROOT / "crates/logweir-core/src/scorecard.rs").read_text().replace("\\\n", " ").split()
+    )
+    assert on14 in rust, "the Rust reader's words"
+    # Otherwise valid twice over: a 2.0.0 subset document of exactly the
+    # partitions its complete block compared, and an original-name document.
+    doc = _scorecard_1_8(version="2.0.0")
+    doc["source"]["selection"] = _subset(partitions=(("orders", [0, 1]),))
+    assert mod.check_invariants(doc) == on14
+    subset_only = json.loads(json.dumps(doc))
+    del subset_only["target"]["original_name"]
+    assert mod.check_invariants(subset_only) == ""
+    whole = json.loads(json.dumps(doc))
+    del whole["source"]["selection"]
+    whole["format_version"] = "1.8.0"
+    assert mod.check_invariants(whole) == ""
+    # CONTROL: a stated window START is whole partitions, bounded in time.
+    windowed = json.loads(json.dumps(whole))
+    end = windowed["integrity"]["verification"]["complete"]["window"]["end_ms"]
+    windowed["integrity"]["verification"]["complete"]["window"]["start_ms"] = end - 1000
+    windowed["source"]["selection"] = {"window_start_ms": end - 1000, "window_end_ms": end}
+    assert mod.check_invariants(windowed) == ""
+    # ON-1 reads major 1 on purpose: with ON-14 out of the way a 2.x document
+    # carrying the block is still refused, in words that do not call 2.0.0 old.
+    assert not mod._defines_original_name("2.0.0")
+    assert mod._defines_original_name("1.8.0") and not mod._defines_original_name("1.7.0")
 
 
 def test_on13_an_original_name_restore_is_verified_completely_or_is_not_a_pass():

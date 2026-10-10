@@ -9694,10 +9694,11 @@ fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
 
 /// **PROD-15.1 review L6.** The readiness check's `plan.parse` refuses an
 /// original-name block in a shape phase 0 refuses — in scratch mode, beside a
-/// prefix, or in a SAMPLED plan (an original-name restore requires complete
-/// verification) — in the runner's own words, and nothing after it runs; the
-/// opted-in plan that asks for complete coverage parses. KILLS: a preview
-/// that says ready for a plan the runner refuses at phase 0.
+/// prefix, in a SAMPLED plan (an original-name restore requires complete
+/// verification), or beside a PARTITION SUBSET (it restores whole topics) —
+/// in the runner's own words, and nothing after it runs; the opted-in plan
+/// that asks for complete coverage parses. KILLS: a preview that says ready
+/// for a plan the runner refuses at phase 0.
 #[test]
 fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
     let point = ms_to_rfc3339(INSIDE_MS);
@@ -9727,8 +9728,31 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
             ),
             "OriginalNameNeedsCompleteCoverage",
         ),
+        (
+            // PROD-15.1 after PROD-11.1b: an original-name restore restores
+            // whole topics. Complete coverage, so the subset is what refuses.
+            "with a partition subset",
+            base.replace(
+                "  topic_mapping_prefix: 'restore-'\n",
+                "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+            )
+            .replace(
+                "  window_end: 2026-09-15T06:00:00Z\n",
+                "  window_end: 2026-09-15T06:00:00Z\n  coverage: complete\n",
+            )
+            .replace(
+                &format!("  point_in_time: {point}\n"),
+                &format!("  point_in_time: \"../{point}\"\n  partitions:\n    orders: [0]\n"),
+            ),
+            "OriginalNameNeedsWholeTopics",
+        ),
     ] {
         assert!(yaml.contains("original_name"), "{label}: the fixture carries the block");
+        assert_eq!(
+            label == "with a partition subset",
+            yaml.contains("partitions:\n    orders: [0]"),
+            "{label}: only the subset case states a subset"
+        );
         let m = mount(&restore_plan(&yaml, None));
         let run = drive(
             &m,

@@ -502,13 +502,14 @@ topic id at creation, and none can be preserved.
 | `confirmation` | string, optional | **OD-10.** `typedTopicNames`: the requester confirmed alone and RE-TYPED every original topic name, exactly, and the console signed what was typed. Present exactly when `approval_mode` is `ordinary`. |
 | `kafka_topic_resources_sha256` | string, optional | `sha256:` of the `KafkaTopic` resources file the runner looked in (`--kafka-topic-resources`, unsigned runner input). Present exactly when `owner_detection` lists `kafkaTopicResources`. |
 
-Thirteen arms, enforced by both readers in the same position (after
+Fourteen arms, enforced by both readers in the same position (after
 `source.selection`, before `redactions`) and words, fire only on a document
-carrying the block:
+carrying the block. ON-14 is judged first, then ON-1 to ON-13 in order:
 
 | Arm | Refuses |
 |---|---|
-| ON-1 | the block under a `format_version` before 1.8.0 |
+| ON-14 | the block beside `source.selection.partitions`: a restore under the original topic names restores whole topics, never a partition subset (the runner refuses such a plan before anything is created, `OriginalNameNeedsWholeTopics`). Every 2.x document names a subset, so no 2.x document carries the block |
+| ON-1 | the block under a `format_version` that does not define it: any 1.x before 1.8.0. The block is format 1's; the arm reads major 1 on purpose, so 2.0.0 does not define it either |
 | ON-2 | the block in a `scratch` document (the identity ban stays there) |
 | ON-3 | a non-empty `target.topic_mapping_prefix` |
 | ON-4 | an `approval_subject` other than `originalName` |
@@ -525,9 +526,9 @@ carrying the block:
 A block that is not an object with these fields and types is refused when the
 document is read; an unknown key in it is ignored. Each arm reads only the new
 block, or judges an existing field against it (`target`; for ON-13,
-`integrity.verification` and the outcome), and can only refuse: MINOR under
-OD-7 (a). Both readers print two lines for a document carrying the
-block:
+`integrity.verification` and the outcome; for ON-14, `source.selection`), and
+can only refuse: MINOR under OD-7 (a). Both readers print two lines for a
+document carrying the block:
 
 ```text
 original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by v1Approval; the target cluster is not the source cluster (5L6g3nShT-eMCtK--X86sw)
@@ -538,13 +539,26 @@ A one-person confirmation's first line reads `approved by ordinary (the
 requester re-typed every original topic name)`.
 
 **The version only rises.** Each step that raises the version keeps the newer
-minor (`scorecard::newer_format_version`), so an original-name restore from a
+one (`scorecard::newer_format_version`), so an original-name restore from a
 stated start is 1.8.0, never 1.7.0.
 
-**The number.** 1.8.0; 1.7.0 is PROD-11.1's. A renumber moves
+**A window is allowed; a partition subset is not.** A restore under the
+original topic names may state a window start or end
+([`source.selection`](#sourceselection-format-170-and-200), a start and its
+end): every partition is restored, bounded in time, and the document is 1.8.0.
+It never states a partition subset, which is what format 2.0.0 is for: the
+block is format 1's only, the 2.0.0 schema does not describe it, and ON-14
+refuses the pair.
+
+**The number.** 1.8.0; 1.7.0 is PROD-11.1's, and 2.0.0 is PROD-11.1b's
+partition-subset format, which this block is never part of. The schema file is
+`schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest minor: the
+frozen 1.7.0 file plus this block as the type derives it
+(`logweir_core::schema::scorecard_format_1_schema`), regenerated and diffed by
+`just schema` beside the 2.0.0 file. A renumber moves
 `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and
 `scorecard::ORIGINAL_NAME_SINCE_MINOR` together, the justfile's
-`scorecard_schema_version` and this schema file's name,
+`scorecard_format_1_schema_version` and this schema file's name,
 `docs/verify_scorecard.py`'s `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`, the parity
 script's `SCORECARD_ORIGINAL_NAME_VERSION`, and the corpus cases `original_name_*.json`
 (their `format_version` and ON-1's reason).

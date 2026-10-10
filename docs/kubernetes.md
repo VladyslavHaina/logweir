@@ -6657,6 +6657,7 @@ nothing created, nothing deleted):
 |---|---|
 | `newTopic` mode and `prefix: ""` beside the block | `OriginalNameNotNewTopic`, `OriginalNamePrefixNotEmpty` |
 | the plan asks for complete verification, `sample.coverage: complete` (see "Complete verification is required" below) | `OriginalNameNeedsCompleteCoverage`, before any broker is asked anything |
+| the plan restores whole topics: it states no `restore.partitions` (see "Whole topics are required" below) | `OriginalNameNeedsWholeTopics`, before any broker is asked anything |
 | every restored name is absent on the target | "already exists" (the refusal every restore gets) |
 | the target is not the source cluster — every known source cluster id (the bound recovery point's verified receipt, measured at backup; else the allowlist file's `source_cluster_id`) differs from the target's — OR every broker reports `auto.create.topics.enable=false` (read from every broker with DescribeConfigs) | `OriginalNameAutoCreateEnabled`; `OriginalNameAutoCreateUnknown` when a broker does not report it (a refused read is exit 1). The source id counted is the bound point's VERIFIED receipt only: the allowlist file's `source_cluster_id` is unsigned runner input and never makes the target "another cluster". Brokers are the ones the cluster metadata lists at phase 0; one offline then is not read (the exclusive create below still refuses a name it creates) |
 | somewhere was looked for a declarative owner (a Strimzi `KafkaTopic`, GitOps, Terraform) of a restored name, and none was found unless the plan chose the owner path; nothing the `KafkaTopic` resources file holds is dropped | `OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`, `OriginalNameOwnersInvalid`, `OriginalNameOwnerUnreadable` (a `KafkaTopic` whose topic cannot be read, one whose `namespace/name` is longer than the 256 characters an owner is recorded with, or a file holding no `KafkaTopic` at all unless it is the explicit empty `List`) |
@@ -6742,6 +6743,21 @@ reports a record the archive does not hold as unexpected, by its target
 offset. `sample.complete_max_records` may still bound the work; a run it stops
 signs `covered: false`, which is never a pass.
 
+**Whole topics are required.** An original-name restore never restores a
+partition subset. A plan that carries the block and `restore.partitions` is
+refused by name, `OriginalNameNeedsWholeTopics`: the controller refuses it
+before any Job (`ExecutionSpecInvalid`, the condition opening with the token),
+both readiness checks say so, `logweir drill approve` refuses to sign it, and
+the runner refuses it before it dials anything (exit 3). There is no CEL rule
+for this one: a `Restore` declares no partitions, so the plan bytes are the
+only place a subset is written and the controller's plan check is the
+Kubernetes boundary. The reason: the run creates each topic under its own
+name with EVERY partition the archive lists and would fill only the selected
+ones, and the partitions left out could never be restored under that name
+afterwards (the name exists, and a restore into an existing topic is
+refused). A window is allowed, a start or an end: it restores every
+partition, bounded in time. Restore a partition subset under a prefix.
+
 **What does NOT change.** The restore does not fence producers: stop every
 producer of a restored name before the restore and repoint consumers after it
 (consumer positions are not copied; PROD-04.2). **A producer still writing
@@ -6761,7 +6777,8 @@ verified in (`v1Approval`, `governed`, `ordinary` — the last with
 with the source cluster id, or `autoCreateDisabled`), where owners were looked
 for and what was found (the `KafkaTopic` resources file by its sha256), and
 whether the owner path was chosen. Both verifiers check it (arms ON-1 to
-ON-13; ON-13 refuses the block beside a sampled verification, and beside a
+ON-14; ON-14 refuses the block beside a partition subset; ON-13 refuses the
+block beside a sampled verification, and beside a
 pass that records none) and print two `original name:` lines
 ([verify-a-scorecard.md](verify-a-scorecard.md)). The decisions and the review's
 findings are recorded in
@@ -6769,8 +6786,8 @@ findings are recorded in
 
 **Readiness.** The `Preflight` for such a `Restore` does not refuse the
 identity mapping it asked for (`plan.names`), and refuses the block in a
-shape phase 0 refuses, a sampled plan included (`TopicMappingIdentity`, in
-the runner's words). It
+shape phase 0 refuses, a sampled plan and a partition subset included
+(`TopicMappingIdentity`, in the runner's words). It
 does not evaluate the cluster and owner conditions, which need the verified
 receipt and the target's brokers. The run's phase 0 does that, before
 anything is written.

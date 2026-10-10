@@ -611,9 +611,10 @@ PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
 `partitions` (non-empty) and `engine_runs` required in it; `window_start_ms`
 is optional there (absent: the window started at the archive's floor). The
 schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
-which pins `format_version` to `2.x.y`; every 1.x schema is frozen beside it,
-and `schemas/logweir-drill-scorecard-1.7.0.json` still describes every other
-document this build writes. The media type keeps `version=1.0.0`, so an older
+which pins `format_version` to `2.x.y`; every 1.x schema up to 1.7.0 is frozen
+beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest
+minor ([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)),
+describes every other document this build writes. The media type keeps `version=1.0.0`, so an older
 reader reaches its major refusal rather than a payload-type mismatch
 ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
@@ -815,10 +816,41 @@ into topics that do not exist, created by the run itself, exclusively
 [kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
 
 - **The signed block.** Such a restore carries `target.original_name` and is
-  format **1.8.0** (MINOR): arms ON-1 to ON-13 read only the block or judge an
-  existing field against it (`target`, and for ON-13 `integrity.verification`
-  and the outcome), and can only refuse (OD-7 (a)). Every other document is
-  the one it was; each version step keeps the newer minor.
+  format **1.8.0** (MINOR): arms ON-1 to ON-14 read only the block or judge an
+  existing field against it (`target`; for ON-13 `integrity.verification` and
+  the outcome; for ON-14 `source.selection`), and can only refuse (OD-7 (a)).
+  Every other document is the one it was; each version step keeps the newer
+  version.
+- **1.8.0 is a minor of format 1, and the block never appears in a 2.x
+  document.** Format 2.0.0 (above) is a partition-subset restore's document
+  and nothing else, and a restore under the original topic names restores
+  WHOLE topics (next bullet). So the two never meet: 2.0.0 stays "1.7.0's
+  fields with the subset meaning", `schemas/logweir-drill-scorecard-2.0.0.json`
+  is byte for byte the file PROD-11.1b published and does not describe the
+  block, and `schemas/logweir-drill-scorecard-1.8.0.json` (the frozen 1.7.0
+  file plus the block) is format 1's newest minor. Both are generated and
+  diffed by `just schema-check`. Arm ON-1 reads major 1 on purpose, where
+  format 1's older optional blocks are also defined under major 2, and arm
+  ON-14 refuses the block beside `source.selection.partitions` in either
+  reader. A later 1.x minor that IS meant for subset restores too says so, and
+  moves 2.x with it.
+- **An original-name restore restores whole topics.** A plan that carries the
+  `original_name` block and `restore.partitions` is refused,
+  `OriginalNameNeedsWholeTopics`, by the same rule as the coverage refusal
+  below and at the same boundaries: the runner before it dials anything (exit
+  3) and again at phase 0, `logweir drill approve`, both readiness checks, and
+  the controller before any Job (`ExecutionSpecInvalid`). There is no CEL rule
+  for it: the `Restore` CRD declares no partitions, so the plan bytes are the
+  only place a subset is written and the controller's plan check is the
+  Kubernetes boundary. The product API passes plan bytes through and does not
+  read them for this. Without the rule the run would create each topic under
+  its production name with every partition, fill only the selected ones, and
+  sign that as covered; the partitions left out could never be restored under
+  that name afterwards, because a restore into an existing topic is refused.
+  **A stated window stays allowed**, a start (`"<start>/<end>"`) or an end:
+  whole partitions, bounded in time, signed as 1.8.0 with a start-only
+  `source.selection`. A partition subset under a PREFIX is PROD-11.1b's and is
+  unchanged.
   A verifier older than `1.28.0` and a `logweir` built before PROD-15.1 accept
   the document, ignore the block and print no `original name:` line
   ([verify-a-scorecard.md](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
@@ -893,8 +925,8 @@ into topics that do not exist, created by the run itself, exclusively
   in a scratch drill; a target that may be the source cluster unless every
   broker reports `auto.create.topics.enable=false`; a declarative owner found
   unless the plan chose the owner path, and an owner looked for nowhere; a
-  sampled verification. Nothing — teardown, a lost race, a stopped creation
-  step — deletes a topic under its original name.
+  sampled verification; a partition subset. Nothing — teardown, a lost race, a
+  stopped creation step — deletes a topic under its original name.
 
 ### The product API's OpenAPI document is pre-release, and says so
 

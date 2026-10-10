@@ -495,17 +495,29 @@ pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
 /// **PROD-15.1.** The `format_version` of a scorecard that carries
 /// `target.original_name` — a restore under the source's ORIGINAL topic names
 /// into absent topics (OD-2). A MINOR bump for a new optional block, under
-/// OD-7 (a): arms ON-1 to ON-13 read only that block (ON-2, ON-3, ON-7 and
-/// ON-13 judge existing fields against it) and can only refuse. Written only for
-/// an original-name restore ([`format_version_with_original_name`]), so every
-/// other document is the one it was. The newest minor: the current schema
-/// file is this version's.
+/// OD-7 (a): arms ON-1 to ON-14 read only that block (ON-2, ON-3, ON-7,
+/// ON-13 and ON-14 judge existing fields against it) and can only refuse.
+/// Written only for an original-name restore
+/// ([`format_version_with_original_name`]), so every other document is the
+/// one it was. The newest minor of FORMAT 1:
+/// `schemas/logweir-drill-scorecard-1.8.0.json` is this version's file
+/// ([`crate::schema::scorecard_format_1_schema`]).
+///
+/// **The block is format 1's only.** An original-name restore restores whole
+/// topics (`crate::original_name::refuse_shape`,
+/// `OriginalNameNeedsWholeTopics`), and a 2.x document is a partition-subset
+/// restore's, so no 2.x document carries the block: arm ON-14 refuses the
+/// pair, ON-1 reads major 1 on purpose, and the 2.0.0 schema does not
+/// describe it.
 pub const FORMAT_VERSION_WITH_ORIGINAL_NAME: &str = "1.8.0";
 
 /// The `format_version` a scorecard is written with once its target block is
 /// known (PROD-15.1): at least [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] when it
 /// carries `target.original_name`, else `current` unchanged. 1.8.0 defines
-/// everything 1.7.0 does. Monotonic: never lowers `current`.
+/// everything 1.7.0 does. Monotonic: never lowers `current` — so a `current`
+/// of 2.0.0 (a partition subset) stays 2.0.0, and such a document is then
+/// refused at signing by arm ON-14. The runner never gets there: it refuses
+/// the plan before anything is created.
 #[must_use]
 pub fn format_version_with_original_name<'a>(
     current: &'a str,
@@ -689,6 +701,17 @@ pub fn defines_format_1_minor(format_version: &str, since_minor: u64) -> bool {
         Some(PARTITION_SUBSETS_MAJOR) => true,
         _ => false,
     }
+}
+
+/// Whether a document of `format_version` defines `target.original_name`
+/// (arm ON-1, PROD-15.1): a 1.x document from 1.8.0 on, and NO document of
+/// another major. Unlike [`defines_format_1_minor`], major 2 does not define
+/// it: a 2.x document is a partition-subset restore's, and a restore under
+/// the original topic names restores whole topics (arm ON-14).
+#[must_use]
+pub fn defines_original_name(format_version: &str) -> bool {
+    major_version(format_version) == Some(1)
+        && minor_version(format_version).is_some_and(|minor| minor >= ORIGINAL_NAME_SINCE_MINOR)
 }
 
 /// Whether this build reads `format_version`'s major at all: 1, and 2 (the
@@ -2621,28 +2644,49 @@ impl Scorecard {
             }
         }
         // `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to
-        // ON-13. They fire ONLY on a document that CARRIES the block, so every
+        // ON-14. They fire ONLY on a document that CARRIES the block, so every
         // document without it is decided exactly as before: MINOR under the
-        // owner's OD-7 (a). ON-2, ON-3, ON-7 and ON-13 judge existing fields
-        // (`target`, `integrity.verification`, the outcome) against the block
-        // and can only refuse.
+        // owner's OD-7 (a). ON-2, ON-3, ON-7, ON-13 and ON-14 judge existing
+        // fields (`target`, `source.selection`, `integrity.verification`, the
+        // outcome) against the block and can only refuse.
         //
         // NOT INTERPOLATED, except ON-1's version, so the messages join
         // `index.json`'s `arm` fields by literal substring.
         //
         // Mirrored arm for arm, in this order and this position (after
         // `source.selection`, before `redactions`, which stays last), in
-        // `docs/verify_scorecard.py::check_invariants`.
+        // `docs/verify_scorecard.py::check_invariants`. ON-14 is judged FIRST.
         if let Some(on) = &self.target.original_name {
-            // ON-1. A document declaring a version before 1.8.0 cannot carry
-            // a 1.8.0 block.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= ORIGINAL_NAME_SINCE_MINOR);
-            if !defined {
+            // ON-14, first. An original-name restore restores WHOLE topics:
+            // the block never sits beside a partition subset. The runner
+            // refuses such a plan before anything is created
+            // (`OriginalNameNeedsWholeTopics`), so a document carrying both
+            // was not written by one. Every 2.x document names a subset
+            // (PS-1), so this is the arm a 2.x document carrying the block
+            // meets; a subset under major 1 has already met PS-2.
+            if self
+                .source
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.partitions.is_some())
+            {
+                return Err(InvariantError(
+                    "target.original_name is present beside source.selection.partitions; a \
+                     restore under the original topic names restores whole topics, never a \
+                     partition subset"
+                        .into(),
+                ));
+            }
+            // ON-1. The block is format 1's, from 1.8.0: a document declaring
+            // an earlier minor cannot carry it. MAJOR 1 ON PURPOSE, where the
+            // older optional blocks read `defines_format_1_minor`: a 2.x
+            // document is a partition-subset restore's and never carries the
+            // block (ON-14), so 2.0.0 does not define it.
+            if !defines_original_name(&self.format_version) {
                 return Err(InvariantError(format!(
-                    "target.original_name is present but format_version {:?} predates it: the \
-                     block is defined from 1.{ORIGINAL_NAME_SINCE_MINOR}.0",
+                    "target.original_name is present but format_version {:?} does not define \
+                     it: the block is format 1's, from 1.{ORIGINAL_NAME_SINCE_MINOR}.0, and no \
+                     other major carries it",
                     self.format_version
                 )));
             }
@@ -5155,7 +5199,7 @@ mod tests {
         }
     }
 
-    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-13 ----
+    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-14 ----
 
     fn original_name_block() -> OriginalNameInfo {
         OriginalNameInfo {
@@ -5249,7 +5293,7 @@ mod tests {
 
     /// ON-1. KILLS: deleting the arm; comparing against the wrong minor.
     #[test]
-    fn on1_refuses_the_block_under_a_version_that_predates_it() {
+    fn on1_refuses_the_block_under_a_version_that_does_not_define_it() {
         for version in ["1.4.0", "1.6.0", "1.7.0", "1.x.0"] {
             assert_eq!(
                 on_err(|sc| {
@@ -5262,11 +5306,108 @@ mod tests {
                     }
                 }),
                 format!(
-                    "target.original_name is present but format_version {version:?} predates \
-                     it: the block is defined from 1.{ORIGINAL_NAME_SINCE_MINOR}.0"
+                    "target.original_name is present but format_version {version:?} does not \
+                     define it: the block is format 1's, from 1.{ORIGINAL_NAME_SINCE_MINOR}.0, \
+                     and no other major carries it"
                 )
             );
         }
+    }
+
+    /// A 2.0.0 document that is otherwise BOTH a valid partition-subset
+    /// restore's and a valid original-name restore's: `orders` [0, 1] under
+    /// a complete verification of exactly those partitions, newTopic, the
+    /// empty prefix, the block.
+    fn subset_with_original_name() -> Scorecard {
+        let mut sc = with_original_name();
+        sc.format_version = FORMAT_VERSION_WITH_PARTITION_SUBSETS.into();
+        let end_ms = sc
+            .integrity
+            .verification
+            .as_ref()
+            .and_then(|v| v.complete.as_ref())
+            .expect("a complete block")
+            .window
+            .end_ms;
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: None,
+            window_end_ms: end_ms,
+            partitions: Some(vec![tp("orders", &[0, 1])]),
+            engine_runs: Some(1),
+        });
+        sc
+    }
+
+    /// **ON-14: the block never sits beside a partition subset** (an
+    /// original-name restore restores whole topics). The pair is refused
+    /// under 2.0.0, where it is the first ON arm a document meets, and the
+    /// version step never turns such a document into a 1.x one.
+    ///
+    /// The fixture is otherwise valid twice over, and the row shows it: the
+    /// same document without the block is an accepted subset document, and
+    /// without the subset (as 1.8.0) an accepted original-name one. KILLS:
+    /// deleting ON-14 (the refusal would become ON-1's, another sentence);
+    /// deleting ON-14 and reading major 2 in ON-1 (the document would be
+    /// accepted: a production-named topic with unselected partitions empty,
+    /// signed as covered).
+    #[test]
+    fn on14_refuses_the_block_beside_a_partition_subset() {
+        const ON14: &str = "target.original_name is present beside source.selection.partitions; a restore under the original topic names restores whole topics, never a partition subset";
+        let sc = subset_with_original_name();
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Err(ON14.into()));
+
+        // Without the block: an accepted 2.0.0 subset document.
+        let mut subset_only = subset_with_original_name();
+        subset_only.target.original_name = None;
+        assert_eq!(subset_only.validate_invariants().map_err(|e| e.0), Ok(()));
+        // Without the subset, as 1.8.0: an accepted original-name document.
+        let mut whole = subset_with_original_name();
+        whole.source.selection = None;
+        whole.format_version = FORMAT_VERSION_WITH_ORIGINAL_NAME.into();
+        assert_eq!(whole.validate_invariants().map_err(|e| e.0), Ok(()));
+        // A stated window START beside the block is whole partitions, bounded
+        // in time: accepted, as 1.8.0.
+        let mut windowed = whole.clone();
+        let window = windowed
+            .integrity
+            .verification
+            .as_mut()
+            .and_then(|v| v.complete.as_mut())
+            .map(|c| &mut c.window)
+            .expect("a complete block");
+        window.start_ms = Some(window.end_ms - 1_000);
+        windowed.source.selection = Some(SelectionLabel {
+            window_start_ms: Some(window.end_ms - 1_000),
+            window_end_ms: window.end_ms,
+            partitions: None,
+            engine_runs: None,
+        });
+        assert_eq!(windowed.validate_invariants().map_err(|e| e.0), Ok(()));
+
+        // The writer's version steps never make the pair a 1.x document: a
+        // subset is 2.0.0 and the original-name step keeps it.
+        let block = sc.target.original_name.as_ref();
+        assert_eq!(
+            format_version_with_original_name(
+                format_version_with_selection("1.4.0", sc.source.selection.as_ref()),
+                block
+            ),
+            "2.0.0"
+        );
+        assert_eq!(
+            format_version_with_selection(
+                format_version_with_original_name("1.4.0", block),
+                sc.source.selection.as_ref()
+            ),
+            "2.0.0"
+        );
+        // And 2.0.0 does not DEFINE the block the way it defines format 1's
+        // older optional blocks: ON-1 reads major 1 on purpose.
+        assert!(defines_format_1_minor("2.0.0", SELECTION_SINCE_MINOR));
+        assert!(!defines_original_name("2.0.0"));
+        assert!(!defines_original_name("2.8.0"));
+        assert!(defines_original_name("1.8.0") && defines_original_name("1.9.0"));
+        assert!(!defines_original_name("1.7.0") && !defines_original_name("1.x.0"));
     }
 
     /// ON-2 and ON-3. KILLS: deleting either; reading a scratch document or
@@ -5475,7 +5616,7 @@ mod tests {
         assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
     }
 
-    /// ON-1 to ON-13 sit after SEL-1 to SEL-3 and before `redactions`.
+    /// ON-1 to ON-14 sit after SEL-1 to SEL-3 and before `redactions`.
     /// KILLS: moving the block.
     #[test]
     fn the_original_name_arms_sit_between_the_selection_arms_and_redactions() {

@@ -180,6 +180,70 @@ fn a_sampled_original_name_plan_is_refused_by_name_before_anything_is_dialled() 
     );
 }
 
+/// `ORIGINAL_PLAN` narrowed to one partition of `orders`, in the one spelling
+/// PROD-11.1b's grammar accepts for a subset (the interval form).
+fn subset_plan() -> String {
+    format!(
+        "{ORIGINAL_PLAN}restore:\n  point_in_time: \"../2026-08-30T01:00:00Z\"\n  partitions:\n    orders: [0]\n"
+    )
+}
+
+/// **An original-name restore restores whole topics, and the runner says so
+/// before it dials anything.** The plan with `restore.partitions`, under a
+/// correct `originalName` approval and with a target nothing listens on:
+/// exit 3, the refusal opening `OriginalNameNeedsWholeTopics`, the last
+/// stdout line a `refusal-reason=`. CONTROLS: the same plan with a window
+/// (no subset) is not refused for its shape, and a subset plan under a
+/// PREFIX is not this rule's (each goes on to fail on the unreachable target
+/// or a later input). KILLS: removing the startup shape check AND phase 0's
+/// (the run would reach the broker and exit 1); refusing a stated window;
+/// refusing a prefixed subset.
+#[test]
+fn a_subset_original_name_plan_is_refused_by_name_before_anything_is_dialled() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("kafkatopics.yaml");
+    std::fs::write(&empty, "").unwrap();
+
+    let b = bundle(&subset_plan(), Some("originalName"));
+    let out = restore_run(&b, &empty);
+    let text = both(&out);
+    assert_eq!(out.status.code(), Some(3), "{text}");
+    assert!(text.contains("OriginalNameNeedsWholeTopics: "), "{text}");
+    assert!(text.contains("Remove restore.partitions"), "{text}");
+    assert!(
+        last_stdout_line(&out).starts_with("refusal-reason="),
+        "{text}"
+    );
+
+    // CONTROL: whole topics from a stated window start.
+    let windowed = format!(
+        "{ORIGINAL_PLAN}restore:\n  point_in_time: \"2026-08-29T12:00:00Z/2026-08-30T01:00:00Z\"\n"
+    );
+    let b = bundle(&windowed, Some("originalName"));
+    let out = restore_run(&b, &empty);
+    let text = both(&out);
+    assert!(
+        !text.contains("OriginalNameNeedsWholeTopics"),
+        "a window is not a subset: {text}"
+    );
+    assert!(!text.contains("does not parse"), "{text}");
+
+    // CONTROL: the subset under a prefix, with an ordinary approval.
+    let prefixed = subset_plan().replace(
+        "  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n",
+        "  topic_naming:\n    prefix: \"restore-\"\n",
+    );
+    assert_ne!(prefixed, subset_plan());
+    let b = bundle(&prefixed, None);
+    let out = restore_run(&b, &empty);
+    let text = both(&out);
+    assert!(
+        !text.contains("OriginalNameNeedsWholeTopics"),
+        "a prefixed subset is PROD-11.1b's: {text}"
+    );
+    assert!(!text.contains("does not parse"), "{text}");
+}
+
 /// The reverse direction at the same call site: an `originalName` approval
 /// authorises nothing else. KILLS: a one-directional check.
 #[test]
@@ -306,4 +370,36 @@ fn drill_approve_signs_the_original_name_subject_only_when_asked() {
     assert!(text.contains("OriginalNameNeedsCompleteCoverage"), "{text}");
     assert!(text.contains("Nothing was signed"), "{text}");
     assert!(!sampled_out.exists(), "nothing is signed");
+
+    // Nor is a PARTITION SUBSET under the original names: such a restore
+    // restores whole topics. KILLS: an approval minted over a plan that
+    // would create a production-named topic and fill part of it.
+    let subset = bundle(&subset_plan(), None);
+    let subset_out = subset.spec.with_file_name("minted.json");
+    for flag in [true, false] {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_logweir"));
+        c.args(["drill", "approve", "--spec"])
+            .arg(&subset.spec)
+            .arg("--key")
+            .arg(&subset.key)
+            .args([
+                "--approver",
+                "ops@example.com",
+                "--ticket",
+                "CHG-1",
+                "--out",
+            ])
+            .arg(&subset_out);
+        if flag {
+            c.args(["--approval-subject", "original-name"]);
+        }
+        let out = c.output().unwrap();
+        let text = both(&out);
+        assert_eq!(out.status.code(), Some(1), "{flag}: {text}");
+        assert!(text.contains("Nothing was signed"), "{flag}: {text}");
+        if flag {
+            assert!(text.contains("OriginalNameNeedsWholeTopics"), "{text}");
+        }
+        assert!(!subset_out.exists(), "nothing is signed");
+    }
 }

@@ -3762,6 +3762,12 @@ pub fn original_name_agrees(restore: &Restore) -> Result<(), RestoreError> {
     // (`crds::restore::ORIGINAL_NAME_COVERAGE_RULE`) refuses the same object
     // at the API server; this is the check for a cluster whose CRD predates
     // that rule, and for the plan bytes themselves.
+    //
+    // A PARTITION SUBSET is refused the same way
+    // (`OriginalNameNeedsWholeTopics`): such a restore restores whole
+    // topics. That half has NO CEL rule, because the `Restore` CRD declares
+    // no partitions: the plan bytes are the only place a subset is written,
+    // so this check IS the Kubernetes boundary for it.
     if in_plan {
         if let Some(why) = logweir_core::original_name::refuse_shape(&plan) {
             return Err(RestoreError::Refused(

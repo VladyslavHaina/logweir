@@ -16,6 +16,7 @@
 //! |---|---|---|---|
 //! | 1 | the plan opts in explicitly: `target.topic_naming: {prefix: "", original_name: {…}}` in `newTopic` mode | phase 0, local ([`refuse_shape`]) | [`ORIGINAL_NAME_NOT_NEW_TOPIC`], [`ORIGINAL_NAME_PREFIX_NOT_EMPTY`]; an empty prefix without the block keeps the old "onto itself" refusal |
 //! | 1b | the plan asks for COMPLETE verification, `sample.coverage: complete` (the orchestrator's ruling of 2026-10-09) | phase 0, local ([`refuse_shape`]); runner and controller readiness; controller admission; the product API and the console | [`ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE`] |
+//! | 1c | the plan restores WHOLE topics: no `restore.partitions` (the orchestrator's ruling of 2026-10-09, after PROD-11.1b allowed partition subsets). A stated window start or end stays allowed: whole partitions, bounded in time | phase 0, local ([`refuse_shape`]); runner startup, `drill approve`, runner and controller readiness; controller admission and reconcile. No CEL rule: the `Restore` CRD declares no partitions | [`ORIGINAL_NAME_NEEDS_WHOLE_TOPICS`] |
 //! | 2 | every restored name is absent on the target | phase 0 (the existing absence refusal, both modes) | "already exists" |
 //! | 3 | the target is not the source cluster, OR every broker reports `auto.create.topics.enable=false` | phase 0 ([`source_relation`], [`require_auto_create_disabled`]) | [`ORIGINAL_NAME_AUTO_CREATE_ENABLED`], [`ORIGINAL_NAME_AUTO_CREATE_UNKNOWN`] |
 //! | 4 | somewhere was looked for a declarative owner, and none was found unless the owner path is chosen | phase 0 ([`owner_verdict`]) | [`ORIGINAL_NAME_OWNER_NOT_CHECKED`], [`ORIGINAL_NAME_OWNER_PRESENT`], [`ORIGINAL_NAME_OWNERS_INVALID`] |
@@ -73,6 +74,13 @@ pub const ORIGINAL_NAME_PREFIX_NOT_EMPTY: &str = "OriginalNamePrefixNotEmpty";
 /// a count bound, which a record another producer wrote into the restored
 /// name can pass.
 pub const ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE: &str = "OriginalNameNeedsCompleteCoverage";
+/// An `original_name` block in a plan that states `restore.partitions`: a
+/// restore under the original topic names restores WHOLE topics. The creation
+/// step creates each topic under its production name with every partition the
+/// archive lists, so a partition subset would leave the other partitions of
+/// that name empty, and they could never be restored under it afterwards
+/// (the name exists, and a restore into an existing topic is refused).
+pub const ORIGINAL_NAME_NEEDS_WHOLE_TOPICS: &str = "OriginalNameNeedsWholeTopics";
 /// The target is (or may be) the source cluster and a broker reports
 /// `auto.create.topics.enable=true`: a producer still pointed at the name
 /// would create it under the restore.
@@ -387,9 +395,10 @@ pub fn is_original_name_restore(spec: &DrillSpec) -> bool {
             .is_some_and(|naming| naming.prefix.is_empty())
 }
 
-/// Conditions 1 and 1b, purely local: an `original_name` block is legal only
-/// in `newTopic` mode, only beside `prefix: ""`, and only in a plan that asks
-/// for COMPLETE verification (`sample.coverage: complete`). `None` for every
+/// Conditions 1, 1b and 1c, purely local: an `original_name` block is legal
+/// only in `newTopic` mode, only beside `prefix: ""`, only in a plan that asks
+/// for COMPLETE verification (`sample.coverage: complete`), and only in a plan
+/// that restores WHOLE topics (no `restore.partitions`). `None` for every
 /// plan that carries no block (an empty prefix without one is the mapping
 /// guard's, and it keeps refusing it).
 ///
@@ -403,6 +412,18 @@ pub fn is_original_name_restore(spec: &DrillSpec) -> bool {
 /// archive by its `x-original-offset` and reports a record the archive does
 /// not hold as unexpected, by offset. Only that is acceptable under an
 /// original name, so the plan must ask for it.
+///
+/// **Why whole topics, and never a partition subset** (PROD-11.1b lifted the
+/// general refusal of `restore.partitions`; this is the rule that stays for
+/// an original name). The creation step creates each topic under its
+/// production name with EVERY partition the archive lists, and the engine
+/// fills only the selected ones. The result is a production-named topic whose
+/// other partitions are empty, signed as covered, because "covered" then
+/// means every SELECTED partition. And it cannot be finished later: the name
+/// now exists, and a restore into an existing topic is refused. So the plan
+/// is refused before anything is created. A stated window (a start, or an
+/// end) restores whole partitions bounded in time, and stays allowed; a
+/// subset under a PREFIX is PROD-11.1b's and is untouched.
 #[must_use]
 pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
     spec.target.original_name()?;
@@ -441,6 +462,25 @@ pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
             } else {
                 ""
             }
+        ));
+    }
+    if !spec.restore.partitions.is_empty() {
+        let narrowed = spec
+            .restore
+            .partitions
+            .keys()
+            .map(|topic| format!("`{topic}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!(
+            "{ORIGINAL_NAME_NEEDS_WHOLE_TOPICS}: target.topic_naming.original_name is set and \
+             restore.partitions selects a partition subset of {narrowed}. A restore under the \
+             original topic names restores whole topics: the run would create each topic under \
+             its own name with every partition and fill only the selected ones, and the \
+             partitions left out could never be restored under that name afterwards (a restore \
+             into an existing topic is refused). Remove restore.partitions to restore every \
+             partition (a window start or end may stay), or restore the subset under a prefix \
+             (target.topic_naming.prefix) and no original_name block"
         ));
     }
     None

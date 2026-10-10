@@ -551,16 +551,18 @@ FORMAT_VERSION = "1.4.0"
 #
 # 1.28.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
 # `target.original_name`: a restore under the source's ORIGINAL topic names,
-# into absent topics (OD-2). Thirteen arms, ON-1 to ON-13, mirrored byte for
+# into absent topics (OD-2). Fourteen arms, ON-1 to ON-14, mirrored byte for
 # byte and in position from `Scorecard::validate_invariants`: the block only
-# under a version of at least 1.8.0, only in a newTopic document with the empty
-# prefix, the approval subject `originalName`, the approval mode and the cluster
-# condition from their closed sets, `targetIsNotSource` only beside a known
-# source cluster id that is not the target's, somewhere looked for an owner,
-# each owner from a place looked in, an owned name only on the owner path, a
-# one-person confirmation only with the names typed, the resources file named
-# by digest, and a COMPLETE verification (never a sampled one, and never a pass
-# that records none).
+# under a 1.x version of at least 1.8.0, only in a newTopic document with the
+# empty prefix, the approval subject `originalName`, the approval mode and the
+# cluster condition from their closed sets, `targetIsNotSource` only beside a
+# known source cluster id that is not the target's, somewhere looked for an
+# owner, each owner from a place looked in, an owned name only on the owner
+# path, a one-person confirmation only with the names typed, the resources file
+# named by digest, a COMPLETE verification (never a sampled one, and never a
+# pass that records none), and never beside a partition subset (ON-14, judged
+# first: such a restore restores whole topics, so the block is format 1's and
+# no 2.x document carries it).
 # They fire only on a document carrying the block, so every document without
 # it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
 # that is not the writer's shape; two `original name:` lines say what admitted
@@ -1202,6 +1204,21 @@ def _defines_format_1_minor(version, since_minor) -> bool:
         minor = _minor(version)
         return minor is not None and minor >= since_minor
     return major == SCORECARD_PARTITION_SUBSETS_MAJOR
+
+
+def _defines_original_name(version) -> bool:
+    """Whether a document of `version` defines `target.original_name` -- the
+    twin of `logweir_core::scorecard::defines_original_name` (arm ON-1): a 1.x
+    document from 1.8.0 on, and NO document of another major. Unlike
+    `_defines_format_1_minor`, major 2 does not define it: a 2.x document is a
+    partition-subset restore's, and a restore under the original topic names
+    restores whole topics (arm ON-14)."""
+    minor = _minor(version)
+    return (
+        _major(version) == 1
+        and minor is not None
+        and minor >= SCORECARD_ORIGINAL_NAME_SINCE_MINOR
+    )
 
 
 def _narrows_partitions(block) -> bool:
@@ -1856,7 +1873,7 @@ def check_invariants(doc) -> str:
     # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
     # `Option<OriginalNameInfo>` over there, so `null` is ABSENT and anything
     # that is not the writer's shape is refused at DESERIALISATION. Arms ON-1
-    # to ON-13 below compare its fields, so the shape is asserted first. The
+    # to ON-14 below compare its fields, so the shape is asserted first. The
     # bad shapes are cases in `shape-index.json`.
     original_name = target.get("original_name")
     if original_name is not None and not _original_name_shape_ok(original_name):
@@ -2616,24 +2633,32 @@ def check_invariants(doc) -> str:
                             "partition source.selection does not select"
                         )
 
-    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-13,
+    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-14,
     # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
     # `redactions`) and with the same words from `Scorecard::validate_invariants`.
     # They fire ONLY on a document carrying the block, so every document before
     # 1.8.0 is decided exactly as before. Not interpolated except ON-1's
-    # version. The shape layer above has proved the block's types.
+    # version. The shape layer above has proved the block's types. ON-14 is
+    # judged FIRST.
     if original_name is not None:
-        # ON-1. A version before 1.8.0 cannot carry the 1.8.0 block.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_ORIGINAL_NAME_SINCE_MINOR
-        ):
+        # ON-14, first. An original-name restore restores WHOLE topics: the
+        # block never sits beside a partition subset. Every 2.x document names
+        # a subset (PS-1), so this is the arm a 2.x document carrying the block
+        # meets; a subset under major 1 has already met PS-2.
+        if selection is not None and selection.get("partitions") is not None:
+            return (
+                "target.original_name is present beside source.selection.partitions; a "
+                "restore under the original topic names restores whole topics, never a "
+                "partition subset"
+            )
+        # ON-1. The block is format 1's, from 1.8.0. MAJOR 1 ON PURPOSE (the
+        # older optional blocks read `_defines_format_1_minor`): a 2.x document
+        # is a partition-subset restore's and never carries the block (ON-14).
+        if not _defines_original_name(version):
             return (
                 f"target.original_name is present but format_version "
-                f"{_rust_debug_str(version)} predates it: the block is defined from "
-                f"1.{SCORECARD_ORIGINAL_NAME_SINCE_MINOR}.0"
+                f"{_rust_debug_str(version)} does not define it: the block is format 1's, "
+                f"from 1.{SCORECARD_ORIGINAL_NAME_SINCE_MINOR}.0, and no other major carries it"
             )
         # ON-2. The identity ban stays in scratch mode (absent mode is scratch).
         if target.get("mode") in (None, "scratch"):
@@ -4970,12 +4995,13 @@ def main(
             "format 2.0.0 only with source.selection.partitions, a format-1 selection a start "
             "only, each subset list sorted and distinct, one engine run per distinct subset or "
             "one more, and a complete block that expects nothing from an unselected partition; "
-            "target.original_name only from 1.8.0, only in a newTopic document with the empty "
+            "target.original_name only from 1.8.0 of format 1 and never beside a partition "
+            "subset, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
             "their closed sets, targetIsNotSource only beside a known other source cluster id, "
             "somewhere looked for an owner, each owner from a place looked in, an owned name "
-            "only on the owner path, a one-person confirmation only with the names typed, and "
-            "the KafkaTopic resources looked in named by digest; "
+            "only on the owner path, a one-person confirmation only with the names typed, "
+            "the KafkaTopic resources looked in named by digest, and a complete verification; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

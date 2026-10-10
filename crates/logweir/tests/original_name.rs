@@ -466,6 +466,93 @@ fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
     );
 }
 
+/// **An original-name restore restores WHOLE topics** (the orchestrator's
+/// ruling of 2026-10-09, once PROD-11.1b allowed partition subsets). A plan
+/// that carries the block and `restore.partitions` is refused BY NAME at
+/// phase 0: exit 3, before any broker is asked anything, nothing created.
+/// The creation step would create `orders` under its own name with every
+/// partition and the engine would fill two of three; the third could never be
+/// restored under that name afterwards.
+///
+/// CONTROLS: the same plan without the subset is admitted; the same plan
+/// with a stated window START (whole partitions, bounded in time) is
+/// admitted; a subset restore under a PREFIX is what PROD-11.1b made it.
+/// KILLS: deleting the whole-topics arm of `refuse_shape`; applying it to a
+/// stated window; applying it to a prefixed restore.
+#[test]
+fn a_partition_subset_under_the_original_names_is_refused_by_name() {
+    let subset = || BTreeMap::from([("orders".to_string(), vec![0, 2])]);
+    let mut spec = plan_no_owner();
+    spec.restore.partitions = subset();
+    let message = refused(
+        admit(&spec, Some(OTHER), &Broker::disabled(), &no_inputs()),
+        "OriginalNameNeedsWholeTopics",
+    );
+    for needle in [
+        "restore.partitions selects a partition subset of `orders`",
+        "restores whole topics",
+        "Remove restore.partitions",
+        "under a prefix",
+    ] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+
+    // The YAML an operator writes: a subset beside the interval form of the
+    // point in time, the one spelling PROD-11.1b's grammar accepts.
+    let mut yaml: serde_yaml::Value =
+        serde_yaml::to_value(plan_no_owner()).expect("the plan serialises");
+    yaml["restore"] = serde_yaml::from_str(
+        "{point_in_time: \"../2026-09-07T14:05:00Z\", partitions: {payments: [1]}}",
+    )
+    .expect("a restore block");
+    let parsed: DrillSpec = serde_yaml::from_value(yaml).expect("the subset plan parses");
+    assert_eq!(parsed.restore.partitions["payments"], vec![1]);
+    assert!(
+        logweir_core::original_name::refuse_shape(&parsed).is_some_and(|m| m
+            .starts_with("OriginalNameNeedsWholeTopics: ")
+            && m.contains("`payments`"))
+    );
+
+    // CONTROL: without the subset the plan is admitted.
+    let run = admit(
+        &plan_no_owner(),
+        Some(OTHER),
+        &Broker::disabled(),
+        &no_inputs(),
+    );
+    assert!(
+        run.result.is_ok(),
+        "{:?}",
+        run.result.err().map(|e| e.to_string())
+    );
+
+    // CONTROL: a stated window start restores whole partitions, bounded in
+    // time, and is not this rule's.
+    let mut windowed = plan_no_owner();
+    windowed.restore.window_start = Some(ts("2026-09-07T13:00:00Z"));
+    assert_eq!(logweir_core::original_name::refuse_shape(&windowed), None);
+    let run = admit(&windowed, Some(OTHER), &Broker::disabled(), &no_inputs());
+    assert!(
+        run.result.is_ok(),
+        "{:?}",
+        run.result.err().map(|e| e.to_string())
+    );
+
+    // CONTROL: a subset under a PREFIX is unchanged from main.
+    let mut prefixed = plan_no_owner();
+    prefixed.restore.partitions = subset();
+    let naming = prefixed.target.topic_naming.as_mut().unwrap();
+    naming.original_name = None;
+    naming.prefix = "restore-".into();
+    assert_eq!(logweir_core::original_name::refuse_shape(&prefixed), None);
+    let run = admit(&prefixed, Some(OTHER), &Broker::disabled(), &no_inputs());
+    assert!(
+        run.result.is_ok(),
+        "{:?}",
+        run.result.err().map(|e| e.to_string())
+    );
+}
+
 /// An empty prefix NOBODY opted into keeps the old refusal. KILLS: allowing
 /// the identity mapping for any empty prefix.
 #[test]
