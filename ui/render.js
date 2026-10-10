@@ -652,13 +652,40 @@ export function esc(value) {
     .replace(/'/g, "&#39;");
 }
 
+/** What a bidi control in displayed text is replaced by: U+FFFD, the same
+ *  character weirkeeper writes where it removes one from a runner's sentence. */
+export const BIDI_REPLACEMENT = "\uFFFD";
+
+/** The nine explicit bidi controls: the embeddings and overrides
+ *  (U+202A-U+202E) and the isolates (U+2066-U+2069). */
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/** TEXT FROM THE CLUSTER IS SHOWN, NEVER OBEYED (FX-34). `esc` stops a
+ *  message becoming MARKUP; it does nothing about a bidi override, which is
+ *  not markup: U+202E in a text node reverses everything after it on screen,
+ *  so a condition message could read as the opposite of what it says. A
+ *  condition's message, a refused run's reason, a check's message and a
+ *  diagnosis are prose somebody else wrote, so each such control is replaced
+ *  by [`BIDI_REPLACEMENT`] before the text is escaped.
+ *
+ *  FOR DISPLAY ONLY, which is why it is in [`cell`] and [`messageText`] and
+ *  not in [`esc`]: `esc` also writes form values and identifiers that are read
+ *  back and sent, and those must stay the bytes they are. */
+export function inert(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value).replace(BIDI_CONTROLS, BIDI_REPLACEMENT);
+}
+
 /** A value for display: the value escaped, or [`ABSENT`] when it is not set.
- *  `false` and `0` are values, not absences, and render as themselves. */
+ *  `false` and `0` are values, not absences, and render as themselves. A bidi
+ *  control in it is shown as [`BIDI_REPLACEMENT`] ([`inert`]). */
 export function cell(value) {
   if (value === null || value === undefined || value === "") {
     return ABSENT;
   }
-  return esc(value);
+  return esc(inert(value));
 }
 
 /** The sentence an empty table carries when its caller gives it none. */
@@ -1397,9 +1424,9 @@ export function conditionBadge(condition, trueWord, falseWord) {
   }
   const c = condition;
   const reason = typeof c.reason === "string" && c.reason.length > 0 ? c.reason : "";
-  const exact = String(c.type || "") + "=" + String(c.status || "") +
+  const exact = inert(String(c.type || "") + "=" + String(c.status || "") +
     (reason.length > 0 ? " " + reason : "") +
-    (typeof c.message === "string" && c.message.length > 0 ? ": " + c.message : "");
+    (typeof c.message === "string" && c.message.length > 0 ? ": " + c.message : ""));
   if (String(c.status) === "True") {
     return titledBadge("green", trueWord, exact);
   }
@@ -1902,9 +1929,9 @@ export function messageText(value) {
   if (typeof value !== "string" || value.length === 0) {
     return cell(value);
   }
-  const parts = value.split("`");
+  const parts = inert(value).split("`");
   if (parts.length < 3) {
-    return esc(value);
+    return esc(inert(value));
   }
   let out = "";
   for (let i = 0; i < parts.length; i += 1) {
@@ -2505,7 +2532,7 @@ export function mutationStatus(state, subject, unmatched) {
   if (s.kind === "refused") {
     return statusRegion(
       "failed",
-      "<p>Nothing was sent: " + esc(error.message) + "</p>",
+      "<p>Nothing was sent: " + esc(inert(error.message)) + "</p>",
     );
   }
   return statusRegion(

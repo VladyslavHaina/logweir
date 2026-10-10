@@ -518,8 +518,62 @@ impl RestoreAdmission {
     }
 }
 
-impl fmt::Display for RestoreAdmission {
+/// The field an ordinary `Restore` names its `Approval` by.
+pub const APPROVAL_REF_FIELD: &str = "spec.approvalRef";
+
+/// The field a standing (rehearsal) `Restore` names its `Approval` by.
+pub const STANDING_APPROVAL_REF_FIELD: &str = "spec.authorization.approvalRef";
+
+/// The field `restore` names its `Approval` by: the one its spec actually
+/// carries. The two are mutually exclusive on a sealed spec (the CEL rule
+/// `has(self.approvalRef) != has(self.authorization)`), and [`admit`]
+/// dispatches on the same presence.
+#[must_use]
+pub fn approval_ref_field(restore: &Restore) -> &'static str {
+    if restore.spec.authorization.is_some() {
+        STANDING_APPROVAL_REF_FIELD
+    } else {
+        APPROVAL_REF_FIELD
+    }
+}
+
+/// One admission's sentence with the approval field it is about.
+struct AdmissionSentence<'a> {
+    admission: &'a RestoreAdmission,
+    field: &'static str,
+}
+
+impl fmt::Display for AdmissionSentence<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.admission.write_sentence(f, self.field)
+    }
+}
+
+impl RestoreAdmission {
+    /// This admission's sentence FOR `restore`: the one a status carries.
+    ///
+    /// **FX-34, PoC batch 5's F-2.** Four of these sentences open by naming
+    /// the field that names the `Approval`, and [`fmt::Display`] spells it
+    /// `spec.approvalRef`. A standing `Restore` has no such field: its
+    /// `Approval` is named by `spec.authorization.approvalRef`, and one
+    /// waiting for it read "spec.approvalRef names the Approval …", sending
+    /// its reader to a field the object does not have. Every status write
+    /// goes through here, so a condition names the field the object uses
+    /// ([`approval_ref_field`]). `Display` keeps the ordinary spelling, which
+    /// is what an ordinary `Restore` gets from this function too, byte for
+    /// byte.
+    #[must_use]
+    pub fn message_for(&self, restore: &Restore) -> String {
+        AdmissionSentence {
+            admission: self,
+            field: approval_ref_field(restore),
+        }
+        .to_string()
+    }
+
+    /// The sentences, with the approval field as a parameter. `Display` and
+    /// [`Self::message_for`] are the two callers.
+    fn write_sentence(&self, f: &mut fmt::Formatter<'_>, field: &str) -> fmt::Result {
         match self {
             Self::Ok => write!(
                 f,
@@ -528,19 +582,19 @@ impl fmt::Display for RestoreAdmission {
             ),
             Self::ApprovalNotVerified { approval } => write!(
                 f,
-                "spec.approvalRef names the Approval `{approval}`, which does not exist yet or is \
+                "{field} names the Approval `{approval}`, which does not exist yet or is \
                  not Verified=True; no Job is created until it is, and this object is looked at \
                  again in {ADMISSION_REQUEUE_SECS}s (interface I19)"
             ),
             Self::ApprovalNotReceived { approval } => write!(
                 f,
-                "spec.approvalRef.name is `{approval}` — it names nothing, so no Approval can \
+                "{field}.name is `{approval}` — it names nothing, so no Approval can \
                  ever bind to this Restore; spec is immutable, so create a new Restore that names \
                  one"
             ),
             Self::ApprovalSubjectMismatch { approval, detail } => write!(
                 f,
-                "spec.approvalRef names Approval `{approval}`, but its verified subject binding \
+                "{field} names Approval `{approval}`, but its verified subject binding \
                  does not identify this Restore ({detail}); create a new Approval for this exact \
                  Restore name, namespace, and UID"
             ),
@@ -569,17 +623,26 @@ impl fmt::Display for RestoreAdmission {
             ),
             Self::AuthorizationPolicyMismatch { approval, detail } => write!(
                 f,
-                "spec.approvalRef names Approval `{approval}`, whose authorization does not match \
+                "{field} names Approval `{approval}`, whose authorization does not match \
                  this namespace's approval policy ({detail}); no Job is created. Both specs are \
                  immutable: create a new Restore, which is confirmed or approved under the policy \
                  bound now"
             ),
             Self::AuthorizationExpired { approval, detail } => write!(
                 f,
-                "spec.approvalRef names Approval `{approval}`, whose authorization expired before \
+                "{field} names Approval `{approval}`, whose authorization expired before \
                  this Restore was admitted ({detail}); no Job is created. Create a new Restore"
             ),
         }
+    }
+}
+
+/// The sentence as an ORDINARY `Restore` reads it ([`APPROVAL_REF_FIELD`]).
+/// A status is written from [`RestoreAdmission::message_for`], which knows
+/// which kind of `Restore` it is about.
+impl fmt::Display for RestoreAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_sentence(f, APPROVAL_REF_FIELD)
     }
 }
 
@@ -5273,7 +5336,7 @@ pub fn admission_hold_patch(
                 CONDITION_ADMITTED,
                 "False",
                 admission.reason(),
-                &admission.to_string(),
+                &admission.message_for(restore),
                 now,
             )],
         }
@@ -7266,11 +7329,11 @@ async fn reconcile_restore_inner(
                     .map(|q| q.limit);
                 return Err(RestoreError::Refused(
                     a.reason(),
-                    expired_while_queued_message(&a.to_string(), behind, limit),
+                    expired_while_queued_message(&a.message_for(restore), behind, limit),
                 ));
             }
             a if a.is_terminal() => {
-                return Err(RestoreError::Refused(a.reason(), a.to_string()));
+                return Err(RestoreError::Refused(a.reason(), a.message_for(restore)));
             }
             a => {
                 // A HOLD — interface I19. `phase: Pending`, one condition, and

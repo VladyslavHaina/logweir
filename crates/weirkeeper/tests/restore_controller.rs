@@ -11654,3 +11654,243 @@ async fn the_longest_refusal_message_fits_the_progress_field() {
     );
     assert_eq!(status["progress"]["message"], message);
 }
+
+/// **The fixture the console's suite reads is what this controller stores.**
+///
+/// `ui/tests/fixtures/refusal-condition.json` holds one hostile
+/// `refusal-detail=` line, the terminal message weirkeeper stores for it, and
+/// the same message with its bidi controls left live.
+/// `ui/tests/condition-message.spec.js` proves the console shows both inert;
+/// this row proves the first is really what a pass over that line writes, so
+/// the two suites cannot drift onto different strings.
+#[tokio::test]
+async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace_root().join("ui/tests/fixtures/refusal-condition.json"))
+            .expect("the shared fixture ships"),
+    )
+    .expect("the fixture is JSON");
+    let line = fixture["detailLine"].as_str().expect("a detail line");
+    let stored = fixture["storedMessage"].as_str().expect("a stored message");
+    let uncleaned = fixture["uncleanedMessage"]
+        .as_str()
+        .expect("an uncleaned message");
+    let (status, seen) =
+        fx34_refused(log_body(&format!("{line}\nrefusal-reason=GuardRefused\n"))).await;
+    assert_eq!(fx34_message(&status), stored);
+    assert_eq!(status["progress"]["message"], stored);
+    fx34_assert_nothing_raw(&seen, "the console fixture");
+    // The CONTROL: the line really carries live bidi controls and markup, and
+    // the stored message differs from the uncleaned one in those controls only.
+    assert!(line.contains("\\u202e") && line.contains("<script>alert(1)</script>"));
+    assert!(uncleaned.contains('\u{202E}') && !stored.contains('\u{202E}'));
+    assert_eq!(
+        uncleaned.replace(['\u{202E}', '\u{202C}'], &REPLACEMENT.to_string()),
+        stored
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-34 / PoC batch 5 F-2 — a condition names the field the object uses
+// ---------------------------------------------------------------------------
+
+/// [`restore`] as a STANDING (rehearsal) `Restore`: `spec.authorization` names
+/// the `Approval`, and there is no `spec.approvalRef` at all.
+fn fx34_standing_restore(approval_ref: &str) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME)).expect("the fixture");
+    value["spec"]
+        .as_object_mut()
+        .expect("a spec")
+        .remove("approvalRef");
+    value["spec"]["authorization"] = serde_json::json!({
+        "kind": "Standing",
+        "approvalRef": {"name": approval_ref},
+        "rehearsalScheduleRef": {"name": "weekly"},
+    });
+    let standing: Restore = serde_json::from_value(value).expect("a standing Restore");
+    assert!(standing.spec.approval_ref.is_none() && standing.spec.authorization.is_some());
+    standing
+}
+
+/// **A standing `Restore` waiting for its approval names
+/// `spec.authorization.approvalRef`.** PoC batch 5 recorded "spec.approvalRef
+/// names the Approval …" on an object that has no such field
+/// (`prod081a/k8/pb5-k8b-control-declared.after.json`).
+///
+/// The CONTROL is the ordinary `Restore` over the same route table: its
+/// sentence is the one it always was, byte for byte.
+///
+/// KILLS: writing the hold from `Display` instead of `message_for`.
+#[tokio::test]
+async fn a_standing_restore_waiting_for_its_approval_names_the_field_it_uses() {
+    let hold = |restore: Restore| async move {
+        let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+            404,
+            not_found_body("approvals.logweir.dev", APPROVAL),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &restore,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a hold is an answer");
+        assert_eq!(outcome.requeue, Requeue::After(30));
+        let seen = bodies.lock().expect("readable").clone();
+        let status = patched_statuses(&seen).remove(0);
+        assert_eq!(
+            conditions_of(&status),
+            vec![(
+                "Admitted".to_string(),
+                "False".to_string(),
+                REASON_APPROVAL_NOT_VERIFIED.to_string()
+            )]
+        );
+        status["conditions"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .to_string()
+    };
+    let rest = "names the Approval `a1`, which does not exist yet or is not Verified=True; no Job \
+                is created until it is, and this object is looked at again in 30s (interface I19)";
+    assert_eq!(
+        hold(fx34_standing_restore(APPROVAL)).await,
+        format!("spec.authorization.approvalRef {rest}")
+    );
+    assert_eq!(
+        hold(restore()).await,
+        format!("spec.approvalRef {rest}"),
+        "an ordinary Restore's sentence is unchanged"
+    );
+}
+
+/// The TERMINAL half: a standing `Restore` whose authorization names no
+/// approval is refused naming `spec.authorization.approvalRef.name`, where it
+/// said `spec.approvalRef.name`. The control is the ordinary `Restore`.
+///
+/// KILLS: writing a terminal admission refusal from `Display`.
+#[tokio::test]
+async fn a_standing_restore_refused_at_admission_names_the_field_it_uses() {
+    let refused = |restore: Restore| async move {
+        // No Approval route: an empty name is never asked about.
+        let routes: Vec<Route> =
+            admission_routes(404, String::new(), 200, cluster_json(true, PLAINTEXT_AUTH))
+                .into_iter()
+                .filter(|r| !r.path_suffix.starts_with("/approvals/"))
+                .collect();
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore(
+            &restore,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a terminal refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_APPROVAL_NOT_RECEIVED)
+        );
+        let seen = bodies.lock().expect("readable").clone();
+        let status = patched_statuses(&seen).remove(0);
+        status["conditions"][0]["message"]
+            .as_str()
+            .expect("a message")
+            .to_string()
+    };
+    let rest = ".name is `` — it names nothing, so no Approval can ever bind to this Restore; \
+                spec is immutable, so create a new Restore that names one";
+    assert_eq!(
+        refused(fx34_standing_restore("")).await,
+        format!("spec.authorization.approvalRef{rest}")
+    );
+    assert_eq!(
+        refused(restore_with_no_approval_ref()).await,
+        format!("spec.approvalRef{rest}")
+    );
+}
+
+/// Every admission sentence that names the approval field names the one the
+/// object carries, and the sentences that name no such field are the same for
+/// both kinds of `Restore`.
+#[test]
+fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
+    use weirkeeper::controllers::restore::{
+        approval_ref_field, APPROVAL_REF_FIELD, STANDING_APPROVAL_REF_FIELD,
+    };
+    let ordinary = restore();
+    let standing = fx34_standing_restore(APPROVAL);
+    assert_eq!(approval_ref_field(&ordinary), "spec.approvalRef");
+    assert_eq!(
+        approval_ref_field(&standing),
+        "spec.authorization.approvalRef"
+    );
+    let a = || APPROVAL.to_string();
+    let d = || "a detail".to_string();
+    let naming = [
+        RestoreAdmission::ApprovalNotVerified { approval: a() },
+        RestoreAdmission::ApprovalNotReceived { approval: a() },
+        RestoreAdmission::ApprovalSubjectMismatch {
+            approval: a(),
+            detail: d(),
+        },
+        RestoreAdmission::AuthorizationPolicyMismatch {
+            approval: a(),
+            detail: d(),
+        },
+        RestoreAdmission::AuthorizationExpired {
+            approval: a(),
+            detail: d(),
+        },
+    ];
+    for admission in &naming {
+        let plain = admission.to_string();
+        assert!(plain.starts_with(APPROVAL_REF_FIELD), "{plain}");
+        assert_eq!(
+            admission.message_for(&ordinary),
+            plain,
+            "an ordinary Restore's sentence is Display's, byte for byte"
+        );
+        let for_standing = admission.message_for(&standing);
+        assert!(
+            for_standing.starts_with(STANDING_APPROVAL_REF_FIELD),
+            "{for_standing}"
+        );
+        assert_eq!(
+            for_standing,
+            plain.replacen(APPROVAL_REF_FIELD, STANDING_APPROVAL_REF_FIELD, 1),
+            "the same sentence, the field aside"
+        );
+        assert!(
+            !for_standing
+                .replace(STANDING_APPROVAL_REF_FIELD, "")
+                .contains("approvalRef"),
+            "and no second mention of a field it does not have: {for_standing}"
+        );
+    }
+    let neutral = [
+        RestoreAdmission::Ok,
+        RestoreAdmission::PlanHashMismatch {
+            recomputed: "sha256:aa".to_string(),
+            approval_says: "sha256:bb".to_string(),
+        },
+        RestoreAdmission::ClusterNotReachable {
+            cluster: "scratch".to_string(),
+        },
+        RestoreAdmission::StandingAuthorizationRefused {
+            approval: a(),
+            detail: d(),
+        },
+    ];
+    for admission in &neutral {
+        assert_eq!(admission.message_for(&standing), admission.to_string());
+        assert!(!admission.to_string().contains("spec.approvalRef"));
+    }
+    assert_eq!(naming.len() + neutral.len(), 9, "every variant is in a row");
+}

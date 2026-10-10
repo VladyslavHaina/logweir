@@ -218,24 +218,32 @@ fn truncate(text: &str) -> String {
 
 /// The reason code a refusal sentence opens with, and the rest of it.
 ///
-/// A guard's message MAY open with `<Code>: `, as I9's terminal states and
-/// the named reasons do (`PartitionSubsetsAwaitOwnerDecision: …`,
-/// `StorageRegionInvalid: …`). The code is a CamelCase word: an ASCII
-/// upper-case letter, then two or more ASCII letters and digits, at most
+/// A guard's message MAY open with its name. I9's terminal states and most
+/// named reasons write `<Code>: ` (`StorageRegionInvalid: …`,
+/// `PlainWithoutTls: …`); the recovery-point and standing-authorization
+/// refusals write `<Code>. ` (`PointBindingMismatch. The plan is bound …`).
+/// Both are read. The code is a CamelCase word: an ASCII upper-case letter,
+/// then two or more ASCII letters and digits, at most
 /// [`REASON_CODE_MAX_BYTES`] in all, and the separator is part of the match.
 /// A sentence that opens with anything else carries
 /// [`DEFAULT_REASON_CODE`] and is kept whole.
 ///
-/// Either way `"{code}: {rest}"` is the runner's own sentence, or that
-/// sentence behind `GuardRefused: `, so a word mistaken for a code changes
-/// nothing a reader sees.
+/// Either way `"{code}: {rest}"` is the runner's own sentence (with `: `
+/// where it wrote `. `), or that sentence behind `GuardRefused: `, so a word
+/// mistaken for a code changes nothing a reader sees.
 #[must_use]
 pub fn split_reason_code(message: &str) -> (&str, &str) {
-    if let Some((head, rest)) = message.split_once(": ") {
-        let camel =
-            head.len() >= 3 && head.as_bytes()[0].is_ascii_uppercase() && is_reason_code(head);
-        if camel {
-            return (head, rest);
+    let word_end = message
+        .bytes()
+        .position(|b| !b.is_ascii_alphanumeric())
+        .unwrap_or(message.len());
+    let (head, tail) = message.split_at(word_end);
+    let camel = head.len() >= 3 && head.as_bytes()[0].is_ascii_uppercase() && is_reason_code(head);
+    if camel {
+        for separator in [": ", ". "] {
+            if let Some(rest) = tail.strip_prefix(separator) {
+                return (head, rest);
+            }
         }
     }
     (DEFAULT_REASON_CODE, message)
@@ -448,6 +456,35 @@ mod tests {
             assert_eq!(d.code(), DEFAULT_REASON_CODE, "{prose}");
             assert_eq!(d.message(), prose);
         }
+    }
+
+    #[test]
+    fn a_code_that_ends_in_a_full_stop_is_read_too() {
+        // The recovery-point refusals' own spelling (`drill/binding.rs`).
+        let d = RefusalDetail::from_refusal_message(
+            "PointBindingMismatch. The plan is bound to recovery point lwp1-abc; no data \
+             operation was started.",
+        )
+        .expect("a line");
+        assert_eq!(d.code(), "PointBindingMismatch");
+        assert_eq!(
+            d.message(),
+            "The plan is bound to recovery point lwp1-abc; no data operation was started."
+        );
+        // A sentence whose first word merely ends a sentence is still prose
+        // when it is not a CamelCase word of three or more characters.
+        for prose in [
+            "No. That is not a code",
+            "it. is lower case",
+            "Has Space. Not a code",
+        ] {
+            let d = RefusalDetail::from_refusal_message(prose).expect("a line");
+            assert_eq!(d.code(), DEFAULT_REASON_CODE, "{prose}");
+            assert_eq!(d.message(), prose);
+        }
+        // Only at the very start, and only one word.
+        let d = RefusalDetail::from_refusal_message("the plan: PointUntrusted. x").expect("a line");
+        assert_eq!(d.code(), DEFAULT_REASON_CODE);
     }
 
     #[test]
