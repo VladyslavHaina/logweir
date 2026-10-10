@@ -1154,13 +1154,17 @@ reversible direction until the owning task rules.
   transitive dependencies (`crc-fast`, the `icu_*` crates, `idna_adapter`,
   pulled in through `reqwest`) then raise the floor further to 1.89.
 
-- **Create-only evidence puts: MinIO is the only S3-compatible backend Logweir
-  has actually tested.** Three facts follow, and they are stated separately
-  because only the second is verified here:
+- **Create-only evidence puts: MinIO and SeaweedFS are the S3-compatible
+  backends Logweir has repeatable rows for**
+  ([the support matrix's archive backends](support-matrix.md#archive-backends);
+  SeaweedFS 4.48 since PROD-01.2). Three facts follow, and they are stated
+  separately because only the second is verified here:
   1. `object_store` 0.14 implements `PutMode::Create` on AWS S3 via the
      conditional `If-None-Match` put.
-  2. MinIO is the only S3-compatible backend Logweir has tested. **Real AWS S3
-     is NOT exercised in v0.1** — Global Constraint 17 forbids provisioning a
+  2. MinIO and SeaweedFS 4.48 are the S3-compatible backends with a row in
+     this repository; RustFS and versitygw were each run once by hand
+     (PROD-01.5) and are untested by the matrix's definition. **Real AWS S3
+     is NOT exercised** — Global Constraint 17 forbids provisioning a
      cloud resource, and no task in this plan supplies a bucket, a region or a
      credential source. The AWS leg is `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` and is
      confirmed by the first adopter run, not by this plan.
@@ -1536,7 +1540,10 @@ Run these with `just e2e`; the default offline suite does not dial the stack.
 MSK's TLS endpoints and Secrets Manager credential projection require a real
 MSK run. Local SASL_PLAINTEXT tests do not establish private-CA or MSK TLS
 compatibility. MSK IAM / OAUTHBEARER remains unimplemented; the
-[authentication matrix](support-matrix.md) records that distinction.
+[compatibility contract](support-matrix.md#the-compatibility-contract) records
+that distinction, and every managed provider there is untested or
+unsupported. SCRAM-SHA-512 over TLS, the mode MSK's SCRAM endpoint needs, has
+no repeatable local row either.
 
 ### The unit suite dials nothing; the e2e suite dials
 
@@ -2116,9 +2123,65 @@ For a visible topic `captureDenied` is therefore an inference: the only
 per-resource errors Kafka returns for an existing, validly named topic are the
 authorizer's and an internal broker error. Reading the code (owner choice
 AP-OC1) turns it into an observation; it never makes the answer `captured`.
-One behaviour is unchanged on purpose. A broker that ANSWERS but lacks the
-`log.message.timestamp.type` key is still read as the Apache default,
-because that is an answer and not a refused read.
+One behaviour was left unchanged by FX-4 and is changed by PROD-01.2 (the
+next ruling): a broker that ANSWERS but lacks the `log.message.timestamp.type`
+key was read as the Apache default. It is now not recorded.
+
+### An endpoint's capability is read from the endpoint, and a value it did not report is not recorded (PROD-01.2)
+
+A Kafka-compatible endpoint is not always Apache Kafka, and two readers
+treated a key missing from a SUCCESSFUL answer as the Apache default. Measured
+on Redpanda v26.2.4, whose broker resource answers nine configuration keys and
+neither the broker's timestamp type nor a record-timestamp bound
+(`e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`).
+
+What changes for an operator:
+
+- **`Restore.status.topicPreflight.timestampType` is absent** when the target's
+  broker did not report its timestamp type. It used to say `CreateTime`. The
+  refusal for a broker that reports `LogAppendTime` and does not honour the
+  per-topic override is unchanged, and applies only to a reported value. Every
+  target topic is still created with `message.timestamp.type=CreateTime`
+  pinned.
+- **Readiness check `target.timestampBound` reads `unknown`
+  (`TimestampBoundNotReported`)** when the broker's answer carries neither
+  bound key. It used to read `ready`, "declares no record-timestamp bound".
+  Every Apache Kafka broker reports at least one of the two keys, so nothing
+  changes there. A plan rendered by an older controller gets the same answer
+  under `BrokerConfigsNotReadable`, a code that controller already reads.
+- **Four capability rows** say, before a backup or restore, what the endpoint
+  itself cannot do: `connection.engineProtocol`, `target.engineProtocol`,
+  `connection.topicConfigsReadable` and `connection.groupTypes`
+  ([kubernetes.md §21.6c](kubernetes.md), and
+  [the compatibility contract](support-matrix.md#capability-checks)). The two
+  engine rows read each broker's own ApiVersions answer, because the engine
+  sends fixed request versions and never negotiates, and they answer for a
+  cluster only when every broker of it answered: a broker that did not, or a
+  bootstrap address nobody answered at, leaves the row `unknown`, never
+  `ready`. A controller from this build lists them in every `Backup` and
+  `Restore` check plan; an older runner refuses such a plan, so the runner
+  image moves with the controller (`runnerImage` in the chart).
+- **A marker topic the restore identity may not Describe** is refused as
+  before (exit 3), and the message now says it does not exist or is not
+  describable, and names the grant. Kafka lists only the topics a principal
+  may describe, so the two cannot be told apart from a listing.
+- **A cluster whose advertised brokers cannot be reached** makes
+  `connection.authenticated` say so, when the bootstrap address answered and
+  named the cluster. `logweir cluster-probe` still reads only the cluster id
+  and answers `reachable=true` for such a cluster.
+- **versitygw's `404 XAdminUserNotFound`** (an unknown access key) is a
+  refused credential (`InvalidCredentials`) and no longer a missing object
+  (PROD-01.5 C6). A genuine `NoSuchKey` is still not-found, whatever its
+  bucket, prefix or key spell: an object store's answer is read from its own
+  HTTP status and the `<Code>` of its error document, never from a word found
+  in the error's text, which echoes all three names.
+
+No signed document changes. The rule every capture path is held to: when the
+endpoint cannot answer, the receipt, the catalog and the status say "not
+recorded" with the reason, and never record an empty answer as a fact. Topic
+IDs, topic configuration, consumer positions, replication factors and schema
+dependency already did
+([the sweep](to-do/decisions/PROD-01.2-compatibility-contract.md#6-capture-paths-swept-unsupported-metadata-never-appears-captured)).
 
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 

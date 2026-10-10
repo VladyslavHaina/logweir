@@ -1,4 +1,4 @@
-# Engine support matrix
+# Support matrix
 
 <!--
 HAND-WRITTEN, except the section between the `engine-matrix:rows` markers,
@@ -11,7 +11,242 @@ worse than a short matrix.
 -->
 
 **Installing Logweir is [install.md](install.md)**, which leads with the engine
-floor below. This file is the row-by-row evidence behind it.
+floor below. This file is the row-by-row evidence behind it: the compatibility
+contract first, then the engine floors and each measurement in detail.
+
+## The compatibility contract
+
+What Logweir was shown to do, against which endpoint, in four words
+(PROD-01.2). The per-operation capability list, the measurements and the
+reasoning are in the
+[decision record](to-do/decisions/PROD-01.2-compatibility-contract.md).
+
+| Word | What it claims | The evidence it needs |
+|---|---|---|
+| supported | The operations the row names work against this endpoint. | A versioned, repeatable row in this repository: a test, named in the row, that passes against an image pinned by digest. |
+| limited | Part works and a named part does not, and Logweir says which before the operation starts. | The same kind of row, showing both halves: what works, and the check or refusal that names what does not. |
+| untested | Nothing either way. The mode is implemented, and nothing in this repository repeats a run against this endpoint. A run somebody made once by hand is named with its date, and the row stays untested. | None. The row says what blocks a real one. |
+| unsupported | It does not work, or Logweir refuses it by name. | The refusal, or the measurement that shows it cannot work. |
+
+Nothing is called supported on reasoning, and a managed provider is untested
+until somebody runs against it (OD-4): a local container is not a hosted
+service. `crates/logweir/tests/support_matrix.rs` holds this page to it: one
+status per row between the two markers below; a named test behind every
+supported and limited row, wherever on the page it stands; every reference of
+that shape is to a function with `#[test]` above it; and every check id named
+here exists.
+
+**A passing connection test is none of these.** `logweir cluster-probe` and the
+console's Test connection reach the bootstrap address and read the cluster id.
+They do not show that the engine can read or write there
+([Advertised addresses](#advertised-addresses), and the capability checks
+below).
+
+Every row ran the engine the images ship, `kafka-backup` `0.23.3+logweir.2`,
+on a compose stack. **A cell says who runs its row.** "CI" is the e2e job of
+every pull request, on Apache Kafka 3.7.1. "By hand" is a row that is
+`#[ignore]`d because it needs a profile or a broker line CI's job does not
+start: somebody ran it on the date given, on compose slot 2, with that engine
+from the published linux/arm64 runner image, and **nothing runs it again
+until somebody does** (tracker row PROD-01.2a asks for a weekly job). A
+supported cell that rests on a hand-run row is true of the day it was run.
+
+<!-- compatibility:begin -->
+
+### Brokers
+
+The status is for the whole path: the probe, the capability checks, a backup,
+a restore into new topics, and both verifiers on the receipt and the scorecard.
+Plaintext, one node, KRaft, MinIO. A cluster of several brokers has one row
+of its own, under [Capability checks](#capability-checks).
+
+| Endpoint | Status | What the row shows | Evidence |
+|---|---|---|---|
+| Apache Kafka 3.7.1, the default fixture and the line CI runs on every pull request | **supported** | The whole path. Its group listing does not type groups: see the next table. Apache no longer maintains this line (legacy, under [Broker versions](#broker-versions-apache-kafka)); supported here means Logweir's rows pass on it. | CI: `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers`, `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. The generic row on this line, `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`: by hand, 2026-10-10; no workflow runs it |
+| Apache Kafka 3.9.2 | **supported** | The whole path, and every capability check `ready`. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 3.9`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Apache Kafka 4.1.2 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.1`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Apache Kafka 4.3.1 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.3`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
+| Confluent Platform 8.3.2 (the `confluentinc/cp-kafka` image, which reports `8.3.2-ccs`) | **supported** | The whole path, with no difference from Apache Kafka 4.3.1: the same request ranges, the same capability answers, a classic group captured. | `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it) |
+| Redpanda v26.2.4 | **limited** | **A backup source only.** The probe, a backup and both verifiers pass, with topic IDs and the topic's configuration recorded. **A restore into it cannot run:** the engine sends Produce v8 and never negotiates, and Redpanda serves Produce v0–v7. `target.engineProtocol` is `notReady` and says so before a restore starts; a restore started anyway fails in the engine and signs nothing. Restore its archive into a cluster that serves Produce v8. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it) |
+| Apache Kafka 4.0.x and 4.2.x | **untested** | No pinned image and no row. | |
+| Apache Kafka on ZooKeeper (any 3.x) | **untested** | Every fixture is KRaft. | |
+| Any other Kafka-compatible endpoint | **untested** | `connection.engineProtocol` and `target.engineProtocol` answer, before anything is read or written, whether it serves the request versions the engine sends. | |
+
+### What a backup records, by endpoint
+
+An endpoint that cannot answer is recorded as **not recorded, with the
+reason**. It is never recorded as an empty answer.
+
+| What | Endpoints | Status | What the receipt says | Evidence |
+|---|---|---|---|---|
+| Consumer-group positions (`--consumer-group`) | Apache Kafka 3.9.2, 4.1.2, 4.3.1; Confluent Platform 8.3.2 | **supported** | A classic or consumer group is `captured` with its positions. | The generic row on each endpoint, which requires its group: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly, as above). Every outcome a group can have, on a broker that types groups: `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt` (CI runs it on 3.7.1, where every group is excluded; its `captured` arms need a line that types groups) |
+| Consumer-group positions | Apache Kafka 3.7.1; Redpanda v26.2.4 | **unsupported** | The endpoint serves ListGroups v0–v4, which names no group type, so Logweir cannot tell a classic consumer group from any other. Every selected group is `excluded: GroupTypeNotCaptured`: never captured, never offset 0. `connection.groupTypes` is `notReady` (advisory) before the backup. | Apache Kafka 3.7.1, CI: `e2e/tests/position_evidence.rs::every_selected_group_gets_one_outcome_in_the_signed_receipt`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it) |
+| Topic IDs (which generation of a topic the backup read) | All six endpoints above | **supported** | `topic_id` before and after the engine, source `describeTopics`. | On every endpoint, the generic row, which requires the ID and that it did not change during the capture: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly). A recreated topic is a new generation, CI on 3.7.1: `e2e/tests/topic_ids.rs::a_recreated_topic_is_a_new_generation_and_the_same_topic_continues` |
+| Topic configuration | All six endpoints above | **supported** | Coverage `captured`, with the entries the endpoint reports. A principal without DescribeConfigs on the topic gets `captureDenied` and no entries, and `connection.topicConfigsReadable` is `notReady` (advisory) before the backup. | On every endpoint, the generic row, which requires coverage `captured`: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`. The denied read, on Apache Kafka 4.3.1: `e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`. All four: by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly |
+| The broker's timestamp type and record-timestamp bound | Apache Kafka (all four lines); Confluent Platform 8.3.2 | **supported** | The receipt records the topic's timestamp type with its source. Before a restore, a `Restore` Preflight in the shape the controller renders (`restorePreflight`) answers `target.timestampBound` `ready` and quotes the bound the broker's own tool reports; during it, phase 0 records the target's timestamp type as that tool reports it (the run's `topic-preflight=` line). The rows restore a recent window, so they show the bound read and compared, and not a window the bound refuses: that arm is in process, `crates/logweir/tests/check_cli.rs` | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; no workflow runs it; the Apache Kafka lines also weekly) |
+| The broker's timestamp type and record-timestamp bound | Redpanda v26.2.4 | **unsupported** | Its broker resource reports neither (it keeps them per topic). Nothing is recorded as `CreateTime` and nothing as "no bound": the type is absent, and `target.timestampBound` is `unknown` (`TimestampBoundNotReported`). | Live, the nine keys, a `Restore` Preflight's `target.timestampBound` and phase 0's own account: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; no workflow runs it). Over those nine keys, in process, on every `cargo test`: `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`, `crates/logweir/tests/topic_preflight.rs::a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time` |
+
+### Authentication modes
+
+Backup, restore and verify on the `auth` profile's listeners, which CI starts
+(Apache Kafka 3.7.1), unless the row says otherwise.
+
+| `auth.mode` | Status | What the row shows | Evidence |
+|---|---|---|---|
+| `plaintext` | **supported** | Every broker row above. | `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers` |
+| `plain` with `tls: true` (SASL/PLAIN over TLS) | **supported** | A private CA; a wrong password and a wrong CA are refused. | `e2e/tests/auth_modes.rs::plain_over_tls_backs_up_restores_and_verifies` |
+| `plain` without TLS | **unsupported** | Refused by name before a socket opens (`PlainWithoutTls`, exit 3): SASL/PLAIN sends the password itself. | `e2e/tests/auth_modes.rs::plain_without_tls_is_refused_by_name_before_dialling` |
+| `scramSha256` | **supported** | A wrong password is refused. Against Redpanda's own SCRAM too (a backup; a restore is the broker row's limit). | CI: `e2e/tests/auth_modes.rs::scram_sha_256_backs_up_restores_and_verifies`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_authenticates_both_scram_mechanisms` (by hand, 2026-10-10; no workflow runs it) |
+| `scramSha256` with `tls: true` | **supported** | A private CA; a wrong CA is refused. | `e2e/tests/auth_modes.rs::scram_sha_256_over_tls_backs_up_restores_and_verifies` |
+| `scramSha512` | **supported** | Both clients, a drill, and the capability checks over SASL (the engine's SaslHandshake v1 and SaslAuthenticate v2 are checked only on a SASL connection). Against Redpanda too. | CI: `e2e/tests/scram.rs::a_drill_passes_over_scram`, `e2e/tests/scram.rs::scram_authenticates_through_the_engines_own_client`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. Redpanda: `e2e/tests/compat_contract.rs::redpanda_authenticates_both_scram_mechanisms` (by hand, 2026-10-10; no workflow runs it) |
+| `scramSha512` with `tls: true` | **untested** | No compose listener serves SCRAM-SHA-512 over TLS. Run once by hand (PLAT-07.1, 2026-09-16, a broker with a private CA on docker-desktop). This is the mode Amazon MSK's SCRAM endpoint needs. | |
+| `mtls` | **supported** | A CA-signed client certificate; a wrong CA and an untrusted client certificate are refused. | `e2e/tests/auth_modes.rs::mtls_backs_up_restores_and_verifies` |
+| OAUTHBEARER, in any form (MSK IAM, an OIDC token, Entra ID) | **unsupported** | No `auth.mode` names it, and the engine's command line has no token plugin. Deferred (OD-3). | |
+| GSSAPI (Kerberos) | **unsupported** | No `auth.mode` names it and no fixture serves it. | |
+
+### Schema registries
+
+Logweir contacts no schema registry. What it does is read the archived bytes.
+
+| Registry | Status | What the row shows | Evidence |
+|---|---|---|---|
+| Records in Confluent's wire format (a zero byte and a schema id), whoever wrote them | **supported** | Detection only: the receipt flags the topic `schemaDependent` with the schema ids seen, from the archived bytes. | `e2e/tests/schema_dependency.rs::a_backup_flags_raw_framed_records_with_their_ids` |
+| Karapace 6.2.3 (the `registry` profile) | **supported** | Detection only: Avro, JSON Schema and Protobuf records produced through its REST proxy are flagged with the registry's ids, with the registry stopped during the backup. | `e2e/tests/schema_dependency.rs::a_backup_flags_the_schema_dependent_topics_from_their_bytes` (by hand, 2026-10-10; no workflow runs it) |
+| Confluent Schema Registry, Apicurio Registry, AWS Glue Schema Registry | **untested** | No fixture. A framing that is not Confluent's reads `notDetected`, which means "no Confluent framing seen" and never "no registry needed". | |
+| A registry's contents (subjects, schemas, compatibility settings), on any registry | **unsupported** | Never contacted and never captured ([stability.md](stability.md), Never #2). A restore brings back the bytes; `schemaDependent` on the receipt is the warning that the schemas are not in the archive. | |
+
+### Archive backends
+
+| Backend | Status | What the row shows | Evidence |
+|---|---|---|---|
+| MinIO `RELEASE.2025-09-07T16-13-09Z` (the project's rebuild, `third_party/minio-mirror/`) | **supported** | Every e2e row archives to it. Conditional create holds: a second run of one execution is refused before the engine starts. Its fixture buckets are unversioned, so no manifest version is pinned. A backup whose id, and so every archive key, spells an S3 credential code (`expiredtoken-…`) is a backup like any other: MinIO's `404 NoSuchKey` echoes the key, and Logweir reads the answer's own code (`e2e/tests/compat_contract.rs::a_backup_whose_id_spells_a_credential_code_is_a_backup`, by hand, 2026-10-10; on every `cargo test`, `crates/logweir-store/tests/options.rs::a_real_404_about_an_object_named_like_a_credential_code_is_not_found`). | `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/backup_argv.rs::a_backup_over_a_set_an_earlier_engine_run_wrote_is_refused_before_the_engine` |
+| SeaweedFS 4.48 (the `objectstore` profile), the maintained choice | **supported** | A backup, a restore and both verifiers with every object on it; a second claim of one execution is refused (`ExecutionAlreadyClaimed`); on a versioned bucket the receipt pins the manifest's version id, and on an unversioned one it carries no pin. | `e2e/tests/compat_contract.rs::seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` (by hand, 2026-10-10; no workflow runs it) |
+| RustFS 1.0.0 | **untested** | No fixture here. Run once by hand (PROD-01.5, 2026-09-29, a private container): 19 of 19 protocol checks, Logweir's store layer 6 of 6, the receipt path `pass`. | |
+| versitygw v1.8.0 | **untested** | No fixture here. Run once by hand, the same way: 19 of 19, the receipt path `pass`, the store layer 5 of 6. The sixth: it answers an unknown access key `404 XAdminUserNotFound`, which Logweir read as a missing object. Since PROD-01.2 Logweir reads it as a refused credential, by the answer's own `<Code>` and never by a word found in its text, and the store layer is 6 of 6 against the same image (by hand, 2026-10-10). | |
+| AWS S3 | **untested** | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` | |
+| Google Cloud Storage, Azure Blob Storage | **untested** | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` | |
+| A local directory (`backend: filesystem`, the standalone CLI) | **untested** | In-process tests claim an execution on a temporary directory. No row runs the engine against a directory archive. | |
+| Object Lock retention, read back through Logweir, on any backend | **unsupported** | Logweir reads no retention back, so a scorecard's evidence block says `immutable: false` on every backend and never guesses from a bucket's configuration. The stores answer the readback to the AWS CLI (PROD-01.5: all four above, GOVERNANCE mode). | `crates/logweir-store/tests/storage.rs::object_lock_readback_reports_no_proof_rather_than_guessing` |
+| A store that ignores `If-None-Match`, or `AWS_CONDITIONAL_PUT=disabled` | **unsupported** | Refused, never silently accepted: every backup exits 4 `ExecutionClaimUnproven` before data is written, and a destination with `writeProbe` on reports `ConditionalCreateUnsupported` beforehand. | `crates/logweir/tests/check_marker_create_only.rs::a_store_without_conditional_put_is_not_ready`, `crates/logweir-store/tests/storage.rs::a_backend_without_conditional_put_reports_create_only_enforced_false` |
+
+### Managed Kafka providers
+
+**No managed provider has been run against.** Workers create no cloud resource
+(OD-4); only AWS is funded, per session, with the owner's approval. Each row
+says how Logweir would reach the provider and what blocks a real row.
+
+| Provider | Status | How Logweir would reach it | What blocks a row |
+|---|---|---|---|
+| Amazon MSK (provisioned), SASL/SCRAM | **untested** | `scramSha512` with `tls: true`, port 9096, the Secrets Manager credential | No cluster until the owner funds a session. The mode itself has no repeatable row either (SCRAM-SHA-512 over TLS, above). |
+| Amazon MSK (provisioned), mutual TLS | **untested** | `mtls`, port 9094 | No cluster. |
+| Amazon MSK with IAM authentication, and MSK Serverless | **unsupported** | Not reachable: both need OAUTHBEARER with a SigV4 token, and MSK Serverless accepts nothing else. | Deferred (OD-3). |
+| Confluent Cloud | **untested** | `plain` with `tls: true`: the API key as the user name, the API secret as the password, the public CA | No account. Not known: whether it serves the request versions the engine sends. The capability checks answer that on first contact. |
+| Redpanda Cloud | **untested** | `scramSha256` or `scramSha512` with `tls: true` | No account. If it serves what Redpanda v26.2.4 serves, it is a backup source only; that is a projection from the local row, not a measurement. |
+| Aiven for Apache Kafka | **untested** | `mtls` with the project CA, or `scramSha256` / `scramSha512` with `tls: true` | No account. |
+| Azure Event Hubs (the Kafka endpoint, port 9093) | **untested** | `plain` with `tls: true`: the user name `$ConnectionString`, the connection string as the password, the public CA | No namespace. It is not a Kafka broker, and whether it serves the engine's requests is not known. Its Entra ID sign-in is OAUTHBEARER, which is unsupported. |
+
+<!-- compatibility:end -->
+
+### Capability checks
+
+A backup or restore Preflight, and `logweir check run` on the same plan, ask
+the endpoint itself what it can do before the operation starts. The controller
+lists these rows in the plan (`capabilityChecks`); a runner emits exactly the
+ones listed. Each names what is missing and what to do instead.
+
+| Check | Operation | What it asks | When the capability is missing | The fallback it names |
+|---|---|---|---|---|
+| `connection.engineProtocol` | backup | Does the endpoint serve every request version the engine sends to read from it (Metadata v9, ListOffsets v5, Fetch v11, DescribeConfigs v1; on a SASL connection also SaslHandshake v1 and SaslAuthenticate v2)? The engine sends fixed versions and never negotiates. | `notReady`, **blocking**, `EngineProtocolUnsupported`: each request, with the range the endpoint serves. | Back up from an endpoint that serves them. |
+| `target.engineProtocol` | restore | The same for what the engine sends to write (Metadata v9, Produce v8, and the SASL pair). | `notReady`, **blocking**, `EngineProtocolUnsupported`. | Restore the archive into a cluster that serves them; an endpoint that cannot be a target can still be a source. |
+| `connection.topicConfigsReadable` | backup | Does DescribeConfigs answer for every selected topic, as this principal? | `notReady`, advisory, `TopicConfigsNotReadable`, naming the topics. The backup runs. | Grant DescribeConfigs on the topic, or accept a point whose configuration is `captureDenied` and whose timestamp type is not recorded. |
+| `connection.groupTypes` | backup | Does the endpoint's group listing name each group's type (ListGroups v5)? | `notReady`, advisory, `GroupTypesNotListed`. The backup runs. | Back up from an endpoint that serves ListGroups v5, or select no group and export positions with the endpoint's own tooling. |
+
+An answer that could not be read is `unknown` (`ApiVersionsNotObserved`), never
+`ready`. The served ranges are read from each broker's own ApiVersions answer
+on a real connection; the engine's versions come from a table held to the
+pinned engine source by `cargo xtask check-drift`. Operator reference:
+[kubernetes.md §21](kubernetes.md).
+
+**The three rows that read ApiVersions answer for a cluster only when every
+broker of it answered.** The engine may be sent to any broker, so the check
+reads the cluster's broker list, connects to every broker on it and to every
+bootstrap address the connection names, and waits for each one's answer
+inside its budget (at most 10 s).
+
+| The cluster | The row |
+|---|---|
+| Every listed broker and every bootstrap address answered | Its own verdict, with the fact `brokersAnswered: N of N` (distinct brokers, never connections). Its message says "all N brokers of this endpoint serve …". |
+| The brokers' answers differ (a rolling upgrade) | Judged on what every one of them serves, and the message says they differ. One broker that does not serve Produce v8 makes `target.engineProtocol` `notReady`. |
+| A broker the cluster lists did not answer in time | `unknown`, `ApiVersionsNotObserved`, never `ready`: "2 of 3 broker(s) the cluster lists answered …; no answer from broker 3 (host:port)". Re-run when the broker is back. |
+| A bootstrap address did not answer | `unknown` the same way, naming the address, even when every listed broker answered: a stopped broker the cluster has dropped from its list is still a broker the connection names. |
+
+Measured on the `cluster3` profile (three Apache Kafka 3.7.1 brokers) with one
+broker's process frozen, and required to be `3 of 3` from three bootstrap
+addresses and from one, five rounds each:
+`e2e/tests/compat_contract.rs::a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` (by
+hand, 2026-10-10; no workflow runs it). On every `cargo test`, against
+librdkafka's in-process cluster of three:
+`crates/logweir-kafka/tests/api_versions.rs::a_silent_broker_makes_the_view_partial_and_never_an_answer`
+and
+`crates/logweir-kafka/tests/api_versions.rs::every_broker_of_a_three_broker_cluster_answers_from_one_address_or_three`.
+
+Two limits. **A broker the cluster no longer lists is not asked:** through
+bootstrap addresses that all answer, a cluster that has dropped a stopped
+broker lists two, both answer, and the row says `2 of 2`. And **the row is
+about request versions, not about a restore into several brokers**: every
+whole-path row above is one node.
+
+### Minimum permissions
+
+Measured on the `acl` profile (Apache Kafka 4.3.1, `StandardAuthorizer`, a
+SCRAM-SHA-512 principal that is not a super user) by granting exactly the list
+and then removing one grant at a time:
+`e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`
+(by hand, 2026-10-10; no workflow runs it).
+
+| Operation | The ACLs it needs | With one removed |
+|---|---|---|
+| Probe (`cluster-probe`, Test connection) | None beyond authenticating. | Nothing to remove: with no ACL at all for the principal, the probe reads the cluster id. |
+| Backup | `Read` on each source topic (it implies `Describe`), and `DescribeConfigs` on each source topic. | Without `Read`: exit 1, the engine fails, no receipt. Without `DescribeConfigs`: exit 0, and the receipt says `captureDenied` with no timestamp type. |
+| Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, the created topic is left behind, **and the run says nothing about it**. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so**: a warning names the topic, the summary line repeats it beside `outcome pass`, and the signed teardown attestation records it. It does not say why: nothing names the missing grant. |
+
+**Give the restore identity `Delete`, and read the summary line of a restore
+that passed.** A leftover scratch topic blocks the next rehearsal that would
+use its name. Two things are open (tracker row FX-44): a restore that FAILS
+leaves its topic without a word, and the teardown warning of one that passes
+does not name the grant. The row above requires both as measured, so this
+paragraph is held to the product.
+
+| Restore without | What the run prints about the topic it leaves |
+|---|---|
+| `Delete` (exit 0, `pass`) | `teardown left 1 scratch topic behind on the target cluster: <topic>` (WARN); `… — outcome pass — … — teardown left 1 scratch topic behind (<topic>)` (the summary line); `teardown-key=logweir/drills/<run>.teardown.json` (the signed attestation) |
+| `Write` or `Read` (exit 1) | Nothing |
+
+The restore row is a scratch drill of a topic whose backup recorded no
+configuration overrides, into a broker on `CreateTime`. Three cases need
+`DescribeConfigs` on the target topics as well (FX-4, measured 2026-10-05): a
+topic whose backup recorded overrides, an existing mapped topic, and a broker
+on `LogAppendTime`.
+
+Consumer-group positions additionally need `Describe` on each selected group:
+a group hidden from the principal is recorded as `failed: NotVisibleToPrincipal`,
+never as absent
+(`e2e/tests/position_evidence.rs::a_group_hidden_from_the_backup_principal_is_never_absent`).
+Archive permissions are the object store's, and are not in this table.
+
+### Advertised addresses
+
+A Kafka client reaches the bootstrap address first and then the addresses the
+cluster advertises. When the second kind cannot be reached from where Logweir
+runs, the probe still passes and nothing else does. Measured on a Confluent
+Platform listener that advertises a dead address
+(`e2e/tests/compat_contract.rs::an_unreachable_advertised_address_is_not_a_reachable_cluster`):
+
+| Step | Result |
+|---|---|
+| `logweir cluster-probe` | exit 0, `reachable=true`, the cluster id |
+| The readiness check | `connection.authenticated` is `notReady` (`BrokerUnreachable`), and its message says the bootstrap address answered and the advertised brokers did not. The capability rows are `unknown`, blocked behind it. |
+| `logweir backup run` | exit 1 after the metadata timeout, no receipt |
 
 ## The floors, stated first
 
@@ -55,7 +290,7 @@ on both platforms, and the parity runs against OSO's binary.
 |---|---|---|---|
 | **0.21.0** | `sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317` | **`pass`** | **The engine floor: `0.21.0` is the minimum supported `kafka-backup` version and the version this row was run against; it was also the shipped pin until PROD-00.3f (2026-10-07). [install.md](install.md) leads with it.** Full drill, 2026-09-05, against the compose stack (Kafka 3.7.1 KRaft + MinIO) via `scripts/demo.sh`: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `pass_rate_measured: 1.0`, `rto_excluding_preflight_seconds: 6`, `rpo_seconds: 9`, all three objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. `header_preflight: honoured`. |
 
-| **0.23.3+logweir.2** | build inputs `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8` (not an image digest) | **`pass`** | **Logweir's build 2 of 0.23.3, the engine the images ship since FX-21: patches 0001 and 0002.** On 2026-10-08, on the compose stack (slot 1, Kafka 3.7.1 KRaft + MinIO), built natively for macOS arm64 with `scripts/engine-source.sh build` and run natively: the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, both readers VALID; `full_drill` 15/15, G-PITR 1/1 and PROD-01.1's record-semantics rows 11 (3 ignored) with the contract asserted. The suites and record-semantics files compared SAME against build 1 run the same way, and the demo, suites and record-semantics files SAME against OSO's 0.23.3 binary (container route) in the same session. FX-21's three-topic `cluster3` row: the manifest records every topic's replication factor (3 of 3; OSO's 0.23.3 and build 1 record 1 of 3). Since then the runner image's linux/arm64 engine has run both suites on four broker lines (PROD-01.5c, "Record semantics and topic identity on each line" below), and CI's `e2e` job builds this engine from the vendored source for linux/amd64 and runs it on every pull request. Not yet run: the published linux/amd64 runner image as a container. |
+| **0.23.3+logweir.2** | build inputs `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8` (not an image digest) | **`pass`** | **Logweir's build 2 of 0.23.3, the engine the images ship since FX-21: patches 0001 and 0002.** On 2026-10-08, on the compose stack (slot 1, Kafka 3.7.1 KRaft + MinIO), built natively for macOS arm64 with `scripts/engine-source.sh build` and run natively: the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, both readers VALID; `full_drill` 15/15, G-PITR 1/1 and PROD-01.1's record-semantics rows 11 (3 ignored) with the contract asserted. The suites and record-semantics files compared SAME against build 1 run the same way, and the demo, suites and record-semantics files SAME against OSO's 0.23.3 binary (container route) in the same session. FX-21's three-topic `cluster3` row: the manifest records every topic's replication factor (3 of 3; OSO's 0.23.3 and build 1 record 1 of 3). Since then the runner image's linux/arm64 engine has run both suites on four broker lines (PROD-01.5c, "Record semantics and topic identity on each line" below) and the hand-run rows of the [compatibility contract](#the-compatibility-contract) (PROD-01.2), and CI's `e2e` job builds this engine from the vendored source for linux/amd64 and runs it on every pull request. Not yet run: the published linux/amd64 runner image as a container. |
 | **0.23.3+logweir.1** | build inputs `sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3` (not an image digest) | **`pass`** | **Logweir's build of 0.23.3, the engine the images shipped from PROD-00.2 until FX-21; `doctor` refuses it since.** On 2026-10-08, on the compose stack (Kafka 3.7.1 KRaft + MinIO), built for linux/arm64 (run natively) and linux/amd64 (run under emulation): the demo drill `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, `header_preflight: honoured`, objectives met, both readers VALID; `full_drill` 15/15, G-PITR (`pitr_boundary`) 1/1, and PROD-01.1's record-semantics rows 8/8 with the contract asserted. All of it compared SAME against OSO's 0.23.3 binary in the same session, and a deliberately modified build did not ([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5). |
 | **0.23.3** | `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db` | **`pass`** | **OSO's release of the shipped source, and the one-release rollback since PROD-00.2; the pin from PROD-00.3f until then.** Full drill, 2026-10-08, against the compose stack (slot 4, Kafka 3.7.1 KRaft + MinIO, the `linux/amd64` image under emulation), `scripts/demo.sh` steps 4–6: `outcome: pass`, `integrity: byte-fingerprint/pass`, 150/150 records reconciled, `header_preflight: honoured`, objectives met, signature VALID under both `logweir drill verify` and `docs/verify_scorecard.py`. The same day CI's e2e command passed (177 tests, PROD-01.1's contract asserted on 0.23.3), and the record-semantics, G-PITR, FX-1, FX-7 and full-drill rows passed on Kafka 4.3.1. An archive 0.21.0 wrote drills `pass` with 0.23.3, and the reverse ([decision record](to-do/decisions/PROD-00-engine-route.md) §12.5). |
 
@@ -86,8 +321,10 @@ and 07) link 0.23.0, 0.23.1 and 0.23.3.
 
 ## Authentication modes, and what each one has actually been run against
 
-The recorded matrix row above is a **PLAINTEXT** drill. Authentication test
-coverage is separate from that recorded result: the Compose stack has SCRAM
+The status of each mode is in the
+[compatibility contract](#authentication-modes); this table is what each client
+is configured with. The recorded engine rows above are **PLAINTEXT** drills.
+Authentication test coverage is separate from those results: the Compose stack has SCRAM
 listeners and `e2e/tests/scram.rs` exercises both clients with real brokers
 when the `e2e` feature and its infrastructure are enabled, and the `auth`
 compose profile (PROD-01.5, extended by PROD-01.3) adds SASL/PLAIN over TLS,
@@ -97,9 +334,9 @@ which `e2e/tests/auth_modes.rs` drives end to end.
 | `auth.mode` | Logweir's client | The engine's client | Exercised |
 |---|---|---|---|
 | `plaintext` (default) | `security.protocol: PLAINTEXT` | no `security:` block rendered — the engine's own default | **Yes**, by the 0.21.0 row above and by every e2e drill. |
-| `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Automated e2e coverage exists.** `e2e/tests/scram.rs` exercises Logweir's librdkafka client and engine-backed backups against the Compose SCRAM listeners, plus an in-cluster pod. It requires the live stack and Kubernetes; it is not part of the default unit suite or an additional result row above. |
-| `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Exercised on docker-desktop, not in CI.** The compose stack's TLS listeners (the `auth` profile) serve PLAIN and SCRAM-SHA-256, not SCRAM-SHA-512, so no automated e2e row covers this pair; PLAT-07.1's live run (2026-09-16, an in-namespace broker with a private CA) succeeded with `KafkaCluster.spec.auth.tlsCa` and failed at the handshake — never a plaintext dial — without the CA or with the wrong one. `auth.tlsCa` hands one CA file to both trust stores (Global Constraint 29; [kubernetes.md](kubernetes.md) §20.2). |
-| `scramSha256`, `tls: false` or `true` | `SASL_PLAINTEXT` / `SASL_SSL`, `sasl.mechanism: SCRAM-SHA-256` | `security_protocol: SASL_PLAINTEXT` / `SASL_SSL`, `sasl_mechanism: SCRAM-SHA256` (one hyphen) | **Automated e2e coverage exists (PROD-01.3).** `e2e/tests/auth_modes.rs` backs up, restores and verifies over the `auth` profile's SCRAM256 listener and, over TLS with the private CA, its SASL_SSL listener; a wrong password and (TLS) a wrong CA are refused. Compose slot 4, Kafka 3.7.1, engine 0.23.3, 2026-10-08. |
+| `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Automated e2e coverage exists.** `e2e/tests/scram.rs` exercises Logweir's librdkafka client, engine-backed backups and a drill against the Compose SCRAM listeners in CI; its in-cluster pod row needs Kubernetes and is skipped there. PROD-01.2 added the capability checks over this listener, and Redpanda's own SCRAM-SHA-512 (`e2e/tests/compat_contract.rs`). |
+| `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Untested: run once by hand, on docker-desktop, and no repeatable row.** The compose stack's TLS listeners (the `auth` profile) serve PLAIN and SCRAM-SHA-256, not SCRAM-SHA-512, so no automated e2e row covers this pair; PLAT-07.1's live run (2026-09-16, an in-namespace broker with a private CA) succeeded with `KafkaCluster.spec.auth.tlsCa` and failed at the handshake — never a plaintext dial — without the CA or with the wrong one. `auth.tlsCa` hands one CA file to both trust stores (Global Constraint 29; [kubernetes.md](kubernetes.md) §20.2). |
+| `scramSha256`, `tls: false` or `true` | `SASL_PLAINTEXT` / `SASL_SSL`, `sasl.mechanism: SCRAM-SHA-256` | `security_protocol: SASL_PLAINTEXT` / `SASL_SSL`, `sasl_mechanism: SCRAM-SHA256` (one hyphen) | **Automated e2e coverage exists (PROD-01.3).** `e2e/tests/auth_modes.rs` backs up, restores and verifies over the `auth` profile's SCRAM256 listener and, over TLS with the private CA, its SASL_SSL listener; a wrong password and (TLS) a wrong CA are refused. Compose slot 4, Kafka 3.7.1, engine 0.23.3, 2026-10-08. Redpanda's own SCRAM-SHA-256 authenticates both clients for a backup (PROD-01.2). |
 | `plain`, `tls: true` only | `SASL_SSL`, `sasl.mechanism: PLAIN` | `security_protocol: SASL_SSL`, `sasl_mechanism: PLAIN` | **Automated e2e coverage exists (PROD-01.3)**, the same file and run: backup, restore and verify over the SASL_SSL listener; a wrong password and a wrong CA refused. **`plain` without TLS is refused, never dialled** — `refusal-reason=PlainWithoutTls` (exit 3) at the runner, the same named reason at the controller, and the CRD's admission rule — because SASL/PLAIN sends the password itself. |
 | `mtls`, `tls: true` only | `SSL`, `ssl.certificate.location` / `ssl.key.location` | `security_protocol: SSL`, `ssl_certificate_location` / `ssl_key_location` | **Automated e2e coverage exists (PROD-01.3)**, the same file and run, over the `auth` profile's MTLS listener (`ssl.client.auth=required`): backup, restore and verify with the CA-signed client certificate; a wrong CA and an untrusted (self-signed) client certificate refused. The key must be unencrypted PEM (PKCS#8, PKCS#1 or SEC1): the engine's loader takes no passphrase. |
 | OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered. The engine's YAML offers only PLAIN, SCRAM-SHA-256/512 and GSSAPI; other mechanisms need a programmatic plugin its CLI does not expose ([PROD-00.1](to-do/decisions/PROD-00-engine-route.md) C9) | **Deferred** (OD-3, 2026-10-07), until a buyer asks. |
@@ -110,22 +347,14 @@ the `logweir-binding` of the connection it was projected for
 (`CredentialBindingMismatch`, before any client exists) —
 [kubernetes.md](kubernetes.md), "Client authentication modes".
 
-## Managed Kafka providers
+## Managed providers: what is not verified
 
-**No managed provider has been run against** (OD-4: workers create no cloud
-resources, and only AWS is funded, per session, with the owner's approval).
-A provider is listed by the mode Logweir would reach it with; "untested" means
-the mode is implemented and exercised against the compose `auth` profile, and
-never that the provider was dialled. Local emulation does not certify a hosted
-provider.
-
-| Provider | How Logweir reaches it | Status |
-|---|---|---|
-| Confluent Cloud | `plain` over TLS (API key as `username`, API secret as the password), the public CA | **untested** (was unsupported: no SASL/PLAIN before PROD-01.3) |
-| Azure Event Hubs (Kafka endpoint, `:9093`) | `plain` over TLS, `username: $ConnectionString`, the connection string as the password, the public CA | **untested** (was unsupported, for the same reason) |
-| Amazon MSK | `scramSha512` over TLS (`:9096`, the Secrets Manager credential) | **untested** until the owner funds a session (OD-4) |
-| Amazon MSK IAM | not reachable: OAUTHBEARER/SigV4 is deferred (OD-3) | **unsupported** |
-| Redpanda Cloud, Aiven | `scramSha256` / `scramSha512` over TLS; Aiven also `mtls` | **untested** (no account funded) |
+**No managed provider has been run against.** The table, with how Logweir
+would reach each provider and what blocks a real row, is in the
+[compatibility contract](#managed-kafka-providers); every provider there is
+untested or unsupported. Confluent Cloud and Azure Event Hubs were unsupported
+before PROD-01.3, because both need SASL/PLAIN. Local emulation does not
+certify a hosted provider.
 
 **Nothing here is an MSK row.** `[UNVERIFIED — needs an MSK cluster]`: MSK
 holds SCRAM credentials in AWS Secrets Manager and requires TLS on its
@@ -160,10 +389,11 @@ verified by both readers).
 The digests are the pins: `stack-env.sh --kafka LINE` runs exactly these
 images (`KAFKA_IMAGE`), and a test fails if the two disagree.
 
-No row yet: **4.0.x** and **4.2.x** (supported by Apache, not run), and
-anything with authentication, several brokers or another object store — the
-optional profiles in [`e2e/README.md`](../e2e/README.md) provide those fixtures;
-their rows belong to the tasks that use them.
+No row yet: **4.0.x** and **4.2.x** (supported by Apache, not run). The rows
+with authentication, another endpoint or another object store are in the
+[compatibility contract](#the-compatibility-contract). Three brokers (the
+`cluster3` profile, [`e2e/README.md`](../e2e/README.md)) have rows of their own
+for replication factors and group listing, and no whole-path row.
 
 **The engine does not negotiate protocol versions, and 4.x accepts what it
 sends.** `kafka-backup` 0.21.0 sends every request at a fixed version and never
@@ -266,6 +496,61 @@ other engine those rows record an outcome and assert nothing.
 Not run: either suite with authentication or on more than one broker, and the
 4.0 and 4.2 lines.
 
+## Other Kafka-compatible endpoints
+
+Two endpoints that are not the `apache/kafka` image run as opt-in compose
+profiles (`redpanda`, `confluent`; [`e2e/README.md`](../e2e/README.md)), pinned
+by digest and never part of the default set. Their statuses are in the
+[compatibility contract](#brokers); this section is what was measured
+(PROD-01.2, 2026-10-10 UTC, compose slot 2, engine `0.23.3+logweir.2`).
+
+| Endpoint | Image | Licence of what the row runs |
+|---|---|---|
+| Redpanda v26.2.4 | `redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89` | Business Source License 1.1 (read at the `v26.2.2` tag; the `v26.2.4` tag is not published on GitHub). Its use grant excludes only offering Redpanda to third parties as a streaming service, so a local test fixture is permitted. The row enables no enterprise feature. |
+| Confluent Platform 8.3.2 (the `confluentinc/cp-kafka` image) | `confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48` | The broker reports `8.3.2-ccs`, Confluent's build of Apache Kafka. The Kafka jars in the image carry the Apache License 2.0 text (`LICENSE-kafka_2.13-8.3.2-ccs.txt` and one file per module). The image's own `/licenses/license.txt` is one copyright line and names no licence, and its base is Red Hat's `ubi9-micro`: **the terms of the image as a whole are not stated in it and were not verified.** The row pulls it by digest, runs it locally and redistributes nothing. |
+
+What each serves, by its own answer to `kafka-broker-api-versions.sh`, beside
+what the engine sends (the engine's column is the one under
+[Broker versions](#broker-versions-apache-kafka)):
+
+| API | Engine sends | Apache Kafka 4.3.1 | Confluent Platform 8.3.2 | Redpanda v26.2.4 |
+|---|---|---|---|---|
+| Produce | v8 | v0–v13 | v0–v13 | **v0–v7** |
+| Fetch | v11 | v4–v18 | v4–v18 | v4–v13 |
+| ListOffsets | v5 | v1–v11 | v1–v11 | v0–v6 |
+| Metadata | v9 | v0–v13 | v0–v13 | v0–v12 |
+| DescribeConfigs | v1 | v1–v4 | v1–v4 | v0–v4 |
+| SaslHandshake / SaslAuthenticate | v1 / v2 | v0–v1 / v0–v2 | v0–v1 / v0–v2 | v0–v1 / v0–v2 |
+| ListGroups (Logweir's own client needs v5 to type a group) | v2, never sent by a backup or restore | v0–v5 | v0–v5 | **v0–v4** |
+| DescribeTopicPartitions, ConsumerGroupDescribe | never sent | served | served | not served |
+
+**Confluent Platform 8.3.2 did not differ from Apache Kafka 4.3.1** in anything
+the row reads: the same ranges, every capability check `ready`, a backup with
+topic IDs, the topic's configuration and a classic group captured, a drill
+`pass`, and both verifiers on both documents.
+
+**Redpanda v26.2.4 differed in four ways**, each one a row above:
+
+1. **A restore into it cannot run.** The engine sends Produce v8; Redpanda
+   serves up to v7 and closes the connection on v8. `target.engineProtocol`
+   says so before the restore (`notReady`: "it sends Produce v8 and this
+   endpoint serves Produce v0-v7"). A drill started anyway exits 1 at the
+   engine ("early eof" reading the response), signs no scorecard, and leaves
+   the scratch topic it created.
+2. **Its groups cannot be typed** (ListGroups v0–v4), so a selected group is
+   `excluded: GroupTypeNotCaptured`, announced by `connection.groupTypes`.
+3. **Its broker resource reports nine configuration keys**, and neither the
+   broker's timestamp type nor a record-timestamp bound is among them. Logweir
+   records the type as absent and the bound as `unknown`; before PROD-01.2 it
+   recorded `CreateTime` and "no bound" for an endpoint that had said neither.
+4. **Its cluster id has a prefix** (`redpanda.` and a UUID). It is recorded as
+   the endpoint reports it.
+
+A backup of it is whole: exit 0, a receipt both readers verify, the records,
+the topic IDs and the topic's configuration with the entries Redpanda reports.
+SCRAM-SHA-256 and SCRAM-SHA-512 against Redpanda's own SCRAM both authenticate
+for a backup, and a wrong password or the other mechanism's user is refused.
+
 ## Object stores: conditional create is required
 
 Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a
@@ -276,14 +561,26 @@ exits 4 `ExecutionClaimUnproven` before any data is written, and a destination
 with `writeProbe` on reports it `notReady / ConditionalCreateUnsupported`
 beforehand ([kubernetes.md §21.5](kubernetes.md)).
 
-| Object store | Status |
+Which store is supported, untested or unsupported is in the
+[compatibility contract](#archive-backends). What was measured about
+conditional create:
+
+| Object store | Conditional create |
 |---|---|
-| MinIO `RELEASE.2025-09-07T16-13-09Z` | **Supported, measured** (private container: the claim, the refused second run, and the readiness probe's double create). The project's rebuild of this release (`third_party/minio-mirror/`), which the compose stack and the chart's demo MinIO now run, answers a second `If-None-Match: *` create with the same `412 PreconditionFailed` as the upstream image (smoke of 2026-09-24) |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` | Measured (private container: the claim, the refused second run, and the readiness probe's double create). The project's rebuild of this release (`third_party/minio-mirror/`), which the compose stack and the chart's demo MinIO now run, answers a second `If-None-Match: *` create with the same `412 PreconditionFailed` as the upstream image (smoke of 2026-09-24) |
+| SeaweedFS 4.48 | Measured through Logweir (PROD-01.2, the `objectstore` profile): the second claim of one execution exits 1 with `failure-reason=ExecutionAlreadyClaimed` |
+| RustFS 1.0.0, versitygw v1.8.0 | Measured once with the AWS CLI and the receipt path (PROD-01.5, 2026-09-29): the second create answered 412, and a second run under one `backup_id` was refused |
 | older MinIO releases | `[UNVERIFIED — needs a run against an older MinIO release]` |
 | AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` |
 | GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |
-| local filesystem (standalone CLI) | **Supported, measured in process** |
-| `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
+| local filesystem (standalone CLI) | Measured in process only: no row runs the engine against a directory archive |
+| `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | Refused, never silently accepted |
+
+**A store's own error codes are read for what they refuse.** versitygw answers
+an unknown access key `404 XAdminUserNotFound`. Logweir read that 404 as a
+missing object, which sent an operator to the wrong remedy; since PROD-01.2 it
+is a refused credential (`InvalidCredentials`), and a genuine `NoSuchKey` is
+still not-found.
 
 **Versioned buckets pin the manifest (FX-7).** On a bucket with versioning
 enabled, a backup receipt records the version id of the manifest it attests

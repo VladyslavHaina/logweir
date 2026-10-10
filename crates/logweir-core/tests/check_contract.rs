@@ -464,6 +464,7 @@ fn an_evidence_write_grant_rides_only_on_a_plan_that_writes_the_marker() {
             evidence_write: grant,
             evidence_read: None,
             skip_checks: Vec::new(),
+            capability_checks: Vec::new(),
         })),
         ..access_plan_with(both.clone(), false, None)
     };
@@ -655,6 +656,7 @@ fn grant_bindings_are_references_on_readiness_plans_only_and_one_per_role() {
                 manifest_key: "bk/manifest.json".into(),
                 checks: Vec::new(),
                 skip_checks: Vec::new(),
+                capability_checks: Vec::new(),
             },
         )),
         ..access_plan_with(vec![DestinationRole::ArchiveWrite], false, None)
@@ -683,6 +685,195 @@ fn grant_bindings_are_references_on_readiness_plans_only_and_one_per_role() {
     };
     assert!(fetch.validate().is_err());
     assert!(!fetch.request.compares_grant_bindings());
+}
+
+/// **PROD-01.2: `capabilityChecks` lists capability rows of its own
+/// operation, once each, never a skipped one, and is absent when empty.**
+///
+/// * The vocabulary: the four capability ids are exactly the union of what
+///   the operations ask for, and no ordinary row is one.
+/// * A plan WITHOUT the list serialises with no `capabilityChecks` key, so it
+///   is byte-identical to every plan rendered before the field existed (an
+///   older runner still accepts it); one WITH it carries the ids in order.
+/// * A source-side row on a restore preflight, a target-side row on a backup,
+///   any ordinary row, a repeat, and an id that is also skipped are each
+///   refused: a runner would not answer such a plan as written.
+/// * The operations that dial no engine list none.
+///
+/// MUTANTS (`validate_capability_checks`): accept any `CheckId`; drop the
+/// repeat rule; drop the listed-and-skipped rule. Each turns one refusal below
+/// into an acceptance.
+#[test]
+fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped() {
+    use logweir_core::check_contract::{capability_checks_for, CAPABILITY_CHECKS};
+    // --- the vocabulary ----------------------------------------------------
+    let union: std::collections::BTreeSet<CheckId> = [
+        CheckOperation::Backup,
+        CheckOperation::Restore,
+        CheckOperation::DestinationAccess,
+        CheckOperation::SourceConnection,
+    ]
+    .into_iter()
+    .flat_map(|op| capability_checks_for(op).iter().copied())
+    .collect();
+    assert_eq!(
+        union,
+        CAPABILITY_CHECKS.into_iter().collect(),
+        "every capability row belongs to an operation, and no other row is one"
+    );
+    assert_eq!(CAPABILITY_CHECKS.len(), 4);
+    for id in CheckId::ALL {
+        assert_eq!(id.is_capability(), CAPABILITY_CHECKS.contains(id), "{id}");
+    }
+    assert_eq!(
+        CAPABILITY_CHECKS.map(CheckId::as_str),
+        [
+            "connection.engineProtocol",
+            "connection.topicConfigsReadable",
+            "connection.groupTypes",
+            "target.engineProtocol",
+        ]
+    );
+    assert!(capability_checks_for(CheckOperation::SourceConnection).is_empty());
+    assert!(capability_checks_for(CheckOperation::DestinationAccess).is_empty());
+
+    // --- the readiness kind --------------------------------------------------
+    let readiness =
+        |operation: CheckOperation, listed: Vec<CheckId>, skipped: Vec<CheckId>| CheckPlan {
+            request: CheckRequest::OperationReadiness(Box::new(OperationReadinessRequest {
+                operation,
+                connection: connection(),
+                destination: Some(destination()),
+                roles: vec![DestinationRole::ArchiveRead],
+                topics: vec!["orders".into()],
+                signer_path: None,
+                write_probe: false,
+                evidence_write: None,
+                evidence_read: None,
+                skip_checks: skipped,
+                capability_checks: listed,
+            })),
+            ..access_plan_with(vec![DestinationRole::ArchiveRead], false, None)
+        };
+    let backup = capability_checks_for(CheckOperation::Backup).to_vec();
+
+    // Absent when empty: byte-identical to a plan from before the field.
+    let none = readiness(CheckOperation::Backup, Vec::new(), Vec::new());
+    none.validate().expect("no list is a valid plan");
+    let bytes = String::from_utf8(plan_bytes(&none)).expect("utf-8");
+    assert!(!bytes.contains("capabilityChecks"), "{bytes}");
+    assert!(none.request.capability_checks().is_empty());
+
+    // Listed: carried in order, and read back through the one accessor.
+    let all = readiness(CheckOperation::Backup, backup.clone(), Vec::new());
+    all.validate().expect("a backup's own three rows");
+    let bytes = String::from_utf8(plan_bytes(&all)).expect("utf-8");
+    assert!(
+        bytes.contains(
+            r#""capabilityChecks":["connection.engineProtocol","connection.topicConfigsReadable","connection.groupTypes"]"#
+        ),
+        "{bytes}"
+    );
+    assert_eq!(all.request.capability_checks(), backup.as_slice());
+    let back: CheckPlan = serde_json::from_slice(&plan_bytes(&all)).expect("round trip");
+    assert_eq!(back, all);
+
+    // Refused: another operation's row, an ordinary row, a repeat, a skip.
+    for (what, listed, skipped) in [
+        (
+            "a target-side row on a backup",
+            vec![CheckId::TargetEngineProtocol],
+            vec![],
+        ),
+        (
+            "an ordinary row",
+            vec![CheckId::ConnectionAuthenticated],
+            vec![],
+        ),
+        (
+            "a repeat",
+            vec![CheckId::ConnectionGroupTypes, CheckId::ConnectionGroupTypes],
+            vec![],
+        ),
+        (
+            "an id that is also skipped",
+            vec![CheckId::ConnectionGroupTypes],
+            vec![CheckId::ConnectionGroupTypes],
+        ),
+    ] {
+        let err = readiness(CheckOperation::Backup, listed, skipped)
+            .validate()
+            .expect_err(what);
+        assert!(
+            err.to_string().contains("capabilityChecks"),
+            "{what}: the refusal names the field: {err}"
+        );
+    }
+    // A capability row skipped and NOT listed is an ordinary skip.
+    readiness(
+        CheckOperation::Backup,
+        vec![CheckId::ConnectionEngineProtocol],
+        vec![CheckId::ConnectionGroupTypes],
+    )
+    .validate()
+    .expect("skipped and not listed");
+    // The operations that dial no engine list none.
+    for operation in [
+        CheckOperation::SourceConnection,
+        CheckOperation::DestinationAccess,
+    ] {
+        readiness(operation, Vec::new(), Vec::new())
+            .validate()
+            .unwrap_or_else(|e| panic!("{operation:?} with no list is a valid plan: {e}"));
+        let err = readiness(
+            operation,
+            vec![CheckId::ConnectionEngineProtocol],
+            Vec::new(),
+        )
+        .validate()
+        .expect_err("no capability row exists for this operation");
+        assert!(err.to_string().contains("capabilityChecks"), "{err}");
+    }
+    // A readiness check ABOUT a restore target asks the target-side row.
+    readiness(
+        CheckOperation::Restore,
+        vec![CheckId::TargetEngineProtocol],
+        Vec::new(),
+    )
+    .validate()
+    .expect("the restore operation's own row");
+
+    // --- the restore preflight ----------------------------------------------
+    let restore = |listed: Vec<CheckId>| CheckPlan {
+        request: CheckRequest::RestorePreflight(Box::new(
+            logweir_core::check_contract::RestorePreflightRequest {
+                plan_file: "/check/plan.yaml".into(),
+                plan_sha256: sha256_prefixed(b"plan"),
+                target: connection(),
+                source_destination: destination(),
+                evidence_destination: None,
+                backup_id: "bk".into(),
+                manifest_key: "bk/manifest.json".into(),
+                checks: Vec::new(),
+                skip_checks: Vec::new(),
+                capability_checks: listed,
+            },
+        )),
+        ..access_plan_with(vec![DestinationRole::ArchiveRead], false, None)
+    };
+    let ok = restore(vec![CheckId::TargetEngineProtocol]);
+    ok.validate().expect("a restore's own row");
+    assert_eq!(
+        ok.request.capability_checks(),
+        &[CheckId::TargetEngineProtocol]
+    );
+    assert!(restore(vec![CheckId::ConnectionEngineProtocol])
+        .validate()
+        .is_err());
+    let bytes = String::from_utf8(plan_bytes(&restore(Vec::new()))).expect("utf-8");
+    assert!(!bytes.contains("capabilityChecks"), "{bytes}");
+    // No other kind carries the list at all.
+    assert!(inventory_plan().request.capability_checks().is_empty());
 }
 
 /// A `sourceConnection` plan carries ONE connection and there is no field on

@@ -5527,7 +5527,7 @@ receipt's size depends on the number of groups, never on partitions**, so the
 catalog reads a point that selects 100 groups over many partitions as
 `Available`. A partition with no committed offset is counted, **never offset
 0**, and nothing is ever dropped
-([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-150)).
+([the field reference](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170)).
 
 - **What it costs the source.** Read-only: the group listings, one
   DescribeConsumerGroups, one RequireStable OffsetFetch per captured group (each
@@ -9124,7 +9124,12 @@ without `tls: true` is refused — never dialled — with the named reason
 Job exists, by every runner entry point (`refusal-reason=PlainWithoutTls`,
 exit 3) before any client exists, and by both clients' builders as a backstop.
 Confluent Cloud API keys and Azure Event Hubs connection strings
-(`username: $ConnectionString`) use this mode.
+(`username: $ConnectionString`) are presented in this mode. **Neither provider
+has been run against**: both are `untested` in
+[the compatibility contract](support-matrix.md#managed-kafka-providers), and
+whether either serves the request versions the engine sends is not known. A
+`Backup` `Preflight` answers that on first contact (§21.6c,
+`connection.engineProtocol`).
 
 **mTLS** presents the client certificate in the TLS handshake. Create the
 Secret with `kubectl create secret tls <name> --cert=client.pem --key=client.key`
@@ -9145,7 +9150,10 @@ record that name `scramSha256`, `plain` or `mtls` are format **1.4.0**, a
 scorecard **1.5.0**; every `plaintext`/`scramSha512` run writes exactly the
 document it always did ([stability.md](stability.md)).
 
-Example (SASL/PLAIN to Confluent Cloud, public CA):
+Example (SASL/PLAIN in the shape Confluent Cloud documents, public CA). It
+shows the mode, and it is not a tested row: no Confluent Cloud cluster has
+been dialled
+([the compatibility contract](support-matrix.md#managed-kafka-providers)).
 
 ```yaml
 apiVersion: logweir.dev/v1alpha1
@@ -9579,8 +9587,8 @@ exactly one block to it.
 
 | `operation` | Block | What it needs | What it runs |
 |---|---|---|---|
-| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
-| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows |
+| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue, and the three capability rows of the source (§21.6c) |
+| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows, and the target's capability row (§21.6c) |
 | `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles, and `destination.credentialBound` over every `SecretKeys` grant the destination declares (§20.10) |
 | `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
@@ -9688,7 +9696,7 @@ server refusal.
 | `Queued` | a concurrency ceiling is holding it back (`ConcurrencyLimited`) |
 | `Running` | the Job exists and has not finished |
 | `Completed` | **a result exists.** The verdict is `status.result.state` |
-| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`, `Stalled` |
+| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `CheckContractMismatch`, `DeadlineExceeded`, `Stalled`. Terminal for this object: it is not run again. Fix the cause and create a new `Preflight` |
 | `Cancelled` | `spec.cancelRequested` was set and the Job's deadline was collapsed |
 
 `status.result.state` is `ready`, `notReady` or `unknown`, aggregated exactly
@@ -10068,6 +10076,84 @@ schema ids in record headers, Apicurio's 8-byte ids and other registries'
 framing read `notDetected`
 ([the stated limits](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
 
+### 21.6c Capability rows: what the endpoint itself can do (PROD-01.2)
+
+The rows above ask what this **principal** may do. Four more ask what this
+**endpoint** can do. A Kafka-compatible endpoint is not always Apache Kafka,
+and a connection test passing says nothing about a restore
+([the compatibility contract](support-matrix.md#the-compatibility-contract)).
+
+| Row | Operation | Gating | `notReady` means | What to do |
+|---|---|---|---|---|
+| `connection.engineProtocol` | `Backup` | blocking | `EngineProtocolUnsupported`: the source does not serve a request version the engine sends to read from it. The message names each request and the range the endpoint serves. | Back up from an endpoint that serves them. Every supported Apache Kafka line does. |
+| `target.engineProtocol` | `Restore` | blocking | `EngineProtocolUnsupported`: the target does not serve a request version the engine sends to write to it. Redpanda v26.2.4 answers this way: the engine sends Produce v8 and it serves Produce v0–v7. | Restore the archive into a cluster that serves them. An endpoint that cannot be a target can still be a source. |
+| `connection.topicConfigsReadable` | `Backup` | advisory | `TopicConfigsNotReadable`: this principal may not read the configuration of the topics the detail names. The backup still runs. | Grant DescribeConfigs on the topic, or accept a point whose configuration is `captureDenied` and whose timestamp type is not recorded (§21.6b). |
+| `connection.groupTypes` | `Backup` | advisory | `GroupTypesNotListed`: the endpoint's group listing names no group type (it serves ListGroups below v5; Apache Kafka 3.7 and Redpanda v26.2.4 do). The backup of the topics is unaffected. | A backup that selects consumer groups records each as excluded (`GroupTypeNotCaptured`), never as captured. Back up from an endpoint that serves ListGroups v5, or select no group. |
+
+**The engine sends fixed versions and never negotiates**, so an endpoint that
+does not serve one closes the connection, and the run fails with only
+`kafka-backup backup exited 1` or `restore exited 1`. The two blocking rows
+say which request it would be, before the run. The SASL pair (SaslHandshake
+v1, SaslAuthenticate v2) is asked for only on a SASL connection.
+
+**Each row reads the endpoint's own answer**: the ApiVersions response on a
+real connection made with the operation's credential, and for the
+configuration row one DescribeConfigs per selected topic. When the answer
+could not be read the row is `unknown` (`ApiVersionsNotObserved`, or the
+read's own timeout code), never `ready`. When the connection did not
+authenticate, or a selected topic is not describable, the rows are `unknown`
+with `BlockedByPrerequisite`.
+
+**The three ApiVersions rows answer for the cluster only when EVERY broker
+answered.** The engine may be sent to any broker, so the check reads the
+cluster's broker list from metadata and waits for an ApiVersions answer from
+every broker on it, and from every bootstrap address the `KafkaCluster`
+names, inside one budget of at most 10 s (less when little of
+`timeoutSeconds` is left; with under 2 s left it does not dial and says so).
+
+- `ready` or `notReady` carries the fact `brokersAnswered: 3 of 3`: distinct
+  brokers of how many the cluster lists, never a count of connections. When
+  the brokers' answers differ (a rolling upgrade), the row is judged on the
+  versions every one of them serves, and its message says they differ.
+- A broker that did not answer in time makes the row `unknown`
+  (`ApiVersionsNotObserved`), with a message such as "2 of 3 broker(s) the
+  cluster lists answered ApiVersions within the check's budget; no answer from
+  broker 3 (kafka-3.example:9092)". So does a bootstrap address nobody
+  answered at. Bring the broker back, or take a decommissioned address out of
+  `spec.bootstrapServers`, and create a new `Preflight`.
+- **A broker the cluster no longer lists is not asked.** A cluster that has
+  dropped a stopped broker lists the others, and through bootstrap addresses
+  that all answer the row says `2 of 2`. The row is about the brokers the
+  cluster says it has.
+- **What it opens.** For the length of the observation, one connection to each
+  bootstrap address and one to each listed broker: six on a three-broker
+  cluster with three bootstrap addresses. A cluster that caps connections per
+  principal below that answers `unknown`. Builds before the fix round of
+  PROD-01.2 read whichever one to three brokers a sparse client had dialled
+  and called the result the endpoint's.
+
+**An advisory row never changes the verdict.** On Apache Kafka 3.7 every
+`Backup` check carries `connection.groupTypes` as a warning beside a `ready`
+verdict. It matters only to a backup that selects consumer groups.
+
+**The target's record-timestamp bound.** `target.timestampBound` is `unknown`
+with `TimestampBoundNotReported` when the target's broker configuration
+answers without either bound key (Redpanda keeps the bound per topic); under
+an older controller the code is `BrokerConfigsNotReadable` (§21.9). Builds
+before PROD-01.2 answered `ready`, "declares no record-timestamp bound", for
+an endpoint that had declared nothing. The same builds published
+`status.topicPreflight.timestampType: CreateTime` on a `Restore` whose target
+had not reported its timestamp type; the field is now absent in that case.
+
+**An unreachable advertised address.** When the bootstrap address answers and
+the brokers the cluster advertises do not, `connection.authenticated` (or
+`target.authenticated`) is `notReady` with `BrokerUnreachable`, and its
+message says exactly that: the bootstrap answered and named the cluster, and
+the advertised listeners are not reachable from the runner. Check
+`advertised.listeners` for the listener the bootstrap address belongs to. A
+`SourceConnection` check, and `logweir cluster-probe`, read only the cluster
+id and pass against such a cluster.
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -10363,6 +10449,42 @@ answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
 older one answered `ready` (§21.6b). No code, field or plan shape is new, so
 the controller and runner may be upgraded in either order. Rolling back the
 runner brings back the old `ready` answer.
+
+**Capability rows (PROD-01.2).** A controller from this build lists the
+capability rows of §21.6c in every `Backup` and `Restore` check plan
+(`request.{operationReadiness,restorePreflight}.capabilityChecks`). An **older
+runner** refuses such a plan at startup (exit 3): the `Preflight` lands
+`phase: Failed`, `CheckContractMismatch`, naming `capabilityChecks`. **Upgrade
+the runner image with the controller**; unlike the conditional fields above,
+this one is in every `Backup` and `Restore` check.
+
+- **Which setting moves.** The chart has two image values, `controllerImage`
+  and `runnerImage`. Its defaults move together, but a release installed with
+  `runnerImage` pinned (a private registry, the ECR example of
+  [install.md](install.md)) keeps the old runner through
+  `helm upgrade --reuse-values` unless `--set runnerImage=…` moves it. An
+  install from `logweir.yaml` has no chart value: the controller reads
+  `LOGWEIR_RUNNER_IMAGE` from its own Deployment, so set it to the new runner
+  image in the same change that rolls the controller.
+- **A `Preflight` that failed this way stays `Failed`.** The phase is terminal
+  (§21.2): the object is not run again when the runner image is corrected.
+  Create a new `Preflight`.
+- **A `Preflight` in flight across the upgrade.** By reading the controller,
+  not by a run: the rows a result must hold are derived from the request as
+  THIS controller renders it, so a check Job the old controller created and
+  the new one sees finish is missing the capability rows, which are then
+  reported `unknown` and blocking (`BlockedByPrerequisite`, "the check Job did
+  not report this row"). That one object's verdict is `unknown`, never a
+  `ready` it did not earn. Create a new `Preflight` after the upgrade.
+
+A **newer runner** handed a
+plan from an older controller (no field) emits no capability row, and the
+older controller reads its result as before. The new answer of
+`target.timestampBound` follows the same rule: a plan from this build's
+controller gets the code `TimestampBoundNotReported`, and a plan from an older
+controller gets the same `unknown`, message and remedy under
+`BrokerConfigsNotReadable`, a code that controller already reads. Rolling the
+runner back brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

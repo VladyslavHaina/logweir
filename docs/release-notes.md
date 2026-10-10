@@ -50,8 +50,9 @@ FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
 restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
 the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
-ceiling held back) and 59 (FX-48, the shared console shows what the product API publishes and
-sends what its routes require) so far. Items continue the next entry's
+ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
+sends what its routes require) and 60 (PROD-01.2, the compatibility contract, and
+the capability rows a readiness check asks of the endpoint itself) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -197,6 +198,12 @@ over the console's own decoder, projection and request builder; it changes the
 console only, and the PoC upgrade that carries it re-runs batch 6's two failed
 rows (the catalog page's and the restore review's schema note) and item 56's
 console journey, which no install has run.
+Item 60 is row PROD-01.2, proven by unit and mock-cluster rows and on the
+compose stack (the four Apache Kafka lines, Confluent Platform 8.3.2, Redpanda
+v26.2.4, SeaweedFS and the ACL broker); it changes the controller's check plan
+and the runner's check rows together, one `Restore` status field and no signed
+document, and the PoC upgrade that carries it runs a `Backup` and a `Restore`
+`Preflight` and reads their capability rows.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2603,6 +2610,111 @@ the Integrity table, `ordinary` for an original-name `Restore`, and no
 original-name submission. Nothing is stored or signed differently, so there
 is nothing to undo.
 
+#### 60. A readiness check asks the endpoint what it can do; compatibility is a tested contract (PROD-01.2)
+
+**Added.** A `Backup` or `Restore` `Preflight`, and `logweir check run` on the
+same plan, carry capability rows: what the endpoint itself can do, read from
+its own answers before the operation starts
+([kubernetes.md](kubernetes.md) §21.6c). `connection.engineProtocol` (backup)
+and `target.engineProtocol` (restore) are **blocking**: the engine sends each
+request at one fixed version and never negotiates, and these rows compare
+those versions with the ranges the endpoint's ApiVersions answer serves, naming
+each request it does not. `connection.topicConfigsReadable` and
+`connection.groupTypes` are **advisory**: the backup runs, and the row says
+what it will record as not captured. The controller lists the rows in the
+check plan (`capabilityChecks`); a runner answers exactly the rows listed.
+**The rows that read ApiVersions answer for a cluster only when every broker
+of it answered.** The check reads the cluster's broker list, connects to
+every broker on it and to every bootstrap address, and waits for each
+answer inside one budget of at most 10 s. A broker that did not answer makes
+the row `unknown` ("2 of 3 broker(s) the cluster lists answered …; no answer
+from broker 3 (host:port)"), never `ready`; so does a bootstrap address
+nobody answered at. When the brokers' answers differ the row is judged on
+what every one of them serves. The fact `brokersAnswered` counts distinct
+brokers. During the observation the check holds one connection to each
+bootstrap address and to each listed broker.
+**The compatibility contract** is published in
+[support-matrix.md](support-matrix.md#the-compatibility-contract): brokers,
+authentication modes, schema registries, archive backends and managed
+providers, each `supported`, `limited`, `untested` or `unsupported`, with the
+test behind every supported row, the minimum Kafka ACLs for a probe, a backup
+and a restore, and what a connection test does not show. Apache Kafka 3.7.1,
+3.9.2, 4.1.2 and 4.3.1 and Confluent Platform 8.3.2 are supported. **Redpanda
+v26.2.4 is a backup source only**: it serves Produce v0–v7 and the engine sends
+v8, so a restore into it cannot run, and `target.engineProtocol` says so
+first. No managed provider has been run against.
+**Changed, to the safer side.** A value an endpoint did not report is no
+longer recorded as the Apache default
+([stability.md](stability.md#an-endpoints-capability-is-read-from-the-endpoint-and-a-value-it-did-not-report-is-not-recorded-prod-012)):
+`target.timestampBound` is `unknown` (`TimestampBoundNotReported`) for a
+target whose broker configuration carries no bound key, where it was `ready`;
+`Restore.status.topicPreflight.timestampType` is absent for a target that did
+not report its timestamp type, where it said `CreateTime`. Neither changes
+against Apache Kafka, which reports both. A scratch marker topic the restore
+identity may not Describe is refused as before, with a message that names the
+grant. `connection.authenticated` says when the bootstrap address answered
+and the advertised brokers did not. An object store's `404
+XAdminUserNotFound` (versitygw's answer to an unknown access key) is a refused
+credential and no longer a missing object. **An object store's answer is now
+read from its own HTTP status and the `<Code>` of its error document, never
+from a word found in the error's text**, which echoes the bucket, the prefix
+and the key: an archive whose bucket, prefix or backup id happens to spell an
+S3 code (`expiredtoken-archive`, `timeout-logs`) no longer moves a
+classification. Two classes change for failures the object-store client
+retried: a transport failure reads `EndpointUnreachable` where the retry
+clause's own `retry_timeout:` made it `Timeout`, and a 5xx it retried reads
+unclassified where it read `Timeout`; a backup's "retry under a new execution
+id" hint is unchanged for both.
+**On Apache Kafka 3.7** every `Backup` check now carries one advisory warning,
+`connection.groupTypes`: that line's group listing names no group type, so a
+backup that selects consumer groups records each as excluded (item 50). The
+verdict is unchanged.
+**Do:** roll the runner image with the controller. A controller from this
+build lists `capabilityChecks` in every `Backup` and `Restore` check plan, and
+an older runner refuses such a plan: the `Preflight` is `Failed`,
+`CheckContractMismatch`, naming the field. The chart has two image values:
+move **`runnerImage`** with `controllerImage` (a release that pins
+`runnerImage` keeps the old runner through `helm upgrade --reuse-values`); an
+install from `logweir.yaml` sets **`LOGWEIR_RUNNER_IMAGE`** on the controller's
+Deployment in the same change. A `Preflight` that failed this way stays
+`Failed`, and one that was in flight across the upgrade reads `unknown`:
+create a new one after both images have moved
+([kubernetes.md](kubernetes.md) §21.9). Give the restore identity `Read` on
+the target topics and `Describe` on the scratch marker topic if a managed
+cluster's ACLs were written from the chart README's earlier list, which named
+neither; and `Delete` on the scratch prefix. Without `Delete` a scratch
+restore signs `pass` and leaves its topics behind; it says so (a warning that
+names the topic, the same clause on its summary line, and the signed teardown
+attestation), and does not name the grant
+([support-matrix.md](support-matrix.md#minimum-permissions)). Take a
+decommissioned address out of a `KafkaCluster`'s `bootstrapServers`: a
+bootstrap address that does not answer now leaves the engine-protocol rows
+`unknown`.
+**Scope:** unit rows for every new row and code, each with the capability
+present, absent, not observed and not listed; librdkafka's in-process mock
+cluster for the ApiVersions reader, one broker and three (all answering, one
+silent, one stopped); the store's classifier against the real object-store
+client on a loopback responder; a guard that holds the published tables to
+their evidence, with a mutant per rule; and compose rows
+(`e2e/tests/compat_contract.rs`, engine `0.23.3+logweir.2`): the generic row
+on each of the four Apache Kafka lines and on Confluent Platform 8.3.2, with
+a `Restore` Preflight in the shape the controller renders; the Redpanda row
+(a backup, the refused restore and the restore that then fails); both SCRAM
+mechanisms on Redpanda; SeaweedFS through a backup, a restore and a refused
+second claim; the ACL profile with each grant removed in turn; a listener
+that advertises an unreachable address; a three-broker cluster with one
+broker frozen; and backups whose ids spell S3 credential codes. Every compose
+row but one is run by hand: CI runs the capability row on Apache Kafka 3.7.1.
+No managed provider, no cloud object store, one version of each other
+endpoint; every whole-path row is one node.
+[UNVERIFIED — no controller has rendered a capability plan to a check Job on a cluster yet; the PoC upgrade that carries this item runs a Backup and a Restore Preflight.]
+**Rollback:** roll the controller and the runner back together. An older
+controller's plan lists no capability row, and this runner then answers none
+and reports an unreported bound under `BrokerConfigsNotReadable`, a code the
+older controller reads; an older runner answers `ready` for an unreported
+bound again and writes `timestampType: CreateTime` again. No signed document
+and no CRD schema changed, so nothing already written needs attention.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2667,6 +2779,18 @@ In addition to the next entry's six, in its order:
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
+- **Roll the runner image with the controller, never the controller alone**
+  (item 60): every `Backup` and `Restore` readiness check from this
+  controller lists capability rows, and an older runner refuses the plan
+  (`CheckContractMismatch`). Move the chart's **`runnerImage`** with
+  `controllerImage` (a pinned `runnerImage` survives `--reuse-values`), or
+  **`LOGWEIR_RUNNER_IMAGE`** on the controller's Deployment for an install
+  without the chart; a `Preflight` that failed this way stays `Failed`, so
+  create a new one. Check a restore identity's Kafka ACLs against
+  [the measured minimum](support-matrix.md#minimum-permissions): `Read` on the
+  target topics and `Describe` on the scratch marker topic were missing from
+  an earlier list, and without `Delete` on the scratch prefix a restore passes
+  and leaves its topics, saying so only on its own output.
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -2682,7 +2806,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 and 60, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2740,7 +2864,10 @@ the `RetentionPolicy` CRD (four additive status fields and a printer column),
 the product API and the console, and needs the CRDs applied before the
 controller rolls, and any script that reads `kubectl get retentionpolicy` by
 column position updated for the new `HELD-BACK` column; item 59 changes the
-console only and needs nothing. To roll back to
+console only and needs nothing; item 60
+changes the controller's check plan and the runner's check rows together and
+one `Restore` status field, and needs the runner image rolled with the
+controller. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
@@ -2779,6 +2906,9 @@ console only and needs nothing. To roll back to
    `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
    field. Finish or delete any original-name `Restore` first, so none is left
    waiting on a runner that refuses it.
+8. Item 60 needs no step of its own beyond rolling the controller and the
+   runner back together: with an older runner the capability rows are gone,
+   and a target that reports no record-timestamp bound reads `ready` again.
 
 ---
 

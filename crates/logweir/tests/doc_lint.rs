@@ -2186,6 +2186,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the shared console shows what the product API publishes",
             "not published by the product API",
         ),
+        // PROD-01.2 (2026-10-10, item 60): a readiness check asks the
+        // endpoint what it can do, and the runner image moves with the
+        // controller because every Backup and Restore plan lists the rows.
+        (
+            "capability rows, and the compatibility contract",
+            "capabilityChecks",
+        ),
     ];
     assert_eq!(
         items.len(),
