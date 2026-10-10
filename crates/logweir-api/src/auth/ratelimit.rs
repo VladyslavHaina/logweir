@@ -10,49 +10,55 @@
 //! 1. IT BOUNDS LOAD, NOT CREDENTIALS. There is nothing to guess here. An OIDC
 //!    sign-in takes no password at this service. A callback reaches the
 //!    provider only with a login cookie this service minted, whose `state`
-//!    must match (`login.rs:214`, `login.rs:225`), and the code it carries is
-//!    exchanged with that cookie's PKCE verifier at the provider's token
-//!    endpoint (`login.rs:231` → `oidc.rs:577`, `oidc.rs:604`): the provider
-//!    makes authorization codes single-use, short-lived and unguessable
-//!    (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier (RFC 7636).
-//!    More attempts buy an attacker nothing but load. THE LOGIN STATE IS
-//!    SINGLE-USE PER REPLICA (FX-13a): the cookie is sealed and stateless and
-//!    opens for `LOGIN_STATE_SECONDS` (600 s), but a callback redeems its
-//!    `state` in the process's `UsedStates` before it exchanges the code
-//!    (`crate::auth::login`), so a replay on the same replica is refused
-//!    `login_state_replayed` with no token request. A replay on another
-//!    replica, or after the bounded record forgot the state, costs one token
-//!    request per replica, which the provider refuses: the code was already
-//!    exchanged. Before FX-13a one cookie armed any number of callbacks inside
-//!    the callback key's own budget, each a token request (point 3).
+//!    must match (`login::callback`: the cookie is opened by
+//!    `session::login_state_from_headers`, then its `state` is compared with
+//!    the query's), and the code it carries is exchanged with that cookie's
+//!    PKCE verifier at the provider's token endpoint (`login::callback` calls
+//!    `oidc::Provider::exchange_and_validate`, which sends the token `POST`):
+//!    the provider makes authorization codes single-use, short-lived and
+//!    unguessable (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier
+//!    (RFC 7636). More attempts buy an attacker nothing but load. THE LOGIN
+//!    STATE IS SINGLE-USE PER REPLICA (FX-13a): the cookie is sealed and
+//!    stateless and opens for `LOGIN_STATE_SECONDS` (600 s), but
+//!    `login::callback` redeems its `state` in the process's record
+//!    (`login::UsedStates::redeem`) before it exchanges the code, so a replay
+//!    on the same replica is refused `login_state_replayed` with no token
+//!    request. A replay on another replica costs one token request per
+//!    replica, and again after that replica restarts or evicts the entry; it
+//!    cannot obtain a second sign-in from a code the provider has exchanged.
+//!    Before FX-13a one cookie armed any number of callbacks inside the
+//!    callback key's own budget, each a token request (point 3).
 //!
 //! 2. NO AMPLIFICATION: AT MOST ONE PROVIDER REQUEST PER REQUEST. Readiness
 //!    warms the discovery and JWKS caches before a replica takes traffic
-//!    (`oidc.rs:357`). Then `/auth/login` makes none while the discovery
-//!    document is cached (`DISCOVERY_MAX_AGE`, an hour, `oidc.rs:40`; the
-//!    cache read at `oidc.rs:412`, called at `login.rs:117`) and one `GET`
-//!    when the hour has lapsed (`oidc.rs:426`); `/auth/callback` makes exactly
-//!    one token `POST` (`oidc.rs:604`), the keys coming from the JWKS cache
-//!    (`JWKS_MAX_AGE`, a day, `oidc.rs:45`; read at `oidc.rs:642`), and an
-//!    unknown `kid` in the provider's OWN ID token forces at most one refetch
-//!    per `JWKS_MIN_REFETCH` per process (a minute, `oidc.rs:43`,
-//!    `oidc.rs:505`, `oidc.rs:644`). A cold or expired cache adds at most the
-//!    discovery `GET` and a JWKS `GET`; a fetch that SUCCEEDS then serves
-//!    every later request, while a failed one is not cached, so during a
-//!    provider outage each request tries again — still at most three. A
-//!    constant per request is no amplification.
+//!    (`oidc::Provider::ready`). Then `/auth/login` makes none while the
+//!    discovery document is cached (`oidc::DISCOVERY_MAX_AGE`, an hour; the
+//!    cache is read in `oidc::Provider::discovery`, which `login::login`
+//!    calls) and one `GET` when the hour has lapsed (the same function's
+//!    fetch); `/auth/callback` makes exactly one token `POST`
+//!    (`oidc::Provider::exchange_and_validate`), the keys coming from the
+//!    JWKS cache (`oidc::JWKS_MAX_AGE`, a day; read in `oidc::Provider::jwks`),
+//!    and an unknown `kid` in the provider's OWN ID token forces at most one
+//!    refetch per `oidc::JWKS_MIN_REFETCH` per process (a minute; the forced
+//!    path of `oidc::Provider::jwks`, which only
+//!    `oidc::Provider::validate_id_token` takes). A cold or expired cache
+//!    adds at most the discovery `GET` and a JWKS `GET`; a fetch that
+//!    SUCCEEDS then serves every later request, while a failed one is not
+//!    cached, so during a provider outage each request tries again — still at
+//!    most three. A constant per request is no amplification.
 //!
 //! 3. BUT IT IS CONCENTRATION: THE PROVIDER SEES THIS SERVICE, NOT THE
 //!    ATTACKER. Each key is held to [`LOGIN_PER_WINDOW`] and none can spend
 //!    another's; past [`MAX_TRACKED_PEERS`] live keys a new key is served
 //!    without a window ([`Decision::AllowedUntracked`]). An attacker with N
 //!    keys therefore gets N bounded budgets, and its callbacks reach the
-//!    provider AUTHENTICATED AS THIS CLIENT (`client_secret`, `oidc.rs:585-597`)
-//!    AND FROM THIS SERVICE'S ADDRESS — not as the unauthenticated requests
-//!    from N addresses it could send the provider directly. A provider that
-//!    throttles per client or per source can therefore refuse this service's
-//!    sign-ins under a many-address attack: a sign-in outage AT THE PROVIDER,
-//!    for every operator, while it lasts.
+//!    provider AUTHENTICATED AS THIS CLIENT (`client_secret`, sent by
+//!    `oidc::Provider::exchange_and_validate`) AND FROM THIS SERVICE'S
+//!    ADDRESS — not as the unauthenticated requests from N addresses it could
+//!    send the provider directly. A provider that throttles per client or per
+//!    source can therefore refuse this service's sign-ins under a
+//!    many-address attack: a sign-in outage AT THE PROVIDER, for every
+//!    operator, while it lasts.
 //!
 //! 4. A DISTRIBUTED ATTACKER CAN CAUSE A SIGN-IN OUTAGE EITHER WAY, AND
 //!    AVAILABILITY DECIDES WHERE. With no budget over all clients, it takes

@@ -936,54 +936,100 @@ mod tests {
         );
     }
 
+    /// THE DENY LIST, WRITTEN OUT (FX-32 review, L3): the fifteen headers
+    /// that describe the replaced body or its caching, each with a value an
+    /// old body could have carried. The two rows below read THIS list, never
+    /// [`REPLACED_BODY_HEADERS`] alone: a row that loops over the constant it
+    /// tests cannot see an entry leave it.
+    const OLD_BODY_HEADERS: [(&str, &str); 15] = [
+        ("content-type", "text/plain; charset=utf-8"),
+        ("content-length", "8"),
+        ("content-encoding", "gzip"),
+        ("content-language", "en"),
+        ("content-location", "/old"),
+        ("content-range", "bytes 0-7/8"),
+        ("content-disposition", "attachment"),
+        ("transfer-encoding", "chunked"),
+        ("trailer", "expires"),
+        ("etag", "\"v1\""),
+        ("last-modified", "Tue, 15 Sep 2026 12:00:00 GMT"),
+        ("accept-ranges", "bytes"),
+        ("cache-control", "public, max-age=3600"),
+        ("expires", "Tue, 15 Sep 2026 13:00:00 GMT"),
+        ("vary", "accept"),
+    ];
+
+    /// **The deny list is exactly these fifteen headers: its length and its
+    /// membership are both pinned.**
+    ///
+    /// REGRESSION REASON (FX-32 review, L3). With `Cache-Control` or
+    /// `Content-Length` deleted from [`REPLACED_BODY_HEADERS`] every row
+    /// stayed green, because the drop row looped over the constant itself. A
+    /// handler's `Cache-Control: public` would then label a problem document
+    /// that can now carry a `Set-Cookie` as cacheable.
+    #[test]
+    fn the_deny_list_is_exactly_the_fifteen_body_and_cache_headers() {
+        let mut listed: Vec<&str> = REPLACED_BODY_HEADERS
+            .iter()
+            .map(HeaderName::as_str)
+            .collect();
+        listed.sort_unstable();
+        let mut pinned: Vec<&str> = OLD_BODY_HEADERS.iter().map(|(name, _)| *name).collect();
+        pinned.sort_unstable();
+        assert_eq!(pinned.len(), 15);
+        assert_eq!(
+            listed.len(),
+            15,
+            "the deny list has fifteen entries: {listed:?}"
+        );
+        assert_eq!(
+            listed, pinned,
+            "the deny list is these headers and no others (a removal makes an old body's \
+             header survive; an addition drops a header a handler meant the client to get)"
+        );
+        let mut distinct = pinned.clone();
+        distinct.dedup();
+        assert_eq!(distinct, pinned, "no header is listed twice");
+    }
+
     /// **The headers that describe the replaced body go with it, and the
     /// rendering's own fields win.**
     ///
-    /// The control for the row above: carrying EVERYTHING would label a
+    /// The control for the keep row above: carrying EVERYTHING would label a
     /// problem document `text/plain`, give it the old body's length, or let a
-    /// cache keep a per-request answer.
+    /// cache keep a per-request answer. The original carries every header of
+    /// [`OLD_BODY_HEADERS`], so each of the fifteen is shown dropped.
     #[test]
     fn a_rerendered_problem_drops_what_described_the_old_body() {
         let mut original = (StatusCode::NOT_FOUND, "old body").into_response();
         let headers = original.headers_mut();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("8"));
-        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        headers.insert(header::ETAG, HeaderValue::from_static("\"v1\""));
-        headers.insert(
-            header::LAST_MODIFIED,
-            HeaderValue::from_static("Tue, 15 Sep 2026 12:00:00 GMT"),
-        );
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        );
-        headers.insert(
-            header::EXPIRES,
-            HeaderValue::from_static("Tue, 15 Sep 2026 13:00:00 GMT"),
-        );
-        headers.insert(header::VARY, HeaderValue::from_static("accept"));
-        headers.insert(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment"),
-        );
+        for (name, value) in OLD_BODY_HEADERS {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
         headers.insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+        for (name, value) in OLD_BODY_HEADERS {
+            assert_eq!(
+                original.headers().get(name).map(|v| v.to_str().unwrap()),
+                Some(value),
+                "the control: the original carries {name}"
+            );
+        }
 
         let mut error = ApiError::new(ProblemCode::RateLimited, "Slow down.");
         error.retry_after_seconds = Some(30);
         let out = rerendered(original, &error);
 
-        for name in REPLACED_BODY_HEADERS {
-            if name == header::CONTENT_TYPE {
+        for (name, _) in OLD_BODY_HEADERS {
+            if name == "content-type" {
                 continue;
             }
             assert!(
-                out.headers().get(&name).is_none(),
+                out.headers().get(name).is_none(),
                 "{name} described the replaced body and must not survive: {:?}",
-                out.headers().get(&name)
+                out.headers().get(name)
             );
         }
         assert_eq!(
