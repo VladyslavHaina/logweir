@@ -28,7 +28,7 @@
 //!   [`RefusalDetail`](logweir_core::refusal_detail::RefusalDetail) cannot be
 //!   built any other way: a reason code of ASCII letters and digits, a
 //!   sentence reduced to printable characters, passed through the credential
-//!   rules and cut to 512 bytes.
+//!   rules and cut to 760 bytes.
 //! * **A bounded read, once** ([`read`]). [`REFUSAL_LOG_TAIL_LINES`] lines and
 //!   [`REFUSAL_LOG_LIMIT_BYTES`] bytes, asked of the API server and enforced
 //!   again on the stream. It is made on the one pass that writes the terminal

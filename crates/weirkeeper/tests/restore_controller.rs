@@ -11103,7 +11103,7 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         text.truncate(bytes);
         text
     };
-    let over_bound = words(600);
+    let over_bound = words(1000);
     let cut = {
         let mut kept = over_bound[..REASON_MESSAGE_MAX_BYTES - 3]
             .trim_end()
@@ -11650,7 +11650,12 @@ async fn the_longest_refusal_message_fits_the_progress_field() {
     assert_eq!(
         message.len(),
         FX34_OLD_MESSAGE.len() + FX34_STATED.len() + 64 + 2 + REASON_MESSAGE_MAX_BYTES,
-        "the old text, the label, a 64-byte code, `: ` and a 512-byte sentence"
+        "the old text, the label, a 64-byte code, `: ` and a 760-byte sentence"
+    );
+    assert_eq!(
+        (FX34_OLD_MESSAGE.len(), FX34_STATED.len(), message.len()),
+        (123, 48, 997),
+        "the figures `REASON_MESSAGE_MAX_BYTES`'s note quotes"
     );
     assert_eq!(status["progress"]["message"], message);
 }

@@ -277,13 +277,14 @@ fn a_refused_restore_prints_one_detail_line_before_its_state_line() {
 }
 
 /// A sentence over the bound is carried cut, with the marker; the human line
-/// carries all of it. Four forbidden keys, one of them nested, make the
-/// forbidden-key refusal longer than 512 bytes.
+/// carries all of it. The forbidden-key refusal lists every key it found, so
+/// sixteen of them make it longer than the bound.
 #[test]
 fn a_sentence_over_the_bound_is_cut_with_a_marker() {
-    let spec = example_restore_spec()
-        + "\nengine_overrides:\n  dry_run: true\n  purge_topics: false\n  \
-           header_preflight_external: true\n  nested:\n    dry_run: true\n";
+    let nested: String = (1..=16)
+        .map(|i| format!("  level{i:02}:\n    dry_run: true\n"))
+        .collect();
+    let spec = example_restore_spec() + "\nengine_overrides:\n" + &nested;
     let (code, stdout, stderr) = restore(&spec, &[], "forbidden keys");
     assert_eq!(code, Some(3), "{stdout}\n{stderr}");
     let detail = the_detail(&stdout, "forbidden keys");
@@ -481,4 +482,43 @@ fn the_detail_writer_prints_exactly_one_json_line() {
     let mut nothing = Vec::new();
     logweir::exit::print_refusal_detail_to(&mut nothing, " \n").unwrap();
     assert!(nothing.is_empty());
+}
+
+/// The example `docs/kubernetes.md` §10 quotes is what the runner prints for
+/// that plan, word for word: an `http://` archive endpoint with
+/// `allow_http: false` (C15). The refusal names the field and never the
+/// endpoint, so the detail line does not carry it either.
+#[test]
+fn the_documented_example_is_what_the_runner_prints() {
+    let example = example_restore_spec();
+    let spec = example.replacen("    allow_http: true\n", "    allow_http: false\n", 1);
+    assert_ne!(
+        spec, example,
+        "the row edits the source storage's allow_http"
+    );
+    let (code, stdout, stderr) = restore(&spec, &[], "c15");
+    assert_eq!(code, Some(3), "{stdout}\n{stderr}");
+    let detail = the_detail(&stdout, "c15");
+    let documented = "GuardRefused: source.storage.endpoint is a plain http:// endpoint but \
+        source.storage.allow_http is false. The pinned engine (kafka-backup 0.22.0 and later) \
+        derives plaintext transport from an http:// endpoint whatever allow_http says, so it \
+        would dial the archive in the clear although the spec asked for no plaintext. Set \
+        allow_http: true to state plaintext explicitly, or use an https:// endpoint.";
+    assert_eq!(detail.to_string(), documented);
+    assert_eq!(
+        format!("GuardRefused: {}", human_sentence(&stderr, "c15")),
+        documented,
+        "and it is the human line's sentence, whole"
+    );
+    let doc = std::fs::read_to_string("../../docs/kubernetes.md").expect("the operator doc ships");
+    assert!(
+        doc.contains(&format!(
+            "; the runner's own reason, cleaned and bounded: {documented}\n"
+        )),
+        "docs/kubernetes.md quotes this refusal as its example; keep the two in step"
+    );
+    assert!(
+        !detail_lines(&stdout)[0].contains(":9000"),
+        "the endpoint's value is not in the line: {stdout}"
+    );
 }

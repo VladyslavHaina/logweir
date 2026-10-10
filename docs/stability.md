@@ -1764,6 +1764,55 @@ them after this line, exactly as exit 0 does.) The key is carried on the scoreca
 phase-9 record, which is pushed after phase 8 froze and signed the document, so nothing that
 delivers it can reach the signed bytes.
 
+### `refusal-detail=` carries a guard refusal's reason code and sentence (FX-34)
+
+```
+refusal-detail={"code":"StorageRegionInvalid","message":"source.storage.region is not an S3 region name: …"}
+refusal-reason=GuardRefused
+```
+
+`logweir restore run` (and its `drill run` alias) and `logweir backup run` print this line at
+**exit 3 and at no other exit**, immediately before `refusal-reason=`. Interface I9 is unchanged:
+`refusal-reason=<TerminalState>` is still the final stdout line of a refused run, and the human line
+on stderr and the tracing lines are what they were.
+
+**Why a second line.** `refusal-reason=` names a state from a closed list, and most refusals have
+none of their own: they are a plain `GuardRefused`. The sentence that says which guard fired and
+what to change was on the human line only, in a pod log that goes with the pod, so a `Restore` or a
+`Backup` said "the runner exited 3 (guard-refused)" and nothing more (PoC batch 5, finding F-1).
+
+**The value is one JSON object with exactly two string members.**
+
+| member | what it is |
+|---|---|
+| `code` | The name the refusal opens with (`<Code>: ` or `<Code>. `, a CamelCase word), or `GuardRefused` when it opens with none. ASCII letters and digits, a letter first, at most 64 bytes. |
+| `message` | The rest of the refusal's sentence, cleaned: printable ASCII and `§ – — … →` are kept, a run of whitespace or control characters is one space, a run of anything else is one `U+FFFD`; a URL has no query string and no userinfo; credential shapes read `[redacted]`. At most 760 bytes, cut on a character boundary, and a cut sentence ends with `…`. |
+
+The line is at most 2048 bytes, so CRI's 16 KiB line split never divides it. A refusal with nothing
+printable in it prints no line.
+
+**A reader validates it; it is not trusted because the runner printed it.** A pod log is stdout and
+stderr merged, and the sentence repeats text from the plan, the broker and the archive. `weirkeeper`
+reads the LAST `refusal-detail=` line of the bounded tail by its key name (the rule erratum E4 draws
+for `refusal-reason=`), ignores a line over 2048 bytes, requires the two-member object and the code
+pattern, and cleans the sentence again whatever the runner did. A line that fails any of that is not
+shown, and an earlier line is not used in its place. `logweir_core::refusal_detail` is the one
+implementation of both sides. What the controller does with it is in
+[docs/kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34).
+
+**Mixed versions.** The line is additive both ways.
+
+- *A new runner under an older controller.* The older controller scans for `refusal-reason=` by
+  name and ignores a line it does not know. The status is what it was.
+- *An older runner under a newer controller.* No line, so the condition's message is byte for byte
+  what it was before this line existed.
+
+**Not printed by the other three binaries that exit 3.** `logweir check run` prints
+`refusal-reason=CheckContractMismatch` and nothing else on stdout, `logweir notify deliver` prints
+no line at all for a refused event document, and `logweir-retention` prints
+`retention-refusal=<code>` for the one refusal the controller names. Their contracts are below and
+are unchanged.
+
 ### Execution contract v2: what v1 still buys, and what it may no longer carry
 
 `logweir_core::execution_contract::VERSION` is `"2"` (decision D3 §8, Amendment I). The bump is the

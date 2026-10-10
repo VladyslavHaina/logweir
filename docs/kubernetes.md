@@ -4758,7 +4758,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
 | **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
-| **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
+| **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. The condition's message ends with the runner's own reason: see "What a refused run says about why" below. |
 | **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create, or (FX-7) the archive could not be read to prove the backup set is new for a reason no retry changes (a 401/403, a wrong bucket, region or CA); the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
@@ -5887,6 +5887,75 @@ a key it would otherwise have missed — never a different one. Two tests keep
 the two halves honest: `progress_channel.rs` measures what the runner actually
 prints, and `backup_controller.rs` checks the window still fits.
 
+### What a refused run says about why (FX-34)
+
+A guard refusal used to leave one sentence on the object: "the runner exited 3
+(guard-refused); the code was read from …". Which guard, and what to change,
+was only in the pod log, and the pod goes with its Job. The terminal
+condition's message now ends with the runner's own reason code and sentence.
+Take a restore whose plan names a plain `http://` archive endpoint without
+`allow_http: true`:
+
+```
+kubectl -n team-a get restore r1 -o jsonpath='{.status.conditions[?(@.type=="Failed")].message}'
+the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode; the runner's own reason, cleaned and bounded: GuardRefused: source.storage.endpoint is a plain http:// endpoint but source.storage.allow_http is false. The pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so it would dial the archive in the clear although the spec asked for no plaintext. Set allow_http: true to state plaintext explicitly, or use an https:// endpoint.
+```
+
+`status.progress.message` carries the same text, and the console's operation
+page shows both. `status.exitReason` is unchanged: it stays the terminal state
+off `refusal-reason=`. Both a `Restore` (a rehearsal's included) and a `Backup`
+(a scheduled one included) do this.
+
+**It is the runner's own words, and a pod log is untrusted text.** The runner
+pod runs in the tenant's namespace, and its sentence repeats what the plan, the
+broker and the archive said. So the controller takes one line, validates it,
+and cleans it before it is stored:
+
+- **One line, by its key name.** The runner prints
+  `refusal-detail={"code":"…","message":"…"}` immediately before
+  `refusal-reason=` ([the line's contract](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
+  The controller reads the last such line in the final sixteen non-empty log
+  lines. A line printed earlier by anything else is superseded by the runner's
+  own, and if the last one does not validate nothing is shown.
+- **The code** is ASCII letters and digits, a letter first, at most 64 bytes.
+  A refusal with no name of its own carries `GuardRefused`.
+- **The sentence** keeps printable ASCII and `§ – — … →`. A run of whitespace
+  or control characters (a line break, a tab, an ANSI escape's `ESC`) becomes
+  one space, and a run of anything else (a bidi override, a zero-width
+  character, a letter of another script) becomes one `U+FFFD`. A URL loses its
+  query string and its userinfo, and the credential shapes every relayed
+  message is checked for are replaced by `[redacted]`. That check errs towards
+  removing: a long unbroken name or path in the sentence can read `[redacted]`
+  too. The sentence is then cut to 760 bytes, on a character boundary, and a
+  cut sentence ends with `…`. That is the most that keeps the whole message
+  inside the 1024 bytes `status.progress.message` and the product API allow
+  it.
+- **The read is bounded and made once.** For exit 3 the controller asks for
+  the `runner` container's last 32 lines and at most 512 KiB, and stops reading
+  at that many bytes whatever arrives. It reads on the pass that writes the
+  terminal status; a terminal object's pod is never read again. No permission
+  was added: it is the `pods/log` `get` the controller already holds.
+
+**What you see when there is no reason to show:**
+
+| The message ends with | It means |
+|---|---|
+| *(nothing after `…exitCode`)* | The runner printed no `refusal-detail=` line: it predates this release. The pod log, while it exists, has the sentence. |
+| `; the runner gave no readable reason: its ``refusal-detail=`` line did not validate, so nothing from it is shown` | The line was there and was not what a runner prints: a bad code, not the two-member JSON object, or longer than 2048 bytes. |
+| `; the runner's reason could not be read because the pod is gone` | The pod was already collected when the controller read its log (a `404`). The exit code was read before that and is recorded. |
+| `; the runner's reason could not be read: the pod log read answered HTTP 403` (or `500`, …) | The read was refused or failed. The controller logs one warning naming the pod and the status, and does not read again. |
+| `; the runner's reason could not be read: the last 32 lines of the pod log are over the 512 KiB this controller reads` | Possible only on a runtime that stores log lines longer than CRI's default 16 KiB. Nothing is taken from a log that was cut, the terminal state included (`exitReason: GuardRefusedUnknownReason`). |
+
+In the last three cases the object is still terminal with `exitCode: 3`: a log
+that cannot be read no longer leaves a refused run in `Running` with the
+reconcile failing, which is what a `403` on `pods/log` used to do. Only exit 3
+changed. Every other exit code reads the log as it always did, and a failure
+of that read is still a reconcile error.
+
+`refusal-reason=`'s own value is held to the same rule as the code: it reaches
+`status.exitReason` only when it is a state name (ASCII letters and digits, 64
+bytes). Anything else is `GuardRefusedUnknownReason`.
+
 ### What a run says about itself while it is running — `status.progress`
 
 Before PLAT-14.1 a run in flight said `phase: Running` and nothing else, which
@@ -6605,7 +6674,9 @@ point's own set ([the plan field](formats/drill-spec.md#sourcepoint-execution-co
 — are exit 3 too, but they are not terminal states: the line reads
 `refusal-reason=GuardRefused`, so the `Restore` records `exitReason:
 GuardRefused`, and the name is the first token of the refusal message in the
-pod log.
+pod log. Since FX-34 that name and its sentence are also the end of the
+`Failed` condition's message (§10, "What a refused run says about why"), so
+they outlive the pod.
 **Read §10's note on `refusal-reason=` before writing any reader of it**
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod

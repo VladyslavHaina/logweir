@@ -57,20 +57,32 @@ pub const REASON_CODE_MAX_BYTES: usize = 64;
 
 /// The longest sentence kept, in bytes, truncation marker included.
 ///
-/// 512, the number every relayed message is already capped at
-/// ([`crate::check_contract::MESSAGE_MAX_CHARS`]), counted in BYTES here
-/// because a status is stored and sent as bytes: 512 characters of four-byte
-/// code points would be 2 KiB. The refusal PoC batch 5 met is 366 bytes and
-/// the longest fixed sentences this build writes are about 460 (the glob and
-/// forbidden-key refusals), so a sentence is cut only when what it
-/// interpolates is long: a list of topics, a parse error.
-pub const REASON_MESSAGE_MAX_BYTES: usize = 512;
+/// # Why 760
+///
+/// It keeps a refused run's WHOLE condition message inside 1024 bytes, which
+/// is `status.progress.message`'s `maxLength` and the bound the product API
+/// serves a condition's message under: the 123 bytes the message always had,
+/// the 48-byte label, a 64-byte code, `: ` and 760 come to 997, with 27 to
+/// spare for the fixed text. A sentence that took the message past 1024
+/// would be cut a second time, with no marker, on its way to the console.
+///
+/// A smaller one cuts remedies. They are at the END of a sentence ("Delete
+/// them, or restore under a prefix nothing has used yet …"), and the fixed
+/// text of the longest sentences this build writes is 489 bytes (a restore
+/// whose target topics already exist), 453 and 435 before any name is
+/// interpolated: at the 512 every other relayed message is capped at
+/// ([`crate::check_contract::MESSAGE_MAX_CHARS`]) the commonest real refusal
+/// would lose its last clause with one topic in it. At 760 it keeps about
+/// eight. The refusal PoC batch 5 met is 366 bytes.
+///
+/// BYTES, not characters, because a status is stored and sent as bytes.
+pub const REASON_MESSAGE_MAX_BYTES: usize = 760;
 
 /// The longest `refusal-detail=` line, prefix included, in bytes.
 ///
-/// [`RefusalDetail::to_line`] cannot exceed it: a 64-byte code, a 512-byte
+/// [`RefusalDetail::to_line`] cannot exceed it: a 64-byte code, a 760-byte
 /// sentence whose every byte is a `"` or a `\` and doubles in JSON, and 39
-/// bytes of prefix and punctuation come to 1127. It is well under the 16 KiB
+/// bytes of prefix and punctuation come to 1623. It is well under the 16 KiB
 /// at which CRI splits a container log line, so the line always arrives
 /// whole. A reader ignores a longer line instead of parsing it.
 pub const REFUSAL_DETAIL_LINE_MAX_BYTES: usize = 2048;
@@ -632,7 +644,7 @@ mod tests {
         // A three-byte character straddling the cut is dropped whole, never
         // split: every offset of the boundary is tried.
         for pad in 0..4 {
-            let text = format!("{}{}", "a".repeat(pad), "—".repeat(400));
+            let text = format!("{}{}", "a".repeat(pad), "—".repeat(600));
             let cut = clean_message(&text);
             assert!(cut.ends_with(TRUNCATION_MARKER), "pad {pad}");
             assert!(
@@ -752,7 +764,7 @@ mod tests {
         assert_eq!(key.len(), 40);
         let run = clean_message(&format!("the key {key} was refused"));
         assert_eq!(run, "the key [redacted] was refused");
-        // The cut comes AFTER the rules: a secret straddling byte 512 is
+        // The cut comes AFTER the rules: a secret straddling the bound is
         // removed whole, never left as a prefix the rules no longer match.
         let straddle = format!("{} {key} tail", prose(REASON_MESSAGE_MAX_BYTES - 25));
         assert!(straddle.len() > REASON_MESSAGE_MAX_BYTES);
@@ -838,7 +850,7 @@ mod tests {
                 "{filler:?}: {} bytes",
                 line.len()
             );
-            assert!(line.len() <= 1127, "the figure the bound's note quotes");
+            assert!(line.len() <= 1623, "the figure the bound's note quotes");
             assert!(!line.contains('\n') && !line.contains('\r'));
             let read = RefusalDetail::from_line(&line).expect("the reader accepts it");
             assert_eq!(read.to_line(), line, "and reading it changes nothing");
