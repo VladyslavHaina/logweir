@@ -1507,20 +1507,38 @@ alike. Now:
   what the rules or a protection keep. The same 371 points read 300 kept, 50 in
   the plan and 21 held back, and 10, 50 and 311.
 - The `Evaluated` message says it in words, and `kubectl get retentionpolicy`
-  prints a `HELD-BACK` column beside `CANDIDATES`.
+  prints a `HELD-BACK` column. **The column sits between `CANDIDATES` and
+  `EVALUATED`**, so a script that reads `kubectl get retentionpolicy` by column
+  position must be updated: `EVALUATED` and `AGE` each move one column right.
+- When no due point fits the ceiling (each is in a backup set that more due
+  points name than `maxDeletionsPerRun`, and a set is planned whole or not at
+  all), the plan is empty and the object says why: `Enforced=False` carries the
+  new closed reason `NothingFitsCeiling`, with the count, the ceiling and what
+  to raise, where it used to read `NothingToDo` ("the evaluation found nothing
+  to remove") beside a held-back count above zero; and the `Evaluated` message
+  no longer promises that a later plan names those points. An empty plan with
+  nothing due is still `NothingToDo`. The plan is empty in both cases.
 - The product API (`lastEvaluation.keptCount`, `truncatedByCap`,
   `maxDeletionsPerRun`) and the console's retention panel ("kept", "in this
-  plan", "held back by the per-run ceiling") read the same numbers. For an
-  evaluation that does not record them (an older controller's, or counts that
-  do not add up) they publish no kept count and no `kept` rows and say "not
-  recorded"; they never count that list.
+  plan", "held back by the per-run ceiling") read the same numbers. The API
+  says on every answer whether they are published:
+  `lastEvaluation.accounting` is `Recorded` or `NotRecorded`. For an
+  evaluation that does not record them (an older controller's, counts that do
+  not add up, or a `kept` list that is not `keptCount` long) it answers
+  `NotRecorded` and publishes no kept count and no `kept` rows, and the console
+  says "not recorded"; neither counts that list. An absent `kept` beside
+  `NotRecorded` says nothing; beside `Recorded` and `keptCount: 0` it means
+  nothing is kept.
 - `status.lastEvaluation.viewIncomplete`, and the same field in the API and
   the console, says when the catalog view the evaluation read was not the whole
-  archive: a window of `sync.viewLimit` points
-  (`RecoveryCatalog.status.truncated`), or the pages of a walk its object
-  budget stopped (`status.cursor.complete: false`). Points outside the view
-  were never evaluated and never candidates, and still are not; the status
-  used to read `EvaluationComplete` with nothing saying so.
+  archive: the catalog cut its view (`RecoveryCatalog.status.truncated`), or
+  the pages are those of a walk its object budget stopped
+  (`status.cursor.complete: false`). Points outside the view were never
+  evaluated and never candidates, and still are not; the status used to read
+  `EvaluationComplete` with nothing saying so. The API and the console show
+  `true` whether or not the counts are recorded, show `false` ("the whole
+  archive, the catalog said") only beside recorded counts, and read an absent
+  member as "not recorded".
 - The API's `lastEnforcement.failed` was cut at 200 rows with nothing saying
   so (`deleted` has always had `deletedTruncated`); `failedTruncated: true`
   is now present when it was cut.
@@ -1532,9 +1550,16 @@ an approved digest stays approved ([kubernetes.md](kubernetes.md) §7f,
 additive `status` fields and one printer column); nothing else is required.
 The first evaluation after the upgrade rewrites each policy's status once. If
 a policy's `HELD-BACK` is above 0 and the backlog should go in fewer runs,
-raise `spec.enforcement.maxDeletionsPerRun` (1–500). If `viewIncomplete` is
-`true`, raise the catalog's `spec.sync.viewLimit` (100–5000) or let its sync
-finish: this policy does not expire a point outside the view.
+raise `spec.enforcement.maxDeletionsPerRun` (1–500); if its `Enforced`
+condition reads `NothingFitsCeiling`, nothing is removed until you do. If
+`viewIncomplete` is `true`, let the catalog's sync finish, or raise its
+`spec.sync.viewLimit` (100–5000) when the archive holds more points than the
+limit: this policy does not expire a point outside the view. Raising the limit
+does not help a view the catalog cut for page space, for an entry too large for
+one page, or by merging duplicate rows. Update any script that reads
+`kubectl get retentionpolicy` by column position (`HELD-BACK` is new, before
+`EVALUATED`), and any client that reads `lastEvaluation.kept` from the product
+API: read `lastEvaluation.accounting` first.
 **Scope:** the evaluation at the PoC's own size, 371 points under `keepLast:
 300` and `keepLast: 10`, with a plan under the ceiling, one exactly at it and
 one point over as controls, and a held-back point in neither `kept` nor the
@@ -1543,12 +1568,18 @@ through a real reconcile over a fake API, the policy's own ceiling published,
 and `truncatedByCap: 0` written for a plan under the ceiling; the status
 written only when its content changes, over a truncated plan, with a real
 change still written once; a controller ahead of its CRD (the four fields
-pruned) leaving `lastEvaluation.at` alone; an older controller's status
+pruned) leaving `lastEvaluation.at` alone, with the older server modelled
+from the pre-FX-22 CRD's own member list and over a catalog that says its view
+is whole, a window, unfinished, or says nothing; an older controller's status
 converted by one write; a windowed view, an unfinished walk, and their
-controls (`crates/weirkeeper/tests/retention_policy_controller.rs`). The
+controls; an empty plan beside held-back points, with nothing due and a plan
+that fits as controls; and the plan writer's rail holding every held-back
+point's set (`crates/weirkeeper/tests/retention_policy_controller.rs`). The
 product API through its router, with the counts that are not the number of
-rows, an evaluation without the accounting, counts that do not add up, and a
-cut `failed` list (`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
+rows, an evaluation without the accounting, counts that do not add up, a
+`kept` list that is not the recorded count, the `accounting` member for an
+older-shape status and for a policy that keeps nothing, and a cut `failed`
+list (`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
 console and legacy mode (`ui/tests/d3.spec.js`). The three read one chain of
 fixtures: the two policies as the reconciler writes them, and the API's answer
 for those two objects, each held to its writer by a test. Each guard has a
@@ -1559,10 +1590,20 @@ panel renders a policy only through a schedule report's `supersededBy`, which
 no controller writes yet.
 **Rollback:** an older controller lists the held-back points under `kept`
 again and does not rewrite the four new fields, which keep the newer
-controller's last values beside lists that move. The product API and the
-console read such a block as not recorded once its counts stop adding up; with
-`kubectl`, re-apply the older CRDs, which prunes the four fields, or ignore
-them while the older controller runs. Plans and approvals are unaffected.
+controller's last values beside lists that move. For a policy whose plan the
+ceiling had cut, the product API answers `accounting: NotRecorded` and
+publishes no kept count, no held-back count and no `kept` rows, and the console
+prints "not recorded" for both, from the older controller's first write: its
+`kept` list is not `keptCount` long, which is refused even while the archive
+does not move and the stale counts still add up. For a policy the ceiling had
+not cut, the older controller's `kept` list is the same list and it writes
+nothing; the API and the console go on showing the newer controller's counts,
+which stay true until the archive changes, and read "not recorded" after
+that. A `viewIncomplete: true` the newer controller wrote stays visible. With
+`kubectl`, re-apply the older CRDs, which prunes the four fields and drops the
+`HELD-BACK` column, or ignore them while the older controller runs. An older
+controller also writes `Enforced=False/NothingToDo` where this build writes
+`NothingFitsCeiling`. Plans and approvals are unaffected.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -1664,8 +1705,9 @@ changes the controller and the runner together (the check plan and a check
 row, and the retention controller's `Enforced` after a binding refusal) and
 needs nothing beyond rolling them together; item 49 changes the controller,
 the `RetentionPolicy` CRD (four additive status fields and a printer column),
-the product API and the console, and needs nothing beyond the CRDs applied
-before the controller rolls. To roll back to
+the product API and the console, and needs the CRDs applied before the
+controller rolls, and any script that reads `kubectl get retentionpolicy` by
+column position updated for the new `HELD-BACK` column. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
