@@ -575,3 +575,24 @@ fn restore_document_renders_strip_offset_headers_false() {
         "the only permitted value is false:\n{doc}"
     );
 }
+
+/// **FX-27.** The restore twin of
+/// `render_backup.rs::the_backup_document_turns_the_engine_metrics_server_off`,
+/// through `render_all`, the path the engine's `preflight` and `restore` take.
+#[test]
+fn the_restore_document_turns_the_engine_metrics_server_off() {
+    let docs = render_restore::render_all(&plan())
+        .expect("G-GLOB: this fixture holds no glob metacharacter");
+    assert!(!docs.is_empty());
+    for (_, doc) in docs {
+        assert!(
+            doc.contains("\nmetrics:\n  enabled: false\n"),
+            "expected a top-level `metrics:` block with `enabled: false`:\n{doc}"
+        );
+        assert_eq!(
+            doc.matches("metrics:").count(),
+            1,
+            "one metrics block:\n{doc}"
+        );
+    }
+}
