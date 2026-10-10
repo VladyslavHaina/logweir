@@ -410,10 +410,17 @@ test("a_run_with_no_window_is_offered_from_its_row_only_when_its_own_verdict_def
     assert.equal(offer.offer, false, verdict);
     assert.match(offer.reason, new RegExp(verdict));
   }
-  // A run with its own window is not this rule's to answer.
+  // FX-35: a run with its own window is offered the row for its OWN receipt
+  // when the controller verified it, and never without the digest naming it.
   const windowed = unverifiedRun("Valid");
   windowed.status.windowCovered = { fromMs: 1, toMs: 2 };
-  assert.equal(backupCatalogOffer(windowed, [row()], page([])).offer, false);
+  assert.equal(backupCatalogOffer(windowed, [row()], page([])).offer, true);
+  const digestless = unverifiedRun("Valid", "");
+  digestless.status.windowCovered = { fromMs: 1, toMs: 2 };
+  assert.match(backupCatalogOffer(digestless, [row()], page([])).reason, /no receipt digest/);
+  const refusedWindowed = unverifiedRun("Invalid");
+  refusedWindowed.status.windowCovered = { fromMs: 1, toMs: 2 };
+  assert.equal(backupCatalogOffer(refusedWindowed, [row()], page([])).offer, false);
   // The row itself must still be offerable.
   assert.equal(backupCatalogOffer(unverifiedRun("NotAttempted"),
     [row({ selectable: false })], page([])).offer, false);
