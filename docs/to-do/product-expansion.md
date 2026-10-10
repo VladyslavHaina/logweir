@@ -215,13 +215,13 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-08.1a | Request and show complete coverage through the CRDs, the API and the console | P1 | M2 | impl | 08.1 | — | k8s | A | Done |
 | 1 | PROD-05.1 | Capture topic configuration with coverage | P1 | M2 | impl | FX-4, 01.5 | — | compose | A | Done |
 | 2 | PROD-05.1a | Detect Strimzi `KafkaTopic` owners from the controller and mark them for desired-state export | P2 | M2 | impl | 05.1 | — | k8s | A | Proposed |
-| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0b, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
+| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0b, 04.0d, 01.4, FX-1 | — | compose | A | Done |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
 | 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Done |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
-| 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
+| 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Done |
 | 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Done |
 | 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
 | 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
@@ -237,7 +237,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-05.2 | Apply a reviewed target topic configuration | P1 | M2 | impl | 05.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | Done |
 | 2 | PROD-11.1a | Safe clones (declared TTL and cleanup of only this execution's targets, `AllowedClusters`, explicit header handling) and the console's advanced selection behind an explicit choice, reusing PLAT-11.2's preview | P1 | M2 | impl | 11.1 | — | k8s | A | Proposed |
-| 2 | PROD-11.1b | Partition-subset replay under scorecard 2.0.0 (OD-9 (a)): lift the `restore.partitions` refusal; a run that states a subset writes format 2.0.0, and both verifiers and the parity script learn major 2 for exactly that shape (every other document stays 1.x and reads as before). The multi-run engine path (one run per distinct subset), phases 4/5/7 judging only the selection, and `source.selection.partitions` are already on main behind the refusal. Rows: a subset restore signs 2.0.0 and verifies in the new readers; the 1.21.0, 1.22.0 and 1.23.0 readers REFUSE it (unsupported major), never read it as full; a start-only or unnarrowed run is unchanged; mutants | P1 | M2 | impl | 11.1 | — | compose | A | Proposed |
+| 2 | PROD-11.1b | Partition-subset replay under scorecard 2.0.0 (OD-9 (a)): lift the `restore.partitions` refusal; a run that states a subset writes format 2.0.0, and both verifiers and the parity script learn major 2 for exactly that shape (every other document stays 1.x and reads as before). The multi-run engine path (one run per distinct subset), phases 4/5/7 judging only the selection, and `source.selection.partitions` are already on main behind the refusal. Rows: a subset restore signs 2.0.0 and verifies in the new readers; the 1.21.0, 1.22.0 and 1.23.0 readers REFUSE it (unsupported major), never read it as full; a start-only or unnarrowed run is unchanged; mutants | P1 | M2 | impl | 11.1 | — | compose | A | Done |
 | 2 | PROD-15.1 | Restore under the original name into an absent topic | P1 | M2 | impl | 01.4 | OD-2 | k8s | A | Proposed |
 | 3 | PROD-00.3 | Engine capabilities by route (child rows) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
 | 3 | PROD-00.3a | Committed-only capture (control records and READ_COMMITTED) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Proposed |
@@ -655,6 +655,17 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
 - **Limits:** two broker lines; the byte-identical replay miss (§4.7) stays until IDs exist.
 - **Rows added:** PROD-01.4a (gated on OD-6), PROD-01.4b, and OD-6.
 
+**Completion record — Done (2026-10-09), PROD-01.4a.**
+- **Ownership:** worker `prod-01-4a` (a run and a fix round), independent Tier-A review `claude/prod-01-4a.review.md` (ACCEPT-WITH-FIXES; the orchestrator read the fix round). Integrated by worker `integrate-5` with PROD-04.1 and PROD-11.1b, because the three collide on format versions. Merged as `55bdff1f` (PR #16, CI check and e2e green on Linux; release-notes item 49).
+- **Delivered:**
+  - topic IDs through DescribeTopics, the first wrapper in the one FFI crate under OD-6: bounded, refusing bad input before sending, the ID built from its two halves (never librdkafka's standard-alphabet text);
+  - each backup reads every named topic's ID right before the engine and again right after it; a read that fails is recorded with its reason and never fails the backup;
+  - receipt and catalog point **1.6.0** carry `generations.<topic>` (the ID before, the ID after, the source or the reason); receipt arms 36 to 40 in both readers; verifier 1.25.0;
+  - the generation rule: different IDs mean a new generation, never a continuation; two reads that differ mean the topic changed during the capture; anything unknown is "not established" with its reason, never "the same".
+- **Evidence:** on the merged tree, `topic_ids` 4 passed on Kafka 3.7.1 and on 4.3.1, `topic_identity` 52 passed, the workspace 5,150 passed and 0 failed, corpus and parity rc 0. PROD-01.5c then ran `topic_identity` on 3.9.2, 4.1.2 and 4.3.1 with no divergence.
+- **Limits:** no live row recreates a topic DURING a capture (the review's note), so that verdict is proven by unit rows only. The consumers of the IDs (lineage, the API and console views) are PROD-02.1's. The upstream exit is PROD-01.4b.
+- **Owed, non-blocking:** the worker's drafted librdkafka use-after-free report (`claude/prod-01-4a.result.md`) waits for the owner's word on filing it upstream.
+
 ### PROD-01.5 — Shared fixture profiles and supported broker versions
 
 - **Issue:** Every fixture pins Apache Kafka 3.7.1 on one combined broker (`e2e/compose/.env`). Apache support for that line has ended, and MSK stopped supporting it on 2026-09-01; no Kafka 4.x broker has been exercised. The compose project name and host ports are fixed, so fixtures cannot run in parallel. Tasks assume environments no task provides: several brokers, a second cluster, extra auth listeners, a lock-capable second bucket, a registry-compatible service, a Kafka Streams application and a transactional producer. MinIO, the only exercised store, is archived upstream.
@@ -845,6 +856,18 @@ Provenance is attested per index by design (`images.yml`), so a platform digest 
 - **Acceptance:** Every selected group is captured, excluded with a reason, or failed; absence never means offset zero. The catalog shows snapshot freshness and whether each position relates to archived data. Share and streams groups appear as not captured (or start offset only), never silently skipped.
 - **Tests/evidence:** Active and empty groups, rebalances, missing Describe permission, offset beyond coverage, expired offsets, partitions added during capture, source loss after backup, Kafka 4.x group types.
 - **Dependencies:** PROD-04.0, 01.4, FX-1. **Handoff:** versioned group snapshot and completeness/consistency classifications.
+
+**Completion record — Done (2026-10-09), PROD-04.1.**
+- **Ownership:** worker `prod-04-1` (a run and fix rounds), independent Tier-A review `claude/prod-04-1.review.md` (ACCEPT-WITH-FIXES with one HIGH, fixed; the second pass ACCEPT-WITH-FIXES with no HIGH; the orchestrator read the last round). Integrated by worker `integrate-5`. Merged as `55bdff1f` (PR #16, CI check and e2e green on Linux; release-notes item 50).
+- **Delivered:**
+  - a backup captures explicitly selected consumer groups natively: next-to-consume positions per partition with the observation time, the group's type, state and members, the partition marks before and after the engine, and how the positions relate to the archived data;
+  - every selected group has exactly one outcome (`captured`, `excluded` with a reason, `failed` with a reason); no group is silently absent and a missing position is never offset 0;
+  - share and streams groups, and every group on a broker that cannot type groups (3.7.1), are `excluded` `GroupTypeNotCaptured`; a group the principal cannot see is `failed` `NotVisibleToPrincipal`;
+  - the positions live in their own document (format 1.0.0) bound by digest into the receipt; receipt and catalog point **1.7.0** carry the summary; receipt arms 30 to 35 in both readers; verifier 1.26.0;
+  - selection through the CLI (`--consumer-group`), the plan and the CRDs (`spec.consumerGroups` on Backup and BackupSchedule); an empty selection leaves every existing plan's bytes and receipt version unchanged; the API and the console show freshness and coverage.
+- **Evidence:** on the merged tree on Kafka 4.3.1, `position_evidence` 8 passed, the large-selection row included: receipts of 64,401 B and 71,732 B with all three new blocks (under the catalog's 256 KiB), positions documents of 512,787 B and 2,087,137 B, both readers VALID, a one-byte change refused by both.
+- **Limits:** on CI's default 3.7.1 stack seven of the eight live rows are ignored (the broker cannot type groups); they run on 4.x locally until PROD-01.5a moves the default line. `Available` for the large points is proven in-process, not by a live catalog sync (a PoC row). Positions are evidence only: nothing restores or translates them (PROD-04.2).
+- **PoC rows:** in the report; the orchestrator runs them at the next upgrade.
 
 ### PROD-04.2 — Translate positions and perform reviewed cutover
 
@@ -1117,6 +1140,17 @@ The orchestrator read the fix round, and confirmed that the schedule's own `maxP
 - **Not delivered:** partition subsets (`restore.partitions`) are refused by name until OD-9; the multi-run engine path exists but cannot be reached. Clones and the console's advanced selection are PROD-11.1a. Consumer-position mapping over a filtered restore waits for PROD-04.2.
 - **Evidence:** 8 live selection rows on compose. Old-reader rows: every reader prints only true lines for start-only documents. Main's runner refuses the start form. Worker and second-pass mutants were killed.
 - **Owed:** the k8s rows at the PoC upgrade that carries `4b669609`.
+
+**Completion record — Done (2026-10-09), PROD-11.1b.**
+- **Ownership:** worker `prod-11-1b`, independent Tier-A review `claude/prod-11-1b.review.md` (ACCEPT-WITH-FIXES; the orchestrator read the fix round). Owner decision OD-9 (a). Integrated by worker `integrate-5`. Merged as `55bdff1f` (PR #16, CI check and e2e green on Linux; release-notes item 51).
+- **Delivered:**
+  - the refusal of `restore.partitions` is lifted on every path (CLI, preview, the runner's phases, the Kubernetes path); a standing authorization still refuses any selection;
+  - a restore that states a partition subset signs scorecard format **2.0.0**, and only then; every other scorecard stays 1.x, byte for byte;
+  - a subset is written only beside the interval form of `restore.point_in_time`, which a runner from before PROD-11.1 cannot parse, so an old runner refuses the plan instead of restoring every partition;
+  - both verifiers read major 2 for exactly this shape and apply every major-1 arm to it, plus PS-2 to PS-5; verifier 1.27.0.
+- **Evidence:** on the merged tree, `replay_selection` 10 passed on 3.7.1, and the older-readers row shows the 1.24.0, 1.25.0 and 1.26.0 readers each refuse the three live 2.0.0 documents; none prints VALID.
+- **Limits:** the console has no subset control (PROD-11.1a). The two older-runner rows need binaries built from older commits and were not re-run at integration.
+- **PoC rows:** K rows in the report; the orchestrator runs them at the next upgrade.
 
 ### PROD-11.2 — Introduce constrained masking for test environments
 
