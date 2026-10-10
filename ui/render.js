@@ -1468,6 +1468,23 @@ export const LEFT_TOPIC_SENTENCE =
   "created by this restore and left empty; remove it yourself once you have checked nothing " +
   "writes to it";
 
+/** What to do with a topic a stopped creation step CANNOT ACCOUNT FOR
+ *  (PROD-15.1 review 2, M2): the restore asked the cluster to create it, got
+ *  no definite answer, and the cluster listed it afterwards. It may be this
+ *  restore's or someone else's, so the sentence never claims it. The product
+ *  API's `unconfirmedInstruction`, word for word. */
+export const UNCONFIRMED_TOPIC_SENTENCE =
+  "exists now; this restore asked the cluster to create it and got no definite answer, so it " +
+  "may be this restore's or someone else's: check what it holds and who writes to it before " +
+  "you remove it";
+
+/** The same for a run that could not list the cluster after the stop
+ *  (`unconfirmedSeen: false`): the topic MAY exist. */
+export const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE =
+  "may exist now; this restore asked the cluster to create it, got no definite answer, and " +
+  "could not list the cluster afterwards: look for it, and check what it holds and who writes " +
+  "to it before you remove it";
+
 /** What a queued manual run is, in the page's own fixed words (P10). */
 export const QUEUED_RUN_SENTENCE =
   "Queued: this manual run is waiting for a slot. Its namespace lets a fixed number of manual " +

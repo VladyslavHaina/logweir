@@ -1460,13 +1460,21 @@ pub struct Restore {
     pub approval_subject: ApprovalSubjectView,
     /// The Job deadline.
     pub deadline_seconds: i64,
-    /// The topics this run created.
+    /// The target topic names of this run (`status.newTopics`). For a run
+    /// that reached its restore, the topics it created. After a stopped
+    /// creation step (`targetTopicsAppeared`), exactly
+    /// `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers
+    /// say it created, never a name someone else created or one it cannot
+    /// account for (empty when its lists could not be read). For a run that
+    /// was refused or failed before the creation step, the names its plan
+    /// maps, none of which it created.
     pub new_topics: Vec<String>,
     /// Present only when the run's creation step stopped (its operation's
     /// `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`):
-    /// the mapped target names someone else created
-    /// while the run was admitted, and every topic THIS run created and left
-    /// in place, empty. Logweir never deletes such a topic.
+    /// the mapped target names someone else created while the run was
+    /// admitted, every topic THIS run created and left in place, empty, and
+    /// the names it asked for and cannot account for. Logweir never deletes
+    /// any of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_topics_appeared: Option<CreationStopView>,
     /// P10: present while this admitted MANUAL restore waits for a slot in its
@@ -1524,8 +1532,10 @@ pub struct RestoreCoverageView {
 }
 
 /// `Restore.targetTopicsAppeared`: what a stopped creation step left behind,
-/// as the controller copied it from the runner onto
-/// `status.targetTopicsAppeared`. Each list holds at most 100 topic names.
+/// as the controller copied it from the runner's last two log lines onto
+/// `status.targetTopicsAppeared`, held to the restore's own mapped target
+/// names. Three lists, each at most 100 topic names, and how many names each
+/// has in all; a name is in at most one list. Logweir deletes none of them.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreationStopView {
@@ -1535,9 +1545,34 @@ pub struct CreationStopView {
     /// Topics this restore created and LEFT, empty. Never deleted by
     /// Logweir: the operator removes each one.
     pub left: Vec<String>,
+    /// Names this restore ASKED the cluster to create and CANNOT ACCOUNT
+    /// FOR: it got no definite answer (the whole request failed, or the name
+    /// was answered with an error that is not "already exists"). Each may be
+    /// this restore's or someone else's. Never listed in `left`, which claims
+    /// ownership, nor in `appeared`. Empty on a stop made of definite
+    /// answers.
+    pub unconfirmed: Vec<String>,
+    /// How many names `appeared` has in all: more than the list holds when
+    /// the 100-name bound cut it.
+    pub appeared_count: i64,
+    /// How many names `left` has in all.
+    pub left_count: i64,
+    /// How many names `unconfirmed` has in all.
+    pub unconfirmed_count: i64,
+    /// Whether the runner listed the cluster after the stop and SAW every
+    /// `unconfirmed` name. `false`: it could not list the cluster, so each
+    /// name MAY exist. Present only beside an `unconfirmed` name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_seen: Option<bool>,
     /// What to do with each topic in `left`, in words: the one sentence the
     /// runner, the Restore's status and the console all say.
     pub left_instruction: String,
+    /// What to do with each topic in `unconfirmed`, in words: "exists now …
+    /// check … before you remove it", or "may exist now … look for it" when
+    /// `unconfirmedSeen` is `false`. Present only beside an `unconfirmed`
+    /// name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_instruction: Option<String>,
 }
 
 /// **PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the

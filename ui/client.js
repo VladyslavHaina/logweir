@@ -1212,16 +1212,24 @@ function projectRestore(item) {
       status.timeBasis.plan = item.timeBasis.plan;
     }
   }
-  // PROD-15.1: A STOPPED CREATION STEP'S TWO LISTS, under the custom
-  // resource's own name (`status.targetTopicsAppeared`): the names someone
-  // else created, and the topics this restore created and LEFT. Nothing is
-  // deleted, so there is no third list to carry.
+  // PROD-15.1: A STOPPED CREATION STEP'S THREE LISTS, under the custom
+  // resource's own names (`status.targetTopicsAppeared`): the names someone
+  // else created, the topics this restore created and LEFT, and the names it
+  // asked for and cannot account for, each with how many there are in all.
+  // Nothing is deleted, so no list says "removed".
   const stopped = item.targetTopicsAppeared;
   if (stopped !== null && stopped !== undefined) {
     status.targetTopicsAppeared = {
       appeared: stopped.appeared.slice(),
       left: stopped.left.slice(),
+      unconfirmed: stopped.unconfirmed.slice(),
+      appearedCount: stopped.appearedCount,
+      leftCount: stopped.leftCount,
+      unconfirmedCount: stopped.unconfirmedCount,
     };
+    if (typeof stopped.unconfirmedSeen === "boolean") {
+      status.targetTopicsAppeared.unconfirmedSeen = stopped.unconfirmedSeen;
+    }
   }
   // PROD-08.1a: THE COVERAGE, under the custom resource's own names, so one
   // badge rule and one list line read it in both modes: what the Restore asks

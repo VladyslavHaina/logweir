@@ -33,17 +33,19 @@
       "orders"
     ],
     "targetTopicsAppeared": {
-      "appeared": [
-        "payments"
-      ],
+      "appeared": [],
       "left": [
         "orders"
       ],
-      "unconfirmed": [],
-      "appearedCount": 1,
+      "unconfirmed": [
+        "payments"
+      ],
+      "appearedCount": 0,
       "leftCount": 1,
-      "unconfirmedCount": 0,
-      "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it"
+      "unconfirmedCount": 1,
+      "unconfirmedSeen": true,
+      "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it",
+      "unconfirmedInstruction": "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it"
     },
     "coverage": {
       "requested": "complete"

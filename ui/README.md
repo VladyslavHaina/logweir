@@ -1205,14 +1205,23 @@ stops while creating its target topics (a name lost a race, or the broker
 refused another one) every topic it had created is still there, empty. The
 Restore's page opens with a caveat block (`creationStoppedWarning`, from
 `status.targetTopicsAppeared`; the product API's `targetTopicsAppeared`): the
-names someone else created, which the restore wrote nothing into, and each
+names someone else created, which the restore wrote nothing into; each
 topic the restore created and left, with `LEFT_TOPIC_SENTENCE` -- "created by
 this restore and left empty; remove it yourself once you have checked nothing
 writes to it" -- the same words the runner, the Restore's status and the API
-(`leftInstruction`) use. On such a Restore the "new topics" fact lists only
-what the restore left: `status.newTopics` is the approved plan's mapped names,
-derived on every terminal Restore and never observed, so it would list a name
-someone else created as this restore's. Rows: `ui/tests/original-name.spec.js`.
+(`leftInstruction`) use; and each name the restore asked for and CANNOT
+ACCOUNT FOR (`unconfirmed`), with `UNCONFIRMED_TOPIC_SENTENCE` ("exists now
+... check what it holds and who writes to it before you remove it", the
+API's `unconfirmedInstruction`), or `UNCONFIRMED_UNLISTED_TOPIC_SENTENCE`
+("may exist now ... look for it") unless the status says `unconfirmedSeen:
+true`. An unconfirmed topic is never shown with the "created by this restore"
+sentence. A list the 100-name bound cut ends "and N more" (from
+`appearedCount`, `leftCount`, `unconfirmedCount`; `creationStopMore`), and
+the block then says that each name is one of the restore's mapped target
+topics and that the runner's log names every one. Every name, in all three
+lists, is escaped. On such a Restore the "new topics" fact lists only what
+the restore left (with "and N more" when cut), never a name someone else
+created or one it cannot account for. Rows: `ui/tests/original-name.spec.js`.
 
 ## The replication factor: a default with its basis, an input, and a refusal before Create
 

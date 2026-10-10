@@ -338,6 +338,27 @@ async fn a_strict_namespace_still_needs_the_second_person_for_an_original_name_r
         vec![format!("{approval_ref}-confirmation")],
         "only the confirmation, which authorises nothing"
     );
+    // **Review 2, L5: that confirmation carries the SUBJECT ALONE (no typed
+    // names: a strict namespace has a second person), and a document that
+    // carries the subject is format 2.1.0.** Written 2.0.0 it would be
+    // refused by every reader, and the strict path would never verify.
+    // KILLS: the version taken from the typed names only (mutant R2-10).
+    let confirmation = last_approval_posted(&app.fake);
+    let bytes = confirmation["spec"]["approvalBytes"]
+        .as_str()
+        .expect("the document's bytes");
+    assert!(
+        bytes.starts_with("{\"formatVersion\":\"2.1.0\","),
+        "a subject-only document is 2.1.0: {bytes}"
+    );
+    let doc: Value = serde_json::from_str(bytes).expect("json");
+    assert_eq!(doc["approvalSubject"], "originalName", "{doc}");
+    assert!(doc.get("originalNameConfirmation").is_none(), "{doc}");
+    let typed_doc =
+        logweir_core::approval_policy::RestoreAuthorization::from_bytes(bytes.as_bytes())
+            .expect("every enforcing reader accepts it");
+    assert_eq!(typed_doc.approval_subject.as_deref(), Some("originalName"));
+    assert_eq!(typed_doc.original_name_confirmation, None);
 
     let mut typed = typed_original_body(&["orders", "payments"]);
     typed["ticket"] = json!("CHG-4711");
@@ -637,7 +658,14 @@ fn creation_stopped_cr() -> Value {
         "exitReason": "TargetTopicAppeared",
         "reason": "Operational",
         "lastPhaseCompleted": 5,
-        "targetTopicsAppeared": {"appeared": ["payments"], "left": ["orders"]},
+        // As this build's controller writes it: the three lists, a count
+        // beside each, and `newTopics` equal to what the run LEFT.
+        "targetTopicsAppeared": {
+            "appeared": ["payments"], "left": ["orders"], "unconfirmed": [],
+            "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 0
+        },
+        "newTopics": ["orders"],
+        "oldTopics": ["orders", "payments"],
         "jobRef": {"name": "orders-drill-a-job"},
         "conditions": [{
             "type": "Failed", "status": "True", "reason": "Operational",
@@ -669,15 +697,22 @@ fn the_restore_view_names_the_topics_a_stopped_creation_step_left() {
         json!({
             "appeared": ["payments"],
             "left": ["orders"],
+            "unconfirmed": [],
+            "appearedCount": 1,
+            "leftCount": 1,
+            "unconfirmedCount": 0,
             "leftInstruction": "created by this restore and left empty; remove it yourself \
                                 once you have checked nothing writes to it"
         }),
-        "{projected}"
+        "no unconfirmed name: no `unconfirmedSeen` and no instruction for one. {projected}"
     );
     assert_eq!(
         projected["targetTopicsAppeared"]["leftInstruction"],
         logweir_core::guard::LEFT_TOPIC_SENTENCE
     );
+    // Review 2, L6: `newTopics` is what the run created (what it left),
+    // never the name someone else created.
+    assert_eq!(projected["newTopics"], json!(["orders"]), "{projected}");
     // The run's operation names the closed state beside it.
     let operation =
         serde_json::to_value(logweir_api::status::restore_operation(&stopped)).expect("serialises");
@@ -698,4 +733,210 @@ fn the_restore_view_names_the_topics_a_stopped_creation_step_left() {
         projected.get("targetTopicsAppeared").is_none(),
         "{projected}"
     );
+}
+
+/// **PROD-15.1 review 2, M2: the THIRD list and the counts, in the Restore
+/// view.** A stop that left a name the run cannot account for carries
+/// `unconfirmed` with `unconfirmedSeen` and its own instruction, word for
+/// word the runner's; the console fixture
+/// `console/restore-creation-unconfirmed.json` IS this projection. When the
+/// status says the runner could not list the cluster, the instruction is the
+/// weaker sentence. A list the 100-name bound cut carries the count beside
+/// it. An older controller's status (two lists, no counts) is still shown,
+/// each count the list's own length. KILLS: a projection that drops the third
+/// list or a count; an unconfirmed topic given the `left` sentence; "exists
+/// now" when the runner did not look.
+#[test]
+fn the_restore_view_shows_what_a_stop_cannot_account_for_and_how_many() {
+    use weirkeeper::crds::restore::Restore as RestoreCr;
+
+    let project = |block: Value, new_topics: Value| -> Value {
+        let mut cr = creation_stopped_cr();
+        cr["status"]["exitReason"] = json!("CreatedTopicsLeft");
+        cr["status"]["targetTopicsAppeared"] = block;
+        cr["status"]["newTopics"] = new_topics;
+        let cr: RestoreCr = serde_json::from_value(cr).expect("the fixture deserialises");
+        serde_json::to_value(logweir_api::projection::restore(&cr, true)).expect("serialises")
+    };
+    let seen = project(
+        json!({
+            "appeared": [], "left": ["orders"], "unconfirmed": ["payments"],
+            "appearedCount": 0, "leftCount": 1, "unconfirmedCount": 1, "unconfirmedSeen": true
+        }),
+        json!(["orders"]),
+    );
+    assert_eq!(
+        seen["targetTopicsAppeared"],
+        json!({
+            "appeared": [], "left": ["orders"], "unconfirmed": ["payments"],
+            "appearedCount": 0, "leftCount": 1, "unconfirmedCount": 1, "unconfirmedSeen": true,
+            "leftInstruction": logweir_core::guard::LEFT_TOPIC_SENTENCE,
+            "unconfirmedInstruction": "exists now; this restore asked the cluster to create it \
+                and got no definite answer, so it may be this restore's or someone else's: \
+                check what it holds and who writes to it before you remove it"
+        }),
+        "{seen}"
+    );
+    assert_eq!(
+        seen["targetTopicsAppeared"]["unconfirmedInstruction"],
+        logweir_core::guard::UNCONFIRMED_TOPIC_SENTENCE
+    );
+    assert_eq!(seen["newTopics"], json!(["orders"]));
+    let golden = support::fixture("console/restore-creation-unconfirmed.json");
+    assert_eq!(
+        seen, golden["item"],
+        "the console fixture is this crate's projection of the same status"
+    );
+
+    // The runner could not list the cluster: "may exist", whatever else.
+    for flag in [json!(false), Value::Null] {
+        let mut block = json!({
+            "appeared": [], "left": [], "unconfirmed": ["orders", "payments"],
+            "appearedCount": 0, "leftCount": 0, "unconfirmedCount": 2
+        });
+        if !flag.is_null() {
+            block["unconfirmedSeen"] = flag.clone();
+        }
+        let unlisted = project(block, json!([]));
+        let view = &unlisted["targetTopicsAppeared"];
+        assert_eq!(view["unconfirmedSeen"], json!(false), "{flag}: {view}");
+        assert_eq!(
+            view["unconfirmedInstruction"],
+            logweir_core::guard::UNCONFIRMED_UNLISTED_TOPIC_SENTENCE,
+            "{flag}"
+        );
+        assert_eq!(unlisted["newTopics"], json!([]));
+    }
+
+    // The bound: 100 names shown, 150 counted.
+    let names: Vec<String> = (0..100).map(|i| format!("t{i:03}")).collect();
+    let cut = project(
+        json!({"appeared": [], "left": names, "unconfirmed": [],
+               "appearedCount": 0, "leftCount": 150, "unconfirmedCount": 0}),
+        json!(names),
+    );
+    assert_eq!(
+        cut["targetTopicsAppeared"]["left"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+    assert_eq!(cut["targetTopicsAppeared"]["leftCount"], 150);
+
+    // An older controller's status: two lists and no counts. Shown, and each
+    // count is the list's own length, never less than what is listed.
+    let older = project(
+        json!({"appeared": ["payments"], "left": ["orders"]}),
+        json!(["orders"]),
+    );
+    assert_eq!(
+        older["targetTopicsAppeared"],
+        json!({
+            "appeared": ["payments"], "left": ["orders"], "unconfirmed": [],
+            "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 0,
+            "leftInstruction": logweir_core::guard::LEFT_TOPIC_SENTENCE
+        })
+    );
+    let short = project(
+        json!({"appeared": [], "left": ["orders", "payments"], "leftCount": 1}),
+        json!(["orders", "payments"]),
+    );
+    assert_eq!(short["targetTopicsAppeared"]["leftCount"], 2);
+}
+
+/// **PROD-15.1 review 2, L9: the approvals view reads an authorization
+/// document v2 the way every enforcing reader does.** A 2.0.0 document that
+/// carries `approvalSubject` is refused by the controller and the runner
+/// (the field is format 2.1.0), so the view shows `unknown`, never
+/// `originalName`; so does a document with an unknown field or one that is
+/// not a v2 document at all. CONTROLS: the same document as 2.1.0 is
+/// `originalName`, and a 2.0.0 document without the field is `ordinary`.
+/// KILLS: reading the field out of the raw bytes, whatever the version says.
+#[tokio::test]
+async fn the_approval_view_reads_a_v2_document_through_the_version_rule() {
+    use logweir_core::approval_policy::PAYLOAD_TYPE_RESTORE_AUTHORIZATION;
+
+    let app = TestApp::new();
+    let sidecar =
+        json!({"payloadType": PAYLOAD_TYPE_RESTORE_AUTHORIZATION, "signatures": []}).to_string();
+    let doc = |version: &str, extra: Value| -> String {
+        let mut doc = json!({
+            "formatVersion": version,
+            "kind": "RestoreAuthorization",
+            "authorizationMode": "Governed",
+            "subject": {"apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                        "namespace": NS_A, "name": "rst-x", "uid": "uid-1"},
+            "planHash": format!("sha256:{}", "a".repeat(64)),
+            "requester": {"issuer": "https://idp.example", "subject": "alice"},
+            "policy": {"name": "p", "digest": format!("sha256:{}", "b".repeat(64))},
+            "issuedAt": "2026-09-22T10:00:00Z",
+            "expiresAt": "2026-09-22T10:10:00Z"
+        });
+        for (k, v) in extra.as_object().expect("an object") {
+            doc[k] = v.clone();
+        }
+        doc.to_string()
+    };
+    let subject = json!({"approvalSubject": "originalName"});
+    for (name, bytes, want, parser_refuses) in [
+        (
+            "v2-original",
+            doc("2.1.0", subject.clone()),
+            "originalName",
+            false,
+        ),
+        ("v2-ordinary", doc("2.0.0", json!({})), "ordinary", false),
+        // The finding: the field under the version that predates it.
+        (
+            "v2-subject-under-2-0-0",
+            doc("2.0.0", subject.clone()),
+            "unknown",
+            true,
+        ),
+        (
+            "v2-subject-under-2-1",
+            doc("2.1", subject.clone()),
+            "unknown",
+            true,
+        ),
+        (
+            "v2-unknown-field",
+            doc("2.1.0", json!({"approvalSubject": "originalName", "x": 1})),
+            "unknown",
+            true,
+        ),
+        (
+            "v2-not-a-document",
+            json!({"approvalSubject": "originalName"}).to_string(),
+            "unknown",
+            true,
+        ),
+        // The parser reads the string; the closed set of subjects refuses it.
+        (
+            "v2-unknown-subject",
+            doc("2.1.0", json!({"approvalSubject": "everything"})),
+            "unknown",
+            false,
+        ),
+    ] {
+        let parsed =
+            logweir_core::approval_policy::RestoreAuthorization::from_bytes(bytes.as_bytes());
+        assert_eq!(parsed.is_err(), parser_refuses, "{name}: {parsed:?}");
+        app.fake.seed(
+            "approvals",
+            NS_A,
+            json!({
+                "metadata": {"name": name},
+                "spec": {"subjectRef": {"kind": "Restore", "name": "rst-x"},
+                         "planHash": "sha256:aa", "approvalBytes": bytes,
+                         "sidecarBytes": sidecar}
+            }),
+        );
+        let view = app
+            .get(&format!("/api/v1/namespaces/{NS_A}/approvals/{name}"))
+            .await
+            .json();
+        assert_eq!(view["item"]["approvalSubject"], want, "{name}");
+    }
 }

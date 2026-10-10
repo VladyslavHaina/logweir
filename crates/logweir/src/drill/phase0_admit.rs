@@ -1139,70 +1139,117 @@ pub fn create_target_topics(
         .collect();
     if !appeared.is_empty() {
         let appeared: Vec<String> = appeared.iter().map(|n| (*n).to_string()).collect();
-        return Err(creation_stopped(appeared, Vec::new(), None));
+        return Err(creation_stopped(
+            appeared,
+            Vec::new(),
+            Unconfirmed::none(),
+            None,
+        ));
     }
+    let asked: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
     // The slice outlives the `NewTopic`s built from it inside the impl — see
     // `RdKafkaReader::create_topics`, which cannot compile otherwise.
-    let results = creator.create_topics(&specs)?;
+    let results = match creator.create_topics(&specs) {
+        Ok(results) => results,
+        // **THE WHOLE CALL FAILED** (PROD-15.1 review 2, M2 (a)): no answer
+        // for ANY name, and that is not "nothing was created". A request the
+        // broker applied after this client gave up leaves every topic in
+        // place, empty, under its target name. So the cluster is listed once
+        // more (a read), and every asked name it shows is named as
+        // UNCONFIRMED: this run cannot say whether its own request made it
+        // or someone else did. Nothing exists: the plain failure it was.
+        Err(e) => {
+            let unconfirmed = Unconfirmed::look(reader, &asked);
+            if unconfirmed.names.is_empty() {
+                return Err(e.into());
+            }
+            return Err(creation_stopped(
+                Vec::new(),
+                Vec::new(),
+                unconfirmed,
+                Some(format!(
+                    "CreateTopics failed as a whole, with no answer for any of [{}]: {e}",
+                    asked.join(", ")
+                )),
+            ));
+        }
+    };
     // **ONE ANSWER PER NAME ASKED, AND NOTHING ELSE** (PROD-15.1 review L1).
     // librdkafka refuses an answer naming MORE topics than requested, not
     // fewer: a short answer would leave a name neither created nor refused,
-    // and the engine would be handed it. Refused here, naming both sides; a
-    // topic the answer says this run created is named and left.
-    let asked: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    // and the engine would be handed it.
+    //
+    // EVERY ASKED NAME IS CLASSIFIED BY ITS OWN ANSWER, and only a DEFINITE
+    // one puts it in a list that makes a claim (review 2, M2 and L2):
+    //
+    // - exactly one answer, `Ok`: this run created it (`topics_created`, and
+    //   `left` if the step then stops);
+    // - exactly one answer, `TOPIC_ALREADY_EXISTS`: someone else created it
+    //   (`appeared`), never this run;
+    // - anything else — no answer, two answers, or an error that is not
+    //   "already exists" (Kafka goes on creating a topic whose request it
+    //   answered `REQUEST_TIMED_OUT`) — is INDEFINITE: the run cannot account
+    //   for the name, and it is neither called created nor called foreign.
+    let mut lost: Vec<String> = Vec::new();
+    let mut indefinite: Vec<String> = Vec::new();
+    let mut failed: Option<(String, String)> = None;
+    for name in &asked {
+        let answers: Vec<&Result<(), String>> = results
+            .iter()
+            .filter(|(answered, _)| answered == name)
+            .map(|(_, answer)| answer)
+            .collect();
+        match answers.as_slice() {
+            [Ok(())] => preflight.topics_created.push(name.clone()),
+            [Err(e)] if logweir_kafka::rdkafka_reader::is_topic_already_exists(e) => {
+                lost.push(name.clone());
+            }
+            [Err(e)] => {
+                indefinite.push(name.clone());
+                failed.get_or_insert_with(|| (name.clone(), e.clone()));
+            }
+            _ => indefinite.push(name.clone()),
+        }
+    }
     let mut answered: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
     answered.sort_unstable();
-    let mut expected = asked.clone();
+    let mut expected: Vec<&str> = asked.iter().map(String::as_str).collect();
     expected.sort_unstable();
-    if answered != expected {
-        let created: Vec<String> = results
-            .iter()
-            .filter(|(n, r)| r.is_ok() && asked.contains(&n.as_str()))
-            .map(|(n, _)| n.clone())
-            .collect();
-        return Err(creation_stopped(
-            Vec::new(),
-            created,
+    let exact = answered == expected;
+    if !exact || !lost.is_empty() || !indefinite.is_empty() {
+        let why = if !exact {
             Some(format!(
                 "CreateTopics answered for [{}] when this run asked for [{}]: a name without \
                  exactly one answer was neither created nor refused, so the restore stops \
                  before the engine starts.",
                 answered.join(", "),
                 expected.join(", ")
-            )),
-        ));
-    }
-    let mut lost: Vec<String> = Vec::new();
-    let mut failed: Option<(String, String)> = None;
-    for (name, r) in results {
-        match r {
-            Ok(()) => preflight.topics_created.push(name),
-            Err(e) if logweir_kafka::rdkafka_reader::is_topic_already_exists(&e) => lost.push(name),
-            Err(e) => {
-                failed.get_or_insert((name, e));
-            }
-        }
-    }
-    if !lost.is_empty() {
+            ))
+        } else {
+            failed.map(|(name, e)| {
+                format!(
+                    "target topic `{name}` could not be created with the pinned configuration \
+                     ({}): {e}",
+                    TARGET_TOPIC_CONFIGS
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+        };
+        // Listed once more only when a name is unaccounted for: a stop made
+        // of definite answers alone needs no second look.
+        let unconfirmed = if indefinite.is_empty() {
+            Unconfirmed::none()
+        } else {
+            Unconfirmed::look(reader, &indefinite)
+        };
         return Err(creation_stopped(
             lost,
             preflight.topics_created.clone(),
-            None,
-        ));
-    }
-    if let Some((name, e)) = failed {
-        return Err(creation_stopped(
-            Vec::new(),
-            preflight.topics_created.clone(),
-            Some(format!(
-                "target topic `{name}` could not be created with the pinned configuration \
-                 ({}): {e}",
-                TARGET_TOPIC_CONFIGS
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            unconfirmed,
+            why,
         ));
     }
     // FX-18: the engine is handed topics the cluster SERVES, not topics the
@@ -1218,6 +1265,7 @@ pub fn create_target_topics(
                 creation_stopped(
                     Vec::new(),
                     preflight.topics_created.clone(),
+                    Unconfirmed::none(),
                     Some(format!(
                         "target topic `{}` was created but the cluster did not serve its {} \
                          partition(s) within {}s: {e}",
@@ -1248,26 +1296,100 @@ pub fn create_target_topics(
 /// recoverable outcome; deleting one a producer just wrote to is not. The same
 /// rule serves a prefixed `newTopic` restore: one step, one rule.
 ///
-/// `appeared` are mapped names someone else created after phase 0 (a lost
-/// race); it is empty when creation stopped for another reason (`why`).
+/// THREE LISTS, and a name is in at most one
+/// (`logweir_core::creation_stop`):
+///
+/// - `appeared`: mapped names someone else created after phase 0 (a lost
+///   race); empty when creation stopped for another reason (`why`).
+/// - `left`: topics this execution created, by its own `CreateTopics`
+///   answer.
+/// - `unconfirmed`: names it asked for, got no definite answer about, and
+///   cannot account for (review 2, M2). Never called `left`, which claims
+///   ownership, nor `appeared`, which says someone else made the topic.
 pub fn creation_stopped(
     appeared: Vec<String>,
     left: Vec<String>,
+    unconfirmed: Unconfirmed,
     why: Option<String>,
 ) -> DrillError {
-    if appeared.is_empty() && left.is_empty() {
-        // Nothing appeared and nothing was created: an ordinary operational
-        // failure with nothing to name.
+    if appeared.is_empty() && left.is_empty() && unconfirmed.names.is_empty() {
+        // Nothing appeared, nothing was created and nothing is unaccounted
+        // for: an ordinary operational failure with nothing to name.
         return DrillError::Operational(why.unwrap_or_else(|| {
             "the target topics could not be created; nothing was created".to_string()
         }));
     }
-    DrillError::CreationStopped(Box::new(CreationStop::new(appeared, left, why)))
+    DrillError::CreationStopped(Box::new(CreationStop::new(
+        appeared,
+        left,
+        unconfirmed,
+        why,
+    )))
 }
 
 /// The sentence every surface says about a topic this execution created and
 /// left: stdout, the Restore's status, the product API and the console.
 pub use logweir_core::guard::LEFT_TOPIC_SENTENCE;
+
+/// The names of a stopped creation step this run CANNOT ACCOUNT FOR: it
+/// asked the cluster to create each and got no definite answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unconfirmed {
+    /// The names. With `seen`, each one the cluster LISTED after the stop;
+    /// without it, every name that got no definite answer.
+    pub names: Vec<String>,
+    /// Whether the cluster was listed after the stop. `false`: the listing
+    /// failed too, so each name MAY exist and the run says so, never that it
+    /// does.
+    pub seen: bool,
+    /// Why the cluster could not be listed, when it could not.
+    pub listing_error: Option<String>,
+}
+
+impl Unconfirmed {
+    /// No name is unaccounted for.
+    #[must_use]
+    pub fn none() -> Self {
+        Unconfirmed {
+            names: Vec::new(),
+            seen: true,
+            listing_error: None,
+        }
+    }
+
+    /// **The one more look** (review 2, M2): lists the cluster — a READ — and
+    /// keeps each of `candidates` that EXISTS NOW. Phase 0 and the creation
+    /// step's own listing found every one of them absent moments ago, so a
+    /// candidate that exists was created since: by this run's request, whose
+    /// answer never came, or by someone else. The run cannot tell which.
+    ///
+    /// When the listing itself fails, EVERY candidate is kept, marked not
+    /// seen: a cluster that stopped answering mid-request is exactly where a
+    /// request can have been applied, and naming none would be the silence
+    /// this exists to end. The surfaces then say "may exist".
+    ///
+    /// WHAT THIS DOES NOT SEE: a topic the broker finishes creating AFTER
+    /// this look. It is one read at one moment.
+    #[must_use]
+    pub fn look(reader: &dyn ClusterReader, candidates: &[String]) -> Self {
+        match reader.list_topics() {
+            Ok(existing) => Unconfirmed {
+                names: candidates
+                    .iter()
+                    .filter(|name| existing.iter().any(|t| &t.name == *name))
+                    .cloned()
+                    .collect(),
+                seen: true,
+                listing_error: None,
+            },
+            Err(e) => Unconfirmed {
+                names: candidates.to_vec(),
+                seen: false,
+                listing_error: Some(e.to_string()),
+            },
+        }
+    }
+}
 
 /// What a stopped creation step leaves behind, for the message, the
 /// `target-topics-appeared=` line and `Restore.status.targetTopicsAppeared`.
@@ -1275,24 +1397,37 @@ pub use logweir_core::guard::LEFT_TOPIC_SENTENCE;
 pub struct CreationStop {
     /// The closed `failure-reason=` state: `TargetTopicAppeared` for a lost
     /// race, `CreatedTopicsLeft` when creation stopped for another reason
-    /// after this execution had created a topic.
+    /// and left a topic this execution created or cannot account for.
     pub reason: &'static str,
     /// Mapped target names someone else created after phase 0: never touched.
     pub appeared: Vec<String>,
     /// Topics this execution created and LEFT, empty. Never deleted.
     pub left: Vec<String>,
-    /// The whole account, in words, opening with the reason.
+    /// Names this execution asked for and cannot account for. Never deleted,
+    /// never called its own.
+    pub unconfirmed: Vec<String>,
+    /// Whether the cluster was listed after the stop and showed every
+    /// `unconfirmed` name (`Unconfirmed::seen`).
+    pub unconfirmed_seen: bool,
+    /// The whole account, in words, opening with the reason. It names EVERY
+    /// topic, past the line's bound.
     pub message: String,
 }
 
 /// The stdout key of the stopped creation step's one structured line.
-pub const TARGET_TOPICS_APPEARED_KEY_PREFIX: &str = "target-topics-appeared=";
+pub use logweir_core::creation_stop::LINE_PREFIX as TARGET_TOPICS_APPEARED_KEY_PREFIX;
 
-/// The most names one list of the line carries; the message names them all.
-pub const TARGET_TOPICS_APPEARED_MAX_NAMES: usize = 100;
+/// The most names one list of the line carries; the message names them all,
+/// and the line carries each list's count.
+pub use logweir_core::creation_stop::MAX_NAMES as TARGET_TOPICS_APPEARED_MAX_NAMES;
 
 impl CreationStop {
-    fn new(appeared: Vec<String>, left: Vec<String>, why: Option<String>) -> Self {
+    fn new(
+        appeared: Vec<String>,
+        left: Vec<String>,
+        unconfirmed: Unconfirmed,
+        why: Option<String>,
+    ) -> Self {
         let names = |list: &[String]| {
             list.iter()
                 .map(|n| format!("`{n}`"))
@@ -1325,42 +1460,64 @@ impl CreationStop {
                 format!("{why}.")
             });
         }
-        if left.is_empty() {
-            parts.push("This run created no topic.".to_string());
-        } else {
+        if !left.is_empty() {
             parts.push(format!(
                 "{}: {LEFT_TOPIC_SENTENCE}. Logweir never deletes a topic under a name it may \
                  not own: a producer could write to it between any check and the delete.",
                 names(&left)
             ));
+        } else if unconfirmed.names.is_empty() {
+            parts.push("This run created no topic.".to_string());
+        } else {
+            // Not "created no topic": for the names below it does not know.
+            parts.push("No CreateTopics answer says this run created a topic.".to_string());
+        }
+        if !unconfirmed.names.is_empty() {
+            let sentence = if unconfirmed.seen {
+                logweir_core::guard::UNCONFIRMED_TOPIC_SENTENCE
+            } else {
+                logweir_core::guard::UNCONFIRMED_UNLISTED_TOPIC_SENTENCE
+            };
+            let mut part = format!("{}: {sentence}.", names(&unconfirmed.names));
+            if let Some(e) = &unconfirmed.listing_error {
+                part.push_str(&format!(" (The cluster could not be listed: {e}.)"));
+            }
+            part.push_str(" Logweir deletes none of them.");
+            parts.push(part);
         }
         CreationStop {
             reason,
             message: format!("{reason}: {}", parts.join(" ")),
             appeared,
             left,
+            unconfirmed_seen: unconfirmed.seen,
+            unconfirmed: unconfirmed.names,
         }
     }
 
-    /// `target-topics-appeared={"appeared":[…],"left":[…]}`: both lists
-    /// bounded by [`TARGET_TOPICS_APPEARED_MAX_NAMES`], and only names a
-    /// broker accepts (anything else cannot have been a mapped name), so the
-    /// line can carry no control character or quote into a status.
+    /// The three lists as the line and every surface carry them: each
+    /// bounded by [`TARGET_TOPICS_APPEARED_MAX_NAMES`] with its count, and
+    /// only names a broker accepts (anything else cannot have been a mapped
+    /// name), so the line can carry no control character or quote into a
+    /// status.
+    #[must_use]
+    pub fn lists(&self) -> logweir_core::creation_stop::CreationStopLists {
+        use logweir_core::creation_stop::{CreationStopLists, NameList};
+        CreationStopLists {
+            appeared: NameList::of(&self.appeared),
+            left: NameList::of(&self.left),
+            unconfirmed: NameList::of(&self.unconfirmed),
+            // Meaningful only beside an unconfirmed name, and written only
+            // then: with none, it is the absent flag a reader reads.
+            unconfirmed_seen: self.unconfirmed_seen && !self.unconfirmed.is_empty(),
+        }
+    }
+
+    /// `target-topics-appeared=`'s value: [`Self::lists`] as one JSON object
+    /// (`logweir_core::creation_stop::CreationStopLists::line_value`).
     #[must_use]
     pub fn status_line_value(&self) -> String {
-        let bounded = |names: &[String]| -> Vec<String> {
-            names
-                .iter()
-                .filter(|n| logweir_core::guard::topic_name_is_kafka_legal(n))
-                .take(TARGET_TOPICS_APPEARED_MAX_NAMES)
-                .cloned()
-                .collect()
-        };
-        serde_json::json!({
-            "appeared": bounded(&self.appeared),
-            "left": bounded(&self.left),
-        })
-        .to_string()
+        self.lists().line_value()
     }
 }
 

@@ -119,6 +119,10 @@ struct Broker {
     /// A created topic's configuration is not the one Logweir set (someone
     /// deleted and recreated it, or it was auto-created).
     foreign_configs: bool,
+    /// How many listings succeed before every later one fails (a cluster
+    /// that stops answering mid-step). `None`: every listing succeeds.
+    listings_before_failure: Option<usize>,
+    listings: Mutex<usize>,
 }
 
 impl Broker {
@@ -134,7 +138,14 @@ impl Broker {
             reads_of_auto_create: Mutex::new(0),
             created: Arc::new(Mutex::new(Vec::new())),
             foreign_configs: false,
+            listings_before_failure: None,
+            listings: Mutex::new(0),
         }
+    }
+    /// The cluster answers `n` listings and then none.
+    fn unlistable_after(mut self, n: usize) -> Self {
+        self.listings_before_failure = Some(n);
+        self
     }
     fn disabled() -> Self {
         Self::with_auto_create(&[Some("false"), Some("false")])
@@ -154,6 +165,16 @@ impl ClusterReader for Broker {
         Ok(TARGET.to_string())
     }
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        let mut listings = self.listings.lock().unwrap();
+        *listings += 1;
+        if self
+            .listings_before_failure
+            .is_some_and(|ok| *listings > ok)
+        {
+            return Err(KafkaError::Client(
+                "BrokerTransportFailure (Local: Broker transport failure)".to_string(),
+            ));
+        }
         let mut topics = self.topics.clone();
         topics.extend(self.created.lock().unwrap().iter().cloned());
         Ok(topics)
@@ -223,6 +244,13 @@ struct Creator {
     /// Names the broker refuses for a reason that is NOT "already exists",
     /// and the error it answers.
     refused: BTreeMap<String, String>,
+    /// Names the broker answers an ERROR for and CREATES ANYWAY (Kafka goes
+    /// on creating a topic whose request it answered `REQUEST_TIMED_OUT`),
+    /// and the error it answers.
+    created_despite: BTreeMap<String, String>,
+    /// The broker applies the whole request and the CALL fails with this
+    /// error (a client that gave up before the broker's answer arrived).
+    applied_but_the_call_fails: Option<String>,
 }
 
 impl TopicCreator for Creator {
@@ -231,6 +259,18 @@ impl TopicCreator for Creator {
         topics: &[NewTopicSpec],
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
         self.calls.lock().unwrap().extend_from_slice(topics);
+        let lists = |t: &NewTopicSpec| {
+            if let Some(list) = &self.lists_into {
+                list.lock().unwrap().push(TopicMeta::new(
+                    &t.name,
+                    self.partitions_override.unwrap_or(t.num_partitions),
+                ));
+            }
+        };
+        if let Some(error) = &self.applied_but_the_call_fails {
+            topics.iter().for_each(lists);
+            return Err(KafkaError::Client(error.clone()));
+        }
         Ok(topics
             .iter()
             .filter(|t| {
@@ -242,6 +282,9 @@ impl TopicCreator for Creator {
                 if self.taken.contains(&t.name) {
                     (t.name.clone(), Err(rdkafka_already_exists()))
                 } else if let Some(why) = self.refused.get(&t.name) {
+                    (t.name.clone(), Err(why.clone()))
+                } else if let Some(why) = self.created_despite.get(&t.name) {
+                    lists(t);
                     (t.name.clone(), Err(why.clone()))
                 } else {
                     if let Some(list) = &self.lists_into {
@@ -997,11 +1040,8 @@ fn mapping() -> BTreeMap<String, String> {
     ])
 }
 
-fn create(
-    broker: &Broker,
-    creator: &Creator,
-) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
-    let facts = logweir_core::engine::BackupSetFacts {
+fn two_topic_facts() -> logweir_core::engine::BackupSetFacts {
+    logweir_core::engine::BackupSetFacts {
         backup_id: "b".into(),
         created_at: ts("2026-09-07T12:00:00Z"),
         source_cluster_id: None,
@@ -1018,7 +1058,14 @@ fn create(
                 partitions: Vec::new(),
             })
             .collect(),
-    };
+    }
+}
+
+fn create(
+    broker: &Broker,
+    creator: &Creator,
+) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
+    let facts = two_topic_facts();
     let mut preflight = phase0_admit::TopicPreflight {
         timestamp_type: "CreateTime".into(),
         retention_ms: "-1".into(),
@@ -1039,12 +1086,14 @@ fn stopped(e: DrillError) -> phase0_admit::CreationStop {
     }
 }
 
+/// What the broker double holds now: the oracle, read off the double itself
+/// (not through `list_topics`, which a row may have made fail).
 fn listed(broker: &Broker) -> Vec<String> {
     broker
-        .list_topics()
-        .expect("the double lists")
-        .into_iter()
-        .map(|t| t.name)
+        .topics
+        .iter()
+        .chain(broker.created.lock().unwrap().iter())
+        .map(|t| t.name.clone())
         .collect()
 }
 
@@ -1073,10 +1122,15 @@ fn a_name_that_appeared_since_phase_0_loses_before_anything_is_created() {
     assert!(stop.left.is_empty());
     assert!(creator.calls.lock().unwrap().is_empty());
     assert!(preflight.topics_created.is_empty());
+    assert!(stop.unconfirmed.is_empty());
     assert_eq!(
         stop.status_line_value(),
-        r#"{"appeared":["payments"],"left":[]}"#
+        r#"{"appeared":["payments"],"left":[],"unconfirmed":[],"appearedCount":1,"leftCount":0,"unconfirmedCount":0}"#
     );
+    // An older controller reads the two lists it always read, first.
+    assert!(stop
+        .status_line_value()
+        .starts_with(r#"{"appeared":["payments"],"left":[],"#));
 }
 
 /// **After a lost race the topic this run created STILL EXISTS and is
@@ -1112,9 +1166,13 @@ fn after_a_lost_race_the_topic_this_run_created_still_exists_and_is_named() {
         "{}",
         stop.message
     );
+    assert!(
+        stop.unconfirmed.is_empty(),
+        "every name got a definite answer"
+    );
     assert_eq!(
         stop.status_line_value(),
-        r#"{"appeared":["payments"],"left":["orders"]}"#
+        r#"{"appeared":["payments"],"left":["orders"],"unconfirmed":[],"appearedCount":1,"leftCount":1,"unconfirmedCount":0}"#
     );
 }
 
@@ -1185,6 +1243,399 @@ fn a_creation_that_stops_for_another_reason_names_and_leaves_what_it_created() {
         .0
         .expect_err("refused");
     assert!(matches!(e, DrillError::Operational(_)), "{e}");
+}
+
+// ---------------------------------------------------------------------------
+// Review 2, M2: every stop of the creation step names what it may have left
+// ---------------------------------------------------------------------------
+
+const UNCONFIRMED: &str = "exists now; this restore asked the cluster to create it and got no \
+     definite answer, so it may be this restore's or someone else's: check what it holds and \
+     who writes to it before you remove it";
+
+/// **Review 2, M2 (a), the reviewer's probe P1: the whole `CreateTopics` call
+/// fails AFTER the broker applied it.** A client that gives up before the
+/// broker's answer arrives has no answer for any name, and every topic is on
+/// the cluster, empty, under its target name. The step lists the cluster
+/// once more and names each one in the THIRD list, `unconfirmed`: it exists
+/// now, this restore asked for it, and it cannot say whose it is. Never in
+/// `left` (that sentence claims ownership) and never in `appeared` (that one
+/// says someone else made it). Nothing is deleted.
+///
+/// KILLS: the plain `?` this was (a generic exit 1 naming nothing, with two
+/// empty production-named topics left behind); calling such a topic `left`
+/// or `appeared`.
+#[test]
+fn a_call_that_fails_after_the_broker_applied_it_names_every_topic_as_unconfirmed() {
+    let broker = Broker::disabled();
+    let creator = Creator {
+        applied_but_the_call_fails: Some("OperationTimedOut (Local: Timed out)".into()),
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let (r, preflight) = create(&broker, &creator);
+    let stop = stopped(r.expect_err("the call failed"));
+    // The broker is the oracle: both topics exist.
+    assert_eq!(
+        listed(&broker),
+        vec!["orders".to_string(), "payments".to_string()]
+    );
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty(), "{:?}", stop.appeared);
+    assert!(stop.left.is_empty(), "no answer says this run created them");
+    assert!(preflight.topics_created.is_empty());
+    assert_eq!(
+        stop.unconfirmed,
+        vec!["orders".to_string(), "payments".to_string()]
+    );
+    assert!(stop.unconfirmed_seen);
+    for needle in [
+        "CreateTopics failed as a whole, with no answer for any of [orders, payments]: ",
+        "OperationTimedOut (Local: Timed out).",
+        "No CreateTopics answer says this run created a topic.",
+        "Logweir deletes none of them.",
+    ] {
+        assert!(stop.message.contains(needle), "{needle}: {}", stop.message);
+    }
+    assert!(
+        stop.message
+            .contains(&format!("`orders`, `payments`: {UNCONFIRMED}.")),
+        "{}",
+        stop.message
+    );
+    assert!(
+        !stop
+            .message
+            .contains("created by this restore and left empty"),
+        "an unconfirmed topic is never called this restore's: {}",
+        stop.message
+    );
+    assert_eq!(
+        stop.status_line_value(),
+        r#"{"appeared":[],"left":[],"unconfirmed":["orders","payments"],"appearedCount":0,"leftCount":0,"unconfirmedCount":2,"unconfirmedSeen":true}"#
+    );
+    assert_eq!(UNCONFIRMED, logweir_core::guard::UNCONFIRMED_TOPIC_SENTENCE);
+
+    // CONTROL: the call fails and the broker applied NOTHING. The same look
+    // finds no asked name, so it is the plain failure it always was: exit 1,
+    // no names, the client's own error.
+    let broker = Broker::disabled();
+    let creator = Creator {
+        applied_but_the_call_fails: Some("OperationTimedOut (Local: Timed out)".into()),
+        lists_into: None,
+        ..Creator::default()
+    };
+    let e = create(&broker, &creator).0.expect_err("the call failed");
+    assert_eq!(e.exit_code(), ExitCode::Operational);
+    assert!(matches!(e, DrillError::Kafka(_)), "{e}");
+    assert!(listed(&broker).is_empty());
+}
+
+/// **Review 2, M2 (b), probe P2: a name answered with an error that is not a
+/// definite refusal, and created anyway.** Kafka goes on creating a topic
+/// whose request it answered `REQUEST_TIMED_OUT`. `orders` is answered `Ok`
+/// and is this run's (`left`); `payments` is answered an error, exists
+/// afterwards, and is `unconfirmed`, with its own sentence. CONTROL: a name
+/// the broker refused and did NOT create (the row above this section,
+/// `PolicyViolation`) is in no list. KILLS: a created topic that no surface
+/// names; calling a topic `left` on an error answer.
+#[test]
+fn a_name_answered_with_an_error_and_created_anyway_is_unconfirmed_never_left() {
+    let broker = Broker::disabled();
+    let creator = Creator {
+        created_despite: BTreeMap::from([(
+            "payments".to_string(),
+            "RequestTimedOut (Broker: Request timed out)".to_string(),
+        )]),
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let (r, preflight) = create(&broker, &creator);
+    let stop = stopped(r.expect_err("stopped"));
+    assert_eq!(
+        listed(&broker),
+        vec!["orders".to_string(), "payments".to_string()]
+    );
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty());
+    assert_eq!(stop.left, vec!["orders".to_string()]);
+    assert_eq!(preflight.topics_created, vec!["orders".to_string()]);
+    assert_eq!(stop.unconfirmed, vec!["payments".to_string()]);
+    assert!(stop.unconfirmed_seen);
+    assert!(
+        stop.message.contains(
+            "`orders`: created by this restore and left empty; remove it yourself once you \
+             have checked nothing writes to it"
+        ),
+        "{}",
+        stop.message
+    );
+    assert!(
+        stop.message
+            .contains(&format!("`payments`: {UNCONFIRMED}.")),
+        "{}",
+        stop.message
+    );
+    assert_eq!(
+        stop.status_line_value(),
+        r#"{"appeared":[],"left":["orders"],"unconfirmed":["payments"],"appearedCount":0,"leftCount":1,"unconfirmedCount":1,"unconfirmedSeen":true}"#
+    );
+
+    // CONTROL: the same error for a name the broker did NOT create is a
+    // definite absence at the look: nothing is unconfirmed.
+    let broker = Broker::disabled();
+    let creator = Creator {
+        refused: BTreeMap::from([(
+            "payments".to_string(),
+            "RequestTimedOut (Broker: Request timed out)".to_string(),
+        )]),
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let stop = stopped(create(&broker, &creator).0.expect_err("stopped"));
+    assert_eq!(stop.left, vec!["orders".to_string()]);
+    assert!(stop.unconfirmed.is_empty(), "{:?}", stop.unconfirmed);
+    assert!(!stop.status_line_value().contains("unconfirmedSeen"));
+}
+
+/// **The cluster cannot be listed after the stop.** A cluster that stops
+/// answering mid-request is exactly where a request can have been applied, so
+/// the run names EVERY name it has no definite answer for, and says each MAY
+/// exist, never that it does (`unconfirmedSeen: false`, the weaker sentence).
+/// KILLS: naming nothing when the look fails (the review's failure scenario,
+/// in its most likely form); claiming "exists now" without having looked.
+#[test]
+fn a_cluster_that_cannot_be_listed_after_the_stop_names_every_unanswered_name_as_may_exist() {
+    // One listing succeeds (the pre-create look), then none.
+    let broker = Broker::disabled().unlistable_after(1);
+    let creator = Creator {
+        applied_but_the_call_fails: Some(
+            "BrokerTransportFailure (Local: Broker transport failure)".into(),
+        ),
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let stop = stopped(create(&broker, &creator).0.expect_err("the call failed"));
+    assert_eq!(stop.reason, "CreatedTopicsLeft");
+    assert!(stop.appeared.is_empty() && stop.left.is_empty());
+    assert_eq!(
+        stop.unconfirmed,
+        vec!["orders".to_string(), "payments".to_string()]
+    );
+    assert!(!stop.unconfirmed_seen);
+    assert!(
+        stop.message.contains(&format!(
+            "`orders`, `payments`: {}.",
+            logweir_core::guard::UNCONFIRMED_UNLISTED_TOPIC_SENTENCE
+        )),
+        "{}",
+        stop.message
+    );
+    assert!(
+        stop.message.contains("(The cluster could not be listed: "),
+        "{}",
+        stop.message
+    );
+    assert!(!stop.message.contains("exists now"), "{}", stop.message);
+    assert!(stop
+        .status_line_value()
+        .ends_with(r#""unconfirmedCount":2,"unconfirmedSeen":false}"#));
+
+    // A per-name error with the cluster unlistable afterwards: the answered
+    // `Ok` name is still this run's, and only the unanswered one may exist.
+    let broker = Broker::disabled().unlistable_after(1);
+    let creator = Creator {
+        refused: BTreeMap::from([(
+            "payments".to_string(),
+            "RequestTimedOut (Broker: Request timed out)".to_string(),
+        )]),
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let stop = stopped(create(&broker, &creator).0.expect_err("stopped"));
+    assert_eq!(stop.left, vec!["orders".to_string()]);
+    assert_eq!(stop.unconfirmed, vec!["payments".to_string()]);
+    assert!(!stop.unconfirmed_seen);
+}
+
+/// **Review 2, L2, probe P3: a short `CreateTopics` answer whose one answered
+/// name was REFUSED is never called `left`.** Only `orders` is answered, and
+/// the answer is `TOPIC_ALREADY_EXISTS`: someone else's topic. It is named as
+/// `appeared`; `payments`, which got no answer and does not exist, is in no
+/// list. KILLS: counting every answered name as created (mutant R2-05: the
+/// product would say "created by this restore … remove it yourself" about a
+/// topic it never made).
+#[test]
+fn a_short_answer_naming_a_refused_topic_never_calls_it_left() {
+    let broker = Broker::disabled();
+    let creator = Creator {
+        answers_only: Some(vec!["orders".into()]),
+        taken: vec!["orders".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let (r, preflight) = create(&broker, &creator);
+    let stop = stopped(r.expect_err("a short answer"));
+    assert!(stop.left.is_empty(), "{:?}", stop.left);
+    assert!(preflight.topics_created.is_empty());
+    assert_eq!(stop.appeared, vec!["orders".to_string()]);
+    assert!(stop.unconfirmed.is_empty(), "{:?}", stop.unconfirmed);
+    assert_eq!(stop.reason, "TargetTopicAppeared");
+    assert!(
+        stop.message.contains(
+            "CreateTopics answered for [orders] when this run asked for [orders, payments]"
+        ),
+        "{}",
+        stop.message
+    );
+    assert!(
+        stop.message.contains("This run created no topic."),
+        "{}",
+        stop.message
+    );
+    assert!(
+        !stop.message.contains("created by this restore"),
+        "{}",
+        stop.message
+    );
+
+    // A name answered TWICE cannot be accounted for either: never `left`,
+    // and named only if it exists afterwards.
+    struct Twice(Arc<Mutex<Vec<TopicMeta>>>);
+    impl TopicCreator for Twice {
+        fn create_topics(
+            &self,
+            topics: &[NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            let mut out = Vec::new();
+            for t in topics {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(TopicMeta::new(&t.name, t.num_partitions));
+                out.push((t.name.clone(), Ok(())));
+            }
+            out.push(("orders".to_string(), Err(rdkafka_already_exists())));
+            Ok(out)
+        }
+    }
+    let broker = Broker::disabled();
+    let facts_broker = Arc::clone(&broker.created);
+    let mut preflight = phase0_admit::TopicPreflight {
+        timestamp_type: "CreateTime".into(),
+        retention_ms: "-1".into(),
+        timestamp_bound_ms: None,
+        configs_set: Vec::new(),
+        topics_created: Vec::new(),
+    };
+    let r = phase0_admit::create_target_topics(
+        &Twice(facts_broker),
+        &broker,
+        &mapping(),
+        &two_topic_facts(),
+        1,
+        &mut preflight,
+    );
+    let stop = stopped(r.expect_err("an answer that is not one per name"));
+    assert_eq!(stop.left, vec!["payments".to_string()]);
+    assert_eq!(stop.unconfirmed, vec!["orders".to_string()]);
+    assert!(stop.appeared.is_empty());
+}
+
+/// **Review 2, M2 (c), probe P4: more than a hundred topics.** The line and
+/// every surface that copies it carry the first 100 names of a list AND how
+/// many there are, so a reader says "and 50 more"; the runner's own message
+/// names every one. KILLS: a cut that says nothing (150 left topics shown as
+/// 100, with nothing telling the operator there are more).
+#[test]
+fn more_than_a_hundred_topics_are_cut_on_the_line_with_their_count() {
+    let left: Vec<String> = (0..150).map(|i| format!("t{i:03}")).collect();
+    let unconfirmed: Vec<String> = (0..120).map(|i| format!("u{i:03}")).collect();
+    let stop = stopped(phase0_admit::creation_stopped(
+        Vec::new(),
+        left,
+        phase0_admit::Unconfirmed {
+            names: unconfirmed,
+            seen: true,
+            listing_error: None,
+        },
+        Some("broker said no".into()),
+    ));
+    assert_eq!(stop.left.len(), 150);
+    assert!(
+        stop.message.contains("`t149`"),
+        "the message names every one"
+    );
+    assert!(stop.message.contains("`u119`"));
+    let line: serde_json::Value = serde_json::from_str(&stop.status_line_value()).unwrap();
+    assert_eq!(line["left"].as_array().unwrap().len(), 100);
+    assert_eq!(line["leftCount"], 150);
+    assert_eq!(line["unconfirmed"].as_array().unwrap().len(), 100);
+    assert_eq!(line["unconfirmedCount"], 120);
+    assert_eq!(line["appeared"].as_array().unwrap().len(), 0);
+    assert_eq!(line["appearedCount"], 0);
+    let lists = stop.lists();
+    assert_eq!(lists.left.more(), 50);
+    assert_eq!(lists.unconfirmed.more(), 20);
+    assert_eq!(
+        phase0_admit::TARGET_TOPICS_APPEARED_MAX_NAMES,
+        logweir_core::creation_stop::MAX_NAMES
+    );
+    // The largest genuine line fits the bound a reader refuses beyond.
+    assert!(stop.status_line_value().len() <= logweir_core::creation_stop::MAX_VALUE_BYTES);
+}
+
+/// **Review 2, L1: the two stdout lines that carry everything to Kubernetes,
+/// through their writer seam.** EXACTLY the lists' line and then the reason,
+/// each ended by one newline, the reason LAST: the controller lifts the pair
+/// only from the log's last two non-empty lines. KILLS: not printing the
+/// `failure-reason=` line (mutant R2-29), printing the two in the other
+/// order, printing anything after them.
+#[test]
+fn the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last() {
+    let broker = Broker::disabled();
+    let creator = Creator {
+        taken: vec!["payments".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let stop = stopped(create(&broker, &creator).0.expect_err("the race is lost"));
+    let mut out = Vec::new();
+    logweir::drill::print_creation_stop_to(&mut out, &stop).expect("a Vec takes the bytes");
+    let printed = String::from_utf8(out).expect("UTF-8");
+    assert_eq!(
+        printed,
+        "target-topics-appeared={\"appeared\":[\"payments\"],\"left\":[\"orders\"],\"unconfirmed\":[],\"appearedCount\":1,\"leftCount\":1,\"unconfirmedCount\":0}\nfailure-reason=TargetTopicAppeared\n"
+    );
+    // The controller's own reader takes the pair from these bytes.
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1], "failure-reason=TargetTopicAppeared");
+    let value = lines[0]
+        .strip_prefix(logweir_core::creation_stop::LINE_PREFIX)
+        .expect("the lists' line");
+    assert_eq!(
+        logweir_core::creation_stop::CreationStopLists::parse_value(value),
+        Some(stop.lists())
+    );
+
+    // The other closed state, and the third list.
+    let stop = stopped(phase0_admit::creation_stopped(
+        Vec::new(),
+        Vec::new(),
+        phase0_admit::Unconfirmed {
+            names: vec!["orders".into()],
+            seen: false,
+            listing_error: Some("down".into()),
+        },
+        None,
+    ));
+    let mut out = Vec::new();
+    logweir::drill::print_creation_stop_to(&mut out, &stop).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "target-topics-appeared={\"appeared\":[],\"left\":[],\"unconfirmed\":[\"orders\"],\"appearedCount\":0,\"leftCount\":0,\"unconfirmedCount\":1,\"unconfirmedSeen\":false}\nfailure-reason=CreatedTopicsLeft\n"
+    );
 }
 
 /// **No code path in the creation step can delete.** The step takes no

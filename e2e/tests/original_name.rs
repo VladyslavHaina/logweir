@@ -15,6 +15,7 @@
 //! | `the_same_cluster_with_auto_creation_enabled_is_refused` | backed up on `autocreate`, deleted, restored into `autocreate`: exit 3 `OriginalNameAutoCreateEnabled`, the name stays absent | the assertion that the name is absent fails if anything was written |
 //! | `a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name` | target `autocreate` (another cluster, so admitted): when the runner announces phase 5 a producer sends one record to the name, which the broker auto-creates; the restore stops at creation, exit 1, its LAST line `failure-reason=TargetTopicAppeared` and the line before it naming the topic as `appeared` with nothing `left` and no `removed` list (review M4), and the topic STILL EXISTS holding the producer's ONE record and nothing restored | a build that wrote into the existing topic leaves more than one record; one that deleted it leaves none |
 //! | `a_creation_step_that_stops_leaves_the_topic_it_created_and_names_it` | two topics restored into `cluster2`, where an unrelated topic collides with the second name (`.` against `_`): the broker creates the first and refuses the second in one request; exit 1, the LAST line `failure-reason=CreatedTopicsLeft`, the line before it naming the created topic as `left`, and the broker still lists it, empty — nothing is ever deleted under an original name | a cleanup deletes the topic and the existence assertion fails |
+//! | `a_partition_subset_under_the_original_names_is_refused_by_name` | the complete plan with `restore.partitions` (PROD-11.1b's subset): `drill approve --approval-subject original-name` refuses to sign it, and under a hand-signed `originalName` approval the runner refuses it, exit 3 `OriginalNameNeedsWholeTopics`, nothing created | the same plan without the subset restores all three partitions under the original name and passes; the same subset under a PREFIX restores partition 0 only and signs format 2.0.0 |
 //! | `a_sampled_plan_under_the_original_names_is_refused_by_name` | the plan without `sample.coverage: complete`: `drill approve --approval-subject original-name` refuses to sign it, and under a hand-signed `originalName` approval the runner refuses it, exit 3 `OriginalNameNeedsCompleteCoverage`, nothing created | the same plan with `coverage: complete` restores and passes, covered |
 //! | `a_producer_writing_during_the_restore_fails_its_verification` | review M5: the runner is suspended at phase 6 while a producer writes 6 records into the topic the restore created; the engine restores 30; phase 7's COMPLETE lane counts 30 expected, 36 restored, 30 matching and 6 unexpected, names each foreign record by its target offset, and the run signs `fail-integrity` (exit 2), the topic holding both | a phase 7 that passed the topic, or counted without naming |
 //! | `a_declarative_owner_blocks_unless_the_owner_path_is_chosen` | a Strimzi `KafkaTopic` for the name given with `--kafka-topic-resources` (simulated: no Strimzi in the lab) refuses, exit 3 `OriginalNameOwnerPresent`; with `owner_path: true` the restore runs and signs the owner and the path; a plan that states no owner and has no resources refuses `OriginalNameOwnerNotChecked` | the two refusals |
@@ -22,6 +23,24 @@
 //!
 //! Scorecard versions are asserted as a FLOOR (`harness::assert_format_at_least`),
 //! never pinned exactly.
+//!
+//! # What is NOT staged live, and why (review 2, M2)
+//!
+//! An INDEFINITE `CreateTopics` answer: the whole call failing after the
+//! broker applied it, or a name answered `REQUEST_TIMED_OUT` and created
+//! anyway. The first needs the broker to accept the request and stop
+//! answering in the few milliseconds between the runner's pre-create listing
+//! and its `CreateTopics` call (pausing the broker earlier fails the listing
+//! instead, which names nothing because nothing was asked); the second needs
+//! a controller that cannot finish a creation inside its operation timeout,
+//! which a healthy single-controller broker does not do, and the stack has no
+//! fault-injecting proxy. Both are rows over a broker double in
+//! `crates/logweir/tests/original_name.rs`
+//! (`a_call_that_fails_after_the_broker_applied_it_names_every_topic_as_unconfirmed`,
+//! `a_name_answered_with_an_error_and_created_anyway_is_unconfirmed_never_left`).
+//! What IS observed live: a per-name error that is a definite refusal leaves
+//! `unconfirmed` empty and the counts right (the created-and-left row), and a
+//! lost race is a definite answer (the race row).
 //!
 //! # Running it
 //!
@@ -485,6 +504,8 @@ enum Naming<'a> {
     Original(&'a str),
     /// A scratch drill carrying the block (refused).
     ScratchWithBlock,
+    /// `newTopic` under this prefix, with no block: an ordinary restore.
+    Prefix(&'a str),
 }
 
 /// A restore plan over one backup, bound to its point, into `target`.
@@ -503,6 +524,12 @@ fn restore_spec(
              \x20 topic_naming:\n\
              \x20   prefix: \"\"\n\
              \x20   original_name:{block}\n"
+        ),
+        Naming::Prefix(prefix) => format!(
+            "\x20 mode: newTopic\n\
+             \x20 topic_mapping_prefix: \"drill-\"\n\
+             \x20 topic_naming:\n\
+             \x20   prefix: \"{prefix}\"\n"
         ),
         Naming::ScratchWithBlock => "\x20 mode: scratch\n\
              \x20 marker_topic: logweir.scratch\n\
@@ -1093,6 +1120,19 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
     // topic under an original name).
     assert_eq!(race_line["left"], json!([]), "{race_line}");
     assert!(race_line.get("removed").is_none(), "{race_line}");
+    // Review 2, M2: a lost race is a DEFINITE answer for the name, so
+    // nothing is unconfirmed, and each list says how many names it has.
+    assert_eq!(race_line["unconfirmed"], json!([]), "{race_line}");
+    assert_eq!(race_line["appearedCount"], 1, "{race_line}");
+    assert_eq!(race_line["leftCount"], 0, "{race_line}");
+    assert_eq!(race_line["unconfirmedCount"], 0, "{race_line}");
+    assert!(race_line.get("unconfirmedSeen").is_none(), "{race_line}");
+    // Review 2, M1: the pair is the runner's LAST TWO stdout lines, in the
+    // order a controller requires.
+    assert!(
+        lines.len() >= 2 && lines[lines.len() - 2].starts_with("target-topics-appeared="),
+        "{all}"
+    );
     // The broker is the oracle: the topic is STILL THERE, and holds the
     // producer's ONE record and nothing the restore would have written.
     assert!(topic_exists(&s.autocreate, &topic), "{all}");
@@ -1166,6 +1206,34 @@ fn a_creation_step_that_stops_leaves_the_topic_it_created_and_names_it() {
     assert_eq!(left_line["left"], json!([kept.clone()]), "{left_line}");
     assert_eq!(left_line["appeared"], json!([]), "{left_line}");
     assert!(left_line.get("removed").is_none(), "{left_line}");
+    // Review 2, M2: the broker's refusal of the second name is a per-name
+    // error that is not "already exists", so the run looked at the cluster
+    // once more; the refused name is NOT there, so nothing is unconfirmed.
+    // (A live indefinite answer cannot be staged on this stack: see the
+    // file's header.)
+    assert_eq!(left_line["unconfirmed"], json!([]), "{left_line}");
+    assert_eq!(left_line["leftCount"], 1, "{left_line}");
+    assert_eq!(left_line["appearedCount"], 0, "{left_line}");
+    assert_eq!(left_line["unconfirmedCount"], 0, "{left_line}");
+    // Review 2, M1: the pair is the LAST TWO stdout lines, in order, and no
+    // line of stdout or stderr begins with either key anywhere else.
+    assert!(
+        lines.len() >= 2 && lines[lines.len() - 2].starts_with("target-topics-appeared="),
+        "{all}"
+    );
+    let keyed = all
+        .lines()
+        .filter(|l| l.starts_with("target-topics-appeared=") || l.starts_with("failure-reason="))
+        .count();
+    assert_eq!(keyed, 2, "exactly the runner's own two lines:\n{all}");
+    // The broker's own words are in the error text, on ONE line.
+    assert!(
+        String::from_utf8_lossy(&r.out.stderr)
+            .lines()
+            .any(|l| l.starts_with("operational: CreatedTopicsLeft: ")
+                && l.contains("created by this restore and left empty")),
+        "{all}"
+    );
     assert!(
         all.contains("created by this restore and left empty; remove it yourself once you have checked nothing writes to it"),
         "{all}"
@@ -1291,6 +1359,160 @@ fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
             "control_records_on_target": record_count(&s.cluster2, &topic),
         }),
     );
+}
+
+/// **A PARTITION SUBSET under the original names is refused by name** (an
+/// original-name restore restores whole topics; PROD-15.1 after PROD-11.1b).
+/// The same backup, the same target and a correct `originalName` approval:
+/// with `restore.partitions` the run is refused at exit 3,
+/// `OriginalNameNeedsWholeTopics`, before anything is created, and `drill
+/// approve --approval-subject original-name` refuses to sign such a plan at
+/// all. CONTROLS, both against the brokers: the same plan WITHOUT the subset
+/// restores every partition under the original name and passes; the same
+/// subset under a PREFIX restores partition 0 only and signs format 2.0.0,
+/// as PROD-11.1b made it. KILLS: admitting the subset under an original name
+/// (a production-named topic with two of three partitions empty); refusing
+/// the whole-topic plan; refusing a prefixed subset.
+#[test]
+#[ignore = "needs the compose stack with the cluster2 and autocreate profiles"]
+fn a_partition_subset_under_the_original_names_is_refused_by_name() {
+    let s = stack();
+    let topic = format!("on-subset-{}", nonce());
+    create_topic(&s.broker, &topic);
+    produce(&s.broker, &topic, 10);
+    let b = backup(&format!("prod151-subset-{}", nonce()), &s.broker, &topic);
+    delete_topic(&s.broker, &topic);
+    // The one spelling of a subset: beside the interval form, from the
+    // archive's floor to the plan's own end.
+    let subset_block = format!(
+        "restore:\n\x20 point_in_time: \"../{}\"\n\x20 partitions:\n\x20   {topic}: [0]\n",
+        rfc3339(b.receipt.covered.to_ms + 1000)
+    );
+    let whole_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), true);
+    let subset_text = format!("{whole_text}{subset_block}");
+    let parsed: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(&subset_text).expect("the subset plan parses");
+    assert_eq!(parsed.restore.partitions[&topic], vec![0]);
+    let subset_spec = write_spec(&subset_text, "subset");
+
+    // The approver's CLI refuses to sign the original-name subject for it.
+    let (refused_mint, minted_path) = cli_approval(&subset_spec, true, "subset");
+    assert_eq!(
+        refused_mint.status.code(),
+        Some(1),
+        "{}",
+        text(&refused_mint)
+    );
+    assert!(
+        text(&refused_mint).contains("OriginalNameNeedsWholeTopics"),
+        "{}",
+        text(&refused_mint)
+    );
+    assert!(!minted_path.exists(), "nothing was signed");
+    // A correctly signed originalName approval made by hand: the RUNNER
+    // refuses the plan, by name, and creates nothing.
+    let approval = hand_approval(&subset_text, Some("originalName"), "subset");
+    let refused = restore(&subset_spec, &approval, &s.cluster2, None, "subset");
+    assert_eq!(refused.out.status.code(), Some(3), "{}", text(&refused.out));
+    assert!(
+        text(&refused.out).contains("OriginalNameNeedsWholeTopics: "),
+        "{}",
+        text(&refused.out)
+    );
+    assert!(
+        refusal_line(&refused.out).is_some(),
+        "{}",
+        text(&refused.out)
+    );
+    assert!(
+        !topic_exists(&s.cluster2, &topic),
+        "a refused run created the topic"
+    );
+    assert_eq!(refused.scorecard, Value::Null, "nothing was signed");
+
+    // CONTROL 1: the same plan without the subset restores whole topics.
+    let whole_spec = write_spec(&whole_text, "subset-control-whole");
+    let whole = restore(
+        &whole_spec,
+        &hand_approval(&whole_text, Some("originalName"), "subset-control-whole"),
+        &s.cluster2,
+        None,
+        "subset-control-whole",
+    );
+    assert_eq!(whole.out.status.code(), Some(0), "{}", text(&whole.out));
+    assert_eq!(whole.scorecard["outcome"], "pass");
+    assert_eq!(record_count(&s.cluster2, &topic), 30);
+    assert!(whole.scorecard["target"]["original_name"].is_object());
+    assert!(
+        whole.scorecard["source"].get("selection").is_none()
+            || whole.scorecard["source"]["selection"].is_null()
+    );
+
+    // CONTROL 2: the same subset under a PREFIX is PROD-11.1b's, unchanged:
+    // partition 0 only, a 2.0.0 scorecard, no original-name block.
+    let prefix = format!("sub{}-", nonce());
+    let prefixed_text = format!(
+        "{}{subset_block}",
+        restore_spec(&b, &topic, &s.cluster2, Naming::Prefix(&prefix), true)
+    );
+    let prefixed_spec = write_spec(&prefixed_text, "subset-control-prefixed");
+    let prefixed = restore(
+        &prefixed_spec,
+        &hand_approval(&prefixed_text, None, "subset-control-prefixed"),
+        &s.cluster2,
+        None,
+        "subset-control-prefixed",
+    );
+    assert_eq!(
+        prefixed.out.status.code(),
+        Some(0),
+        "{}",
+        text(&prefixed.out)
+    );
+    assert_eq!(prefixed.scorecard["outcome"], "pass");
+    harness::assert_format_at_least(
+        prefixed.scorecard["format_version"]
+            .as_str()
+            .unwrap_or_default(),
+        "2.0.0",
+        "a partition-subset restore's scorecard",
+    );
+    assert_eq!(
+        prefixed.scorecard["source"]["selection"]["partitions"],
+        json!([{"topic": topic.clone(), "partitions": [0]}]),
+        "{}",
+        prefixed.scorecard["source"]["selection"]
+    );
+    assert!(prefixed.scorecard["target"].get("original_name").is_none());
+    let prefixed_topic = format!("{prefix}{topic}");
+    assert_eq!(
+        record_count(&s.cluster2, &prefixed_topic),
+        10,
+        "partition 0 only, of three"
+    );
+    write_evidence(
+        "subset-refused",
+        &json!({
+            "topic": topic,
+            "target_cluster_id": cluster_id(&s.cluster2),
+            "cli_refused_mint_exit": refused_mint.status.code(),
+            "cli_refused_mint_message": said(&text(&refused_mint), "OriginalNameNeedsWholeTopics"),
+            "exit": refused.out.status.code(),
+            "refusal": refusal_line(&refused.out),
+            "message": said(&text(&refused.out), "OriginalNameNeedsWholeTopics"),
+            "exists_after_the_refusal": false,
+            "control_whole_exit": whole.out.status.code(),
+            "control_whole_outcome": whole.scorecard["outcome"],
+            "control_whole_format": whole.scorecard["format_version"],
+            "control_whole_records_on_target": 30,
+            "control_prefixed_exit": prefixed.out.status.code(),
+            "control_prefixed_outcome": prefixed.scorecard["outcome"],
+            "control_prefixed_format": prefixed.scorecard["format_version"],
+            "control_prefixed_selection": prefixed.scorecard["source"]["selection"],
+            "control_prefixed_records_on_target": record_count(&s.cluster2, &prefixed_topic),
+        }),
+    );
+    delete_topic(&s.cluster2, &prefixed_topic);
 }
 
 /// `n` unkeyed records to an EXISTING topic, as an application's producer

@@ -731,9 +731,16 @@ const RESTORE_COVERAGE = shapeOf(
 // names someone else created while the restore was admitted, and every topic
 // this restore created and LEFT, empty. Logweir deletes none of them;
 // `leftInstruction` is the one sentence that says what to do with each.
+// Review 2, M2: a THIRD list, `unconfirmed` (names the restore asked for and
+// cannot account for, with their own sentence), and a count beside each list
+// so a list the 100-name bound cut says how many more there are.
 const CREATION_STOP = shapeOf(
   "CreationStopView",
-  { appeared: listOf(str), left: listOf(str), leftInstruction: str },
+  {
+    appeared: listOf(str), left: listOf(str), unconfirmed: listOf(str),
+    appearedCount: int, leftCount: int, unconfirmedCount: int, leftInstruction: str,
+  },
+  { unconfirmedSeen: bool, unconfirmedInstruction: str },
 );
 
 // PROD-11.1b: a Restore's signed replay selection -- a window from a stated

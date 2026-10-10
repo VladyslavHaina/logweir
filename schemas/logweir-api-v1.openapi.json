@@ -7892,12 +7892,16 @@
         }
       },
       "CreationStopView": {
-        "description": "`Restore.targetTopicsAppeared`: what a stopped creation step left behind, as the controller copied it from the runner onto `status.targetTopicsAppeared`. Each list holds at most 100 topic names.",
+        "description": "`Restore.targetTopicsAppeared`: what a stopped creation step left behind, as the controller copied it from the runner's last two log lines onto `status.targetTopicsAppeared`, held to the restore's own mapped target names. Three lists, each at most 100 topic names, and how many names each has in all; a name is in at most one list. Logweir deletes none of them.",
         "type": "object",
         "required": [
           "appeared",
+          "appearedCount",
           "left",
-          "leftInstruction"
+          "leftCount",
+          "leftInstruction",
+          "unconfirmed",
+          "unconfirmedCount"
         ],
         "properties": {
           "appeared": {
@@ -7907,6 +7911,11 @@
               "type": "string"
             }
           },
+          "appearedCount": {
+            "description": "How many names `appeared` has in all: more than the list holds when the 100-name bound cut it.",
+            "type": "integer",
+            "format": "int64"
+          },
           "left": {
             "description": "Topics this restore created and LEFT, empty. Never deleted by Logweir: the operator removes each one.",
             "type": "array",
@@ -7914,9 +7923,36 @@
               "type": "string"
             }
           },
+          "leftCount": {
+            "description": "How many names `left` has in all.",
+            "type": "integer",
+            "format": "int64"
+          },
           "leftInstruction": {
             "description": "What to do with each topic in `left`, in words: the one sentence the runner, the Restore's status and the console all say.",
             "type": "string"
+          },
+          "unconfirmed": {
+            "description": "Names this restore ASKED the cluster to create and CANNOT ACCOUNT FOR: it got no definite answer (the whole request failed, or the name was answered with an error that is not \"already exists\"). Each may be this restore's or someone else's. Never listed in `left`, which claims ownership, nor in `appeared`. Empty on a stop made of definite answers.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unconfirmedCount": {
+            "description": "How many names `unconfirmed` has in all.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "unconfirmedInstruction": {
+            "description": "What to do with each topic in `unconfirmed`, in words: \"exists now … check … before you remove it\", or \"may exist now … look for it\" when `unconfirmedSeen` is `false`. Present only beside an `unconfirmed` name.",
+            "type": "string",
+            "nullable": true
+          },
+          "unconfirmedSeen": {
+            "description": "Whether the runner listed the cluster after the stop and SAW every `unconfirmed` name. `false`: it could not list the cluster, so each name MAY exist. Present only beside an `unconfirmed` name.",
+            "type": "boolean",
+            "nullable": true
           }
         }
       },
@@ -12208,7 +12244,7 @@
             "type": "string"
           },
           "newTopics": {
-            "description": "The topics this run created.",
+            "description": "The target topic names of this run (`status.newTopics`). For a run that reached its restore, the topics it created. After a stopped creation step (`targetTopicsAppeared`), exactly `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for (empty when its lists could not be read). For a run that was refused or failed before the creation step, the names its plan maps, none of which it created.",
             "type": "array",
             "items": {
               "type": "string"
@@ -12266,7 +12302,7 @@
             "$ref": "#/components/schemas/RestoreTargetView"
           },
           "targetTopicsAppeared": {
-            "description": "Present only when the run's creation step stopped (its operation's `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`): the mapped target names someone else created while the run was admitted, and every topic THIS run created and left in place, empty. Logweir never deletes such a topic.",
+            "description": "Present only when the run's creation step stopped (its operation's `result.exitReason` is `TargetTopicAppeared` or `CreatedTopicsLeft`): the mapped target names someone else created while the run was admitted, every topic THIS run created and left in place, empty, and the names it asked for and cannot account for. Logweir never deletes any of them.",
             "$ref": "#/components/schemas/CreationStopView",
             "nullable": true
           },

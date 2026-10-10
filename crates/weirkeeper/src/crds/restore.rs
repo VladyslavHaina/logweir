@@ -553,8 +553,10 @@ pub struct TopicPreflight {
     pub timestamp_bound: Option<i64>,
 }
 
-/// A stopped creation step, as the runner named it. Every list is at most
-/// 100 topic names a broker accepts.
+/// A stopped creation step, as the runner named it and as the controller
+/// held it to this Restore's plan: three lists, each at most 100 of the
+/// plan's mapped target topic names, and how many names each list has in
+/// all. A name is in at most one list. Logweir deletes none of them.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetTopicsAppeared {
@@ -568,6 +570,36 @@ pub struct TargetTopicsAppeared {
     #[serde(default)]
     #[schemars(length(max = 100), inner(length(max = 249)))]
     pub left: Vec<String>,
+    /// Names this run ASKED the cluster to create and CANNOT ACCOUNT FOR: it
+    /// got no definite answer (the whole request failed, or the name was
+    /// answered with an error that is not "already exists"). With
+    /// `unconfirmedSeen: true` each one exists now; it may be this
+    /// restore's or someone else's, so check what it holds and who writes
+    /// to it before you remove it. Never listed in `left`, which claims
+    /// ownership, nor in `appeared`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub unconfirmed: Vec<String>,
+    /// How many names `appeared` has in all. More than the list holds when
+    /// the 100-name bound cut it: the runner's log names every one, and each
+    /// is one of this restore's mapped target topics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub appeared_count: Option<i64>,
+    /// How many names `left` has in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub left_count: Option<i64>,
+    /// How many names `unconfirmed` has in all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub unconfirmed_count: Option<i64>,
+    /// Whether the runner LISTED the cluster after the stop and saw every
+    /// `unconfirmed` name. `false`: it could not list the cluster, so each
+    /// name MAY exist; look for it. Present only beside an `unconfirmed`
+    /// name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfirmed_seen: Option<bool>,
 }
 
 /// Where the signed evidence is, and what the controller made of it.
@@ -909,21 +941,32 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
     /// A creation step that stopped (`exitReason: TargetTopicAppeared` for a
-    /// lost race, `CreatedTopicsLeft` for any other stop after a topic was
-    /// created; exit 1): mapped target names someone else created after phase
-    /// 0 proved them absent, and the topics THIS run created and LEFT — each
-    /// created by this restore and left empty; remove it yourself once you
-    /// have checked nothing writes to it. Logweir never deletes them. Read
-    /// off the runner's `target-topics-appeared=` line; absent on every other
-    /// run.
+    /// lost race, `CreatedTopicsLeft` for any other stop that left a topic;
+    /// exit 1): mapped target names someone else created after phase 0
+    /// proved them absent (`appeared`), the topics THIS run created and LEFT
+    /// (`left`: each created by this restore and left empty; remove it
+    /// yourself once you have checked nothing writes to it), and the names it
+    /// asked for and cannot account for (`unconfirmed`). Logweir never
+    /// deletes any of them. Read off the LAST TWO lines of the runner's log
+    /// (`target-topics-appeared=`, then `failure-reason=`) and held to this
+    /// Restore's mapped target names; absent on every other run. The names
+    /// are what the runner's log gives: with a runner image older than this
+    /// controller, check the list against the cluster before acting on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_topics_appeared: Option<TargetTopicsAppeared>,
     /// The signed scorecard, the offset report, and the controller's
     /// verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<RestoreEvidence>,
-    /// The topics this run CREATED. For `mode: scratch`, exactly what phase 9
-    /// tears down.
+    /// The target topic names of this run. For a run that REACHED its restore
+    /// these are the topics it created (for `mode: scratch`, exactly what
+    /// phase 9 tears down). After a stopped creation step
+    /// (`targetTopicsAppeared`) it is exactly `targetTopicsAppeared.left`,
+    /// the topics the run's own `CreateTopics` answers say it created, never
+    /// a name someone else created or one it cannot account for; and it is
+    /// ABSENT when that list could not be read. For a run that was refused
+    /// or failed before the creation step, it is the names the plan maps,
+    /// none of which the run created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_topics: Option<Vec<String>>,
     /// The source topics the new ones were restored from. Nothing here was

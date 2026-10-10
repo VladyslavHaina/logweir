@@ -173,6 +173,95 @@ fn complete_verification_names_a_foreign_record_interleaved_in_the_restored_name
     sc.validate_invariants().expect("the readers accept it");
 }
 
+/// **Review 2, L11 (probe C1): an original name beside
+/// `sample.complete_max_records`.** The bound is allowed, and a run it stops
+/// is NEVER a pass: the same restore with a bound of one decoded record signs
+/// `fail-integrity`, `integrity.result: partial`, `covered: false` with the
+/// reason naming the bound, and both readers' invariants accept that signed
+/// failure. Every way of turning the document into a pass is refused: the
+/// integrity result alone (IV-6), the outcome too, the pass with the
+/// verification block removed, and the pass over a sampled block (ON-13).
+/// CONTROL: `an_original_name_restore_runs_and_signs_its_block` — the same
+/// restore without the bound — passes, covered.
+/// KILLS: a bounded complete run under an original name signing a pass; a
+/// reader that accepts a pass over a block that did not cover.
+#[test]
+fn an_original_name_restore_stopped_by_its_record_bound_is_never_a_pass() {
+    use logweir_core::outcome::{IntegrityResult, Outcome};
+    use logweir_core::scorecard::Scorecard;
+
+    let mut f = fixtures::orchestrator_fixture(Drill::RestoresUnderTheOriginalNames);
+    assert!(f.ctx.spec.target.original_name().is_some());
+    f.ctx.spec.sample.complete_max_records = Some(1);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("not covered is not a pass");
+    assert!(matches!(err, DrillError::NotPass(..)), "{err:?}");
+    assert_eq!(err.exit_code(), ExitCode::DrillNotPass);
+    let sc: Scorecard =
+        serde_json::from_slice(&std::fs::read(&f.out).expect("the run signed its scorecard"))
+            .expect("a scorecard");
+    assert!(sc.target.original_name.is_some());
+    assert_eq!(sc.outcome, Outcome::FailIntegrity);
+    assert_eq!(sc.integrity.result, IntegrityResult::Partial);
+    let verification = sc.integrity.verification.as_ref().expect("signed");
+    assert_eq!(verification.coverage, "complete");
+    let complete = verification.complete.as_ref().expect("the complete block");
+    assert!(!complete.covered);
+    let reason = complete.incomplete_reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("sample.complete_max_records = 1"),
+        "{reason}"
+    );
+    sc.validate_invariants()
+        .expect("the signed failure is accepted");
+
+    // No edit of that document is a pass a reader accepts.
+    let refused = |forged: &Scorecard, what: &str| -> String {
+        forged.validate_invariants().expect_err(what).0
+    };
+    let mut result_only = sc.clone();
+    result_only.integrity.result = IntegrityResult::Pass;
+    assert!(
+        refused(&result_only, "an integrity pass that did not cover").starts_with(
+            "integrity.result is pass but integrity.verification.complete is not covered"
+        ),
+    );
+    let mut both = sc.clone();
+    both.outcome = Outcome::Pass;
+    both.integrity.result = IntegrityResult::Pass;
+    assert_eq!(
+        refused(&both, "a pass that did not cover"),
+        "outcome is 'pass' but integrity.partial_reason is present"
+    );
+    // ... with the reason removed as well, the block that did not cover
+    // still refuses the pass (IV-6).
+    let mut no_reason = both.clone();
+    no_reason.integrity.partial_reason = None;
+    assert!(
+        refused(&no_reason, "a pass over a block that did not cover").starts_with(
+            "integrity.result is pass but integrity.verification.complete is not covered"
+        ),
+    );
+    // ... and with the verification block removed to hide it: ON-13.
+    let on13 = "target.original_name is present but integrity.verification.coverage is not \
+                \"complete\", or a pass records no verification";
+    let mut no_block = no_reason.clone();
+    no_block.integrity.verification = None;
+    assert!(
+        refused(&no_block, "a pass with no verification").starts_with(on13),
+        "ON-13 refuses a pass that records no verification"
+    );
+    // ... or swapped for a sampled one (as a sampled block is written:
+    // header order not verified): ON-13 again.
+    let mut sampled = no_reason;
+    if let Some(v) = sampled.integrity.verification.as_mut() {
+        v.coverage = "sampled".into();
+        v.header_order = "notVerified".into();
+        v.complete = None;
+    }
+    let why = refused(&sampled, "a sampled pass under an original name");
+    assert!(why.starts_with(on13), "{why}");
+}
+
 /// Review M3, the call site AFTER PHASE 1: an ordinary v1 approval for an
 /// original-name plan is refused by name once phase 1 has verified it, and
 /// NOTHING is created. KILLS: removing that call site (the run would create

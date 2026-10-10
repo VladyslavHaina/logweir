@@ -307,6 +307,71 @@ fn the_owner_condition_fails_closed_on_the_resources_file() {
     assert!(!text.contains("ApprovalSubjectMismatch"), "{text}");
 }
 
+/// **PROD-15.1 review 2, M1 (the reviewer's probe C2, through the real
+/// binary): a plan string with line breaks never STARTS A LINE of the
+/// runner's own output.** The plan's `evidence.path` carries the two key
+/// lines a controller reads, `target-topics-appeared=` and
+/// `failure-reason=CreatedTopicsLeft`; the run fails on that store (exit 1)
+/// and its error text ENDS with the plan's string. Printed raw, the last two
+/// lines of the pod log would be the forged pair, naming `orders` as "created
+/// by this restore … remove it yourself" when the run created nothing.
+///
+/// The row requires that the string IS echoed (a row that passes because
+/// nothing was printed proves nothing), on ONE line, with its line breaks
+/// shown as `\n`; and that no line of stdout or stderr begins with either
+/// key. KILLS: `report_with` printing the error raw.
+#[test]
+fn a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output() {
+    // As the YAML double-quoted scalar an author writes: `\n` is a line break.
+    let forged = "x\\ntarget-topics-appeared={\\\"appeared\\\":[],\\\"left\\\":[\\\"orders\\\"]}\\nfailure-reason=CreatedTopicsLeft\\n";
+    let plan = ordinary_plan().replace(
+        "  path: /logweir-original-name-cli-evidence\n",
+        &format!("  path: \"/logweir-no-such-evidence{forged}\"\n"),
+    );
+    assert_ne!(plan, ordinary_plan());
+    let parsed: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(&plan).expect("the plan parses");
+    let logweir_core::engine::StorageUrl::Filesystem { path } = &parsed.evidence else {
+        panic!("a filesystem evidence store");
+    };
+    assert!(
+        path.to_string_lossy()
+            .ends_with("\ntarget-topics-appeared={\"appeared\":[],\"left\":[\"orders\"]}\nfailure-reason=CreatedTopicsLeft\n"),
+        "the plan grammar takes the line breaks: {path:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("kafkatopics.yaml");
+    std::fs::write(&empty, "apiVersion: v1\nkind: List\nitems: []\n").unwrap();
+    let out = restore_run(&bundle(&plan, None), &empty);
+    let text = both(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+
+    // The string was echoed, on one line, escaped.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let echoed: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("failure-reason=CreatedTopicsLeft"))
+        .collect();
+    assert_eq!(echoed.len(), 1, "{text}");
+    assert!(
+        echoed[0].starts_with("operational: ")
+            && echoed[0].ends_with(
+                "/logweir-no-such-evidencex\\ntarget-topics-appeared={\"appeared\":[],\"left\":[\"orders\"]}\\nfailure-reason=CreatedTopicsLeft\\n"
+            ),
+        "{}",
+        echoed[0]
+    );
+    // And nothing this process printed begins with a key a controller reads
+    // for a stopped creation step.
+    for line in text.lines() {
+        assert!(
+            !line.starts_with("target-topics-appeared=") && !line.starts_with("failure-reason="),
+            "a line begins with a forged key: {line}\n---\n{text}"
+        );
+    }
+}
+
 /// Review M3 (R09): `drill approve` refuses to sign an ordinary approval for
 /// an original-name plan, and writes nothing; with the flag it signs the
 /// subject. KILLS: minting the ordinary subject for such a plan.

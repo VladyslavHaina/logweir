@@ -1277,6 +1277,12 @@ impl RestoreAuthorization {
     /// that knows the subject. Can only refuse; a document without the fields
     /// is decided exactly as before.
     ///
+    /// **The version is THREE NUMERIC PARTS** (review 2, L8): `2.<minor>.<patch>`,
+    /// each part decimal digits with no sign, no padding and nothing after
+    /// it ([`numeric_version`]). `2.1`, `2.01.0`, `2.+1.0`, `2.1.x`,
+    /// `2.1.0-rc1` and `2.1.0.0` are not versions this rule reads, and a
+    /// document carrying the fields under one is refused.
+    ///
     /// # Errors
     ///
     /// [`AuthorizationRefusal::DocumentInvalid`], naming both versions.
@@ -1284,12 +1290,9 @@ impl RestoreAuthorization {
         if !self.carries_subject_fields() {
             return Ok(());
         }
-        let mut parts = self.format_version.split('.');
-        let major = parts.next();
-        let minor = parts.next().and_then(|m| m.parse::<u64>().ok());
-        if major == Some("2")
-            && minor.is_some_and(|m| m >= RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR)
-        {
+        if numeric_version(&self.format_version).is_some_and(|(major, minor, _)| {
+            major == 2 && minor >= RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR
+        }) {
             return Ok(());
         }
         Err(AuthorizationRefusal::DocumentInvalid(format!(
@@ -1299,6 +1302,24 @@ impl RestoreAuthorization {
             self.format_version
         )))
     }
+}
+
+/// `major.minor.patch` as three numbers, or `None`: exactly three parts, each
+/// one or more ASCII digits with no leading zero (`0` itself aside), no sign
+/// and no suffix. `u64::from_str` alone accepts `+1`, and a `split` that
+/// reads two parts accepts anything after them.
+#[must_use]
+pub fn numeric_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let mut next = || -> Option<u64> {
+        let part = parts.next()?;
+        let canonical = !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'));
+        canonical.then(|| part.parse::<u64>().ok()).flatten()
+    };
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
 }
 
 /// What a boundary knows about the subject independently of the document.
@@ -1916,7 +1937,26 @@ namespaces:
             ("the subject alone", false, true),
             ("the typed names alone", true, false),
         ] {
-            for version in ["2.0.0", "2.0.9", "2", "2.x.0"] {
+            // 2.0.x, and (review 2, L8) every string that is not three
+            // numeric parts, each of which the looser rule read as 2.1.
+            for version in [
+                "2.0.0",
+                "2.0.9",
+                "2",
+                "2.x.0",
+                "2.",
+                "2.1",
+                "2.01.0",
+                "2.+1.0",
+                "2.-1.0",
+                "2.1.x",
+                "2.1.0-rc1",
+                "2.1.0.0",
+                "2.1.",
+                "2..0",
+                "2.1.0 ",
+                "2.18446744073709551616.0",
+            ] {
                 let mut old = subject.clone();
                 old.format_version = version.into();
                 if strip_subject {
@@ -1944,13 +1984,22 @@ namespaces:
                 }
             }
         }
-        // Another major stays refused, whatever it carries.
-        let mut major = subject.clone();
-        major.format_version = "3.1.0".into();
-        assert_eq!(
-            check_binding(&major, &expected(), &p).map_err(|r| r.reason()),
-            Err("AuthorizationDocumentInvalid")
-        );
+        // Another major stays refused, whatever it carries — a major that
+        // is not written exactly `2` included (L8).
+        for version in ["3.1.0", "1.1.0", " 2.1.0", "02.1.0", "+2.1.0"] {
+            let mut major = subject.clone();
+            major.format_version = version.into();
+            for refused in [
+                check_binding(&major, &expected(), &p),
+                RestoreAuthorization::from_bytes(&major.to_bytes()).map(|_| ()),
+            ] {
+                assert_eq!(
+                    refused.map_err(|r| r.reason()),
+                    Err("AuthorizationDocumentInvalid"),
+                    "{version:?}"
+                );
+            }
+        }
 
         // CONTROLS. A 2.0.0 document without the fields is read as before, and
         // a minor adds optional fields only: 2.1.0 without them is accepted.
@@ -1966,6 +2015,28 @@ namespaces:
             RestoreAuthorization::from_bytes(&newer.to_bytes()),
             Ok(newer)
         );
+        // A later minor or patch of major 2, written as three numbers, reads
+        // the fields: the rule is "from 2.1.0", not "exactly 2.1.0".
+        for version in ["2.1.1", "2.2.0", "2.10.0"] {
+            let mut later = subject.clone();
+            later.format_version = version.into();
+            assert_eq!(check_binding(&later, &expected(), &p), Ok(()), "{version}");
+        }
+        assert_eq!(numeric_version("2.1.0"), Some((2, 1, 0)));
+        assert_eq!(numeric_version("0.0.0"), Some((0, 0, 0)));
+        assert_eq!(numeric_version("10.20.30"), Some((10, 20, 30)));
+        for not_a_version in [
+            "",
+            "2",
+            "2.1",
+            "2.1.0.0",
+            "2.01.0",
+            "2.+1.0",
+            "a.b.c",
+            "2.1.0-rc1",
+        ] {
+            assert_eq!(numeric_version(not_a_version), None, "{not_a_version:?}");
+        }
     }
 
     #[test]

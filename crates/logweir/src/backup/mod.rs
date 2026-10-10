@@ -966,7 +966,11 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
             // `run_id` on the EVENT and not only on an entered span: a
             // single-line consumer reads the event object.
             tracing::error!(run_id = %run_id, error = %e, "backup failed");
-            eprintln!("{e}");
+            // On one line, for the reason `crate::drill`'s twin is
+            // (PROD-15.1 review 2, M1's sweep): a controller reads this pod
+            // log by key at the start of a line, `failure-reason=` included,
+            // and an error text can echo a plan's or a broker's string.
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             e.exit_code()
         }
     };
@@ -985,7 +989,10 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
 /// values.
 fn summary_line(o: &BackupOutcome) -> String {
     let records: u64 = o.records_per_topic.values().sum();
-    format!(
+    // ONE LINE whatever the fields hold (PROD-15.1 review 2, M1's sweep):
+    // the cluster id is the BROKER's own string and the keys carry the plan's
+    // prefix, and this is printed on stdout just before interface I7's keys.
+    crate::exit::one_line(&format!(
         "backup {} captured {} record(s) across {} topic(s) from cluster {} — manifest {} {}",
         o.backup_id,
         records,
@@ -993,7 +1000,7 @@ fn summary_line(o: &BackupOutcome) -> String {
         o.source_cluster_id,
         o.manifest_key,
         o.manifest_sha256
-    )
+    ))
 }
 
 /// Logs the exit code and what it means, then returns it unchanged — and, for

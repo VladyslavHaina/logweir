@@ -44,6 +44,9 @@ pub mod connection;
 /// PROD-04.1: the receipt's consumer position evidence (format 1.7.0), its
 /// closed vocabularies and the rules its arms re-derive.
 pub mod consumer_positions;
+/// PROD-15.1: the one line a runner prints about a stopped creation step
+/// (`target-topics-appeared=`), written and read through one definition.
+pub mod creation_stop;
 /// FX-20: the credential binding for every credential reference — object
 /// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
 pub mod credential_binding;

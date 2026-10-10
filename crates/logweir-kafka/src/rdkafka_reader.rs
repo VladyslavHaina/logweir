@@ -22,6 +22,34 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
 
+/// **PROD-15.1 review 2, M2: how long the BROKER may take over `CreateTopics`
+/// before it answers, set explicitly BELOW the client's request timeout
+/// [`T`].**
+///
+/// librdkafka's operation timeout defaults to the admin request timeout of
+/// the client configuration (`rdkafka_admin.c`, `socket.timeout.ms`, 60 s),
+/// which is LONGER than the 20 s this client waits. So a creation the
+/// controller finished between 20 s and 60 s was applied on the cluster while
+/// the call here failed as a whole, with no answer for any name.
+///
+/// WHAT THIS BUYS: a broker that is reachable and answering returns within
+/// this bound with ONE ANSWER PER NAME — `REQUEST_TIMED_OUT` for a topic it
+/// has not finished creating — and the remaining [`T`] minus this is the
+/// round trip's. The creation step can then say which names it cannot
+/// account for.
+///
+/// WHAT IT DOES NOT GUARANTEE: an answer at all (a lost connection, a broker
+/// that stops responding, or a controller lookup that eats the margin still
+/// fails the whole call), or that a name answered `REQUEST_TIMED_OUT` is not
+/// created afterwards — Kafka goes on creating it. Both are what
+/// `logweir::drill::phase0_admit::Unconfirmed::look` is for.
+pub const CREATE_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+const _: () = assert!(
+    CREATE_OPERATION_TIMEOUT.as_secs() < T.as_secs(),
+    "the broker's operation timeout must be below the client's request timeout"
+);
+
 pub struct RdKafkaReader {
     consumer: BaseConsumer,
     admin: AdminClient<DefaultClientContext>,
@@ -1209,6 +1237,12 @@ impl TopicCreator for RdKafkaReader {
     /// not destruction. The names come from `topic_mapping`, which phase 0's
     /// mapping guard has already refused to let equal any source topic, and
     /// phase 3 reports every target name that already exists.
+    ///
+    /// **THIS IMPLEMENTATION CREATES AND DOES NOTHING ELSE.** It never
+    /// deletes, not what its own request created and not after a partial
+    /// failure: `logweir-kafka`'s one topic delete is `impl TopicDeleter`'s,
+    /// behind the scratch prefix and the protected names
+    /// (`crates/logweir/tests/no_topic_delete_inventory.rs` reads this file).
     fn create_topics(
         &self,
         topics: &[NewTopicSpec],
@@ -1222,11 +1256,13 @@ impl TopicCreator for RdKafkaReader {
             .enable_all()
             .build()
             .map_err(|e| KafkaError::Client(e.to_string()))?;
+        // The broker's bound is BELOW the client's, so its answer is per name
+        // wherever it can be (`CREATE_OPERATION_TIMEOUT`).
+        let options = AdminOptions::new()
+            .request_timeout(Some(T))
+            .operation_timeout(Some(CREATE_OPERATION_TIMEOUT));
         let res = rt
-            .block_on(
-                self.admin
-                    .create_topics(&new_topics, &AdminOptions::new().request_timeout(Some(T))),
-            )
+            .block_on(self.admin.create_topics(&new_topics, &options))
             .map_err(|e| KafkaError::Client(e.to_string()))?;
         // `TopicResult = Result<String, (String, RDKafkaErrorCode)>` — the
         // error here IS the `(name, code)` tuple, as in `delete_topics`.

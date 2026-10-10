@@ -5497,7 +5497,7 @@ spec:
                     type: integer
                 type: object
               newTopics:
-                description: 'The topics this run CREATED. For `mode: scratch`, exactly what phase 9 tears down.'
+                description: 'The target topic names of this run. For a run that REACHED its restore these are the topics it created (for `mode: scratch`, exactly what phase 9 tears down). After a stopped creation step (`targetTopicsAppeared`) it is exactly `targetTopicsAppeared.left`, the topics the run''s own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for; and it is ABSENT when that list could not be read. For a run that was refused or failed before the creation step, it is the names the plan maps, none of which the run created.'
                 items:
                   type: string
                 nullable: true
@@ -5705,7 +5705,7 @@ spec:
                 nullable: true
                 type: string
               targetTopicsAppeared:
-                description: 'A creation step that stopped (`exitReason: TargetTopicAppeared` for a lost race, `CreatedTopicsLeft` for any other stop after a topic was created; exit 1): mapped target names someone else created after phase 0 proved them absent, and the topics THIS run created and LEFT — each created by this restore and left empty; remove it yourself once you have checked nothing writes to it. Logweir never deletes them. Read off the runner''s `target-topics-appeared=` line; absent on every other run.'
+                description: 'A creation step that stopped (`exitReason: TargetTopicAppeared` for a lost race, `CreatedTopicsLeft` for any other stop that left a topic; exit 1): mapped target names someone else created after phase 0 proved them absent (`appeared`), the topics THIS run created and LEFT (`left`: each created by this restore and left empty; remove it yourself once you have checked nothing writes to it), and the names it asked for and cannot account for (`unconfirmed`). Logweir never deletes any of them. Read off the LAST TWO lines of the runner''s log (`target-topics-appeared=`, then `failure-reason=`) and held to this Restore''s mapped target names; absent on every other run. The names are what the runner''s log gives: with a runner image older than this controller, check the list against the cluster before acting on it.'
                 nullable: true
                 properties:
                   appeared:
@@ -5716,6 +5716,12 @@ spec:
                       type: string
                     maxItems: 100
                     type: array
+                  appearedCount:
+                    description: 'How many names `appeared` has in all. More than the list holds when the 100-name bound cut it: the runner''s log names every one, and each is one of this restore''s mapped target topics.'
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
                   left:
                     default: []
                     description: 'Topics this run created and LEFT under these names, empty. Logweir never deletes them: remove each yourself once you have checked nothing writes to it.'
@@ -5724,6 +5730,29 @@ spec:
                       type: string
                     maxItems: 100
                     type: array
+                  leftCount:
+                    description: How many names `left` has in all.
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
+                  unconfirmed:
+                    description: 'Names this run ASKED the cluster to create and CANNOT ACCOUNT FOR: it got no definite answer (the whole request failed, or the name was answered with an error that is not "already exists"). With `unconfirmedSeen: true` each one exists now; it may be this restore''s or someone else''s, so check what it holds and who writes to it before you remove it. Never listed in `left`, which claims ownership, nor in `appeared`.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  unconfirmedCount:
+                    description: How many names `unconfirmed` has in all.
+                    format: int64
+                    minimum: 0
+                    nullable: true
+                    type: integer
+                  unconfirmedSeen:
+                    description: 'Whether the runner LISTED the cluster after the stop and saw every `unconfirmed` name. `false`: it could not list the cluster, so each name MAY exist; look for it. Present only beside an `unconfirmed` name.'
+                    nullable: true
+                    type: boolean
                 type: object
               teardown:
                 description: What phase 9 removed, and what it could not.

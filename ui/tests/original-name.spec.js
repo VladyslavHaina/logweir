@@ -498,8 +498,141 @@ test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", 
   // CONTROL: no block on the status, nothing rendered.
   assert.equal(creationStoppedWarning(undefined), "");
   assert.ok(!renderRestoreDetail(restore(undefined)).includes("restore-creation-stopped"));
-  // A hostile name is escaped, never markup.
-  assert.ok(!creationStoppedWarning({ appeared: [], left: ["<img src=x>"] }).includes("<img"));
+  // A hostile name is escaped, never markup -- in EVERY list (review 2, L4:
+  // the control fed only `left`, and an unescaped `appeared` sentence
+  // survived). KILLS: a list rendered without `esc` (mutant R2-09).
+  const hostile = "<img src=x onerror=alert(1)>";
+  for (const key of ["appeared", "left", "unconfirmed"]) {
+    const lists = { appeared: [], left: [], unconfirmed: [], unconfirmedSeen: true };
+    lists[key] = [hostile];
+    const rendered = creationStoppedWarning(lists);
+    assert.ok(!rendered.includes("<img"), "NEGATIVE CONTROL: an unescaped " + key +
+      " name fails this:\n" + rendered);
+    assert.ok(rendered.includes("&lt;img src=x onerror=alert(1)&gt;"), key + ": the name is " +
+      "shown, as text:\n" + rendered);
+  }
+});
+
+test("a_stopped_creation_step_shows_what_it_cannot_account_for_and_how_many_more", async () => {
+  // Review 2, M2. KILLS: an unconfirmed topic shown with the "created by this
+  // restore" sentence, or not shown; "exists now" when the runner could not
+  // look; a list the 100-name bound cut that says nothing; the "new topics"
+  // row listing a name the restore cannot account for.
+  const { creationStoppedWarning, creationStopMore, renderRestoreDetail } =
+    await import("../pages/history.js");
+  const { LEFT_TOPIC_SENTENCE, UNCONFIRMED_TOPIC_SENTENCE, UNCONFIRMED_UNLISTED_TOPIC_SENTENCE } =
+    await import("../render.js");
+  const seen = visible(creationStoppedWarning({
+    appeared: [], left: ["orders"], unconfirmed: ["payments"],
+    appearedCount: 0, leftCount: 1, unconfirmedCount: 1, unconfirmedSeen: true,
+  }));
+  assert.ok(seen.includes("orders: " + LEFT_TOPIC_SENTENCE + "."), seen);
+  assert.ok(seen.includes("payments: " + UNCONFIRMED_TOPIC_SENTENCE + "."),
+    "NEGATIVE CONTROL: a detail without the unconfirmed topic fails this:\n" + seen);
+  assert.ok(!seen.includes("payments: created by this restore"), seen);
+  assert.ok(seen.includes("Logweir never deletes a topic under a name it may not own"));
+  assert.doesNotMatch(seen, /and \d+ more|first 100 names/);
+  assert.equal(UNCONFIRMED_TOPIC_SENTENCE,
+    "exists now; this restore asked the cluster to create it and got no definite answer, so " +
+      "it may be this restore's or someone else's: check what it holds and who writes to it " +
+      "before you remove it");
+
+  // The runner could not list the cluster: "may exist", for `false` and for
+  // an absent flag alike; never "exists now".
+  for (const flag of [false, undefined]) {
+    const lists = { appeared: [], left: [], unconfirmed: ["orders", "payments"],
+      appearedCount: 0, leftCount: 0, unconfirmedCount: 2 };
+    if (flag !== undefined) lists.unconfirmedSeen = flag;
+    const words = visible(creationStoppedWarning(lists));
+    assert.ok(words.includes("orders: " + UNCONFIRMED_UNLISTED_TOPIC_SENTENCE + "."), words);
+    assert.ok(!words.includes("exists now"), words);
+    assert.ok(words.includes("No CreateTopics answer says this restore created a topic."), words);
+    assert.ok(!words.includes("This restore created no topic."), words);
+  }
+
+  // The bound: 100 names shown of 150, in each list.
+  const names = (prefix) => Array.from({ length: 100 }, (_, i) => prefix + String(i).padStart(3, "0"));
+  const cut = { appeared: ["a"], left: names("t"), unconfirmed: names("u"),
+    appearedCount: 3, leftCount: 150, unconfirmedCount: 120, unconfirmedSeen: true };
+  assert.equal(creationStopMore(cut, "left"), 50);
+  assert.equal(creationStopMore(cut, "unconfirmed"), 20);
+  assert.equal(creationStopMore(cut, "appeared"), 2);
+  const words = visible(creationStoppedWarning(cut));
+  assert.match(words, /t099: created by this restore[^]*?and 50 more/);
+  assert.match(words, /u099: exists now[^]*?and 20 more/);
+  assert.ok(words.includes("a and 2 more: created by someone else after this restore was " +
+    "admitted. The restore wrote nothing into them."), words);
+  assert.ok(words.includes("A list shows its first 100 names. Each name is one of this " +
+    "restore's mapped target topics, and the runner's log names every one."),
+  "NEGATIVE CONTROL: a cut list that says nothing fails this:\n" + words);
+  // A count that is absent, smaller than the list or not a whole number cuts
+  // nothing.
+  for (const leftCount of [undefined, 1, -3, 2.5, "150", null]) {
+    assert.equal(creationStopMore({ left: ["x", "y"], leftCount }, "left"), 0);
+  }
+
+  // The "new topics" row is what the restore LEFT, with its count, and never
+  // an unconfirmed name.
+  const restore = (targetTopicsAppeared) => ({
+    metadata: { name: "r", namespace: "team-a" },
+    spec: { planBytes: text("plan-original-name.golden.yaml"),
+      pointInTime: "2026-09-07T14:05:00Z", backupSetRef: "b",
+      target: { mode: "newTopic", topicNaming: { prefix: "", originalName: true } } },
+    status: { phase: "Failed", exitCode: 1, exitReason: "CreatedTopicsLeft",
+      newTopics: targetTopicsAppeared.left, targetTopicsAppeared },
+  });
+  const html = renderRestoreDetail(restore({ appeared: [], left: ["orders"],
+    unconfirmed: ["payments"], appearedCount: 0, leftCount: 1, unconfirmedCount: 1,
+    unconfirmedSeen: true }));
+  const facts = visible(html.slice(html.indexOf("<h3>Topics</h3>")));
+  assert.match(facts, /new topics\s*orders/, facts.slice(0, 200));
+  assert.doesNotMatch(facts.slice(0, facts.indexOf("old topics")), /payments/);
+  const cutFacts = visible(renderRestoreDetail(restore(cut)));
+  assert.match(cutFacts.slice(cutFacts.indexOf("new topics")), /t099 and 50 more/);
+});
+
+test("the_console_projection_carries_what_a_stopped_creation_step_cannot_account_for", async () => {
+  // BOTH SIDES READ ONE FIXTURE: `console/restore-creation-unconfirmed.json` is
+  // the product API's projection of a status carrying the THIRD list
+  // (`crates/logweir-api/tests/original_name.rs`). KILLS: a decoder that
+  // refuses, or a projection that drops, `unconfirmed`, a count or the flag;
+  // a console sentence that is not the API's.
+  const { apiClient, resetMode, selectMode } = await import("../client.js");
+  const { UNCONFIRMED_TOPIC_SENTENCE } = await import("../render.js");
+  const answer = fixture("console/restore-creation-unconfirmed.json");
+  assert.equal(answer.item.targetTopicsAppeared.unconfirmedInstruction,
+    UNCONFIRMED_TOPIC_SENTENCE,
+    "the console says the API's (and so the runner's) sentence, word for word");
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  const operation = fixture("console/operation-restore-completed.json");
+  operation.item.state = "failed";
+  operation.item.result.exitCode = 1;
+  operation.item.result.exitReason = "CreatedTopicsLeft";
+  const original = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: () => Promise.resolve(JSON.stringify(
+      String(url).includes("/operations") ? operation : answer)),
+  });
+  try {
+    const object = await apiClient().get("team-a", "restores", answer.item.name);
+    assert.deepEqual(object.status.targetTopicsAppeared, {
+      appeared: [], left: ["orders"], unconfirmed: ["payments"],
+      appearedCount: 0, leftCount: 1, unconfirmedCount: 1, unconfirmedSeen: true,
+    }, "NEGATIVE CONTROL: a projection that drops the third list fails this");
+    const { renderRestoreDetail } = await import("../pages/history.js");
+    const words = visible(renderRestoreDetail(object));
+    assert.ok(words.includes("payments: " + UNCONFIRMED_TOPIC_SENTENCE + "."), words);
+    assert.ok(!words.includes("payments: created by this restore"), words);
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
 });
 
 test("the_console_projection_carries_the_topics_a_stopped_creation_step_left", async () => {
@@ -534,7 +667,8 @@ test("the_console_projection_carries_the_topics_a_stopped_creation_step_left", a
   try {
     const object = await apiClient().get("team-a", "restores", answer.item.name);
     assert.deepEqual(object.status.targetTopicsAppeared,
-      { appeared: ["payments"], left: ["orders"] },
+      { appeared: ["payments"], left: ["orders"], unconfirmed: [],
+        appearedCount: 1, leftCount: 1, unconfirmedCount: 0 },
       "NEGATIVE CONTROL: a decoder that refuses, or a projection that drops, the block " +
         "fails this");
     assert.equal(object.status.exitReason, "TargetTopicAppeared");

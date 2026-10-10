@@ -2820,10 +2820,17 @@ pub fn crash_terminal_state(pod: Option<&Pod>) -> &'static str {
 /// evidence keys and the refusal reason.
 ///
 /// CLOSED, AND PAIRED WITH THE CODE: a value is lifted only when
-/// `logweir_core::guard::FAILURE_REASONS` lists it for THIS exit code, so a
-/// noisy log cannot put an arbitrary string on `status.exitReason`, and an
-/// older runner, which prints no such line, keeps the plain wire reason.
+/// `logweir_core::guard::BACKUP_FAILURE_REASONS` lists it for THIS exit code,
+/// so a noisy log cannot put an arbitrary string on `status.exitReason`, and
+/// an older runner, which prints no such line, keeps the plain wire reason.
 /// The LAST occurrence wins, as for every other tail line.
+///
+/// **A BACKUP's states only** (PROD-15.1 review 2, M1's class note): the
+/// closed set is per kind, so a Backup's log can never lift a restore-only
+/// state (`TargetTopicAppeared`, `CreatedTopicsLeft`) onto a `Backup`. The
+/// Restore reconciler reads its own two through
+/// `super::restore::creation_stop_state`, which also holds the line to its
+/// place.
 #[must_use]
 pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
     let mut found = None;
@@ -2832,7 +2839,13 @@ pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
             found = Some(v);
         }
     }
-    found.and_then(|v| logweir_core::guard::failure_reason_for_exit(exit_code, v.trim()))
+    found.and_then(|v| {
+        logweir_core::guard::failure_reason_for_exit(
+            logweir_core::guard::FailureReasonKind::Backup,
+            exit_code,
+            v.trim(),
+        )
+    })
 }
 
 /// Whether an exit-4 run left a payload without its sidecar.

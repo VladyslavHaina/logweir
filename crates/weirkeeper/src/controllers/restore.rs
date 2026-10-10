@@ -333,11 +333,26 @@ pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 /// **PROD-15.1 review M4.** The runner's one line about a creation step that
 /// stopped (`logweir::drill::phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX`),
 /// printed with `failure-reason=TargetTopicAppeared` or `CreatedTopicsLeft` on
-/// exit 1.
-pub const TARGET_TOPICS_APPEARED_KEY_PREFIX: &str = "target-topics-appeared=";
+/// exit 1. ONE definition for the writer and this reader:
+/// `logweir_core::creation_stop`.
+pub use logweir_core::creation_stop::LINE_PREFIX as TARGET_TOPICS_APPEARED_KEY_PREFIX;
 
 /// The most names one list of `status.targetTopicsAppeared` carries.
-pub const TARGET_TOPICS_APPEARED_MAX_NAMES: usize = 100;
+pub use logweir_core::creation_stop::MAX_NAMES as TARGET_TOPICS_APPEARED_MAX_NAMES;
+
+/// **PROD-15.1 review 2, L7: how much of the pod log the terminal read asks
+/// for.** `tailLines` on the `pods/log` request: every key this reconciler
+/// reads is in the last [`backup::KEY_SCAN_TAIL_LINES`] NON-EMPTY lines, and
+/// this many raw lines leave room for blank ones between them.
+///
+/// WHAT IT BOUNDS: the number of lines read. WHAT IT DOES NOT: the length of
+/// one line, which the API cannot bound without cutting the END of the log
+/// (`limitBytes` keeps the first bytes of the tail, and the keys are last).
+/// The one line this reconciler parses as JSON is therefore refused over
+/// `logweir_core::creation_stop::MAX_VALUE_BYTES` BEFORE it is parsed.
+pub const TERMINAL_LOG_TAIL_LINES: i64 = 256;
+
+const _: () = assert!(TERMINAL_LOG_TAIL_LINES as usize >= 16 * backup::KEY_SCAN_TAIL_LINES);
 
 /// What every surface says about a topic a stopped creation step created and
 /// left — the runner's own sentence, from the one place both read.
@@ -6186,61 +6201,135 @@ pub fn finished_status_patch(
     json!({ "status": Value::Object(status) })
 }
 
-/// **PROD-15.1 review M4.** The stopped-creation line, scanned by NAME out
-/// of the same bounded tail as every other key — the LAST occurrence — and
-/// FILTERED: only the two lists, only names a broker accepts, at most
-/// [`TARGET_TOPICS_APPEARED_MAX_NAMES`] each, so a noisy log cannot put an
-/// arbitrary string on the object. `None` when the line is absent or is not
-/// an object.
+/// The terminal read's `pods/log` parameters: the last
+/// [`TERMINAL_LOG_TAIL_LINES`] lines, and nothing else changed.
 #[must_use]
-pub fn target_topics_appeared(log: &str) -> Option<Value> {
-    let mut raw: Option<&str> = None;
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX) {
-            raw = Some(v);
-        }
+pub fn terminal_log_params() -> LogParams {
+    LogParams {
+        tail_lines: Some(TERMINAL_LOG_TAIL_LINES),
+        ..LogParams::default()
     }
-    let doc: Value = serde_json::from_str(raw?).ok()?;
-    let doc = doc.as_object()?;
+}
+
+/// **PROD-15.1: the closed state of a stopped creation step**, read off a
+/// Restore runner's log: `TargetTopicAppeared` or `CreatedTopicsLeft`, beside
+/// exit 1.
+///
+/// THREE RULES, each to the safer side (review 2, M1):
+///
+/// - **per kind**: only a RESTORE's two states
+///   (`logweir_core::guard::RESTORE_FAILURE_REASONS`), so a line carrying a
+///   backup-only state is nothing here;
+/// - **paired with the code**: exit 1 only;
+/// - **held to its place**: `failure-reason=` must be the LAST non-empty line
+///   of the log, which is where `logweir::drill::print_creation_stop_to`
+///   prints it. A line of the same shape earlier in the log is text something
+///   else produced, and is not read.
+///
+/// **What the place rule does and does not prove.** It refuses a key line
+/// that sits anywhere but last. It CANNOT tell the runner's own last line from
+/// text the runner was made to print last: stdout and stderr reach the pod
+/// log as one stream whose order is not guaranteed, and a runner built before
+/// `logweir::exit::one_line` prints an error's text raw. With such a runner
+/// an exit-1 error that ENDS with a plan's string can end the log with a
+/// forged pair. This build's runner escapes every line break in what it
+/// prints, which is the fix that carries the weight; for an older runner
+/// image the names are shown as its log gives them (`docs/kubernetes.md`).
+#[must_use]
+pub fn creation_stop_state(exit_code: i32, log: &str) -> Option<&'static str> {
+    let tail = backup::tail_lines(log);
+    let value = tail
+        .last()?
+        .strip_prefix(logweir_core::guard::FAILURE_REASON_PREFIX)?;
+    logweir_core::guard::failure_reason_for_exit(
+        logweir_core::guard::FailureReasonKind::Restore,
+        exit_code,
+        value.trim(),
+    )
+}
+
+/// **PROD-15.1: the three lists of a stopped creation step**, as THIS
+/// Restore may show them. `None` unless every one of these holds (review 2,
+/// M1, M2, L3, L7):
+///
+/// - the run's last non-empty log line is its closed state
+///   ([`creation_stop_state`]) and the line BEFORE it is
+///   `target-topics-appeared=`: the pair, in the order and the place the
+///   runner prints it, and nowhere else in the log;
+/// - the line's value is no longer than a genuine one and is a JSON object
+///   (`logweir_core::creation_stop::CreationStopLists::parse_value`, which
+///   refuses a longer value before parsing it and keeps only the three
+///   lists, only names a broker accepts, at most 100 each, with counts);
+/// - **each name is a mapped target of THIS Restore's plan** (`mapped`,
+///   [`topic_mapping`]'s new names). A restore can only have created, lost a
+///   race over, or asked for a name its plan maps, so any other name is not
+///   this run's to speak of and is dropped; a count is held to the number of
+///   names the plan maps;
+/// - something remains. A block with no name left is dropped whole.
+#[must_use]
+pub fn creation_stop_lists(
+    exit_code: i32,
+    log: &str,
+    mapped: &[String],
+) -> Option<logweir_core::creation_stop::CreationStopLists> {
+    use logweir_core::creation_stop::CreationStopLists;
+    creation_stop_state(exit_code, log)?;
+    let tail = backup::tail_lines(log);
+    let line = tail.len().checked_sub(2).and_then(|i| tail.get(i))?;
+    let lists =
+        CreationStopLists::parse_value(line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX)?)?;
+    let keep = |name: &str| mapped.iter().any(|m| m == name);
+    let held = CreationStopLists {
+        appeared: lists.appeared.held_to(keep, mapped.len()),
+        left: lists.left.held_to(keep, mapped.len()),
+        unconfirmed: lists.unconfirmed.held_to(keep, mapped.len()),
+        unconfirmed_seen: lists.unconfirmed_seen,
+    };
+    (!held.is_empty()).then_some(held)
+}
+
+/// `status.targetTopicsAppeared` for `lists`: the three lists, a count beside
+/// each, and `unconfirmedSeen` only beside an unconfirmed name.
+#[must_use]
+pub fn creation_stop_status(lists: &logweir_core::creation_stop::CreationStopLists) -> Value {
     let mut out = serde_json::Map::new();
-    for key in ["appeared", "left"] {
-        let names: Vec<&str> = doc
-            .get(key)
-            .and_then(Value::as_array)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|n| logweir_core::guard::topic_name_is_kafka_legal(n))
-                    .take(TARGET_TOPICS_APPEARED_MAX_NAMES)
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(key.to_string(), json!(names));
+    out.insert("appeared".into(), json!(lists.appeared.names));
+    out.insert("left".into(), json!(lists.left.names));
+    out.insert("unconfirmed".into(), json!(lists.unconfirmed.names));
+    out.insert("appearedCount".into(), json!(lists.appeared.count));
+    out.insert("leftCount".into(), json!(lists.left.count));
+    out.insert("unconfirmedCount".into(), json!(lists.unconfirmed.count));
+    if !lists.unconfirmed.is_empty() {
+        out.insert("unconfirmedSeen".into(), json!(lists.unconfirmed_seen));
     }
-    Some(Value::Object(out))
+    Value::Object(out)
 }
 
 /// **PROD-15.1 review M4.** The terminal patch of a run whose creation step
-/// stopped: `status.targetTopicsAppeared` carries the two lists, and the
-/// `Failed` condition's message says, in words, which names appeared and
-/// which topics this run created and LEFT — so the operator reads it on the
-/// object and not in a pod log that is garbage-collected with the Job.
-/// Nothing was deleted, and the message says what to do with what was left.
+/// stopped: `status.targetTopicsAppeared` carries the three lists with their
+/// counts, and the `Failed` condition's message says, in words, which names
+/// appeared, which topics this run created and LEFT, and which it asked for
+/// and cannot account for — so the operator reads it on the object and not
+/// in a pod log that is garbage-collected with the Job. Nothing was deleted,
+/// and the message says what to do with each.
+///
+/// `status.newTopics` becomes exactly `left` (review 2, L6): "the topics this
+/// run created" is what its own `CreateTopics` answers say, never a mapped
+/// name someone else created or one it cannot account for.
 #[must_use]
-pub fn with_target_topics_appeared(mut patch: Value, race: &Value) -> Value {
-    let list = |key: &str| -> Option<String> {
-        race.get(key)
-            .and_then(Value::as_array)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .filter(|s| !s.is_empty())
+pub fn with_target_topics_appeared(
+    mut patch: Value,
+    lists: &logweir_core::creation_stop::CreationStopLists,
+) -> Value {
+    use logweir_core::creation_stop::{and_more, NameList};
+    let named = |list: &NameList| -> String {
+        let names = list
+            .names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{names}{}", and_more(list.more()))
     };
     // The closed state the runner named, as `status.exitReason` already
     // carries it: the words open with it so a reader of the condition alone
@@ -6251,21 +6340,87 @@ pub fn with_target_topics_appeared(mut patch: Value, race: &Value) -> Value {
         .unwrap_or(logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT)
         .to_string();
     let mut words = format!("; the creation step stopped ({state})");
-    if let Some(appeared) = list("appeared") {
+    if !lists.appeared.is_empty() {
         words.push_str(&format!(
-            ": mapped target topic(s) {appeared} were created by someone else after phase 0 \
-             proved them absent, and nothing was written into them"
+            ": mapped target topic(s) {} were created by someone else after phase 0 proved \
+             them absent, and nothing was written into them",
+            named(&lists.appeared)
         ));
     }
-    match list("left") {
-        Some(left) => words.push_str(&format!(
-            "; {left}: {LEFT_TOPIC_SENTENCE} (Logweir never deletes a topic under a name it may \
-             not own)"
-        )),
-        None => words.push_str("; this restore created no topic"),
+    if !lists.left.is_empty() {
+        words.push_str(&format!(
+            "; {}: {LEFT_TOPIC_SENTENCE} (Logweir never deletes a topic under a name it may \
+             not own)",
+            named(&lists.left)
+        ));
+    } else if lists.unconfirmed.is_empty() {
+        words.push_str("; this restore created no topic");
+    } else {
+        words.push_str("; no CreateTopics answer says this restore created a topic");
+    }
+    if !lists.unconfirmed.is_empty() {
+        words.push_str(&format!(
+            "; {}: {} (Logweir deletes none of them)",
+            named(&lists.unconfirmed),
+            lists.unconfirmed_sentence()
+        ));
+    }
+    if lists.appeared.more() + lists.left.more() + lists.unconfirmed.more() > 0 {
+        words.push_str(&format!(
+            "; a list shows its first {TARGET_TOPICS_APPEARED_MAX_NAMES} names, each name is one \
+             of this restore's mapped target topics, and the runner's log names every one"
+        ));
     }
     if let Some(status) = patch.get_mut("status").and_then(Value::as_object_mut) {
-        status.insert("targetTopicsAppeared".to_string(), race.clone());
+        status.insert(
+            "targetTopicsAppeared".to_string(),
+            creation_stop_status(lists),
+        );
+        // L6: what this run CREATED is `left`, not every mapped name.
+        status.insert("newTopics".to_string(), json!(lists.left.names));
+        // The scalar the REASON column reads stays the terminal condition's
+        // (review finding M2): this only adds words to its message.
+        let reason = status
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!(reason_for_exit(1)));
+        status.insert("reason".to_string(), reason);
+        if let Some(message) = status
+            .get_mut("conditions")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.first_mut())
+            .and_then(|c| c.get_mut("message"))
+        {
+            if let Some(text) = message.as_str() {
+                *message = json!(format!("{text}{words}"));
+            }
+        }
+    }
+    patch
+}
+
+/// The terminal patch of a run that NAMED a stopped creation step
+/// (`status.exitReason`) and whose lists this Restore cannot show: the line
+/// before the reason was absent, longer than a genuine one, not an object,
+/// or named nothing this Restore's plan maps. The condition says so and says
+/// what to do, and `status.newTopics` is OMITTED: with no list, which of the
+/// mapped names the run created is not known, and the plan's names are not
+/// an answer (review 2, L6).
+#[must_use]
+pub fn with_unread_creation_stop(mut patch: Value) -> Value {
+    let state = patch
+        .pointer("/status/exitReason")
+        .and_then(Value::as_str)
+        .unwrap_or(logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT)
+        .to_string();
+    let words = format!(
+        "; the creation step stopped ({state}) and the runner's list of topics could not be \
+         read, so this restore may have left empty topics under its mapped target names: list \
+         the target cluster for them, and check what each holds and who writes to it before \
+         you remove it (Logweir never deletes a topic under a name it may not own)"
+    );
+    if let Some(status) = patch.get_mut("status").and_then(Value::as_object_mut) {
+        status.remove("newTopics");
         // The scalar the REASON column reads stays the terminal condition's
         // (review finding M2): this only adds words to its message.
         let reason = status
@@ -8053,30 +8208,22 @@ async fn reconcile_restore_inner(
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     let log = pods
-        .logs(&pod_name, &LogParams::default())
+        .logs(&pod_name, &terminal_log_params())
         .await
         .map_err(RestoreError::Api)?;
     let keys = restore_evidence_keys(&log);
+    // PROD-15.1 review M4: an exit-1 run whose LAST line names a state on the
+    // Restore's closed `failure-reason=` list (a stopped creation step) says
+    // so on `status.exitReason`; every other exit 1 keeps the wire reason.
+    let creation_stop = creation_stop_state(exit_code, &log);
     let refusal = if exit_code == 3 {
         Some(
             backup::refusal_state(&log)
                 .unwrap_or_else(|| TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON.to_string()),
         )
     } else {
-        // PROD-15.1 review M4: an exit-1 run that named a state on the closed
-        // `failure-reason=` list (a lost creation race) says so on
-        // `status.exitReason`; every other exit 1 keeps the wire reason.
-        backup::failure_state(exit_code, &log).map(str::to_string)
+        creation_stop.map(str::to_string)
     };
-    let race = matches!(
-        refusal.as_deref(),
-        Some(
-            logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED
-                | logweir_core::guard::TERMINAL_STATE_CREATED_TOPICS_LEFT
-        )
-    )
-    .then(|| target_topics_appeared(&log))
-    .flatten();
     // THE SCORECARD, THROUGH THE READ-ONLY ARCHIVE HANDLE. AWAITED: the real
     // oracle's `Store` read happens inside one `spawn_blocking` (interface
     // I13, see `ScorecardOracle`), so this is the one point in the reconcile
@@ -8139,6 +8286,16 @@ async fn reconcile_restore_inner(
         ) => None,
     };
     let topics = topic_mapping(restore);
+    // The stopped creation step's lists, held to THIS Restore's mapped
+    // target names (`topics`' new names): a name the plan does not map is
+    // not this run's to speak of.
+    let race = creation_stop.and_then(|_| {
+        creation_stop_lists(
+            exit_code,
+            &log,
+            topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
+        )
+    });
     // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
     // out of the same bounded tail as the evidence keys.
     let preflight = topic_preflight(&log);
@@ -8178,9 +8335,12 @@ async fn reconcile_restore_inner(
         preflight.as_ref(),
         now,
     );
-    let finished = match race.as_ref() {
-        Some(race) => with_target_topics_appeared(finished, race),
-        None => finished,
+    let finished = match (creation_stop, race.as_ref()) {
+        (_, Some(lists)) => with_target_topics_appeared(finished, lists),
+        // The state is named and no list can be shown: say so, and do not
+        // call the plan's names "created".
+        (Some(_), None) => with_unread_creation_stop(finished),
+        (None, None) => finished,
     };
     let terminal = diagnostics::apply_finished(
         finished,

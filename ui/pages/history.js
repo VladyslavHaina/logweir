@@ -51,6 +51,8 @@ import {
   planTimeBasis,
   runPhaseBadge,
   LEFT_TOPIC_SENTENCE,
+  UNCONFIRMED_TOPIC_SENTENCE,
+  UNCONFIRMED_UNLISTED_TOPIC_SENTENCE,
   QUEUED_RUN_SENTENCE,
   replace,
   restorePointLink,
@@ -438,12 +440,25 @@ export function signedTimeBasisText(timeBasis) {
       "the archive manifest's segment bounds show";
 }
 
+/** How many names a list of a stopped creation step has BEYOND the ones it
+ *  shows: its count (`<list>Count`, how many the runner named) less its
+ *  length. 0 when the status carries no count, a count that is not a whole
+ *  number, or one smaller than the list. */
+export function creationStopMore(stopped, key) {
+  const list = Array.isArray(stopped[key]) ? stopped[key] : [];
+  const count = stopped[key + "Count"];
+  return Number.isInteger(count) && count > list.length ? count - list.length : 0;
+}
+
 /** What a Restore whose creation step stopped left on the target cluster
  *  (PROD-15.1), from `status.targetTopicsAppeared`: the mapped names someone
- *  else created while the restore was admitted (never written to), and EVERY
- *  topic this restore created and left, empty, with what to do about it.
- *  Logweir deletes none of them, so the operator must be told they are there.
- *  Empty when the status carries no such block. */
+ *  else created while the restore was admitted (never written to), EVERY
+ *  topic this restore created and left, empty, with what to do about it, and
+ *  every name it asked for and CANNOT ACCOUNT FOR, with its own sentence
+ *  (review 2, M2) -- never called this restore's. A list the 100-name bound
+ *  cut says how many more there are. Logweir deletes none of them, so the
+ *  operator must be told they are there. Empty when the status carries no
+ *  such block. Every name is escaped, in all three lists. */
 export function creationStoppedWarning(stopped) {
   if (stopped === null || stopped === undefined || typeof stopped !== "object") {
     return "";
@@ -451,21 +466,51 @@ export function creationStoppedWarning(stopped) {
   const names = (list) => (Array.isArray(list) ? list.filter((n) => typeof n === "string") : []);
   const appeared = names(stopped.appeared);
   const left = names(stopped.left);
+  const unconfirmed = names(stopped.unconfirmed);
+  const more = (key) => {
+    const n = creationStopMore(stopped, key);
+    return n === 0 ? "" : " and " + n + " more";
+  };
+  const moreItem = (key) => {
+    const n = creationStopMore(stopped, key);
+    return n === 0 ? "" : "<li>" + esc("and " + n + " more") + "</li>";
+  };
+  const cut = ["appeared", "left", "unconfirmed"].some((key) => creationStopMore(stopped, key) > 0);
+  // "exists now" only when the status says the runner saw the names; anything
+  // else, an absent flag included, is the weaker sentence.
+  const unconfirmedSentence = stopped.unconfirmedSeen === true
+    ? UNCONFIRMED_TOPIC_SENTENCE
+    : UNCONFIRMED_UNLISTED_TOPIC_SENTENCE;
   return "<div class=\"caveat\" id=\"restore-creation-stopped\">" +
     "<p>" + esc("This restore stopped while creating its target topics, before anything " +
       "was restored.") + "</p>" +
     (appeared.length === 0
       ? ""
-      : "<p id=\"restore-topics-appeared\">" + esc(appeared.join(", ") + ": created by " +
-        "someone else after this restore was admitted. The restore wrote nothing into " +
-        (appeared.length === 1 ? "it." : "them.")) + "</p>") +
+      : "<p id=\"restore-topics-appeared\">" + esc(appeared.join(", ") + more("appeared") +
+        ": created by someone else after this restore was admitted. The restore wrote " +
+        "nothing into " + (appeared.length === 1 && more("appeared") === "" ? "it." : "them.")) +
+        "</p>") +
     (left.length === 0
-      ? "<p id=\"restore-topics-left\">" + esc("This restore created no topic.") + "</p>"
+      ? "<p id=\"restore-topics-left\">" + esc(unconfirmed.length === 0
+        ? "This restore created no topic."
+        : "No CreateTopics answer says this restore created a topic.") + "</p>"
       : "<ul id=\"restore-topics-left\">" + left.map((name) =>
         "<li><strong>" + esc(name) + "</strong>" + esc(": " + LEFT_TOPIC_SENTENCE + ".") +
-        "</li>").join("") + "</ul>" +
-        "<p>" + esc("Logweir never deletes a topic under a name it may not own: a producer " +
-          "could write to it between any check and the delete.") + "</p>") +
+        "</li>").join("") + moreItem("left") + "</ul>") +
+    (unconfirmed.length === 0
+      ? ""
+      : "<ul id=\"restore-topics-unconfirmed\">" + unconfirmed.map((name) =>
+        "<li><strong>" + esc(name) + "</strong>" + esc(": " + unconfirmedSentence + ".") +
+        "</li>").join("") + moreItem("unconfirmed") + "</ul>") +
+    (left.length === 0 && unconfirmed.length === 0
+      ? ""
+      : "<p>" + esc("Logweir never deletes a topic under a name it may not own: a producer " +
+        "could write to it between any check and the delete.") + "</p>") +
+    (cut
+      ? "<p id=\"restore-topics-cut\">" + esc("A list shows its first 100 names. Each name " +
+        "is one of this restore's mapped target topics, and the runner's log names every " +
+        "one.") + "</p>"
+      : "") +
     "</div>";
 }
 
@@ -498,9 +543,11 @@ export function renderRestoreDetail(object, operation) {
   const newTopics = Array.isArray(status.newTopics) ? status.newTopics : [];
   const oldTopics = Array.isArray(status.oldTopics) ? status.oldTopics : [];
   const stopped = status.targetTopicsAppeared;
-  const createdTopics = stopped !== null && stopped !== undefined && typeof stopped === "object"
+  const isStopped = stopped !== null && stopped !== undefined && typeof stopped === "object";
+  const createdTopics = isStopped
     ? (Array.isArray(stopped.left) ? stopped.left.filter((n) => typeof n === "string") : [])
     : newTopics;
+  const stoppedLeftMore = isStopped ? creationStopMore(stopped, "left") : 0;
   // THE SCORECARD'S FACTS ARE ITS CLAIM UNTIL IT VERIFIED -- by the same rule
   // the verdict badge uses (`validVerification`).
   const verified = validVerification(status) !== null;
@@ -606,11 +653,16 @@ export function renderRestoreDetail(object, operation) {
     ]) +
     "<h3>Topics</h3>" +
     facts([
-      // PROD-15.1: `status.newTopics` is the PLAN's mapped names, derived and
-      // never observed. For a run whose creation step stopped, the row says
-      // what the restore actually created -- the topics it left -- so a name
-      // someone else created is never listed as this restore's.
-      ["new topics", createdTopics.length === 0 ? cell(null) : esc(createdTopics.join(", "))],
+      // PROD-15.1: for a run whose creation step stopped, the row says what
+      // the restore actually created -- the topics it left -- so a name
+      // someone else created, or one the restore cannot account for, is never
+      // listed as this restore's. (This controller writes the same list into
+      // `status.newTopics`; an older one wrote the plan's mapped names.)
+      ["new topics", createdTopics.length === 0
+        ? cell(null)
+        : esc(createdTopics.join(", ") + (stoppedLeftMore === 0
+          ? ""
+          : " and " + stoppedLeftMore + " more"))],
       ["old topics -- written to by nothing, in any tag",
         oldTopics.length === 0 ? cell(null) : esc(oldTopics.join(", "))],
     ]) +

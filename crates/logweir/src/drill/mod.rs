@@ -1063,14 +1063,18 @@ pub fn print_deprecation_to<W: std::io::Write>(
 /// what was found, the object and its digest, the reason, and the notice's
 /// kind. A function rather than a `format!` at each call site so the line a
 /// test asserts and the line an operator reads are the same bytes.
+///
+/// ONE LINE whatever the archive holds (PROD-15.1 review 2, M1's sweep): the
+/// backup id is the plan's and the key and reason are the store's, and none
+/// of them may start a line of the pod log (`crate::exit::one_line`).
 pub fn archive_notice_line(
     backup_id: &str,
     notice: &logweir_core::engine::ArchiveNotice,
 ) -> String {
-    format!(
+    crate::exit::one_line(&format!(
         "warning: backup set {backup_id}: {}: {} ({}): {} [{}]",
         notice.message, notice.key, notice.sha256, notice.reason, notice.kind
-    )
+    ))
 }
 
 /// Tells the operator every notice `DataEngine::describe_with_notices`
@@ -1272,7 +1276,13 @@ fn report_with(
             // field extractor) reads the event object and not its span. The
             // identity has to be on the line that survives both.
             tracing::error!(run_id = %run_id, error = %e, "drill failed");
-            eprintln!("{e}");
+            // ON ONE LINE (PROD-15.1 review 2, M1). The text can echo a
+            // string this process did not write (a plan's `source.backup`, a
+            // broker's error), and the pod log has no stream selector: a line
+            // break in it would let that string START a line a controller
+            // reads by key. The structured event above is JSON and already
+            // escapes it.
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             failure_message = Some(e.to_string());
         }
     }
@@ -1418,18 +1428,16 @@ fn exiting(
     }
     // **PROD-15.1 review M4: the stopped creation step, named.** Exit 1 like
     // any operational failure, but the controller lifts `failure-reason=` (the
-    // RECEIPT-DUP mechanism, `logweir_core::guard::FAILURE_REASONS`) onto
-    // `status.exitReason`, and the one bounded line before it onto
-    // `status.targetTopicsAppeared` — the names that appeared, and the topics
-    // this run created and LEFT (nothing is deleted). The reason is the LAST
-    // line.
+    // RECEIPT-DUP mechanism, `logweir_core::guard::RESTORE_FAILURE_REASONS`)
+    // onto `status.exitReason`, and the one bounded line before it onto
+    // `status.targetTopicsAppeared` — the names that appeared, the topics
+    // this run created and LEFT (nothing is deleted), and the names it asked
+    // for and cannot account for. The reason is the LAST line
+    // (`print_creation_stop_to`).
     if let (ExitCode::Operational, Some(race)) = (code, race) {
-        println!(
-            "{}{}",
-            phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX,
-            race.status_line_value()
-        );
-        println!("{}", logweir_core::guard::failure_reason_line(race.reason));
+        // A closed stdout is not a reason to change the exit code, which
+        // GC11 has already decided.
+        let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
@@ -1517,6 +1525,37 @@ fn exiting(
         }
     }
     code
+}
+
+/// **The stopped creation step's TWO stdout lines, through a writer seam**
+/// (PROD-15.1 review 2, L1), for the reason `crate::exit::
+/// print_refusal_reason_to` has one: these two lines carry everything a
+/// controller learns about the stop, and a `println!` nobody can observe is a
+/// contract nothing pins.
+///
+/// EXACTLY these bytes, in this order, each ended by one newline:
+///
+/// ```text
+/// target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],…}
+/// failure-reason=<TargetTopicAppeared|CreatedTopicsLeft>
+/// ```
+///
+/// `failure-reason=` is LAST: the controller lifts the pair only when it is
+/// the log's last non-empty line with the lists on the line before it, so
+/// nothing may be printed between them or after them on exit 1.
+///
+/// # Errors
+/// The writer's.
+pub fn print_creation_stop_to<W: std::io::Write>(
+    w: &mut W,
+    stop: &phase0_admit::CreationStop,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", stop.lists().line())?;
+    writeln!(
+        w,
+        "{}",
+        logweir_core::guard::failure_reason_line(stop.reason)
+    )
 }
 
 /// The scorecard file is written by `write_scorecard_artifact` from the bytes
@@ -4590,6 +4629,99 @@ fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::score
     sample.partitions = u32::try_from(c.partitions.len()).unwrap_or(u32::MAX);
     let topics: BTreeSet<&str> = c.partitions.iter().map(|p| p.topic.as_str()).collect();
     sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
+}
+
+// =======================================================================
+// PROD-15.1 review 2, M1 and L1 — what this process puts at the start of a
+// line of its pod log
+// =======================================================================
+
+#[cfg(test)]
+mod pod_log_lines_pin {
+    /// The text of the top-level `fn <name>(` in `src`, up to its closing
+    /// brace at column 0.
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("\nfn {name}("))
+            .unwrap_or_else(|| panic!("no top-level `fn {name}(`"));
+        let rest = &src[start + 1..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` has no closing brace at column 0"));
+        &rest[..end + 2]
+    }
+
+    /// **The runner never starts a line with someone else's text.** An error's
+    /// text can echo a plan's string or a broker's, and `report_with` is the
+    /// one place this command prints it: through `crate::exit::one_line`,
+    /// which leaves no line break in it. The behaviour is
+    /// `exit::one_line_tests` and, through the real binary,
+    /// `tests/original_name_cli.rs::a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`;
+    /// this pins the call site, and that no raw print of an error is left in
+    /// either runner. KILLS: printing the error raw again (the review's
+    /// forgery: two key lines inside a plan string).
+    #[test]
+    fn an_errors_text_reaches_stderr_only_on_one_line() {
+        // Built from two halves so this row's own source is not a match.
+        let raw = concat!("eprintln!(\"{", "e}\")");
+        let drill = include_str!("mod.rs");
+        let report = fn_body(drill, "report_with");
+        assert!(
+            report.contains("eprintln!(\"{}\", crate::exit::one_line(&e.to_string()));"),
+            "report_with prints the error through one_line"
+        );
+        assert_eq!(drill.matches(raw).count(), 0, "no raw print of an error");
+        // `backup run`'s twin: a controller reads that pod log by key too.
+        let backup = include_str!("../backup/mod.rs");
+        assert!(backup.contains("eprintln!(\"{}\", crate::exit::one_line(&e.to_string()));"));
+        assert_eq!(backup.matches(raw).count(), 0, "no raw print of an error");
+    }
+
+    /// **Review 2, L1: `exiting` prints the stopped creation step's two lines
+    /// through the seam, on exit 1 only, and nothing else in this file prints
+    /// a `failure-reason=`.** The bytes are pinned by
+    /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
+    /// this pins that the terminal path calls it. KILLS: `exiting` no longer
+    /// printing the pair (the Restore would be a generic `Failed`, with the
+    /// left topics named nowhere durable); a second printer.
+    #[test]
+    fn exiting_prints_the_stopped_creation_step_through_its_seam() {
+        let drill = include_str!("mod.rs");
+        let production = drill
+            .split("\n#[cfg(test)]\nmod ")
+            .next()
+            .expect("the production half");
+        let exiting = fn_body(production, "exiting");
+        let call = "let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);";
+        let guard = "if let (ExitCode::Operational, Some(race)) = (code, race) {";
+        let at = exiting.find(guard).expect("on exit 1, with a stop");
+        assert!(
+            exiting[at..]
+                .trim_start_matches(guard)
+                .trim_start()
+                .starts_with("// A closed stdout"),
+            "the guard's body is the seam call"
+        );
+        assert_eq!(exiting.matches(call).count(), 1);
+        // The definition is generic (`…_to<W: …>(`), so this counts calls.
+        assert_eq!(
+            production.matches("print_creation_stop_to(").count(),
+            1,
+            "called from exactly one place"
+        );
+        // One printer of the reason in this command, inside the seam.
+        assert_eq!(production.matches("failure_reason_line(").count(), 1);
+        let seam = production
+            .find("pub fn print_creation_stop_to<W: std::io::Write>(")
+            .expect("the seam");
+        let seam = &production[seam..];
+        let seam = &seam[..seam.find("\n}\n").expect("the seam ends")];
+        let lists = seam.find("stop.lists().line()").expect("the lists' line");
+        let reason = seam
+            .find("failure_reason_line(stop.reason)")
+            .expect("the reason");
+        assert!(reason > lists, "the reason is printed LAST");
+    }
 }
 
 #[cfg(test)]
