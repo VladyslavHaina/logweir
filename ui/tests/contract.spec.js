@@ -225,6 +225,10 @@ const CONSOLE_FIXTURES = [
   ["catalog-signers.json", "SignerPageResponse"],
   ["retention-policy-enforce.json", "RetentionPolicyResponse"],
   ["retention-policies-list.json", "RetentionPolicyList"],
+  // FX-22: the product API's answer for the two policies of
+  // `fixtures/retention-held-back.json`, held to it by
+  // `logweir-api/tests/retention_accounting.rs`.
+  ["retention-policies-held-back.json", "RetentionPolicyList"],
   ["trust-policy.json", "TrustPolicyResponse"],
   ["trust-policies-list.json", "TrustPolicyList"],
 
@@ -237,7 +241,7 @@ test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 72,
+  assert.equal(CONSOLE_FIXTURES.length, 73,
     "the console fixture set covers PLAT-17.1, D1, D2 and D3");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");

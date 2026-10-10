@@ -2171,6 +2171,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a catalog restore's preflight judges the archive as the runner will",
             "ManifestSuperseded",
         ),
+        // FX-22 (2026-10-09, item 58): a RetentionPolicy's status says what
+        // the per-run ceiling held back and never counts it as kept; the
+        // field an operator reads the held-back count from.
+        (
+            "a retention status says what the per-run ceiling held back",
+            "truncatedByCap",
+        ),
     ];
     assert_eq!(
         items.len(),

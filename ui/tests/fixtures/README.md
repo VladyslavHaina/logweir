@@ -278,3 +278,39 @@ entries, which `crates/logweir-api/tests/d3_reads.rs`
 (`the_point_view_publishes_each_topics_schema_dependency`) seeds and compares; and
 `schema-dependency.spec.js` renders `pointTopics` in the catalog page and the restore wizard. A
 change on any side fails the side that changed.
+
+## The held-back retention chain (`retention-held-back.json`, `console/retention-policies-held-back.json`, FX-22)
+
+Two `Report` `RetentionPolicy` objects over the same 371 points, `keep-300` and `keep-10`. PoC
+batch 3 read "321 kept, 50 candidate(s)" on both; they now read 300 kept / 50 in the plan / 21
+held back by the per-run ceiling, and 10 / 50 / 311. **Neither file is written by hand, and
+three sides read them:**
+
+- `retention-held-back.json` is the two custom resources **as the reconciler leaves them**.
+  `crates/weirkeeper/tests/retention_policy_controller.rs`
+  `fx22_the_shared_fixture_is_what_the_controller_writes` runs the reconcile over a 371-entry
+  catalog view and fails when the checked-in file is not its output.
+- `console/retention-policies-held-back.json` is **the product API's answer** for those two
+  objects, served through the real router with the request id pinned.
+  `crates/logweir-api/tests/retention_accounting.rs`
+  `the_api_reads_the_counts_the_controller_wrote` fails when it is not, and `contract.spec.js`
+  holds it to the published schema.
+- `d3.spec.js` renders both: the API's answer in console mode and the custom resources
+  themselves in legacy mode.
+
+Both policies were evaluated over a catalog that says its view is the whole archive
+(`status.truncated: false`, `status.cursor.complete: true`, the two members a real catalog
+writes beside its pages), so both carry `viewIncomplete: false`, and the API's answer carries
+`accounting: "Recorded"` for both. The two hand-kept console answers
+(`console/retention-policy-enforce.json`, `console/retention-policies-list.json`) are of
+statuses an older controller wrote: they carry `accounting: "NotRecorded"` and no counts,
+which is what the API answers for that shape. The member is optional in the schema (default
+`NotRecorded`); `d3.spec.js` deletes it from a copy of the held-back answer to read what a
+build of the API that predates it would send.
+
+Regenerate both, in this order, with:
+
+```
+LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper --test retention_policy_controller fx22_the_shared_fixture
+LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p logweir-api --test retention_accounting
+```
