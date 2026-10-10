@@ -337,7 +337,10 @@ fn backup(backup_id: &str, topics: &[String]) -> Backup {
     let receipt_key = line("receipt-key=").expect("backup run prints receipt-key=");
     let catalog_key = line("catalog-key=");
     let (receipt_bytes, _) = archive_store(backup_id)
-        .get(&receipt_key)
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
     Backup {
@@ -358,7 +361,10 @@ fn both_readers(b: &Backup) -> (Output, Output) {
     let sig = dir.join("receipt.sig");
     std::fs::write(&doc, &b.receipt_bytes).expect("written");
     let (sidecar, _) = archive_store(&b.backup_id)
-        .get(&b.receipt_key.replace(".receipt.json", ".receipt.sig"))
+        .get_capped(
+            &b.receipt_key.replace(".receipt.json", ".receipt.sig"),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the sidecar");
     std::fs::write(&sig, sidecar).expect("written");
     let pubkey = root().join("e2e/fixtures/signed/public.pem");
@@ -492,7 +498,10 @@ fn a_backup_flags_raw_framed_records_with_their_ids() {
     let (doc, sig) = (dir.join("receipt.json"), dir.join("receipt.sig"));
     std::fs::write(&doc, &b.receipt_bytes).unwrap();
     let (sidecar, _) = archive_store(&b.backup_id)
-        .get(&b.receipt_key.replace(".receipt.json", ".receipt.sig"))
+        .get_capped(
+            &b.receipt_key.replace(".receipt.json", ".receipt.sig"),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the sidecar");
     std::fs::write(&sig, sidecar).unwrap();
     let mut rust = Command::new(bin());
@@ -733,7 +742,7 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
         .as_ref()
         .expect("the catalog point was written");
     let (bytes, _) = archive_store(&b.backup_id)
-        .get(key)
+        .get_capped(key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
         .unwrap_or_else(|e| panic!("read {key}: {e}"));
     let record: Value = serde_json::from_slice(&bytes).expect("a record");
     harness::assert_format_at_least(

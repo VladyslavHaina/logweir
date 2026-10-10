@@ -171,7 +171,10 @@ fn a_missing_key_and_a_missing_bucket_are_different_answers() {
     let store = Store::read_only_with(&location(&bucket(), ""), &opts(ROOT_USER, ROOT_PASSWORD))
         .expect("the client builds");
     let err = store
-        .get("logweir/definitely-not-here-d2w2.json")
+        .get_capped(
+            "logweir/definitely-not-here-d2w2.json",
+            logweir_store::caps::SIGNED_DOCUMENT,
+        )
         .expect_err("the key does not exist");
     assert!(
         matches!(err, StoreError::NotFound(_)),

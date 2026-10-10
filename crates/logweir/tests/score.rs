@@ -424,7 +424,10 @@ fn the_stored_bytes_are_the_signed_bytes_and_verify_against_the_signing_key() {
     let signed = logweir::drill::phase8_score::run(&sc, &key.path, &store, None).unwrap();
 
     let (stored, _vid) = store
-        .get(&format!("logweir/drills/{}.json", sc.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", sc.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap();
     assert_eq!(
         stored, signed.bytes,
@@ -443,7 +446,10 @@ fn the_stored_bytes_are_the_signed_bytes_and_verify_against_the_signing_key() {
 
     // And the sidecar that was uploaded is the one returned.
     let (stored_sig, _) = store
-        .get(&format!("logweir/drills/{}.sig", sc.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.sig", sc.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap();
     assert_eq!(stored_sig, serde_json::to_vec(&signed.sidecar).unwrap());
 }
@@ -468,7 +474,10 @@ fn an_existing_key_is_refused_and_the_first_drills_bytes_are_untouched() {
     assert_eq!(ExitCode::from(err), ExitCode::SigningOrLock);
 
     let (stored, _) = store
-        .get(&format!("logweir/drills/{}.json", sc.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", sc.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap();
     assert_eq!(
         stored, first.bytes,
@@ -558,7 +567,10 @@ fn the_signed_bytes_carry_no_unsubstantiated_claim_about_the_upload() {
 
     // Property 2: the stored bytes are still the signed bytes.
     let (stored, _) = store
-        .get(&format!("logweir/drills/{}.json", sc.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", sc.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap();
     assert_eq!(signed.bytes, stored);
     let vk = logweir_evidence::keys::SigningKey::from_pem_file(&key.path)
@@ -924,13 +936,23 @@ fn the_persisted_attestation_is_signed_create_only_and_still_reports_the_failure
         ]
     );
 
-    let (bytes, _) = store.get("logweir/drills/RUN0.teardown.json").unwrap();
+    let (bytes, _) = store
+        .get_capped(
+            "logweir/drills/RUN0.teardown.json",
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(doc["topics_deleted"], serde_json::json!([]));
     assert_eq!(doc["topics_failed"][0][0], "drill-orders");
     assert_eq!(doc["scorecard_sha256"], "sha256:deadbeef");
 
-    let (sig_bytes, _) = store.get("logweir/drills/RUN0.teardown.sig").unwrap();
+    let (sig_bytes, _) = store
+        .get_capped(
+            "logweir/drills/RUN0.teardown.sig",
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .unwrap();
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&sig_bytes).unwrap();
     let vk = logweir_evidence::keys::SigningKey::from_pem_file(&key.path)
         .unwrap()

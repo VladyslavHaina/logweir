@@ -30,9 +30,15 @@ futures.workspace = true
 chrono.workspace = true
 # `StoreError`'s derive.
 thiserror.workspace = true
-# The untyped `serde_json::Value` reads in `segments_in_manifest` and
-# `manifest_facts`: this crate links NO vendored upstream struct.
+# The untyped `serde_json::Value` read in `segments_in_manifest` and the
+# streaming parse in `manifest_facts`: this crate links NO vendored upstream
+# struct.
 serde_json.workspace = true
+# FX-31: the `Visitor` traits behind `manifest_window`, which folds a
+# manifest's window while it parses and never builds a `serde_json::Value`
+# of it. A declaration of a package the graph already resolves (`serde_json`
+# itself depends on it); `tests/deps.rs` lists it.
+serde.workspace = true
 
 [features]
 default = []

@@ -105,13 +105,18 @@ pub fn marker_body(destination_uid: &str) -> Vec<u8> {
 /// The bounded object-store surface one check needs.
 ///
 /// Four methods, each time-bounded by the implementation (the timeout lives on
-/// the handle, in [`StoreOptions::with_request_timeout`], not on the call).
+/// the handle, in [`StoreOptions::with_request_timeout`], not on the call), and
+/// every read SIZE-bounded by the caller (FX-31): a read names its cap from
+/// `logweir_store::caps`, and an object over it is
+/// [`StoreError::TooLarge`], never a read of the whole object.
 pub trait ObjectAccess {
-    /// Read one object whole.
+    /// Read one object whole, and never more than `max_bytes` of it
+    /// (`Store::get_capped`'s two fences).
     ///
     /// # Errors
-    /// [`StoreError`]; `NotFound` is a genuine absence and never a denial.
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError>;
+    /// [`StoreError`]; `NotFound` is a genuine absence and never a denial;
+    /// `TooLarge` is an object over `max_bytes`.
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError>;
 
     /// At most `max` keys under `prefix`, in ascending key order, starting
     /// strictly AFTER `start_after`.
@@ -155,6 +160,7 @@ pub trait ObjectAccess {
 
     /// **FX-7.** [`ObjectAccess::get`], together with the VERSION id the store
     /// answered the read with — `None` for a store that keeps no versions.
+    /// The same `max_bytes` cap (FX-31).
     ///
     /// A PROVIDED method answering `None`, which is the unversioned store's
     /// true answer, so a double that models one needs nothing more. `Store`,
@@ -164,21 +170,26 @@ pub trait ObjectAccess {
     ///
     /// # Errors
     /// As [`ObjectAccess::get`].
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        self.get(key).map(|bytes| (bytes, None))
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        self.get(key, max_bytes).map(|bytes| (bytes, None))
     }
 
     /// **FX-7.** Read ONE VERSION of an object by the id a signed document
-    /// pinned.
+    /// pinned, never more than `max_bytes` of it (FX-31).
     ///
     /// The provided method REFUSES, as [`StoreError::Backend`]: a handle that
     /// cannot read by version must never be taken to have read one, and an
     /// answer with the current bytes would verify exactly the rewrite a pin
-    /// exists to catch (`Store::get_version`'s own argument).
+    /// exists to catch (`Store::get_version_capped`'s own argument).
     ///
     /// # Errors
     /// [`StoreError`]; `NotFound` when the store retains no such version.
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        let _ = max_bytes;
         Err(StoreError::Backend(format!(
             "this handle does not read objects by version ({key}?versionId={version})"
         )))
@@ -186,16 +197,20 @@ pub trait ObjectAccess {
 }
 
 impl ObjectAccess for Store {
-    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        Store::get(self, key).map(|(bytes, _)| bytes)
+    fn get(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        Store::get_capped(self, key, max_bytes).map(|(bytes, _)| bytes)
     }
 
-    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        Store::get(self, key)
+    fn get_with_version(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        Store::get_capped(self, key, max_bytes)
     }
 
-    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
-        Store::get_version(self, key, version).map(|(bytes, _)| bytes)
+    fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        Store::get_version_capped(self, key, version, max_bytes).map(|(bytes, _)| bytes)
     }
 
     fn list_page(

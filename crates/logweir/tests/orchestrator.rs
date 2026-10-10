@@ -286,7 +286,10 @@ fn signing_pub(f: &fixtures::OrchestratorFixture) -> VerifyingKey {
 fn scorecard_from_store(f: &fixtures::OrchestratorFixture) -> Vec<u8> {
     f.ctx
         .store
-        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("phase 8 uploaded the scorecard")
         .0
 }
@@ -366,13 +369,19 @@ fn rotating_the_file_does_not_change_any_execution_evidence_signer() {
         let bytes = f
             .ctx
             .store
-            .get(&format!("logweir/drills/{}{stem}.json", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}{stem}.json", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap()
             .0;
         let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
             &f.ctx
                 .store
-                .get(&format!("logweir/drills/{}{stem}.sig", f.run_id))
+                .get_capped(
+                    &format!("logweir/drills/{}{stem}.sig", f.run_id),
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+                )
                 .unwrap()
                 .0,
         )
@@ -403,13 +412,19 @@ fn an_external_ed25519_key_still_signs_independently_verifiable_evidence() {
         let bytes = f
             .ctx
             .store
-            .get(&format!("logweir/drills/{}{stem}.json", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}{stem}.json", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap()
             .0;
         let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
             &f.ctx
                 .store
-                .get(&format!("logweir/drills/{}{stem}.sig", f.run_id))
+                .get_capped(
+                    &format!("logweir/drills/{}{stem}.sig", f.run_id),
+                    logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+                )
                 .unwrap()
                 .0,
         )
@@ -456,7 +471,10 @@ fn a_blocked_preflight_exits_2_with_a_signed_scorecard_and_never_reaches_phase_6
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
         &f.ctx
             .store
-            .get(&format!("logweir/drills/{}.sig", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.sig", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap()
             .0,
     )
@@ -792,13 +810,19 @@ fn a_second_signed_receipt_publishes_the_post_put_readback() {
     let receipt_bytes = f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.receipt.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.receipt.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the post-put receipt must be uploaded beside the scorecard")
         .0;
     let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
         &f.ctx
             .store
-            .get(&format!("logweir/drills/{}.receipt.sig", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.receipt.sig", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .expect("the receipt must be signed")
             .0,
     )
@@ -1217,7 +1241,10 @@ fn teardown_deletes_the_mapped_scratch_topics_and_attests_them_against_the_signe
     let bytes = f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.teardown.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.teardown.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("phase 9 must persist its attestation")
         .0;
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1459,7 +1486,10 @@ fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_d
     let att = f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.teardown.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.teardown.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("a teardown that happened must be attested")
         .0;
     let v: serde_json::Value = serde_json::from_slice(&att).unwrap();
@@ -1485,7 +1515,10 @@ fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_d
     assert!(
         b.ctx
             .store
-            .get(&format!("logweir/drills/{}.teardown.json", b.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.teardown.json", b.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
             .is_err(),
         "no teardown ran, so no teardown may be attested"
     );
@@ -1501,7 +1534,10 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     let r: logweir::drill::phase8_score::PutReceipt = serde_json::from_slice(
         &f.ctx
             .store
-            .get(&format!("logweir/drills/{}.receipt.json", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.receipt.json", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap()
             .0,
     )
@@ -1509,12 +1545,19 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     // The key must name an object that EXISTS and holds the bytes the receipt
     // is bound to — which is the whole property a reconstructed key cannot
     // guarantee.
-    let at_key = f.ctx.store.get(&r.scorecard_key).unwrap_or_else(|e| {
-        panic!(
-            "the receipt names `{}`, which holds nothing: {e}",
-            r.scorecard_key
+    let at_key = f
+        .ctx
+        .store
+        .get_capped(
+            &r.scorecard_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
         )
-    });
+        .unwrap_or_else(|e| {
+            panic!(
+                "the receipt names `{}`, which holds nothing: {e}",
+                r.scorecard_key
+            )
+        });
     assert_eq!(
         r.scorecard_sha256,
         logweir_core::ids::sha256_prefixed(&at_key.0),
@@ -1783,7 +1826,10 @@ fn the_time_basis_refusal_creates_no_target_topic() {
     assert!(
         f.ctx
             .store
-            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.json", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
             .is_err(),
         "a refused run signs nothing"
     );
@@ -1961,7 +2007,10 @@ fn refused_set_mismatch(f: &fixtures::OrchestratorFixture, err: DrillError, need
     assert!(
         f.ctx
             .store
-            .get(&format!("logweir/drills/{}.json", f.run_id))
+            .get_capped(
+                &format!("logweir/drills/{}.json", f.run_id),
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+            )
             .is_err(),
         "a refused run signs nothing"
     );
@@ -2044,7 +2093,10 @@ fn a_bound_key_the_listing_does_not_show_is_operational_and_creates_nothing() {
     assert!(f
         .ctx
         .store
-        .get(&format!("logweir/drills/{}.json", f.run_id))
+        .get_capped(
+            &format!("logweir/drills/{}.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
         .is_err());
 }
 

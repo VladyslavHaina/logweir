@@ -702,12 +702,20 @@ fn finished(backup_id: &str, out: Output) -> Backup {
     let receipt_key = line("receipt-key=").expect("backup run prints receipt-key=");
     let catalog_key = line("catalog-key=");
     let (receipt_bytes, _) = archive_store(backup_id)
-        .get(&receipt_key)
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
     let document = receipt.consumer_positions.as_ref().map(|cp| {
         let (bytes, _) = archive_store(backup_id)
-            .get(&cp.document.key)
+            // FX-31: the document is bound by the signed receipt, and is read
+            // under the runner and CLI's cap for a signed evidence document.
+            .get_capped(
+                &cp.document.key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
             .unwrap_or_else(|e| panic!("read {}: {e}", cp.document.key));
         let doc: PositionsDocument = serde_json::from_slice(&bytes).expect("a positions document");
         (bytes, doc)
@@ -736,7 +744,10 @@ fn verify_both(b: &Backup) -> Value {
     let sig = dir.join("receipt.sig");
     std::fs::write(&doc, &b.receipt_bytes).expect("written");
     let (sidecar, _) = archive_store(&b.backup_id)
-        .get(&b.receipt_key.replace(".receipt.json", ".receipt.sig"))
+        .get_capped(
+            &b.receipt_key.replace(".receipt.json", ".receipt.sig"),
+            logweir_engine_oso::storage::caps::SIDECAR,
+        )
         .expect("the sidecar");
     std::fs::write(&sig, sidecar).expect("written");
     let pubkey = root().join("e2e/fixtures/signed/public.pem");
@@ -854,7 +865,7 @@ fn catalog_summary(b: &Backup) -> Value {
         .as_ref()
         .expect("backup run wrote its catalog point");
     let (bytes, _) = archive_store(&b.backup_id)
-        .get(key)
+        .get_capped(key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
         .unwrap_or_else(|e| panic!("read {key}: {e}"));
     let record: Value = serde_json::from_slice(&bytes).expect("a catalog record");
     assert_eq!(
@@ -1561,7 +1572,10 @@ fn the_capture_is_readable_after_the_source_topic_and_group_are_gone() {
     }
     // The evidence does not: read back from the bucket, verified with no broker.
     let reread = archive_store(&b.backup_id)
-        .get(&b.receipt_key)
+        .get_capped(
+            &b.receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the receipt is still in the bucket")
         .0;
     assert_eq!(reread, b.receipt_bytes);

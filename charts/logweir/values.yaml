@@ -204,6 +204,7 @@ api:
     trustedProxyCidrs: []       # shared: the ingress's ranges; never an identity
     trustedProxyService: { namespace: "", name: "" }  # shared: the ingress controller's Service; its serving pods
     requireTrustedProxy: false  # shared: refuse (421) any request not from those proxies over HTTPS
+    trustedProxy: ""            # shared + ingress.enabled: one of the two above is REQUIRED, or `none` to opt out deliberately (no per-peer cap)
     rateLimits: { manualBackupsPerMinute: 10, manualRestoresPerMinute: 5 }  # P10: starts per person, per namespace, per minute; then 429
     hostAliases: []             # [{ip, hostnames}]: e.g. the issuer's public name -> the in-cluster ingress
     oidc:

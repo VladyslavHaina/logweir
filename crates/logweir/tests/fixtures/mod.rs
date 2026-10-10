@@ -961,7 +961,7 @@ pub const FIXTURE_MARKER_TOPIC: &str = "logweir.scratch";
 /// Under `logweir/` only because seeding an in-memory `Store` goes through
 /// `put_create_only`, which asserts Global Constraint 6 unconditionally and on
 /// every handle. A real OSO archive key is never under `logweir/`, and nothing
-/// in phase 7 cares: it reads the key back with `Store::get`, which has no
+/// in phase 7 cares: it reads the key back with `Store::get_capped`, which has no
 /// prefix rule at all.
 pub const FIXTURE_SEGMENT_KEY: &str = "logweir/fixture-archive/orders/0/000000000000.kbak";
 pub const FIXTURE_WINDOW_START: &str = "2026-08-29T00:00:00Z";

@@ -212,8 +212,18 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
         .expect("the client builds either way")
     };
 
-    let refused_scheme = format!("{}", build(false).get("team-a/anything.json").unwrap_err());
-    let reached_transport = format!("{}", build(true).get("team-a/anything.json").unwrap_err());
+    let refused_scheme = format!(
+        "{}",
+        build(false)
+            .get_capped("team-a/anything.json", logweir_store::caps::SIGNED_DOCUMENT)
+            .unwrap_err()
+    );
+    let reached_transport = format!(
+        "{}",
+        build(true)
+            .get_capped("team-a/anything.json", logweir_store::caps::SIGNED_DOCUMENT)
+            .unwrap_err()
+    );
 
     assert_ne!(
         refused_scheme, reached_transport,

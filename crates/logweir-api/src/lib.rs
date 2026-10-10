@@ -237,6 +237,7 @@ pub fn state_from_parts(
                         settings.trusted_proxy_service.clone(),
                     )),
                     require_trusted_proxy: settings.require_trusted_proxy,
+                    used_states: auth::login::UsedStates::new(),
                 })),
             )
         }

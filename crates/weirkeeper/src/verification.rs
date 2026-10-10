@@ -130,7 +130,7 @@ use logweir_core::trust::{
     decide, ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
     TrustedKey, UntrustReason, Verdict,
 };
-use logweir_store::{Store, StoreError};
+use logweir_store::{caps, Store, StoreError};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde_json::{json, Value};
 
@@ -779,11 +779,27 @@ pub fn verify_evidence(
 
     // STEP 2. Both objects, through the read-only handle. EVERY StoreError is
     // NotAttempted — `NotFound` and the rest alike.
-    let payload = match store.get(payload_key) {
+    //
+    // FX-31: EACH UNDER ITS CAP, and never whole. This process serves every
+    // namespace, so a tenant's multi-gigabyte object at its receipt key must
+    // not take memory the other reconciles need: the document is read under
+    // `caps::CONTROLLER_DOCUMENT` (the evidence relay's 1 MiB, so the two read
+    // paths agree on what can be verified) and the sidecar under
+    // `caps::SIDECAR`. An object over its cap is refused on the size the store
+    // reports, before a body byte is read, and is `NotAttempted` naming the
+    // cap — a FINAL verdict (`not_attempted_class`): the object will not
+    // shrink, so it is not read again on the schedule.
+    //
+    // AND OUT OF ONE BUDGET (review F2): the document's worst case is reserved
+    // before it is read and held until the verdict is built, so concurrent
+    // verifications cannot together exceed `read_budget`'s bound.
+    let _reservation = crate::read_budget::ReadBudget::controller()
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
+    let payload = match store.get_capped(payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
-    let sidecar_bytes = match store.get(sidecar_key) {
+    let sidecar_bytes = match store.get_capped(sidecar_key, caps::SIDECAR) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
@@ -1048,15 +1064,33 @@ pub async fn verify_relayed(
 /// (PoC defect P12, [`not_attempted_class`]): a definite absence is final, and
 /// a store that would not answer — a missing credential, a denial, a timeout —
 /// is read again.
+///
+/// **FX-31: an object over the controller's read cap is a third sentence**,
+/// [`over_read_cap_detail`], and a FINAL one: the read was answered, the
+/// object is too big for this process to hold, and a later read reads the
+/// same object. It names the key, the cap and the size the store reported.
 #[must_use]
 pub fn store_detail(e: &StoreError) -> String {
     match e {
         StoreError::NotFound(key) => {
             format!("the evidence object {key}{EVIDENCE_OBJECT_ABSENT_SUFFIX}")
         }
+        StoreError::TooLarge { key, cap, observed } => over_read_cap_detail(key, *cap, observed),
         other => format!("{EVIDENCE_OBJECT_UNREADABLE_PREFIX}{other}"),
     }
 }
+
+/// [`store_detail`]'s sentence for an object over the controller's read cap —
+/// FX-31. The twin of the evidence relay's "is larger than the N-byte cap an
+/// evidence fetch relays" (`evidence_fetch`), and FINAL like it: it begins
+/// with the key, so no transient prefix of [`not_attempted_class`] matches.
+#[must_use]
+pub fn over_read_cap_detail(key: &str, cap: u64, observed: &logweir_store::OverCap) -> String {
+    format!("{key} is larger than the {cap}{CONTROLLER_READ_CAP_PHRASE} ({observed}); nothing was verified")
+}
+
+/// What every [`over_read_cap_detail`] says after the cap's byte count.
+pub const CONTROLLER_READ_CAP_PHRASE: &str = "-byte cap weirkeeper reads";
 
 /// How [`store_detail`] begins for every store failure that is NOT a definite
 /// absence — the transient class of [`not_attempted_class`].
@@ -1738,13 +1772,13 @@ pub const ROSTER_UNREADABLE_DETAIL: &str =
 ///
 /// # Interface I13, and it is not decoration
 ///
-/// `Store::get` drives its own current-thread runtime and `kube` drives every
+/// `Store::get_capped` drives its own current-thread runtime and `kube` drives every
 /// reconciler ON a runtime, so calling [`verify_evidence`] straight from the
 /// `async move` block below COMPILES CLEANLY and panics with *Cannot start a
 /// runtime from within a runtime* at the first verification.
 /// `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking` names
 /// `verify_evidence(` in its `STORE_CALL_TOKENS` for exactly that reason: this
-/// call site holds a `Store::get` while naming no `Store` at all, which is the
+/// call site holds a `Store::get_capped` while naming no `Store` at all, which is the
 /// same blindness the Task 20 review found in `observe_archive(` and
 /// `observe_scorecard(`.
 ///
@@ -2085,7 +2119,8 @@ pub fn retrust_with(
                     SigningTime::NotNeeded
                     | SigningTime::Deferred
                     | SigningTime::Unreadable(_)
-                    | SigningTime::NotAttempted(_) => stored_claim(stored),
+                    | SigningTime::NotAttempted(_)
+                    | SigningTime::OverCap(_) => stored_claim(stored),
                 },
                 policy: policy_ref(&resolved.source),
                 compromise_recorded_by: resolved
@@ -2216,6 +2251,12 @@ pub fn retrust_with(
             SigningTime::Absent(_) => {
                 object.insert("signingTimeRead".into(), json!(SIGNING_TIME_ABSENT));
             }
+            // OVER THE CAP: the store answered with a size this controller
+            // will not read, and the next read would answer the same — so it
+            // settles too, with its own word (FX-31 review F8).
+            SigningTime::OverCap(_) => {
+                object.insert("signingTimeRead".into(), json!(SIGNING_TIME_OVER_CAP));
+            }
             // A SUCCESSFUL READ CARRIES NEITHER. `signedAt` is on the block now
             // and `compared_a_claim` answers from the basis, so leaving a stale
             // backoff behind would be a field nobody reads.
@@ -2303,6 +2344,7 @@ fn unverified_detail(
             format!("the archive was read for it and did not answer: {detail}")
         }
         SigningTime::NotAttempted(detail) => format!("no re-read was attempted: {detail}"),
+        SigningTime::OverCap(detail) => format!("the document was not re-read: {detail}"),
         // UNREACHABLE THROUGH `retrust_with`, which reaches this function only
         // for a claim that is still `NotRecorded` — and both of these arms
         // replace the claim. A sentence rather than a panic, because a
@@ -2377,7 +2419,7 @@ fn unverified_detail(
 /// absence, [`decide`] refuses it exactly as before, and the completed read
 /// records `trust.signingTimeRead: absent` so the object is never asked again.
 /// It buys the only thing that can tell the two apart — reading the document —
-/// for exactly one `Store::get`; guessing the other way is what left five sound
+/// for exactly one `Store::get_capped`; guessing the other way is what left five sound
 /// archives marked `Untrusted`.
 ///
 /// **THE BOUND IS ON THE OBJECT, BECAUSE RECONCILES ARE NOT RARE** (review
@@ -2419,11 +2461,16 @@ fn compared_a_claim(stored: &Value) -> bool {
     // settled fact: the absence is the DOCUMENT's, exactly as if a basis had
     // compared one. Without it a document that genuinely carries none is
     // re-read on every reconcile for ever — review finding **G2**.
-    if stored
-        .pointer("/trust/signingTimeRead")
-        .and_then(Value::as_str)
-        == Some(SIGNING_TIME_ABSENT)
-    {
+    //
+    // `overCap` settles the same way (FX-31 review F8): the store answered
+    // with a size this controller will not read, and it would answer the same
+    // again.
+    if matches!(
+        stored
+            .pointer("/trust/signingTimeRead")
+            .and_then(Value::as_str),
+        Some(SIGNING_TIME_ABSENT | SIGNING_TIME_OVER_CAP)
+    ) {
         return true;
     }
     matches!(
@@ -2436,13 +2483,17 @@ fn compared_a_claim(stored: &Value) -> bool {
 /// signing time.
 const SIGNING_TIME_ABSENT: &str = "absent";
 
+/// `trust.signingTimeRead` for a re-read the store answered with a document
+/// over the controller's read cap (FX-31 review F8).
+pub const SIGNING_TIME_OVER_CAP: &str = "overCap";
+
 /// How long a fruitless attempt bars the next one — review finding **G2**.
 ///
 /// **A TERMINAL OBJECT RECONCILES EVERY `REQUEUE_SECS` (15 s), NOT ONLY ON A
 /// POLICY EVENT.** The re-trust hook wraps `reconcile`, which requeues every
 /// object unconditionally, so "one bounded re-read" was bounded per pass and
 /// not over time: a namespace holding a thousand objects whose archive cannot
-/// answer issued ~67 `Store::get`s a second, for ever, for verdicts that
+/// answer issued ~67 `Store::get_capped`s a second, for ever, for verdicts that
 /// provably cannot change. Fifteen minutes is sixty reconciles, so the steady
 /// cost is one `get` and one small patch per object per quarter hour, and an
 /// archive that comes back is noticed within one window.
@@ -2462,7 +2513,7 @@ pub enum ReadPlan {
     /// An attempt is owed and due. The caller performs it.
     Read(SigningTimeNeed),
     /// An attempt was made recently and learned nothing; `trust.retryAfter`
-    /// has not passed. No `Store::get`, no `evidence_source` resolution, and
+    /// has not passed. No `Store::get_capped`, no `evidence_source` resolution, and
     /// the stored sentence is carried forward unchanged.
     Deferred,
 }
@@ -2533,6 +2584,14 @@ pub enum SigningTime {
     /// evidence credential, or the destination reads evidence with a grant
     /// only a pod may hold (D2 §3.9).
     NotAttempted(String),
+    /// **FX-31 review F8.** The store answered, and the document is larger
+    /// than the controller's read cap, so it was not read. A fact about the
+    /// DOCUMENT, like [`Self::Absent`]: the object will not shrink, so the
+    /// question is SETTLED (`trust.signingTimeRead: overCap`, no
+    /// `retryAfter`) and never asked again — where [`Self::Unreadable`] would
+    /// re-read it every quarter hour for ever. Like `Unreadable`, nothing was
+    /// learned, so the stored result is kept on an unverified basis.
+    OverCap(String),
 }
 
 /// Whether a stored status needs one bounded re-read before its verdict can be
@@ -2668,7 +2727,7 @@ pub fn signing_time_in(bytes: &[u8], need: &SigningTimeNeed) -> SigningTime {
 ///
 /// Synchronous on purpose: this is the body of a `spawn_blocking` closure, for
 /// the reason this module's header gives. It is named in
-/// `tests/retention.rs::STORE_CALL_TOKENS` because it holds a `Store::get`
+/// `tests/retention.rs::STORE_CALL_TOKENS` because it holds a `Store::get_capped`
 /// while its callers name no `Store` at all — the same blindness that let a
 /// planted call survive that guard once.
 #[must_use]
@@ -2676,8 +2735,14 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
     let Some(store) = store else {
         return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
     };
-    match store.get(&need.payload_key) {
+    // FX-31: under the same cap as `verify_evidence`'s read of the document,
+    // and out of the same budget (review F2).
+    let _reservation = crate::read_budget::ReadBudget::controller()
+        .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
+    match store.get_capped(&need.payload_key, caps::CONTROLLER_DOCUMENT) {
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
+        // Over the cap: settled, not retried (review F8).
+        Err(e @ StoreError::TooLarge { .. }) => SigningTime::OverCap(store_detail(&e)),
         Err(e) => SigningTime::Unreadable(store_detail(&e)),
     }
 }
@@ -2939,7 +3004,8 @@ where
         SigningTime::NotNeeded
         | SigningTime::Deferred
         | SigningTime::Unreadable(_)
-        | SigningTime::NotAttempted(_) => {
+        | SigningTime::NotAttempted(_)
+        | SigningTime::OverCap(_) => {
             "re-deriving from the stored matchedKeyId, signedAt and verifiedAt — no storage \
              read and no signature check"
         }

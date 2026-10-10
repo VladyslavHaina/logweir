@@ -2107,6 +2107,34 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a partition subset signs scorecard format 2.0.0",
             "logweir-drill-scorecard-2.0.0.json",
         ),
+        // FX-31 (2026-10-09, item 52): every object-store read has a size cap;
+        // the controller reads evidence under the relay's cap, which sets the
+        // receipt's topic limit an operator must know.
+        (
+            "every object-store read has a size cap",
+            "about **250–300 topics**",
+        ),
+        // FX-24c (2026-10-09, item 53): one peer outside the trusted proxy
+        // holds at most its share of the console's connections, and a request
+        // body must keep up the window's floor; the constant names the cap an
+        // operator can find in the source.
+        (
+            "one peer's share of the console's connections",
+            "MAX_CONNECTIONS_PER_PEER",
+        ),
+        // FX-19 (2026-10-09, item 54): a probe Job Kubernetes is collecting
+        // is not a crash; the field that says it is being collected.
+        (
+            "a probe Job being collected does not clear reachable",
+            "metadata.deletionTimestamp",
+        ),
+        // FX-13a and FX-32 (2026-10-09, item 55): a sign-in state is
+        // single-use on each replica, and a replay there is refused under the
+        // audit code an operator alerts on, before any token request.
+        (
+            "a sign-in state is single-use on each replica",
+            "login_state_replayed",
+        ),
     ];
     assert_eq!(
         items.len(),

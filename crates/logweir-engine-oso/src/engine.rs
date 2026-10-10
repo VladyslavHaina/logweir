@@ -214,7 +214,7 @@ pub struct OsoCliEngine {
     digest: String,
     workdir: PathBuf,
     /// Reads the archive: `list_backup_sets`, `describe` and `fingerprints`
-    /// all go through this handle and only ever call `Store::get` /
+    /// all go through this handle and only ever call `Store::get_capped` /
     /// `list_manifests` / `segment_keys_for_set` — never `put_create_only`.
     /// Nothing in this file writes evidence, so the caller should construct
     /// this engine with `Store::read_only_from_url` over the OSO archive
@@ -495,7 +495,12 @@ impl OsoCliEngine {
             .rsplit_once('/')
             .map(|(dir, _)| format!("{dir}/{name}"))
             .unwrap_or_else(|| name.to_string());
-        match self.store.get(&key) {
+        // FX-31: under the engine-document cap. An object over it is an
+        // error like any other read failure that leaves presence unknown.
+        match self
+            .store
+            .get_capped(&key, crate::storage::caps::ENGINE_DOCUMENT)
+        {
             Ok((bytes, _)) => Ok(Some((key, bytes))),
             Err(crate::storage::StoreError::NotFound(_)) => Ok(None),
             Err(other) => Err(other.into()),
@@ -714,7 +719,9 @@ impl DataEngine for OsoCliEngine {
         &self,
         set: &BackupSetRef,
     ) -> Result<(BackupSetFacts, Vec<ArchiveNotice>), EngineError> {
-        let (bytes, version_id) = self.store.get(&set.manifest_key)?;
+        let (bytes, version_id) = self
+            .store
+            .get_capped(&set.manifest_key, crate::storage::caps::MANIFEST)?;
         let m: vendored::manifest::BackupManifest = serde_json::from_slice(&bytes)
             .map_err(|e| EngineError::Operational(format!("{}: {e}", set.manifest_key)))?;
         let created_at = chrono::DateTime::from_timestamp_millis(m.created_at)
@@ -780,7 +787,7 @@ impl DataEngine for OsoCliEngine {
                                     // `Store::qualify`), and `SegmentFacts.key`
                                     // is consumed by `phase7_verify::
                                     // segment_evidence` as an argument to
-                                    // `Store::get`. Passing the relative key
+                                    // `Store::get_capped`. Passing the relative key
                                     // through made every segment of a real
                                     // archive with a non-empty prefix 404 in
                                     // `get` — so the byte-fingerprint segment
@@ -958,7 +965,7 @@ impl DataEngine for OsoCliEngine {
         // `BackupSetRef`. Refusing here, with a message naming exactly what
         // is wrong, turns a forgotten patch step into a loud, specific
         // `EngineError::Operational` rather than relying on
-        // `Store::get("")`'s incidental "object not found" (harmless today,
+        // `Store::get_capped("", …)`'s incidental "object not found" (harmless today,
         // but a guard that depends on a downstream error happening to be
         // legible is not a guard).
         if sel.set.manifest_key.is_empty() {
@@ -994,7 +1001,9 @@ impl DataEngine for OsoCliEngine {
             sel.partition,
             sel.window,
         )? {
-            let (bytes, _) = self.store.get(&key)?;
+            // FX-31: one segment, under the segment ceiling (FX-30 owns the
+            // decode's own caps).
+            let (bytes, _) = self.store.get_capped(&key, crate::storage::caps::SEGMENT)?;
             for r in crate::kbak::decode_segment(&bytes)? {
                 // Err(Unsupported) propagates
                 if r.timestamp < sel.window.0 || r.timestamp > sel.window.1 {

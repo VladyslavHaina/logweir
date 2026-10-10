@@ -930,6 +930,44 @@ console_refuses "an Ingress in front of the in-cluster administrator mode" "is r
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
   --set api.console.ingress.tlsSecretName=logweir-console-tls
+# FX-24c: a shared console the chart publishes through its Ingress names that
+# proxy (trustedProxyService or trustedProxyCidrs), or opts out by name. Without
+# it the per-peer connection cap is off and every sign-in through the ingress
+# shares one budget, so leaving it unnamed by accident is refused.
+CONSOLE_INGRESS=(
+  --set-string api.console.publicBaseUrl=https://console.example.com
+  --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com
+  --set api.console.ingress.tlsSecretName=logweir-console-tls
+)
+console_refuses "a shared-console Ingress with no trusted proxy named" \
+  "api.console.ingress.enabled in shared mode needs the trusted proxy named" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}"
+console_refuses "the trusted-proxy opt-out beside a named proxy" "trustedProxy=none says the console trusts no proxy" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
+  --set api.console.trustedProxy=none --set "api.console.trustedProxyCidrs={10.42.0.0/24}"
+console_refuses "the trusted-proxy opt-out in the in-cluster administrator mode" \
+  "api.console.trustedProxy belongs to api.console.mode=shared" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" --set api.console.trustedProxy=none
+console_refuses "a trusted-proxy opt-out that is not \`none\`" "/api/console/trustedProxy': value must be one of" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
+  --set api.console.trustedProxy=off
+# …and the deliberate opt-out renders the Ingress, with no proxy named.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
+  --set api.console.trustedProxy=none \
+  > "$tmp/console-optout.yaml" 2> "$tmp/console-optout.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: the shared-console Ingress with api.console.trustedProxy=none did NOT render; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/console-optout.err" >&2
+  fail=1
+elif ! grep -q "^kind: Ingress$" "$tmp/console-optout.yaml" || grep -F -q "trustedProxyService:" "$tmp/console-optout.yaml" \
+  || grep -F -q "trustedProxyCidrs:" "$tmp/console-optout.yaml"; then
+  echo "FAIL: the opt-out render must carry the Ingress and name no trusted proxy in the console's configuration" >&2
+  fail=1
+else
+  echo "   rc=0  (the deliberate opt-out, api.console.trustedProxy=none, renders the Ingress with no proxy named)"
+fi
 console_refuses "a product role binding for a namespace the console is not bound in" "which is not one the console is bound in" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -1114,6 +1152,7 @@ helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
   --set api.console.ingress.tlsSecretName=logweir-console-tls \
+  --set api.console.trustedProxyService.namespace=traefik --set api.console.trustedProxyService.name=traefik \
   > "$tmp/console-supported.yaml" 2> "$tmp/console-supported.err"
 rc=$?
 if [ "$rc" -ne 0 ]; then

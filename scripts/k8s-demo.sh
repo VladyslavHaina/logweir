@@ -678,7 +678,7 @@ objectives:
 # \`logweir backup run\` puts its receipt through \`evidence_location(spec.storage)\`
 # — the archive's own backend and bucket, prefix \`logweir/\` (Global Constraint
 # 6) — and it has no field to point elsewhere. The controller holds ONE
-# read-only handle, built from \`LOGWEIR_ARCHIVE_URL\`, and \`Store::get\` takes a
+# read-only handle, built from \`LOGWEIR_ARCHIVE_URL\`, and \`Store::get_capped\` takes a
 # BUCKET-RELATIVE key. So a restore writing its scorecard into
 # \`logweir-evidence\` (what \`examples/restore.yaml\` does) would put one of the
 # two documents in a bucket that handle cannot see, and its verification would

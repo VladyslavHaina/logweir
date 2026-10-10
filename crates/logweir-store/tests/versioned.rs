@@ -5,7 +5,7 @@
 //! compare the key's CURRENT version with that pin and read the pinned version
 //! by its id. Two properties of `Store` carry that, and both are pinned here:
 //!
-//! 1. `Store::get_version` returns the pinned bytes or fails — it NEVER hands
+//! 1. `Store::get_version_capped` returns the pinned bytes or fails — it NEVER hands
 //!    back the current object as if it were the pinned one. `object_store`'s
 //!    in-memory and local-filesystem backends ignore a version request and
 //!    answer with the current object; a reader that believed that answer would
@@ -22,12 +22,12 @@ use logweir_store::{Store, StoreError};
 const KEY: &str = "logweir/archive/set-1/manifest.json";
 
 /// A backend that cannot read by version answers a version read with ITS
-/// CURRENT OBJECT and no version id. `get_version` must refuse that answer.
+/// CURRENT OBJECT and no version id. `get_version_capped` must refuse that answer.
 #[test]
 fn a_store_that_ignores_the_version_is_an_error_not_the_current_object() {
     let store = Store::in_memory("logweir/");
     store.put_create_only(KEY, b"current bytes").unwrap();
-    match store.get_version(KEY, "some-version") {
+    match store.get_version_capped(KEY, "some-version", logweir_store::caps::SIGNED_DOCUMENT) {
         Err(StoreError::Backend(message)) => {
             assert!(
                 message.contains("does not read objects by version"),
@@ -46,7 +46,9 @@ fn a_store_that_ignores_the_version_is_an_error_not_the_current_object() {
 fn an_unversioned_store_reports_no_version_id() {
     let store = Store::in_memory("logweir/");
     store.put_create_only(KEY, b"bytes").unwrap();
-    let (_, version) = store.get(KEY).unwrap();
+    let (_, version) = store
+        .get_capped(KEY, logweir_store::caps::SIGNED_DOCUMENT)
+        .unwrap();
     assert_eq!(version, None);
 }
 
@@ -63,11 +65,15 @@ fn a_versioned_bucket_keeps_every_version_readable_by_id() {
     let second = bucket.overwrite(KEY, b"second");
     assert_ne!(first, second, "an overwrite is a new version");
 
-    let (bytes, current) = store.get(KEY).unwrap();
+    let (bytes, current) = store
+        .get_capped(KEY, logweir_store::caps::SIGNED_DOCUMENT)
+        .unwrap();
     assert_eq!(bytes, b"second");
     assert_eq!(current.as_deref(), Some(second.as_str()));
 
-    let (old, answered) = store.get_version(KEY, &first).unwrap();
+    let (old, answered) = store
+        .get_version_capped(KEY, &first, logweir_store::caps::SIGNED_DOCUMENT)
+        .unwrap();
     assert_eq!(old, b"first", "the earlier version is retained");
     assert_eq!(answered.as_deref(), Some(first.as_str()));
     assert_eq!(bucket.versions(KEY), vec![first, second]);
@@ -79,7 +85,7 @@ fn an_unknown_version_id_is_not_found() {
     let (store, _bucket) = Store::in_memory_versioned("logweir/");
     store.put_create_only(KEY, b"first").unwrap();
     assert!(matches!(
-        store.get_version(KEY, "no-such-version"),
+        store.get_version_capped(KEY, "no-such-version", logweir_store::caps::SIGNED_DOCUMENT),
         Err(StoreError::NotFound(_))
     ));
 }

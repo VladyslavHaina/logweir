@@ -901,6 +901,102 @@ same reason.
   bucket is now told so*. A `RetentionPolicy` (§7f) is the per-destination
   answer.
 
+### 7b.4 Every object-store read has a size cap (FX-31)
+
+The controller is one process for every namespace. Until FX-31 it read a
+receipt, a scorecard, a sidecar and a manifest **whole**. A tenant could put a
+multi-gigabyte object at its own receipt or sidecar key, and that object would
+then take the controller's memory every time a reconcile read it. The pod's
+memory limit (`controller.resources.limits.memory`, 512Mi in the chart) would
+OOM-kill the controller for every namespace, and every restart read the
+object again.
+
+Every read now names a cap. Nothing in the tree can read an object whole:
+
+- **The size the store reports is checked first.** That is the GET's
+  `Content-Length` or `Content-Range`, or a filesystem's metadata. An object
+  over the cap is refused there, and no body byte is read.
+- **Then a running cap holds over the stream.** A store that reports a small
+  size and then streams more is cut off at the cap.
+- **An existence test reads no body.** The sidecar's presence is a `HEAD`, and
+  the readiness probe's GET has a 0-byte cap.
+
+| Document | Read by | Cap |
+|---|---|---|
+| Receipt, scorecard (the signed document) | the controller | **1 MiB**, the evidence relay's own cap |
+| DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
+| Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
+| Receipt, scorecard, catalog record | runner, CLI, check Jobs | 64 MiB (the catalog walk keeps its own 256 KiB) |
+| Engine manifest | runner, CLI, check Jobs | 256 MiB |
+| Archived segment | runner, CLI | 1 GiB |
+| Consumer-groups snapshot, engine report | runner, CLI | 64 MiB |
+
+The controller's caps are the evidence relay's. A document is therefore
+verifiable through the controller's own handle (`ControllerIdentity`, or the
+inline-archive handle) exactly when an evidence-fetch Job can relay it.
+
+The 1 MiB cap is also what bounds the controller's parse. The controller reads
+a receipt's window and a scorecard's outcome before any digest check, and a
+document of tiny values parses into about 37 times its size. That figure was
+measured by `crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB.
+
+A manifest is never parsed into a tree. The window is folded as the bytes
+stream past, so the retention report holds at most the 64 MiB it read.
+
+**Concurrent reads share one budget.** A cap bounds one read, and the
+controller runs reconciles concurrently: every schedule reconcile evaluates
+its retention report, and a controller start reconciles every schedule at
+once. So every controller read reserves its worst case out of one
+process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
+it reads, and holds the reservation until its bytes and its parse are freed:
+
+- a receipt or scorecard reserves 40 MiB, its 1 MiB cap plus the parse;
+- a manifest reserves 64 MiB.
+
+A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
+- eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
+  memory under the budget, and 504 MB without it;
+- sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
+
+A degraded store makes evidence reads for every namespace wait on one another.
+The store's own request timeout bounds that wait, and it is the trade the
+controller's four-permit evidence-read pool already makes.
+
+**What an operator sees.** An object over its cap is never a crash and never
+a pass:
+
+| Where | What it says |
+|---|---|
+| `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
+| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
+| A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
+| `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
+| Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
+
+**The limit this sets, measured.** A receipt is two-space pretty JSON. With
+FX-4's configuration coverage, PROD-05.1's 14 semantic entries and PROD-03.0's
+schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic,
+so 1 MiB holds about **250–300 topics**: about 300 with no overrides (a
+300-topic receipt measured 1,034,994 bytes through the runner's own
+serializer), and fewer with per-topic configuration overrides (about 250 with
+five each). A run that
+selects more topics writes a receipt that neither path can verify. It reads
+`NotAttempted` naming the cap, and it is not a recovery point. This was
+already true of every evidence-fetch relay before FX-31. It is new for the
+controller's own handle, where such a receipt used to verify. Under OD-7's
+third case this moves a verdict to the safer side only. Lifting it means
+raising the relay and the controller caps together, with a parse that is
+bounded without the cap. It is proposed as a follow-up row and is not done in
+FX-31.
+
+**A manifest has a limit too.** An engine manifest is about 540 bytes per
+segment, so the retention report's 64 MiB holds about 124,000 segments. At
+Logweir's default 10 MiB segment that is about 1.2 TB in one backup set, and
+about 15 TB at the engine's 128 MiB default. A set whose manifest is larger is
+listed under `skipped` on every report, naming the cap, and is never listed as
+removable. Runner-side reads, such as a drill or a restore preflight, take a
+manifest of up to 256 MiB.
+
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
 **In this build, end to end.** The reconciler resolves the connection, renders
@@ -4985,7 +5081,9 @@ the deadline as the cause. A named allowlist has no such floor.
    and its connection settings, and deliberately **not**
    `KafkaCluster.status.clusterId` — that field is the probe's record of its
    last successful look, rewritten by every reachable pass (the companion
-   `reachable` is cleared by every pass that cannot vouch for it), so pinning
+   `reachable` is cleared by every probe verdict that cannot vouch for it,
+   and never by the collection of a probe Job whose verdict is already on the
+   status — the crashed-Job section below), so pinning
    it would turn ordinary probe churn during the discovery window into a
    refused run.
 2. Creates `lwd-<backup uid>` — a `topicInventory` check Job, running
@@ -5812,7 +5910,9 @@ finishes.
 crashed-Job branch below — `exitCode` absent, phase `Failed`, reason
 `NoExitCode`, and for a probe `reachable` cleared and the Job replaced on the
 re-probe cadence — which is also what happens when the pod was genuinely
-garbage-collected. A Job with no
+garbage-collected BEFORE the run's verdict was recorded (one collected after
+it is not re-judged: *A Job Kubernetes is collecting is not a crash*, below).
+A Job with no
 `metadata.uid` is not even listed for. Every candidate that was not read is
 logged once, with code `ForeignPodIgnored` and the namespace, the Job and the
 pod name; in the contested case **all** claimants are named, including the one
@@ -5824,7 +5924,8 @@ status.
 ### The crashed Job: when there is no exit code at all
 
 A Job can finish having produced no terminated state for `runner` — the node
-went away, the pod never scheduled, the pod was garbage-collected. There is no
+went away, the pod never scheduled, the pod was garbage-collected before the
+run's verdict was read. There is no
 code to read and there never will be, so the controller writes a **terminal**
 status rather than watching forever, and **never invents a code**: a fabricated
 `1` is indistinguishable from a real operational failure, and a fabricated `0`
@@ -5861,6 +5962,72 @@ diagnostics' fail-fast (*The runner's requests and limits*, §12), and on a
 probe runs. With no such
 event the rows above stand. An absent `EXIT` column with
 `PHASE=Failed` is therefore a real, distinct state and not a rendering gap.
+
+**A Job Kubernetes is collecting is not a crash either** (FX-19). The TTL
+controller deletes a finished Job with *foreground* propagation: the Job gains
+a `metadata.deletionTimestamp`, its pod is deleted first, and the Job stays
+readable — finished and pod-less — until the pod is gone. A controller
+patches a Job's `ttlSecondsAfterFinished` on only AFTER the status write that
+recorded the Job's verdict (the catalog sync Job alone carries its TTL from
+creation, and that TTL is at least an hour — three sync intervals — so the
+sync is harvested long before it), so that collection follows a recorded
+verdict, and no controller reads it as a crash:
+
+* `Backup` and `Restore` stop at their terminal status before any pod read;
+  the catalog sync stops at the record of that Job's completion, retention at
+  `lastEnforcement.finishedAt`, a `ProtectionPolicy` delivery once its ledger
+  entry is no longer `Pending`, and `Preflight` and `TopicDiscovery` never
+  read a terminal object's Job at all.
+* The `KafkaCluster` probe re-reads its Job on every pass, so it states the
+  rule itself. A probe Job with a `deletionTimestamp` is judged not at all —
+  no pod read, no status write, no TTL patch — and the next probe is created
+  once it is gone. A finished probe Job that carries **this controller's
+  marker** has had its verdict recorded and is not re-judged when it has no
+  terminated `runner` left: the annotation
+  `logweir.dev/probe-verdict-recorded`, whose value is the Job's own UID, which
+  the controller sends in the same patch as the five-minute TTL and only after
+  the status write that recorded the verdict. **A TTL alone is never the
+  marker:** a mutating admission policy or a defaulting webhook that gives
+  every new Job a `ttlSecondsAfterFinished` does not make a crashed probe read
+  as judged, and the controller overwrites that TTL with its own re-probe
+  timer.
+* **The last recorded verdict stands until the next probe answers, for at
+  most 630 s** (`STALE_AFTER_SECS`, twice the 315 s re-probe interval — the
+  console's own freshness budget). The probe Job's name is fixed, so while it
+  is mid-deletion (a finished pod `Terminating` on a node that went away, a
+  foreign finalizer) or judged and never collected by its TTL, no newer probe
+  can run. Once the reading in `status.observedAt` is older than that bound,
+  any pass that forms no new verdict — the deferred ones, a re-read of the old
+  Job, a probe still running — clears `reachable` with reason `ProbeStale`
+  (`Reachable=Unknown`, its message naming why no newer probe has answered)
+  and leaves `observedAt` and `clusterId` as the record of the last real look.
+  A `Restore` and a rehearsal admit a target on `reachable: true` alone, so a
+  stale reading admits nothing; the next probe that answers sets `reachable`
+  again. A healthy connection is re-read every 315 s plus the probe's run, so
+  it never reaches the bound.
+* `NotFound` and `Conflict` while a Job is collected are expected: the probe
+  pod gone between the pod list and the `pods/log` read, the Job gone before
+  its TTL patch, and a status write that lost its `resourceVersion`
+  precondition to a newer copy of the object (the watch cache delivers the new
+  probe Job's events before the status the creating pass wrote) are debug
+  lines and ordinary outcomes, never a WARN and never a reconcile error. A
+  verdict write that lost the precondition is never followed by its TTL; the
+  newer copy's own watch event reconciles again. Only those calls are
+  answered that way: any other error, a `404` or a `409` from another call
+  included, reaches `error_policy` and is a WARN
+  (`KafkaCluster probe reconcile failed; requeueing`).
+* A real crash, an unreadable probe log, a refused probe pod and a reading
+  cleared as `ProbeStale` are logged at WARN **once per Job**, on the pass
+  whose status write first recorded them.
+
+Before this build PoC batch 2 measured `reachable` cleared for about 17 s on a
+healthy connection whenever its probe Job was collected — long enough for a
+`Restore` against it to be refused `ClusterNotReachable` — and about twelve
+WARN lines per five-minute cadence for twelve connections. Nothing about the
+objects' schema changes, so there is no migration step: the first pass over a
+probe Job finished by an older controller (which carries no marker) judges it
+once more, as that controller would have, and gives it the marker. A rollback
+brings back the flap and the WARN lines, and drops the 630 s bound.
 
 The pod is found by `batch.kubernetes.io/job-name=<job>`, falling back to the
 legacy unprefixed `job-name=<job>` when that returns nothing — both are set on
@@ -7273,6 +7440,7 @@ key's validity window?**
 |---|---|---|
 | `trust.basis` is `Current` or `Historical` | a signing time was read from the document and compared to the key's validity window | `Untrusted`, `SignedOutsideValidity`, as before — the document itself carries none |
 | `trust.signingTimeRead: absent` | a re-read completed and the document carried no signing time | the same, and no further read: the answer is on the record |
+| `trust.signingTimeRead: overCap` (FX-31) | the store answered with a document larger than the controller's read cap (§7b.4), so it was not re-read | the stored verdict is kept on an unverified basis, the sentence says the document was not re-read and names the cap, and no further read: the next would answer the same |
 | anything else — no `trust` block, a `trust` block with no `basis`, `None`, `Unverified`, or a spelling a later build invents | nothing has been compared to the window yet | one bounded re-read, then decide |
 
 Only `Current` and `Historical` are reachable through the window comparison, and
@@ -7365,8 +7533,9 @@ changes.
 
 **What it costs.** One `get` and one destination resolution per pre-`signedAt`
 object, then nothing: a successful read writes `signedAt`, a document that
-carries none records `signingTimeRead`, and an attempt that learned nothing is
-barred for fifteen minutes by `retryAfter`. The destination handle is UID-cached
+carries none records `signingTimeRead`, as does one over the controller's read
+cap (`overCap`), and an attempt that learned nothing is barred for fifteen
+minutes by `retryAfter`. The destination handle is UID-cached
 and the installation policy is cached, so the marginal cost is the `get` itself.
 A cluster with many such objects and an unreachable archive pays one failed
 `get` and one small patch per object per quarter hour until the archive answers

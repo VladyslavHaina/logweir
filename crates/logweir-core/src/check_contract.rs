@@ -2536,8 +2536,13 @@ pub struct EvidenceObjectResult {
     pub bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<CheckCode>,
-    /// `true` when the object was longer than the request's `maxBytes`, so the
-    /// relayed bytes are a prefix and the digest is NOT the object's digest.
+    /// `true` when the object was longer than the request's `maxBytes`.
+    ///
+    /// A runner since FX-31 never reads such an object past the cap and relays
+    /// NO bytes for it (`sha256` and `bytes` absent); an earlier runner relayed
+    /// a prefix, whose digest was NOT the object's. The controller refuses a
+    /// truncated object either way ("the cap is a refusal, not a prefix"), so
+    /// both shapes read the same.
     #[serde(default)]
     pub truncated: bool,
 }

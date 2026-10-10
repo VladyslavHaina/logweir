@@ -172,7 +172,7 @@ impl DataEngine for WindowEngine {
 
 /// `logweir/`-prefixed because `Store::put_create_only` asserts Global
 /// Constraint 6 on every handle; `segment_evidence` reads the key back with
-/// `Store::get`, which has no prefix rule.
+/// `Store::get_capped`, which has no prefix rule.
 fn seed_segment(store: &Store, key: &str, payload: &[u8]) -> String {
     store.put_create_only(key, payload).unwrap();
     logweir_core::ids::sha256_prefixed(payload)
