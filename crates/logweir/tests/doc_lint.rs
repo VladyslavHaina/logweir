@@ -2164,6 +2164,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a restore under the original topic names",
             "--approval-subject original-name",
         ),
+        // FX-33 (2026-10-10, item 57): one backup names at most 1,000
+        // topics; the name a selection over it is refused under, at every
+        // entry, before the engine runs.
+        (
+            "one backup names at most 1,000 topics",
+            "BackupSelectionTooLarge",
+        ),
     ];
     assert_eq!(
         items.len(),
