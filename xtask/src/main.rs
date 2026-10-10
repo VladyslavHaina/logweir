@@ -45,6 +45,9 @@
 //! item against a `rename` on each field) are reported as drift, which errs on
 //! the safe side; and anything a macro generates.
 //!
+//! It also compares vendored VERSION TABLES (`VERSION_CHECKS`, PROD-01.2): the
+//! request versions the engine sends, which it never negotiates.
+//!
 //! It also compares vendored LISTS (`LIST_CHECKS`, FX-4): a `&str` array that
 //! must name exactly the string literals of one upstream function, for data
 //! the engine never serialises -- the topic-configuration allowlist. A key only
@@ -159,6 +162,199 @@ const LIST_CHECKS: &[ListCheck] = &[ListCheck {
     upstream: "crates/kafka-backup-core/src/backup/engine.rs",
     function: "is_recovery_topic_config",
 }];
+
+/// A vendored VERSION TABLE (PROD-01.2): a `(&str, i16)` array constant that
+/// must hold exactly the `ApiKey::<Name> => <version>` arms of one upstream
+/// function, and a constant that must equal its `_ =>` arm. The engine sends
+/// every request at a fixed version and never negotiates, so this table is
+/// what Logweir holds an endpoint's ApiVersions answer against; an engine
+/// that changes a version, adds a key, or starts negotiating changes which
+/// endpoints an operation can work on.
+struct VersionCheck {
+    /// File name under `VENDORED_DIR`.
+    vendored: &'static str,
+    /// The `(&str, i16)` array constant in it.
+    constant: &'static str,
+    /// The `i16` constant holding the fallback version.
+    fallback: &'static str,
+    /// Path relative to the root of an upstream checkout.
+    upstream: &'static str,
+    /// The upstream function whose match arms are the table.
+    function: &'static str,
+}
+
+const VERSION_CHECKS: &[VersionCheck] = &[VersionCheck {
+    vendored: "request_versions.rs",
+    constant: "ENGINE_REQUEST_VERSIONS",
+    fallback: "ENGINE_FALLBACK_VERSION",
+    upstream: "crates/kafka-backup-core/src/kafka/client.rs",
+    function: "get_api_version",
+}];
+
+/// The integer starting at `s` (after leading whitespace), or `None`.
+fn leading_int(s: &str) -> Option<i64> {
+    let s = s.trim_start();
+    let end = s
+        .char_indices()
+        .find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-')))
+        .map_or(s.len(), |(i, _)| i);
+    s[..end].parse().ok()
+}
+
+/// Every `("Name", N)` tuple in the body of a `(&str, i16)` array, in order.
+fn name_version_tuples(body: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        if body.as_bytes()[i] == b'"' {
+            if let Some(end) = literal_end(body, i) {
+                let name = body[i + 1..end.saturating_sub(1)].to_string();
+                if let Some(v) = body[end..]
+                    .trim_start()
+                    .strip_prefix(',')
+                    .and_then(leading_int)
+                {
+                    out.push((name, v));
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += body[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+/// Every `ApiKey::<Name> => <version>` arm in a function body, in order, and
+/// the `_ => <version>` arm when there is one.
+fn api_key_arms(body: &str) -> (Vec<(String, i64)>, Option<i64>) {
+    let mut arms = Vec::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("ApiKey::") {
+        let after = &rest[at + "ApiKey::".len()..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        if let Some(v) = after[end..]
+            .trim_start()
+            .strip_prefix("=>")
+            .and_then(leading_int)
+        {
+            arms.push((name.to_string(), v));
+        }
+        rest = &after[end..];
+    }
+    let fallback = body
+        .match_indices("_ =>")
+        .filter(|(i, _)| {
+            // A lone `_` pattern, not the tail of an identifier.
+            body[..*i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
+        .find_map(|(i, m)| leading_int(&body[i + m.len()..]));
+    (arms, fallback)
+}
+
+/// The value of `const <name>: i16 = <int>;` in comment-stripped `src`.
+fn const_int(src: &str, name: &str) -> Option<i64> {
+    let at = src.find(&format!("const {name}:"))?;
+    let eq = at + src[at..].find('=')? + 1;
+    leading_int(&src[eq..])
+}
+
+/// One [`VersionCheck`]: the SET of `(name, version)` pairs must be equal and
+/// so must the fallback; the same pairs in another order are a note. A side
+/// that resolves to no table at all is DRIFT, never agreement.
+fn compare_versions(
+    check: &VersionCheck,
+    ours: &str,
+    theirs: &str,
+    tag: &str,
+    report: &mut Report,
+) {
+    let (ours, theirs) = (strip_comments(ours), strip_comments(theirs));
+    let label = format!("{}::{}", check.vendored, check.constant);
+    let Some(mine) = const_array_body(&ours, check.constant).map(name_version_tuples) else {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: no `const {}: … = [ … ];` in {}",
+            check.constant, check.vendored
+        ));
+        return;
+    };
+    let Some((upstream, upstream_fallback)) = fn_body(&theirs, check.function).map(api_key_arms)
+    else {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: upstream {} has no `fn {}` -- renamed, moved, or replaced by \
+             negotiation, and nothing was compared",
+            check.upstream, check.function
+        ));
+        return;
+    };
+    if mine.is_empty() || upstream.is_empty() {
+        report.drift(format!(
+            "DRIFT  {tag} {label}: resolved to an EMPTY table (ours {}, upstream {}), which is \
+             not agreement",
+            mine.len(),
+            upstream.len()
+        ));
+        return;
+    }
+    let version_of = |table: &[(String, i64)], name: &str| {
+        table.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
+    };
+    for (name, theirs_v) in &upstream {
+        match version_of(&mine, name) {
+            None => report.drift(format!(
+                "DRIFT  {tag} {label}: upstream `{}` sends {name} at v{theirs_v}, and we do not \
+                 list it",
+                check.function
+            )),
+            Some(v) if v != *theirs_v => report.drift(format!(
+                "DRIFT  {tag} {label}: we say the engine sends {name} at v{v}, upstream `{}` \
+                 sends v{theirs_v}",
+                check.function
+            )),
+            Some(_) => {}
+        }
+    }
+    for (name, v) in &mine {
+        if version_of(&upstream, name).is_none() {
+            report.drift(format!(
+                "DRIFT  {tag} {label}: we list {name} at v{v}, upstream `{}` has no such arm",
+                check.function
+            ));
+        }
+    }
+    let my_fallback = const_int(&ours, check.fallback);
+    if my_fallback.is_none() || my_fallback != upstream_fallback {
+        report.drift(format!(
+            "DRIFT  {tag} {}::{}: ours is {my_fallback:?}, upstream `{}`'s `_ =>` arm is \
+             {upstream_fallback:?}",
+            check.vendored, check.fallback, check.function
+        ));
+    }
+    let same_set = {
+        let (a, b): (BTreeSet<&(String, i64)>, BTreeSet<&(String, i64)>) =
+            (mine.iter().collect(), upstream.iter().collect());
+        a == b
+    };
+    if same_set && mine != upstream {
+        report.lines.push(format!(
+            "note   {tag} {label}: the same {} versions as upstream `{}`, in another order",
+            mine.len(),
+            check.function
+        ));
+    }
+    report.compared.push((
+        check.vendored.to_string(),
+        check.constant.to_string(),
+        check.upstream.to_string(),
+        check.function.to_string(),
+    ));
+}
 
 /// The contents of every string literal in `src`, in order (escapes kept as
 /// written: the lists compared hold plain configuration keys).
@@ -1155,6 +1351,17 @@ fn run(
         )?;
         compare_list(check, &ours, &theirs, tag, &mut report);
     }
+    for check in VERSION_CHECKS {
+        let ours = read(
+            &root.join(VENDORED_DIR).join(check.vendored),
+            "the vendored file should exist in-tree; run xtask from the repository root",
+        )?;
+        let theirs = read(
+            &upstream.join(check.upstream),
+            "extract kafka-backup at the pinned tag and pass its path via --upstream",
+        )?;
+        compare_versions(check, &ours, &theirs, tag, &mut report);
+    }
     for (i, d) in divergences.iter().enumerate() {
         if !used.contains(&i) && checks.iter().any(|c| c.vendored == d.vendored) {
             let what = if d.field.is_empty() {
@@ -1204,10 +1411,12 @@ fn main() {
         std::process::exit(1);
     }
     println!(
-        "vendored structs and lists agree with {tag} ({} item pairs: names, types and serde \
-         wire attributes; {} list(s): their keys)",
-        report.compared.len() - LIST_CHECKS.len(),
-        LIST_CHECKS.len()
+        "vendored structs, lists and version tables agree with {tag} ({} item pairs: names, \
+         types and serde wire attributes; {} list(s): their keys; {} version table(s): their \
+         pairs)",
+        report.compared.len() - LIST_CHECKS.len() - VERSION_CHECKS.len(),
+        LIST_CHECKS.len(),
+        VERSION_CHECKS.len()
     );
 }
 
@@ -1283,6 +1492,7 @@ mod tests {
                 .iter()
                 .map(|c| c.upstream)
                 .chain(LIST_CHECKS.iter().map(|c| c.upstream))
+                .chain(VERSION_CHECKS.iter().map(|c| c.upstream))
                 .map(|u| format!("{top}/{u}"))
                 .collect();
             let mut child = Command::new("tar")
@@ -1399,7 +1609,7 @@ mod tests {
         let pairs: usize = CHECKS.iter().map(|c| c.items.len()).sum();
         assert_eq!(
             r.compared.len(),
-            pairs + LIST_CHECKS.len(),
+            pairs + LIST_CHECKS.len() + VERSION_CHECKS.len(),
             "{:?}",
             r.compared
         );
@@ -1479,6 +1689,85 @@ mod tests {
         );
     }
 
+    /// **PROD-01.2's version table, at the pin, and its drift shapes.** The
+    /// vendored `ENGINE_REQUEST_VERSIONS` holds exactly the arms of the pinned
+    /// engine's `get_api_version`, and `ENGINE_FALLBACK_VERSION` its `_ =>`
+    /// arm. A version the engine changes, a key it adds, a key we invented, a
+    /// changed fallback and a function that is gone (an engine that
+    /// negotiates) are each DRIFT; the same pairs in another order are a note.
+    #[test]
+    fn the_request_version_table_agrees_with_the_pinned_engine_and_drift_is_caught() {
+        let up = Checkout::extract();
+        let check = &VERSION_CHECKS[0];
+        let theirs = up.src(check.upstream);
+        let ours = vendored_src(check.vendored);
+        let at_pin = |ours: &str, theirs: &str| {
+            let mut r = Report::default();
+            compare_versions(check, ours, theirs, &up.tag, &mut r);
+            r
+        };
+        let r = at_pin(&ours, &theirs);
+        assert!(!r.drift, "drift at the pin:\n{}", r.lines.join("\n"));
+        assert_eq!(r.compared.len(), 1, "{:?}", r.compared);
+        assert!(r.lines.is_empty(), "{:?}", r.lines);
+        // The parsers read what they claim to: eighteen arms and a fallback.
+        let (arms, fallback) = api_key_arms(
+            fn_body(&strip_comments(&theirs), check.function).expect("the function exists"),
+        );
+        assert_eq!(arms.len(), 18, "{arms:?}");
+        assert_eq!(fallback, Some(0));
+        assert!(arms.contains(&("Produce".to_string(), 8)), "{arms:?}");
+
+        // The engine raises a version (the change that would let it restore
+        // into an endpoint that serves Produce only up to v7, or stop it).
+        let bumped = mutate(&theirs, "ApiKey::Produce => 8,", "ApiKey::Produce => 9,");
+        let d = drift_lines(&at_pin(&ours, &bumped)).join("\n");
+        assert!(
+            d.contains("we say the engine sends Produce at v8") && d.contains("sends v9"),
+            "{d}"
+        );
+
+        let added = mutate(
+            &theirs,
+            "ApiKey::DeleteAcls => 1,",
+            "ApiKey::DeleteAcls => 1,\n            ApiKey::InitProducerId => 4,",
+        );
+        let d = drift_lines(&at_pin(&ours, &added)).join("\n");
+        assert!(
+            d.contains("sends InitProducerId at v4, and we do not list it"),
+            "{d}"
+        );
+
+        let invented = mutate(
+            &ours,
+            "    (\"DeleteAcls\", 1),\n",
+            "    (\"DeleteAcls\", 1),\n    (\"DescribeGroups\", 5),\n",
+        );
+        let d = drift_lines(&at_pin(&invented, &theirs)).join("\n");
+        assert!(d.contains("we list DescribeGroups at v5"), "{d}");
+
+        let fallback = mutate(&theirs, "_ => 0,", "_ => 1,");
+        let d = drift_lines(&at_pin(&ours, &fallback)).join("\n");
+        assert!(d.contains("ENGINE_FALLBACK_VERSION"), "{d}");
+
+        let negotiating = mutate(&theirs, "fn get_api_version(", "fn negotiated_version(");
+        let d = drift_lines(&at_pin(&ours, &negotiating)).join("\n");
+        assert!(d.contains("has no `fn get_api_version`"), "{d}");
+
+        let reordered = mutate(
+            &ours,
+            "    (\"Metadata\", 9),\n    (\"Fetch\", 11),\n",
+            "    (\"Fetch\", 11),\n    (\"Metadata\", 9),\n",
+        );
+        let r = at_pin(&reordered, &theirs);
+        assert!(!r.drift, "{:?}", r.lines);
+        assert!(
+            r.lines.iter().any(|l| l.contains("in another order")),
+            "{:?}",
+            r.lines
+        );
+    }
+
     /// **The gate cannot skip a file.** Every `.rs` under `vendored/` but
     /// `mod.rs` is covered by `CHECKS` or `LIST_CHECKS`; FX-1's
     /// `consumer_groups.rs` was not, and FX-4's `topic_config.rs` was not
@@ -1496,6 +1785,7 @@ mod tests {
             .iter()
             .map(|c| c.vendored.to_string())
             .chain(LIST_CHECKS.iter().map(|c| c.vendored.to_string()))
+            .chain(VERSION_CHECKS.iter().map(|c| c.vendored.to_string()))
             .collect();
         let ungated: Vec<&String> = files.difference(&gated).collect();
         assert!(
