@@ -652,9 +652,9 @@ verify` refuses it at deserialisation.
 ## PROD-11.1: `source.selection` (scorecard format 1.7.0)
 
 Three arms, SEL-1 to SEL-3, which both readers state in the same position
-(after `sample.unsampled_topics`, before `redactions`). The block is a stated
-window START only (partition subsets are refused by the runner until the
-owner decides OD-9). Every case is `verification_1_4_sampled.json` (or, for
+(after `sample.unsampled_topics`, before `redactions`). A format-1 block is a
+stated window START only (PS-2 below; partition subsets are format 2.0.0).
+Every case is `verification_1_4_sampled.json` (or, for
 SEL-3, `verification_1_4_complete_pass.json`) with `format_version` and
 `source.selection` set (and, for the complete cases, the complete block's
 `window`) and nothing else touched.
@@ -671,9 +671,43 @@ SEL-1's message interpolates the document's `format_version`, so its `arm` is
 the literal text before the placeholder; every other `arm` is the text of the
 arm's first source line. One `shape-index.json` case, `selection_not_an_object`
 (`"orders"`), is a `message:` case: `drill verify` refuses it at
-deserialisation. The other bad shapes (a missing or non-integer start or end,
-a value outside `i64`) are pinned by
+deserialisation. The other bad shapes (a missing or non-integer end, a
+non-integer start, a value outside `i64`, a malformed subset list or engine-run
+count) are pinned by
 `docs/test_verify_scorecard.py::test_the_selection_shape_is_refused_before_its_arms`.
+
+## PROD-11.1b: partition subsets (scorecard format 2.0.0, OD-9 (a))
+
+A restore that states a partition subset signs format **2.0.0**, the format's
+first MAJOR: 1.7.0's fields with `source.selection.partitions` and
+`engine_runs` required, and `complete.partitions[]` and the sampled lane's
+fields naming the SELECTED partitions. Every reader before 1.27.0 refuses such
+a document as an unsupported major. Five arms: PS-1 (major 2 is read only for
+a document carrying a subset) is `Scorecard::refuse_unreadable_major`'s, which
+the arithmetic below does not count (it slices `validate_invariants` only), so
+its two-reader row is `scripts/check-verifier-parity.sh`'s subset loop; PS-2
+to PS-5 are `validate_invariants` statements, after SEL-1 to SEL-3 in this
+order: SEL-1, PS-2, SEL-2, SEL-3, PS-3, PS-4, PS-5. The sampled cases start
+from `verification_1_4_sampled.json`, the complete ones from
+`verification_1_4_complete_pass.json` (its partitions `orders/0` and
+`orders/1`, both expecting records), with `format_version` and
+`source.selection` set and, for a start, the complete block's
+`window.start_ms`.
+
+| case | what it pins |
+|---|---|
+| `subsets_2_0_sampled` | ACCEPT: `orders` [0, 2] from the archive's floor, one run, a sampled verification |
+| `subsets_2_0_complete_pass` | ACCEPT: `orders` [0, 1] from a start, a complete pass over its window |
+| `subsets_2_0_complete_mixed_pass` | ACCEPT: `orders` [0] narrowed and `payments` restored WHOLE (no subset, every partition selected), `engine_runs` 2, a complete pass: PS-5 reads a topic without a subset as selected (review L2) |
+| `subsets_under_format_1_7_0` | PS-2: a subset under 1.7.0, which an older reader would read as every partition |
+| `selection_1_7_without_a_start` | PS-2: a 1.7.0 block with no start |
+| `subsets_list_unsorted` | PS-3: `[2, 0]` |
+| `subsets_engine_runs_short` | PS-4: two distinct subsets restored by one run |
+| `subsets_complete_expects_an_unselected_partition` | PS-5: `orders` [0] beside a complete block expecting records from `orders/1` |
+
+One `shape-index.json` case, `subsets_engine_runs_negative` (`engine_runs:
+-1`), is a `message:` case: `drill verify` refuses it at deserialisation (a
+`u32`).
 
 ## PROD-15.1: `target.original_name` (scorecard format 1.8.0)
 
@@ -719,3 +753,34 @@ verify` refuses it at deserialisation. The other bad shapes are pinned by
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
+
+## PROD-04.1: `consumer_positions` (receipt 1.7.0) and `consumer-positions-index.json`
+
+A 1.7.0 receipt carries a bounded SUMMARY of the selected consumer groups and
+binds, by SHA-256 and length, a positions document beside it. So the corpus is
+two-sided:
+
+- **`backup-receipt-index.json`**, ids `receipt_1_7_with_consumer_positions`
+  (the accept-control) and `consumer_positions_*`: one refusing case per
+  receipt arm 30–35, and for arm 34 one per clause of its captured branch
+  (`active`, `members`, `listed_state`, `counts` missing, and a group described
+  `Dead` with no member recorded as captured).
+- **`consumer-positions-index.json`**: a receipt (`receipt`) and the positions
+  document (`document`) both readers are handed with `--consumer-positions`,
+  one refusing case per document arm CP-1 to CP-14 and one accept-control. Its
+  entries carry SEVEN fields — `id`, `receipt`, `document`, `rust_exit`,
+  `python_exit`, `reason`, `arm` — and `scripts/check-invariant-corpus.sh`
+  closes the same arithmetic over
+  `BackupReceipt::validate_consumer_positions_document` and
+  `check_consumer_positions_document` that it closes over the receipt's arms.
+  The two-reader half is
+  `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_positions_document_corpus`
+  and `scripts/check-verifier-parity.sh`'s positions loop.
+
+**These cases are GENERATED** by `scripts/fixtures/consumer_positions_corpus.py`
+(idempotent; rerun after changing a case or an arm's message). A document case
+needs a receipt that binds THAT document's exact bytes — otherwise it tests
+CP-2 instead of the arm it names — so each one is the accepted receipt and the
+accepted document with one change, rebound. The recorded `reason` is the
+Python reader's; the Rust reader is held to it by the two-reader walk, and
+every Rust message by `crates/logweir-core/tests/backup_receipt.rs`.

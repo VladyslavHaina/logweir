@@ -1486,6 +1486,14 @@ pub struct Restore {
     /// signed scorecard says it verified — on the list too, so a row says
     /// sampled or complete without a second read.
     pub coverage: RestoreCoverageView,
+    /// **PROD-11.1b.** The signed replay selection (`status.integrity.selection`):
+    /// a window from a stated start, or a partition subset of each narrowed
+    /// topic — on the list too, so a row never reads a narrowed restore as a
+    /// restore of everything. A CLAIM until the evidence verifies. ABSENT
+    /// means the scorecard states none: every partition of every restored
+    /// topic, from the archive's floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<RestoreSelectionView>,
     /// The normalized status summary.
     pub operation: OperationSummary,
 }
@@ -1506,7 +1514,8 @@ pub struct RestoreCoverageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recorded: Option<RestoreCoverage>,
     /// For a recorded complete verification: whether it covered every
-    /// partition. `false` is NEVER a pass.
+    /// SELECTED partition (every partition unless `selection.partitions`
+    /// narrows a topic). `false` is NEVER a pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covered: Option<bool>,
     /// Why `covered` is `false`.
@@ -1529,6 +1538,50 @@ pub struct CreationStopView {
     /// What to do with each topic in `left`, in words: the one sentence the
     /// runner, the Restore's status and the console all say.
     pub left_instruction: String,
+}
+
+/// **PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the
+/// signed replay selection, copied from `status.integrity.selection` (itself
+/// copied from the scorecard's `source.selection`) and never recomputed.
+/// Present exactly when the scorecard states a selection; every field may be
+/// absent when the controller could not read the signed block, which is still
+/// a selection (never read as a restore of everything).
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSelectionView {
+    /// Always `partial`: the marker a client that reads no further cannot
+    /// take for a restore of every partition of every topic.
+    pub scope: String,
+    /// The plan's stated inclusive window start, epoch milliseconds; absent:
+    /// the archive's floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<i64>,
+    /// The inclusive window end, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_end_ms: Option<i64>,
+    /// How many topics were narrowed to a PARTITION SUBSET (scorecard format
+    /// 2.0.0): present exactly when one was, even when `partitions` is not
+    /// served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrowed_topics: Option<i64>,
+    /// Each narrowed topic and the partitions it restored; absent past the
+    /// status' bounds and for a window start alone. A restored topic not
+    /// listed restored every partition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<SelectedPartitionsView>>,
+    /// How many engine runs restored the selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_runs: Option<i64>,
+}
+
+/// One narrowed topic of a [`RestoreSelectionView`].
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedPartitionsView {
+    /// The source topic.
+    pub topic: String,
+    /// The partitions it restored, ascending; no other partition of it was.
+    pub partitions: Vec<i32>,
 }
 
 /// `Restore.timeBasis` (FX-8): the signed time-basis label.

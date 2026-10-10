@@ -641,6 +641,14 @@ pub enum DrillCmd {
         // auditor runs the two readers with one command line.
         #[arg(long, default_value = "scorecard")]
         payload_type: String,
+        /// **PROD-04.1.** With `--payload-type backup-receipt`: the positions
+        /// document the receipt binds (`<run_id>.consumer-positions.json`,
+        /// beside it in the evidence store), checked against the verified
+        /// receipt by digest and by its own fourteen arms; each position is
+        /// then printed. Without it the receipt's position counts are printed
+        /// and the document is reported as not checked.
+        #[arg(long)]
+        consumer_positions: Option<PathBuf>,
     },
 }
 
@@ -919,6 +927,15 @@ pub enum BackupCmd {
         /// backup's source. Without it, any cluster label counts.
         #[arg(long, requires = "kafka_topic_resources")]
         strimzi_cluster: Option<String>,
+        /// A consumer group whose committed positions this backup records as
+        /// evidence (PROD-04.1), by its exact id; repeat it for several. Added
+        /// to the plan's own `source.consumer_groups`. Each selected group gets
+        /// one outcome in the receipt's `consumer_positions` (captured,
+        /// excluded with a reason, or failed): absence is never offset 0. A
+        /// blank, repeated or control-character id, or more than 100 groups in
+        /// all, is refused before anything runs (exit 3).
+        #[arg(long = "consumer-group", value_name = "GROUP_ID")]
+        consumer_groups: Vec<String>,
     },
 }
 

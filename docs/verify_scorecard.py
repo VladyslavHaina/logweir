@@ -113,6 +113,8 @@ from", before trusting a VALID result.
 """
 import base64
 import binascii
+# `calendar` is stdlib: PROD-04.1's arm 31 compares two RFC 3339 instants.
+import calendar
 import hashlib
 import json
 # `re` is stdlib, like every other import here: this script's ONLY third-party
@@ -500,7 +502,54 @@ FORMAT_VERSION = "1.4.0"
 # carrying the block, so every earlier receipt is decided exactly as before
 # (OD-7 (a)). The shape layer refuses a block that is not the writer's shape,
 # and `schema_dependency` lines say, per topic, what the Rust reader says.
-# 1.25.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
+# 1.25.0 (PROD-01.4a) knows receipt format 1.6.0 and its `generations`: per
+# named topic, the topic ID (KIP-516) Logweir's own DescribeTopics read
+# returned before the engine and after it, or `null` with the reason. Five arms,
+# 36 to 40, mirrored byte for byte and in position from
+# `BackupReceipt::validate_invariants`: the block only from 1.6.0, covering
+# exactly the named topic set, every recorded ID in Kafka's text (22 URL-safe
+# base64 characters over 16 bytes, never Kafka's reserved zero or (0, 1) ID), a reason exactly for
+# a null ID from the closed set, and a source exactly for a recorded one. They
+# fire only on a document carrying the block (OD-7 (a)). The shape layer
+# refuses a block whose fields are not strings or null, and the `generations`
+# lines say, per topic, whether the capture saw one generation, saw the topic
+# recreated while it ran, or could not establish it by ID.
+# 1.26.0 (PROD-04.1) knows receipt format 1.7.0 and its `consumer_positions`:
+# the consumer position evidence of the groups a backup selected, as a
+# summary — per group its outcome, type, states, members, active flag and
+# position counts, the capture window, and the positions document beside the
+# receipt by key, SHA-256 and length — whose size depends on the selection,
+# never on partitions. Six arms, 30 to 35, mirrored byte for byte and in
+# position from `BackupReceipt::validate_invariants`: the block only under a
+# version of at least 1.7.0; a forward capture window, a closed listing and at
+# least one group; this run's document by a well-formed digest; each group's
+# outcome and reason from the closed sets; what a captured (never `Dead` with
+# no member), a GroupTypeNotCaptured and any other group records; and an
+# `active` the two states derive. With `--consumer-positions <file>` it also
+# checks that document against the receipt — fourteen arms, CP-1 to CP-14,
+# mirrored from `BackupReceipt::validate_consumer_positions_document`: bound
+# by digest and length, the receipt's backup and run, the named topics with
+# their partitions in order and well-formed marks, a derived changed flag,
+# exactly the captured groups, no position on a changed topic, no capture
+# over an unread topic, every partition accounted for so absence is never
+# offset 0, each position's status, value, reason and derived coverage, and
+# the receipt's counts — and prints each position.
+#
+# 1.27.0 (PROD-11.1b, the owner's decision OD-9 (a)) reads scorecard format
+# 2.0.0, the format's first MAJOR, written ONLY for a restore that states a
+# partition subset: 1.7.0's fields with the subset meaning (its
+# `complete.partitions[]` and the sampled lane's fields name the SELECTED
+# partitions). Major 2 is read for that shape alone -- a 2.x document without
+# `source.selection.partitions` is refused before any arm (PS-1) -- and every
+# arm of major 1 holds for it. PS-2 holds a format-1 block to a start and its
+# end (so no subset rides in a document an older reader accepts); PS-3 to
+# PS-5 judge the subset list, the engine runs and the complete block. The
+# shape layer reads the 2.0.0 block (an optional start, the subsets, the
+# runs); the `replay selection:` line names the subset and the sampled-pass
+# line of a subset document is qualified by it, in the Rust reader's words.
+# Every reader before 1.27.0 refuses a 2.0.0 document as an unsupported major.
+#
+# 1.28.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
 # `target.original_name`: a restore under the source's ORIGINAL topic names,
 # into absent topics (OD-2). Thirteen arms, ON-1 to ON-13, mirrored byte for
 # byte and in position from `Scorecard::validate_invariants`: the block only
@@ -516,7 +565,15 @@ FORMAT_VERSION = "1.4.0"
 # it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
 # that is not the writer's shape; two `original name:` lines say what admitted
 # the restore, in the Rust reader's words.
-SCRIPT_VERSION = "1.25.0"
+SCRIPT_VERSION = "1.28.0"
+
+# PROD-11.1b: the format of a partition-subset restore and its major --
+# `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
+# `crates/logweir-core/src/scorecard.rs`, which they must equal
+# (`docs/test_verify_scorecard.py::test_the_partition_subset_major_is_the_rust_readers`).
+# The newest major this script reads, and only for that shape (arm PS-1).
+SCORECARD_PARTITION_SUBSETS_VERSION = "2.0.0"
+SCORECARD_PARTITION_SUBSETS_MAJOR = 2
 
 # The first minor of SCORECARD format 1 whose `target.auth.mode` may be
 # `scramSha256`, `plain` or `mtls` (PROD-01.3) -- `AUTH_MODES_SINCE_MINOR` in
@@ -651,6 +708,205 @@ RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
 # (`docs/test_verify_scorecard.py::test_the_topic_configuration_minor_is_the_rust_readers`).
 RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR = 3
 
+# PROD-04.1: the first minor of the BACKUP RECEIPT's format 1 that defines
+# `consumer_positions` (arm 30) — `CONSUMER_POSITIONS_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_consumer_positions_minor_is_the_rust_readers`).
+RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR = 7
+
+# PROD-04.1: the closed vocabularies of `consumer_positions`, in the order
+# `crates/logweir-core/src/consumer_positions.rs` declares them, which they must
+# equal (`docs/test_verify_scorecard.py::test_the_consumer_positions_vocabulary_is_the_rust_readers`).
+CP_EXCLUDED_REASONS = ("GroupTypeNotCaptured", "GroupNotFound")
+CP_FAILED_REASONS = (
+    "NotVisibleToPrincipal",
+    "NotVisibleOrUnreachable",
+    "NotAuthorized",
+    "PositionsUnstable",
+    "ListingInconsistent",
+    "AbsenceUnproven",
+    "TypeUnproven",
+    "Unreachable",
+    "DescribeFailed",
+    "PositionsFailed",
+    "GenerationChangedDuringCapture",
+    "CaptureUnavailable",
+    "GroupVanishedDuringCapture",
+    "PartitionsNotRead",
+)
+CP_CAPTURED_TYPES = ("classic", "consumer")
+CP_GROUP_STATES = (
+    "PreparingRebalance",
+    "CompletingRebalance",
+    "Stable",
+    "Dead",
+    "Empty",
+    "stateUnknownToClient",
+)
+CP_INACTIVE_STATES = ("Empty", "Dead")
+CP_POSITION_STATUSES = ("captured", "excluded", "failed", "notObserved")
+CP_POSITION_FAILED_REASONS = (
+    "TopicNotAuthorized",
+    "Unstable",
+    "NotAPosition",
+    "PartitionFailed",
+    "MarksNotRead",
+)
+CP_NOT_OBSERVED_REASONS = ("PartitionAddedDuringCapture", "TopicNotObserved")
+CP_COVERAGE_RELATIONS = (
+    "beforeLogStart",
+    "noArchivedData",
+    "beforeArchive",
+    "withinArchive",
+    "atArchiveEnd",
+    "beyondArchive",
+)
+CP_RELATED = ("withinArchive", "atArchiveEnd")
+CP_LISTING_VALUES = ("complete", "notComplete")
+
+
+def _cp_relation(position, facts):
+    """`logweir_core::consumer_positions::relation`, word for word: the
+    verdict a committed position's partition facts derive."""
+    log_start = facts.get("log_start")
+    high = facts.get("high_watermark")
+    if log_start is None or high is None:
+        return "MarksNotRead"
+    if position > high:
+        return "PositionBeyondEnd"
+    if position < log_start:
+        return "beforeLogStart"
+    first = facts.get("archived_first")
+    last = facts.get("archived_last")
+    if first is None or last is None:
+        return "noArchivedData"
+    if position < first:
+        return "beforeArchive"
+    if position <= last:
+        return "withinArchive"
+    # `i64::saturating_add(1)`.
+    if position == min(last + 1, 2**63 - 1):
+        return "atArchiveEnd"
+    return "beyondArchive"
+
+
+def _cp_changed(partitions):
+    """`logweir_core::consumer_positions::changed_during_capture`."""
+    for p in partitions:
+        for before, after in (
+            ("log_start", "log_start_after"),
+            ("high_watermark", "high_watermark_after"),
+        ):
+            b, a = p.get(before), p.get(after)
+            if b is not None and a is not None and a < b:
+                return True
+    return False
+
+
+def _cp_active(state, listed):
+    """`logweir_core::consumer_positions::active`."""
+    return state not in CP_INACTIVE_STATES or listed not in CP_INACTIVE_STATES
+
+
+def _cp_vanished(state, members) -> bool:
+    """`logweir_core::consumer_positions::vanished`: `Dead` with no member."""
+    return state == "Dead" and members == 0
+
+
+def _cp_document_key(backup_id, run_id) -> str:
+    """`logweir_core::consumer_positions::document_key`."""
+    return f"logweir/backups/{backup_id}/{run_id}.consumer-positions.json"
+
+
+CP_COUNT_NAMES = ("related", "not_related", "never_committed", "beyond_end", "failed",
+                  "not_observed")
+
+
+def _cp_counts_of(group):
+    """`PositionCounts::of` over one captured group's document entry."""
+    c = dict.fromkeys(CP_COUNT_NAMES, 0)
+    c["never_committed"] = group["no_committed_position"]
+    for p in group["positions"]:
+        status = p["status"]
+        if status == "captured":
+            slot = "related" if p.get("coverage") in CP_RELATED else "not_related"
+        elif status == "excluded":
+            slot = "beyond_end"
+        elif status == "failed":
+            slot = "failed"
+        else:
+            slot = "not_observed"
+        c[slot] = min(c[slot] + 1, 2**32 - 1)
+    return c
+
+
+def _cp_counts_total(c) -> int:
+    """`PositionCounts::total`."""
+    return sum(c[n] for n in CP_COUNT_NAMES)
+
+
+def _cp_counts_render(c) -> str:
+    """`PositionCounts::render`, word for word."""
+    return (
+        f"{c['related']} related, {c['not_related']} not related, {c['never_committed']} "
+        f"never committed, {c['beyond_end']} beyond the end, {c['failed']} failed, "
+        f"{c['not_observed']} not observed"
+    )
+
+
+_RFC3339 = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?"
+    r"([Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
+def _rfc3339_ns(value):
+    """Nanoseconds since the epoch of an RFC 3339 instant, or None — what
+    chrono's `DateTime<Utc>` deserialises, compared as the Rust reader does
+    (a later instant is greater, whatever its offset)."""
+    if not isinstance(value, str):
+        return None
+    m = _RFC3339.fullmatch(value)
+    if not m:
+        return None
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    if not (1 <= month <= 12 and 1 <= day <= 31 and hour <= 23 and minute <= 59
+            and second <= 60):
+        return None
+    frac = m.group(7) or "."
+    nanos = int((frac[1:] + "000000000")[:9])
+    tz = m.group(8)
+    offset = 0
+    if tz not in ("Z", "z"):
+        offset = (1 if tz[0] == "+" else -1) * (int(tz[1:3]) * 3600 + int(tz[4:6]) * 60)
+    seconds = calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)) - offset
+    return seconds * 10**9 + nanos
+
+
+def _rust_bool(b) -> str:
+    """A `bool` as Rust's `{}` renders it."""
+    return "true" if b else "false"
+
+
+def _cp_pair(a, b) -> bool:
+    """Arm CP-6's pair rule: recorded whole, never negative, never inverted."""
+    if a is None and b is None:
+        return True
+    if a is not None and b is not None:
+        return 0 <= a <= b
+    return False
+
+
+def _cp_shown(value) -> str:
+    """An `Option<String>` as the Rust arms render it: `{:?}` or `absent`."""
+    return "absent" if value is None else _rust_debug_str(value)
+
+
+def _cp_place(topic, partition) -> str:
+    """A position's place, `"topic":partition`, as arm CP-11 and the lines render it."""
+    return f"{_rust_debug_str(topic)}:{partition}"
+
+
 # PROD-03.0: the first minor of the BACKUP RECEIPT's format 1 that defines
 # `schema_dependency` (arm 22) — `SCHEMA_DEPENDENCY_SINCE_MINOR` in
 # `crates/logweir-core/src/backup_receipt.rs`, which it must equal
@@ -701,6 +957,47 @@ def _judged_records(side) -> int:
     """`logweir_core::schema_dependency::judged_records`: framed, unframed and
     nulls together, exact."""
     return side["framed"] + side["unframed"] + side["nulls"]
+# PROD-01.4a: the first minor of the BACKUP RECEIPT's format 1 that defines
+# `generations` (arm 36) — `GENERATIONS_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_generations_minor_is_the_rust_readers`).
+RECEIPT_GENERATIONS_SINCE_MINOR = 6
+
+# PROD-01.4a: why a topic ID is null (arm 39) and where a recorded one came
+# from (arm 40) — `TOPIC_ID_REASONS` and `TOPIC_ID_SOURCES` in
+# `crates/logweir-core/src/topic_identity.rs`, in their order.
+RECEIPT_TOPIC_ID_REASONS = (
+    "noTopicId",
+    "notAuthorized",
+    "topicNotFound",
+    "readFailed",
+    "notRead",
+    "reservedTopicId",
+)
+RECEIPT_TOPIC_ID_SOURCES = ("describeTopics", "engineManifest")
+
+_TOPIC_ID_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def _is_canonical_topic_id(text) -> bool:
+    """Kafka's text form of a real topic ID — the twin of
+    `logweir_core::topic_identity::is_canonical`: 22 URL-safe base64
+    characters, no padding, over 16 bytes that re-encode to the SAME text (no
+    stray trailing bits), and never one of Kafka's reserved IDs: the all-zero ID
+    ("no ID") or (0, 1), `AAAAAAAAAAAAAAAAAAAAAQ` (`ONE_UUID`,
+    `METADATA_TOPIC_ID`), which `org.apache.kafka.common.Uuid` never gives a
+    topic (PROD-01.4a review M1)."""
+    if not isinstance(text, str) or len(text) != 22 or not set(text) <= _TOPIC_ID_ALPHABET:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(text + "==")
+    except (ValueError, TypeError):
+        return False
+    if len(raw) != 16 or raw in (bytes(16), bytes(15) + b"\x01"):
+        return False
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == text
 
 # PROD-05.1: `ConfigEntry::portability`'s closed set (arm 16), in
 # `logweir_core::topic_configuration::PORTABILITY_CLASSES`'s order, which the
@@ -893,6 +1190,27 @@ def _major(version: str):
     return n if n < 2 ** 64 else None
 
 
+def _defines_format_1_minor(version, since_minor) -> bool:
+    """Whether a document of `version` defines a field format 1 added at
+    `since_minor` -- the twin of `logweir_core::scorecard::
+    defines_format_1_minor` (PROD-11.1b): a 1.x document from that minor on,
+    and every document of major 2, which is 1.7.0's fields plus the subset
+    meaning. False for a version that does not parse or names another
+    major."""
+    major = _major(version)
+    if major == 1:
+        minor = _minor(version)
+        return minor is not None and minor >= since_minor
+    return major == SCORECARD_PARTITION_SUBSETS_MAJOR
+
+
+def _narrows_partitions(block) -> bool:
+    """`SelectionLabel::narrows_partitions`: the block names a partition
+    subset (a non-empty `partitions` list). The shape layer has proved the
+    block's shape before any caller reads it."""
+    return isinstance(block, dict) and bool(block.get("partitions"))
+
+
 def _minor(version: str):
     """Second integer of a dotted version string, or None if there is none.
 
@@ -947,14 +1265,33 @@ def _time_basis_shape_ok(block) -> bool:
 
 def _selection_shape_ok(block) -> bool:
     """`source.selection` has the shape `SelectionLabel` deserialises
-    (PROD-11.1, format 1.7.0): an object whose `window_start_ms` and
-    `window_end_ms` are both i64. Unknown keys are ignored, as serde ignores
-    them."""
-    return (
-        isinstance(block, dict)
-        and _int_in(block.get("window_start_ms"), 64)
-        and _int_in(block.get("window_end_ms"), 64)
-    )
+    (PROD-11.1, format 1.7.0; PROD-11.1b, format 2.0.0): an object whose
+    `window_end_ms` is an i64, whose `window_start_ms` is absent, null or an
+    i64, whose `partitions` is absent, null or an array of `{topic: string,
+    partitions: [i32]}`, and whose `engine_runs` is absent, null or a u32.
+    Unknown keys are ignored, as serde ignores them. Which of the optional
+    fields a document of each major must carry is an arm's (PS-1, PS-2)."""
+    if not isinstance(block, dict) or not _int_in(block.get("window_end_ms"), 64):
+        return False
+    start = block.get("window_start_ms")
+    if start is not None and not _int_in(start, 64):
+        return False
+    subsets = block.get("partitions")
+    if subsets is not None:
+        if not isinstance(subsets, list):
+            return False
+        for entry in subsets:
+            if not isinstance(entry, dict) or not isinstance(entry.get("topic"), str):
+                return False
+            listed = entry.get("partitions")
+            if not isinstance(listed, list) or not all(_int_in(p, 32) for p in listed):
+                return False
+    runs = block.get("engine_runs")
+    if runs is not None and not (
+        isinstance(runs, int) and not isinstance(runs, bool) and 0 <= runs < 2 ** 32
+    ):
+        return False
+    return True
 
 
 def _original_name_shape_ok(block) -> bool:
@@ -1431,11 +1768,12 @@ def check_invariants(doc) -> str:
     doc_major = _major(version)
     if doc_major is None:
         return f"format_version {version!r} is not a parseable semver"
-    known_major = _major(FORMAT_VERSION)
-    if doc_major > known_major:
+    # PROD-11.1b: this script reads major 2, the partition-subset format, too
+    # (and only for that shape: arm PS-1, after the shape layer below).
+    if doc_major > SCORECARD_PARTITION_SUBSETS_MAJOR:
         return (
             f"format_version {version} has a major version newer than this reader "
-            f"understands (this script knows {FORMAT_VERSION})"
+            f"understands (this script knows {SCORECARD_PARTITION_SUBSETS_VERSION})"
         )
 
     # THE BLOCK-PRESENCE CHECKS ARE NOT INVARIANT ARMS. They are this script's
@@ -1510,8 +1848,9 @@ def check_invariants(doc) -> str:
     selection = source.get("selection")
     if selection is not None and not _selection_shape_ok(selection):
         return (
-            "source.selection is not an object of the shape the writer gives it: a window start "
-            "and a window end, both integers"
+            "source.selection is not an object of the shape the writer gives it: a window end "
+            "and an optional window start, both integers, an optional array of topic partition "
+            "lists and an optional engine-run count"
         )
 
     # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
@@ -1670,8 +2009,22 @@ def check_invariants(doc) -> str:
     # both readers. A retroactive tightening of the 1.0.0 reader, not a format
     # change: no byte of the format changes, the accepted set narrows, and the
     # writer's zeroing is unconditional, so no document Logweir has ever written
-    # is refused. Scoped to major 1 so a future major may redefine the block.
-    if doc_major == 1:
+    # is refused. Scoped to the majors this script reads (1, and 2 since
+    # PROD-11.1b, which is 1.7.0's fields), so a future major may redefine the
+    # block.
+    #
+    # PS-1 first (PROD-11.1b), mirrored from `Scorecard::refuse_unreadable_major`,
+    # which the Rust reader runs before every arm: major 2 is the format of a
+    # partition-subset restore and nothing else. HERE, after the shape layer,
+    # because the Rust reader reaches it only after `serde_json` has read the
+    # document; the same words.
+    if doc_major == SCORECARD_PARTITION_SUBSETS_MAJOR and not _narrows_partitions(selection):
+        return (
+            f"format_version {version} is the format of a partition-subset restore, and this "
+            "document carries no source.selection.partitions; a reader reads major "
+            f"{SCORECARD_PARTITION_SUBSETS_MAJOR} only for that shape"
+        )
+    if doc_major in (1, SCORECARD_PARTITION_SUBSETS_MAJOR):
         if evidence.get("version_id") is not None:
             return "evidence.version_id is set but the four post-put fields are zeroed before signing"
         if evidence.get("retain_until") is not None:
@@ -1947,10 +2300,7 @@ def check_invariants(doc) -> str:
         # 1.5.0, and the unchanged closed two below it.
         target_mode = str(target_auth.get("mode"))
         version = doc.get("format_version")
-        five_defined = (
-            _major(version) == 1
-            and (_minor(version) or 0) >= SCORECARD_AUTH_MODES_SINCE_MINOR
-        )
+        five_defined = _defines_format_1_minor(version, SCORECARD_AUTH_MODES_SINCE_MINOR)
         if target_mode in PROD_01_3_AUTH_MODES:
             if not five_defined:
                 return (
@@ -1980,12 +2330,7 @@ def check_invariants(doc) -> str:
     # both lists and the block are arrays of strings.
     if not_reconstructed is not None:
         # NR-1. A version before 1.2.0 cannot carry the 1.2.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR):
             return (
                 f"topic_parity.not_reconstructed is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2040,12 +2385,7 @@ def check_invariants(doc) -> str:
     # lists name topics. The shape layer above has proved the block's shape.
     if time_basis is not None:
         # TB-1. A version before 1.3.0 cannot carry the 1.3.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_TIME_BASIS_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_TIME_BASIS_SINCE_MINOR):
             return (
                 f"source.time_basis is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2081,12 +2421,7 @@ def check_invariants(doc) -> str:
     # u64 loop every count's domain.
     if verification is not None:
         # IV-1. A version before 1.4.0 cannot carry the 1.4.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_VERIFICATION_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_VERIFICATION_SINCE_MINOR):
             return (
                 f"integrity.verification is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2177,12 +2512,7 @@ def check_invariants(doc) -> str:
     # by code point and Rust `String` by UTF-8 byte, which order alike.
     if unsampled is not None:
         # US-1. A version before 1.6.0 cannot carry the 1.6.0 field.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR):
             return (
                 f"sample.unsampled_topics is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the field is defined from "
@@ -2207,35 +2537,40 @@ def check_invariants(doc) -> str:
                 "leaves no topic unsampled"
             )
 
-    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3,
-    # mirrored ARM FOR ARM, IN THIS POSITION (after `sample.unsampled_topics`,
-    # before `redactions`) and with the same words from
-    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
-    # the block, so every document before 1.7.0 is decided exactly as before.
-    # Not interpolated except SEL-1's version. The shape layer above has
-    # proved its two integers.
+    # `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3, and
+    # (format 2.0.0, PROD-11.1b, OD-9 (a)) PS-2 to PS-5, mirrored ARM FOR ARM,
+    # IN THIS POSITION (after `sample.unsampled_topics`, before `redactions`)
+    # and with the same words from `Scorecard::validate_invariants`. They fire
+    # ONLY on a document carrying the block, so every document without it is
+    # decided exactly as before. Not interpolated except SEL-1's version. The
+    # shape layer above has proved the block's types.
     if selection is not None:
         # SEL-1. A version before 1.7.0 cannot carry the 1.7.0 block.
-        minor = _minor(version)
-        if not (
-            doc_major == 1
-            and minor is not None
-            and minor >= SCORECARD_SELECTION_SINCE_MINOR
-        ):
+        if not _defines_format_1_minor(version, SCORECARD_SELECTION_SINCE_MINOR):
             return (
                 f"source.selection is present but format_version "
                 f"{_rust_debug_str(version)} predates it: the block is defined from "
                 f"1.{SCORECARD_SELECTION_SINCE_MINOR}.0"
             )
-        start = selection["window_start_ms"]
+        start = selection.get("window_start_ms")
         end = selection["window_end_ms"]
+        subsets = selection.get("partitions")
+        runs = selection.get("engine_runs")
+        # PS-2. A format-1 block is a window start and its end, nothing else.
+        if doc_major == 1 and (start is None or subsets is not None or runs is not None):
+            return (
+                "source.selection under major 1 is a stated window start and its end, and "
+                "nothing else: a block without window_start_ms, or with partitions or "
+                "engine_runs, is a partition-subset selection, which is format 2.0.0"
+            )
         # SEL-2. A stated start is before the end.
-        if start >= end:
+        if start is not None and start >= end:
             return (
                 "source.selection.window_start_ms is not before window_end_ms; a selection's "
                 "window holds at least one instant after its start"
             )
-        # SEL-3. The complete block's window is the selection's.
+        # SEL-3. The complete block's window is the selection's (no start for
+        # a 2.0.0 block from the archive's floor, as the complete block's).
         complete = verification.get("complete") if verification is not None else None
         if complete is not None:
             window = complete["window"]
@@ -2244,6 +2579,42 @@ def check_invariants(doc) -> str:
                     "integrity.verification.complete.window is not source.selection's window; "
                     "the expected output is selected by the plan's own start and end"
                 )
+        if subsets is not None:
+            # PS-3. One spelling per selection.
+            well_formed = all(
+                a["topic"] < b["topic"] for a, b in zip(subsets, subsets[1:])
+            ) and all(
+                e["topic"].strip(RUST_WHITESPACE)
+                and e["partitions"]
+                and all(p >= 0 for p in e["partitions"])
+                and all(a < b for a, b in zip(e["partitions"], e["partitions"][1:]))
+                for e in subsets
+            )
+            if not well_formed:
+                return (
+                    "source.selection.partitions does not name each topic once, in order, with "
+                    "a non-empty, sorted list of distinct partitions that are not negative"
+                )
+            # PS-4. One run per distinct subset, and at most one more.
+            need = len({tuple(e["partitions"]) for e in subsets})
+            if runs is None or runs not in (need, need + 1):
+                return (
+                    "source.selection.engine_runs is not one run per distinct partition subset, "
+                    "or one more for the topics without one"
+                )
+            # PS-5. Nothing is expected from a partition the plan did not
+            # select.
+            if complete is not None:
+                chosen = {e["topic"]: e["partitions"] for e in subsets}
+                for entry in complete["partitions"]:
+                    listed = chosen.get(entry["topic"])
+                    if entry["replay"]["expected"] > 0 and (
+                        listed is not None and entry["partition"] not in listed
+                    ):
+                        return (
+                            "integrity.verification.complete.partitions expects records from a "
+                            "partition source.selection does not select"
+                        )
 
     # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-13,
     # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
@@ -2587,6 +2958,163 @@ def _receipt_shape(doc) -> str:
                     for i in ids
                 ):
                     return f"{where}.{name}.schema_ids is not a list of u32"
+    # PROD-01.4a, format 1.6.0: `generations` is `Option<BTreeMap<String,
+    # TopicIdentity>>`, whose five fields are each an `Option<String>`, so Rust
+    # refuses any other JSON type at DESERIALISATION, before arm 36 runs. `null`
+    # is absent on both sides.
+    generations = doc.get("generations")
+    if generations is not None:
+        if not isinstance(generations, dict):
+            return "generations is not an object"
+        for topic in sorted(generations):
+            entry = generations[topic]
+            where = f"generations[{_rust_debug_str(topic)}]"
+            if not isinstance(entry, dict):
+                return f"{where} is not an object"
+            for name in (
+                "topic_id",
+                "topic_id_after",
+                "topic_id_source",
+                "topic_id_reason",
+                "topic_id_after_reason",
+            ):
+                value = entry.get(name)
+                if value is not None and not isinstance(value, str):
+                    return f"{where}.{name} is not a string"
+    # PROD-04.1, format 1.7.0: `consumer_positions` is
+    # `Option<ConsumerPositions>` over there; every one of these is refused at
+    # DESERIALISATION by the Rust reader before arm 30 runs (an instant is
+    # RFC 3339, a count and `members` a `u32`, `document.bytes` a `u64`,
+    # `active` a `bool`), so they belong in the shape layer here for the
+    # reason `source.auth` does. `null` is absent on both sides.
+    shape = _consumer_positions_shape(doc.get("consumer_positions"))
+    if shape:
+        return shape
+    return ""
+
+
+def _is_int_in(value, low, high) -> bool:
+    """A JSON integer (never a bool) in `[low, high]`."""
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _consumer_positions_shape(cp) -> str:
+    """"" when `cp` is absent or has the shape `ConsumerPositions` reads (the
+    receipt's 1.7.0 block: the summary, never the positions)."""
+    if cp is None:
+        return ""
+    if not isinstance(cp, dict):
+        return "consumer_positions is not an object"
+    for name in ("observed_from", "observed_to"):
+        if _rfc3339_ns(cp.get(name)) is None:
+            return f"consumer_positions.{name} is not an RFC 3339 instant"
+    if not isinstance(cp.get("listing"), str):
+        return "consumer_positions.listing is not a string"
+    document = cp.get("document")
+    if not isinstance(document, dict):
+        return "consumer_positions.document is not an object"
+    for name in ("key", "sha256"):
+        if not isinstance(document.get(name), str):
+            return f"consumer_positions.document.{name} is not a string"
+    if not _is_int_in(document.get("bytes"), 0, 2**64 - 1):
+        return "consumer_positions.document.bytes is not a u64"
+    if not isinstance(cp.get("groups"), dict):
+        return "consumer_positions.groups is not an object"
+    u32 = (0, 2**32 - 1)
+    for group_id in sorted(cp["groups"]):
+        group = cp["groups"][group_id]
+        where = f"consumer_positions.groups[{_rust_debug_str(group_id)}]"
+        if not isinstance(group, dict):
+            return f"{where} is not an object"
+        if not isinstance(group.get("outcome"), str):
+            return f"{where}.outcome is not a string"
+        for name in ("reason", "group_type", "state", "listed_state"):
+            value = group.get(name)
+            if value is not None and not isinstance(value, str):
+                return f"{where}.{name} is not a string"
+        members = group.get("members")
+        if members is not None and not _is_int_in(members, *u32):
+            return f"{where}.members is not a u32"
+        active = group.get("active")
+        if active is not None and not isinstance(active, bool):
+            return f"{where}.active is not a boolean"
+        counts = group.get("counts")
+        if counts is None:
+            continue
+        if not isinstance(counts, dict):
+            return f"{where}.counts is not an object"
+        for name in CP_COUNT_NAMES:
+            if not _is_int_in(counts.get(name), *u32):
+                return f"{where}.counts.{name} is not a u32"
+    return ""
+
+
+def _positions_document_shape(pd) -> str:
+    """"" when `pd` has the shape `PositionsDocument` reads; otherwise why not,
+    as the Rust reader refuses it at deserialisation before arm CP-1."""
+    if not isinstance(pd, dict):
+        return "the positions document is not an object"
+    for name in ("format_version", "backup_id", "run_id"):
+        if not isinstance(pd.get(name), str):
+            return f"the positions document's {name} is not a string"
+    for name in ("topics", "groups"):
+        if not isinstance(pd.get(name), dict):
+            return f"the positions document's {name} is not an object"
+    i64 = (-(2**63), 2**63 - 1)
+    u32 = (0, 2**32 - 1)
+    for topic in sorted(pd["topics"]):
+        entry = pd["topics"][topic]
+        where = f"the positions document's topics[{_rust_debug_str(topic)}]"
+        if not isinstance(entry, dict):
+            return f"{where} is not an object"
+        if not isinstance(entry.get("partitions"), list):
+            return f"{where}.partitions is not an array"
+        if not isinstance(entry.get("changed_during_capture"), bool):
+            return f"{where}.changed_during_capture is not a boolean"
+        for i, facts in enumerate(entry["partitions"]):
+            at = f"{where}.partitions[{i}]"
+            if not isinstance(facts, dict):
+                return f"{at} is not an object"
+            if not _is_int_in(facts.get("partition"), *u32):
+                return f"{at}.partition is not a u32"
+            if not isinstance(facts.get("observed"), bool):
+                return f"{at}.observed is not a boolean"
+            for name in (
+                "log_start",
+                "high_watermark",
+                "log_start_after",
+                "high_watermark_after",
+                "archived_first",
+                "archived_last",
+            ):
+                value = facts.get(name)
+                if value is not None and not _is_int_in(value, *i64):
+                    return f"{at}.{name} is not an i64"
+    for group_id in sorted(pd["groups"]):
+        group = pd["groups"][group_id]
+        where = f"the positions document's groups[{_rust_debug_str(group_id)}]"
+        if not isinstance(group, dict):
+            return f"{where} is not an object"
+        if not _is_int_in(group.get("no_committed_position"), *u32):
+            return f"{where}.no_committed_position is not a u32"
+        if not isinstance(group.get("positions"), list):
+            return f"{where}.positions is not an array"
+        for i, entry in enumerate(group["positions"]):
+            at = f"{where}.positions[{i}]"
+            if not isinstance(entry, dict):
+                return f"{at} is not an object"
+            for name in ("topic", "status"):
+                if not isinstance(entry.get(name), str):
+                    return f"{at}.{name} is not a string"
+            if not _is_int_in(entry.get("partition"), *u32):
+                return f"{at}.partition is not a u32"
+            position = entry.get("position")
+            if position is not None and not _is_int_in(position, *i64):
+                return f"{at}.position is not an i64"
+            for name in ("reason", "coverage"):
+                value = entry.get(name)
+                if value is not None and not isinstance(value, str):
+                    return f"{at}.{name} is not a string"
     return ""
 
 
@@ -2648,6 +3176,14 @@ def check_backup_receipt_invariants(doc) -> str:
     4. `covered.from_ms < covered.to_ms` — the end is EXCLUSIVE.
     5. `source.auth.mode` is `plaintext` or `scramSha512`, and from format
        1.4.0 (PROD-01.3) also `scramSha256`, `plain` or `mtls`.
+
+    Arms 6-21 read the 1.1.0 and 1.3.0 blocks (FX-4, PROD-05.1), arms 22-29
+    the 1.5.0 `schema_dependency` (PROD-03.0), arms 30-35 the 1.7.0
+    `consumer_positions` summary (PROD-04.1), and arms 36-40 the 1.6.0
+    `generations` (PROD-01.4a): present only from 1.6.0,
+    covering exactly the named topic set, every recorded topic ID canonical, a
+    reason exactly when an ID is null, and a source exactly when one is
+    recorded. Each block's arms run only when it is present.
     """
     # ARM 1. GC12 for this document: a reader refuses a major it has never
     # seen rather than guessing at a shape. FIRST, so a document from a future
@@ -3095,6 +3631,469 @@ def check_backup_receipt_invariants(doc) -> str:
                         "dependent"
                     )
 
+    # ARMS 30-35 (format 1.7.0, PROD-04.1): the `consumer_positions` block, and
+    # ONLY when it is present. Groups in id order. The positions themselves
+    # are in the document the block binds, checked by
+    # `check_consumer_positions_document` (arms CP-1 to CP-14).
+    cp = doc.get("consumer_positions")
+    if cp is not None:
+        # ARM 30. A document declaring a minor before 7 cannot carry a 1.7 field.
+        if parsed[1] < RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR:
+            return (
+                f"consumer_positions is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR}.0"
+            )
+        # ARM 31. The capture ends at or after it starts, the listing word is
+        # closed, and at least one group is recorded.
+        window_fits = _rfc3339_ns(cp["observed_to"]) >= _rfc3339_ns(cp["observed_from"])
+        if not window_fits or cp["listing"] not in CP_LISTING_VALUES or not cp["groups"]:
+            return (
+                f"consumer_positions records listing {_rust_debug_str(cp['listing'])}, "
+                f"{len(cp['groups'])} group(s) and a capture that "
+                f"{'ends at or after it starts' if window_fits else 'ends before it starts'}: "
+                "the capture ends at or after it starts, the listing is \"complete\" or "
+                "\"notComplete\", and at least one group is recorded"
+            )
+        # ARM 32. The positions document is the one beside this receipt, named
+        # by a well-formed digest over at least one byte.
+        document = cp["document"]
+        key = _cp_document_key(doc["backup_id"], doc["run_id"])
+        digest = document["sha256"]
+        digest_fits = (
+            digest.startswith("sha256:")
+            and len(digest) == 71
+            and all(ch in "0123456789abcdef" for ch in digest[7:])
+        )
+        if document["key"] != key or not digest_fits or document["bytes"] == 0:
+            return (
+                f"consumer_positions.document is {_rust_debug_str(document['key'])} with sha256 "
+                f"{_rust_debug_str(digest)} over {document['bytes']} bytes: the positions "
+                f"document is {_rust_debug_str(key)}, its digest \"sha256:\" and 64 lowercase "
+                "hex digits, over at least one byte"
+            )
+        shown = _cp_shown
+        for group_id in sorted(cp["groups"]):
+            group = cp["groups"][group_id]
+            gid = _rust_debug_str(group_id)
+            outcome = group["outcome"]
+            reason = group.get("reason")
+            # ARM 33. The outcome, and a reason exactly when it is not captured.
+            if outcome == "captured":
+                reason_fits = reason is None
+            elif outcome == "excluded":
+                reason_fits = reason in CP_EXCLUDED_REASONS
+            elif outcome == "failed":
+                reason_fits = reason in CP_FAILED_REASONS
+            else:
+                reason_fits = False
+            if not reason_fits:
+                return (
+                    f"consumer_positions.groups[{gid}] has outcome {_rust_debug_str(outcome)} "
+                    f"and reason {shown(reason)}: the outcome is \"captured\", \"excluded\" "
+                    "or \"failed\", a reason is present exactly when it is not \"captured\", "
+                    "and it is one this format defines for that outcome"
+                )
+            # ARM 34. What a group records follows from its outcome; a captured
+            # group's counts cover at least one partition, and a group
+            # described `Dead` with no member is never captured.
+            captured = outcome == "captured"
+            other = reason == "GroupTypeNotCaptured"
+            group_type = group.get("group_type")
+            state = group.get("state")
+            listed = group.get("listed_state")
+            members = group.get("members")
+            active = group.get("active")
+            counts = group.get("counts")
+            if captured:
+                fields_fit = (
+                    group_type in CP_CAPTURED_TYPES
+                    and state in CP_GROUP_STATES
+                    and listed in CP_GROUP_STATES
+                    and members is not None
+                    and active is not None
+                    and counts is not None
+                    and _cp_counts_total(counts) >= 1
+                    and not (state is not None and members is not None
+                             and _cp_vanished(state, members))
+                )
+            else:
+                only_type = (
+                    state is None
+                    and listed is None
+                    and members is None
+                    and active is None
+                    and counts is None
+                )
+                ty = group_type == "other" if other else group_type is None
+                fields_fit = only_type and ty
+            counts_shown = (
+                "absent" if counts is None else f"over {_cp_counts_total(counts)} partition(s)"
+            )
+            if not fields_fit:
+                return (
+                    f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with "
+                    f"group_type {shown(group_type)}, state {shown(state)}, listed_state "
+                    f"{shown(listed)}, members {'absent' if members is None else members}, "
+                    f"active {'absent' if active is None else _rust_bool(active)} and counts "
+                    f"{counts_shown}: "
+                    "a captured group records a type of \"classic\" or \"consumer\", both "
+                    "states from the closed set, its members, active and counts over at least "
+                    "one partition, and is never \"Dead\" with no member; a "
+                    "GroupTypeNotCaptured group records group_type \"other\" and nothing else; "
+                    "any other group records none of them"
+                )
+            if state is not None and listed is not None and active is not None:
+                # ARM 35. `active` is what the two states say.
+                derived = _cp_active(state, listed)
+                if active != derived:
+                    return (
+                        f"consumer_positions.groups[{gid}].active is {_rust_bool(active)} but "
+                        f"its states {_rust_debug_str(state)} and {_rust_debug_str(listed)} say "
+                        f"{_rust_bool(derived)}: a group is active unless both its states are "
+                        "\"Empty\" or \"Dead\""
+                    )
+    # ARMS 36-40 (format 1.6.0, PROD-01.4a): the `generations` block, and ONLY
+    # when it is present, so every earlier receipt is decided exactly as
+    # before. Topics in NAME order; per topic, arms 38, 39 and 40, each over
+    # `topic_id` then `topic_id_after`.
+    generations = doc.get("generations")
+    if generations is not None:
+        # ARM 36. A document declaring a minor before 6 cannot carry a 1.6 field.
+        if parsed[1] < RECEIPT_GENERATIONS_SINCE_MINOR:
+            return (
+                f"generations is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_GENERATIONS_SINCE_MINOR}.0"
+            )
+        # ARM 37. The observed set is the named set — arms 3, 7 and 14's twin.
+        observed = list(generations.keys())
+        if sorted(set(observed)) != sorted(set(named_topics)):
+            return (
+                f"generations covers {_render_topic_set(observed)} but the named topic set "
+                f"is {_render_topic_set(named_topics)}"
+            )
+        for topic in sorted(generations):
+            entry = generations[topic]
+            reads = (
+                ("topic_id", entry.get("topic_id"), entry.get("topic_id_reason")),
+                (
+                    "topic_id_after",
+                    entry.get("topic_id_after"),
+                    entry.get("topic_id_after_reason"),
+                ),
+            )
+            # ARM 38. A recorded ID is Kafka's text form of a real ID.
+            for field, topic_id, _ in reads:
+                if topic_id is not None and not _is_canonical_topic_id(topic_id):
+                    return (
+                        f"generations[{_rust_debug_str(topic)}].{field} "
+                        f"{_rust_debug_str(topic_id)} is not a topic ID this format defines: "
+                        "22 characters of URL-safe base64 without padding over the ID's 16 "
+                        "bytes, and never one of Kafka's reserved IDs (AAAAAAAAAAAAAAAAAAAAAA, "
+                        "AAAAAAAAAAAAAAAAAAAAAQ)"
+                    )
+            # ARM 39. A reason exactly when the ID is null, from the closed set.
+            for field, topic_id, reason in reads:
+                if topic_id is not None:
+                    fits = reason is None
+                else:
+                    fits = reason is not None and reason in RECEIPT_TOPIC_ID_REASONS
+                if not fits:
+                    rendered = "absent" if reason is None else _rust_debug_str(reason)
+                    state = "recorded" if topic_id is not None else "null"
+                    return (
+                        f"generations[{_rust_debug_str(topic)}].{field}_reason {rendered} "
+                        f"does not fit a {state} {field}: a reason is present exactly when "
+                        "the ID is null, and is \"noTopicId\", \"notAuthorized\", "
+                        "\"topicNotFound\", \"readFailed\", \"notRead\" or \"reservedTopicId\""
+                    )
+            # ARM 40. A source exactly when an ID is recorded, from the closed set.
+            recorded = entry.get("topic_id") is not None or entry.get("topic_id_after") is not None
+            source = entry.get("topic_id_source")
+            if source is not None:
+                fits = recorded and source in RECEIPT_TOPIC_ID_SOURCES
+            else:
+                fits = not recorded
+            if not fits:
+                rendered = "absent" if source is None else _rust_debug_str(source)
+                return (
+                    f"generations[{_rust_debug_str(topic)}].topic_id_source {rendered} does "
+                    "not fit its IDs: a source is present exactly when an ID is recorded, and "
+                    "is \"describeTopics\" or \"engineManifest\""
+                )
+
+    return ""
+
+
+def _catalog_point_problem(doc) -> str:
+    """The one check this script makes of a catalog point record's content, or
+    "" when it holds — the twin of `logweir_core::topic_identity::
+    refuse_copied_topic_ids`, with the same text (PROD-01.4a review M1): every
+    topic ID the record copies (`topics[].identity.topic_id`,
+    `.topic_id_after`) is a real topic ID in Kafka's text, never one of
+    Kafka's reserved IDs."""
+    topics = doc.get("topics") if isinstance(doc, dict) else None
+    if not isinstance(topics, list):
+        return ""
+    for topic in topics:
+        identity = topic.get("identity") if isinstance(topic, dict) else None
+        if identity is None:
+            continue
+        name = topic.get("name")
+        rendered = _rust_debug_str(name) if isinstance(name, str) else "?"
+        for field in ("topic_id", "topic_id_after"):
+            value = identity.get(field) if isinstance(identity, dict) else None
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                return f"topics[{rendered}].identity.{field} is not a string"
+            if not _is_canonical_topic_id(value):
+                return (
+                    f"topics[{rendered}].identity.{field} {_rust_debug_str(value)} is not a "
+                    "topic ID this format defines: 22 characters of URL-safe base64 without "
+                    "padding over the ID's 16 bytes, and never one of Kafka's reserved IDs "
+                    "(AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ)"
+                )
+    return ""
+
+
+def check_consumer_positions_document(doc, raw, pd) -> str:
+    """The positions document `pd` (its exact bytes `raw`) checked against the
+    receipt `doc` that binds it, or "" when it holds — arms CP-1 to CP-14.
+
+    ARM FOR ARM, IN ORDER, WITH `BackupReceipt::
+    validate_consumer_positions_document`
+    (crates/logweir-core/src/backup_receipt.rs), and with BYTE-IDENTICAL
+    refusal text. Called only after the receipt's own arms accepted it and
+    `_positions_document_shape(pd)` returned "".
+    """
+    # ARM CP-1. Only a receipt that selected groups binds a document.
+    cp = doc.get("consumer_positions")
+    if cp is None:
+        return (
+            f"the receipt of run {_rust_debug_str(doc['run_id'])} records no consumer_positions "
+            "block, so it binds no positions document: only a backup that selected consumer "
+            "groups writes one"
+        )
+    # ARM CP-2. The exact bytes the receipt's signature covers.
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if digest != cp["document"]["sha256"] or len(raw) != cp["document"]["bytes"]:
+        return (
+            f"the positions document is {digest} over {len(raw)} bytes but the receipt binds "
+            f"{cp['document']['sha256']} over {cp['document']['bytes']} bytes: it is not the "
+            "document this receipt signed"
+        )
+    # ARM CP-3. Format 1, for this receipt's own backup and run.
+    parsed = _receipt_parse_semver(pd["format_version"])
+    if (
+        parsed is None
+        or parsed[0] != 1
+        or pd["backup_id"] != doc["backup_id"]
+        or pd["run_id"] != doc["run_id"]
+    ):
+        return (
+            f"the positions document is format {_rust_debug_str(pd['format_version'])} for "
+            f"backup {_rust_debug_str(pd['backup_id'])} run {_rust_debug_str(pd['run_id'])} but "
+            f"the receipt is backup {_rust_debug_str(doc['backup_id'])} run "
+            f"{_rust_debug_str(doc['run_id'])}: a format-1 positions document names its "
+            "receipt's own backup and run"
+        )
+    # ARM CP-4. The observed topics are the named topics.
+    named_topics = [str(x) for x in doc["source"]["topics"]]
+    observed = list(pd["topics"].keys())
+    if sorted(set(observed)) != sorted(set(named_topics)):
+        return (
+            f"the positions document's topics cover {_render_topic_set(observed)} but the "
+            f"named topic set is {_render_topic_set(named_topics)}"
+        )
+    changed = []
+    unread = []
+    facts_at = {}
+    for topic in sorted(pd["topics"]):
+        entry = pd["topics"][topic]
+        for i, facts in enumerate(entry["partitions"]):
+            # ARM CP-5. Every partition once, from 0, in order.
+            if facts["partition"] != i:
+                return (
+                    f"the positions document's topics[{_rust_debug_str(topic)}].partitions[{i}] "
+                    f"is partition {facts['partition']}: each topic lists its partitions from 0, "
+                    "one entry each, in order"
+                )
+            # ARM CP-6. Marks and ranges are well formed.
+            fits = (
+                _cp_pair(facts.get("log_start"), facts.get("high_watermark"))
+                and _cp_pair(facts.get("log_start_after"), facts.get("high_watermark_after"))
+                and _cp_pair(facts.get("archived_first"), facts.get("archived_last"))
+                and (
+                    facts["observed"]
+                    or (facts.get("log_start") is None and facts.get("high_watermark") is None)
+                )
+            )
+            if not fits:
+                return (
+                    f"the positions document's topics[{_rust_debug_str(topic)}].partitions[{i}] "
+                    "records marks that are not well formed: a log start and its high watermark "
+                    "are recorded together with 0 <= log start <= high watermark, the archived "
+                    "range is recorded whole with 0 <= first <= last, and a partition the "
+                    "capture did not observe has no group-capture marks"
+                )
+            facts_at[(topic, facts["partition"])] = facts
+        # ARM CP-7. `changed_during_capture` is what the marks say.
+        derived = _cp_changed(entry["partitions"])
+        if entry["changed_during_capture"] != derived:
+            return (
+                f"the positions document's topics[{_rust_debug_str(topic)}].changed_during_capture "
+                f"is {_rust_bool(entry['changed_during_capture'])} but its marks say "
+                f"{_rust_bool(derived)}: a topic changed during the capture exactly when a mark "
+                "read after the engine is below the one read at group capture"
+            )
+        if derived:
+            changed.append(topic)
+        if not entry["partitions"]:
+            unread.append(topic)
+    # ARM CP-8. Positions for exactly the captured groups.
+    captured = [g for g in cp["groups"] if cp["groups"][g]["outcome"] == "captured"]
+    positioned = list(pd["groups"].keys())
+    if sorted(set(positioned)) != sorted(set(captured)):
+        return (
+            f"the positions document records positions for the groups "
+            f"{_render_topic_set(positioned)} but the receipt's captured groups are "
+            f"{_render_topic_set(captured)}: it records exactly the captured groups"
+        )
+    shown = _cp_shown
+    for group_id in sorted(cp["groups"]):
+        group = cp["groups"][group_id]
+        gid = _rust_debug_str(group_id)
+        outcome = group["outcome"]
+        reason = group.get("reason")
+        positions = pd["groups"].get(group_id)
+        # ARM CP-9. No kept position on a topic that changed, and no group
+        # failed GenerationChangedDuringCapture when none changed.
+        on_changed = any(
+            e.get("position") is not None and e["topic"] in changed
+            for e in (positions["positions"] if positions is not None else [])
+        )
+        blamed = reason == "GenerationChangedDuringCapture"
+        if on_changed or (blamed and not changed):
+            return (
+                f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with reason "
+                f"{shown(reason)} while the topics that changed during the capture are "
+                f"{_render_topic_set(changed)}: a group holding a position on such a topic "
+                "fails GenerationChangedDuringCapture, and no group fails so when none changed"
+            )
+        # ARM CP-10. A group is captured only over topics whose partitions
+        # were read.
+        not_read = reason == "PartitionsNotRead"
+        if (outcome == "captured" and unread) or (not_read and not unread):
+            return (
+                f"consumer_positions.groups[{gid}] is {_rust_debug_str(outcome)} with reason "
+                f"{shown(reason)} while the topics whose partitions were never read are "
+                f"{_render_topic_set(unread)}: a group is captured only when every named "
+                "topic's partitions were read, and fails PartitionsNotRead only when one was not"
+            )
+        if positions is None:
+            continue
+        # ARM CP-11. The entries name partitions of the named topics, in order,
+        # once each, every unobserved one among them; every other partition is
+        # counted as having no committed position.
+        entries = positions["positions"]
+        out_of_place = None
+        for i, e in enumerate(entries):
+            here = (e["topic"], e["partition"])
+            if here not in facts_at or (
+                i > 0 and (entries[i - 1]["topic"], entries[i - 1]["partition"]) >= here
+            ):
+                out_of_place = i
+                break
+        listed = {(e["topic"], e["partition"]) for e in entries}
+        unobserved_missing = sum(
+            1 for at, f in facts_at.items() if not f["observed"] and at not in listed
+        )
+        total = len(facts_at)
+        if (
+            out_of_place is not None
+            or unobserved_missing > 0
+            or len(entries) + positions["no_committed_position"] != total
+        ):
+            first = (
+                "none"
+                if out_of_place is None
+                else f"{out_of_place}, "
+                + _cp_place(entries[out_of_place]["topic"], entries[out_of_place]["partition"])
+            )
+            return (
+                f"the positions document's groups[{gid}] lists {len(entries)} position(s) "
+                f"(first out of place: {first}), leaves {unobserved_missing} unobserved "
+                f"partition(s) out and counts {positions['no_committed_position']} without a "
+                f"committed position over {total} partition(s): a captured group lists, topics "
+                "in name order and partitions in order, each partition of a named topic at most "
+                "once and every one the capture did not observe, and counts every other "
+                "partition as without a committed position"
+            )
+        for i, entry in enumerate(entries):
+            facts = facts_at[(entry["topic"], entry["partition"])]
+            status = entry["status"]
+            position = entry.get("position")
+            why = entry.get("reason")
+            # ARM CP-12. The status, the position and the reason fit.
+            if status == "excluded":
+                reason_ok = why == "PositionBeyondEnd"
+            elif status == "failed":
+                reason_ok = why in CP_POSITION_FAILED_REASONS
+            elif status == "notObserved":
+                reason_ok = why in CP_NOT_OBSERVED_REASONS
+            else:
+                reason_ok = why is None
+            fits = (
+                status in CP_POSITION_STATUSES
+                and (position is not None) == (status in ("captured", "excluded"))
+                and (position is None or position >= 0)
+                and reason_ok
+                and (status == "notObserved") == (not facts["observed"])
+            )
+            if not fits:
+                return (
+                    f"the positions document's groups[{gid}].positions[{i}] has status "
+                    f"{_rust_debug_str(status)}, position "
+                    f"{'absent' if position is None else position} and reason {shown(why)}: the "
+                    "status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a "
+                    "position is present exactly when it is \"captured\" or \"excluded\" and is "
+                    "never negative, a reason exactly when it is not \"captured\" and from that "
+                    "status's set, and \"notObserved\" is exactly a partition the capture did "
+                    "not observe"
+                )
+            # ARM CP-13. A coverage word exactly on a captured position, and a
+            # kept position's verdict follows from its partition's facts.
+            coverage = entry.get("coverage")
+            derived = None if position is None else _cp_relation(position, facts)
+            if status == "excluded":
+                recorded = "PositionBeyondEnd"
+            elif status == "captured":
+                recorded = coverage
+            else:
+                recorded = None
+            coverage_fits = (coverage is not None) == (status == "captured")
+            if not coverage_fits or recorded != derived:
+                return (
+                    f"the positions document's groups[{gid}].positions[{i}] is "
+                    f"{_rust_debug_str(status)} with coverage {shown(coverage)} at position "
+                    f"{'absent' if position is None else position}, but its partition's facts "
+                    f"make it {'unjudged' if derived is None else derived}: a coverage word is "
+                    "recorded exactly on a captured position, and a kept position's coverage, "
+                    "or its PositionBeyondEnd, follows from the marks and the archived range"
+                )
+        # ARM CP-14. The receipt's counts are the document's.
+        derived = _cp_counts_of(positions)
+        recorded = group.get("counts")
+        if recorded is None or any(recorded[n] != derived[n] for n in CP_COUNT_NAMES):
+            return (
+                f"consumer_positions.groups[{gid}].counts are "
+                f"{'absent' if recorded is None else _cp_counts_render(recorded)} but its "
+                f"positions count {_cp_counts_render(derived)}: the receipt counts what the "
+                "positions document records"
+            )
+
     return ""
 
 
@@ -3124,6 +4123,52 @@ def _coverage_lines(block):
         else:
             timestamp = "message.timestamp.type not recorded"
         lines.append(f"config_coverage[{_rust_debug_str(topic)}]: {coverage}, {timestamp}")
+    return lines
+
+
+def _generation_lines(block):
+    """The receipt's `generations`, one line per topic in NAME order, or the
+    line that says it is absent — the twin of `crates/logweir/src/verify.rs::
+    generation_lines`, in the same words (PROD-01.4a). An unknown ID is never
+    read as "the same": it says why, and that the generation is not
+    established by ID."""
+    if block is None:
+        return [
+            "generations: not recorded, so no topic ID is known from this receipt and each "
+            "topic's generation is UNKNOWN, never the same as another point's"
+        ]
+
+    def side(topic_id, reason):
+        if topic_id is not None:
+            return topic_id
+        if reason is not None:
+            return f"not recorded ({reason})"
+        return "not recorded"
+
+    lines = []
+    for topic in sorted(block):
+        entry = block[topic]
+        before = entry.get("topic_id")
+        after = entry.get("topic_id_after")
+        if before is not None and after is not None and before == after:
+            source = entry.get("topic_id_source")
+            said = (
+                f"topic ID {before} before and after the capture "
+                f"({source if source is not None else 'no source'}), one generation"
+            )
+        elif before is not None and after is not None:
+            said = (
+                f"topic ID CHANGED during the capture ({before} before, {after} after): the "
+                "topic was deleted and recreated while it ran, so this point mixes two "
+                "generations"
+            )
+        else:
+            said = (
+                f"topic ID {side(before, entry.get('topic_id_reason'))} before the capture and "
+                f"{side(after, entry.get('topic_id_after_reason'))} after it, so its "
+                "generation is not established by ID and is UNKNOWN"
+            )
+        lines.append(f"generations[{_rust_debug_str(topic)}]: {said}")
     return lines
 
 
@@ -3178,6 +4223,72 @@ def _topic_configuration_lines(block, detection=None):
             f"topic_configuration[{_rust_debug_str(topic)}]: partitions "
             f"{count(model.get('partitions'))}, replication factor "
             f"{count(model.get('replication_factor'))}, {said}, {route}"
+        )
+    return lines
+
+
+def _consumer_positions_lines(block, verified=None):
+    """The receipt's `consumer_positions`: a header, the positions document and
+    whether it was verified, one line per group in id order and — only for a
+    VERIFIED document — one line per listed position of each captured group
+    and one with how many partitions have no committed position. The twin of
+    `crates/logweir/src/verify.rs::consumer_positions_lines`, in the same
+    words (PROD-04.1). Nothing when the receipt carries no block: the backup
+    selected no group."""
+    if block is None:
+        return []
+    document = block["document"]
+    lines = [
+        f"consumer_positions: {len(block['groups'])} group(s), listing {block['listing']}",
+        f"consumer_positions: positions document {document['key']} ({document['sha256']}, "
+        f"{document['bytes']} bytes) "
+        + (
+            "verified against this receipt"
+            if verified is not None
+            else "not checked: pass --consumer-positions <file> to verify it and print each "
+            "position"
+        ),
+    ]
+    for group_id in sorted(block["groups"]):
+        g = block["groups"][group_id]
+        c = g.get("counts")
+        if g["outcome"] == "captured" and c is not None:
+            members = g.get("members") if g.get("members") is not None else 0
+            active = "inactive" if g.get("active") is False else "active"
+            lines.append(
+                f"consumer_positions[{_rust_debug_str(group_id)}]: captured "
+                f"{g.get('group_type') or ''}, state {g.get('state') or ''} (listed "
+                f"{g.get('listed_state') or ''}), {members} member(s), {active}; positions: "
+                f"{c['related']} related to archived data, {c['not_related']} not related, "
+                f"{c['never_committed']} never committed, {c['beyond_end']} beyond the end, "
+                f"{c['failed']} failed, {c['not_observed']} not observed"
+            )
+        else:
+            other = ", group type other" if g.get("group_type") == "other" else ""
+            lines.append(
+                f"consumer_positions[{_rust_debug_str(group_id)}]: {g['outcome']} "
+                f"({g.get('reason') or ''}){other}, no position recorded"
+            )
+    if verified is None:
+        return lines
+    for group_id in sorted(verified["groups"]):
+        g = verified["groups"][group_id]
+        for e in g["positions"]:
+            at = (
+                f"consumer_positions[{_rust_debug_str(group_id)}]"
+                f"[{_cp_place(e['topic'], e['partition'])}]"
+            )
+            position = e.get("position")
+            if e["status"] == "captured" and position is not None:
+                lines.append(f"{at}: position {position}, {e.get('coverage') or ''}")
+            elif position is not None:
+                lines.append(f"{at}: {e['status']} ({e.get('reason') or ''}), position {position}")
+            else:
+                lines.append(f"{at}: {e['status']} ({e.get('reason') or ''}), no position")
+        lines.append(
+            f"consumer_positions[{_rust_debug_str(group_id)}][*]: "
+            f"{g['no_committed_position']} other partition(s) with no committed position, "
+            "never offset 0"
         )
     return lines
 
@@ -3279,25 +4390,42 @@ def _sampled_pass_lines(doc):
     sampled = block is None or block.get("coverage") == "sampled"
     if doc.get("outcome") != "pass" or not sampled:
         return []
-    # PROD-11.1 (review H1): over a narrowed window the guarantee is QUALIFIED
-    # by it, in the Rust reader's words (`sampled_pass_lines_over`).
+    # PROD-11.1 (review H1): over a narrowed restore the guarantee is
+    # QUALIFIED by the selection, in the Rust reader's words
+    # (`sampled_pass_lines_over`): a 2.0.0 partition subset (PROD-11.1b), or
+    # a 1.7.0 window start.
+    start_clause = (
+        "no record before the start was expected, and a sampled check does not prove that "
+        "none was restored"
+    )
     window = doc["source"].get("selection")
+    if _narrows_partitions(window):
+        start = window.get("window_start_ms")
+        frm = "the archive's floor" if start is None else f"epoch-ms {start}"
+        line = (
+            f"sample coverage: a sampled pass over a partition subset from {frm} to epoch-ms "
+            f"{window['window_end_ms']}: every selected partition was held to its own count "
+            "bound over that window, every other partition of a narrowed topic was held empty, "
+            "max_partitions reached every topic before a second partition of any, and a "
+            "readable engine report lacking a selected partition with records in that window "
+            "was refused"
+        )
+        if start is not None:
+            line += "; " + start_clause
+        return [line]
     if window is not None:
         return [
             f"sample coverage: a sampled pass over a replay selection from epoch-ms "
-            f"{window['window_start_ms']} to epoch-ms {window['window_end_ms']}: every mapped "
-            "partition was held to its own count bound over that window, max_partitions "
+            f"{window.get('window_start_ms') or 0} to epoch-ms {window['window_end_ms']}: every "
+            "mapped partition was held to its own count bound over that window, max_partitions "
             "reached every topic before a second partition of any, and a readable engine "
-            "report lacking a partition with records in that window was refused; no record "
-            "before the start was expected, and a sampled check does not prove that none was "
-            "restored"
+            "report lacking a partition with records in that window was refused; "
+            + start_clause
         ]
     version = doc.get("format_version")
-    if (
-        _major(version) == 1
-        and (_minor(version) is not None)
-        and _minor(version) >= SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR
-    ):
+    # A 2.x document is written only by a build with FX-23's checks
+    # (`proves_fx23_sampled_checks`).
+    if _defines_format_1_minor(version, SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR):
         return [
             "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition "
             "was held to its own count bound, max_partitions reached every topic before a "
@@ -3334,20 +4462,56 @@ def _before_the_start(doc):
     return "no record before the start was expected"
 
 
-def _selection_lines(block, before):
+def _outside_the_subset(doc):
+    """What a 2.0.0 document proves about the OTHER partitions of a narrowed
+    topic -- the twin of `OutsideTheSubset::of` in `crates/logweir-core/src/
+    scorecard.rs` (PROD-11.1b), in the same words. A verification whose
+    `integrity.result` is `pass` shows none of them holds a restored record,
+    on either lane (the sampled lane holds them empty; the complete lane
+    counts a record there as unexpected, and IV-6 refuses the pass);
+    anything else shows only that none was expected."""
+    block = doc["integrity"].get("verification")
+    if block is not None and doc["integrity"].get("result") == "pass":
+        return "no record of another partition of these topics was restored or expected"
+    return "no record of another partition of these topics was expected"
+
+
+def _selection_lines(block, before, outside):
     """`source.selection` as lines -- the twin of `crates/logweir/src/
     verify.rs::selection_lines` (PROD-11.1): the writer's sentence
-    (`SelectionLabel::sentence`), ending in `before`, what this document
-    proves about the records before the start (`_before_the_start`, review
-    N1). Absent prints nothing: the restore selected every record from the
-    archive's floor."""
+    (`SelectionLabel::sentence`), ending in what this document proves -- of
+    the other partitions of a narrowed topic (`outside`, `_outside_the_subset`,
+    a 2.0.0 block) and of the records before a stated start (`before`,
+    `_before_the_start`, review N1). Absent prints nothing: the restore
+    selected every record from the archive's floor."""
     if block is None:
         return []
-    return [
-        f"replay selection: every partition of every restored topic, from epoch-ms "
-        f"{block['window_start_ms']} (the plan's stated window start, inclusive) to epoch-ms "
-        f"{block['window_end_ms']} (inclusive); {before}"
-    ]
+    start = block.get("window_start_ms")
+    end = block["window_end_ms"]
+    if not _narrows_partitions(block):
+        # Format 1.7.0, a start only: the 1.23.0 sentence, byte for byte.
+        return [
+            f"replay selection: every partition of every restored topic, from epoch-ms "
+            f"{start or 0} (the plan's stated window start, inclusive) to epoch-ms {end} "
+            f"(inclusive); {before}"
+        ]
+    named = "; ".join(
+        f"{e['topic']} partitions [{', '.join(str(p) for p in e['partitions'])}]"
+        for e in block["partitions"]
+    )
+    frm = (
+        "from the archive's floor"
+        if start is None
+        else f"from epoch-ms {start} (the plan's stated window start, inclusive)"
+    )
+    line = (
+        f"replay selection: ONLY {named} (every partition of any other restored topic), {frm} "
+        f"to epoch-ms {end} (inclusive), in {block.get('engine_runs') or 0} engine run(s); "
+        f"{outside}"
+    )
+    if start is not None:
+        line += f"; {before}"
+    return [line]
 
 
 def _original_name_lines(block):
@@ -3498,7 +4662,17 @@ def main(
     sig_path: str,
     pubkey_path: str,
     payload_type_wanted: str = PAYLOAD_TYPE,
+    positions_path=None,
 ) -> int:
+    # PROD-04.1: the positions document is checked against the backup receipt
+    # that binds it, and against nothing else.
+    if positions_path is not None and payload_type_wanted != PAYLOAD_TYPES["backup-receipt"]:
+        print(
+            "INVALID: --consumer-positions applies to --payload-type backup-receipt only: the "
+            "positions document is checked against the backup receipt that binds it",
+            file=sys.stderr,
+        )
+        return 1
     # The payload is the bytes as stored on disk, byte for byte, including
     # any trailing newline. Re-serialising the parsed JSON before verifying
     # would check a signature over a document nobody actually signed or
@@ -3738,7 +4912,9 @@ def main(
             print(f"       coverage: {line}")
         # PROD-11.1: the replay selection a narrowed restore restored, in the
         # words `logweir drill verify` prints (`selection_lines`).
-        for line in _selection_lines(doc["source"].get("selection"), _before_the_start(doc)):
+        for line in _selection_lines(
+            doc["source"].get("selection"), _before_the_start(doc), _outside_the_subset(doc)
+        ):
             print(f"       coverage: {line}")
         # PROD-15.1: a restore under the original topic names, and what
         # admitted it, in the words `logweir drill verify` prints
@@ -3791,6 +4967,9 @@ def main(
             "not blank, and never beside a complete verification; "
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window; "
+            "format 2.0.0 only with source.selection.partitions, a format-1 selection a start "
+            "only, each subset list sorted and distinct, one engine run per distinct subset or "
+            "one more, and a complete block that expects nothing from an unselected partition; "
             "target.original_name only from 1.8.0, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
             "their closed sets, targetIsNotSource only beside a known other source cluster id, "
@@ -3816,6 +4995,30 @@ def main(
         if problem:
             print(f"INVALID: {problem}", file=sys.stderr)
             return 1
+        # PROD-04.1: the positions document, only when given, against the
+        # receipt just verified — its exact bytes, never a re-serialisation.
+        verified_positions = None
+        if positions_path is not None:
+            try:
+                raw = open(positions_path, "rb").read()
+            except OSError as e:
+                print(
+                    f"INVALID: cannot read positions document {positions_path!r}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                pd = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"INVALID: the positions document is not valid JSON: {e}", file=sys.stderr)
+                return 1
+            problem = _positions_document_shape(pd) or check_consumer_positions_document(
+                doc, raw, pd
+            )
+            if problem:
+                print(f"INVALID: {problem}", file=sys.stderr)
+                return 1
+            verified_positions = pd
         archive = doc["archive"]
         covered = doc["covered"]
         records = doc["records"]
@@ -3874,6 +5077,18 @@ def main(
         # schema_dependency_lines`); the parity script compares them.
         for line in _schema_dependency_lines(doc.get("schema_dependency")):
             print(f"       {line}")
+        # PROD-01.4a: the topic ID before and after the capture, one line per
+        # topic, in the same words `logweir drill verify` prints (`verify.rs::
+        # generation_lines`); the parity script compares them.
+        for line in _generation_lines(doc.get("generations")):
+            print(f"       {line}")
+        # PROD-04.1: the consumer position evidence, one line per group, in the
+        # same words `logweir drill verify` prints (`verify.rs::
+        # consumer_positions_lines`); the parity script compares them.
+        for line in _consumer_positions_lines(
+            doc.get("consumer_positions"), verified_positions
+        ):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -3893,11 +5108,28 @@ def main(
             "fit, a closed owner with a usable reference, and counts of at least one, "
             "owner_detection's two: a closed set present only beside "
             "topic_configuration, and an owner only from a source it lists, "
-            "and schema_dependency's eight: present only from 1.5.0, covering exactly the "
+            "schema_dependency's eight: present only from 1.5.0, covering exactly the "
             "named topic set, closed verdict, reason and basis sets, both sides exactly when "
             "judged, a judged count that fits records, distinct plausible schema ids within "
-            "the cap, the one-in-ten threshold, and a verdict its sides give)"
+            "the cap, the one-in-ten threshold, and a verdict its sides give, "
+            "consumer_positions' six: present only from 1.7.0, a forward capture window with "
+            "a closed listing and at least one group, this run's positions document by a "
+            "well-formed digest, closed outcomes and reasons, fields and counts that fit the "
+            "outcome with no captured group Dead and memberless, and an active flag the "
+            "states derive, "
+            "and the topic IDs' five: generations present only from 1.6.0, covering exactly "
+            "the named topic set, every recorded ID in Kafka's text and never the zero ID, a "
+            "reason exactly for a null ID, and a source exactly for a recorded one)"
         )
+        if verified_positions is not None:
+            print(
+                "       positions document: the fourteen CP arms held (bound to this receipt "
+                "by digest and length, its backup and run, its topic set, partitions in "
+                "order, well-formed marks, a derived changed flag, exactly the captured "
+                "groups, no position on a changed topic, no capture over an unread topic, "
+                "every partition accounted for so absence is never offset 0, status, value "
+                "and reason, a derived coverage, and the receipt's counts)"
+            )
         return 0
 
     if payload_type_wanted == PAYLOAD_TYPES["receipt"]:
@@ -3930,12 +5162,18 @@ def main(
         return 0
 
     if payload_type_wanted == PAYLOAD_TYPES["catalog-point"]:
-        # SIGNATURE-ONLY, and the lines below say why rather than leaving an
-        # exit 0 to be read as more than it is. A catalog point record is an
-        # INDEX over evidence that already exists; every fact in it that
+        # The signature, and ONE check of the record's own content (PROD-01.4a
+        # review M1): every topic ID it copies is a real topic ID in Kafka's
+        # text. Nothing else, and the lines below say why rather than leaving
+        # an exit 0 to be read as more than it is. A catalog point record is an
+        # INDEX over evidence that already exists; every other fact in it that
         # matters is recomputed from the backup receipt it names, and this
         # script deliberately does not fetch that receipt — it was handed three
         # local files and it phones nothing.
+        problem = _catalog_point_problem(doc)
+        if problem:
+            print(f"INVALID: {problem}", file=sys.stderr)
+            return 1
         print(f"VALID  payloadType={payload_type_wanted}")
         print(f"       {len(payload)} bytes verified under the presented key")
         if isinstance(doc, dict):
@@ -3962,8 +5200,9 @@ def main(
             "       This signature covers the record only. It is NOT a claim that the point "
             "is available, that its archive is readable, or that its copied facts are true: "
             "fetch the backup receipt named above, verify it with --payload-type "
-            "backup-receipt, and compare. No invariant of this document type is evaluated "
-            "by this build."
+            "backup-receipt, and compare. One check of this document type is evaluated by "
+            "this build: every topic ID the record copies (topics[].identity) is a real topic "
+            "ID in Kafka's text. No other is."
         )
         return 0
 
@@ -3982,10 +5221,23 @@ if __name__ == "__main__":
     # given.
     argv = sys.argv[1:]
     wanted = PAYLOAD_TYPE
+    positions = None
     rest = []
     i = 0
     while i < len(argv):
         a = argv[i]
+        # PROD-04.1: the positions document a backup receipt binds.
+        if a == "--consumer-positions":
+            if i + 1 >= len(argv):
+                print("INVALID: --consumer-positions needs a value", file=sys.stderr)
+                sys.exit(1)
+            positions = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--consumer-positions="):
+            positions = a.split("=", 1)[1]
+            i += 1
+            continue
         if a == "--payload-type":
             if i + 1 >= len(argv):
                 print("INVALID: --payload-type needs a value", file=sys.stderr)
@@ -4011,8 +5263,9 @@ if __name__ == "__main__":
         print(
             f"usage: {sys.argv[0]} "
             "[--payload-type " + "|".join(sorted(PAYLOAD_TYPES)) + "] "
+            "[--consumer-positions <positions.json>] "
             "<document.json> <document.sig> <public.pem>",
             file=sys.stderr,
         )
         sys.exit(1)
-    sys.exit(main(rest[0], rest[1], rest[2], wanted))
+    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions))

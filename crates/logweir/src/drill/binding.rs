@@ -1089,7 +1089,9 @@ mod tests {
             config_coverage: None,
             topic_configuration: None,
             owner_detection: None,
+            consumer_positions: None,
             schema_dependency: None,
+            generations: None,
         }
     }
 

@@ -567,3 +567,18 @@ fn every_interpolated_backup_value_is_escaped() {
         );
     }
 }
+
+/// **PROD-04.1: Logweir's own backups never write the engine's consumer-group
+/// snapshot.** The rendered document leaves `consumer_group_snapshot` at the
+/// engine's default, `false` (`kafka-backup-core/src/config.rs`, 0.23.3), by
+/// never naming it: a selected group's positions are recorded natively in the
+/// receipt (`consumer_positions`), and an engine snapshot is only ever an
+/// import source for a FOREIGN archive (`ConsumerGroupSnapshotRead::imported`).
+#[test]
+fn a_logweir_backup_never_asks_the_engine_for_a_consumer_group_snapshot() {
+    let doc = render_backup::render(&plan()).expect("the fixture renders");
+    assert!(
+        !doc.contains("consumer_group_snapshot"),
+        "the backup document turns the engine's snapshot on:\n{doc}"
+    );
+}

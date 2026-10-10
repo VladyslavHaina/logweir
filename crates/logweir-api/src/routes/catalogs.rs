@@ -470,6 +470,86 @@ pub struct PointSchemaDependencyView {
     pub schema_ids_omitted: bool,
 }
 
+/// **PROD-04.1.** A recovery point's consumer position evidence, as the
+/// catalog's view lists it: how fresh the snapshot is against the recovery
+/// point, and per selected group its outcome and how many of its positions
+/// relate to archived data. Never a position: the positions are in the signed
+/// receipt, which the point record binds by digest.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointConsumerPositionsView {
+    /// When the backup run started reading the groups.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_from: Option<DateTime<Utc>>,
+    /// When it finished, before the engine started: the positions are this
+    /// old at the recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_to: Option<DateTime<Utc>>,
+    /// The snapshot's FRESHNESS: how many milliseconds before the recovery
+    /// point (`recoveryPointAt`) the positions were last observed. Positions
+    /// of an active group may have moved after that, and are not atomic with
+    /// the records the engine read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_before_recovery_point_ms: Option<i64>,
+    /// `complete` when the run's group listings were complete, `notComplete`
+    /// when an unlisted id was classified by a targeted describe.
+    pub listing: String,
+    /// One per selected group, in id order; at most 32.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub groups: Vec<PointGroupView>,
+    /// How many groups the view left out of `groups`, so a reader never takes
+    /// a partial list for the whole selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups_omitted: Option<u32>,
+}
+
+/// **PROD-04.1.** One selected consumer group of a recovery point.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointGroupView {
+    /// The group id.
+    pub group_id: String,
+    /// `captured`, `excluded` or `failed`. A group that is not captured
+    /// carries no position: absence is never offset 0.
+    pub outcome: String,
+    /// Why, when it is not captured (`GroupTypeNotCaptured`,
+    /// `GroupNotFound`, `NotVisibleToPrincipal`, `PositionsUnstable`, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `classic`, `consumer`, or `other` (a share or streams group, or one the
+    /// client could not type).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_type: Option<String>,
+    /// Whether the group had members when its positions were read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// A captured group's positions, counted by what they say about archived
+    /// data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positions: Option<PointPositionCountsView>,
+}
+
+/// **PROD-04.1.** A captured group's positions, one count per kind.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointPositionCountsView {
+    /// Positions whose next record is in the archive, or right after its end.
+    pub related: u32,
+    /// Committed positions that do not relate to archived data: before the
+    /// archive or the source's log start, beyond the archive's end, or on a
+    /// partition with nothing archived.
+    pub not_related: u32,
+    /// Partitions with no committed offset (never offset 0).
+    pub never_committed: u32,
+    /// Committed offsets above the partition's end at capture.
+    pub beyond_end: u32,
+    /// Partitions whose position could not be read.
+    pub failed: u32,
+    /// Partitions added during the capture, never asked for.
+    pub not_observed: u32,
+}
+
 /// One recovery point, with its two verdicts kept apart.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -566,6 +646,13 @@ pub struct PointView {
     /// ABSENT is NOT PUBLISHED.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
+    /// **PROD-04.1.** The consumer position evidence of the groups the backup
+    /// selected, from a point record that agreed with its verified receipt.
+    /// ABSENT is NOT PUBLISHED: the backup selected no group, the point
+    /// predates format 1.7.0, the catalog was synced by an older runner, or
+    /// the point is not `Available`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_positions: Option<PointConsumerPositionsView>,
 }
 
 /// The longest topic name Kafka accepts.
@@ -649,6 +736,38 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
             .owner_detection
             .as_ref()
             .map(|d| d.iter().take(2).map(|w| bounded(w, 32)).collect()),
+        consumer_positions: entry
+            .consumer_positions
+            .as_ref()
+            .map(|c| PointConsumerPositionsView {
+                observed_from: instant(c.observed_from_ms),
+                observed_to: instant(c.observed_to_ms),
+                observed_before_recovery_point_ms: entry
+                    .recovery_point_at_ms
+                    .checked_sub(c.observed_to_ms),
+                listing: bounded(&c.listing, 32),
+                groups: c
+                    .groups
+                    .iter()
+                    .take(32)
+                    .map(|g| PointGroupView {
+                        group_id: bounded(&g.group_id, 255),
+                        outcome: bounded(&g.outcome, 32),
+                        reason: g.reason.as_deref().map(|r| bounded(r, 64)),
+                        group_type: g.group_type.as_deref().map(|t| bounded(t, 32)),
+                        active: g.active,
+                        positions: g.positions.map(|p| PointPositionCountsView {
+                            related: p.related,
+                            not_related: p.not_related,
+                            never_committed: p.never_committed,
+                            beyond_end: p.beyond_end,
+                            failed: p.failed,
+                            not_observed: p.not_observed,
+                        }),
+                    })
+                    .collect(),
+                groups_omitted: c.groups_omitted,
+            }),
     }
 }
 

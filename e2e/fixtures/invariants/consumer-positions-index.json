@@ -1,0 +1,200 @@
+[
+  {
+    "id": "positions_document_accepted",
+    "receipt": "positions_document_accepted.receipt.json",
+    "document": "positions_document_accepted.positions.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "positions_document_for_a_receipt_that_selected_no_group",
+    "receipt": "positions_document_for_a_receipt_that_selected_no_group.receipt.json",
+    "document": "positions_document_for_a_receipt_that_selected_no_group.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the receipt of run \"01J8Z9QK7V6M3F2R5T8W1XB0CD\" records no consumer_positions block, so it binds no positions document: only a backup that selected consumer groups writes one",
+    "arm": "the receipt of run \"01J8Z9QK7V6M3F2R5T8W1XB0CD\" records no consumer_positions block, so it binds no positions document: only a backup that selected consumer groups writes one"
+  },
+  {
+    "id": "positions_document_tampered_after_signing",
+    "receipt": "positions_document_tampered_after_signing.receipt.json",
+    "document": "positions_document_tampered_after_signing.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document is sha256:8ecdd6ea6adfa3d1e0023f5d664d2ebeda175a882c7448ed87a0643640d2b9b9 over 2581 bytes but the receipt binds sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8 over 2581 bytes: it is not the document this receipt signed",
+    "arm": "the positions document is sha256:8ecdd6ea6adfa3d1e0023f5d664d2ebeda175a882c7448ed87a0643640d2b9b9 over 2581 bytes but the receipt binds sha256:85a55cab18337c24b8c7cd2219105766cabc855741aaccedf89adbe0d8d03ee8 over 2581 bytes: it is not the document this receipt signed"
+  },
+  {
+    "id": "positions_document_of_another_run",
+    "receipt": "positions_document_of_another_run.receipt.json",
+    "document": "positions_document_of_another_run.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document is format \"1.0.0\" for backup \"logweir-backup-01J8Z9QK7V\" run \"another-run\" but the receipt is backup \"logweir-backup-01J8Z9QK7V\" run \"01J8Z9QK7V6M3F2R5T8W1XB0CD\": a format-1 positions document names its receipt's own backup and run",
+    "arm": "the positions document is format \"1.0.0\" for backup \"logweir-backup-01J8Z9QK7V\" run \"another-run\" but the receipt is backup \"logweir-backup-01J8Z9QK7V\" run \"01J8Z9QK7V6M3F2R5T8W1XB0CD\": a format-1 positions document names its receipt's own backup and run"
+  },
+  {
+    "id": "positions_document_missing_a_named_topic",
+    "receipt": "positions_document_missing_a_named_topic.receipt.json",
+    "document": "positions_document_missing_a_named_topic.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics cover {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "the positions document's topics cover {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "positions_document_partition_out_of_order",
+    "receipt": "positions_document_partition_out_of_order.receipt.json",
+    "document": "positions_document_partition_out_of_order.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics[\"orders\"].partitions[1] is partition 2: each topic lists its partitions from 0, one entry each, in order",
+    "arm": "the positions document's topics[\"orders\"].partitions[1] is partition 2: each topic lists its partitions from 0, one entry each, in order"
+  },
+  {
+    "id": "positions_document_mark_pair_half_recorded",
+    "receipt": "positions_document_mark_pair_half_recorded.receipt.json",
+    "document": "positions_document_mark_pair_half_recorded.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics[\"orders\"].partitions[0] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks",
+    "arm": "the positions document's topics[\"orders\"].partitions[0] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks"
+  },
+  {
+    "id": "positions_document_unobserved_partition_with_marks",
+    "receipt": "positions_document_unobserved_partition_with_marks.receipt.json",
+    "document": "positions_document_unobserved_partition_with_marks.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics[\"orders\"].partitions[2] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks",
+    "arm": "the positions document's topics[\"orders\"].partitions[2] records marks that are not well formed: a log start and its high watermark are recorded together with 0 <= log start <= high watermark, the archived range is recorded whole with 0 <= first <= last, and a partition the capture did not observe has no group-capture marks"
+  },
+  {
+    "id": "positions_document_changed_flag_hides_a_regression",
+    "receipt": "positions_document_changed_flag_hides_a_regression.receipt.json",
+    "document": "positions_document_changed_flag_hides_a_regression.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics[\"orders\"].changed_during_capture is false but its marks say true: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture",
+    "arm": "the positions document's topics[\"orders\"].changed_during_capture is false but its marks say true: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture"
+  },
+  {
+    "id": "positions_document_changed_flag_without_a_regression",
+    "receipt": "positions_document_changed_flag_without_a_regression.receipt.json",
+    "document": "positions_document_changed_flag_without_a_regression.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's topics[\"payments\"].changed_during_capture is true but its marks say false: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture",
+    "arm": "the positions document's topics[\"payments\"].changed_during_capture is true but its marks say false: a topic changed during the capture exactly when a mark read after the engine is below the one read at group capture"
+  },
+  {
+    "id": "positions_document_positions_for_a_failed_group",
+    "receipt": "positions_document_positions_for_a_failed_group.receipt.json",
+    "document": "positions_document_positions_for_a_failed_group.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document records positions for the groups {\"audit\", \"billing\", \"hidden\"} but the receipt's captured groups are {\"audit\", \"billing\"}: it records exactly the captured groups",
+    "arm": "the positions document records positions for the groups {\"audit\", \"billing\", \"hidden\"} but the receipt's captured groups are {\"audit\", \"billing\"}: it records exactly the captured groups"
+  },
+  {
+    "id": "positions_document_position_on_a_changed_topic",
+    "receipt": "positions_document_position_on_a_changed_topic.receipt.json",
+    "document": "positions_document_position_on_a_changed_topic.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"] is \"captured\" with reason absent while the topics that changed during the capture are {\"payments\"}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed",
+    "arm": "consumer_positions.groups[\"billing\"] is \"captured\" with reason absent while the topics that changed during the capture are {\"payments\"}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed"
+  },
+  {
+    "id": "positions_document_blame_without_a_change",
+    "receipt": "positions_document_blame_without_a_change.receipt.json",
+    "document": "positions_document_blame_without_a_change.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"hidden\"] is \"failed\" with reason \"GenerationChangedDuringCapture\" while the topics that changed during the capture are {}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed",
+    "arm": "consumer_positions.groups[\"hidden\"] is \"failed\" with reason \"GenerationChangedDuringCapture\" while the topics that changed during the capture are {}: a group holding a position on such a topic fails GenerationChangedDuringCapture, and no group fails so when none changed"
+  },
+  {
+    "id": "positions_document_capture_over_an_unread_topic",
+    "receipt": "positions_document_capture_over_an_unread_topic.receipt.json",
+    "document": "positions_document_capture_over_an_unread_topic.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"audit\"] is \"captured\" with reason absent while the topics whose partitions were never read are {\"payments\"}: a group is captured only when every named topic's partitions were read, and fails PartitionsNotRead only when one was not",
+    "arm": "consumer_positions.groups[\"audit\"] is \"captured\" with reason absent while the topics whose partitions were never read are {\"payments\"}: a group is captured only when every named topic's partitions were read, and fails PartitionsNotRead only when one was not"
+  },
+  {
+    "id": "positions_document_partitions_not_read_with_every_topic_read",
+    "receipt": "positions_document_partitions_not_read_with_every_topic_read.receipt.json",
+    "document": "positions_document_partitions_not_read_with_every_topic_read.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"hidden\"] is \"failed\" with reason \"PartitionsNotRead\" while the topics whose partitions were never read are {}: a group is captured only when every named topic's partitions were read, and fails PartitionsNotRead only when one was not",
+    "arm": "consumer_positions.groups[\"hidden\"] is \"failed\" with reason \"PartitionsNotRead\" while the topics whose partitions were never read are {}: a group is captured only when every named topic's partitions were read, and fails PartitionsNotRead only when one was not"
+  },
+  {
+    "id": "positions_document_never_committed_partition_dropped",
+    "receipt": "positions_document_never_committed_partition_dropped.receipt.json",
+    "document": "positions_document_never_committed_partition_dropped.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"billing\"] lists 3 position(s) (first out of place: none), leaves 0 unobserved partition(s) out and counts 0 without a committed position over 4 partition(s): a captured group lists, topics in name order and partitions in order, each partition of a named topic at most once and every one the capture did not observe, and counts every other partition as without a committed position",
+    "arm": "the positions document's groups[\"billing\"] lists 3 position(s) (first out of place: none), leaves 0 unobserved partition(s) out and counts 0 without a committed position over 4 partition(s): a captured group lists, topics in name order and partitions in order, each partition of a named topic at most once and every one the capture did not observe, and counts every other partition as without a committed position"
+  },
+  {
+    "id": "positions_document_unobserved_partition_left_out",
+    "receipt": "positions_document_unobserved_partition_left_out.receipt.json",
+    "document": "positions_document_unobserved_partition_left_out.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"billing\"] lists 2 position(s) (first out of place: none), leaves 1 unobserved partition(s) out and counts 2 without a committed position over 4 partition(s): a captured group lists, topics in name order and partitions in order, each partition of a named topic at most once and every one the capture did not observe, and counts every other partition as without a committed position",
+    "arm": "the positions document's groups[\"billing\"] lists 2 position(s) (first out of place: none), leaves 1 unobserved partition(s) out and counts 2 without a committed position over 4 partition(s): a captured group lists, topics in name order and partitions in order, each partition of a named topic at most once and every one the capture did not observe, and counts every other partition as without a committed position"
+  },
+  {
+    "id": "positions_document_no_committed_position_read_as_zero",
+    "receipt": "positions_document_no_committed_position_read_as_zero.receipt.json",
+    "document": "positions_document_no_committed_position_read_as_zero.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"billing\"].positions[0] has status \"noCommittedPosition\", position 0 and reason absent: the status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a position is present exactly when it is \"captured\" or \"excluded\" and is never negative, a reason exactly when it is not \"captured\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe",
+    "arm": "the positions document's groups[\"billing\"].positions[0] has status \"noCommittedPosition\", position 0 and reason absent: the status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a position is present exactly when it is \"captured\" or \"excluded\" and is never negative, a reason exactly when it is not \"captured\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe"
+  },
+  {
+    "id": "positions_document_negative_position",
+    "receipt": "positions_document_negative_position.receipt.json",
+    "document": "positions_document_negative_position.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"billing\"].positions[2] has status \"captured\", position -1 and reason absent: the status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a position is present exactly when it is \"captured\" or \"excluded\" and is never negative, a reason exactly when it is not \"captured\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe",
+    "arm": "the positions document's groups[\"billing\"].positions[2] has status \"captured\", position -1 and reason absent: the status is \"captured\", \"excluded\", \"failed\" or \"notObserved\", a position is present exactly when it is \"captured\" or \"excluded\" and is never negative, a reason exactly when it is not \"captured\" and from that status's set, and \"notObserved\" is exactly a partition the capture did not observe"
+  },
+  {
+    "id": "positions_document_beyond_end_recorded_as_captured",
+    "receipt": "positions_document_beyond_end_recorded_as_captured.receipt.json",
+    "document": "positions_document_beyond_end_recorded_as_captured.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"audit\"].positions[0] is \"captured\" with coverage \"beyondArchive\" at position 21, but its partition's facts make it PositionBeyondEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range",
+    "arm": "the positions document's groups[\"audit\"].positions[0] is \"captured\" with coverage \"beyondArchive\" at position 21, but its partition's facts make it PositionBeyondEnd: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range"
+  },
+  {
+    "id": "positions_document_coverage_the_facts_do_not_derive",
+    "receipt": "positions_document_coverage_the_facts_do_not_derive.receipt.json",
+    "document": "positions_document_coverage_the_facts_do_not_derive.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions document's groups[\"billing\"].positions[0] is \"captured\" with coverage \"atArchiveEnd\" at position 12, but its partition's facts make it withinArchive: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range",
+    "arm": "the positions document's groups[\"billing\"].positions[0] is \"captured\" with coverage \"atArchiveEnd\" at position 12, but its partition's facts make it withinArchive: a coverage word is recorded exactly on a captured position, and a kept position's coverage, or its PositionBeyondEnd, follows from the marks and the archived range"
+  },
+  {
+    "id": "positions_document_counts_the_positions_do_not_give",
+    "receipt": "positions_document_counts_the_positions_do_not_give.receipt.json",
+    "document": "positions_document_counts_the_positions_do_not_give.positions.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "consumer_positions.groups[\"billing\"].counts are 1 related, 1 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed but its positions count 2 related, 0 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed: the receipt counts what the positions document records",
+    "arm": "consumer_positions.groups[\"billing\"].counts are 1 related, 1 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed but its positions count 2 related, 0 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed: the receipt counts what the positions document records"
+  }
+]

@@ -552,6 +552,9 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 not_recorded: tb.not_recorded.clone(),
             }),
         coverage: restore_coverage(object),
+        // PROD-11.1b: the signed selection, so a list row never reads a
+        // narrowed restore as a restore of everything.
+        selection: crate::status::selection_view(status.and_then(|s| s.integrity.as_ref())),
         operation: summary(&operation),
     }
 }

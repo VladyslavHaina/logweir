@@ -4201,6 +4201,78 @@ fn a_points_topics_reach_the_view_and_an_unbounded_list_is_malformed() {
     assert_eq!(row.topics_omitted, Some(70));
 }
 
+// ===========================================================================
+// PROD-04.1: a point's consumer position summary travels into the view
+// ===========================================================================
+
+fn with_groups(mut e: Value, groups: usize) -> Value {
+    let groups: Vec<Value> = (0..groups)
+        .map(|i| {
+            json!({"groupId": format!("g{i:03}"), "outcome": "captured", "groupType": "classic",
+                   "active": false,
+                   "positions": {"related": 2, "notRelated": 1, "neverCommitted": 0,
+                                 "beyondEnd": 0, "failed": 0, "notObserved": 0}})
+        })
+        .collect();
+    e["consumerPositions"] = json!({"observedFromMs": 1, "observedToMs": 2,
+                                    "listing": "notComplete", "groups": groups});
+    e
+}
+
+/// The summary parses, survives the merge of two copies of one point (a copy
+/// that lists the groups fills one that does not), and reaches the published
+/// row unchanged; an entry listing more groups than the grammar allows is
+/// skipped and counted like any other malformed entry.
+#[test]
+fn a_points_consumer_positions_reach_the_view_and_an_unbounded_list_is_malformed() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let point = "lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let body = versioned(&page_block(1, 1, &[with_groups(ok_entry(point, 1), 2)]));
+    let parsed = view::parse_body(&body, 5000).expect("an entry with groups parses");
+    let listed = parsed.pages[0].entries[0].clone();
+    let cp = listed
+        .consumer_positions
+        .clone()
+        .expect("the summary parses");
+    assert_eq!(cp.groups.len(), 2);
+    assert_eq!(cp.listing, "notComplete");
+    assert_eq!(cp.groups[0].positions.unwrap().not_related, 1);
+
+    let mut bare = entry(point, 1, "s3://copy/p");
+    bare.consumer_positions = None;
+    for order in [
+        vec![bare.clone(), listed.clone()],
+        vec![listed.clone(), bare],
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].consumer_positions, listed.consumer_positions);
+        let row = view::view_entry(merged[0].clone(), &trust, now());
+        let published = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            published["consumerPositions"]["observedToMs"], 2,
+            "{published}"
+        );
+        assert_eq!(
+            published["consumerPositions"]["groups"][1]["groupId"], "g001",
+            "{published}"
+        );
+    }
+
+    let wide = with_groups(
+        ok_entry("lwp1-ffffffffffffffffffffffffffffffff", 2),
+        view::MAX_ENTRY_GROUPS + 1,
+    );
+    let body = versioned(&page_block(1, 1, &[wide]));
+    let parsed = view::parse_body(&body, 5000).expect("skipped, never fatal");
+    assert_eq!(
+        parsed.pages[0].entries.len(),
+        0,
+        "NEGATIVE CONTROL: an unbounded list"
+    );
+    assert_eq!(parsed.skipped_entries, 1);
+}
+
 /// PROD-03.0 (review L7): a topic's schema dependency is bounded like the rest
 /// of an entry. At most [`view::MAX_ENTRY_SCHEMA_IDS`] ids and two sides parse;
 /// an entry naming one id more, or a third side, is malformed and skipped and

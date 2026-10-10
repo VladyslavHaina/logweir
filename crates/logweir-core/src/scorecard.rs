@@ -16,9 +16,11 @@ pub struct Scorecard {
     /// `logweir-drill-scorecard-1.0.0.json`, so a schema-only validator — the
     /// one route that does not go through
     /// `Scorecard::refuse_unreadable_major` — accepted exactly the document
-    /// GC12 exists to refuse. The pattern allows any `1.x.y`, because a MINOR
-    /// bump adds optional fields only and a 1.0.0 reader must still read it.
-    #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
+    /// GC12 exists to refuse. Each published file pins its own major: the
+    /// frozen 1.x files allow any `1.x.y` (a MINOR bump adds optional fields
+    /// only and a 1.0.0 reader must still read it), and the current file,
+    /// format 2.0.0 (PROD-11.1b, a partition-subset restore's), any `2.x.y`.
+    #[schemars(regex(pattern = r"^2\.[0-9]+\.[0-9]+$"))]
     pub format_version: String,
     pub run_id: String,
     pub outcome: Outcome,
@@ -124,75 +126,202 @@ pub struct SourceInfo {
     /// `e2e/fixtures/signed/` round-trip byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_basis: Option<TimeBasisLabel>,
-    /// **Format 1.7.0 (PROD-11.1).** The plan's stated INCLUSIVE window
-    /// start, when it states one: see [`SelectionLabel`].
+    /// **Format 1.7.0 (PROD-11.1), and 2.0.0 (PROD-11.1b).** The plan's
+    /// REPLAY SELECTION, when it states one: see [`SelectionLabel`].
     ///
     /// ABSENT means the restore selected every record of every partition of
     /// every restored topic from the archive's floor, which is what every
-    /// restore before 1.7.0 did. Partition subsets are refused until the
-    /// owner decides OD-9, so no format-1 document narrows partitions. Nested
-    /// optional (Global Constraint 12 as amended); `skip_serializing_if`, so
-    /// every document without a start keeps its bytes.
+    /// restore before 1.7.0 did. A format-1 document's block states a window
+    /// start only; a block naming partition subsets is format 2.0.0, and a
+    /// 2.0.0 document always carries it (arm PS-1). Nested optional (Global
+    /// Constraint 12 as amended); `skip_serializing_if`, so every document
+    /// without a selection keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<SelectionLabel>,
 }
 
-/// **PROD-11.1, scorecard format 1.7.0.** A narrowed restore's window: the
-/// plan's stated inclusive start and its end. The contract is
+/// **PROD-11.1, scorecard format 1.7.0; PROD-11.1b, format 2.0.0.** What a
+/// narrowed restore selected. The contract is
 /// `docs/to-do/decisions/PROD-11.1-replay-selection.md`.
 ///
-/// **A START ONLY.** Every partition of every restored topic is restored and
-/// judged; only the window's start moved. A partition-subset restore is
-/// refused by name (`PartitionSubsetsAwaitOwnerDecision`) until the owner
-/// decides OD-9, because a reader that predates its scorecard would read it
-/// as a full restore.
+/// **Format 1.7.0: a START only.** `window_start_ms` and `window_end_ms`, and
+/// nothing else: every partition of every restored topic is restored and
+/// judged; only the window's start moved.
 ///
-/// Every verdict of such a document is judged over `[window_start_ms,
-/// window_end_ms]`: samples start no earlier than the start, the count bound
-/// and the per-partition presence check are over that window, and a complete
-/// verification expects every archived record whose own timestamp is in it.
-/// The EXISTING fields name the start too: `sample.window_start` is never
-/// earlier than it, `sample.coverage_note` opens with it, and a complete
-/// block's `window.start_ms` (1.4.0) is it.
+/// **Format 2.0.0: partition subsets** (the owner's decision OD-9 (a),
+/// 2026-10-09). `partitions` names each narrowed topic's selected partitions
+/// and `engine_runs` how many engine runs restored them (the engine's
+/// partition filter applies to every topic of one run); `window_start_ms` is
+/// ABSENT when the window started at the archive's floor. In a 2.0.0 document
+/// the EXISTING fields name the selection, not the archive:
+/// `integrity.verification.complete.partitions[]` lists every SELECTED
+/// partition of every restored topic (and, with nothing expected, any other
+/// partition the target holds a record in, which fails it), and the sampled
+/// lane's fields (`sample.partitions`, the per-partition count bound, the
+/// engine-report check) are the selected partitions'. A reader that predates
+/// 2.0.0 refuses the document as an unsupported major, so none reads it as a
+/// full restore.
+///
+/// Every verdict of such a document is judged over the selection only:
+/// samples come only from selected partitions and from the stated start, the
+/// count bound and the per-partition presence check are the selected
+/// partitions' over `[start-or-floor, window_end_ms]`, a record in a partition
+/// the plan did not select fails the run on both lanes, and a complete
+/// verification expects records only from selected partitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SelectionLabel {
-    /// The plan's stated INCLUSIVE window start, epoch milliseconds.
-    pub window_start_ms: i64,
+    /// The plan's stated INCLUSIVE window start, epoch milliseconds. Present
+    /// in every format-1 block (arm PS-2). In a 2.0.0 block ABSENT means the
+    /// window started at the archive set's floor (guard G-WIN).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<i64>,
     /// The window's INCLUSIVE end, epoch milliseconds: the end of the plan's
     /// `restore.point_in_time` interval.
     pub window_end_ms: i64,
+    /// **Format 2.0.0.** The per-topic partition subsets, one entry per
+    /// narrowed SOURCE topic in ascending order, each list ascending and
+    /// distinct (arm PS-3). A restored topic not listed was restored on every
+    /// partition the archive lists for it. Required in a 2.0.0 document (arm
+    /// PS-1) and never present in a format-1 one (arm PS-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<TopicPartitions>>,
+    /// **Format 2.0.0.** How many engine runs restored the selection: one per
+    /// distinct subset, and one more when a restored topic has none (arm
+    /// PS-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_runs: Option<u32>,
+}
+
+/// One narrowed topic of a 2.0.0 [`SelectionLabel`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicPartitions {
+    /// The SOURCE topic.
+    pub topic: String,
+    /// Its selected partitions, ascending and distinct.
+    pub partitions: Vec<i32>,
 }
 
 impl SelectionLabel {
-    /// The `replay selection:` sentence, ending in what the document proves
-    /// about records BEFORE the start (review N1): the same words in the
+    /// Whether `topic`'s `partition` is in this selection: a topic the block
+    /// does not list restores every partition.
+    #[must_use]
+    pub fn selects_partition(&self, topic: &str, partition: i32) -> bool {
+        self.partitions
+            .iter()
+            .flatten()
+            .find(|tp| tp.topic == topic)
+            .is_none_or(|tp| tp.partitions.contains(&partition))
+    }
+
+    /// Whether the block names a partition subset (format 2.0.0).
+    #[must_use]
+    pub fn narrows_partitions(&self) -> bool {
+        self.partitions.as_ref().is_some_and(|p| !p.is_empty())
+    }
+
+    /// The `replay selection:` sentence, ending in what the document proves:
+    /// about records of the OTHER partitions of a narrowed topic
+    /// ([`OutsideTheSubset`], a 2.0.0 block only) and about records BEFORE a
+    /// stated start (review N1, [`BeforeTheStart`]). The same words in the
     /// writer's `sample.coverage_note` ([`Self::coverage_note`]) and in the
     /// line both readers print (`logweir::verify::selection_lines`,
     /// `docs/verify_scorecard.py::_selection_lines`).
     #[must_use]
-    pub fn sentence(&self, before: BeforeTheStart) -> String {
-        format!(
-            "replay selection: every partition of every restored topic, from epoch-ms {} (the \
-             plan's stated window start, inclusive) to epoch-ms {} (inclusive); {}",
-            self.window_start_ms,
-            self.window_end_ms,
-            before.words()
-        )
+    pub fn sentence(&self, before: BeforeTheStart, outside: OutsideTheSubset) -> String {
+        let end = self.window_end_ms;
+        let Some(subsets) = self.partitions.as_ref().filter(|p| !p.is_empty()) else {
+            // Format 1.7.0, a start only: the 1.23.0 sentence, byte for byte.
+            return format!(
+                "replay selection: every partition of every restored topic, from epoch-ms {} \
+                 (the plan's stated window start, inclusive) to epoch-ms {end} (inclusive); {}",
+                self.window_start_ms.unwrap_or_default(),
+                before.words()
+            );
+        };
+        let named: Vec<String> = subsets
+            .iter()
+            .map(|tp| {
+                let list: Vec<String> = tp.partitions.iter().map(i32::to_string).collect();
+                format!("{} partitions [{}]", tp.topic, list.join(", "))
+            })
+            .collect();
+        let from = match self.window_start_ms {
+            Some(ms) => format!("from epoch-ms {ms} (the plan's stated window start, inclusive)"),
+            None => "from the archive's floor".to_string(),
+        };
+        let mut s = format!(
+            "replay selection: ONLY {} (every partition of any other restored topic), {from} to \
+             epoch-ms {end} (inclusive), in {} engine run(s); {}",
+            named.join("; "),
+            self.engine_runs.unwrap_or_default(),
+            outside.words()
+        );
+        if self.window_start_ms.is_some() {
+            s.push_str("; ");
+            s.push_str(before.words());
+        }
+        s
     }
 
     /// The sentence that opens the writer's `sample.coverage_note`, naming
-    /// the window in an EXISTING field (PROD-11.1 §5.2). Written before phase
-    /// 7 judges anything, so it claims only what the plan's lane can say then:
-    /// a sampled lane says it cannot show that no record before the start was
-    /// restored; a complete lane says only that none was expected (whether
-    /// none was restored is the complete block's verdict, which a reader
-    /// states — [`BeforeTheStart::of`]).
+    /// the selection in an EXISTING field (PROD-11.1 §5.2). Written before
+    /// phase 7 judges anything, so it claims only what the plan's lane can say
+    /// then: a sampled lane says it cannot show that no record before the
+    /// start was restored; a complete lane says only that none was expected
+    /// (whether none was restored is the complete block's verdict, which a
+    /// reader states — [`BeforeTheStart::of`]); and of the other partitions
+    /// of a narrowed topic, only that no record was expected
+    /// ([`OutsideTheSubset::of`] is the reader's).
     #[must_use]
     pub fn coverage_note(&self, coverage: crate::spec::Coverage) -> String {
-        self.sentence(match coverage {
-            crate::spec::Coverage::Sampled => BeforeTheStart::SampledUnproved,
-            crate::spec::Coverage::Complete => BeforeTheStart::Expected,
-        })
+        self.sentence(
+            match coverage {
+                crate::spec::Coverage::Sampled => BeforeTheStart::SampledUnproved,
+                crate::spec::Coverage::Complete => BeforeTheStart::Expected,
+            },
+            OutsideTheSubset::Expected,
+        )
+    }
+}
+
+/// What a 2.0.0 document proves about the OTHER partitions of a topic its
+/// selection narrowed (PROD-11.1b). A verification whose `integrity.result` is
+/// `pass` shows that none of them holds a restored record, on either lane:
+/// the sampled lane holds every target partition the plan did not select to
+/// empty (a record there is a finding, `fail`), and the complete lane lists
+/// such a partition with nothing expected, so a record there is `unexpected`
+/// and IV-6 refuses the pass. Anything else (a verdict that did not pass, or
+/// no verification) proves only that none was expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutsideTheSubset {
+    /// A verification that passed: none was restored or expected.
+    ProvedNoneRestored,
+    /// Anything else: none was expected, nothing more.
+    Expected,
+}
+
+impl OutsideTheSubset {
+    /// What THIS document proves, from its `integrity.result` and its
+    /// `integrity.verification`. The one predicate both readers use.
+    #[must_use]
+    pub fn of(integrity: &IntegrityResult, verification: Option<&Verification>) -> Self {
+        if verification.is_some() && *integrity == IntegrityResult::Pass {
+            Self::ProvedNoneRestored
+        } else {
+            Self::Expected
+        }
+    }
+
+    /// The clause the subset half of the `replay selection:` sentence ends
+    /// in.
+    #[must_use]
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::ProvedNoneRestored => {
+                "no record of another partition of these topics was restored or expected"
+            }
+            Self::Expected => "no record of another partition of these topics was expected",
+        }
     }
 }
 
@@ -533,10 +662,50 @@ impl OriginalNameInfo {
     }
 }
 
-/// The NEWER of two scorecard versions of major 1, by minor (PROD-11.1 review:
-/// every version step takes the max, so a later minor is never downgraded by
-/// an earlier step). A version this build cannot parse is kept as it is, so a
-/// malformed value is never silently replaced.
+/// **PROD-11.1b (the owner's decision OD-9 (a), 2026-10-09).** The
+/// `format_version` of a scorecard whose restore stated a PARTITION SUBSET —
+/// the format's first MAJOR. It is 1.7.0's fields with the subset meaning:
+/// `source.selection.partitions` is required (arm PS-1), and the existing
+/// `integrity.verification.complete.partitions[]` and the sampled lane's
+/// fields name the SELECTED partitions only, which a 1.x reader would read as
+/// every partition. So every reader before it refuses it as an unsupported
+/// major, and it is written ONLY for a subset restore
+/// ([`format_version_with_selection`]): every other document stays 1.x, byte
+/// for byte. The newest version: the current schema file is this version's.
+pub const FORMAT_VERSION_WITH_PARTITION_SUBSETS: &str = "2.0.0";
+
+/// The major of [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]: the newest major
+/// this build reads, and only for that shape (arm PS-1).
+pub const PARTITION_SUBSETS_MAJOR: u64 = 2;
+
+/// Whether a document of `format_version` defines a field format 1 added at
+/// minor `since_minor`: a 1.x document from that minor on, and every document
+/// of major 2, which is 1.7.0's fields plus the subset meaning (PROD-11.1b).
+/// `false` for a version that does not parse or names another major.
+#[must_use]
+pub fn defines_format_1_minor(format_version: &str, since_minor: u64) -> bool {
+    match major_version(format_version) {
+        Some(1) => minor_version(format_version).is_some_and(|minor| minor >= since_minor),
+        Some(PARTITION_SUBSETS_MAJOR) => true,
+        _ => false,
+    }
+}
+
+/// Whether this build reads `format_version`'s major at all: 1, and 2 (the
+/// partition-subset shape only, arm PS-1). The scope of the arms that hold
+/// for every document of a known major.
+fn known_major(format_version: &str) -> bool {
+    matches!(
+        major_version(format_version),
+        Some(1) | Some(PARTITION_SUBSETS_MAJOR)
+    )
+}
+
+/// The NEWER of two scorecard versions, by major and then minor (PROD-11.1
+/// review: every version step takes the max, so a later version is never
+/// downgraded by an earlier step; PROD-11.1b: a 2.0.0 chosen for a subset is
+/// never lowered to a 1.x minor). A version this build cannot parse is kept
+/// as it is, so a malformed value is never silently replaced.
 #[must_use]
 pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
     match (
@@ -549,18 +718,22 @@ pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
 }
 
 /// The `format_version` a scorecard is written with once its plan's replay
-/// selection is known (PROD-11.1): at least [`FORMAT_VERSION_WITH_SELECTION`]
-/// when it carries `source.selection`, else `current` unchanged. 1.7.0
-/// defines everything 1.6.0 does. Monotonic: never lowers `current`.
+/// selection is known (PROD-11.1): [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]
+/// (2.0.0) when its `source.selection` names a partition subset
+/// (PROD-11.1b), at least [`FORMAT_VERSION_WITH_SELECTION`] when it carries a
+/// start-only block, else `current` unchanged. 1.7.0 defines everything 1.6.0
+/// does, and 2.0.0 everything 1.7.0 does. Monotonic: never lowers `current`.
 #[must_use]
 pub fn format_version_with_selection<'a>(
     current: &'a str,
     selection: Option<&SelectionLabel>,
 ) -> &'a str {
-    if selection.is_some() {
-        newer_format_version(current, FORMAT_VERSION_WITH_SELECTION)
-    } else {
-        current
+    match selection {
+        Some(s) if s.narrows_partitions() => {
+            newer_format_version(current, FORMAT_VERSION_WITH_PARTITION_SUBSETS)
+        }
+        Some(_) => newer_format_version(current, FORMAT_VERSION_WITH_SELECTION),
+        None => current,
     }
 }
 
@@ -574,8 +747,9 @@ pub fn format_version_with_selection<'a>(
 /// `docs/verify_scorecard.py::_sampled_pass_lines`).
 #[must_use]
 pub fn proves_fx23_sampled_checks(format_version: &str) -> bool {
-    major_version(format_version) == Some(1)
-        && minor_version(format_version).is_some_and(|m| m >= UNSAMPLED_TOPICS_SINCE_MINOR)
+    // PROD-11.1b: a 2.0.0 document is written only by a build with FX-23's
+    // checks, which it holds over the selected partitions.
+    defines_format_1_minor(format_version, UNSAMPLED_TOPICS_SINCE_MINOR)
 }
 
 /// The `format_version` a scorecard is written with once its plan's coverage
@@ -1490,8 +1664,16 @@ impl Scorecard {
     /// rule. `docs/verify_scorecard.py` is the third reader and implements the
     /// same comparison against its own `FORMAT_VERSION` constant.
     ///
-    /// The comparison is against `crate::FORMAT_VERSION` by string, never by
-    /// re-deriving what "this build understands" some other way.
+    /// The comparison is against [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]'s
+    /// major ([`PARTITION_SUBSETS_MAJOR`]), never re-derived some other way.
+    ///
+    /// **Major 2 is read for ONE shape** (PROD-11.1b, the owner's OD-9 (a)):
+    /// a partition-subset restore's document, which carries
+    /// `source.selection.partitions`. A major-2 document without it is
+    /// refused here (arm PS-1), before any other rule reads it, so a reader
+    /// never applies 1.x meanings to a 2.x document whose shape it does not
+    /// know. `docs/verify_scorecard.py` makes the same two refusals, in this
+    /// order, with the same words.
     pub fn refuse_unreadable_major(&self) -> Result<(), InvariantError> {
         let doc_major = major_version(&self.format_version).ok_or_else(|| {
             InvariantError(format!(
@@ -1499,14 +1681,26 @@ impl Scorecard {
                 self.format_version
             ))
         })?;
-        let known_major =
-            major_version(crate::FORMAT_VERSION).expect("FORMAT_VERSION is a valid semver");
-        if doc_major > known_major {
+        if doc_major > PARTITION_SUBSETS_MAJOR {
             return Err(InvariantError(format!(
                 "format_version {} has a major version newer than this reader understands \
                  (this build knows {})",
-                self.format_version,
-                crate::FORMAT_VERSION
+                self.format_version, FORMAT_VERSION_WITH_PARTITION_SUBSETS
+            )));
+        }
+        // PS-1. Major 2 is the partition-subset format and nothing else.
+        if doc_major == PARTITION_SUBSETS_MAJOR
+            && !self
+                .source
+                .selection
+                .as_ref()
+                .is_some_and(SelectionLabel::narrows_partitions)
+        {
+            return Err(InvariantError(format!(
+                "format_version {} is the format of a partition-subset restore, and this document \
+                 carries no source.selection.partitions; a reader reads major \
+                 {PARTITION_SUBSETS_MAJOR} only for that shape",
+                self.format_version
             )));
         }
         Ok(())
@@ -1533,7 +1727,9 @@ impl Scorecard {
         // `docs/verify_scorecard.py::check_invariants` mirrors this arm in the
         // same position with the same order and the same words, so a document
         // violating two fields gets the SAME message from both readers.
-        if major_version(&self.format_version) == Some(1) {
+        // PROD-11.1b: and major 2, which is 1.7.0's fields plus the subset
+        // meaning, so every arm of major 1 holds for it.
+        if known_major(&self.format_version) {
             if self.evidence.version_id.is_some() {
                 return Err(InvariantError(
                     "evidence.version_id is set but the four post-put fields are zeroed before signing".into(),
@@ -1944,9 +2140,7 @@ impl Scorecard {
             // five (the third). An older reader refuses a 1.5.0 scorecard
             // naming a new mode through the first statement — the SAFER
             // verdict, OD-7's third case — so the change is MINOR.
-            let five_defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= AUTH_MODES_SINCE_MINOR);
+            let five_defined = defines_format_1_minor(&self.format_version, AUTH_MODES_SINCE_MINOR);
             if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
                 if !five_defined {
                     return Err(InvariantError(format!(
@@ -1992,9 +2186,8 @@ impl Scorecard {
             // a 1.2.0 field: under it, `intentionally_deviated` used the
             // scratch rationale in every mode, so a reader would not know
             // which of the two meanings the lists carry.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= NOT_RECONSTRUCTED_SINCE_MINOR);
+            let defined =
+                defines_format_1_minor(&self.format_version, NOT_RECONSTRUCTED_SINCE_MINOR);
             if !defined {
                 return Err(InvariantError(format!(
                     "topic_parity.not_reconstructed is present but format_version {:?} predates \
@@ -2075,9 +2268,7 @@ impl Scorecard {
         if let Some(time_basis) = &self.source.time_basis {
             // TB-1. A document declaring a version before 1.3.0 cannot carry
             // a 1.3.0 field.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= TIME_BASIS_SINCE_MINOR);
+            let defined = defines_format_1_minor(&self.format_version, TIME_BASIS_SINCE_MINOR);
             if !defined {
                 return Err(InvariantError(format!(
                     "source.time_basis is present but format_version {:?} predates it: the \
@@ -2140,9 +2331,7 @@ impl Scorecard {
         if let Some(v) = &self.integrity.verification {
             // IV-1. A document declaring a version before 1.4.0 cannot carry
             // a 1.4.0 field.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= VERIFICATION_SINCE_MINOR);
+            let defined = defines_format_1_minor(&self.format_version, VERIFICATION_SINCE_MINOR);
             if !defined {
                 return Err(InvariantError(format!(
                     "integrity.verification is present but format_version {:?} predates it: the \
@@ -2262,9 +2451,8 @@ impl Scorecard {
         if let Some(unsampled) = &self.sample.unsampled_topics {
             // US-1. A document declaring a version before 1.6.0 cannot carry
             // a 1.6.0 field.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= UNSAMPLED_TOPICS_SINCE_MINOR);
+            let defined =
+                defines_format_1_minor(&self.format_version, UNSAMPLED_TOPICS_SINCE_MINOR);
             if !defined {
                 return Err(InvariantError(format!(
                     "sample.unsampled_topics is present but format_version {:?} predates it: \
@@ -2308,6 +2496,14 @@ impl Scorecard {
         // owner's OD-7 (a). SEL-3 judges an existing field (the 1.4.0 complete
         // block's window) against it, as IV-6 does, and can only refuse.
         //
+        // PROD-11.1b (format 2.0.0, the owner's OD-9 (a)): arms PS-2 to PS-5.
+        // PS-1, that a major-2 document carries partition subsets, is
+        // `refuse_unreadable_major`'s. PS-2 holds a format-1 block to the
+        // 1.7.0 shape (a start and its end, nothing else), so a subset never
+        // rides in a document an older reader would read as a full restore;
+        // PS-3 to PS-5 read only a 2.0.0 block's own fields, or judge the
+        // complete block against it, and can only refuse.
+        //
         // NOT INTERPOLATED, except SEL-1's version, so the messages join
         // `index.json`'s `arm` fields by literal substring.
         //
@@ -2317,9 +2513,7 @@ impl Scorecard {
         if let Some(selection) = &self.source.selection {
             // SEL-1. A document declaring a version before 1.7.0 cannot carry
             // a 1.7.0 block.
-            let defined = major_version(&self.format_version) == Some(1)
-                && minor_version(&self.format_version)
-                    .is_some_and(|minor| minor >= SELECTION_SINCE_MINOR);
+            let defined = defines_format_1_minor(&self.format_version, SELECTION_SINCE_MINOR);
             if !defined {
                 return Err(InvariantError(format!(
                     "source.selection is present but format_version {:?} predates it: the \
@@ -2327,9 +2521,27 @@ impl Scorecard {
                     self.format_version
                 )));
             }
+            // PS-2. A format-1 block is a window start and its end, nothing
+            // else: a subset in a document an older reader accepts would be
+            // read as every partition (OD-9).
+            if major_version(&self.format_version) == Some(1)
+                && (selection.window_start_ms.is_none()
+                    || selection.partitions.is_some()
+                    || selection.engine_runs.is_some())
+            {
+                return Err(InvariantError(
+                    "source.selection under major 1 is a stated window start and its end, and \
+                     nothing else: a block without window_start_ms, or with partitions or \
+                     engine_runs, is a partition-subset selection, which is format 2.0.0"
+                        .into(),
+                ));
+            }
             // SEL-2. A stated start is before the end (the plan refuses
             // anything else before it runs).
-            if selection.window_start_ms >= selection.window_end_ms {
+            if selection
+                .window_start_ms
+                .is_some_and(|start| start >= selection.window_end_ms)
+            {
                 return Err(InvariantError(
                     "source.selection.window_start_ms is not before window_end_ms; a selection's \
                      window holds at least one instant after its start"
@@ -2337,19 +2549,72 @@ impl Scorecard {
                 ));
             }
             // SEL-3. A complete verification's expected output is selected by
-            // the plan's own window.
-            if let Some(c) = self
+            // the plan's own window: its start (absent for a 2.0.0 block from
+            // the archive's floor, as the complete block's is) and its end.
+            let complete = self
                 .integrity
                 .verification
                 .as_ref()
-                .and_then(|v| v.complete.as_ref())
-            {
-                if c.window.start_ms != Some(selection.window_start_ms)
+                .and_then(|v| v.complete.as_ref());
+            if let Some(c) = complete {
+                if c.window.start_ms != selection.window_start_ms
                     || c.window.end_ms != selection.window_end_ms
                 {
                     return Err(InvariantError(
                         "integrity.verification.complete.window is not source.selection's window; \
                          the expected output is selected by the plan's own start and end"
+                            .into(),
+                    ));
+                }
+            }
+            if let Some(subsets) = &selection.partitions {
+                // PS-3. One spelling per selection: each topic once, in order,
+                // not blank, each list non-empty, ascending, distinct and not
+                // negative.
+                let well_formed = subsets.windows(2).all(|w| w[0].topic < w[1].topic)
+                    && subsets.iter().all(|tp| {
+                        !tp.topic.trim().is_empty()
+                            && !tp.partitions.is_empty()
+                            && tp.partitions.iter().all(|p| *p >= 0)
+                            && tp.partitions.windows(2).all(|w| w[0] < w[1])
+                    });
+                if !well_formed {
+                    return Err(InvariantError(
+                        "source.selection.partitions does not name each topic once, in order, \
+                         with a non-empty, sorted list of distinct partitions that are not \
+                         negative"
+                            .into(),
+                    ));
+                }
+                // PS-4. The engine's partition filter applies to every topic
+                // of one run, so each distinct subset is its own run, and at
+                // most one more run restores the topics without one.
+                let mut distinct: Vec<&Vec<i32>> =
+                    subsets.iter().map(|tp| &tp.partitions).collect();
+                distinct.sort();
+                distinct.dedup();
+                let need = distinct.len() as u64;
+                if !selection
+                    .engine_runs
+                    .is_some_and(|runs| u64::from(runs) == need || u64::from(runs) == need + 1)
+                {
+                    return Err(InvariantError(
+                        "source.selection.engine_runs is not one run per distinct partition \
+                         subset, or one more for the topics without one"
+                            .into(),
+                    ));
+                }
+                // PS-5. Nothing is expected from a partition the plan did not
+                // select: the complete block lists one only when the target
+                // holds a record there, which is unexpected.
+                if complete.is_some_and(|c| {
+                    c.partitions.iter().any(|p| {
+                        p.replay.expected > 0 && !selection.selects_partition(&p.topic, p.partition)
+                    })
+                }) {
+                    return Err(InvariantError(
+                        "integrity.verification.complete.partitions expects records from a \
+                         partition source.selection does not select"
                             .into(),
                     ));
                 }
@@ -3258,7 +3523,8 @@ mod tests {
         let mut sc = valid_scorecard();
         sc.format_version = "9.9.9".into();
         // Deliberately ALSO violating the T0-2 evidence arm. The evidence arm
-        // is scoped to major 1, so on this document it is skipped whichever
+        // is scoped to the known majors (1, and 2 since PROD-11.1b), so on this
+        // document it is skipped whichever
         // side of `refuse_unreadable_major` it sits on — the two orders are
         // behaviourally identical and the reorder alone is an equivalent
         // mutant (brief §7 M8). What this line does kill is the COMBINED
@@ -3285,7 +3551,7 @@ mod tests {
             format!(
                 "format_version 9.9.9 has a major version newer than this reader understands \
                  (this build knows {})",
-                crate::FORMAT_VERSION
+                FORMAT_VERSION_WITH_PARTITION_SUBSETS
             )
         );
     }
@@ -4607,8 +4873,9 @@ mod tests {
     }
 
     /// FX-23 review M2: only 1.6.0 and later prove an FX-23 build signed the
-    /// document. KILLS: comparing against the wrong minor; accepting another
-    /// major.
+    /// document — and every 2.x document (PROD-11.1b), which only a build
+    /// with FX-23's checks writes. KILLS: comparing against the wrong minor;
+    /// accepting a major this build does not read.
     #[test]
     fn only_1_6_0_and_later_prove_the_fx23_sampled_checks() {
         for (v, want) in [
@@ -4617,7 +4884,9 @@ mod tests {
             ("1.5.0", false),
             ("1.6.0", true),
             ("1.7.0", true),
-            ("2.6.0", false),
+            ("2.0.0", true),
+            ("3.6.0", false),
+            ("0.9.0", false),
             ("1.x.0", false),
         ] {
             assert_eq!(proves_fx23_sampled_checks(v), want, "{v}");
@@ -4716,8 +4985,10 @@ mod tests {
         let mut sc = with_verification(sampled_verification());
         sc.format_version = FORMAT_VERSION_WITH_SELECTION.into();
         sc.source.selection = Some(SelectionLabel {
-            window_start_ms: start,
+            window_start_ms: Some(start),
             window_end_ms: 1_760_000_005_000,
+            partitions: None,
+            engine_runs: None,
         });
         sc
     }
@@ -4770,6 +5041,9 @@ mod tests {
         assert_eq!(newer_format_version("1.6.0", "1.7.0"), "1.7.0");
         assert_eq!(newer_format_version("1.7.0", "1.6.0"), "1.7.0");
         assert_eq!(newer_format_version("1.x.0", "1.6.0"), "1.x.0");
+        // PROD-11.1b: a major outranks every minor, in both directions.
+        assert_eq!(newer_format_version("1.7.0", "2.0.0"), "2.0.0");
+        assert_eq!(newer_format_version("2.0.0", "1.9.0"), "2.0.0");
     }
 
     /// SEL-1. KILLS: deleting the arm; comparing against the wrong minor.
@@ -5207,8 +5481,10 @@ mod tests {
     fn the_original_name_arms_sit_between_the_selection_arms_and_redactions() {
         let mut sc = with_original_name();
         sc.source.selection = Some(SelectionLabel {
-            window_start_ms: 5,
+            window_start_ms: Some(5),
             window_end_ms: 5,
+            partitions: None,
+            engine_runs: None,
         });
         assert!(sc
             .validate_invariants()
@@ -5311,5 +5587,335 @@ mod tests {
         for unproved in [BeforeTheStart::SampledUnproved, BeforeTheStart::Expected] {
             assert!(!unproved.words().contains("restored or"), "{unproved:?}");
         }
+    }
+
+    // ---- PROD-11.1b: partition subsets, format 2.0.0 (OD-9 (a)), PS-1 to PS-5 ----
+
+    /// A 2.0.0 scorecard narrowed to `orders` [0, 2] (from the floor when
+    /// `start` is `None`), restored by one run, over a sampled verification.
+    fn with_subset(start: Option<i64>) -> Scorecard {
+        let mut sc = with_verification(sampled_verification());
+        sc.format_version = FORMAT_VERSION_WITH_PARTITION_SUBSETS.into();
+        sc.source.selection = Some(SelectionLabel {
+            window_start_ms: start,
+            window_end_ms: 1_760_000_005_000,
+            partitions: Some(vec![TopicPartitions {
+                topic: "orders".into(),
+                partitions: vec![0, 2],
+            }]),
+            engine_runs: Some(1),
+        });
+        sc
+    }
+
+    fn tp(topic: &str, partitions: &[i32]) -> TopicPartitions {
+        TopicPartitions {
+            topic: topic.into(),
+            partitions: partitions.to_vec(),
+        }
+    }
+
+    const PS1: &str = "is the format of a partition-subset restore, and this document carries no source.selection.partitions; a reader reads major 2 only for that shape";
+
+    /// **The version choice** (OD-9 (a)): 2.0.0 EXACTLY when the block names
+    /// a partition subset — with or without a start, whatever the version
+    /// before — and never for a start-only block or no block, which stay the
+    /// 1.x they were. The steps after it keep it (monotonic). KILLS: 2.0.0
+    /// written for a non-subset run; 1.x written for a subset run; a later
+    /// step lowering 2.0.0 to a minor.
+    #[test]
+    fn a_subset_is_written_as_2_0_0_and_only_a_subset() {
+        use crate::spec::Coverage::{Complete, Sampled};
+        for start in [None, Some(1_760_000_001_000)] {
+            let sc = with_subset(start);
+            assert_eq!(
+                sc.validate_invariants().map_err(|e| e.0),
+                Ok(()),
+                "{start:?}"
+            );
+            for current in ["1.4.0", "1.5.0", "1.6.0", "1.7.0"] {
+                assert_eq!(
+                    format_version_with_selection(current, sc.source.selection.as_ref()),
+                    "2.0.0",
+                    "{current} {start:?}"
+                );
+            }
+            assert_eq!(
+                format_version_with_sample("2.0.0", &sc.sample, Sampled),
+                "2.0.0"
+            );
+            assert_eq!(
+                format_version_with_sample("2.0.0", &sc.sample, Complete),
+                "2.0.0"
+            );
+        }
+        let start_only = with_selection(1_760_000_001_000);
+        assert_eq!(
+            format_version_with_selection("1.6.0", start_only.source.selection.as_ref()),
+            "1.7.0"
+        );
+        assert_eq!(format_version_with_selection("1.4.0", None), "1.4.0");
+        assert_eq!(format_version_with_selection("1.6.0", None), "1.6.0");
+        // An EMPTY subset list narrows nothing and is not a 2.0.0 block.
+        let mut empty = start_only.source.selection.clone().unwrap();
+        empty.partitions = Some(Vec::new());
+        assert!(!empty.narrows_partitions());
+        assert_eq!(
+            format_version_with_selection("1.6.0", Some(&empty)),
+            "1.7.0"
+        );
+        assert!(proves_fx23_sampled_checks(
+            FORMAT_VERSION_WITH_PARTITION_SUBSETS
+        ));
+        assert!(defines_format_1_minor("2.0.0", SELECTION_SINCE_MINOR));
+        assert!(defines_format_1_minor("2.3.1", VERIFICATION_SINCE_MINOR));
+        assert!(!defines_format_1_minor("3.0.0", TIME_BASIS_SINCE_MINOR));
+        assert!(!defines_format_1_minor("1.6.0", SELECTION_SINCE_MINOR));
+    }
+
+    /// **PS-1, in `refuse_unreadable_major`**: major 2 is read for the
+    /// partition-subset shape and nothing else — no block, a start-only block
+    /// and an empty list are refused before any other arm; a major above 2 is
+    /// refused as newer than this reader. KILLS: reading every 2.x document
+    /// (deleting PS-1); refusing every 2.x document (the old known major).
+    #[test]
+    fn ps1_reads_major_2_only_for_a_partition_subset() {
+        assert!(with_subset(None).refuse_unreadable_major().is_ok());
+        let mut none = with_subset(None);
+        none.source.selection = None;
+        let mut start_only = with_subset(Some(1_760_000_001_000));
+        start_only.source.selection.as_mut().unwrap().partitions = None;
+        let mut empty = with_subset(None);
+        empty.source.selection.as_mut().unwrap().partitions = Some(Vec::new());
+        for (label, mut sc) in [("none", none), ("start-only", start_only), ("empty", empty)] {
+            // A redaction too: PS-1 answers before every arm, `redactions`
+            // included.
+            sc.redactions = vec![Redaction {
+                path: "/x".into(),
+                reason: "y".into(),
+                present: true,
+            }];
+            assert_eq!(
+                sel_err(&sc),
+                format!("format_version 2.0.0 {PS1}"),
+                "{label}"
+            );
+        }
+        let mut newer = with_subset(None);
+        newer.format_version = "3.0.0".into();
+        assert_eq!(
+            sel_err(&newer),
+            "format_version 3.0.0 has a major version newer than this reader understands (this build knows 2.0.0)"
+        );
+    }
+
+    /// **2.0.0 is 1.7.0's fields**: every arm of major 1 holds for it — the
+    /// evidence arm (once scoped to major 1), and the arms that ask whether a
+    /// version defines a field (IV-1, US-1 and SEL-1 accept a 2.0.0 block).
+    /// KILLS: an arm left scoped to `Some(1)`, which a 2.0.0 document would
+    /// pass silently.
+    #[test]
+    fn every_format_1_arm_holds_for_a_2_0_0_document() {
+        let mut sc = with_subset(None);
+        sc.evidence.create_only_enforced = true;
+        assert_eq!(
+            sel_err(&sc),
+            "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing"
+        );
+        let mut sc = with_subset(None);
+        sc.target.marker_topic = None;
+        sc.target.mode = TargetMode::Scratch;
+        assert!(sel_err(&sc).starts_with("target.marker_topic is absent"));
+        let mut sc = with_subset(None);
+        sc.sample.unsampled_topics = Some(vec!["a".into()]);
+        sc.source.time_basis = Some(TimeBasisLabel::default());
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+    }
+
+    /// **PS-2**: a format-1 block is a start and its end, nothing else — a
+    /// subset (or an engine-run count) under major 1, or a block with no
+    /// start, is refused, so no subset ever rides in a document an older
+    /// reader would accept. KILLS: deleting the arm; any one of its three
+    /// conditions.
+    #[test]
+    fn ps2_holds_a_format_1_block_to_a_start_only() {
+        let want = "source.selection under major 1 is a stated window start and its end, and nothing else: a block without window_start_ms, or with partitions or engine_runs, is a partition-subset selection, which is format 2.0.0";
+        let mut with_partitions = with_selection(1_760_000_001_000);
+        with_partitions
+            .source
+            .selection
+            .as_mut()
+            .unwrap()
+            .partitions = Some(vec![tp("orders", &[0])]);
+        let mut with_runs = with_selection(1_760_000_001_000);
+        with_runs.source.selection.as_mut().unwrap().engine_runs = Some(1);
+        let mut no_start = with_selection(1_760_000_001_000);
+        no_start.source.selection.as_mut().unwrap().window_start_ms = None;
+        let mut subset_as_1_9 = with_subset(None);
+        subset_as_1_9.format_version = "1.9.0".into();
+        for (label, sc) in [
+            ("partitions", with_partitions),
+            ("engine_runs", with_runs),
+            ("no start", no_start),
+            ("a subset document as 1.9.0", subset_as_1_9),
+        ] {
+            assert_eq!(sel_err(&sc), want, "{label}");
+        }
+        assert!(with_selection(1_760_000_001_000)
+            .validate_invariants()
+            .is_ok());
+    }
+
+    /// **PS-3**: one spelling per subset list. KILLS: deleting the arm or any
+    /// of its conditions.
+    #[test]
+    fn ps3_refuses_a_subset_list_with_two_spellings() {
+        let want = "source.selection.partitions does not name each topic once, in order, with a non-empty, sorted list of distinct partitions that are not negative";
+        for bad in [
+            vec![tp("orders", &[])],
+            vec![tp("orders", &[2, 0])],
+            vec![tp("orders", &[1, 1])],
+            vec![tp("orders", &[-1])],
+            vec![tp("\u{2003}", &[0])],
+            vec![tp("payments", &[0]), tp("orders", &[0])],
+            vec![tp("orders", &[0]), tp("orders", &[1])],
+        ] {
+            let mut sc = with_subset(None);
+            sc.source.selection.as_mut().unwrap().partitions = Some(bad.clone());
+            assert_eq!(sel_err(&sc), want, "{bad:?}");
+        }
+    }
+
+    /// **PS-4**: one run per distinct subset, and at most one more. KILLS:
+    /// deleting the arm; accepting an absent count; either bound.
+    #[test]
+    fn ps4_holds_the_engine_runs_to_the_distinct_subsets() {
+        let want = "source.selection.engine_runs is not one run per distinct partition subset, or one more for the topics without one";
+        let two_distinct = Some(vec![tp("a", &[0]), tp("b", &[1, 2]), tp("c", &[0])]);
+        for (runs, ok) in [
+            (None, false),
+            (Some(0), false),
+            (Some(1), false),
+            (Some(2), true),
+            (Some(3), true),
+            (Some(4), false),
+        ] {
+            let mut sc = with_subset(None);
+            let sel = sc.source.selection.as_mut().unwrap();
+            sel.partitions = two_distinct.clone();
+            sel.engine_runs = runs;
+            let r = sc.validate_invariants().map_err(|e| e.0);
+            if ok {
+                assert_eq!(r, Ok(()), "{runs:?}");
+            } else {
+                assert_eq!(r, Err(want.to_string()), "{runs:?}");
+            }
+        }
+    }
+
+    /// **SEL-3 and PS-5 over a 2.0.0 complete block**: its window is the
+    /// selection's (no start for a subset from the floor), and nothing is
+    /// expected from a partition the plan did not select — a listed
+    /// unselected partition expecting nothing (a stray record's) is the
+    /// selection's own finding, refused by IV-6 if the document passes.
+    /// KILLS: deleting PS-5; judging a partition that expects nothing;
+    /// comparing a floor subset's window against a start.
+    #[test]
+    fn ps5_and_sel3_hold_the_complete_block_to_the_subset() {
+        let complete = |start: Option<i64>| {
+            let mut v = complete_verification();
+            v.complete.as_mut().unwrap().window = CompleteWindow {
+                start_ms: start,
+                end_ms: 1_760_000_005_000,
+            };
+            v
+        };
+        // The fixture block lists orders/0 and orders/1, both with records
+        // expected; selecting [0, 1] holds.
+        let mut ok = with_subset(None);
+        ok.source.selection.as_mut().unwrap().partitions = Some(vec![tp("orders", &[0, 1])]);
+        ok.integrity.verification = Some(complete(None));
+        assert_eq!(ok.validate_invariants().map_err(|e| e.0), Ok(()));
+        let mut started = ok.clone();
+        started.source.selection.as_mut().unwrap().window_start_ms = Some(1_760_000_001_000);
+        assert_eq!(
+            sel_err(&started),
+            "integrity.verification.complete.window is not source.selection's window; the expected output is selected by the plan's own start and end"
+        );
+        let mut narrower = ok.clone();
+        narrower.source.selection.as_mut().unwrap().partitions = Some(vec![tp("orders", &[0])]);
+        assert_eq!(
+            sel_err(&narrower),
+            "integrity.verification.complete.partitions expects records from a partition source.selection does not select"
+        );
+        // orders/1 listed but expecting nothing: not PS-5's.
+        let mut stray = not_a_pass(narrower, IntegrityResult::Fail);
+        let c = stray
+            .integrity
+            .verification
+            .as_mut()
+            .unwrap()
+            .complete
+            .as_mut()
+            .unwrap();
+        c.partitions[1].replay.expected = 0;
+        c.partitions[1].replay.matching = 0;
+        c.partitions[1].replay.unexpected = 7;
+        c.replay.expected = 5;
+        c.replay.matching = 5;
+        c.replay.unexpected = 7;
+        let r = stray.validate_invariants();
+        assert!(
+            !matches!(&r, Err(e) if e.0.starts_with("integrity.verification.complete.partitions expects")),
+            "PS-5 does not judge a partition that expects nothing: {r:?}"
+        );
+    }
+
+    /// The subset sentence, in the writer's note and both readers' line: the
+    /// partitions named, the start (or the floor), the runs, what the
+    /// document proves of the other partitions and, with a start, of the
+    /// records before it. KILLS: a non-pass claiming "restored"; a floor
+    /// subset naming a start; a subset sentence dropping the start clause.
+    #[test]
+    fn the_subset_sentence_names_the_partitions_and_claims_per_verdict() {
+        use crate::outcome::IntegrityResult::{Fail, Pass};
+        let floor = with_subset(None).source.selection.unwrap();
+        assert_eq!(
+            floor.sentence(BeforeTheStart::Expected, OutsideTheSubset::ProvedNoneRestored),
+            "replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), from the archive's floor to epoch-ms 1760000005000 (inclusive), in 1 engine run(s); no record of another partition of these topics was restored or expected"
+        );
+        let started = with_subset(Some(1_760_000_001_000))
+            .source
+            .selection
+            .unwrap();
+        assert_eq!(
+            started.coverage_note(crate::spec::Coverage::Sampled),
+            "replay selection: ONLY orders partitions [0, 2] (every partition of any other restored topic), from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive), in 1 engine run(s); no record of another partition of these topics was expected; no record before the start was expected; a sampled check does not prove that none was restored"
+        );
+        let (sampled, complete) = (sampled_verification(), complete_verification());
+        for v in [&sampled, &complete] {
+            assert_eq!(
+                OutsideTheSubset::of(&Pass, Some(v)),
+                OutsideTheSubset::ProvedNoneRestored
+            );
+            assert_eq!(
+                OutsideTheSubset::of(&Fail, Some(v)),
+                OutsideTheSubset::Expected
+            );
+        }
+        assert_eq!(
+            OutsideTheSubset::of(&Pass, None),
+            OutsideTheSubset::Expected
+        );
+        assert!(!OutsideTheSubset::Expected.words().contains("restored"));
+        // A start-only block keeps the 1.23.0 sentence byte for byte.
+        assert_eq!(
+            with_selection(1_760_000_001_000)
+                .source
+                .selection
+                .unwrap()
+                .sentence(BeforeTheStart::Expected, OutsideTheSubset::ProvedNoneRestored),
+            "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); no record before the start was expected"
+        );
     }
 }

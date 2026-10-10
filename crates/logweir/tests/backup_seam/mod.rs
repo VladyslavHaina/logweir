@@ -89,6 +89,7 @@ impl Fixture {
                 backup_id_override: None,
                 kafka_topic_resources: None,
                 strimzi_cluster: None,
+                consumer_groups: Vec::new(),
             },
             key,
             _dir: dir,
@@ -97,6 +98,51 @@ impl Fixture {
 
     pub fn public_key(&self) -> VerifyingKey {
         self.key.verifying_key()
+    }
+
+    /// **PROD-04.1.** Rewrite the plan so `source.consumer_groups` names
+    /// `groups` (after `topics`).
+    pub fn select_in_plan(&self, groups: &[&str]) {
+        let text = std::fs::read_to_string(&self.args.spec).unwrap();
+        let line = format!(
+            "\x20 topics: [orders]\n\x20 consumer_groups: [{}]\n",
+            groups.join(", ")
+        );
+        let text = text.replacen("\x20 topics: [orders]\n", &line, 1);
+        assert!(text.contains("consumer_groups"), "{text}");
+        std::fs::write(&self.args.spec, text).unwrap();
+    }
+
+    /// **PROD-04.1.** One `backup run` through `reader`, with `cli_groups` as
+    /// `--consumer-group`.
+    pub fn execute_reading(
+        &self,
+        evidence: &Store,
+        reader: &dyn ClusterReader,
+        cli_groups: Vec<String>,
+    ) -> Result<BackupOutcome, BackupError> {
+        let archive = Store::in_memory(ARCHIVE_PREFIX);
+        let args = BackupRunArgs {
+            store_contract_version: None,
+            spec: self.args.spec.clone(),
+            allowed_clusters: self.args.allowed_clusters.clone(),
+            signing_key: self.args.signing_key.clone(),
+            triggered_by: self.args.triggered_by.clone(),
+            out: None,
+            receipt_out: None,
+            backup_id_override: Some(BACKUP_ID.to_string()),
+            kafka_topic_resources: None,
+            strimzi_cluster: None,
+            consumer_groups: cli_groups,
+        };
+        execute_with(
+            &args,
+            "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+            reader,
+            &OneTopicEngine { archive: &archive },
+            &archive,
+            evidence,
+        )
     }
 
     /// One successful `backup run`, writing its evidence through `evidence`.
@@ -140,6 +186,7 @@ impl Fixture {
             backup_id_override: Some(backup_id.to_string()),
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            consumer_groups: Vec::new(),
         };
         execute_with(
             &args,
@@ -154,7 +201,7 @@ impl Fixture {
 
 /// A `ClusterReader` that answers one cluster id and nothing else. It
 /// constructs no client; the bootstrap list above is data.
-struct StubReader;
+pub struct StubReader;
 
 impl ClusterReader for StubReader {
     fn cluster_id(&self) -> Result<String, KafkaError> {

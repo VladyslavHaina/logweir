@@ -114,6 +114,7 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
             backup_id_override: None,
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            consumer_groups: Vec::new(),
         },
     }
 }
@@ -488,6 +489,26 @@ fn guard_message(err: BackupError) -> String {
         BackupError::Guard(refusal) => refusal.0,
         other => panic!("expected a guard refusal (exit 3), got {other:?}"),
     }
+}
+
+/// A document's `format_version` is **at least** `min` — the minor that defines
+/// the field under test — rather than an exact pin. Receipt and catalog-point
+/// versions are renumbered when several format-bumping rows integrate together
+/// (PROD-01.3/01.4a/03.0/04.1), and a future renumber only raises the stamped
+/// version, so `>= min` survives it where `== min` would break a sibling's CI.
+fn assert_format_at_least(actual: &str, min: &str, what: &str) {
+    let triple = |v: &str| -> (u64, u64, u64) {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    assert!(
+        triple(actual) >= triple(min),
+        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,15 +1192,42 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    // PROD-03.0: every receipt this build signs carries `schema_dependency`
-    // (beside PROD-05.1's `topic_configuration`), so every one is 1.5.0.
-    assert_eq!(receipt.format_version, "1.5.0");
+    // PROD-05.1, PROD-03.0 and PROD-01.4a: every receipt this build signs
+    // carries `topic_configuration`, `schema_dependency` and `generations`, so
+    // it is at least 1.6.0.
+    assert_format_at_least(
+        &receipt.format_version,
+        "1.6.0",
+        "the receipt carries topic_configuration, schema_dependency and generations",
+    );
+    // PROD-01.4a: one `generations` entry per named topic. This seam's reader
+    // reads no topic IDs, so each ID is null and SAYS so (`notRead`) — never
+    // a guessed ID, never omitted.
+    let generations = receipt
+        .generations
+        .as_ref()
+        .expect("every receipt this build signs carries generations");
+    assert_eq!(
+        generations.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(generations["orders"].topic_id, None);
+    assert_eq!(generations["orders"].topic_id_after, None);
+    assert_eq!(
+        generations["orders"].topic_id_reason.as_deref(),
+        Some("notRead")
+    );
+    assert_eq!(
+        generations["orders"].topic_id_after_reason.as_deref(),
+        Some("notRead")
+    );
+    assert_eq!(generations["orders"].topic_id_source, None);
     // …one model entry per named topic, and — the read having failed — NO
     // entries: NOT RECORDED, never an empty "no configuration".
     let model = receipt
         .topic_configuration
         .as_ref()
-        .expect("a 1.3.0 receipt this build signs carries topic_configuration");
+        .expect("a receipt this build signs carries topic_configuration");
     assert_eq!(
         model.keys().cloned().collect::<Vec<_>>(),
         vec!["orders".to_string()]
@@ -2082,4 +2130,231 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
         verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
         ExitCode::Ok
     );
+}
+
+// ---------------------------------------------------------------------------
+// PROD-01.4a: the receipt's topic IDs, end to end through the backup seam.
+// ---------------------------------------------------------------------------
+
+/// A source reader whose topics CHANGE WHEN THE ENGINE RUNS (review M3):
+/// it answers from the state of `engine_ran`, which only [`ChangesTheTopic`]
+/// sets, from inside the engine's `backup`. So a read taken before the engine
+/// sees the old topic, and only a read taken after it sees the new one,
+/// whatever order the reads are made in. `orders` is recreated by the engine
+/// (A, then B); `ledger` keeps its ID; `refunds` is refused, then not found.
+struct IdReader {
+    calls: Mutex<usize>,
+    engine_ran: std::sync::atomic::AtomicBool,
+}
+
+/// An engine double that, when it runs, deletes and recreates `orders` on
+/// [`IdReader`]'s cluster (it flips `engine_ran`), and records how many
+/// DescribeTopics reads had happened by then.
+struct ChangesTheTopic<'a> {
+    engine: &'a dyn DataEngine,
+    reader: &'a IdReader,
+    reads_when_the_engine_ran: Mutex<Option<usize>>,
+}
+
+impl DataEngine for ChangesTheTopic<'_> {
+    fn id(&self) -> EngineId {
+        self.engine.id()
+    }
+    fn list_backup_sets(&self, loc: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+        self.engine.list_backup_sets(loc)
+    }
+    fn describe(&self, set: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+        self.engine.describe(set)
+    }
+    fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError> {
+        self.engine.preflight(plan)
+    }
+    fn restore(
+        &self,
+        plan: &RestorePlan,
+        obs: &mut dyn PhaseObserver,
+    ) -> Result<RestoreFacts, EngineError> {
+        self.engine.restore(plan, obs)
+    }
+    fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+        self.engine.fingerprints(sel)
+    }
+    fn backup(
+        &self,
+        plan: &BackupPlan,
+        obs: &mut dyn PhaseObserver,
+    ) -> Result<BackupFacts, EngineError> {
+        *self.reads_when_the_engine_ran.lock().unwrap() = Some(*self.reader.calls.lock().unwrap());
+        self.reader
+            .engine_ran
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.engine.backup(plan, obs)
+    }
+}
+
+const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
+const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
+const ID_L: &str = "NSSUDfCtRqWqyhqP5Vttsw";
+
+impl ClusterReader for IdReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok("SOURCE-CLUSTER-00000001".into())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![])
+    }
+    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn consume_range(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_ids(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, logweir_kafka::topic_ids::TopicIdRead)>, KafkaError> {
+        use logweir_kafka::topic_ids::TopicIdRead as R;
+        *self.calls.lock().unwrap() += 1;
+        let after = self.engine_ran.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(topics
+            .iter()
+            .map(|t| {
+                let read = match (t.as_str(), after) {
+                    ("orders", false) => R::Id(ID_A.into()),
+                    ("orders", true) => R::Id(ID_B.into()),
+                    ("ledger", _) => R::Id(ID_L.into()),
+                    (_, false) => R::NotAuthorized,
+                    (_, true) => R::NotFound,
+                };
+                (t.clone(), read)
+            })
+            .collect())
+    }
+}
+
+/// **PROD-01.4a, the receipt.** The block is signed with the run, one entry
+/// per named topic: each ID read BEFORE the engine and AFTER it, so a topic
+/// recreated while the engine ran carries two different IDs (and the rule
+/// calls the point changed during its capture); a topic that kept its ID
+/// carries it twice; a refused read is `null` with `notAuthorized`, never
+/// absent, and the read after says `topicNotFound`. The reader is asked
+/// exactly twice. The receipt verifies through the shipped reader, and its
+/// catalog point copies the block.
+#[test]
+fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
+    use logweir_core::topic_identity::{between, Generation};
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders, ledger, refunds]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let engine = RecordingEngine::ok(
+        ["orders", "ledger", "refunds"]
+            .iter()
+            .map(|t| topic_facts(t, vec![segment(2, 1_756_000_000_000, 1_756_000_010_000)]))
+            .collect(),
+    );
+    let (store, _k, _b) = archive_for("mvp-demo");
+    let reader = IdReader {
+        calls: Mutex::new(0),
+        engine_ran: std::sync::atomic::AtomicBool::new(false),
+    };
+    let changing = ChangesTheTopic {
+        engine: &engine,
+        reader: &reader,
+        reads_when_the_engine_ran: Mutex::new(None),
+    };
+
+    let outcome = exec(&f.args, "run-1", &reader, &changing, &store, &store).unwrap();
+    // Review M3: exactly ONE read happened before the engine ran, and the
+    // other after it — a read hoisted above the engine would make this 2, and
+    // would record A after the engine too.
+    assert_eq!(
+        *changing.reads_when_the_engine_ran.lock().unwrap(),
+        Some(1),
+        "the read before the engine, and only it, precedes the engine"
+    );
+    assert_eq!(
+        *reader.calls.lock().unwrap(),
+        2,
+        "one read before, one after"
+    );
+    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
+    assert_format_at_least(
+        &receipt.format_version,
+        "1.6.0",
+        "the receipt carries generations",
+    );
+    let g = receipt
+        .generations
+        .clone()
+        .expect("the block is always written");
+    assert_eq!(g.len(), 3);
+    assert_eq!(g["orders"].topic_id.as_deref(), Some(ID_A));
+    assert_eq!(g["orders"].topic_id_after.as_deref(), Some(ID_B));
+    assert_eq!(
+        g["orders"].topic_id_source.as_deref(),
+        Some("describeTopics")
+    );
+    assert_eq!(g["ledger"].topic_id.as_deref(), Some(ID_L));
+    assert_eq!(g["ledger"].topic_id_after.as_deref(), Some(ID_L));
+    assert_eq!(g["refunds"].topic_id, None);
+    assert_eq!(
+        g["refunds"].topic_id_reason.as_deref(),
+        Some("notAuthorized")
+    );
+    assert_eq!(
+        g["refunds"].topic_id_after_reason.as_deref(),
+        Some("topicNotFound")
+    );
+    assert_eq!(g["refunds"].topic_id_source, None);
+    // The rule over this one point: `orders` changed during its capture.
+    assert_eq!(
+        between(None, &receipt, "orders"),
+        Generation::ChangedDuringCapture {
+            before: ID_A.into(),
+            after: ID_B.into()
+        }
+    );
+    assert!(matches!(
+        between(None, &receipt, "ledger"),
+        Generation::NotEstablished(_)
+    ));
+    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let dir = f._dir.path();
+    assert_eq!(
+        verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
+        ExitCode::Ok
+    );
+    let record_key = outcome
+        .catalog_key
+        .clone()
+        .expect("the run wrote its catalog point");
+    let (record, _) = store.get(&record_key).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
+    assert_format_at_least(
+        record["format_version"].as_str().expect("a version"),
+        "1.6.0",
+        "the catalog point copies identity",
+    );
+    for t in record["topics"].as_array().expect("topics") {
+        let name = t["name"].as_str().unwrap();
+        assert_eq!(
+            t["identity"],
+            serde_json::to_value(&g[name]).unwrap(),
+            "{name}"
+        );
+    }
 }

@@ -4849,7 +4849,9 @@ fn the_restore_printer_columns_are_the_contract() {
             "COVERAGE",
             "RTO",
             "SIGNED",
-            "AGE"
+            "AGE",
+            // PROD-11.1b: appended, so every column before it keeps its place.
+            "SELECTION"
         ],
         "`kubectl get restores` is an interface: a renamed or reordered column breaks a runbook \
          nobody will think to update"
@@ -10884,5 +10886,128 @@ fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
         badge.reason,
         weirkeeper::conditions::REASON_VERIFICATION_INVALID,
         "the control: the signature is judged before anything the status says"
+    );
+}
+
+// ------------------------------------------------------------- PROD-11.1b
+
+/// A 1.4.0-shaped sampled pass with `source.selection` set to `selection`
+/// (and the format the writer gives it), or with no block for `None`.
+fn scorecard_with_selection(selection: Option<Value>) -> Value {
+    let mut doc: Value = serde_json::from_str(&scorecard_with_verification(
+        "pass", "pass", "sampled", None,
+    ))
+    .unwrap();
+    if let Some(sel) = selection {
+        let subset = sel.get("partitions").is_some();
+        doc["format_version"] = serde_json::json!(if subset { "2.0.0" } else { "1.7.0" });
+        doc["source"]["selection"] = sel;
+    }
+    doc
+}
+
+/// **PROD-11.1b (review M1): a narrowed restore names its selection in the
+/// status, beside the verdict it qualifies.** A 2.0.0 subset's block is
+/// copied to `status.integrity.selection` (the narrowed topics, their
+/// partitions, the count, the runs and the window's ends); a 1.7.0 start-only
+/// block is copied with its start and no subset. The CONTROL: a document
+/// with no block (and one whose block is `null`) gets no `selection`, so an
+/// unnarrowed restore's status is exactly what it was. FAIL SAFE: a block the
+/// controller cannot read is still a selection (copied empty), and a subset
+/// list past the bounds keeps its count. KILLS: the selection not read; the
+/// block not written into `integrity`; a malformed block read as none; the
+/// count dropped with the rows.
+#[test]
+fn a_narrowed_restore_names_its_selection_in_the_status() {
+    use weirkeeper::controllers::restore::integrity_block;
+    let observe = |doc: &Value| scorecard_observation(doc.to_string().as_bytes()).expect("JSON");
+
+    let subset = observe(&scorecard_with_selection(Some(serde_json::json!({
+        "window_end_ms": 1_760_000_010_000i64,
+        "partitions": [{"topic": "orders", "partitions": [0, 2]},
+                       {"topic": "payments", "partitions": [1]}],
+        "engine_runs": 3
+    }))));
+    let block = integrity_block(&subset);
+    assert_eq!(
+        block.get("selection"),
+        Some(&serde_json::json!({
+            "scope": "partial",
+            "windowEndMs": 1_760_000_010_000i64,
+            "narrowedTopics": 2,
+            "partitions": [{"topic": "orders", "partitions": [0, 2]},
+                           {"topic": "payments", "partitions": [1]}],
+            "engineRuns": 3
+        })),
+        "{block:?}"
+    );
+    // The CRD's own type reads it back (the status schema is generated from
+    // it, so a field name that drifted would not round-trip).
+    let typed: weirkeeper::crds::restore::RestoreSelection =
+        serde_json::from_value(block["selection"].clone()).expect("the status type reads it");
+    assert_eq!(typed.narrowed_topics, Some(2));
+
+    let start_only = observe(&scorecard_with_selection(Some(serde_json::json!({
+        "window_start_ms": 1_760_000_000_030i64,
+        "window_end_ms": 1_760_000_010_000i64
+    }))));
+    assert_eq!(
+        integrity_block(&start_only).get("selection"),
+        Some(&serde_json::json!({
+            "scope": "partial",
+            "windowStartMs": 1_760_000_000_030i64,
+            "windowEndMs": 1_760_000_010_000i64
+        }))
+    );
+
+    // The control: no block, or `null`, is no selection.
+    for doc in [scorecard_with_selection(None), {
+        let mut d = scorecard_with_selection(None);
+        d["source"]["selection"] = Value::Null;
+        d
+    }] {
+        let o = observe(&doc);
+        assert_eq!(o.selection, None);
+        assert!(!integrity_block(&o).contains_key("selection"));
+    }
+
+    // Fail safe: an unreadable block is a selection with only its marker, and
+    // a malformed subset list is still narrowed.
+    let unreadable = observe(&scorecard_with_selection(Some(serde_json::json!("orders"))));
+    assert_eq!(
+        integrity_block(&unreadable).get("selection"),
+        Some(&serde_json::json!({"scope": "partial"}))
+    );
+    let malformed = observe(&scorecard_with_selection(Some(serde_json::json!({
+        "window_end_ms": 1,
+        "partitions": "orders"
+    }))));
+    assert_eq!(
+        malformed.selection.as_ref().and_then(|s| s.narrowed_topics),
+        Some(1)
+    );
+    assert_eq!(
+        malformed
+            .selection
+            .as_ref()
+            .and_then(|s| s.partitions.clone()),
+        None
+    );
+
+    // Past the bound: the rows go, the count stays.
+    let many: Vec<Value> = (0..=weirkeeper::crds::restore::SELECTION_TOPICS_MAX)
+        .map(|i| serde_json::json!({"topic": format!("t{i:04}"), "partitions": [0]}))
+        .collect();
+    let big = observe(&scorecard_with_selection(Some(serde_json::json!({
+        "window_end_ms": 1,
+        "partitions": many,
+        "engine_runs": 1
+    }))));
+    let sel = big.selection.expect("still a selection");
+    assert_eq!(sel.scope.as_deref(), Some("partial"));
+    assert_eq!(sel.partitions, None);
+    assert_eq!(
+        sel.narrowed_topics,
+        Some(i64::try_from(weirkeeper::crds::restore::SELECTION_TOPICS_MAX + 1).unwrap())
     );
 }

@@ -2358,39 +2358,68 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
 
-/// **PROD-11.1: a partition subset can never sign** (the review's H1,
-/// OD-9). A plan stating `restore.partitions` — one the archive satisfies, so
-/// the refusal is not the archive's — is refused exit 3 at phase 0, its
-/// message opening with `PartitionSubsetsAwaitOwnerDecision`: no target topic
-/// created, no sample fingerprinted, nothing signed. The control is the same
-/// archive with no selection (`Drill::Passes`), which runs and signs.
+/// **PROD-11.1b: a partition subset is restored, judged over its selection
+/// and SIGNED as format 2.0.0** (the owner's OD-9 (a)). The approved plan
+/// states `restore.partitions: {orders: [0]}` from the archive's floor
+/// (`point_in_time: "../<end>"`), one the archive satisfies. The run passes;
+/// its scorecard is format 2.0.0 with `source.selection` naming the subset,
+/// the end, no start and one engine run, and the EXISTING
+/// `sample.coverage_note` opens with the subset and names no start limit (it
+/// states no start). The control is the same archive with no selection:
+/// neither block nor 2.0.0.
 ///
-/// KILLS: the refusal deleted from `ReplaySelection::from_spec` (the subset
-/// would be restored and signed under a format a verifier that predates it
-/// reads as a full restore).
+/// KILLS: the old refusal left in place; the version choice writing 1.x for
+/// a subset (or 2.0.0 for the control); dropping the subsets from the block;
+/// a start-limit sentence for a plan that states no start.
 #[test]
-fn a_partition_subset_is_refused_by_name_and_never_signed() {
+fn a_partition_subset_is_restored_and_signed_as_format_2_0_0() {
     let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
-    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
-    let (message, code, line) = refusal(err);
-    assert_eq!(code, ExitCode::GuardRefused);
-    assert_eq!(line, "refusal-reason=GuardRefused");
-    assert!(
-        message.contains("PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition subset of orders"),
-        "{message}"
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the subset runs");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
     );
-    assert!(fixtures::created_topics(&f).is_empty(), "nothing created");
-    assert!(fixtures::fingerprint_calls(&f).is_empty(), "before phase 4");
-    assert!(
-        f.ctx
-            .store
-            .get(&format!("logweir/drills/{}.json", f.run_id))
-            .is_err(),
-        "a refused run signs nothing"
+    let end = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_END)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(
+        sc.source.selection,
+        Some(logweir_core::scorecard::SelectionLabel {
+            window_start_ms: None,
+            window_end_ms: end,
+            partitions: Some(vec![logweir_core::scorecard::TopicPartitions {
+                topic: "orders".into(),
+                partitions: vec![0],
+            }]),
+            engine_runs: Some(1),
+        })
     );
+    assert!(
+        sc.sample.coverage_note.starts_with(&format!(
+            "replay selection: ONLY orders partitions [0] (every partition of any other restored \
+             topic), from the archive's floor to epoch-ms {end} (inclusive), in 1 engine run(s); \
+             no record of another partition of these topics was expected"
+        )),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert!(
+        !sc.sample.coverage_note.contains("before the start"),
+        "{}",
+        sc.sample.coverage_note
+    );
+    assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+    assert_eq!(fixtures::created_topics(&f).len(), 1);
+
     let control = fixtures::orchestrator_fixture(Drill::Passes);
     execute_with(&control.args, &control.run_id, &control.ctx).expect("the control runs");
-    assert_eq!(fixtures::created_topics(&control).len(), 1);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert!(sc.source.selection.is_none());
+    assert!(sc.format_version.starts_with("1."), "{}", sc.format_version);
 }
 
 /// **PROD-11.1: a stated window start is restored, judged over its window and
@@ -2425,8 +2454,10 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
     assert_eq!(
         sc.source.selection,
         Some(logweir_core::scorecard::SelectionLabel {
-            window_start_ms: start,
+            window_start_ms: Some(start),
             window_end_ms: end,
+            partitions: None,
+            engine_runs: None,
         })
     );
     assert!(

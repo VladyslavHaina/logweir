@@ -395,10 +395,11 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              never by sample); every other restore sets a prefix nothing has used."
         }
         CheckCode::SelectionInvalid => {
-            "The plan's replay selection is refused: a partition subset (restore.partitions), which \
-             is not accepted until the owner decides how its scorecard is versioned, or a window \
-             start (restore.point_in_time \"<start>/<end>\") at or after the window's end. \
-             Fix the selection in the draft."
+            "The plan's replay selection is refused as stated: a partition subset \
+             (restore.partitions) for a topic the plan does not select, an empty subset, or a \
+             repeated or negative partition; or a window start (restore.point_in_time \
+             \"<start>/<end>\") at or after the window's end or after the sample window. Fix the \
+             selection in the draft."
         }
         CheckCode::WindowStartBeforeCoverage => {
             "The requested window start is older than anything this backup set covers. It is \

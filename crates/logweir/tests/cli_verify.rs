@@ -15,11 +15,13 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest minor (PROD-15.1's 1.8.0); the writer writes 1.8.0
-            // only for a restore under the original topic names, 1.7.0 for
-            // one that states a replay selection, 1.6.0 for every other
-            // sampled drill (FX-23), and 1.4.0/1.5.0 for a complete one.
-            logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+            // The newest version (PROD-11.1b's 2.0.0); the writer writes
+            // 2.0.0 only for a restore that states a partition subset, 1.8.0
+            // for one under the original topic names (PROD-15.1; that file is
+            // format 1's newest, `schemas/logweir-drill-scorecard-1.8.0.json`),
+            // 1.7.0 for one that states a window start only, 1.6.0 for every
+            // other sampled drill (FX-23), and 1.4.0/1.5.0 for a complete one.
+            logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
         )),
         "{s}"
     );
@@ -531,9 +533,19 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all twenty-nine backup-receipt invariants"),
+        stdout.contains("the signature AND all forty backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout (twenty-nine since \
-         PROD-03.0's eight schema_dependency arms), got: {stdout}"
+         PROD-03.0's eight schema_dependency arms, forty since PROD-04.1's six \
+         consumer_positions arms and PROD-01.4a's five generations arms), got: {stdout}"
+    );
+    // PROD-01.4a: the checked-in receipt is a 1.0.0 document, so no topic ID
+    // is known from it — said, never left to read as "the same generation".
+    assert!(
+        stdout.contains(
+            "generations: not recorded, so no topic ID is known from this receipt and each \
+             topic's generation is UNKNOWN, never the same as another point's"
+        ),
+        "{stdout}"
     );
     // PROD-03.0: the checked-in receipt is a 1.0.0 document, so whether its
     // topics need a schema registry is NOT ASSESSED — said, never left to read
@@ -1020,8 +1032,10 @@ fn a_sampled_pass_over_a_selection_says_so() {
         complete: None,
     };
     let window = SelectionLabel {
-        window_start_ms: 1_760_000_010_000,
+        window_start_ms: Some(1_760_000_010_000),
         window_end_ms: 1_760_000_015_000,
+        partitions: None,
+        engine_runs: None,
     };
     assert_eq!(
         sampled_pass_lines_over(Outcome::Pass, Some(&sampled), "1.7.0", Some(&window)),
@@ -1053,6 +1067,45 @@ fn a_sampled_pass_over_a_selection_says_so() {
     assert!(
         sampled_pass_lines_over(Outcome::Pass, Some(&complete), "1.7.0", Some(&window)).is_empty()
     );
+
+    // PROD-11.1b: a 2.0.0 subset, from the floor and from a start.
+    let subset = |start: Option<i64>| SelectionLabel {
+        window_start_ms: start,
+        window_end_ms: 1_760_000_015_000,
+        partitions: Some(vec![TopicPartitions {
+            topic: "orders".into(),
+            partitions: vec![0, 2],
+        }]),
+        engine_runs: Some(1),
+    };
+    let held = "every selected partition was held to its own count bound over that window, \
+                every other partition of a narrowed topic was held empty, max_partitions \
+                reached every topic before a second partition of any, and a readable engine \
+                report lacking a selected partition with records in that window was refused";
+    assert_eq!(
+        sampled_pass_lines_over(Outcome::Pass, Some(&sampled), "2.0.0", Some(&subset(None))),
+        vec![format!(
+            "sample coverage: a sampled pass over a partition subset from the archive's floor to \
+             epoch-ms 1760000015000: {held}"
+        )]
+    );
+    assert_eq!(
+        sampled_pass_lines_over(
+            Outcome::Pass,
+            Some(&sampled),
+            "2.0.0",
+            Some(&subset(Some(1_760_000_010_000)))
+        ),
+        vec![format!(
+            "sample coverage: a sampled pass over a partition subset from epoch-ms 1760000010000 \
+             to epoch-ms 1760000015000: {held}; no record before the start was expected, and a \
+             sampled check does not prove that none was restored"
+        )]
+    );
+    assert!(
+        sampled_pass_lines_over(Outcome::Pass, Some(&complete), "2.0.0", Some(&subset(None)))
+            .is_empty()
+    );
 }
 
 /// **PROD-11.1 review N1, a row per lane.** The `replay selection:` line says
@@ -1081,14 +1134,20 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
     let mut complete = sampled.clone();
     complete.coverage = COVERAGE_COMPLETE.into();
     let window = SelectionLabel {
-        window_start_ms: 1_760_000_010_000,
+        window_start_ms: Some(1_760_000_010_000),
         window_end_ms: 1_760_000_015_000,
+        partitions: None,
+        engine_runs: None,
     };
     let head = "replay selection: every partition of every restored topic, from epoch-ms \
                 1760000010000 (the plan's stated window start, inclusive) to epoch-ms \
                 1760000015000 (inclusive); ";
     let line = |result: IntegrityResult, v: Option<&Verification>| {
-        selection_lines(Some(&window), BeforeTheStart::of(&result, v))
+        selection_lines(
+            Some(&window),
+            BeforeTheStart::of(&result, v),
+            OutsideTheSubset::of(&result, v),
+        )
     };
     assert_eq!(
         line(IntegrityResult::Pass, Some(&complete)),
@@ -1115,5 +1174,49 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
             vec![format!("{head}no record before the start was expected")]
         );
     }
-    assert!(selection_lines(None, BeforeTheStart::ProvedNoneRestored).is_empty());
+    assert!(selection_lines(
+        None,
+        BeforeTheStart::ProvedNoneRestored,
+        OutsideTheSubset::ProvedNoneRestored
+    )
+    .is_empty());
+
+    // PROD-11.1b: a 2.0.0 subset says no record of another partition was
+    // RESTORED only over a verification that passed, on either lane (the
+    // sampled lane holds every other partition empty; the complete lane
+    // counts a record there as unexpected); anything else, only expected.
+    let subset = SelectionLabel {
+        window_start_ms: None,
+        window_end_ms: 1_760_000_015_000,
+        partitions: Some(vec![TopicPartitions {
+            topic: "orders".into(),
+            partitions: vec![0, 2],
+        }]),
+        engine_runs: Some(1),
+    };
+    let head = "replay selection: ONLY orders partitions [0, 2] (every partition of any other \
+                restored topic), from the archive's floor to epoch-ms 1760000015000 \
+                (inclusive), in 1 engine run(s); ";
+    for (result, v, proved) in [
+        (IntegrityResult::Pass, Some(&sampled), true),
+        (IntegrityResult::Pass, Some(&complete), true),
+        (IntegrityResult::Fail, Some(&sampled), false),
+        (IntegrityResult::Fail, Some(&complete), false),
+        (IntegrityResult::Pass, None, false),
+    ] {
+        let words = if proved {
+            "no record of another partition of these topics was restored or expected"
+        } else {
+            "no record of another partition of these topics was expected"
+        };
+        assert_eq!(
+            selection_lines(
+                Some(&subset),
+                BeforeTheStart::of(&result, v),
+                OutsideTheSubset::of(&result, v)
+            ),
+            vec![format!("{head}{words}")],
+            "{result:?} {v:?}"
+        );
+    }
 }

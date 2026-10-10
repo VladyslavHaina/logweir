@@ -736,6 +736,25 @@ const CREATION_STOP = shapeOf(
   { appeared: listOf(str), left: listOf(str), leftInstruction: str },
 );
 
+// PROD-11.1b: a Restore's signed replay selection -- a window from a stated
+// start, or a partition subset of each narrowed topic. ABSENT means the
+// scorecard states none (every partition of every restored topic, from the
+// archive's floor); PRESENT and empty is a selection the controller could not
+// read, which is still a selection and never a restore of everything.
+const SELECTED_PARTITIONS = shapeOf(
+  "SelectedPartitionsView",
+  { topic: str, partitions: listOf(int) },
+);
+
+const RESTORE_SELECTION = shapeOf(
+  "RestoreSelectionView",
+  { scope: str },
+  {
+    windowStartMs: int, windowEndMs: int, narrowedTopics: int,
+    partitions: listOf(objectOf(SELECTED_PARTITIONS)), engineRuns: int,
+  },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -754,6 +773,7 @@ const RESTORE = shapeOf(
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
     queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
     targetTopicsAppeared: objectOf(CREATION_STOP),
+    selection: objectOf(RESTORE_SELECTION),
   },
 );
 
@@ -1689,6 +1709,8 @@ export const CONSOLE_SHAPES = Object.freeze({
   RestoreTargetView: RESTORE_TARGET,
   Restore: RESTORE,
   RestoreCoverageView: RESTORE_COVERAGE,
+  RestoreSelectionView: RESTORE_SELECTION,
+  SelectedPartitionsView: SELECTED_PARTITIONS,
   SubjectRefView: SUBJECT_REF,
   VerifiedSubjectView: VERIFIED_SUBJECT,
   Approval: APPROVAL,
@@ -2443,7 +2465,7 @@ const D3_VERIFICATION_SCOPE = shapeOf(
   {
     recordsSampled: int, recordsSampledMatching: int, recordsExpected: int,
     coverage: oneOf(COVERAGE_VALUES), complete: objectOf(D3_COMPLETE_VERIFICATION),
-    unsampledTopics: listOf(str),
+    unsampledTopics: listOf(str), selection: objectOf(RESTORE_SELECTION),
   },
 );
 
@@ -2696,6 +2718,28 @@ const D3_POINT_TOPIC = shapeOf(
   { partitions: int, replicationFactor: int, configCoverage: str, owner: str },
 );
 
+/** PROD-04.1: a point's consumer position evidence, as the catalog's view
+ *  lists it -- the snapshot's freshness, and per selected group its outcome and
+ *  its positions counted by what they say about archived data. Never a
+ *  position. */
+const D3_POINT_POSITION_COUNTS = shapeOf("PointPositionCountsView", {
+  related: int, notRelated: int, neverCommitted: int, beyondEnd: int, failed: int,
+  notObserved: int,
+});
+const D3_POINT_GROUP = shapeOf(
+  "PointGroupView",
+  { groupId: str, outcome: str },
+  { reason: str, groupType: str, active: bool, positions: objectOf(D3_POINT_POSITION_COUNTS) },
+);
+const D3_POINT_CONSUMER_POSITIONS = shapeOf(
+  "PointConsumerPositionsView",
+  { listing: str },
+  {
+    observedFrom: str, observedTo: str, observedBeforeRecoveryPointMs: int,
+    groups: listOf(objectOf(D3_POINT_GROUP)), groupsOmitted: int,
+  },
+);
+
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2721,6 +2765,9 @@ const D3_POINT = shapeOf(
     // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
     // `unknown` -- never read as `adminApi`.
     ownerDetection: listOf(str),
+    // PROD-04.1: the consumer position evidence of the groups the backup
+    // selected. ABSENT is not published, never "no positions".
+    consumerPositions: objectOf(D3_POINT_CONSUMER_POSITIONS),
   },
 );
 

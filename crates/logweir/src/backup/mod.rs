@@ -57,9 +57,11 @@
 //! A binary CANNOT be handed an in-process double, which is why the one
 //! binary-level argv assertion lives under `e2e/` (`e2e/tests/backup_argv.rs`).
 pub mod config_coverage;
+pub mod consumer_positions;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 pub mod schema_dependency;
+pub mod topic_ids;
 
 use crate::exit::ExitCode;
 use logweir_core::engine::{AuthRender, BackupFacts, BackupPlan, DataEngine};
@@ -113,6 +115,25 @@ pub struct BackupRunArgs {
     /// **PROD-05.1.** Only `KafkaTopic` resources labelled
     /// `strimzi.io/cluster=<this>` count.
     pub strimzi_cluster: Option<String>,
+    /// **PROD-04.1.** `--consumer-group`: groups selected on the command line,
+    /// after the plan's own `source.consumer_groups` ([`selected_groups`]).
+    pub consumer_groups: Vec<String>,
+}
+
+/// **PROD-04.1.** The consumer groups this run records positions for: the
+/// plan's `source.consumer_groups`, then `--consumer-group`, in that order.
+/// Phase −1 refuses the combined list when it is not a selection
+/// (`logweir_core::consumer_positions::refuse_selection`); EMPTY selects
+/// nothing, and the receipt then carries no `consumer_positions`.
+#[must_use]
+pub fn selected_groups(args: &BackupRunArgs, spec: &BackupSpec) -> Vec<String> {
+    spec.source
+        .consumer_groups
+        .iter()
+        .flatten()
+        .chain(args.consumer_groups.iter())
+        .cloned()
+        .collect()
 }
 
 /// What one `logweir backup run` established. Task 5b turns this into the
@@ -189,6 +210,20 @@ pub struct BackupOutcome {
     /// `phase_run::build_receipt` writes it as the receipt's 1.5.0
     /// `schema_dependency` block.
     pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
+    /// **PROD-01.4a.** Per named topic, the topic ID Logweir's DescribeTopics
+    /// read returned before the engine and after it, or why there is none
+    /// (`topic_ids::block`). One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.6.0
+    /// `generations` block.
+    pub generations: BTreeMap<String, logweir_core::backup_receipt::TopicIdentity>,
+    /// **PROD-04.1.** The consumer position evidence of the selected groups
+    /// (`consumer_positions::build`), or `None` when the run selected none:
+    /// the receipt's 1.7.0 `consumer_positions` block.
+    pub consumer_positions: Option<logweir_core::consumer_positions::ConsumerPositions>,
+    /// **PROD-04.1.** The exact bytes of the positions document the block
+    /// binds (`<run_id>.consumer-positions.json`, beside the receipt), put
+    /// before the receipt is: `Some` exactly when `consumer_positions` is.
+    pub consumer_positions_document: Option<Vec<u8>>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -734,9 +769,65 @@ fn execute_with_signer(
             );
             BTreeMap::new()
         });
+    // PROD-01.4a: each named topic's ID, read by LOGWEIR through the same
+    // reader, as the LAST read of phase −1 — as close to the engine's start as
+    // this process can get. Never fatal: a broker with no IDs, a refused or a
+    // failed read is a reason the receipt records (`topic_ids`).
+    let ids_before = topic_ids::observe(reader, &plan.topics, "before the engine");
+
+    // **PROD-04.1: the selected consumer groups, read BEFORE the engine** —
+    // their listings, descriptions, positions and the marks of every named
+    // partition, through the same reader. Never fatal: every outcome,
+    // `failed` included, is a value the receipt records. Before the engine,
+    // so a position is at or below the end the engine then reads from; the
+    // positions of an active group are still not atomic with the records
+    // (`logweir_core::consumer_positions`'s module doc).
+    let selected = selected_groups(args, &inputs.spec);
+    let group_capture = (!selected.is_empty()).then(|| {
+        let observed_from = chrono::Utc::now();
+        let observation = reader.observe_consumer_groups(&selected, &plan.topics);
+        let observed_to = chrono::Utc::now().max(observed_from);
+        (observed_from, observed_to, observation)
+    });
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    // ...and again the moment the engine has exited: a topic whose ID differs
+    // was deleted and recreated WHILE it ran (decision §4.4).
+    let ids_after = topic_ids::observe(reader, &plan.topics, "after the engine");
+    let generations = topic_ids::block(&plan.topics, &ids_before, &ids_after);
+    topic_ids::log_changes(&generations);
+    // PROD-04.1: the marks again, after the engine, and the archive's offsets:
+    // what each position is judged against.
+    // Only when a group was described: a capture that asked no position needs
+    // no marks (PROD-04.1 review L8).
+    let built = group_capture
+        .map(|(observed_from, observed_to, observation)| {
+            let after = if consumer_positions::positions_were_asked(&observation) {
+                reader.partition_marks(&plan.topics)
+            } else {
+                BTreeMap::new()
+            };
+            let built = consumer_positions::build(&consumer_positions::Capture {
+                backup_id: &backup_id,
+                run_id,
+                selected: &selected,
+                topics: &plan.topics,
+                observed_from,
+                observed_to,
+                observation: &observation,
+                after: &after,
+                archived: &ran.manifest_ranges,
+            })
+            .map_err(BackupError::Signing)?;
+            consumer_positions::log(&built.block, &observation);
+            Ok::<_, BackupError>(built)
+        })
+        .transpose()?;
+    let (consumer_positions, consumer_positions_document) = match built {
+        Some(b) => (Some(b.block), Some(b.document_bytes)),
+        None => (None, None),
+    };
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
         config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
@@ -766,6 +857,9 @@ fn execute_with_signer(
         topic_configuration,
         owner_detection: inputs.owner_detection.clone(),
         schema_dependency: ran.schema_dependency,
+        generations,
+        consumer_positions,
+        consumer_positions_document,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

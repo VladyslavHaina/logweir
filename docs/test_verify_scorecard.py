@@ -277,15 +277,14 @@ def test_a_catalog_point_verifies_signature_only_under_its_own_payload_type():
         # scorecard: nothing about availability was checked, and the record's
         # copied facts are only worth what the receipt they name is worth.
         assert "This signature covers the record only" in r.stdout
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "One check of this document type is evaluated by this build" in r.stdout
 
 
-def test_a_catalog_point_evaluates_no_invariant_of_its_own():
+def test_a_catalog_point_evaluates_only_its_copied_topic_ids():
     # A record that is internally absurd — a covered window running backwards,
     # a `point_id` that its own receipt digest does not imply — still verifies,
-    # because this reader makes no semantic claim about the type. The test
-    # exists so that a later build which DOES evaluate invariants has to change
-    # it deliberately rather than discovering the difference in production.
+    # because this reader makes ONE semantic claim about the type (PROD-01.4a
+    # review M1, changed deliberately): the topic IDs it copies are real ones.
     doc = dict(CATALOG_POINT)
     doc["covered"] = {"from_ms": 99, "to_ms": 1}
     doc["point_id"] = "lwp1-" + "f" * 32
@@ -293,7 +292,31 @@ def test_a_catalog_point_evaluates_no_invariant_of_its_own():
         p, s = _write_signed(d, "absurd", CATALOG_POINT_TYPE, doc)
         r = run_typed("catalog-point", p, s, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "No invariant of this document type is evaluated" in r.stdout
+        assert "No other is." in r.stdout
+
+
+def test_a_catalog_point_copying_kafkas_reserved_topic_id_is_refused():
+    # PROD-01.4a review M1: a record whose topics[].identity copies Kafka's
+    # reserved (0, 1) ID is refused, in the Rust reader's words; the control,
+    # the same record with a real ID, verifies.
+    good = dict(CATALOG_POINT)
+    good["topics"] = [{"name": "orders", "records": 1,
+                       "identity": {"topic_id": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_after": "gtOq2VXiTCK1QM2UtERijA",
+                                    "topic_id_source": "describeTopics"}}]
+    bad = json.loads(json.dumps(good))
+    bad["topics"][0]["identity"]["topic_id"] = "AAAAAAAAAAAAAAAAAAAAAQ"
+    with tempfile.TemporaryDirectory() as d:
+        p, s = _write_signed(d, "good", CATALOG_POINT_TYPE, good)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        p, s = _write_signed(d, "bad", CATALOG_POINT_TYPE, bad)
+        r = run_typed("catalog-point", p, s, FIX / "public.pem")
+        assert r.returncode == 1, r.stdout
+        assert (
+            'INVALID: topics["orders"].identity.topic_id "AAAAAAAAAAAAAAAAAAAAAQ" is not a topic '
+            "ID this format defines"
+        ) in r.stderr, r.stderr
 
 
 def test_a_catalog_point_never_verifies_as_a_scorecard_or_a_receipt():
@@ -502,13 +525,13 @@ def test_a_higher_major_format_version_is_refused():
     # Global Constraint 12. This script did not read `format_version` at all.
     #
     # The document ALSO violates the T0-2 evidence arm. That arm is scoped to
-    # major 1, so on a 2.0.0 document it must not fire: dropping its
-    # `if doc_major == 1:` guard makes this test report the evidence message
-    # instead of the major-version one (brief §7 M9).
+    # the majors this script reads (1, and 2 since PROD-11.1b), so on a 3.0.0
+    # document it must not fire: dropping its guard makes this test report the
+    # evidence message instead of the major-version one (brief §7 M9).
     with tempfile.TemporaryDirectory() as d:
         sc, sig = _signed_scorecard(
             d,
-            format_version="2.0.0",
+            format_version="3.0.0",
             **{"evidence.create_only_enforced": True},
         )
         r = run(sc, sig, FIX / "public.pem")
@@ -882,7 +905,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.25.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.28.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -950,7 +973,13 @@ def test_the_version_line_names_the_current_invariant_set():
             "source.selection only from 1.7.0, its start before its end, and a complete block "
             "over its window"
         ) in r.stdout, r.stdout
-        # 1.25.0's addition (PROD-15.1): `target.original_name`'s ten arms.
+        # 1.27.0's addition (PROD-11.1b, OD-9 (a)): format 2.0.0, PS-1 to PS-5.
+        assert (
+            "format 2.0.0 only with source.selection.partitions, a format-1 selection a start "
+            "only, each subset list sorted and distinct, one engine run per distinct subset or "
+            "one more, and a complete block that expects nothing from an unselected partition"
+        ) in r.stdout, r.stdout
+        # 1.28.0's addition (PROD-15.1): `target.original_name`'s arms.
         assert (
             "target.original_name only from 1.8.0, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
@@ -2266,13 +2295,25 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.24.0 (PROD-03.0) adds the backup receipt's eight `schema_dependency`
     # arms (22-29, format 1.5.0), its shape check and the `schema_dependency`
     # lines. Map still five.
+    # 1.25.0 (PROD-01.4a) adds the backup receipt's five `generations` arms
+    # (36-40, format 1.6.0), its shape check and the `generations` lines. Map
+    # still five.
+    # 1.26.0 (PROD-04.1) adds the backup receipt's six `consumer_positions`
+    # arms (30-35, format 1.7.0), the positions document's fourteen (CP-1 to
+    # CP-14, with --consumer-positions), their shape checks and the
+    # `consumer_positions` lines. Map still five.
     #
-    # 1.25.0 (PROD-15.1) adds the scorecard's thirteen `target.original_name`
+    # 1.27.0 (PROD-11.1b, OD-9 (a)) reads scorecard format 2.0.0 for the
+    # partition-subset shape only (PS-1), holds a format-1 selection to a
+    # start (PS-2), adds PS-3 to PS-5, the 2.0.0 shape and the subset's lines.
+    # Map still five.
+    #
+    # 1.28.0 (PROD-15.1) adds the scorecard's thirteen `target.original_name`
     # arms (ON-1 to ON-13, format 1.8.0), its shape check and the two
     # `original name:` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.25.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.28.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2299,6 +2340,83 @@ def test_the_topic_configuration_minor_is_the_rust_readers():
     m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
     assert m, "backup_receipt.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
     assert mod.RECEIPT_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_generations_minor_is_the_rust_readers():
+    # Arm 36's minor is ONE number in each reader (PROD-01.4a); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const GENERATIONS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares GENERATIONS_SINCE_MINOR"
+    assert mod.RECEIPT_GENERATIONS_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_topic_id_reasons_and_sources_are_the_rust_readers():
+    # Arms 39 and 40's closed sets are the Rust constants', read from the
+    # source, in their order (PROD-01.4a).
+    mod = _verifier_module()
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "crates/logweir-core/src/topic_identity.rs").read_text()
+    values = dict(re.findall(r'pub const ([A-Z_0-9]+): &str = "([^"]+)";', src))
+    for const, got in (("TOPIC_ID_REASONS", mod.RECEIPT_TOPIC_ID_REASONS),
+                       ("TOPIC_ID_SOURCES", mod.RECEIPT_TOPIC_ID_SOURCES)):
+        block = src.split(f"pub const {const}", 1)[1].split("];", 1)[0]
+        names = re.findall(r"\b([A-Z][A-Z_0-9]+)\b", block.split("=", 1)[1])
+        assert tuple(values[n] for n in names) == got, (const, names)
+
+
+def test_a_topic_id_is_canonical_exactly_as_the_rust_reader_says():
+    # The twin of `topic_identity.rs`'s tests: Kafka's text from PROD-01.4's
+    # measured IDs, and every shape arm 38 refuses.
+    mod = _verifier_module()
+    for good in ("gtOq2VXiTCK1QM2UtERijA", "tpWwuKExQo2lN9NziDMpYg",
+                 "NSSUDfCtRqWqyhqP5Vttsw", "Cf6zT_mcTNCoxuPmv1Ztxw",
+                 "AAAAAAAAAAAAAAAAAAAAAg"):  # (0, 2), the reserved ID's neighbour
+        assert mod._is_canonical_topic_id(good), good
+    for bad in ("Cf6zT/mcTNCoxuPmv1Ztxw",  # librdkafka's standard alphabet (C4)
+                "AAAAAAAAAAAAAAAAAAAAAA",  # Kafka's "no ID"
+                "AAAAAAAAAAAAAAAAAAAAAQ",  # Kafka's reserved ONE_UUID (review M1)
+                "gtOq2VXiTCK1QM2UtERijA==", "gtOq2VXiTCK1QM2UtERij",
+                "gtOq2VXiTCK1QM2UtERijB",  # stray trailing bits
+                "gtOq2VXiTCK1QM2UtERij.", "", None, 7):
+        assert not mod._is_canonical_topic_id(bad), bad
+
+
+def test_the_generation_lines_say_one_changed_or_unknown():
+    mod = _verifier_module()
+    assert mod._generation_lines(None) == [
+        "generations: not recorded, so no topic ID is known from this receipt and each "
+        "topic's generation is UNKNOWN, never the same as another point's"
+    ]
+    a, b = "gtOq2VXiTCK1QM2UtERijA", "tpWwuKExQo2lN9NziDMpYg"
+    lines = mod._generation_lines({
+        "same": {"topic_id": a, "topic_id_after": a, "topic_id_source": "describeTopics"},
+        "changed": {"topic_id": a, "topic_id_after": b, "topic_id_source": "describeTopics"},
+        "unknown": {"topic_id": None, "topic_id_after": None,
+                    "topic_id_reason": "noTopicId", "topic_id_after_reason": "notAuthorized"},
+    })
+    assert lines == [
+        f'generations["changed"]: topic ID CHANGED during the capture ({a} before, {b} after): '
+        "the topic was deleted and recreated while it ran, so this point mixes two generations",
+        f'generations["same"]: topic ID {a} before and after the capture (describeTopics), one '
+        "generation",
+        'generations["unknown"]: topic ID not recorded (noTopicId) before the capture and not '
+        "recorded (notAuthorized) after it, so its generation is not established by ID and is "
+        "UNKNOWN",
+    ], lines
+
+
+def test_a_generations_block_of_the_wrong_type_is_refused_at_the_shape_layer():
+    mod = _verifier_module()
+    doc = json.loads((FIX / "backup-receipt.json").read_text())
+    doc["generations"] = {"orders": {"topic_id": 7}}
+    assert mod._receipt_shape(doc) == 'generations["orders"].topic_id is not a string'
+    doc["generations"] = ["orders"]
+    assert mod._receipt_shape(doc) == "generations is not an object"
+    doc["generations"] = {"orders": None}
+    assert mod._receipt_shape(doc) == 'generations["orders"] is not an object'
 
 
 def test_the_portability_classes_and_sources_are_the_rust_readers():
@@ -3733,6 +3851,302 @@ def test_a_sampled_pass_says_what_it_proves_at_its_version():
     assert "sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition \\" in rust
 
 
+# ===================================================================== PROD-04.1
+
+CP_FIXTURE = "e2e/fixtures/invariants/receipt_1_7_with_consumer_positions.json"
+CP_DOCUMENT = "e2e/fixtures/invariants/consumer_positions_document_accepted.json"
+
+
+def test_the_consumer_positions_minor_is_the_rust_readers():
+    # Arm 30's minor is ONE number in each reader (PROD-04.1); a renumber must
+    # move both, and the arm's message is built from it on both sides.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares CONSUMER_POSITIONS_SINCE_MINOR"
+    assert mod.RECEIPT_CONSUMER_POSITIONS_SINCE_MINOR == int(m.group(1))
+
+
+def test_the_consumer_positions_vocabulary_is_the_rust_readers():
+    # Every closed set arms 30-35 and CP-1 to CP-14 read, in the Rust
+    # declaration order: a word added on one side only fails here before it
+    # splits the readers.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/consumer_positions.rs").read_text()
+
+    def array(name):
+        block = rust.split(f"pub const {name}:", 1)[1].split("];", 1)[0]
+        return tuple(re.findall(r'"([^"]+)"', block.split("=", 1)[1]))
+
+    assert array("EXCLUDED_REASONS") == mod.CP_EXCLUDED_REASONS
+    assert array("FAILED_REASONS") == mod.CP_FAILED_REASONS
+    assert array("CAPTURED_TYPES") == mod.CP_CAPTURED_TYPES
+    assert array("GROUP_STATES") == mod.CP_GROUP_STATES
+    assert array("INACTIVE_STATES") == mod.CP_INACTIVE_STATES
+    assert array("POSITION_STATUSES") == mod.CP_POSITION_STATUSES
+    assert array("POSITION_FAILED_REASONS") == mod.CP_POSITION_FAILED_REASONS
+    assert array("NOT_OBSERVED_REASONS") == mod.CP_NOT_OBSERVED_REASONS
+    assert array("COVERAGE_RELATIONS") == mod.CP_COVERAGE_RELATIONS
+    assert array("RELATED") == mod.CP_RELATED
+    assert array("LISTING_VALUES") == mod.CP_LISTING_VALUES
+    # The document's key, word for word.
+    m = re.search(r'format!\("(logweir/backups/\{backup_id\}/\{run_id\}\.consumer-positions\.json)"\)',
+                  rust)
+    assert m, "consumer_positions.rs no longer derives the document key the same way"
+    assert mod._cp_document_key("B", "R") == "logweir/backups/B/R.consumer-positions.json"
+
+
+def test_the_relation_rule_is_the_rust_readers():
+    # `relation`'s table at every boundary, the rows of the Rust unit test
+    # `the_relation_follows_the_table_at_every_boundary`.
+    mod = _verifier_module()
+    f = {"log_start": 5, "high_watermark": 20, "archived_first": 8, "archived_last": 15}
+    rows = [(21, "PositionBeyondEnd"), (20, "beyondArchive"), (17, "beyondArchive"),
+            (16, "atArchiveEnd"), (15, "withinArchive"), (8, "withinArchive"),
+            (7, "beforeArchive"), (5, "beforeArchive"), (4, "beforeLogStart"),
+            (0, "beforeLogStart")]
+    for position, want in rows:
+        assert mod._cp_relation(position, f) == want, position
+    empty = {"log_start": 5, "high_watermark": 20}
+    assert mod._cp_relation(10, empty) == "noArchivedData"
+    assert mod._cp_relation(4, empty) == "beforeLogStart"
+    assert mod._cp_relation(3, {"high_watermark": 20}) == "MarksNotRead"
+    assert mod._cp_relation(0, {"log_start": 0, "high_watermark": 0}) == "noArchivedData"
+    assert mod._cp_changed([{"log_start": 5, "high_watermark": 20,
+                             "log_start_after": 5, "high_watermark_after": 19}])
+    assert not mod._cp_changed([{"log_start": 5, "high_watermark": 20}])
+    assert mod._cp_active("Stable", "Empty") and not mod._cp_active("Dead", "Empty")
+    assert mod._cp_vanished("Dead", 0)
+    assert not mod._cp_vanished("Dead", 1) and not mod._cp_vanished("Empty", 0)
+
+
+def test_rfc3339_instants_compare_as_instants():
+    # Arm 31 compares the capture window as chrono does: by instant, whatever
+    # the offset or the number of fractional digits.
+    mod = _verifier_module()
+    ns = mod._rfc3339_ns
+    assert ns("2026-09-09T11:02:15Z") == 1788951735 * 10**9
+    assert ns("2026-09-09T11:02:15.25Z") == 1788951735 * 10**9 + 250_000_000
+    assert ns("2026-09-09T11:02:15.123456789Z") == 1788951735 * 10**9 + 123_456_789
+    assert ns("2026-09-09T13:02:15+02:00") == ns("2026-09-09T11:02:15Z")
+    assert ns("2026-09-09T11:02:15.000000001Z") > ns("2026-09-09T11:02:15Z")
+    for bad in ("2026-09-09", "2026-09-09T11:02:15", "yesterday", 1757415735, None,
+                "2026-13-09T11:02:15Z"):
+        assert ns(bad) is None, bad
+
+
+def test_the_consumer_positions_shape_is_the_rust_deserialisers():
+    # Rust refuses each of these at DESERIALISATION, so the Python reader must
+    # refuse them in its shape layer and never reach arm 30 with them.
+    mod = _verifier_module()
+    base = json.loads((ROOT / CP_FIXTURE).read_text())
+    assert mod._receipt_shape(base) == ""
+    g = ["consumer_positions", "groups", "billing"]
+    cases = [
+        (["consumer_positions"], [], "consumer_positions is not an object"),
+        (["consumer_positions", "observed_from"], 1,
+         "consumer_positions.observed_from is not an RFC 3339 instant"),
+        (["consumer_positions", "observed_to"], "2026-09-09",
+         "consumer_positions.observed_to is not an RFC 3339 instant"),
+        (["consumer_positions", "listing"], None, "consumer_positions.listing is not a string"),
+        (["consumer_positions", "document"], "doc", "consumer_positions.document is not an object"),
+        (["consumer_positions", "document", "sha256"], 7,
+         "consumer_positions.document.sha256 is not a string"),
+        (["consumer_positions", "document", "bytes"], -1,
+         "consumer_positions.document.bytes is not a u64"),
+        (["consumer_positions", "groups"], [], "consumer_positions.groups is not an object"),
+        (g + ["members"], True, 'consumer_positions.groups["billing"].members is not a u32'),
+        (g + ["active"], "true", 'consumer_positions.groups["billing"].active is not a boolean'),
+        (g + ["counts"], [], 'consumer_positions.groups["billing"].counts is not an object'),
+        (g + ["counts", "related"], 2 ** 32,
+         'consumer_positions.groups["billing"].counts.related is not a u32'),
+    ]
+    for path, value, want in cases:
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._receipt_shape(doc) == want, (path, value)
+    doc = json.loads(json.dumps(base))
+    del doc["consumer_positions"]["groups"]["billing"]["counts"]["failed"]
+    assert mod._receipt_shape(doc) == (
+        'consumer_positions.groups["billing"].counts.failed is not a u32')
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"] = None
+    assert mod._receipt_shape(doc) == "", "null is absent"
+
+
+def test_the_positions_document_shape_is_the_rust_deserialisers():
+    mod = _verifier_module()
+    base = json.loads((ROOT / CP_DOCUMENT).read_text())
+    assert mod._positions_document_shape(base) == ""
+    t = ["topics", "orders"]
+    g = ["groups", "billing"]
+    w = "the positions document's"
+    cases = [
+        ([], [], f"the positions document is not an object"),
+        (["run_id"], 1, f"{w} run_id is not a string"),
+        (["groups"], [], f"{w} groups is not an object"),
+        (t + ["changed_during_capture"], 0,
+         f'{w} topics["orders"].changed_during_capture is not a boolean'),
+        (t + ["partitions", 0, "partition"], -1,
+         f'{w} topics["orders"].partitions[0].partition is not a u32'),
+        (t + ["partitions", 0, "log_start"], 2 ** 63,
+         f'{w} topics["orders"].partitions[0].log_start is not an i64'),
+        (g + ["no_committed_position"], -1,
+         f'{w} groups["billing"].no_committed_position is not a u32'),
+        (g + ["positions"], {}, f'{w} groups["billing"].positions is not an array'),
+        (g + ["positions", 0, "position"], "12",
+         f'{w} groups["billing"].positions[0].position is not an i64'),
+        (g + ["positions", 0, "partition"], 2 ** 32,
+         f'{w} groups["billing"].positions[0].partition is not a u32'),
+    ]
+    for path, value, want in cases:
+        if not path:
+            assert mod._positions_document_shape(value) == want
+            continue
+        doc = json.loads(json.dumps(base))
+        at = doc
+        for step in path[:-1]:
+            at = at[step]
+        at[path[-1]] = value
+        assert mod._positions_document_shape(doc) == want, (path, value)
+
+
+def test_the_consumer_positions_lines_say_each_outcome_its_counts_and_each_verified_position():
+    mod = _verifier_module()
+    doc = json.loads((ROOT / CP_FIXTURE).read_text())
+    head = [
+        "consumer_positions: 5 group(s), listing complete",
+        "consumer_positions: positions document logweir/backups/logweir-backup-01J8Z9QK7V/"
+        "01J8Z9QK7V6M3F2R5T8W1XB0CD.consumer-positions.json ("
+        + doc["consumer_positions"]["document"]["sha256"] + ", "
+        + str(doc["consumer_positions"]["document"]["bytes"]) + " bytes) ",
+    ]
+    groups = [
+        'consumer_positions["audit"]: captured consumer, state Empty (listed Empty), 0 member(s), '
+        "inactive; positions: 0 related to archived data, 1 not related, 0 never committed, "
+        "1 beyond the end, 1 failed, 1 not observed",
+        'consumer_positions["billing"]: captured classic, state Stable (listed Stable), 2 '
+        "member(s), active; positions: 2 related to archived data, 0 not related, 1 never "
+        "committed, 0 beyond the end, 0 failed, 1 not observed",
+        'consumer_positions["gone"]: excluded (GroupNotFound), no position recorded',
+        'consumer_positions["hidden"]: failed (NotVisibleToPrincipal), no position recorded',
+        'consumer_positions["share-1"]: excluded (GroupTypeNotCaptured), group type other, no '
+        "position recorded",
+    ]
+    unverified = mod._consumer_positions_lines(doc["consumer_positions"])
+    assert unverified == [head[0], head[1] + "not checked: pass --consumer-positions <file> to "
+                          "verify it and print each position"] + groups
+    pd = json.loads((ROOT / CP_DOCUMENT).read_text())
+    verified = mod._consumer_positions_lines(doc["consumer_positions"], pd)
+    assert verified == [head[0], head[1] + "verified against this receipt"] + groups + [
+        'consumer_positions["audit"]["orders":0]: excluded (PositionBeyondEnd), position 21',
+        'consumer_positions["audit"]["orders":1]: position 2, beforeLogStart',
+        'consumer_positions["audit"]["orders":2]: notObserved (PartitionAddedDuringCapture), '
+        "no position",
+        'consumer_positions["audit"]["payments":0]: failed (Unstable), no position',
+        'consumer_positions["audit"][*]: 0 other partition(s) with no committed position, never '
+        "offset 0",
+        'consumer_positions["billing"]["orders":0]: position 12, withinArchive',
+        'consumer_positions["billing"]["orders":2]: notObserved (PartitionAddedDuringCapture), '
+        "no position",
+        'consumer_positions["billing"]["payments":0]: position 7, atArchiveEnd',
+        'consumer_positions["billing"][*]: 1 other partition(s) with no committed position, '
+        "never offset 0",
+    ]
+    assert mod._consumer_positions_lines(None) == []
+
+
+def test_the_positions_document_flag_reads_only_with_a_backup_receipt_and_refuses_a_tamper():
+    # End to end through the script's command line: the accepted pair is
+    # VALID and prints each position; one byte changed in the document is
+    # refused at CP-2; and the flag beside any other payload type is refused
+    # before anything is read.
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        receipt = (ROOT / CP_FIXTURE).read_bytes()
+        (d / "r.json").write_bytes(receipt)
+        (d / "r.sig").write_text(json.dumps(_sign(BACKUP_RECEIPT_TYPE, receipt)))
+        good = (ROOT / CP_DOCUMENT).read_bytes()
+        (d / "p.json").write_bytes(good)
+
+        def verify(*flags):
+            return subprocess.run(
+                [sys.executable, str(VERIFIER), "--payload-type", "backup-receipt", *flags,
+                 str(d / "r.json"), str(d / "r.sig"), str(FIX / "public.pem")],
+                capture_output=True, text=True,
+            )
+
+        r = verify("--consumer-positions", str(d / "p.json"))
+        assert r.returncode == 0, r.stderr
+        assert 'consumer_positions["billing"]["orders":0]: position 12, withinArchive' in r.stdout
+        assert "the fourteen CP arms held" in r.stdout
+        r = verify(f"--consumer-positions={d / 'p.json'}")
+        assert r.returncode == 0, r.stderr
+        (d / "p.json").write_bytes(good.replace(b'"position": 12', b'"position": 13'))
+        r = verify("--consumer-positions", str(d / "p.json"))
+        assert r.returncode == 1
+        assert "it is not the document this receipt signed" in r.stderr, r.stderr
+        r = verify()
+        assert r.returncode == 0, r.stderr
+        assert "not checked: pass --consumer-positions" in r.stdout
+        r = subprocess.run(
+            [sys.executable, str(VERIFIER), "--consumer-positions", str(d / "p.json"),
+             str(FIX / "scorecard.json"), str(FIX / "scorecard.sig"), str(FIX / "public.pem")],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 1
+        assert "--consumer-positions applies to --payload-type backup-receipt only" in r.stderr
+
+
+def test_each_half_of_the_consumer_positions_arms_refuses_with_its_exact_message():
+    # The halves the corpus does not exercise, with the Rust reader's exact
+    # words (`crates/logweir-core/tests/backup_receipt.rs`).
+    mod = _verifier_module()
+    base = json.loads((ROOT / CP_FIXTURE).read_text())
+    raw = (ROOT / CP_DOCUMENT).read_bytes()
+    assert mod.check_backup_receipt_invariants(base) == ""
+    assert mod.check_consumer_positions_document(base, raw, json.loads(raw)) == ""
+    # Arm 31's boundary: a capture that ends as it starts holds.
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"]["observed_to"] = doc["consumer_positions"]["observed_from"]
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    # Arm 31 across offsets: the same instant written with an offset.
+    doc["consumer_positions"]["observed_to"] = "2026-09-09T13:02:14+02:00"
+    assert mod.check_backup_receipt_invariants(doc).endswith(
+        "and a capture that ends before it starts: the capture ends at or after it starts, the "
+        'listing is "complete" or "notComplete", and at least one group is recorded')
+    # Arm 32: zero bytes.
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"]["document"]["bytes"] = 0
+    assert " over 0 bytes: the positions document is " in mod.check_backup_receipt_invariants(doc)
+    # Arm 34: a captured group's counts over no partition.
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"]["groups"]["billing"]["counts"] = dict.fromkeys(
+        mod.CP_COUNT_NAMES, 0)
+    assert "and counts over 0 partition(s): " in mod.check_backup_receipt_invariants(doc)
+    # The control of the vanished clause: Dead WITH a member holds.
+    doc = json.loads(json.dumps(base))
+    doc["consumer_positions"]["groups"]["billing"]["state"] = "Dead"
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    # CP-11: an entry naming a partition no topic has.
+    pd = json.loads(raw)
+    pd["groups"]["billing"]["positions"][2]["partition"] = 1
+    doc = json.loads(json.dumps(base))
+    data = (json.dumps(pd, indent=2) + "\n").encode()
+    doc["consumer_positions"]["document"]["sha256"] = (
+        "sha256:" + __import__("hashlib").sha256(data).hexdigest())
+    doc["consumer_positions"]["document"]["bytes"] = len(data)
+    assert mod.check_consumer_positions_document(doc, data, pd) == (
+        'the positions document\'s groups["billing"] lists 3 position(s) (first out of place: 2, '
+        '"payments":1), leaves 0 unobserved partition(s) out and counts 1 without a committed '
+        "position over 4 partition(s): a captured group lists, topics in name order and "
+        "partitions in order, each partition of a named topic at most once and every one the "
+        "capture did not observe, and counts every other partition as without a committed "
+        "position")
+
 # ---- PROD-11.1: `source.selection` (scorecard 1.7.0), arms SEL-1 to SEL-3 ----
 
 
@@ -3788,11 +4202,158 @@ def test_sel1_to_sel3_refuse_with_the_rust_readers_words():
 def test_the_selection_shape_is_refused_before_its_arms():
     mod = _verifier_module()
     message = ("source.selection is not an object of the shape the writer gives it: a window "
-               "start and a window end, both integers")
-    for bad in ("orders", [], {"window_end_ms": 1}, {"window_start_ms": "1", "window_end_ms": 2},
+               "end and an optional window start, both integers, an optional array of topic "
+               "partition lists and an optional engine-run count")
+    subset = lambda **kw: {"window_end_ms": 2, **kw}  # noqa: E731
+    for bad in ("orders", [], {"window_start_ms": 1}, {"window_start_ms": "1", "window_end_ms": 2},
                 {"window_start_ms": True, "window_end_ms": 2},
-                {"window_start_ms": 1, "window_end_ms": 2**63}):
+                {"window_start_ms": 1, "window_end_ms": 2**63},
+                subset(partitions="orders"), subset(partitions=[{"partitions": [0]}]),
+                subset(partitions=[{"topic": 1, "partitions": [0]}]),
+                subset(partitions=[{"topic": "orders"}]),
+                subset(partitions=[{"topic": "orders", "partitions": [2**31]}]),
+                subset(partitions=[{"topic": "orders", "partitions": [True]}]),
+                subset(engine_runs=-1), subset(engine_runs=2**32), subset(engine_runs=True),
+                subset(engine_runs="1")):
         assert mod.check_invariants(_scorecard_1_7(bad, version="1.0.0")) == message, bad
+    # `null` is ABSENT, as `Option` reads it: these are shapes, judged by arms.
+    for ok in (subset(), subset(window_start_ms=None, partitions=None, engine_runs=None)):
+        assert mod._selection_shape_ok(ok), ok
+
+
+def _subset(start=None, end=1760000005000, partitions=(("orders", [0, 2]),), runs=1):
+    """A 2.0.0 `source.selection`: subsets from the floor (or `start`)."""
+    block = {"window_end_ms": end,
+             "partitions": [{"topic": t, "partitions": list(ps)} for t, ps in partitions],
+             "engine_runs": runs}
+    if start is not None:
+        block["window_start_ms"] = start
+    return block
+
+
+def test_the_partition_subset_major_is_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r'pub const FORMAT_VERSION_WITH_PARTITION_SUBSETS: &str = "(\d+)\.0\.0";', rust)
+    assert m, "scorecard.rs no longer declares FORMAT_VERSION_WITH_PARTITION_SUBSETS"
+    assert mod.SCORECARD_PARTITION_SUBSETS_VERSION == f"{m.group(1)}.0.0"
+    m = re.search(r"pub const PARTITION_SUBSETS_MAJOR: u64 = (\d+);", rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_PARTITION_SUBSETS_MAJOR == 2
+
+
+def test_a_subset_document_is_read_at_2_0_0_and_only_for_that_shape():
+    # PS-1 (PROD-11.1b, OD-9 (a)): a 2.0.0 subset document is accepted; a 2.x
+    # document without a subset is refused before every arm, in the Rust
+    # reader's words; a 3.x document is newer than this reader.
+    mod = _verifier_module()
+    for start in (None, 1760000001000):
+        assert mod.check_invariants(_scorecard_1_7(_subset(start), version="2.0.0")) == "", start
+    ps1 = ("format_version 2.0.0 is the format of a partition-subset restore, and this document "
+           "carries no source.selection.partitions; a reader reads major 2 only for that shape")
+    start_only = _scorecard_1_7(_selection(), version="2.0.0")
+    empty = _scorecard_1_7(_subset(partitions=()), version="2.0.0")
+    none = _scorecard_1_7(None, version="2.0.0")
+    for doc in (start_only, empty, none):
+        doc["redactions"] = [{"path": "/x", "reason": "y", "present": True}]
+        assert mod.check_invariants(doc) == ps1, doc["source"].get("selection")
+    newer = _scorecard_1_7(_subset(), version="3.0.0")
+    assert mod.check_invariants(newer) == (
+        "format_version 3.0.0 has a major version newer than this reader understands "
+        "(this script knows 2.0.0)")
+    # Every arm of major 1 holds for 2.0.0: the evidence arm fires.
+    doc = _scorecard_1_7(_subset(), version="2.0.0")
+    doc["evidence"]["create_only_enforced"] = True
+    assert mod.check_invariants(doc) == (
+        "evidence.create_only_enforced is true but the four post-put fields are zeroed before "
+        "signing")
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    assert "is the format of a partition-subset restore, and this document \\" in rust
+
+
+def test_ps2_to_ps5_refuse_with_the_rust_readers_words():
+    mod = _verifier_module()
+    ps2 = ("source.selection under major 1 is a stated window start and its end, and nothing "
+           "else: a block without window_start_ms, or with partitions or engine_runs, is a "
+           "partition-subset selection, which is format 2.0.0")
+    for block in (_subset(), _subset(start=1760000001000), {"window_end_ms": 1760000005000},
+                  {**_selection(), "engine_runs": 1}):
+        assert mod.check_invariants(_scorecard_1_7(block)) == ps2, block
+    ps3 = ("source.selection.partitions does not name each topic once, in order, with a "
+           "non-empty, sorted list of distinct partitions that are not negative")
+    for partitions in ((("orders", []),), (("orders", [2, 0]),), (("orders", [1, 1]),),
+                       (("orders", [-1]),), (("\u2003", [0]),),
+                       (("payments", [0]), ("orders", [0])),
+                       (("orders", [0]), ("orders", [1]))):
+        assert mod.check_invariants(
+            _scorecard_1_7(_subset(partitions=partitions), version="2.0.0")) == ps3, partitions
+    ps4 = ("source.selection.engine_runs is not one run per distinct partition subset, or one "
+           "more for the topics without one")
+    two = (("a", [0]), ("b", [1, 2]), ("c", [0]))
+    for runs, ok in ((None, False), (0, False), (1, False), (2, True), (3, True), (4, False)):
+        got = mod.check_invariants(
+            _scorecard_1_7(_subset(partitions=two, runs=runs), version="2.0.0"))
+        assert got == ("" if ok else ps4), runs
+    # SEL-3 and PS-5 over the complete block (orders/0 and orders/1, both
+    # expecting records): [0, 1] holds; [0] expects from an unselected one.
+    ok = _scorecard_1_7(_subset(partitions=(("orders", [0, 1]),)), version="2.0.0",
+                        block=_complete_block())
+    assert mod.check_invariants(ok) == ""
+    started = _scorecard_1_7(_subset(start=1760000001000, partitions=(("orders", [0, 1]),)),
+                             version="2.0.0", block=_complete_block())
+    assert mod.check_invariants(started) == (
+        "integrity.verification.complete.window is not source.selection's window; the expected "
+        "output is selected by the plan's own start and end")
+    narrower = _scorecard_1_7(_subset(partitions=(("orders", [0]),)), version="2.0.0",
+                              block=_complete_block())
+    assert mod.check_invariants(narrower) == (
+        "integrity.verification.complete.partitions expects records from a partition "
+        "source.selection does not select")
+
+
+def test_the_subset_lines_are_the_rust_readers():
+    mod = _verifier_module()
+    head = ("replay selection: ONLY orders partitions [0, 2] (every partition of any other "
+            "restored topic), from the archive's floor to epoch-ms 1760000005000 (inclusive), in "
+            "1 engine run(s); ")
+    proved = "no record of another partition of these topics was restored or expected"
+    expected = "no record of another partition of these topics was expected"
+    sampled = _scorecard_1_7(_subset(), version="2.0.0")
+    complete_doc = _scorecard_1_7(_subset(partitions=(("orders", [0, 1]),)), version="2.0.0",
+                                  block=_complete_block())
+    bare = _scorecard_1_7(_subset(), version="2.0.0", block=None)
+    bare["integrity"].pop("verification", None)
+    for doc, want in ((sampled, proved), (_not_a_pass(_scorecard_1_7(_subset(),
+                                                                     version="2.0.0")), expected),
+                      (bare, expected)):
+        outside = mod._outside_the_subset(doc)
+        assert outside == want, doc["integrity"]
+        assert mod._selection_lines(doc["source"]["selection"], "x", outside) == [head + want]
+    assert mod._outside_the_subset(complete_doc) == proved
+    started = _subset(start=1760000001000)
+    assert mod._selection_lines(started, "BEFORE", proved) == [
+        "replay selection: ONLY orders partitions [0, 2] (every partition of any other restored "
+        "topic), from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to "
+        "epoch-ms 1760000005000 (inclusive), in 1 engine run(s); " + proved + "; BEFORE"]
+    held = ("every selected partition was held to its own count bound over that window, every "
+            "other partition of a narrowed topic was held empty, max_partitions reached every "
+            "topic before a second partition of any, and a readable engine report lacking a "
+            "selected partition with records in that window was refused")
+    doc = _scorecard_1_7(_subset(), version="2.0.0")
+    doc["outcome"] = "pass"
+    assert mod._sampled_pass_lines(doc) == [
+        "sample coverage: a sampled pass over a partition subset from the archive's floor to "
+        "epoch-ms 1760000005000: " + held]
+    doc = _scorecard_1_7(_subset(start=1760000001000), version="2.0.0")
+    doc["outcome"] = "pass"
+    assert mod._sampled_pass_lines(doc) == [
+        "sample coverage: a sampled pass over a partition subset from epoch-ms 1760000001000 to "
+        "epoch-ms 1760000005000: " + held + "; no record before the start was expected, and a "
+        "sampled check does not prove that none was restored"]
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    assert '"replay selection: ONLY {} (every partition of any other restored topic), {from} to \\' in rust
+    assert '"no record of another partition of these topics was restored or expected"' in rust
+    rust_reader = (ROOT / "crates/logweir/src/verify.rs").read_text()
+    assert '"sample coverage: a sampled pass over a partition subset from {from} to epoch-ms {}: \\' in rust_reader
 
 
 def test_the_selection_lines_are_the_rust_readers():
@@ -3800,7 +4361,7 @@ def test_the_selection_lines_are_the_rust_readers():
     head = ("replay selection: every partition of every restored topic, from epoch-ms "
             "1760000001000 (the plan's stated window start, inclusive) to epoch-ms "
             "1760000005000 (inclusive); ")
-    assert mod._selection_lines(None, "x") == []
+    assert mod._selection_lines(None, "x", "y") == []
     # Review N1, a row per lane: only a complete verification that PASSED
     # proves no record before the start was restored; a sampled one never
     # does; a complete one that did not pass, or no verification, says only
@@ -3822,9 +4383,10 @@ def test_the_selection_lines_are_the_rust_readers():
     ):
         before = mod._before_the_start(doc)
         assert before == want, doc["integrity"]
-        assert mod._selection_lines(doc["source"]["selection"], before) == [head + want]
+        assert mod._selection_lines(
+            doc["source"]["selection"], before, mod._outside_the_subset(doc)) == [head + want]
     rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
-    assert '"replay selection: every partition of every restored topic, from epoch-ms {} (the \\' in rust
+    assert '"replay selection: every partition of every restored topic, from epoch-ms {} \\' in rust
     assert '"no record before the start was restored or expected"' in rust
     # The narrowed sampled-pass line (review H1), qualified about the records
     # before the start (review N1), and the unchanged one beside it.
