@@ -15,6 +15,8 @@
 //! | `seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `objectstore` | the maintained object store, through Logweir: conditional create, the pinned manifest version on a versioned bucket, backup, restore, verify |
 //! | `the_minimum_acls_for_probe_backup_and_restore` | profile `acl` | the minimum-permission profile: exactly the listed ACLs work, and each one removed fails or degrades the way the record says |
 //! | `an_unreachable_advertised_address_is_not_a_reachable_cluster` | profile `confluent` | a listener that advertises a dead address: the probe still answers `reachable=true`, the readiness check says the bootstrap answered and the advertised brokers did not, the capability rows are blocked behind it, and a backup fails with no receipt |
+//! | `a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` | profile `cluster3` | the engine-protocol row answers for a cluster only when every broker of it answered: `3 of 3` from three addresses and from one, every round; with one broker frozen it is `unknown`, naming `2 of 3` and the broker, never `ready`; and it recovers |
+//! | `a_backup_whose_id_spells_a_credential_code_is_a_backup` | the stack as CI runs it | a backup whose id (and so every archive key) spells a credential code exits 0 with a receipt: MinIO's `404 NoSuchKey` echoing the key is an absent object, not a refused credential |
 //!
 //! Every row but the first is `#[ignore]`d, like `config_coverage`'s: each
 //! needs a profile CI's default job does not start, or runs a whole drill on
@@ -45,8 +47,12 @@ use harness::*;
 use logweir_core::check_contract::frames::Decoder;
 use logweir_core::check_contract::{
     capability_checks_for, CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlan,
-    CheckRequest, CheckResult, CheckState, ConnectionPlan, FrameExpectations, Gating,
-    OperationReadinessRequest, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    CheckRequest, CheckResult, CheckState, ConnectionPlan, CredentialMode, DestinationPlan,
+    FrameExpectations, Gating, OperationReadinessRequest, RestorePreflightRequest,
+    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+};
+use logweir_core::destination::{
+    Addressing, DestinationLocation, StorageProvider, TransportSecurity,
 };
 use logweir_kafka::inventory::InventoryProbe;
 use logweir_kafka::positions::{CommittedPosition, TopicPartition};
@@ -314,11 +320,80 @@ fn spelled(range: Option<&(i16, i16)>) -> String {
     }
 }
 
+/// **The ground truth for a broker setting: the broker's own tool**
+/// (`kafka-configs.sh --describe --all` of the `apache/kafka` image, run
+/// inside `kafka-broker-1` against the endpoint's in-network listener, for
+/// the node id `kafka-broker-api-versions.sh` names). Every key the endpoint
+/// reports for its broker resource, with its value; a key it does not report
+/// is absent, which is Redpanda's answer for the timestamp keys.
+fn broker_own_configs(ep: Endpoint) -> BTreeMap<String, String> {
+    let versions = exec_in(
+        "kafka-broker-1",
+        &[
+            "/opt/kafka/bin/kafka-broker-api-versions.sh",
+            "--bootstrap-server",
+            ep.in_network,
+        ],
+    );
+    // "kafka-cp:9094 (id: 1 rack: null isFenced: false) -> ("
+    let head = String::from_utf8_lossy(&versions.stdout).to_string();
+    let node = head
+        .split_once("(id: ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: no node id in the tool's output: {}",
+                ep.label,
+                tail(&head, 400)
+            )
+        });
+    let out = exec_in(
+        "kafka-broker-1",
+        &[
+            "/opt/kafka/bin/kafka-configs.sh",
+            "--bootstrap-server",
+            ep.in_network,
+            "--describe",
+            "--all",
+            "--entity-type",
+            "brokers",
+            "--entity-name",
+            &node,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}: kafka-configs.sh failed for broker {node}:\n{}",
+        ep.label,
+        tail(&text(&out), 2000)
+    );
+    // "  log.message.timestamp.type=CreateTime sensitive=false synonyms={…}"
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (key, rest) = line.trim().split_once('=')?;
+            let value = rest.split(" sensitive=").next()?;
+            (!key.contains(' ')).then(|| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 // ============================================================ check run
 
 /// The shipped `logweir check run` over one plan: the process, and the result
 /// its frames decode to.
 fn check_run(plan: &CheckPlan, password: Option<&str>) -> (Output, CheckResult) {
+    check_run_with(plan, password, &[])
+}
+
+/// [`check_run`] with more of the environment a check Job is given: the
+/// object-store credential of a plan that reads an archive.
+fn check_run_with(
+    plan: &CheckPlan,
+    password: Option<&str>,
+    env: &[(&str, &str)],
+) -> (Output, CheckResult) {
     let bytes = serde_json::to_vec(plan).expect("a plan serialises");
     let sha = logweir_core::ids::sha256_prefixed(&bytes);
     let dir = demo_dir().join("compat");
@@ -341,6 +416,9 @@ fn check_run(plan: &CheckPlan, password: Option<&str>) -> (Output, CheckResult) 
         .env_remove(PASSWORD_ENV);
     if let Some(p) = password {
         c.env(PASSWORD_ENV, p);
+    }
+    for (k, v) in env {
+        c.env(k, v);
     }
     let out = output_within(c, 180);
     assert_eq!(
@@ -395,6 +473,90 @@ fn capability_plan(
             capability_checks: capabilities.to_vec(),
         })),
     }
+}
+
+/// **The plan a controller renders for a `Restore` Preflight**
+/// (`weirkeeper::controllers::preflight`, its `PreflightOperation::Restore`
+/// arm): a `restorePreflight` request over the verbatim restore plan, the
+/// target connection, the archive it restores from, and the capability rows
+/// of a restore. `checks` is empty, which means every row the kind owns.
+///
+/// PROD-01.2's review, M4: the rows that answer for a restore were run only
+/// through `operationReadiness{operation: Restore}`, a shape the controller
+/// never renders, so `target.timestampBound` was never emitted live. This is
+/// the shape it does render, run by the shipped `logweir check run`.
+fn restore_preflight(
+    auth: &Auth,
+    bootstrap: &str,
+    restore_plan: &serde_yaml::Value,
+    backup_id: &str,
+    storage: &Storage,
+) -> CheckResult {
+    let yaml = serde_yaml::to_string(restore_plan).expect("the plan serialises");
+    let dir = demo_dir().join("compat");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plan_file = dir.join(format!("restore-plan-{backup_id}.yaml"));
+    std::fs::write(&plan_file, &yaml).unwrap();
+    let location = DestinationLocation {
+        provider: StorageProvider::S3,
+        bucket: storage.bucket.clone(),
+        // The backup's own archive prefix (`backup_spec`).
+        prefix: backup_id.to_string(),
+        region: Some("us-east-1".into()),
+        endpoint: Some(storage.endpoint.clone()),
+        addressing: Addressing::PathStyle,
+        transport: TransportSecurity::InsecureHttp,
+    };
+    let plan = CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.to_string(),
+        contract_version: CHECK_CONTRACT_VERSION,
+        subject_uid: "prod-01-2-compat-restore".into(),
+        timeout_seconds: 120,
+        policy_digest: None,
+        request: CheckRequest::RestorePreflight(Box::new(RestorePreflightRequest {
+            plan_file: plan_file.display().to_string(),
+            plan_sha256: logweir_core::ids::sha256_prefixed(yaml.as_bytes()),
+            target: auth.connection_plan(bootstrap),
+            source_destination: DestinationPlan {
+                location_digest: location.location_digest(),
+                location,
+                name: "compat-archive".into(),
+                uid: "prod-01-2-compat-archive".into(),
+                ca_file: None,
+                credentials: CredentialMode::Static,
+                grant_bindings: Vec::new(),
+            },
+            evidence_destination: None,
+            backup_id: backup_id.to_string(),
+            manifest_key: format!("{backup_id}/manifest.json"),
+            checks: Vec::new(),
+            skip_checks: Vec::new(),
+            capability_checks: capability_checks_for(CheckOperation::Restore).to_vec(),
+        })),
+    };
+    plan.validate()
+        .expect("a restorePreflight plan the controller could render");
+    let (_, result) = check_run_with(
+        &plan,
+        auth.password.as_deref(),
+        &[
+            ("AWS_ACCESS_KEY_ID", "minioadmin"),
+            ("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+            ("AWS_REGION", "us-east-1"),
+        ],
+    );
+    result
+}
+
+/// The value of a run's `topic-preflight=` line: what phase 0 recorded of
+/// the target (`Restore.status.topicPreflight`'s three fields), or `None`
+/// when the run printed none.
+fn topic_preflight_line(output: &str) -> Option<Value> {
+    output
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("topic-preflight="))
+        .and_then(|json| serde_json::from_str(json).ok())
 }
 
 fn row(result: &CheckResult, id: CheckId) -> CheckOutcome {
@@ -484,6 +646,14 @@ fn capability_checks(ep: Endpoint, auth: &Auth, bootstrap: &str, topic: &str) ->
                 .as_str()
         ),
         "{label}: the row names what the engine sends"
+    );
+    // Every endpoint these rows reach is ONE broker, and the row says whose
+    // answer it is as distinct brokers of how many (review M3; the
+    // three-broker cluster has its own row).
+    assert_eq!(
+        engine.facts.get("brokersAnswered").map(String::as_str),
+        Some("1 of 1"),
+        "{label}: {engine:?}"
     );
     if capture_ok {
         // The message quotes the endpoint's own range for each request.
@@ -577,6 +747,11 @@ fn capability_checks(ep: Endpoint, auth: &Auth, bootstrap: &str, topic: &str) ->
         "{label}: target.engineProtocol must agree with the broker's own Produce range ({}): \
          {target:?}",
         spelled(truth.get(&0))
+    );
+    assert_eq!(
+        target.facts.get("brokersAnswered").map(String::as_str),
+        Some("1 of 1"),
+        "{label}: {target:?}"
     );
     if !replay_ok {
         let want = format!(
@@ -903,6 +1078,9 @@ struct Generic {
     drill_exit: Option<i32>,
     scorecard: Option<Value>,
     drill_output: String,
+    /// The broker's timestamp type, as its OWN tool reports it; `None` for an
+    /// endpoint whose broker resource does not report one.
+    broker_timestamp_type: Option<String>,
 }
 
 /// **THE GENERIC ROW.** On one endpoint, in order: the probe; the capability
@@ -915,8 +1093,16 @@ struct Generic {
 /// topic, `captured` configuration coverage, and for the selected group
 /// exactly the outcome the endpoint's ListGroups range implies (`captured` as
 /// classic from v5, `excluded: GroupTypeNotCaptured` below it; never offset 0,
-/// never absent). The restore's outcome is returned for the caller to judge
-/// against `replay_ok`.
+/// never absent). The group is REQUIRED: a row that could not commit one
+/// fails, it does not pass without positions (review L3).
+///
+/// Then a `Restore` Preflight in the shape the controller renders
+/// ([`restore_preflight`]), held to the broker's own tool: `target.
+/// engineProtocol` is what the Produce range implies, and
+/// `target.timestampBound` is `ready` quoting the bound the broker reports,
+/// or `unknown` (`TimestampBoundNotReported`) for a broker that reports none
+/// (review M4). The restore's outcome, and the timestamp type phase 0
+/// recorded of the target, are returned for the caller to judge.
 fn generic_row(ep: Endpoint, topic: &str) -> Generic {
     let label = ep.label;
     let bootstrap = (ep.bootstrap)();
@@ -947,17 +1133,17 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
     // --- backup -------------------------------------------------------------
     let window = produce(&bootstrap, &auth, topic, 30);
     let group = format!("compat-g-{}", nonce());
-    let group_made = commit_a_group(&bootstrap, &auth, topic, &group);
+    // REQUIRED (review L3): the "Consumer-group positions" cell of the matrix
+    // cites this row, so a run that could not commit a group is a failed row,
+    // never one that passes having asserted nothing about positions.
+    commit_a_group(&bootstrap, &auth, topic, &group).unwrap_or_else(|why| {
+        panic!("{label}: the row's consumer group could not be committed: {why}")
+    });
     let backup_id = format!("compat-{label}-{}", nonce());
     let storage = Storage::minio();
     let spec = backup_spec(&bootstrap, &auth, topic, &backup_id, &storage);
     let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
-    let selected: Vec<&str> = if group_made.is_ok() {
-        vec![group.as_str()]
-    } else {
-        Vec::new()
-    };
-    let out = backup(&spec, &receipt, &auth, &selected);
+    let out = backup(&spec, &receipt, &auth, &[group.as_str()]);
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -995,35 +1181,100 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
     );
     // The selected group: captured where the endpoint can type it, and
     // excluded with the reason where it cannot. Never absent.
-    let group_outcome = match &group_made {
-        Err(why) => json!({"not_made": why}),
-        Ok(()) => {
-            let g = &doc["consumer_positions"]["groups"][&group];
-            if typed {
-                assert_eq!(
-                    (g["outcome"].as_str(), g["group_type"].as_str()),
-                    (Some("captured"), Some("classic")),
-                    "{label}: an endpoint that serves ListGroups v5 types the group: {g}"
-                );
-            } else {
-                assert_eq!(
-                    (g["outcome"].as_str(), g["reason"].as_str()),
-                    (Some("excluded"), Some("GroupTypeNotCaptured")),
-                    "{label}: a group this endpoint cannot type is NOT RECORDED as captured, \
-                     with the reason: {g}"
-                );
-                assert!(
-                    g.get("counts").is_none() && g.get("state").is_none(),
-                    "{label}: an excluded group carries no position evidence: {g}"
-                );
-            }
-            g.clone()
+    let group_outcome = {
+        let g = &doc["consumer_positions"]["groups"][&group];
+        if typed {
+            assert_eq!(
+                (g["outcome"].as_str(), g["group_type"].as_str()),
+                (Some("captured"), Some("classic")),
+                "{label}: an endpoint that serves ListGroups v5 types the group: {g}"
+            );
+        } else {
+            assert_eq!(
+                (g["outcome"].as_str(), g["reason"].as_str()),
+                (Some("excluded"), Some("GroupTypeNotCaptured")),
+                "{label}: a group this endpoint cannot type is NOT RECORDED as captured, \
+                 with the reason: {g}"
+            );
+            assert!(
+                g.get("counts").is_none() && g.get("state").is_none(),
+                "{label}: an excluded group carries no position evidence: {g}"
+            );
         }
+        g.clone()
     };
 
-    // --- restore and verify -------------------------------------------------
+    // --- the Restore Preflight, as the controller renders it -----------------
     sweep_drill_topics(&bootstrap, &auth);
     let dspec = drill_spec(&bootstrap, &auth, topic, &backup_id, window, &storage);
+    let preflight = restore_preflight(&auth, &bootstrap, &dspec, &backup_id, &storage);
+    let parse = row(&preflight, CheckId::PlanParse);
+    assert_eq!(
+        parse.state,
+        CheckState::Ready,
+        "{label}: the restore plan is the one the check read: {parse:?}"
+    );
+    // target.engineProtocol, from THIS plan shape: what the Produce range of
+    // the broker's own tool implies.
+    let target_protocol = row(&preflight, CheckId::TargetEngineProtocol);
+    assert_eq!(
+        (
+            target_protocol.state,
+            target_protocol.code,
+            target_protocol.gating
+        ),
+        if replay_ok {
+            (
+                CheckState::Ready,
+                CheckCode::EngineProtocolSupported,
+                Gating::Blocking,
+            )
+        } else {
+            (
+                CheckState::NotReady,
+                CheckCode::EngineProtocolUnsupported,
+                Gating::Blocking,
+            )
+        },
+        "{label}: a Restore Preflight's target.engineProtocol: {target_protocol:?}"
+    );
+    // target.timestampBound: the broker's own bound, by the broker's own tool.
+    let own = broker_own_configs(ep);
+    let own_bound = own
+        .get("log.message.timestamp.before.max.ms")
+        .or_else(|| own.get("log.message.timestamp.difference.max.ms"))
+        .cloned();
+    let broker_timestamp_type = own.get("log.message.timestamp.type").cloned();
+    let bound = row(&preflight, CheckId::TargetTimestampBound);
+    match &own_bound {
+        Some(ms) => {
+            assert_eq!(
+                (bound.state, bound.code),
+                (CheckState::Ready, CheckCode::TimestampWithinBound),
+                "{label}: the broker reports a {ms} ms bound and the plan's window is recent: \
+                 {bound:?}"
+            );
+            assert!(
+                bound
+                    .message
+                    .contains(&format!("the target's {ms} ms record-timestamp bound")),
+                "{label}: the row quotes the bound the broker's own tool reports ({ms}): {}",
+                bound.message
+            );
+            assert_eq!(
+                bound.facts.get("brokerTimestampType"),
+                broker_timestamp_type.as_ref(),
+                "{label}: and the broker's timestamp type: {bound:?}"
+            );
+        }
+        None => assert_eq!(
+            (bound.state, bound.code),
+            (CheckState::Unknown, CheckCode::TimestampBoundNotReported),
+            "{label}: a broker that reports no bound is `unknown`, never \"no bound\": {bound:?}"
+        ),
+    }
+
+    // --- restore and verify -------------------------------------------------
     let allow = allowlist_for(&cluster_id);
     let mut o = RunOpts::new(&dspec);
     o.allowlist = Some(&allow);
@@ -1041,6 +1292,7 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
         }
     }
     let left = sweep_drill_topics(&bootstrap, &auth);
+    let topic_preflight = topic_preflight_line(&drill_output);
     let seen = json!({
         "endpoint": label,
         "bootstrap": bootstrap,
@@ -1060,12 +1312,27 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
                 .as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
             "group": group_outcome,
         },
+        "broker_tool_configs": {
+            "log.message.timestamp.type": broker_timestamp_type,
+            "record_timestamp_bound_ms": own_bound,
+            "keys_reported": own.len(),
+        },
+        "restore_preflight": {
+            "plan_kind": "restorePreflight",
+            "plan.parse": parse,
+            "target.engineProtocol": target_protocol,
+            "target.timestampBound": bound,
+            "rows": preflight.checks.iter()
+                .map(|c| json!({"id": c.id, "state": c.state, "code": c.code}))
+                .collect::<Vec<_>>(),
+        },
         "restore": {
             "exit": r.out.status.code(),
             "outcome": scorecard.as_ref().map(|s| s["outcome"].clone()),
             "phases": scorecard.as_ref().map(phase_outcomes),
             "scorecard_format": scorecard.as_ref().map(|s| s["format_version"].clone()),
             "scratch_topics_left_after_the_run": left,
+            "topic_preflight": topic_preflight,
         },
     });
     Generic {
@@ -1074,6 +1341,7 @@ fn generic_row(ep: Endpoint, topic: &str) -> Generic {
         drill_exit: r.out.status.code(),
         scorecard,
         drill_output,
+        broker_timestamp_type,
     }
 }
 
@@ -1100,6 +1368,24 @@ fn assert_restored(label: &str, g: &Generic) {
             "{label}: phase {n} — {phases:?}"
         );
     }
+    // PHASE 0 READ THE TARGET'S TIMESTAMP TYPE (review M4): the run's own
+    // `topic-preflight=` line, which is what `Restore.status.topicPreflight`
+    // is copied from, names the type the broker's own tool reports.
+    let line = topic_preflight_line(&g.drill_output).unwrap_or_else(|| {
+        panic!(
+            "{label}: the run printed no `topic-preflight=` line:\n{}",
+            tail(&g.drill_output, 3000)
+        )
+    });
+    assert!(
+        g.broker_timestamp_type.is_some(),
+        "{label}: this row is for a broker that reports its timestamp type"
+    );
+    assert_eq!(
+        line["timestampType"].as_str(),
+        g.broker_timestamp_type.as_deref(),
+        "{label}: phase 0 recorded the target's timestamp type as its broker reports it: {line}"
+    );
 }
 
 // ============================================================ rows
@@ -1717,9 +2003,11 @@ const RESTRICTED: &str = "User:logweir";
 const OTHER: &str = "User:prod-01-2-other";
 
 /// The `error` field of the run's own "… failed" log line, or its last
-/// `failure-reason=` / `refusal-reason=` line: how a refused run READS.
+/// `failure-reason=` / `refusal-reason=` line: how a refused run READS. And,
+/// for a run that passed, the warning it logged about its teardown.
 fn how_it_reads(out: &Output) -> String {
     let all = text(out);
+    let teardown = teardown_said(out);
     let reason = all
         .lines()
         .rev()
@@ -1757,7 +2045,55 @@ fn how_it_reads(out: &Output) -> String {
     if !said.is_empty() && !out.contains(&said) {
         out.push_str(&format!(" || authorization: …{said}…"));
     }
+    // A run that PASSED can still say something went wrong after the bytes
+    // were signed: its teardown warning (review M2).
+    if let Some(warning) = teardown["warning"].as_str() {
+        if !out.is_empty() {
+            out.push_str(" || ");
+        }
+        out.push_str(&format!("teardown: {warning}"));
+    }
     out
+}
+
+/// **What a run said about its own teardown** (PROD-01.2 review, M2): the
+/// warning phase 9 logs for a scratch topic it could not delete, the clause
+/// the run's summary line ends with, and the key of the signed teardown
+/// attestation. Each is `null` when the run printed none.
+///
+/// The first version of this row read only `failure-reason=`,
+/// `refusal-reason=`, a message ending " failed" and a line containing
+/// "authoriz". A teardown warning is none of those, so a restore that passed
+/// and left its topic was recorded with `reads: ""`, and the record said
+/// "nothing on the output says the teardown failed". It says so three times.
+fn teardown_said(out: &Output) -> Value {
+    let all = text(out);
+    let warning = all
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["level"] == "WARN")
+        .filter_map(|v| v["fields"]["message"].as_str().map(str::to_string))
+        .find(|m| m.starts_with("teardown left "));
+    let summary = all
+        .lines()
+        .find(|l| l.starts_with("run ") && l.contains(" — outcome "))
+        .and_then(|l| l.rsplit(" — ").next())
+        .filter(|clause| clause.starts_with("teardown left "))
+        .map(str::to_string);
+    let attestation = all
+        .lines()
+        .find_map(|l| l.strip_prefix("teardown-key="))
+        .map(str::to_string);
+    json!({
+        "warning": warning,
+        "summary_clause": summary,
+        "attestation_key": attestation,
+        // FX-44: whether anything the run printed names the grant it lacked.
+        "names_authorization": all.to_ascii_lowercase().contains("authoriz"),
+        "names_the_delete_grant": all.contains("Delete")
+            || all.to_ascii_lowercase().contains("delete on")
+            || all.to_ascii_lowercase().contains("delete acl"),
+    })
 }
 
 /// How each phase of a run ended, off its own "phase finished" log lines:
@@ -2028,6 +2364,7 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
             "outcome": scorecard.as_ref().map(|s| s["outcome"].clone()),
             "scratch_topics_left": left,
             "reads": how_it_reads(&r.out),
+            "teardown": teardown_said(&r.out),
             "phases": phases_logged(&r.out),
         }));
         grants.add(g);
@@ -2073,14 +2410,34 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
     assert_eq!(restore_rows[1]["exit"], 1, "{}", restore_rows[1]);
     assert!(restore_rows[1]["outcome"].is_null(), "{}", restore_rows[1]);
     assert_eq!(restore_rows[1]["scratch_topics_left"], json!([mapped]));
+    assert!(
+        reads(1).contains("kafka-backup restore exited 1"),
+        "{}",
+        restore_rows[1]
+    );
     // Read: restored and unverifiable; nothing is signed.
     assert_eq!(restore_rows[2]["exit"], 1, "{}", restore_rows[2]);
     assert!(restore_rows[2]["outcome"].is_null(), "{}", restore_rows[2]);
+    assert_eq!(restore_rows[2]["scratch_topics_left"], json!([mapped]));
     assert!(
         reads(2).contains("TopicAuthorizationFailed"),
         "{}",
         restore_rows[2]
     );
+    // A FAILED restore says NOTHING about the topic it leaves (tracker row
+    // FX-44; measured 2026-10-10, 0 teardown lines in the whole output). When
+    // this stops holding, the run has started to say so: update the matrix.
+    for i in [1, 2] {
+        let said = &restore_rows[i]["teardown"];
+        assert!(
+            said["warning"].is_null()
+                && said["summary_clause"].is_null()
+                && said["attestation_key"].is_null(),
+            "a failed restore now says something about its teardown; the matrix's sentence \
+             about it (and FX-44) is stale: {}",
+            restore_rows[i]
+        );
+    }
     // Delete: the restore is verified and signed `pass`, exit 0, and the
     // target topic OUTLIVES the run although the plan says `teardown: delete`.
     assert_eq!(
@@ -2090,6 +2447,55 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         restore_rows[3]
     );
     assert_eq!(restore_rows[3]["scratch_topics_left"], json!([mapped]));
+    // ...AND THE RUN SAYS SO, three times (review M2): a WARN that names the
+    // topic, the same clause on the summary line beside `outcome pass`, and
+    // the key of the signed teardown attestation.
+    let said = &restore_rows[3]["teardown"];
+    assert_eq!(
+        said["warning"],
+        json!(format!(
+            "teardown left 1 scratch topic behind on the target cluster: {mapped}"
+        )),
+        "the run warns that its teardown left the topic, and names it: {}",
+        restore_rows[3]
+    );
+    assert_eq!(
+        said["summary_clause"],
+        json!(format!("teardown left 1 scratch topic behind ({mapped})")),
+        "the summary line says it beside `outcome pass`: {}",
+        restore_rows[3]
+    );
+    assert!(
+        said["attestation_key"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("logweir/drills/") && k.ends_with(".teardown.json")),
+        "the signed teardown attestation is written and its key printed: {}",
+        restore_rows[3]
+    );
+    assert!(
+        reads(3).contains("teardown left 1 scratch topic behind"),
+        "what the run says is in the evidence, never an empty `reads`: {}",
+        restore_rows[3]
+    );
+    // What it does NOT say is WHY (FX-44): nothing names the missing `Delete`
+    // grant or an authorization refusal. When this stops holding, the open
+    // finding is closed: update the matrix and the chart README.
+    assert_eq!(
+        (
+            &said["names_authorization"],
+            &said["names_the_delete_grant"]
+        ),
+        (&json!(false), &json!(false)),
+        "the teardown warning now names the grant; FX-44's sentence in the matrix is stale: {}",
+        restore_rows[3]
+    );
+    // No removal reads as nothing at all.
+    for r in &restore_rows {
+        assert!(
+            r["reads"].as_str().is_some_and(|s| !s.is_empty()),
+            "a removal whose run says nothing readable: {r}"
+        );
+    }
     // DescribeConfigs on the cluster: refused at phase 0, by name (FX-4).
     assert_eq!(restore_rows[4]["exit"], 1, "{}", restore_rows[4]);
     assert!(
@@ -2116,6 +2522,340 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
             "--topic",
             &topic,
         ],
+    );
+}
+
+// ============================================================ a backup id that spells a credential code
+
+/// **PROD-01.2 review, M1, live: a backup whose id spells a credential code
+/// is a backup.** The id is also the archive prefix, so every key the run
+/// reads or writes carries it, and MinIO's `404 NoSuchKey` for the manifest
+/// that is not there yet echoes it in `<Key>` and `<Resource>`.
+///
+/// The first classifier matched credential words anywhere in that text: the
+/// "is this backup set new?" read answered a refused credential, and the
+/// backup exited 4 (`ExecutionClaimUnproven`) with a remedy about IAM grants
+/// and no receipt. Measured by the review on this stack for `expiredtoken-…`
+/// and `invalidsecurity-…`.
+///
+/// Each id, one for every word the classifier matched that an id can spell:
+/// exit 0, a receipt, both readers. CONTROL: an ordinary id, the same.
+#[test]
+#[ignore = "three backups with the engine on a topic of its own; run it by name (module doc)"]
+fn a_backup_whose_id_spells_a_credential_code_is_a_backup() {
+    let topic = format!("compat-orders-{}", nonce());
+    create_topic(&topic, 3);
+    let auth = Auth::plaintext();
+    let bootstrap = bootstrap();
+    produce(&bootstrap, &auth, &topic, 30);
+    let storage = Storage::minio();
+    let mut rows = Vec::new();
+    for word in [
+        "compat-plain",
+        "expiredtoken",
+        "invalidsecurity",
+        "invalidaccesskeyid",
+        "signaturedoesnotmatch",
+        "tokenrefreshrequired",
+        "xadminusernotfound",
+    ] {
+        let id = format!("{word}-{}", nonce());
+        let spec = backup_spec(&bootstrap, &auth, &topic, &id, &storage);
+        let receipt = demo_dir().join(format!("{id}.receipt.json"));
+        let out = backup(&spec, &receipt, &auth, &[]);
+        let readers = receipt.exists().then(|| verify_receipt(&receipt));
+        rows.push(json!({
+            "backup_id": id,
+            "exit": out.status.code(),
+            "receipt_written": receipt.exists(),
+            "receipt_verified_by_both_readers": readers == Some((Some(0), Some(0))),
+            "reads": how_it_reads(&out),
+        }));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a backup whose id is `{id}` did not exit 0:\n{}",
+            tail(&text(&out), 3000)
+        );
+        assert_eq!(
+            readers,
+            Some((Some(0), Some(0))),
+            "`{id}`: a receipt, verified by both readers"
+        );
+    }
+    evidence(
+        "a_backup_whose_id_spells_a_credential_code_is_a_backup",
+        &json!({"object_store": "MinIO (the stack's)", "topic": topic, "backups": rows}),
+    );
+    let _ = kafka_topics(&[
+        "--bootstrap-server",
+        "kafka-broker-1:9094",
+        "--delete",
+        "--topic",
+        &topic,
+    ]);
+}
+
+// ============================================================ a cluster of three brokers
+
+/// `docker compose <args…>`, bounded, on THIS stack's project.
+fn compose(args: &[&str]) -> Output {
+    harness::stack::ensure_coherent();
+    let mut c = Command::new("docker");
+    c.args(["compose", "-f", "e2e/compose/docker-compose.yml"])
+        .args(args)
+        .current_dir(root());
+    output_within(c, 120)
+}
+
+/// One node of the `cluster3` profile, frozen: its process is paused, so its
+/// published port still accepts a connection and nothing behind it answers.
+/// Unfrozen when dropped, whatever the row did.
+struct Frozen(&'static str);
+
+impl Frozen {
+    fn freeze(service: &'static str) -> Self {
+        let out = compose(&["pause", service]);
+        assert!(
+            out.status.success(),
+            "pausing {service}:\n{}",
+            tail(&text(&out), 800)
+        );
+        Self(service)
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        let _ = compose(&["unpause", self.0]);
+    }
+}
+
+/// The capability rows of a backup from the three-broker cluster reached
+/// through `addresses`, by the shipped `logweir check run`.
+fn cluster3_rows(addresses: &[String]) -> (CheckOutcome, CheckOutcome) {
+    let mut connection = Auth::plaintext().connection_plan(&addresses[0]);
+    connection.bootstrap_servers = addresses.to_vec();
+    let (_, result) = check_run(
+        &capability_plan(
+            CheckOperation::Backup,
+            connection,
+            &[],
+            &[
+                CheckId::ConnectionEngineProtocol,
+                CheckId::ConnectionGroupTypes,
+            ],
+        ),
+        None,
+    );
+    assert_eq!(
+        row(&result, CheckId::ConnectionAuthenticated).state,
+        CheckState::Ready,
+        "the cluster answers a client: {:?}",
+        row(&result, CheckId::ConnectionAuthenticated)
+    );
+    (
+        row(&result, CheckId::ConnectionEngineProtocol),
+        row(&result, CheckId::ConnectionGroupTypes),
+    )
+}
+
+/// **PROD-01.2 review, M3, live: the engine-protocol row answers for a
+/// cluster only when every broker of it answered.**
+///
+/// The first version read whichever connections the observing client had
+/// opened: on this three-broker cluster, two of three brokers in two runs of
+/// three from all three addresses, and ONE of three from one address
+/// (measured by the review), each time `ready`.
+///
+/// 1. **All three answering**, from all three addresses and from each single
+///    one, five rounds each: `ready`, `brokersAnswered: 3 of 3`, every time.
+/// 2. **One broker frozen** (its process paused: the port still accepts, and
+///    nothing answers). The row is `unknown`, `ApiVersionsNotObserved`, never
+///    `ready`, and its message names how many of how many answered and which
+///    did not: `2 of 3` while the cluster still lists the broker, and, once
+///    the controller has fenced it and lists two, both of them and the
+///    bootstrap address nobody answered at.
+/// 3. **It recovers**: with the broker running again the row is `ready`,
+///    `3 of 3`.
+///
+/// What a frozen broker the cluster has stopped listing does to a connection
+/// that names ONLY live addresses is recorded, not required: the cluster then
+/// lists two brokers, both answer, and the row says `2 of 2`. That is the
+/// stated limit of asking a cluster who its brokers are.
+#[test]
+#[ignore = "needs the stack's `cluster3` profile; see the module doc"]
+fn a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all() {
+    let all: Vec<String> = bootstrap_c3().split(',').map(str::to_string).collect();
+    assert_eq!(
+        all.len(),
+        3,
+        "the cluster3 profile's three addresses: {all:?}"
+    );
+    let ready_three = |what: &str, addresses: &[String]| -> Value {
+        let (engine, groups) = cluster3_rows(addresses);
+        for r in [&engine, &groups] {
+            assert_eq!(
+                r.facts.get("brokersAnswered").map(String::as_str),
+                Some("3 of 3"),
+                "{what}: every broker answered, as distinct brokers: {r:?}"
+            );
+        }
+        assert_eq!(
+            (engine.state, engine.code),
+            (CheckState::Ready, CheckCode::EngineProtocolSupported),
+            "{what}: {engine:?}"
+        );
+        assert!(
+            engine
+                .message
+                .starts_with("all 3 brokers of this endpoint serve"),
+            "{what}: {}",
+            engine.message
+        );
+        json!({"addresses": addresses, "state": engine.state, "brokersAnswered": engine.facts.get("brokersAnswered")})
+    };
+
+    // --- 1. all three answering ----------------------------------------------
+    let mut whole = Vec::new();
+    for round in 0..5 {
+        whole.push(ready_three(
+            &format!("round {round}, all three addresses"),
+            &all,
+        ));
+        let one = vec![all[round % 3].clone()];
+        whole.push(ready_three(&format!("round {round}, {one:?}"), &one));
+    }
+
+    // --- 2. one broker frozen --------------------------------------------------
+    // Not the active controller: freezing it would start an election, and
+    // this row is about a broker, not about the quorum.
+    let quorum = exec_in(
+        "kafka-c3-1",
+        &[
+            "/opt/kafka/bin/kafka-metadata-quorum.sh",
+            "--bootstrap-server",
+            "kafka-c3-1:9094",
+            "describe",
+            "--status",
+        ],
+    );
+    let leader: i32 = String::from_utf8_lossy(&quorum.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("LeaderId:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no LeaderId:\n{}", tail(&text(&quorum), 800)));
+    let (node, service): (i32, &'static str) = [(3, "kafka-c3-3"), (2, "kafka-c3-2")]
+        .into_iter()
+        .find(|(id, _)| *id != leader)
+        .expect("two candidates, one leader");
+    let frozen_address = all[(node - 1) as usize].clone();
+    let frozen = Frozen::freeze(service);
+    let started = Instant::now();
+
+    let (engine, groups) = cluster3_rows(&all);
+    let first_took = started.elapsed();
+    for r in [&engine, &groups] {
+        assert_eq!(
+            (r.state, r.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "a cluster one of whose brokers did not answer is never `ready`: {r:?}"
+        );
+        assert!(!r.facts.contains_key("brokersAnswered"), "{r:?}");
+    }
+    assert!(
+        engine.message.contains("2 of 3 broker(s)")
+            && engine
+                .message
+                .contains(&format!("broker {node} ({frozen_address})")),
+        "the row names how many of how many answered and which did not: {}",
+        engine.message
+    );
+    assert!(
+        engine.remedy.contains("Re-run the check"),
+        "{}",
+        engine.remedy
+    );
+
+    // Later, when the controller has fenced the frozen broker and lists two:
+    // still not `ready` from a connection that names its address.
+    let mut later = None;
+    for _ in 0..12 {
+        std::thread::sleep(Duration::from_secs(5));
+        let (engine, _) = cluster3_rows(&all);
+        assert_eq!(
+            (engine.state, engine.code),
+            (CheckState::Unknown, CheckCode::ApiVersionsNotObserved),
+            "still never `ready`: {engine:?}"
+        );
+        if engine.message.contains("2 of 2 broker(s)") {
+            assert!(
+                engine.message.contains(&format!(
+                    "no answer from the bootstrap address(es) {frozen_address}"
+                )),
+                "both listed brokers answered and a named address did not: {}",
+                engine.message
+            );
+            later = Some(engine);
+            break;
+        }
+    }
+    // Recorded, not required: the same cluster through its two live addresses.
+    let live: Vec<String> = all
+        .iter()
+        .filter(|a| **a != frozen_address)
+        .cloned()
+        .collect();
+    let (through_live, _) = cluster3_rows(&live);
+
+    // --- 3. it recovers --------------------------------------------------------
+    drop(frozen);
+    let mut recovered = None;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let (engine, _) = cluster3_rows(&all);
+        if engine.state == CheckState::Ready {
+            recovered = Some(engine);
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    let recovered = recovered.expect("with the broker running again the row is ready within 120 s");
+    assert_eq!(
+        recovered.facts.get("brokersAnswered").map(String::as_str),
+        Some("3 of 3"),
+        "{recovered:?}"
+    );
+
+    evidence(
+        "a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all",
+        &json!({
+            "cluster": "profile cluster3: kafka-c3-1..3, combined broker and controller, KRaft",
+            "addresses": all,
+            "all_three_answering": whole,
+            "one_frozen": {
+                "frozen": {"service": service, "node": node, "address": frozen_address, "how": "docker compose pause"},
+                "controller_leader": leader,
+                "while_the_cluster_still_lists_it": {
+                    "seconds": first_took.as_secs_f64(),
+                    "connection.engineProtocol": engine,
+                    "connection.groupTypes": groups,
+                },
+                "after_the_cluster_fenced_it": later,
+                "through_the_two_live_addresses_only": {
+                    "state": through_live.state,
+                    "code": through_live.code,
+                    "message": through_live.message,
+                    "brokersAnswered": through_live.facts.get("brokersAnswered"),
+                },
+            },
+            "recovered": recovered,
+        }),
+    );
+    eprintln!(
+        "[prod-01-2] cluster3: 10 of 10 whole views are 3 of 3; with {service} frozen the row is \
+         unknown ({}); recovered to 3 of 3",
+        tail(&engine.message, 200)
     );
 }
 
