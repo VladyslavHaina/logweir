@@ -22,8 +22,8 @@
 //! 4.10.0+2.12.1), each behind its own thread and broker prefix:
 //!
 //! ```text
-//! [thrd:localhost:9092/bootstrap]: localhost:9092/bootstrap: Broker API support:
-//! [thrd:localhost:9092/bootstrap]: localhost:9092/bootstrap:   ApiKey Produce (0) Versions 0..13
+//! [thrd:broker.example:9092/bootstrap]: broker.example:9092/bootstrap: Broker API support:
+//! [thrd:broker.example:9092/bootstrap]: broker.example:9092/bootstrap:   ApiKey Produce (0) Versions 0..13
 //! ```
 //!
 //! **A log line is not an API**, and this module treats it as one would treat
@@ -214,8 +214,8 @@ pub fn fold<'a>(
 mod tests {
     use super::*;
 
-    const BOOT: &str = "[thrd:localhost:9092/bootstrap]: localhost:9092/bootstrap: ";
-    const NODE: &str = "[thrd:localhost:9092/1001]: localhost:9092/1001: ";
+    const BOOT: &str = "[thrd:broker.example:9092/bootstrap]: broker.example:9092/bootstrap: ";
+    const NODE: &str = "[thrd:broker.example:9092/1001]: broker.example:9092/1001: ";
 
     fn line(prefix: &str, rest: &str) -> (&'static str, String) {
         (FACILITY, format!("{prefix}{rest}"))
@@ -270,7 +270,7 @@ mod tests {
         }
         assert_eq!(
             connection_of(&format!("{BOOT}x")),
-            "localhost:9092/bootstrap"
+            "broker.example:9092/bootstrap"
         );
         assert_eq!(connection_of("no prefix"), "");
     }

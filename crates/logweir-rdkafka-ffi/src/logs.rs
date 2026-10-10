@@ -94,13 +94,13 @@ fn log_line(event: &Event) -> Option<LogLine> {
     let mut facility: *const c_char = std::ptr::null();
     let mut message: *const c_char = std::ptr::null();
     let mut level: c_int = 0;
+    let (fac, msg, lvl) = (&mut facility, &mut message, &mut level);
     // SAFETY: the event is live (owned by `event`); the three out-pointers
     // point to initialised locals that outlive the call. The function writes
     // them and returns 0 only for a log event (`rdkafka_event.c`,
     // `rd_kafka_event_log`), and the two strings it hands back are owned by
     // the event.
-    let rc =
-        unsafe { rd::rd_kafka_event_log(event.as_ptr(), &mut facility, &mut message, &mut level) };
+    let rc = unsafe { rd::rd_kafka_event_log(event.as_ptr(), fac, msg, lvl) };
     if rc != 0 {
         return None;
     }
