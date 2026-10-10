@@ -10644,6 +10644,78 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
     }
 }
 
+/// **Points nobody can take never push a readable point out of the window.**
+/// An archive can hold many points that are not `Available` — an older
+/// build's oversized points, a crashed run's half-written records, reads that
+/// failed — and the window is `viewLimit` entries in walk order. Here five
+/// unreadable points are NEWER than three readable ones, so the walk meets
+/// them first, and the window holds three: it lists the three readable
+/// points, and counts all eight (so the controller's view says it is a
+/// window). CONTROL: with room for all eight, the five are listed too.
+///
+/// KILLS: entries kept in walk order alone (the window would hold three
+/// unreadable points and no readable one).
+#[test]
+fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut readable = Vec::new();
+    for day in 1..=8 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{day}"),
+                "run-a",
+                &format!("2026-09-{day:02}T03:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+        if day <= 3 {
+            readable.push(f.point.point_id.clone());
+        } else {
+            // A crashed run's half-written record.
+            objects = objects.with_object(&f.record_key, b"{\"format_version\":\"1.");
+        }
+    }
+    let window = |view_limit: i64| {
+        let body = body_of(&drive_sync(
+            logweir_core::check_contract::CatalogSyncRequest {
+                view_limit,
+                ..sync_request()
+            },
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        ));
+        let counts = summary_of(&body, "catalog-counts=");
+        assert_eq!(counts["total"], 8, "every point is counted: {counts}");
+        assert_eq!(counts["unreadableMalformed"], 5, "{counts}");
+        entries_of(&body)
+    };
+    let listed = window(3);
+    let mut ids: Vec<&str> = listed
+        .iter()
+        .map(|e| e["pointId"].as_str().expect("an id"))
+        .collect();
+    ids.sort_unstable();
+    let mut want: Vec<&str> = readable.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    assert_eq!(
+        ids, want,
+        "the window holds the readable points: {listed:?}"
+    );
+    assert!(listed.iter().all(|e| e["availability"] == "Available"));
+    // CONTROL: room for every point, and the unreadable ones are listed.
+    let all = window(8);
+    assert_eq!(all.len(), 8);
+    assert_eq!(
+        all.iter()
+            .filter(|e| e["availability"] == "Unreadable")
+            .count(),
+        5
+    );
+}
+
 /// **A `Full` rescan lists a point whose record gave no facts, by the point id
 /// its key carries, and an object under the points prefix whose key names no
 /// point id is not a point.**

@@ -1585,10 +1585,26 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33). There is no
-    // observation `build_entry` has no entry for.
+    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and a point
+    // that is not `Available` never costs an `Available` one its place. An
+    // archive can hold many points nobody can take — an older build's
+    // oversized points, a crashed run's half-written records, reads that
+    // failed — and the window is `viewLimit` entries in walk order. When it is
+    // full, an `Available` point takes the place of the last-listed entry that
+    // is not. Either way the walk counted more than it listed, so the view
+    // says it is a window (`truncated`).
+    let entry = build_entry(&observation);
     if walk.entries.len() < view_limit {
-        walk.entries.push(build_entry(&observation));
+        walk.entries.push(entry);
+    } else if entry.availability == Availability::Available {
+        if let Some(at) = walk
+            .entries
+            .iter()
+            .rposition(|e| e.availability != Availability::Available)
+        {
+            walk.entries.remove(at);
+            walk.entries.push(entry);
+        }
     }
 }
 
