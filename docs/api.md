@@ -956,6 +956,27 @@ row onto itself.
 | `target.topicNaming.prefix` | `prefix_with_original_name` | `originalName` is `true` and the prefix is not empty. |
 | `target.topicNaming.prefix` | `invalid_prefix` | without `originalName`, the prefix is empty, longer than 128 characters or not a legal topic name: every other restore writes NEW topics. |
 | `approvalBytes` | `approval_subject_mismatch` | the legacy approval route (`legacy-governed-v1`): the signed document's `approval_subject` is not the one the Restore needs — `originalName` for a Restore that declares it, absent for every other. |
+| `originalNameConfirmation.typedTopics` | `typed_topics_required` | OD-10: a Restore declaring `originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`) without the typed topic names. |
+| `originalNameConfirmation.typedTopics` | `typed_topics_mismatch` | the typed names are not exactly the plan's `source.topics` — each once, nothing else, byte for byte; the message names what is missing, extra or repeated. |
+| `originalNameConfirmation` | `not_accepted` | typed names on any other request: an ordinary restore, a `strict` (Governed) namespace, whose second person they never replace, or an unbound one, which signs nothing. |
+
+**One person confirms only with the names typed (OD-10).** In a namespace
+confirmed by one person, the request carries the original topic names the
+requester re-typed:
+
+```json
+{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
+ "originalNameConfirmation": {"typedTopics": ["orders", "payments"]}}
+```
+
+The console signs them into the authorization document beside the subject
+(`originalNameConfirmation`). The controller and the runner hold them to the
+plan again. Holding them to the plan is the one read this route makes of the
+plan bytes, and it reads only `source.topics`; a plan that does not parse is
+refused (`planBytes` / `invalid`). Absent, the field leaves the idempotency hash unchanged. In a
+`strict` namespace the requester's submission is only the console's
+confirmation (`awaitingApproval`), and the Restore runs once an approver
+countersigns it.
 
 **Its own approval subject.** Both restore reads carry `approvalSubject`
 (`ordinary` or `originalName`), the subject the Restore needs, and

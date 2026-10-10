@@ -1432,23 +1432,41 @@ mismatched pair terminally before any Job (`ApprovalSubjectMismatch`), the
 runner refuses it again (exit 3), and a standing rehearsal authorization never
 authorises one. The product API's restore reads and approvals list carry
 `approvalSubject`, and the console shows it on the review step and the
-approvals page.
+approvals page. **On a one-person-confirmation install the names are typed
+(the owner's decision OD-10):** in a `confirm` namespace the requester may
+confirm alone only after re-typing every original topic name, exactly. The
+console signs the typed names into the authorization document
+(`originalNameConfirmation`), and the API (`typed_topics_required`,
+`typed_topics_mismatch`), the controller and the runner refuse anything
+else. A `strict` namespace still needs the second person.
 **What the runner proves first** (exit 3, nothing written): every restored name
 is absent; the target is another cluster than the archive's source (the bound
-point's receipt), or every broker reports `auto.create.topics.enable=false`
-(`OriginalNameAutoCreateEnabled`, `OriginalNameAutoCreateUnknown`); an owner
-was looked for — the plan's statement, the `KafkaTopic` resources given to
-`logweir restore run --kafka-topic-resources`, or the receipt's recorded
-owners — and none found unless the plan chose the owner path
-(`OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`); and the
-`LogAppendTime` probe stays under the scratch prefix, never an original name.
-Creation is exclusive: a name that appears after phase 0 stops the run before
-the engine starts (`TargetTopicAppeared`, exit 1), and nothing is written into
-a topic the run did not create. Teardown never deletes a topic under its
-original name. The scorecard is format **1.8.0** with `target.original_name`
-(the approval subject and mode, the cluster condition, the owners); both
-readers check it (arms ON-1 to ON-10, `verify_scorecard.py` 1.25.0) and print
-two `original name:` lines, and `logweir drill show` names it in its footer.
+point's VERIFIED receipt only; the allowlist file's `source_cluster_id` never
+counts), or every metadata-listed broker reports
+`auto.create.topics.enable=false` (`OriginalNameAutoCreateEnabled`,
+`OriginalNameAutoCreateUnknown`); an owner was looked for — the plan's
+statement, the `KafkaTopic` resources given to `logweir restore run
+--kafka-topic-resources`, or the receipt's recorded owners — and none found
+unless the plan chose the owner path (`OriginalNameOwnerNotChecked`,
+`OriginalNameOwnerPresent`; a `KafkaTopic` that cannot be read or recorded,
+or a file holding none, is `OriginalNameOwnerUnreadable`, never "none
+found"); and the `LogAppendTime` probe stays under the scratch prefix, never
+an original name. Creation is exclusive: a name that appears after phase 0
+stops the run before the engine starts, exit 1, with
+`failure-reason=TargetTopicAppeared` as the last line. The controller shows
+the race on the Restore (`status.exitReason`, `status.targetTopicsAppeared`,
+the `Failed` message). A topic this run created in the same request is
+removed only when it is provably its own and empty, and is left and named
+otherwise. Nothing is written into a topic the run did not create, and
+teardown never deletes a topic under its original name. A producer still
+writing while the restore runs is detected, not prevented: phase 7's count
+bound fails and the run signs `fail-integrity`. The scorecard is format
+**1.8.0** with `target.original_name` (the approval subject and mode, the
+typed confirmation, the cluster condition, the owners, the resources file's
+digest). Both readers check it (arms ON-1 to ON-12, `verify_scorecard.py`
+1.25.0) and print two `original name:` lines, and `logweir drill show` names
+it in its footer. The readiness check no longer refuses such a plan as an
+accidental identity map.
 **Do:** nothing for any other restore. Apply the `Restore` CRD before the
 controller rolls, and roll the controller, the runner, the product API and the
 console together. Stop every producer of a restored name before such a
@@ -1460,8 +1478,14 @@ probe, the exclusive create (the pre-create re-check and `CreateTopics`'
 already-exists answer), the teardown rail and the subject check; controller
 rows for admission step 4b, the declaration and the standing refusal; API rows
 for the create, the identity mapping, the signed subject and the legacy
-route; both verifiers over twelve corpus cases and the parity script; the
-console's golden plan, parsed by the runner. Compose rows on slot 1
+route, the typed confirmation and the strict namespace; both verifiers over
+sixteen corpus cases and the parity script; the console's golden plan, parsed
+by the runner, and its typed-names rows. Each of the runner's three
+approval-subject call sites has a CI-run row that fails without it (the
+binary at startup, the orchestrator fixture before phase 0 and after phase 1),
+and so does `drill approve`'s refusal; the race's cleanup has rows for the
+removal and for each reason a topic is left; the lost race is named on the
+Restore by a controller row. Compose rows on slot 1
 (`COMPOSE_PROFILES=auth,cluster2,autocreate`; the new `autocreate` profile is
 a one-broker cluster that auto-creates topics), each against the brokers: a
 deleted topic recovered under its name on a second cluster (30 of 30
@@ -1472,9 +1496,12 @@ auto-creates the name while the runner is suspended at phase 5 wins, the run
 stops `TargetTopicAppeared` and the topic holds that one record; an ordinary
 approval refused, and `drill approve` refusing to sign one; a `KafkaTopic`
 owner (simulated with a resources file: no Strimzi operator in the lab)
-refused, then restored on the owner path; scratch mode refused. Each
-condition, the exclusive create and the subject check has a mutant that fails
-a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
+refused, then restored on the owner path; scratch mode refused; a producer
+writing six records while the restore ran left 36 against a bound of 30 and
+the run signed `fail-integrity` (exit 2); the race printed
+`failure-reason=TargetTopicAppeared` last. Each condition, the exclusive
+create, the subject check, the typed confirmation, the race's naming and its
+cleanup has a mutant that fails a row. Older readers (`verify_scorecard.py` 1.23.0 and 1.24.0, and a
 `logweir` built before this item) accept the live 1.8.0 scorecards and print
 nothing about the original name. Not proven live: a
 real Strimzi operator, and the PoC upgrade.
@@ -1482,8 +1509,10 @@ real Strimzi operator, and the PoC upgrade.
 empty prefix and refuses the plan (exit 3) before it writes anything; an older
 controller ignores `topicNaming.originalName` and its runner refuses the same
 way; an older reader of an authorization document v2 refuses one carrying
-`approvalSubject`. Rolling the CRD back prunes the field from stored objects,
-whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
+`approvalSubject` or `originalNameConfirmation`; an older controller reads a
+lost race as a plain exit 1. Rolling the CRD back prunes
+`topicNaming.originalName` and `status.targetTopicsAppeared` from stored
+objects, whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
 under older readers, which ignore the block.
 
 ### Required operator actions after `v0.2.0-rc.1`

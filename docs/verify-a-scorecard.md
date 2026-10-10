@@ -193,8 +193,10 @@ The current scorecard checks include:
   original topic names) appears only under a version that defines it, never in
   a scratch drill and only beside an empty `target.topic_mapping_prefix`; its
   approval subject is `originalName`; "not the source cluster" names a source
-  cluster id other than the target's; it names where owners were looked for,
-  and an owner found only on the owner path
+  cluster id other than the target's; it names where owners were looked for
+  (a `KafkaTopic` resources file by its sha256), and an owner found only on
+  the owner path; a one-person confirmation is signed only with every
+  original topic name re-typed (`confirmation: typedTopicNames`)
   ([the arms](formats/drill-scorecard.md#targetoriginal_name-format-180)).
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
@@ -842,7 +844,7 @@ history is:
 | `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
 | `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
 | `1.24.0` | Knows backup receipt format `1.5.0` (PROD-03.0). Adds `schema_dependency`'s eight arms (22 to 29: only from 1.5.0; covering exactly the named topics; a closed verdict, reason and basis; both sides exactly when judged; a judged count that fits `records`; distinct plausible schema ids within the cap of 16 and a count; the one-in-ten threshold; a verdict its sides give) and its shape check, and prints one `schema_dependency["<topic>"]:` line per topic — `schema-dependent, registry not captured`, `no schema framing detected` or `not assessed (<reason>)`, with the framed share and the schema ids — or `schema_dependency: not assessed, …` for a receipt without the block. Every receipt without the block is decided exactly as before. |
-| `1.25.0` | Knows scorecard format `1.8.0` (PROD-15.1). Adds `target.original_name`'s ten arms (ON-1 to ON-10: only from 1.8.0; never in scratch mode; only beside an empty `target.topic_mapping_prefix`; the `originalName` approval subject; the approval mode, cluster condition and owner-detection places from their closed sets; `targetIsNotSource` beside a different, known source cluster id; every owner found in a place looked in, of a known kind, and only on the owner path) and its shape check, and prints the two `original name:` lines. Every document without the block is decided exactly as before. |
+| `1.25.0` | Knows scorecard format `1.8.0` (PROD-15.1). Adds `target.original_name`'s twelve arms (ON-1 to ON-12: only from 1.8.0; never in scratch mode; only beside an empty `target.topic_mapping_prefix`; the `originalName` approval subject; the approval mode, cluster condition and owner-detection places from their closed sets; `targetIsNotSource` beside a different, known source cluster id; every owner found in a place looked in, of a known kind, and only on the owner path; a one-person confirmation (`ordinary`) exactly with `confirmation: typedTopicNames`; the `KafkaTopic` resources looked in named by their sha256) and its shape check, and prints the two `original name:` lines. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -850,7 +852,7 @@ reports `run_id`. Both refuse; this is not an acceptance disagreement.
 
 A verifier older than `1.25.0`, and a `logweir` built before PROD-15.1, accept a
 1.8.0 scorecard — the major is unchanged — ignore `target.original_name`, check
-none of ON-1 to ON-10 and print no `original name:` line. What they print is
+none of ON-1 to ON-12 and print no `original name:` line. What they print is
 true of the restore: measured on three live 1.8.0 scorecards (a second
 cluster, the same cluster under a complete verification, and the owner path),
 `verify_scorecard.py` 1.23.0 and 1.24.0 and a `logweir drill verify` built

@@ -452,26 +452,35 @@ The block is a strict object: an unknown key is a parse error (exit 1).
 each message opening with the condition's name; nothing created): the mode is
 `newTopic` and `prefix` is `""` (`OriginalNameNotNewTopic`,
 `OriginalNamePrefixNotEmpty`); every restored name is absent on the target;
-the target is not the source cluster — every source cluster id known (the
-bound point's verified receipt, else the allowlist file's
-`source_cluster_id`) differs from the target's — or every broker reports
+the target is not the source cluster — the source cluster id the bound
+point's VERIFIED receipt measured differs from the target's (the allowlist
+file's `source_cluster_id` never counts: it is unsigned runner input) — or
+every broker the cluster's metadata lists reports
 `auto.create.topics.enable=false` (`OriginalNameAutoCreateEnabled`,
 `OriginalNameAutoCreateUnknown`); an owner was looked for somewhere — the
 plan's `owners`, the `KafkaTopic` resources given to `logweir restore run
---kafka-topic-resources <file>` (optionally narrowed by `--strimzi-cluster`),
-or, for a target that may be the source, the owners the point's receipt
-recorded at backup — and none was found unless `owner_path` is `true`
+--kafka-topic-resources <file>` (optionally narrowed by `--strimzi-cluster`;
+a `KafkaTopic` the runner cannot read or whose reference it cannot record,
+and a file holding no `KafkaTopic` unless it is the explicit empty `List`,
+are refused `OriginalNameOwnerUnreadable` — never read as none), or, for a
+target that may be the source, the owners the point's receipt recorded at
+backup — and none was found unless `owner_path` is `true`
 (`OriginalNameOwnerNotChecked`, `OriginalNameOwnerPresent`,
 `OriginalNameOwnersInvalid`); and the `LogAppendTime` probe's name,
 `<topic_mapping_prefix>logweir-probe-<12 hex of the plan hash>`, is legal, is
 no restored name and is free (`OriginalNameProbeUnusable`). The approval must
 carry the separate approval subject `originalName`
 (`ApprovalSubjectMismatch`; `logweir drill approve --approval-subject
-original-name` mints one).
+original-name` mints one); a one-person confirmation (an authorization
+document v2 under an `Ordinary` policy) must also carry every one of
+`source.topics` re-typed, exactly (`OriginalNameConfirmationMissing`,
+`OriginalNameConfirmationMismatch`; the owner's decision OD-10).
 
 **Creation is exclusive.** The names are looked for once more right before
 `CreateTopics`, which itself fails on a name that exists; either way the run
-stops before the engine starts, exit 1, `TargetTopicAppeared`. Teardown never
+stops before the engine starts, exit 1, `failure-reason=TargetTopicAppeared`.
+A topic this run created in the same request is removed only when it is
+provably its own and empty, and left and named otherwise. Teardown never
 deletes a topic under its original name.
 
 **It is inside `plan_hash`.** A plan without the block serialises exactly as

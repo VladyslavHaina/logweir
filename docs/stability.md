@@ -644,7 +644,7 @@ into topics that do not exist, created by the run itself, exclusively
 [kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
 
 - **The signed block.** Such a restore carries `target.original_name` and is
-  format **1.8.0** (MINOR): arms ON-1 to ON-10 read only the block or judge an
+  format **1.8.0** (MINOR): arms ON-1 to ON-12 read only the block or judge an
   existing `target` field against it, and can only refuse (OD-7 (a)). Every
   other document is the one it was; each version step keeps the newer minor.
   A verifier older than `1.25.0` and a `logweir` built before PROD-15.1 accept
@@ -659,7 +659,22 @@ into topics that do not exist, created by the run itself, exclusively
   case), never reads it as ordinary, and every document without it keeps its
   bytes. An original-name plan needs the subject and the subject authorises
   nothing else, in the runner (both directions, exit 3) and in the
-  controller's admission (`ApprovalSubjectMismatch`, terminal).
+  controller's admission (`ApprovalSubjectMismatch`, terminal). **OD-10:** an
+  authorization document v2 under an `Ordinary` policy (a one-person
+  confirmation) of an original-name restore also carries
+  `originalNameConfirmation.typedTopics`, the original topic names the
+  requester re-typed, held to the plan's topics at every boundary; it is
+  absent on every other document and refused there, under the same
+  no-new-`formatVersion` reasoning.
+- **A lost creation race is named on exit 1.** The runner's last stdout line
+  is `failure-reason=TargetTopicAppeared` (the closed
+  `logweir_core::guard::FAILURE_REASONS` list, paired with exit 1), and the
+  line before it is `target-topics-appeared={"appeared":[…],"removed":[…],"left":[…]}`
+  (legal topic names only, at most 100 per list). A controller lifts both
+  onto `status.exitReason` and `status.targetTopicsAppeared`; an older one
+  ignores them. Topics this run created in the same request are removed only
+  when proven its own and empty — the one deletion of an original name
+  Logweir performs — and left and named otherwise.
 - **An older runner refuses an original-name plan**: it ignores the
   `original_name` block and sees an empty prefix, which maps every topic onto
   itself, so its guard refuses the plan at phase 0 (exit 3) before anything is

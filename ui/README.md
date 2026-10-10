@@ -1034,6 +1034,7 @@ API in the same words** (`routes/restores.rs::validate_topic_mapping`):
 | the same source twice | names both rows and the target they share | `topicMapping[i].target` / `duplicate_mapping` |
 | a prefix that is not a Kafka name, or an empty one (the identity map) without the original-name choice | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
 | the original-name choice without the owner statement | asks for the statement (the runner would refuse `OriginalNameOwnerNotChecked`) | -- (the API never sees the plan; the runner refuses it) |
+| a one-person confirmation of the original-name choice without every original topic name re-typed, exactly | names what is missing, extra or repeated | `originalNameConfirmation.typedTopics` / `typed_topics_required` or `typed_topics_mismatch` |
 | a mapped name longer than a broker accepts | names the topic and the bound | `topicMapping[i].target` / `mapped_name_illegal` |
 
 A duplicate target can only be a duplicate SOURCE, because a prefix map over
@@ -1164,11 +1165,23 @@ the review step shows the approval subject the plan needs (`originalName`, or
 `ordinary`). In console mode the page signs `approvalSubject: originalName`
 into the authorization document only for a Restore that declares it.
 
+**One person confirms only with the names typed (the owner's decision
+OD-10).** When the namespace is confirmed by one person (`confirm`) and the
+original-name choice is made, the plan step asks the requester to RE-TYPE
+every original topic name, one per line (`ORIGINAL_NAME_TYPED_SENTENCE`).
+Create refuses until the typed list is exactly the plan's topics: each once,
+nothing else, compared byte for byte, with no case folding
+(`typedTopicsProblem`, which names what is missing, extra or repeated). The
+request then carries `originalNameConfirmation.typedTopics`, which the console
+signs. In a `strict` namespace nothing is typed: the second person approves.
+
 **The approvals page shows the subject the SIGNED bytes carry**:
 `originalName`, `ordinary`, or `unknown` when the document cannot be read, with
 `ORIGINAL_NAME_APPROVAL_SENTENCE` beside an original-name Restore waiting for
 an approval (the CLI line, `logweir drill approve --approval-subject
-original-name`, included). Rows: `ui/tests/original-name.spec.js`.
+original-name`, included), and, for a one-person confirmation, the typed
+names the signed document carries (`typedTopicsOf`). Rows:
+`ui/tests/original-name.spec.js`.
 
 ## The replication factor: a default with its basis, an input, and a refusal before Create
 

@@ -489,6 +489,25 @@ Nothing in the CRD shapes depends on the bump: a `Restore` carrying
 `spec.authorization` is refused by a v1 runner because the bundle it needs is
 absent, which is the same fail-closed path as a missing approval.
 
+## Amendment J — restore under the original topic names (OD-2, OD-10)
+
+Accepted from 2026-10-09 (PROD-15.1). The MVP's founding constraint, that a
+restore writes only topics that did not exist, is KEPT. What changes is which
+names those may be. A restore may now recreate a topic under the source's own
+name (`target.topic_naming.original_name` in `newTopic` mode), but only into
+an ABSENT topic that the run creates itself, exclusively, behind its own
+signed approval subject (`originalName`). This is the owner's decision OD-2,
+which narrowed `docs/stability.md`'s Never #1 to a LIVE topic. On a
+one-person-confirmation install the requester must also re-type every
+original topic name (OD-10). The conditions are held by the runner, the
+controller and the product API, and the evidence carries them as scorecard
+1.8.0's `target.original_name`. Teardown and the probe never touch such a
+name. The one deletion of an original name Logweir performs is a topic this
+run created in the same request and proved untouched, after a lost creation
+race. No CRD kind is added, so Amendment A's list is unchanged. The contract
+is [PROD-15.1-original-name.md](to-do/decisions/PROD-15.1-original-name.md),
+and the operator's account is [kubernetes.md](kubernetes.md) §12.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

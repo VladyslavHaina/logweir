@@ -367,7 +367,8 @@ script's `SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json`
     {"topic": "orders", "kind": "strimzi", "reference": "kafka/orders",
      "found_in": "kafkaTopicResources"}
   ],
-  "owner_path": true
+  "owner_path": true,
+  "kafka_topic_resources_sha256": "sha256:3f5c…"
 }
 ```
 
@@ -382,14 +383,16 @@ topic id at creation, and none can be preserved.
 | Field | Type | Meaning |
 |---|---|---|
 | `approval_subject` | string | `originalName`: the separate approval subject phase 1 verified in the signed approval. An ordinary approval never authorises this restore. |
-| `approval_mode` | string | The approval document it was verified in: `v1Approval` (a per-run approval document v1), `governed` or `ordinary` (an authorization document v2 under that policy). A standing rehearsal authorization never authorises one. |
+| `approval_mode` | string | The approval document it was verified in: `v1Approval` (a per-run approval document v1), `governed` or `ordinary` (an authorization document v2 under that policy; `ordinary` is a one-person confirmation). A standing rehearsal authorization never authorises one. |
 | `cluster_condition` | string | Which condition admitted the identity mapping: `targetIsNotSource` (a known source cluster id differs from `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be, the source cluster, and every broker reported `auto.create.topics.enable=false`). |
-| `source_cluster_id` | string, optional | The source cluster id compared: the bound point's verified receipt, else the allowlist file's. Required beside `targetIsNotSource`. |
+| `source_cluster_id` | string, optional | The source cluster id compared: the bound point's verified receipt, measured at backup time. An unsigned runner input (the allowlist file's) never counts. Required beside `targetIsNotSource`. |
 | `owner_detection` | string[] | Where the run looked for a declarative owner of a restored name: `plan` (the approved plan's `owners`), `kafkaTopicResources` (the `KafkaTopic` resources given with `--kafka-topic-resources`), `pointReceipt` (the owners the bound point's receipt recorded at backup). Never empty: an owner nobody looked for is never read as no owner. |
 | `owners` | object[] | Every owner found, sorted: `topic`, `kind` (`strimzi` or `external`), `reference` (a `KafkaTopic`'s `namespace/name`, a repository path) and `found_in` (one of `owner_detection`). |
 | `owner_path` | bool | Whether the approved plan chose the owner path (restore although an owner is found, its reconciliation paused). Required for any owner found. |
+| `confirmation` | string, optional | **OD-10.** `typedTopicNames`: the requester confirmed alone and RE-TYPED every original topic name, exactly, and the console signed what was typed. Present exactly when `approval_mode` is `ordinary`. |
+| `kafka_topic_resources_sha256` | string, optional | `sha256:` of the `KafkaTopic` resources file the runner looked in (`--kafka-topic-resources`, unsigned runner input). Present exactly when `owner_detection` lists `kafkaTopicResources`. |
 
-Ten arms, enforced by both readers in the same position (after
+Twelve arms, enforced by both readers in the same position (after
 `source.selection`, before `redactions`) and words, fire only on a document
 carrying the block:
 
@@ -405,6 +408,8 @@ carrying the block:
 | ON-8 | an empty `owner_detection`, a repeated place, or one outside the three above |
 | ON-9 | an owner whose `found_in` is not in `owner_detection`, whose `kind` is unknown, or whose `topic` is blank |
 | ON-10 | an owner found with `owner_path: false` |
+| ON-11 | `confirmation` other than `typedTopicNames`, or present when `approval_mode` is not `ordinary`, or absent when it is |
+| ON-12 | `kafka_topic_resources_sha256` that is not `sha256:` and 64 lowercase hex, or present without `kafkaTopicResources` in `owner_detection`, or absent beside it |
 
 A block that is not an object with these fields and types is refused when the
 document is read; an unknown key in it is ignored. Each arm reads only the new
@@ -414,8 +419,11 @@ block:
 
 ```text
 original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by v1Approval; the target cluster is not the source cluster (5L6g3nShT-eMCtK--X86sw)
-original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path
+original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path; KafkaTopic resources sha256:3f5c…
 ```
+
+A one-person confirmation's first line reads `approved by ordinary (the
+requester re-typed every original topic name)`.
 
 **The version only rises.** Each step that raises the version keeps the newer
 minor (`scorecard::newer_format_version`), so an original-name restore from a
