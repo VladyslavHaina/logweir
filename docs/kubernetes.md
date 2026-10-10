@@ -5795,12 +5795,30 @@ verdict, and no controller reads it as a crash:
 * The `KafkaCluster` probe re-reads its Job on every pass, so it states the
   rule itself. A probe Job with a `deletionTimestamp` is judged not at all —
   no pod read, no status write, no TTL patch — and the next probe is created
-  once it is gone. A finished probe Job that carries its TTL has had its
-  verdict recorded (the TTL is patched on only after that write), so a
-  missing terminated `runner` on it is not re-judged. **The last recorded
-  verdict stands until the next probe answers:** `reachable`, `clusterId`,
-  `observedAt` and the `Reachable` condition do not move while Kubernetes
-  collects a Job.
+  once it is gone. A finished probe Job that carries **this controller's
+  marker** has had its verdict recorded and is not re-judged when it has no
+  terminated `runner` left: the annotation
+  `logweir.dev/probe-verdict-recorded`, whose value is the Job's own UID, which
+  the controller sends in the same patch as the five-minute TTL and only after
+  the status write that recorded the verdict. **A TTL alone is never the
+  marker:** a mutating admission policy or a defaulting webhook that gives
+  every new Job a `ttlSecondsAfterFinished` does not make a crashed probe read
+  as judged, and the controller overwrites that TTL with its own re-probe
+  timer.
+* **The last recorded verdict stands until the next probe answers, for at
+  most 630 s** (`STALE_AFTER_SECS`, twice the 315 s re-probe interval — the
+  console's own freshness budget). The probe Job's name is fixed, so while it
+  is mid-deletion (a finished pod `Terminating` on a node that went away, a
+  foreign finalizer) or judged and never collected by its TTL, no newer probe
+  can run. Once the reading in `status.observedAt` is older than that bound,
+  any pass that forms no new verdict — the deferred ones, a re-read of the old
+  Job, a probe still running — clears `reachable` with reason `ProbeStale`
+  (`Reachable=Unknown`, its message naming why no newer probe has answered)
+  and leaves `observedAt` and `clusterId` as the record of the last real look.
+  A `Restore` and a rehearsal admit a target on `reachable: true` alone, so a
+  stale reading admits nothing; the next probe that answers sets `reachable`
+  again. A healthy connection is re-read every 315 s plus the probe's run, so
+  it never reaches the bound.
 * `NotFound` and `Conflict` while a Job is collected are expected: the probe
   pod gone between the pod list and the `pods/log` read, the Job gone before
   its TTL patch, and a status write that lost its `resourceVersion`
@@ -5808,16 +5826,22 @@ verdict, and no controller reads it as a crash:
   probe Job's events before the status the creating pass wrote) are debug
   lines and ordinary outcomes, never a WARN and never a reconcile error. A
   verdict write that lost the precondition is never followed by its TTL; the
-  newer copy's own watch event reconciles again.
-* A real crash, an unreadable probe log and a refused probe pod are logged at
-  WARN **once per Job**, on the pass whose status write first recorded them.
+  newer copy's own watch event reconciles again. Only those calls are
+  answered that way: any other error, a `404` or a `409` from another call
+  included, reaches `error_policy` and is a WARN
+  (`KafkaCluster probe reconcile failed; requeueing`).
+* A real crash, an unreadable probe log, a refused probe pod and a reading
+  cleared as `ProbeStale` are logged at WARN **once per Job**, on the pass
+  whose status write first recorded them.
 
 Before this build PoC batch 2 measured `reachable` cleared for about 17 s on a
 healthy connection whenever its probe Job was collected — long enough for a
 `Restore` against it to be refused `ClusterNotReachable` — and about twelve
 WARN lines per five-minute cadence for twelve connections. Nothing about the
-objects' schema changes, so there is no migration step, and a rollback brings
-back only the flap and the WARN lines.
+objects' schema changes, so there is no migration step: the first pass over a
+probe Job finished by an older controller (which carries no marker) judges it
+once more, as that controller would have, and gives it the marker. A rollback
+brings back the flap and the WARN lines, and drops the 630 s bound.
 
 The pod is found by `batch.kubernetes.io/job-name=<job>`, falling back to the
 legacy unprefixed `job-name=<job>` when that returns nothing — both are set on

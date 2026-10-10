@@ -1430,56 +1430,85 @@ twelve connections, about 3,000 a day. Now:
 
 - a probe Job with a `deletionTimestamp` is not read at all and nothing is
   written; the next probe is created once it is gone;
-- a finished probe Job that carries its TTL — patched on only after the status
-  write that recorded its verdict — is not re-judged when its pod is gone;
+- a finished probe Job that carries the controller's own marker — the
+  annotation `logweir.dev/probe-verdict-recorded` = the Job's UID, sent in the
+  same patch as its TTL and only after the status write that recorded its
+  verdict — is not re-judged when its pod is gone. A TTL alone is never the
+  marker: a Job that a mutating admission policy gave a TTL at creation is
+  still judged, and its TTL is overwritten with the five-minute re-probe timer;
 - `NotFound` on the pod log or the TTL patch and `Conflict` on a status write
   are debug lines and ordinary outcomes, not reconcile errors, and a verdict
-  write that lost its precondition is never followed by its TTL;
+  write that lost its precondition is never followed by its TTL; every other
+  error, a `404` or `409` from another call included, is still a WARN;
 - a crash, an unreadable probe log and a refused probe pod are logged at WARN
   once per Job, on the pass whose write first recorded them.
 
-The last recorded verdict therefore stands until the next probe answers. The
-sweep of every other Job-owning controller (`Backup`, `Restore`, the catalog
-sync, retention, a `ProtectionPolicy` delivery, `Preflight` and
-`TopicDiscovery`; a `RehearsalSchedule` owns `Restore`s, not Jobs) found none
-that reads a collected Job: each records a Job's verdict before it gives the
-Job a TTL (the catalog sync's TTL, from creation, is at least an hour) and
-stops at that record before it reads a pod ([kubernetes.md](kubernetes.md),
-*The crashed Job*).
+The last recorded verdict therefore stands until the next probe answers — **for
+at most 630 s** (twice the 315 s re-probe interval, the console's freshness
+budget). A probe Job stuck mid-deletion (a pod `Terminating` on a node that
+went away, a foreign finalizer) or judged and never collected keeps its fixed
+name, so no newer probe can run; once the reading is older than the bound,
+`reachable` is cleared with the new reason `ProbeStale` (`Reachable=Unknown`,
+`observedAt` and `clusterId` kept) and logged at WARN once, so a `Restore` or a
+rehearsal is refused `ClusterNotReachable` rather than admitted on a reading
+nobody repeated. The sweep of every other Job-owning controller (`Backup`,
+`Restore`, the catalog sync, retention, a `ProtectionPolicy` delivery,
+`Preflight` and `TopicDiscovery`; a `RehearsalSchedule` owns `Restore`s, not
+Jobs) found none that reads a collected Job: each records a Job's verdict
+before it gives the Job a TTL (the catalog sync's TTL, from creation, is at
+least an hour) and stops at that record before it reads a pod
+([kubernetes.md](kubernetes.md), *The crashed Job*).
 **Do:** nothing is required. A `KafkaCluster probe reconcile failed` WARN line
-now means a transport, authorization or server failure; an alert that ignored
-the line for its noise can use it again.
+now means a failure other than the collection of a probe Job; an alert that
+ignored the line for its noise can use it again. A connection that reads
+`ProbeStale` has a probe Job Kubernetes has not collected: look for a pod stuck
+`Terminating` or a finalizer on `logweir-probe-<name>`.
 **Scope:** controller rows over the fake API with the controller's log
 captured (`crates/weirkeeper/tests/kafka_cluster_controller.rs`, `fx19_*`): a
-probe Job being deleted, in four shapes (TTL set with its pod gone or still
-terminating, deleted before any TTL, still running), costs one Job read,
+probe Job being deleted, in four shapes (recorded with its pod gone or still
+terminating, deleted before any verdict, still running), costs one Job read,
 writes nothing and logs no WARN; a recorded verdict whose pod was collected
-writes nothing; the pod gone by the log read and the Job gone by its TTL
-patch are outcomes with no WARN, and a `500` on the log read is still an
-error; a `409` on a status write is an outcome on every write path, and a
-verdict's TTL is not patched after it (and is after a `200`); one whole probe
-cycle — the read Job re-read, its deletion with the pod terminating and then
-gone, a stale read of it, the next probe's creation, a `409` from a stale copy,
-the new probe running and then read — keeps `reachable: true` after every pass
-and logs no WARN; `error_policy` logs a stray `404` or `409` at debug and a
-`500` or `403` at WARN. Negative controls: a real crash clears `reachable` and
-logs exactly one WARN over three passes; a refused probe pod logs one WARN
-over three passes. The class-sweep rows (`backup_controller.rs`,
-`restore_controller.rs`, `recovery_catalog_controller.rs`,
-`retention_policy_controller.rs`, `protection_controller.rs`, `fx19_*`) hand
-each other controller a Job in its being-collected shape and assert no write
-and no WARN, each with a control showing that the read its gate prevents is
-reachable. Twenty-eight mutants of the controller change, all killed:
-among them deletion read as a crash, a WARN on `NotFound` or `Conflict`, a
-`404` or a `409` propagated as an error, clearing on an already-recorded
-verdict, a TTL after a superseded write on each of six paths, and a WARN on
-every pass (one survived a first run and got its row). Not proven live in this branch: the PoC upgrade that carries it
-watches every connection's `reachable` across fifteen minutes of probe cycles
-(it must never leave `true` on a healthy connection) and counts the
-controller's `KafkaCluster` WARN lines (about zero, against about twelve a
-cadence before).
-**Rollback:** an older controller brings the flap and the WARN lines back;
-nothing is stored differently, so nothing needs converting.
+writes nothing; a crashed Job created with a foreign TTL is judged and gets
+the TTL and the marker, a marker naming another UID is not this Job's, and a
+reading under a foreign day-long TTL keeps the five-minute cadence; a
+deletion stalled past the bound clears `reachable` (`ProbeStale`, one WARN
+over three passes) while one inside it is deferred and silent; a judged Job
+its TTL never collects is bounded the same way and is looked at again before
+the bound; a reading older than the bound is not written as a verdict, and a
+running probe clears a stale `reachable`; a `Restore` over the target the
+probe left is admitted inside the bound and refused `ClusterNotReachable`
+past it; the pod gone by the log read and the Job gone by its TTL patch are
+outcomes with no WARN, and a `500` on the log read is still an error; a `409`
+on a status write is an outcome on every write path, and a verdict's TTL is
+not patched after it (and is after a `200`); an `AlreadyExists` on the probe
+Job's `POST` is a reconcile error and a WARN; one whole probe cycle — the read
+Job re-read, its deletion with the pod terminating and then gone, a stale read
+of it, the next probe's creation, a `409` from a stale copy, the new probe
+running and then read — keeps `reachable: true` after every pass and logs no
+WARN. Negative controls: a real crash clears `reachable` and logs exactly one
+WARN over three passes; a refused probe pod, an unreadable log and a crash
+whose TTL patch failed log one WARN each over their passes. The class-sweep
+rows (`backup_controller.rs`, `restore_controller.rs`,
+`recovery_catalog_controller.rs`, `retention_policy_controller.rs`,
+`protection_controller.rs`, `fx19_*`) hand each other controller a Job in its
+being-collected shape and assert no write and no WARN, each with a control
+showing that the read its gate prevents is reachable. Forty-two mutants of the controller change, all
+killed: among them deletion read as a crash, a WARN on `NotFound` or
+`Conflict`, a `404` or a `409` propagated as an error, clearing on an
+already-recorded verdict, the marker read as "has a TTL", the staleness bound
+removed at the deferrals, at a re-read and at a running probe, a requeue that
+sleeps past it, a superseded write ignored on each of its ten paths, a WARN
+on every pass at each of five sites, and `error_policy` demoting what it is
+handed (three survived a first run and got their rows).
+Not proven live in this branch: the PoC upgrade that carries it watches every
+connection's `reachable` across fifteen minutes of probe cycles (it must never
+leave `true` on a healthy connection), checks that new probe Jobs carry no
+TTL before their verdict, records the longest any probe Job stays mid-deletion,
+and counts the controller's `KafkaCluster` WARN lines (about zero, against
+about twelve a cadence before).
+**Rollback:** an older controller brings the flap and the WARN lines back and
+drops the 630 s bound; the marker annotation it does not read is harmless,
+and nothing stored needs converting.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
