@@ -12148,19 +12148,20 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
     }
 }
 
-/// **Points nobody can take never push a readable point out of the window.**
-/// An archive can hold many points that are not `Available` — an older
-/// build's oversized points, a crashed run's half-written records, reads that
-/// failed — and the window is `viewLimit` entries in walk order. Here five
-/// unreadable points are NEWER than three readable ones, so the walk meets
-/// them first, and the window holds three: it lists the three readable
-/// points, and counts all eight (so the controller's view says it is a
-/// window). CONTROL: with room for all eight, the five are listed too.
+/// **Points that only failed to be read never push a readable point out of
+/// the window.** An archive can hold many points nobody can take — an older
+/// build's oversized points, reads that failed — and the window is
+/// `viewLimit` entries in walk order. Here five such points are NEWER than
+/// three readable ones, so the walk meets them first, and the window holds
+/// three: it lists the three readable points, and counts all eight (so the
+/// controller's view says it is a window). CONTROL: with room for all eight,
+/// the five are listed too.
 ///
 /// KILLS: entries kept in walk order alone (the window would hold three
 /// unreadable points and no readable one).
 #[test]
 fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
+    use logweir_engine_oso::storage::caps;
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let mut objects = FakeObjects::new();
     let mut readable = Vec::new();
@@ -12178,9 +12179,15 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
         objects = place(objects, &f);
         if day <= 3 {
             readable.push(f.point.point_id.clone());
+        } else if day % 2 == 0 {
+            // An older build's oversized point.
+            objects = objects.reporting_size(&f.record_key, caps::CATALOG_RECORD + 1);
         } else {
-            // A crashed run's half-written record.
-            objects = objects.with_object(&f.record_key, b"{\"format_version\":\"1.");
+            // A read that failed.
+            objects = objects.failing_key(
+                &f.record_key,
+                Fault::Io("connection reset by peer".to_string()),
+            );
         }
     }
     let window = |view_limit: i64| {
@@ -12193,7 +12200,7 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
         ));
         let counts = summary_of(&body, "catalog-counts=");
         assert_eq!(counts["total"], 8, "every point is counted: {counts}");
-        assert_eq!(counts["unreadableMalformed"], 5, "{counts}");
+        assert_eq!(counts["unreadable"], 5, "{counts}");
         entries_of(&body)
     };
     let listed = window(3);
@@ -12218,6 +12225,77 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
             .count(),
         5
     );
+}
+
+/// **A readable point never pushes EVIDENCE out of the window.** Entries
+/// that say something about the archive's integrity — a `Conflict` (the
+/// archive contradicts the signed receipt), a record whose bytes are not a
+/// record — are never the ones an `Available` point displaces. Here three
+/// such points are newer than three readable ones, the window holds three,
+/// and it keeps the three pieces of evidence; the readable points are
+/// counted, and the view says it is a window.
+///
+/// KILLS: an `Available` point displacing any entry that is not `Available`
+/// (a tampered point pushed out of the listing by points written after it).
+#[test]
+fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut evidence = Vec::new();
+    for day in 1..=6 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{day}"),
+                "run-a",
+                &format!("2026-09-{day:02}T03:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+        match day {
+            // The archive's manifest is not the one the receipt signed.
+            4 => objects = objects.with_object(&f.manifest_key, b"{\"topics\":[1]}"),
+            // The record contradicts the receipt it names.
+            5 => {
+                let mut doc: serde_json::Value =
+                    serde_json::from_slice(&f.record_bytes).expect("JSON");
+                doc["covered"]["to_ms"] = serde_json::json!(1i64);
+                objects =
+                    objects.with_object(&f.record_key, &serde_json::to_vec(&doc).expect("JSON"));
+            }
+            // Bytes at the record's key that are not a record.
+            6 => objects = objects.with_object(&f.record_key, b"{\"format_version\":\"1."),
+            _ => continue,
+        }
+        evidence.push(f.point.point_id.clone());
+    }
+    let body = body_of(&drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            view_limit: 3,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    ));
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(
+        (&counts["total"], &counts["available"], &counts["conflict"]),
+        (
+            &serde_json::json!(6),
+            &serde_json::json!(3),
+            &serde_json::json!(2)
+        ),
+        "{counts}"
+    );
+    let listed = entries_of(&body);
+    let mut ids: Vec<&str> = listed
+        .iter()
+        .map(|e| e["pointId"].as_str().expect("an id"))
+        .collect();
+    ids.sort_unstable();
+    evidence.sort_unstable();
+    assert_eq!(ids, evidence, "the evidence stays listed: {listed:?}");
 }
 
 /// **A `Full` rescan lists a point whose record gave no facts, by the point id

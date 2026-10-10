@@ -1011,6 +1011,9 @@ impl WalkStop {
 /// The state one walk accumulates.
 struct Walk {
     entries: Vec<CatalogEntry>,
+    /// FX-33: beside each entry, whether it may give its place in a full
+    /// window to an `Available` point ([`displaceable`]).
+    displaceable: Vec<bool>,
     counts: CatalogCounts,
     by_day: BTreeMap<String, i64>,
     signers: BTreeMap<String, i64>,
@@ -1032,6 +1035,7 @@ impl Walk {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
+            displaceable: Vec::new(),
             counts: CatalogCounts::default(),
             by_day: BTreeMap::new(),
             signers: BTreeMap::new(),
@@ -1585,26 +1589,61 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and a point
-    // that is not `Available` never costs an `Available` one its place. An
-    // archive can hold many points nobody can take — an older build's
-    // oversized points, a crashed run's half-written records, reads that
-    // failed — and the window is `viewLimit` entries in walk order. When it is
-    // full, an `Available` point takes the place of the last-listed entry that
-    // is not. Either way the walk counted more than it listed, so the view
-    // says it is a window (`truncated`).
+    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and an
+    // `Available` point is not kept out of it by points that only failed to be
+    // read. The window is `viewLimit` entries in walk order, and an archive can
+    // hold many points nobody can take — an older build's oversized points,
+    // reads that failed. When the window is full, an `Available` point takes
+    // the place of the last-listed DISPLACEABLE entry ([`displaceable`]), and
+    // never of one that is evidence about the archive's integrity. Either way
+    // the walk counted more than it listed, so the view says it is a window
+    // (`truncated`), and the counts name every point.
+    let can_give_way = displaceable(&observation);
     let entry = build_entry(&observation);
     if walk.entries.len() < view_limit {
         walk.entries.push(entry);
+        walk.displaceable.push(can_give_way);
     } else if entry.availability == Availability::Available {
-        if let Some(at) = walk
-            .entries
-            .iter()
-            .rposition(|e| e.availability != Availability::Available)
-        {
+        if let Some(at) = walk.displaceable.iter().rposition(|d| *d) {
             walk.entries.remove(at);
+            walk.displaceable.remove(at);
             walk.entries.push(entry);
+            walk.displaceable.push(can_give_way);
         }
+    }
+}
+
+/// **FX-33.** Whether a listed entry may give its place in a full window to an
+/// `Available` point: only when it carries no evidence about the archive's
+/// integrity — what the walk can tell apart, and no more.
+///
+/// - **May**: `Missing`, `Deleted`, `Partial`, `UnsupportedFormat`, and an
+///   `Unreadable` point whose document could not be read (a store error) or
+///   is over its read bound (a size). None of these says the bytes are other
+///   than what was written.
+/// - **Never**: a signature that did not verify, whatever the availability; a
+///   `Conflict` (the archive contradicts the signed receipt, or the set was
+///   written again); an `Unreadable` point whose bytes are not the document
+///   their key names (`malformed`), which is what tampered bytes look like —
+///   and also a crashed run's half-written record, which the walk cannot tell
+///   from them, so both stay listed; an `Unreadable` point with no stated
+///   cause. And an `Available` point is never displaced.
+fn displaceable(observation: &Observation) -> bool {
+    if observation.signature == SignatureVerdict::Invalid {
+        return false;
+    }
+    match observation.availability {
+        Availability::Missing
+        | Availability::Deleted
+        | Availability::Partial
+        | Availability::UnsupportedFormat => true,
+        Availability::Unreadable => observation.cause.is_some_and(|c| {
+            matches!(
+                c.reason,
+                CauseReason::ReadFailed | CauseReason::OverReadCap | CauseReason::NotFound
+            )
+        }),
+        Availability::Available | Availability::Conflict => false,
     }
 }
 
