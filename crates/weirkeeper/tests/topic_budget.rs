@@ -381,6 +381,137 @@ fn a_backup_of_many_topics_is_verified_by_the_controller() {
     );
 }
 
+/// **The receipt a REAL backup of 500 topics signed gets a real verdict from
+/// the controller's own verification, on both of its paths.** The document is
+/// the one the live row `e2e/tests/topic_budget.rs` leaves in its scratch
+/// directory (`topic-budget/receipt.json` and `receipt.sig`): a real engine,
+/// a real broker, signed with the fixture key this file's roster carries.
+///
+/// `#[ignore]`: it needs those two files, named by `FX33_LIVE_RECEIPT_DIR`.
+/// It is a row about a REAL document; the rows above hold the same code to
+/// generated ones at every size on every run.
+///
+/// NEGATIVE CONTROLS: the same bytes under the 1 MiB document cap, which is
+/// how the controller read a receipt before FX-33, are `NotAttempted`; and one
+/// changed byte is `Invalid`.
+#[test]
+#[ignore = "live: needs FX33_LIVE_RECEIPT_DIR, where e2e/tests/topic_budget.rs wrote receipt.json and receipt.sig"]
+fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller() {
+    let dir = PathBuf::from(
+        std::env::var("FX33_LIVE_RECEIPT_DIR").expect("FX33_LIVE_RECEIPT_DIR names the directory"),
+    );
+    let receipt = std::fs::read(dir.join("receipt.json")).expect("receipt.json");
+    let sidecar = std::fs::read(dir.join("receipt.sig")).expect("receipt.sig");
+    let document: logweir_core::backup_receipt::BackupReceipt =
+        serde_json::from_slice(&receipt).expect("a backup receipt");
+    let topics = document.source.topics.len();
+    let len = receipt.len() as u64;
+    let digest = sha256_prefixed(&receipt);
+    let trust = trust();
+
+    // 1. The controller's own handle.
+    let store = stored(&receipt, &sidecar);
+    let r = verify_evidence(
+        Some(&store),
+        &trust,
+        PAYLOAD_KEY,
+        &digest,
+        SIDECAR_KEY,
+        RECEIPT,
+    );
+    assert_eq!(r.result, VerificationVerdict::Valid, "{:?}", r.detail);
+    assert_eq!(r.matched_key_id.as_deref(), Some(FIXTURE_KEY_ID));
+    let o = observe_archive(&store, &keys()).expect("two keys: an observation");
+    assert_eq!(o.receipt_sha256, Some(digest.clone()));
+    assert_eq!(
+        o.covered,
+        Some((document.covered.from_ms, document.covered.to_ms))
+    );
+    let records: u64 = document.records.values().sum();
+    assert_eq!(o.records, Some(i64::try_from(records).unwrap()));
+
+    // 2. The relay, framed as `logweir check run` frames it.
+    let log = relay_log(&receipt, &sidecar);
+    let request = request(RECEIPT);
+    let relay = decode_within(&log, &expectations(), &request.stream_caps())
+        .expect("the receipt decodes under its own cap");
+    let (
+        Presence::Complete,
+        Relayed::Both {
+            payload,
+            sidecar: relayed_sidecar,
+        },
+    ) = read_relay(&relay, &request)
+    else {
+        panic!("the relay carries both objects whole");
+    };
+    let via_relay = verify_fetched(
+        &payload,
+        &relayed_sidecar,
+        &trust,
+        PAYLOAD_KEY,
+        &digest,
+        SIDECAR_KEY,
+        RECEIPT,
+    );
+    assert_eq!(
+        via_relay.result,
+        VerificationVerdict::Valid,
+        "{:?}",
+        via_relay.detail
+    );
+
+    eprintln!(
+        "[fx33-live] a real receipt of {topics} topics, {len} bytes ({} a topic), {records} \
+         records: Valid by the controller's handle and by the relay ({} bytes of log); key {}",
+        len / topics.max(1) as u64,
+        log.len(),
+        FIXTURE_KEY_ID
+    );
+
+    // CONTROL: what the controller answered for these bytes before FX-33.
+    if len > caps::CONTROLLER_DOCUMENT {
+        let old = verify_fetched(
+            &receipt,
+            &sidecar,
+            &trust,
+            PAYLOAD_KEY,
+            &digest,
+            SIDECAR_KEY,
+            SCORECARD,
+        );
+        assert_eq!(old.result, VerificationVerdict::NotAttempted, "{old:?}");
+        assert!(
+            names(
+                old.detail.as_deref().unwrap_or_default(),
+                caps::CONTROLLER_DOCUMENT
+            ),
+            "{old:?}"
+        );
+        eprintln!("[fx33-live] under the 1 MiB document cap the same bytes are NotAttempted");
+    }
+    // CONTROL: one byte changed after signing.
+    let mut tampered = receipt.clone();
+    let marker = b"\"backup_id\": \"";
+    let at = tampered
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("the receipt names its set")
+        + marker.len();
+    assert!(tampered[at].is_ascii_alphabetic());
+    tampered[at] ^= 0x20;
+    let r = verify_fetched(
+        &tampered,
+        &sidecar,
+        &trust,
+        PAYLOAD_KEY,
+        &sha256_prefixed(&tampered),
+        SIDECAR_KEY,
+        RECEIPT,
+    );
+    assert_eq!(r.result, VerificationVerdict::Invalid, "{r:?}");
+}
+
 /// **A receipt over the bound — one an older runner wrote, 5,000 topics — is
 /// `NotAttempted` NAMING THE RECEIPT CAP, final, and is not read.** It is
 /// present, and nothing is taken from it.
