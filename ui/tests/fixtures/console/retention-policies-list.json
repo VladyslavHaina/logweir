@@ -52,6 +52,7 @@
       "holds": 0,
       "keepLast": 1,
       "lastEvaluation": {
+        "accounting": "NotRecorded",
         "at": "2026-09-19T01:49:15.729621386Z",
         "candidateCount": 3,
         "candidates": [
@@ -177,6 +178,7 @@
         "startedAt": "2026-09-19T04:17:00Z"
       },
       "lastEvaluation": {
+        "accounting": "NotRecorded",
         "at": "2026-09-19T01:49:15.729621386Z",
         "candidateCount": 3,
         "candidates": [

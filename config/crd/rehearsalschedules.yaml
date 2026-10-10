@@ -119,7 +119,7 @@ spec:
                     type: integer
                   recordsPerPartition:
                     default: 25
-                    description: How many records per partition the canary restores.
+                    description: 'How many records each rehearsal reads back from every sampled partition of the restored topics and reconciles against the archive: the sample''s size, rendered into the slot''s plan as `sample.records_per_partition`. It does not bound the restore, which writes every archived record in the window; the scorecard''s `sample.records_restored` is the count actually read back. Unread under `coverage: complete`.'
                     format: int32
                     maximum: 1000
                     minimum: 1

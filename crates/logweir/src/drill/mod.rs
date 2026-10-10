@@ -4799,6 +4799,128 @@ mod tests {
         );
     }
 
+    /// **FX-14 (FX-7 merge review MR-L2): a NOTED point keeps its verified
+    /// coverage, through `check_v2_bindings` itself.** The two source scans
+    /// around this row pin the assignment's text; this one drives the function
+    /// over a real archive and reads what it returns.
+    ///
+    /// The archive is a pinned point COPIED into an unversioned store (a
+    /// local filesystem, which serves no version): the receipt pins a version
+    /// this bucket never issued, so the binding proves the point by its digest
+    /// and notes that the pin could not be checked (FX-7, review H-1). That
+    /// note is a warning, never a reason to trust the receipt less: the
+    /// receipt's `captureDenied` must reach the run, or phases 3 and 7 read
+    /// every topic as `notAssessed (unknown)` although the receipt the run
+    /// verified recorded more.
+    ///
+    /// KILLS MR8 (the merge review's mutant, which survived every suite): the
+    /// assignment wrapped in `if verified.pin_note.is_none() { … }`. Also
+    /// kills the assignment deleted, or replaced by UNKNOWN, for a noted point.
+    /// The control is the same archive's unnoted reading: the binding proves
+    /// it with the note set, so the row is about the noted path and not about
+    /// a point whose pin happened to be checked.
+    #[test]
+    fn a_noted_point_hands_its_verified_coverage_through_check_v2_bindings() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        use logweir_evidence::keys::SigningKey;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // A filesystem store has no prefix, so the engine reads set
+        // `nightly-7`'s manifest at `nightly-7/manifest.json`
+        // (`Store::engine_manifest_key`), and that is the key the receipt
+        // attests.
+        let manifest_key = "nightly-7/manifest.json";
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let mut receipt = binding::tests::receipt(manifest_key, &manifest_sha256);
+        receipt.format_version =
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION.into();
+        // The version the SIGNING bucket answered; this copy never issued it.
+        receipt.archive.manifest_version_id = Some("signing-bucket-version-1".into());
+        receipt.config_coverage = Some(std::collections::BTreeMap::from([(
+            "orders".to_string(),
+            TopicConfigCoverage {
+                coverage: "captureDenied".into(),
+                reason: None,
+                timestamp_type: None,
+            },
+        )]));
+        assert_eq!(receipt.validate_invariants(), Ok(()), "a 1.2.0 receipt");
+        let receipt_bytes = serde_json::to_vec(&receipt).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        let sidecar = logweir_evidence::sign::sign_detached(
+            &signer,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            &receipt_bytes,
+        )
+        .expect("signs");
+        let receipt_key = "logweir/backups/nightly-7/run-1.receipt.json";
+        for (key, bytes) in [
+            (receipt_key.to_string(), receipt_bytes.clone()),
+            (
+                crate::catalog::cli::sidecar_key_of(receipt_key),
+                serde_json::to_vec(&sidecar).expect("serialises"),
+            ),
+            (manifest_key.to_string(), manifest),
+        ] {
+            let path = root.join(&key);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(&path, bytes).expect("an archive object is written");
+        }
+        let mut plan =
+            binding::tests::plan_with(Some(logweir_core::execution_contract::PointBinding {
+                point_id: crate::catalog::record::point_id(&receipt_bytes),
+                receipt_key: receipt_key.into(),
+                receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+                manifest_sha256,
+            }));
+        plan.source.storage = logweir_core::engine::StorageUrl::Filesystem {
+            path: root.to_path_buf(),
+        };
+        let keys = binding::tests::evidence_keys(vec![(&signer, binding::tests::trusted(&signer))]);
+
+        // The path under test: the binding PROVES the point WITH the note.
+        let archive = archive_read_handle(&plan.source.storage, None).expect("the archive opens");
+        let verified =
+            binding::verify_point_binding(&plan, &archive, Some(&keys), chrono::Utc::now())
+                .expect("a copy of a signed point is that point")
+                .expect("the plan is bound");
+        assert!(
+            verified
+                .pin_note
+                .as_deref()
+                .is_some_and(|n| n.starts_with(binding::POINT_PIN_UNCHECKED)),
+            "this row is about a noted point: {verified:?}"
+        );
+
+        let startup = StartupInputs {
+            spec_text: String::new(),
+            allowed_text: String::new(),
+            approved: None,
+            authorization: None,
+            evidence_keys: Some(keys),
+        };
+        let bindings = check_v2_bindings(
+            &args_with(None),
+            &startup,
+            &plan,
+            None,
+            false,
+            &SigningKey::generate_ed25519().verifying_key(),
+        )
+        .expect("the noted point is bound, not refused");
+        assert_eq!(
+            bindings.source_config_coverage.of("orders"),
+            ConfigCoverage::CaptureDenied,
+            "the note never costs the run the coverage its verified receipt recorded"
+        );
+        assert_eq!(
+            bindings.bound_set.map(|s| s.backup_id).as_deref(),
+            Some("nightly-7"),
+            "the noted point's set travels with its coverage"
+        );
+    }
+
     /// **FX-16: the set the verified receipt describes travels WITH its
     /// coverage**, from the same `VerifiedPoint`, through `V2Bindings` and
     /// `context` into `Ctx::bound_set` — so a run whose coverage came from a

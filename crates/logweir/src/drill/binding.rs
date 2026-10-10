@@ -794,6 +794,23 @@ fn verify_receipt_signature(
 /// this build computes — so both are answered without a round trip, and the
 /// message says which field.
 fn check_point_shape(point: &PointBinding) -> Result<(), DrillError> {
+    let faults = point_shape_faults(point);
+    if faults.is_empty() {
+        return Ok(());
+    }
+    Err(refuse(format!(
+        "{POINT_BINDING_MISMATCH}. The plan's recovery point binding is malformed: {}; no data \
+         operation was started.",
+        faults.join("; ")
+    )))
+}
+
+/// **FX-14.** What is malformed about `point` on its face, one sentence per
+/// field, empty when nothing is. [`check_point_shape`]'s whole judgement, and
+/// the restore preflight's (`check::kinds::restore`), so the preview refuses
+/// exactly the bindings the runner will.
+#[must_use]
+pub fn point_shape_faults(point: &PointBinding) -> Vec<String> {
     let mut faults = Vec::new();
     if !point
         .point_id
@@ -823,14 +840,7 @@ fn check_point_shape(point: &PointBinding) -> Result<(), DrillError> {
             ));
         }
     }
-    if faults.is_empty() {
-        return Ok(());
-    }
-    Err(refuse(format!(
-        "{POINT_BINDING_MISMATCH}. The plan's recovery point binding is malformed: {}; no data \
-         operation was started.",
-        faults.join("; ")
-    )))
+    faults
 }
 
 /// What [`verify_standing_authorization`] PROVED, returned so the caller does
@@ -1045,14 +1055,14 @@ pub fn verify_standing_authorization(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use logweir_core::backup_receipt::{
         BackupReceipt, ReceiptArchive, ReceiptAuth, ReceiptCovered, ReceiptEngine, ReceiptSource,
     };
     use std::collections::BTreeMap;
 
-    fn receipt(manifest_key: &str, manifest_sha256: &str) -> BackupReceipt {
+    pub(crate) fn receipt(manifest_key: &str, manifest_sha256: &str) -> BackupReceipt {
         BackupReceipt {
             format_version: "1.0.0".into(),
             run_id: "run-1".into(),
@@ -1121,7 +1131,7 @@ mod tests {
 
     /// An `EvidenceSigning` key's lifecycle record, active for a day either
     /// side of now -- the fixtures change one field at a time from here.
-    fn trusted(key: &SigningKey) -> logweir_core::trust::TrustedKey {
+    pub(crate) fn trusted(key: &SigningKey) -> logweir_core::trust::TrustedKey {
         logweir_core::trust::TrustedKey {
             key_id: key.key_id(),
             principal_id: format!("install:{}", key.key_id()),
@@ -1137,7 +1147,9 @@ mod tests {
     }
 
     /// An [`wire::EvidenceKeyring`] over `(key, lifecycle)` pairs.
-    fn evidence_keys(entries: Vec<(&SigningKey, logweir_core::trust::TrustedKey)>) -> Vec<u8> {
+    pub(crate) fn evidence_keys(
+        entries: Vec<(&SigningKey, logweir_core::trust::TrustedKey)>,
+    ) -> Vec<u8> {
         serde_json::to_vec(&wire::EvidenceKeyring {
             format_version: wire::EVIDENCE_KEYRING_FORMAT_VERSION.to_string(),
             keys: entries
@@ -1358,7 +1370,7 @@ objectives: {rto_seconds: 1800, pass_rate: 1.0}
 evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
 "#;
 
-    fn plan_with(point: Option<PointBinding>) -> DrillSpec {
+    pub(crate) fn plan_with(point: Option<PointBinding>) -> DrillSpec {
         let mut plan: DrillSpec = serde_yaml::from_str(PLAN_YAML).expect("the fixture parses");
         plan.source.point = point;
         plan

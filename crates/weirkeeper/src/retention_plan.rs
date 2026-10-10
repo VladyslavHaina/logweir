@@ -358,21 +358,46 @@ pub struct Skipped {
 }
 
 /// What one evaluation found. **Nothing here has been deleted.**
+///
+/// # The accounting closes (FX-22)
+///
+/// Every point at this destination is in exactly one of four places, and
+/// [`Evaluation::accounts_for_every_point`] says so:
+///
+/// ```text
+/// points_evaluated = kept + candidates + held_back + skipped
+/// ```
+///
+/// `protected` is not a fifth: every protected point is in `kept`, with its
+/// reason beside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Evaluation {
     /// How many points at this destination were considered.
     pub points_evaluated: i64,
-    /// The point ids that stay, newest first.
+    /// The point ids that STAY, newest first: the rules keep them, or
+    /// something protects them (those are in `protected` too).
+    ///
+    /// **Never a point the per-run ceiling held back** (FX-22). A point the
+    /// rules would remove and `maxDeletionsPerRun` left out of this plan used
+    /// to be pushed here, so 371 points read "321 kept, 50 candidate(s)" for
+    /// `keepLast: 300` and for `keepLast: 10` alike: 21 and 311 points nothing
+    /// keeps were reported as kept. They are in [`Evaluation::held_back`].
     pub kept: Vec<String>,
-    /// The points that would go, newest first, truncated to
-    /// `maxDeletionsPerRun`.
+    /// The points THIS PLAN would remove, newest first — at most
+    /// `maxDeletionsPerRun` of them.
     pub candidates: Vec<Candidate>,
+    /// The points the rules would remove and nothing protects, that the
+    /// per-run ceiling left out of this plan, newest first. **Due, not kept**:
+    /// they are in no plan line, nothing deletes them in this run, and a later
+    /// plan takes them once the ones ahead of them are gone.
+    pub held_back: Vec<String>,
     /// The points something protected.
     pub protected: Vec<Protected>,
     /// The points the evaluation could not classify.
     pub skipped: Vec<Skipped>,
-    /// How many candidates the `maxDeletionsPerRun` truncation dropped. A
-    /// number rather than a bool, so a console can say "50 of 380".
+    /// How many points the `maxDeletionsPerRun` ceiling held back —
+    /// `held_back.len()`. A number rather than a bool, so a console can say
+    /// "50 of 380".
     pub truncated_by_cap: i64,
     /// What every point at this destination that is NOT a candidate still
     /// names — its backup set and the object keys the view knows for it.
@@ -385,6 +410,23 @@ pub struct Evaluation {
     /// the ceiling. It reads the same `PointFacts`, so it defends nothing
     /// against missing or wrong view data (review L2).
     pub retained: RetainedObjects,
+}
+
+impl Evaluation {
+    /// Whether every point considered is in exactly one of `kept`,
+    /// `candidates`, `held_back` and `skipped`, and `truncated_by_cap` is the
+    /// held-back count — the closed accounting the status publishes (FX-22).
+    /// `true` for every value [`evaluate`] returns.
+    #[must_use]
+    pub fn accounts_for_every_point(&self) -> bool {
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        self.truncated_by_cap == count(self.held_back.len())
+            && self.points_evaluated
+                == count(self.kept.len())
+                    .saturating_add(count(self.candidates.len()))
+                    .saturating_add(count(self.held_back.len()))
+                    .saturating_add(count(self.skipped.len()))
+    }
 }
 
 /// The objects retained points still name — [`Evaluation::retained`].
@@ -512,7 +554,8 @@ impl<'a> Located<'a> {
 /// 4. Protect, with a reason: `ActiveRestore`, `Hold`, `LegalHold`,
 ///    `SharedSegment`, `Unknown`.
 /// 5. Candidates = `usable` − kept − protected, truncated to
-///    `maxDeletionsPerRun`.
+///    `maxDeletionsPerRun`. What the ceiling leaves out is `held_back`:
+///    counted, named, and never reported as kept.
 ///
 /// # The newest selectable point is never a candidate
 ///
@@ -740,8 +783,8 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     //    selected whole or not at all: selecting one receipt of a shared set
     //    and keeping its sibling "over the ceiling" would remove the set a
     //    point this evaluation reports as kept still names. A group larger
-    //    than the room left is kept and counted in `truncated_by_cap`, and the
-    //    walk continues with the groups that fit.
+    //    than the room left is HELD BACK whole (`held_back`, counted in
+    //    `truncated_by_cap`), and the walk continues with the groups that fit.
     let cap = usize::try_from(input.max_deletions_per_run.max(0)).unwrap_or(usize::MAX);
     let mut group_size: BTreeMap<usize, usize> = BTreeMap::new();
     for (located, verdict) in &verdicts {
@@ -753,7 +796,6 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     }
     let mut group_selected: BTreeMap<usize, bool> = BTreeMap::new();
     let mut selected = 0usize;
-    let mut over_cap = 0i64;
     for (located, verdict) in &verdicts {
         let point = located.point;
         match verdict {
@@ -776,11 +818,15 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                     fits
                 });
                 if !take {
-                    // Over the ceiling is KEPT and counted, never silently
-                    // dropped: a console that showed 50 candidates out of 380
-                    // without saying so would read as "380 is all there is".
-                    out.kept.push(point.point_id.clone());
-                    over_cap += 1;
+                    // OVER THE CEILING IS HELD BACK — counted, named, and
+                    // NEVER `kept` (FX-22). It stays in the archive after this
+                    // run, which is why it is in `retained` below; but the
+                    // rules would remove it and nothing protects it, so a
+                    // status that filed it under "kept" told an operator that
+                    // `keepLast: 10` keeps 321 points. Never silently dropped
+                    // either: a console that showed 50 candidates out of 380
+                    // without saying so would read as "50 is all there is".
+                    out.held_back.push(point.point_id.clone());
                     continue;
                 }
                 out.candidates.push(Candidate {
@@ -815,7 +861,7 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     }
     out.retained = retained;
     out.protected.sort_by(|a, b| a.point_id.cmp(&b.point_id));
-    out.truncated_by_cap = over_cap;
+    out.truncated_by_cap = i64::try_from(out.held_back.len()).unwrap_or(i64::MAX);
     out
 }
 

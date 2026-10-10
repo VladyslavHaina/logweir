@@ -3517,6 +3517,172 @@ export const ENFORCEMENT_DEGRADED_SENTENCE =
   "scheduling them until its spec changes. Nothing was deleted by the failed runs beyond what " +
   "their own records name.";
 
+/** The two words the product API publishes in `lastEvaluation.accounting`
+ *  (`RetentionAccountingState`, FX-22 review M1). */
+export const ACCOUNTING_RECORDED = "Recorded";
+export const ACCOUNTING_NOT_RECORDED_WORD = "NotRecorded";
+
+/** THE FOUR COUNTS OF A RETENTION EVALUATION, OR `null` WHEN THEY ARE NOT
+ *  RECORDED (FX-22).
+ *
+ *  `pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` +
+ *  the skipped points. `truncatedByCap` is what the policy's rules would
+ *  remove and its per-run ceiling left out of this plan: DUE, NOT KEPT. A
+ *  controller that did not record it filed those points under `kept` -- 371
+ *  points read "321 kept, 50 candidate(s)" for `keepLast: 300` and for
+ *  `keepLast: 10` alike -- so where the counts are absent this page says
+ *  "not recorded" and NEVER counts the `kept` list.
+ *
+ *  THE PRODUCT API SAYS WHETHER THE ACCOUNTING IS RECORDED, AND THIS PAGE
+ *  READS IT (review M1). `lastEvaluation.accounting` is `Recorded` or
+ *  `NotRecorded` on every answer, so console mode does not infer the state
+ *  from a count that happens to be absent: `NotRecorded` -- and any word this
+ *  build does not know -- is `null` whatever else the block carries, and
+ *  `Recorded` still needs the counts themselves to be whole numbers, because
+ *  a word is not a number. AN ANSWER WITHOUT THE WORD, from a build of the
+ *  API that predates it, decodes with `accounting: null` and reads as
+ *  `NotRecorded`, the schema's declared default: nothing is inferred from
+ *  whatever counts such an answer carries.
+ *
+ *  THE RULE IS THE CONTROLLER'S (`RetentionEvaluation::accounting`). Legacy
+ *  mode hands this page the custom resource itself, with no API in between
+ *  and so no `accounting` key at all (`undefined`, which is how this function
+ *  tells the two modes apart), and the rule is applied here wherever the
+ *  lists in hand are whole -- which is every legacy read, and every console
+ *  read whose `truncated` is not `true`:
+ *
+ *  - the four counts add up; and
+ *  - the `kept` list is `keptCount` long (review M2).
+ *
+ *  A block that fails either is two writers' numbers: after a rollback of the
+ *  controller image alone the older controller rewrites the lists and cannot
+ *  remove the counts. While the archive stands still the counts even add up,
+ *  beside a `kept` list of 321 ids for `keptCount: 10`. A stale count is not
+ *  a count.
+ *
+ *  A NEGATIVE NUMBER IS NOT A COUNT (review L3), wherever it stands: the sum
+ *  can close over one (10 + 50 - 5 = 55), and a list cut at the API's row
+ *  bound is not checked against anything. */
+export function evaluationAccounting(evaluation) {
+  const e = evaluation || {};
+  const whole = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0;
+  if (e.accounting !== undefined && e.accounting !== ACCOUNTING_RECORDED) {
+    return null;
+  }
+  if (!whole(e.pointsEvaluated) || !whole(e.keptCount) || !whole(e.candidateCount) ||
+    !whole(e.truncatedByCap)) {
+    return null;
+  }
+  if (e.truncated !== true) {
+    const skipped = Array.isArray(e.skipped) ? e.skipped.length : 0;
+    if (e.keptCount + e.candidateCount + e.truncatedByCap + skipped !== e.pointsEvaluated) {
+      return null;
+    }
+    // FX-39 will cut the status lists at the CRD's bound; this comparison
+    // must then be with `min(keptCount, bound)`, as the controller's is.
+    const listed = Array.isArray(e.kept) ? e.kept.length : 0;
+    if (listed !== e.keptCount) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    pointsEvaluated: e.pointsEvaluated,
+    kept: e.keptCount,
+    candidates: e.candidateCount,
+    heldBack: e.truncatedByCap,
+    ceiling: whole(e.maxDeletionsPerRun) ? e.maxDeletionsPerRun : null,
+  });
+}
+
+/** What the retention panel prints where a count the evaluation does not
+ *  record would go. Never a number derived from a list. */
+export const ACCOUNTING_NOT_RECORDED = "not recorded";
+
+/** Why a retention evaluation shows no kept count and no held-back count. */
+export const ACCOUNTING_NOT_RECORDED_SENTENCE =
+  "This evaluation does not record how many points it keeps or how many its per-run ceiling " +
+  "held back, so this page does not say. An older controller wrote it, or an older " +
+  "controller rewrote part of it after a rollback: its kept list may include points that are " +
+  "due for removal.";
+
+/** The sentence a retention evaluation carries when its per-run ceiling cut
+ *  the plan. `ceiling` is `null` when the evaluation does not record it.
+ *
+ *  `planned` IS HOW MANY POINTS THIS PLAN NAMES, AND ZERO CHANGES THE
+ *  SENTENCE (FX-22 review L1). A plan that names nothing while points are due
+ *  means not one of them fits: each is in a backup set that more due points
+ *  name than the ceiling, and a set is planned whole or not at all. The next
+ *  plan finds the same sets over the same ceiling, so "the rest stay due
+ *  until a later plan names them" would promise what nothing keeps. */
+export function heldBackSentence(heldBack, ceiling, planned) {
+  const limit = ceiling === null || ceiling === undefined
+    ? "maxDeletionsPerRun"
+    : "maxDeletionsPerRun " + String(ceiling);
+  if (planned === 0) {
+    return String(heldBack) + (heldBack === 1 ? " point is" : " points are") +
+      " due under this policy's rules and held back by its per-run ceiling (" + limit + "). " +
+      (heldBack === 1 ? "It is not kept, and it does not fit" : "They are not kept, and not " +
+        "one of them fits") +
+      " this plan: each is in a backup set that more due points name than the ceiling (sets " +
+      "that share objects count as one), a set is planned whole or not at all, and no plan " +
+      "names them until maxDeletionsPerRun is raised.";
+  }
+  return String(heldBack) + (heldBack === 1 ? " more point is" : " more points are") +
+    " due under this policy's rules and held back by its per-run ceiling (" + limit + "). " +
+    (heldBack === 1 ? "It is not kept and it is" : "They are not kept and they are") +
+    " not in this plan: a plan names at most that many points, and the rest stay due until " +
+    "a later plan names them.";
+}
+
+/** WHAT THE CATALOG SAID ABOUT THE VIEW AN EVALUATION READ -- ONE RULE, THE
+ *  PRODUCT API'S TOO (`published_view_incomplete`, FX-22 review L3 and L5):
+ *  never hide a warning, and never assert a completeness that is not
+ *  recorded.
+ *
+ *  - `"incomplete"`: `viewIncomplete` is `true`. Shown WHETHER OR NOT the
+ *    accounting is recorded.
+ *  - `"whole"`: `viewIncomplete` is `false` AND the accounting is recorded:
+ *    the catalog said its view is the whole archive, about the evaluation the
+ *    counts describe.
+ *  - `"not-recorded"`: the member is absent, is not a boolean, or is `false`
+ *    beside an accounting that is not recorded.
+ *
+ *  Before this the panel printed a sentence for `true` and NOTHING for `false`
+ *  and for absent alike, so "the catalog said the view is whole" and "nobody
+ *  said" were the same page. */
+export function evaluationView(evaluation, recorded) {
+  const e = evaluation || {};
+  if (e.viewIncomplete === true) {
+    return "incomplete";
+  }
+  if (e.viewIncomplete === false && recorded === true) {
+    return "whole";
+  }
+  return "not-recorded";
+}
+
+/** The words for [`evaluationView`]'s three answers. */
+export const EVALUATION_VIEW_WORDS = Object.freeze({
+  incomplete: "not the whole archive",
+  whole: "the whole archive, the catalog said",
+  "not-recorded": ACCOUNTING_NOT_RECORDED,
+});
+
+/** The sentence a retention evaluation carries when the catalog said its view
+ *  does not hold every point of the archive.
+ *
+ *  IT DOES NOT OFFER `viewLimit` AS THE REMEDY (review L4). A catalog reports
+ *  `truncated` when the archive holds more points than `sync.viewLimit`, and
+ *  also when entries do not fit its pages or duplicate rows were merged,
+ *  where raising the limit changes nothing. */
+export const VIEW_INCOMPLETE_SENTENCE =
+  "The catalog view this evaluation read does not hold every point of the archive: the " +
+  "catalog cut its view, or its walk had not finished. Points outside it were not evaluated, " +
+  "are in none of the numbers above, and are never candidates while they stay outside the " +
+  "view. A view is cut at the newest sync.viewLimit points, and also when entries do not fit " +
+  "its pages or duplicate rows are merged, so raising viewLimit brings the missing points in " +
+  "only in the first case.";
+
 /** The sentence the legacy schedule retention report carries once a
  *  RetentionPolicy covers the same destination. */
 export const SUPERSEDED_SENTENCE =

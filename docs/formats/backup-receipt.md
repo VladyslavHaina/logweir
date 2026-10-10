@@ -1382,9 +1382,21 @@ its answer decide (FX-7 fix round; one rule for both, `catalog::pin`):
 The deep check takes the pin from the verified RECEIPT, never from the record
 (an older writer's record may lack it), and reserves the extra read in its
 per-point object budget. A pinned point whose version IS the current one is
-exactly as before, and costs no extra read. The read by id needs
-`s3:GetObjectVersion` on the archive prefix, beside the `s3:GetObject` the
-manifest read already needs.
+exactly as before, and costs no extra read.
+
+**A third reader applies the same rule before a restore is approved (FX-14).**
+The restore preflight of a plan bound to a recovery point judges the manifest
+it read through the same `catalog::pin`: the first row is `archive.backupSet`
+`notReady`, `ManifestSuperseded`; the second is `ready` with `PointPinUnchecked`
+in the message and the note as the remedy; the third keeps the store's code
+with the remedy that names `s3:GetObjectVersion`
+([what it reads, and what it refuses to read](../kubernetes.md#218-what-this-build-does-not-do)).
+
+**The grant.** On AWS S3 the read by id is authorised as `s3:GetObjectVersion`
+on the archive prefix, beside the `s3:GetObject` the manifest read already
+needs [UNVERIFIED — needs a real AWS S3 bucket and a credential source]. MinIO
+serves it under `s3:GetObject` (measured 2026-10-09, FX-14:
+[the grants table](../kubernetes.md#the-object-storage-permission-each-grant-actually-needs-measured)).
 
 **The cost of reading a copy as a copy.** The pin is checked only where the
 bucket being read still HOLDS the pinned version and serves it by id: "not this

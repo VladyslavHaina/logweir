@@ -48,9 +48,10 @@ connections, and a rate floor on request bodies), 54 (FX-19, a probe Job
 Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
 FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
-restored under its own name, behind its own approval subject) and 57 (FX-33,
-one backup names at most 1,000 topics, and a backup of many topics stays
-listed and verified) so far. Items continue the next entry's
+restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
+the runner will, and reads only that point's own receipt) and 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
+ceiling held back) and 59 (FX-33, one backup names at most 1,000 topics,
+and a backup of many topics stays listed and verified) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -180,7 +181,18 @@ authorization document (format 2.1.0), the product API and the console, and
 the PoC upgrade that carries it applies the CRD first, creates an
 original-name restore through the console, and reads the Approval's bytes,
 the `Restore`'s status and the scorecard.
-Item 57 is fix-now row FX-33, proven by runner, check, store and controller
+Item 57 is fix-now row FX-14, proven by runner rows that hold the preflight
+to the runner's own binding over one archive each, by a read-counting store
+double, and on the compose stack's MinIO with the built binary; it changes
+the runner (a restore preflight's archive rows, and two check codes the
+controller relays) and three descriptions, and the PoC upgrade that carries it
+runs the preflight of a restore started from the Catalog view.
+Item 58 is fix-now row FX-22, proven by evaluation, controller, API and console
+rows over one chain of fixtures; it changes the controller, the
+`RetentionPolicy` CRD (four additive status fields and a printer column), the
+product API and the console, and the PoC upgrade that carries it reads a
+`Report` policy's counts at `keepLast: 300` and at `keepLast: 10`.
+Item 59 is fix-now row FX-33, proven by runner, check, store and controller
 rows, by child-process peak-RSS measurements, and on the compose stack with a
 backup of 500 topics; it changes the runner, the check Jobs, the controller
 and (one line) the product API, signs nothing differently, and
@@ -1781,12 +1793,12 @@ the readiness probe and the backup set check GET with a 0-byte cap. The caps:
 - The controller reads a receipt or scorecard under **1 MiB** and a sidecar
   under **64 KiB**. These are the evidence relay's own caps, so a document is
   verifiable through the controller's handle exactly when a relay can carry
-  it. (Since item 57 a backup receipt is read under 5,131,072 bytes.)
+  it. (Since item 59 a backup receipt is read under 5,131,072 bytes.)
 - The controller's retention report reads a manifest under 64 MiB, folded as
   it streams, never as a tree.
 - Runner, CLI and check Jobs read documents under 64 MiB, manifests under
   256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB
-  (item 57 replaces it with a cap for each document).
+  (item 59 replaces it with a cap for each document).
 - The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
   it relayed a prefix the controller refused anyway).
 - Concurrent controller reads share ONE 128 MiB budget, a quarter of the
@@ -1808,7 +1820,7 @@ is about 3.4 KB per topic, so a run that selects more than about **250–300 top
 writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
 is not a recovery point. Before this item, the controller's own handle verified
 it, and an evidence-fetch relay did not. This moves a verdict only to the safer
-side (OD-7's third case), and no signed format changes. **Item 57 lifts this
+side (OD-7's third case), and no signed format changes. **Item 59 lifts this
 limit**: a backup receipt has its own cap, 5,131,072 bytes, and one backup
 names at most 1,000 topics.
 **Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
@@ -2303,7 +2315,226 @@ check them against the cluster. Rolling the CRD back prunes
 objects, whose plans then fail at the runner as above. 1.8.0 scorecards stay valid
 under older readers, which ignore the block.
 
-#### 57. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
+#### 57. A restore preflight of a catalog point judges the archive as the runner will, and reads only that point's own receipt (FX-14)
+
+**Changed.** A plan bound to a recovery point (`source.point`, every restore
+started from the Catalog view) is restored only if the runner proves the
+point against the archive (item 11's pin, item 34's set). The restore
+preflight read the set's CURRENT manifest alone, so it could answer `ready`
+over a set that was written again after the point was signed, and the run was
+then refused (exit 3). Now `archive.backupSet` makes the runner's own
+comparisons for such a plan: the bound receipt's digest and point id, the
+manifest digest it attests, the set it describes, the manifest version it
+pins, and the current manifest's digest. A set written again is `notReady`,
+**`ManifestSuperseded`**; every other disagreement is `notReady`,
+**`PointBindingMismatch`**; a pinned version that cannot be read keeps the
+store's code (`AccessDenied` for a 403) with a remedy that names
+`s3:GetObjectVersion`; a pin this bucket cannot check (a copy of the archive,
+an unversioned bucket) passes on the digest and says `PointPinUnchecked`.
+`archive.coverage` and `archive.segments` are `BlockedByPrerequisite` behind
+a refusal. The preflight does not check the receipt's SIGNATURE (a check Job
+is given no evidence keyring): the runner does, and refuses an unsigned or
+untrusted point with exit 3, `PointUntrusted`, so `ready` here is not yet the
+runner's word on trust. **A preflight runs before any approval, so what it may
+read is confined first:** nothing is opened unless the plan's `source.backup`
+is the set the check reads and its receipt key is, byte for byte, the key a
+backup of that set writes
+(`logweir/backups/<backupId>/<run id>.receipt.json`). The check can confine
+an id that is one path segment the store addresses exactly as written:
+printable ASCII, and a space is allowed (a set named `nightly 7` is checked
+like any other); an id with a `/`, a control character, a character that is
+not ASCII, or a character an object-store path rewrites (`%`, `?`, `#`, `*`,
+`~` and the like) is refused with nothing read. A key under another prefix, of
+another set, or naming any other object is refused by name and not fetched,
+and no answer repeats a digest, a version id or a receipt field read from the
+store. A receipt that is absent and one with other bytes get one answer where
+the store answers 404 for an absent key (measured on MinIO). The receipt is
+read under the 64 MiB cap the runner reads it under, and the manifest at the
+pinned version under the 256 MiB manifest cap (item 52); an object over the
+receipt cap at that key gets that same one answer, by the one read an absent
+receipt costs, and its size is not repeated. On AWS S3 a
+principal without a listing grant over the key gets 403 for an absent object,
+so with the documented minimal `archiveRead` grant an absent receipt reads as
+`AccessDenied` and a receipt with other bytes as `PointBindingMismatch`: the
+difference is confined to the plan's own set's receipt keys, and a deleted
+receipt can therefore look like a missing grant.
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]
+The receipt namespace is bucket-wide, so the confinement is by set id and not
+by archive prefix ([kubernetes.md](kubernetes.md) §21.8). A plan with no
+`source.point` is judged exactly as before.
+Three descriptions were also corrected, with no change of behaviour: a
+`RehearsalSchedule`'s `recordsPerPartition` and a scorecard's
+`sample.records_restored` (and the product API's `recordsRestored`) count the
+records READ BACK for the sample, not the records the restore wrote.
+**Do:** roll the controller and the runner image together (the chart does):
+an older controller cannot parse a result carrying either new code and reports
+`ResultUnreadable`. If you restore catalog points with an `archiveRead` grant
+narrower than the catalog-sync row, add `s3:GetObject` on
+`<bucket>/logweir/backups/*` (the runner's binding has always read the receipt
+there) and, on a versioned bucket, `s3:GetObjectVersion` on
+`<bucket>/<prefix>/*`: the preflight now reports a missing one as
+`AccessDenied` before the run does ([kubernetes.md](kubernetes.md) §7a, *The
+read of a pinned version*; §21.8).
+**Scope:** the preflight and the runner's binding over one archive each, in
+process, required to agree (unchanged, written again, an unversioned copy, a
+copy of another manifest, an unreadable pinned version, an unpinned point,
+five refused receipts, a foreign set, a receipt naming another manifest key,
+a receipt naming another set, a set and a run id that hold a space); thirteen
+receipt keys outside the plan's own receipts, and fourteen look-alikes of a
+spaced id's key (a tab, a no-break space, `%20`, a leading or trailing space),
+refused with a read-counting store double untouched; the key-segment rule
+held to the store's own path type for every ASCII byte
+(`crates/logweir/tests/check_cli.rs`, `crates/logweir/src/catalog/record.rs`);
+20 planted mutants, all killed, and after the review fifteen more, all killed
+(the review's ten that are not equivalent, three on the key-segment rule, two
+on the grant lint). Live on compose (2026-10-09, the stack's MinIO, a versioned bucket,
+the built `logweir check run`): unchanged `ready`, written again with
+identical bytes `ManifestSuperseded`, an unversioned copy `ready` with the
+note. The same run measured the grant on MinIO, which serves
+a read by version under `s3:GetObject`; AWS S3's separate
+`s3:GetObjectVersion` is
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. A second
+run put a receipt through the product's own store at
+`logweir/backups/nightly 7/run 1.receipt.json`: MinIO holds the key with its
+spaces as written, and the preflight over it is `ready`. A docs lint
+now holds both grant tables to the readers that read by version and by
+receipt, under both names the read by version has since item 52. The read
+caps: one row holds an absent receipt, other bytes, an object one byte over
+the receipt cap and one far over it to one answer, at the same two store
+calls under the same caps, with the over-cap object holding the bound
+receipt's bytes; six planted mutants on the caps and the single answer, all
+killed. Live on the same MinIO (2026-10-10): nothing, other bytes, an object
+of 67,108,865 bytes and one of 200 MiB at one receipt key are one answer in
+every row of the result, and the bound receipt at that key is `ready`. The
+controller relays these rows unchanged; the next PoC upgrade runs a catalog
+restore's preflight.
+**Rollback:** an older runner reads the current manifest alone again and can
+answer `ready` over a set the runner's binding will refuse; an older
+controller reports a newer runner's refusal as `ResultUnreadable`. Nothing is
+stored, so nothing needs converting.
+
+#### 58. A `RetentionPolicy`'s status says what the per-run ceiling held back, and no longer counts it as kept (FX-22)
+
+**Changed.** A retention plan names at most `maxDeletionsPerRun` points: 50 by
+default, and 50 for every `Report` policy. The points the rules would remove
+beyond that were listed under `status.lastEvaluation.kept`, and nothing
+published how many there were. On the PoC, with 371 points, a `Report` policy
+read "321 kept, 50 candidate(s)" for `keepLast: 300` and for `keepLast: 10`
+alike. Now:
+
+- `status.lastEvaluation` carries four counts that add up: `pointsEvaluated` =
+  `keptCount` + `candidateCount` + `truncatedByCap` + the points in `skipped`.
+  `candidateCount` is this plan; `truncatedByCap` is how many more points are
+  due and held back by the ceiling, and `maxDeletionsPerRun` is the ceiling the
+  evaluation applied. A held-back point is in no list, and `kept` names only
+  what the rules or a protection keep. The same 371 points read 300 kept, 50 in
+  the plan and 21 held back, and 10, 50 and 311.
+- The `Evaluated` message says it in words, and `kubectl get retentionpolicy`
+  prints a `HELD-BACK` column. **The column sits between `CANDIDATES` and
+  `EVALUATED`**, so a script that reads `kubectl get retentionpolicy` by column
+  position must be updated: `EVALUATED` and `AGE` each move one column right.
+- When no due point fits the ceiling (each is in a backup set that more due
+  points name than `maxDeletionsPerRun`, and a set is planned whole or not at
+  all), the plan is empty and the object says why: `Enforced=False` carries the
+  new closed reason `NothingFitsCeiling`, with the count, the ceiling and what
+  to raise, where it used to read `NothingToDo` ("the evaluation found nothing
+  to remove") beside a held-back count above zero; and the `Evaluated` message
+  no longer promises that a later plan names those points. An empty plan with
+  nothing due is still `NothingToDo`. The plan is empty in both cases.
+- The product API (`lastEvaluation.keptCount`, `truncatedByCap`,
+  `maxDeletionsPerRun`) and the console's retention panel ("kept", "in this
+  plan", "held back by the per-run ceiling") read the same numbers. The API
+  says on every answer whether they are published:
+  `lastEvaluation.accounting` is `Recorded` or `NotRecorded` (optional in the
+  schema, with the default `NotRecorded`, which is how an answer from an older
+  build without the member reads). For an
+  evaluation that does not record them (an older controller's, counts that do
+  not add up, or a `kept` list that is not `keptCount` long) it answers
+  `NotRecorded` and publishes no kept count and no `kept` rows, and the console
+  says "not recorded"; neither counts that list. An absent `kept` beside
+  `NotRecorded` says nothing; beside `Recorded` and `keptCount: 0` it means
+  nothing is kept.
+- `status.lastEvaluation.viewIncomplete`, and the same field in the API and
+  the console, says when the catalog view the evaluation read was not the whole
+  archive: the catalog cut its view (`RecoveryCatalog.status.truncated`), or
+  the pages are those of a walk its object budget stopped
+  (`status.cursor.complete: false`). Points outside the view were never
+  evaluated and never candidates, and still are not; the status used to read
+  `EvaluationComplete` with nothing saying so. The API and the console show
+  `true` whether or not the counts are recorded, show `false` ("the whole
+  archive, the catalog said") only beside recorded counts, and read an absent
+  member as "not recorded".
+- The API's `lastEnforcement.failed` was cut at 200 rows with nothing saying
+  so (`deleted` has always had `deletedTruncated`); `failedTruncated: true`
+  is now present when it was cut.
+
+What a plan contains, its `planSha256` and what a run deletes are unchanged, so
+an approved digest stays approved ([kubernetes.md](kubernetes.md) §7f,
+[api.md](api.md)).
+**Do:** apply the CRDs before the controller rolls, as for every upgrade (four
+additive `status` fields and one printer column); nothing else is required.
+The first evaluation after the upgrade rewrites each policy's status once. If
+a policy's `HELD-BACK` is above 0 and the backlog should go in fewer runs,
+raise `spec.enforcement.maxDeletionsPerRun` (1–500); if its `Enforced`
+condition reads `NothingFitsCeiling`, nothing is removed until you do. If
+`viewIncomplete` is `true`, let the catalog's sync finish, or raise its
+`spec.sync.viewLimit` (100–5000) when the archive holds more points than the
+limit: this policy does not expire a point outside the view. Raising the limit
+does not help a view the catalog cut for page space, for an entry too large for
+one page, or by merging duplicate rows. Update any script that reads
+`kubectl get retentionpolicy` by column position (`HELD-BACK` is new, before
+`EVALUATED`), and any client that reads `lastEvaluation.kept` from the product
+API: read `lastEvaluation.accounting` first.
+**Scope:** the evaluation at the PoC's own size, 371 points under `keepLast:
+300` and `keepLast: 10`, with a plan under the ceiling, one exactly at it and
+one point over as controls, and a held-back point in neither `kept` nor the
+plan; the controller's status and `Evaluated` message for both policies
+through a real reconcile over a fake API, the policy's own ceiling published,
+and `truncatedByCap: 0` written for a plan under the ceiling; the status
+written only when its content changes, over a truncated plan, with a real
+change still written once; a controller ahead of its CRD (the four fields
+pruned) leaving `lastEvaluation.at` alone, with the older server modelled
+from the pre-FX-22 CRD's own member list and over a catalog that says its view
+is whole, a window, unfinished, or says nothing; an older controller's status
+converted by one write; a windowed view, an unfinished walk, and their
+controls; an empty plan beside held-back points, with nothing due and a plan
+that fits as controls; and the plan writer's rail holding every held-back
+point's set (`crates/weirkeeper/tests/retention_policy_controller.rs`). The
+product API through its router, with the counts that are not the number of
+rows, an evaluation without the accounting, counts that do not add up, a
+`kept` list that is not the recorded count, the `accounting` member for an
+older-shape status and for a policy that keeps nothing, and a cut `failed`
+list (`crates/logweir-api/tests/retention_accounting.rs`); the console's panel in
+console and legacy mode (`ui/tests/d3.spec.js`). The three read one chain of
+fixtures: the two policies as the reconciler writes them, and the API's answer
+for those two objects, each held to its writer by a test. Each guard has a
+mutant that fails a row. Not proven live in this branch: the PoC upgrade that
+carries it creates a `Report` policy over the PoC's catalog and reads its
+counts at both `keepLast` values. The console cannot show that row live: its
+panel renders a policy only through a schedule report's `supersededBy`, which
+no controller writes yet.
+**Rollback:** an older controller lists the held-back points under `kept`
+again and does not rewrite the four new fields, which keep the newer
+controller's last values beside lists that move. For a policy whose plan the
+ceiling had cut, the product API answers `accounting: NotRecorded` and
+publishes no kept count, no held-back count and no `kept` rows, and the console
+prints "not recorded" for both, from the older controller's first write: its
+`kept` list is not `keptCount` long, which is refused even while the archive
+does not move and the stale counts still add up. For a policy the ceiling had
+not cut, the older controller's `kept` list is the same list and it leaves the
+block as it is; the API and the console go on showing the newer controller's
+counts for as long as that list stays `keptCount` long and the counts add up,
+and read "not recorded" from the first plan the ceiling cuts. (The check
+compares lengths and sums. One block reads as recorded and is not: the number
+of kept points falling by exactly the number the ceiling newly holds back,
+which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
+`viewIncomplete: true` the newer controller wrote stays visible. With
+`kubectl`, re-apply the older CRDs, which prunes the four fields and drops the
+`HELD-BACK` column, or ignore them while the older controller runs. An older
+controller also writes `Enforced=False/NothingToDo` where this build writes
+`NothingFitsCeiling`. Plans and approvals are unaffected.
+
+#### 59. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
 
 **Changed.** A backup receipt records about 3 KB for every topic, and the
 catalog point record copies it. Both were read under caps nobody had tied to a
@@ -2395,7 +2626,7 @@ with this runner works as before.
 In addition to the next entry's six, in its order:
 
 - **Before the upgrade, split every `Backup` and `BackupSchedule` that names
-  or resolves to more than 1,000 topics** (item 57). The two commands in
+  or resolves to more than 1,000 topics** (item 59). The two commands in
   [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
   selection is refused by name at each run.
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
@@ -2439,6 +2670,14 @@ In addition to the next entry's six, in its order:
 - **Before the runner image rolls, name the point's set in every standalone
   point-bound plan that says `backup: latestCompleted`**, and approve it again
   (item 34).
+- **Check the `archiveRead` grant of every destination you restore catalog
+  points from** (item 57): `s3:GetObject` on `<bucket>/logweir/backups/*`
+  and, on a versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*`.
+  The restore preflight now reads the bound receipt and, when the manifest's
+  current version is not the pinned one, the pinned version; a grant without
+  them answers `archive.backupSet` `AccessDenied` where the preview used to be
+  `ready` and the run then failed. A destination whose catalog syncs already
+  grants the first ([kubernetes.md](kubernetes.md) §7a).
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35); a standalone CLI
   install replaces its engine with Logweir's build and exports
@@ -2465,7 +2704,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56 and 57, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2515,7 +2754,14 @@ only and needs nothing; item 55 changes the console
 only and needs nothing; item 56
 changes the `Restore` CRD (apply it before the controller rolls), the
 controller, the runner, the product API and the console, and needs nothing
-for any other restore (an older runner refuses an original-name plan); item 57
+for any other restore (an older runner refuses an original-name plan); item 57 changes the runner's
+restore preflight and adds two check codes the controller must know to relay
+(and corrects one CRD description), and needs the two rolled together and, for
+a narrow `archiveRead` grant, the two reads above; item 58 changes the controller,
+the `RetentionPolicy` CRD (four additive status fields and a printer column),
+the product API and the console, and needs the CRDs applied before the
+controller rolls, and any script that reads `kubectl get retentionpolicy` by
+column position updated for the new `HELD-BACK` column; item 59
 changes the runner, the check Jobs, the controller and the product API, and
 needs every `Backup` and `BackupSchedule` that names or resolves
 to more than 1,000 topics split before the upgrade, and each
@@ -2558,7 +2804,7 @@ to more than 1,000 topics split before the upgrade, and each
    `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
    field. Finish or delete any original-name `Restore` first, so none is left
    waiting on a runner that refuses it.
-8. Item 57 needs no rollback step of its own: an older runner accepts a
+8. Item 59 needs no rollback step of its own: an older runner accepts a
    selection of more than 1,000 topics again, and an older controller reads a
    receipt under 1 MiB again, so a backup of about 300 topics and more is
    `NotAttempted` again. Roll the runner and the controller together.

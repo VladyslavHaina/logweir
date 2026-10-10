@@ -323,7 +323,13 @@ pub struct RehearsalBounds {
     #[serde(default = "default_starting_deadline_seconds")]
     #[schemars(range(min = 60, max = 86400))]
     pub starting_deadline_seconds: i32,
-    /// How many records per partition the canary restores.
+    /// How many records each rehearsal reads back from every sampled
+    /// partition of the restored topics and reconciles against the archive:
+    /// the sample's size, rendered into the slot's plan as
+    /// `sample.records_per_partition`. It does not bound the restore, which
+    /// writes every archived record in the window; the scorecard's
+    /// `sample.records_restored` is the count actually read back. Unread
+    /// under `coverage: complete`.
     #[serde(default = "default_records_per_partition")]
     #[schemars(range(min = 1, max = 1000))]
     pub records_per_partition: i32,
