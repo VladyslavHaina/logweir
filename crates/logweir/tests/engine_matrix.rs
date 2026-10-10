@@ -1887,11 +1887,11 @@ fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
         ),
         ("the stack is brought up (`just e2e-up`)", up),
     ] {
-        if !step.is_some_and(|s| s < suites) {
+        if step.is_none_or(|s| s >= suites) {
             out.push(format!("before the suites, {what}: missing or after them"));
         }
     }
-    if !down.is_some_and(|d| d > suites) {
+    if down.is_none_or(|d| d <= suites) {
         out.push("the stack is not torn down after the suites".to_string());
     }
     if serde_yaml::to_string(&job["env"])

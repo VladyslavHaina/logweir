@@ -274,7 +274,7 @@ Run with `LOGWEIR_TOPIC_IDENTITY_EVIDENCE=<file> cargo test --locked -p e2e --fe
 - **Fix round**, at `d22dd170`, on 2026-09-29 (UTC). The comparison is archive against archive, and every row records four modes.
   - 3.7.1 (image `sha256:ed74d7d1…9b68`): 53 of 53 tests in 518 s — 33 pure tests, 19 live rows and the L9 row.
   - 4.3.1 (image `sha256:77e3df90…2837`): 53 of 53 in 536 s. Every mode of every row, and every classification, is equal to 3.7.1 (`oracle-fix-summary.txt`).
-- **PROD-01.5c**, at `fa7a9b0b`, on 2026-10-10 (UTC): the same command on compose slot 2, one line at a time, with engine `0.23.3+logweir.2` run natively from the published linux/arm64 runner image (the fix round ran 0.21.0 under emulation).
+- **PROD-01.5c**, with the oracle as at main `64b66a15` (branch commit `fa7a9b0b`), on 2026-10-10 (UTC): the same command on compose slot 2, one line at a time, with engine `0.23.3+logweir.2` run natively from the published linux/arm64 runner image (the fix round ran 0.21.0 under emulation).
   - 3.7.1, 3.9.2, 4.1.2 and 4.3.1 (the digest-pinned images of `stack-env.sh --kafka`): 53 of 53 on each line, in 820, 1,079, 1,153 and 1,041 s on a loaded host.
   - Every mode of every row, with its signals, and every classification is equal on the four lines and equal to the fix round's 3.7.1 run (`artifacts/prod-01-5c/topic-identity-summary-all-lines.txt`). The engine change moved no verdict.
   - c10's retention check deleted its segment after 102 to 227 s.
