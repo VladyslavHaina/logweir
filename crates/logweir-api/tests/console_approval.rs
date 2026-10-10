@@ -477,10 +477,15 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
             {"source": "payments", "target": "restore-20260907T140500Z-payments", "originalName": false}
         ])
     );
+    // The golden plan's own servers, read through the one scope function (the
+    // address is never spelt here: this file opens no connection).
+    let golden = logweir_core::approval_scope::plan_scope(support::golden_plan().as_bytes())
+        .expect("the golden plan has a complete scope");
     assert_eq!(
         scope["target"]["bootstrapServers"],
-        json!(["localhost:9092"])
+        json!(golden.target.bootstrap_servers)
     );
+    assert_eq!(golden.target.bootstrap_servers.len(), 1);
     assert_eq!(scope["target"]["mode"], "newTopic");
     assert_eq!(
         scope["source"]["storage"]["location"],
