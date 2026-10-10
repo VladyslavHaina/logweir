@@ -2974,6 +2974,93 @@ async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
     assert_no_duplicate_condition_types(&status3);
 }
 
+/// **PROD-15.1 review M4: a lost creation race is NAMED on the Restore.** An
+/// exit-1 run whose final line is `failure-reason=TargetTopicAppeared` says so
+/// on `status.exitReason` and the reconcile outcome, carries the runner's
+/// `target-topics-appeared=` lists on `status.targetTopicsAppeared` (filtered
+/// to legal topic names), and the `Failed` condition's message names the
+/// topics — so the operator reads them on the object, not in a pod log
+/// garbage-collected with the Job. Controls: an exit 1 without the line keeps
+/// the wire reason and no lists; the state on another exit code is not lifted.
+/// KILLS: not reading `failure-reason=` on a Restore; dropping the lists;
+/// trusting an arbitrary name from the log.
+#[tokio::test]
+async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
+    let tail = "target-topics-appeared={\"appeared\":[\"payments\"],\"removed\":[\"orders\"],\"left\":[\"audit\",\"bad name\"]}\nfailure-reason=TargetTopicAppeared\n";
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(1),
+        log_body(tail),
+        "Failed",
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    assert_eq!(outcome.exit_code, Some(1));
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some("TargetTopicAppeared")
+    );
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(
+        status["exitReason"].as_str(),
+        Some("TargetTopicAppeared"),
+        "{status}"
+    );
+    assert_eq!(
+        status["targetTopicsAppeared"],
+        serde_json::json!({"appeared": ["payments"], "removed": ["orders"], "left": ["audit"]}),
+        "{status}"
+    );
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    for needle in [
+        "TargetTopicAppeared",
+        "`payments`",
+        "removed `orders`",
+        "left `audit`",
+    ] {
+        assert!(message.contains(needle), "{needle}: {message}");
+    }
+
+    // Control: a plain exit 1 — no failure line — is the wire reason, no lists.
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(1),
+        log_body("target-topics-appeared={\"appeared\":[\"payments\"]}\n"),
+        "Failed",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(
+        status["exitReason"].as_str(),
+        Some(REASON_OPERATIONAL),
+        "{status}"
+    );
+    assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
+}
+
 /// No two conditions in one status share a `type`.
 ///
 /// A condition array is a MAP KEYED BY `type`, so two entries sharing one is a
@@ -10253,6 +10340,98 @@ fn the_job_builder_refuses_a_coverage_the_plan_does_not_say() {
                 weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID
             );
             assert!(message.contains("spec declares coverage"), "{message}");
+        }
+        other => panic!("refused, not {other:?}"),
+    }
+}
+
+/// PROD-15.1 review L5 (R07): a Restore whose `topicNaming.originalName`
+/// declaration is `declared`, over `plan`.
+fn restore_declaring_original_name(plan: &str, declared: Option<bool>) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(plan, APPROVAL, NAME)).expect("fixture JSON");
+    if let Some(d) = declared {
+        value["spec"]["target"]["topicNaming"]["originalName"] = serde_json::json!(d);
+    }
+    serde_json::from_value(value).expect("the fixture is a Restore")
+}
+
+/// The fixture plan restored under the ORIGINAL topic names.
+fn original_name_plan_bytes() -> String {
+    PLAN_BYTES.replace(
+        "  topic_mapping_prefix: \"drill-\"\n",
+        "  topic_mapping_prefix: \"drill-\"\n  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n",
+    )
+}
+
+/// **PROD-15.1 review L5 (R07), the reconcile's call site.** A declaration
+/// the plan does not say — `originalName: true` over an ordinary plan, or an
+/// original-name plan declared nothing — ends `Failed` / `ExecutionSpecInvalid`
+/// before the approval is read and with no Job, so a list never shows the
+/// wrong approval subject. KILLS: removing the reconcile's
+/// `original_name_agrees(restore)?`.
+#[tokio::test]
+async fn an_original_name_declaration_the_plan_does_not_say_is_refused_before_anything_is_read() {
+    for (label, object) in [
+        (
+            "originalName declared over an ordinary plan",
+            restore_declaring_original_name(PLAN_BYTES, Some(true)),
+        ),
+        (
+            "an original-name plan declared nothing",
+            restore_declaring_original_name(&original_name_plan_bytes(), None),
+        ),
+    ] {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            "{label}: {outcome:?}"
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&bodies, "/jobs"), 0, "{label}: no Job");
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "{label}: refused before the approval is read"
+        );
+    }
+}
+
+/// **PROD-15.1 review L5 (R07), the Job builder's call site**: it refuses
+/// exactly what the reconcile refuses. KILLS: dropping `original_name_agrees`
+/// from `runner_job_spec_with_policy`.
+#[test]
+fn the_job_builder_refuses_an_original_name_declaration_the_plan_does_not_say() {
+    let refused = runner_job_spec(
+        &restore_declaring_original_name(PLAN_BYTES, Some(true)),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    );
+    match refused {
+        Err(weirkeeper::controllers::restore::RestoreError::Refused(state, message)) => {
+            assert_eq!(
+                state,
+                weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID
+            );
+            assert!(message.contains("topicNaming.originalName"), "{message}");
         }
         other => panic!("refused, not {other:?}"),
     }

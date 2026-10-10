@@ -250,6 +250,9 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   ["spec.evidenceDestinationRef", "evidenceDestination"],
   // PLAT-19.2: the change ticket a Governed policy requires (D0).
   ["ticket", "ticket"],
+  // OD-10 (PROD-15.1): the original topic names re-typed on a one-person
+  // confirmation, beside the field they are typed into.
+  ["originalNameConfirmation", "originalNameTyped"],
 ]);
 
 /** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
@@ -4335,6 +4338,7 @@ export function renderPlanStep(prepared, state) {
     "<p class=\"note\" id=\"restore-semantics\">" + messageText(RESTORE_SEMANTICS_SENTENCE) +
     "</p>" +
     approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
+    renderTypedConfirmation(s, errors.originalNameTyped) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
     (pending || !renderable || blocked !== null || policyRefusal(s) !== null ? " disabled" : "") +
@@ -5348,7 +5352,99 @@ export function restoreBody(state, prepared) {
     // console signs into the authorization document. Sent only under an
     // explicit binding; an unbound namespace signs nothing.
     ticket: ticketFor(s),
+    // OD-10 (PROD-15.1): the original topic names the requester re-typed,
+    // sent only on a one-person confirmation of an original-name restore --
+    // the console signs them into the authorization document, and the
+    // controller and the runner hold them to the plan again.
+    originalNameConfirmation: typedConfirmationRequired(s)
+      ? { typedTopics: parseTypedTopics(s.originalNameTyped) }
+      : undefined,
   };
+}
+
+/** OD-10: what a requester confirming alone is asked to do, beside the field. */
+export const ORIGINAL_NAME_TYPED_SENTENCE =
+  "This namespace is confirmed by one person (confirm). A restore under the ORIGINAL topic " +
+  "names is confirmed only by RE-TYPING every original topic name below, exactly, one per " +
+  "line: the console signs what you typed, and the controller and the runner hold it to the " +
+  "plan again (the owner's decision OD-10). A namespace where a second person approves needs " +
+  "no typed names.";
+
+/** OD-10: whether this submission is a one-person confirmation of a restore
+ *  under the original topic names -- the one case the typed names are owed. */
+export function typedConfirmationRequired(state) {
+  const s = state || {};
+  const p = s.approvalPolicy;
+  return originalNameChosen(s) && p !== null && typeof p === "object" &&
+    p.legacy === false && p.mode === "ordinary";
+}
+
+/** The typed names, one per line (a comma also separates), surrounding
+ *  spaces trimmed, empty entries dropped. Never case-folded: the names are
+ *  compared byte for byte. */
+export function parseTypedTopics(text) {
+  return String(typeof text === "string" ? text : "")
+    .split(/[\n,]/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/** OD-10: what the typed names get wrong against the topics this plan
+ *  restores, or `null` when they are exactly them -- each once, nothing else.
+ *  The product API answers the same refusal (`typed_topics_mismatch`). */
+export function typedTopicsProblem(state) {
+  const s = state || {};
+  if (!typedConfirmationRequired(s)) {
+    return null;
+  }
+  const typed = parseTypedTopics(s.originalNameTyped);
+  if (typed.length === 0) {
+    return "re-type every original topic name, exactly, to confirm this restore under the " +
+      "original topic names alone";
+  }
+  const wanted = new Set(selectedTopics(s).map(String));
+  const seen = new Set();
+  const repeated = new Set();
+  for (const t of typed) {
+    if (seen.has(t)) {
+      repeated.add(t);
+    }
+    seen.add(t);
+  }
+  const missing = [...wanted].filter((t) => !seen.has(t));
+  const extra = [...seen].filter((t) => !wanted.has(t));
+  const parts = [];
+  if (missing.length > 0) {
+    parts.push("not typed: " + missing.join(", "));
+  }
+  if (extra.length > 0) {
+    parts.push("typed but not restored by this plan: " + extra.join(", "));
+  }
+  if (repeated.size > 0) {
+    parts.push("typed more than once: " + [...repeated].join(", "));
+  }
+  return parts.length === 0 ? null : "the typed names are not exactly the topics this plan " +
+    "restores (" + parts.join("; ") + ")";
+}
+
+/** OD-10: the typed-names field, rendered only when it is owed. */
+export function renderTypedConfirmation(state, typedErrors) {
+  const s = state || {};
+  if (!typedConfirmationRequired(s)) {
+    return "";
+  }
+  return (
+    "<div class=\"field\" id=\"original-name-typed-field\">" +
+    "<label for=\"original-name-typed\">Re-type the original topic names</label>" +
+    "<p class=\"note\" id=\"original-name-typed-meaning\">" +
+    esc(ORIGINAL_NAME_TYPED_SENTENCE) + "</p>" +
+    "<textarea id=\"original-name-typed\" name=\"originalNameTyped\" rows=\"4\" " +
+    "autocomplete=\"off\" spellcheck=\"false\"" +
+    invalidAttributes("original-name-typed", typedErrors) + ">" +
+    esc(typeof s.originalNameTyped === "string" ? s.originalNameTyped : "") + "</textarea>" +
+    fieldErrorLine("original-name-typed", typedErrors) +
+    "</div>"
+  );
 }
 
 /** The ticket this state sends, or `undefined`. */
@@ -5466,6 +5562,12 @@ export async function submitRestore(state, deps, lifecycle, options) {
       ticket: "a namespace under a Governed approval policy requires a change ticket; it is " +
         "signed into the confirmation the approver countersigns",
     });
+  }
+  // OD-10: a one-person confirmation of an original-name restore needs every
+  // original topic name re-typed, exactly, before anything is sent.
+  const typedProblem = typedTopicsProblem(s);
+  if (typedProblem !== null) {
+    throw invalidInput({ originalNameTyped: typedProblem });
   }
   const reviewed = (options || {}).reviewedHash;
   if (typeof reviewed === "string" && reviewed !== prepared.hash) {
@@ -7816,6 +7918,14 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   if (ticket !== null) {
     listen(ticket, "input", () => {
       state.ticket = valueOf(ticket);
+    }, lifecycle);
+  }
+  // OD-10: THE TYPED NAMES ARE NOT IN THE PLAN BYTES either; read into the
+  // state and sent beside the create body.
+  const typedNames = node.querySelector("#original-name-typed");
+  if (typedNames !== null) {
+    listen(typedNames, "input", () => {
+      state.originalNameTyped = valueOf(typedNames);
     }, lifecycle);
   }
   for (const box of node.querySelectorAll(".topic-box")) {

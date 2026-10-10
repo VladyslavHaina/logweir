@@ -955,8 +955,9 @@ def test_the_version_line_names_the_current_invariant_set():
             "target.original_name only from 1.8.0, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
             "their closed sets, targetIsNotSource only beside a known other source cluster id, "
-            "somewhere looked for an owner, each owner from a place looked in, and an owned name "
-            "only on the owner path"
+            "somewhere looked for an owner, each owner from a place looked in, an owned name "
+            "only on the owner path, a one-person confirmation only with the names typed, and "
+            "the KafkaTopic resources looked in named by digest"
         ) in r.stdout, r.stdout
 
 
@@ -3846,6 +3847,9 @@ def test_the_selection_lines_are_the_rust_readers():
 # ---- PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-10 ----
 
 
+RESOURCES_DIGEST = "sha256:" + "0" * 64
+
+
 def _original_name_block(**over):
     block = {
         "approval_subject": "originalName",
@@ -3907,8 +3911,12 @@ def test_an_original_name_block_is_accepted_as_the_writer_writes_it():
         owners=[{"topic": "orders", "kind": "strimzi", "reference": "kafka/orders",
                  "found_in": "kafkaTopicResources"}],
         owner_path=True,
+        kafka_topic_resources_sha256=RESOURCES_DIGEST,
     )
     assert mod.check_invariants(_scorecard_1_8(owned)) == ""
+    # OD-10: a one-person confirmation, with the names typed.
+    typed = _original_name_block(approval_mode="ordinary", confirmation="typedTopicNames")
+    assert mod.check_invariants(_scorecard_1_8(typed)) == ""
     # `null` is ABSENT, as `Option` reads it.
     doc = _scorecard_1_8()
     doc["target"]["original_name"] = None
@@ -3964,13 +3972,30 @@ def test_each_original_name_arm_refuses_with_the_rust_readers_words():
     assert mod.check_invariants(
         _scorecard_1_8(_original_name_block(owners=[owner]))
     ).startswith("target.original_name.owners is not empty and owner_path is false")
+    on11 = "target.original_name.confirmation is not \"typedTopicNames\" exactly when"
+    for bad in (
+        _original_name_block(approval_mode="ordinary"),
+        _original_name_block(confirmation="typedTopicNames"),
+        _original_name_block(approval_mode="ordinary", confirmation="clicked"),
+    ):
+        assert mod.check_invariants(_scorecard_1_8(bad)).startswith(on11), bad
+    on12 = "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest"
+    for bad in (
+        _original_name_block(owner_detection=["kafkaTopicResources"]),
+        _original_name_block(kafka_topic_resources_sha256=RESOURCES_DIGEST),
+        _original_name_block(owner_detection=["kafkaTopicResources"],
+                             kafka_topic_resources_sha256="sha256:XYZ"),
+    ):
+        assert mod.check_invariants(_scorecard_1_8(bad)).startswith(on12), bad
 
 
 def test_a_malformed_original_name_block_is_refused_at_the_shape_layer():
     mod = _verifier_module()
     for bad in ("orders", {"approval_subject": "originalName"},
                 _original_name_block(owner_path="yes"),
-                _original_name_block(owners=[{"topic": "orders"}])):
+                _original_name_block(owners=[{"topic": "orders"}]),
+                _original_name_block(confirmation=True),
+                _original_name_block(kafka_topic_resources_sha256=7)):
         assert mod.check_invariants(_scorecard_1_8(bad)).startswith(
             "target.original_name is not an object of the shape the writer gives it"), bad
 
@@ -3986,6 +4011,14 @@ def test_the_original_name_lines_are_the_rust_readers():
         "(SOURCE-CLUSTER)",
         "original name: declarative owners looked for in plan: none found",
     ]
+    typed = mod._original_name_lines(_original_name_block(
+        approval_mode="ordinary", confirmation="typedTopicNames",
+        owner_detection=["kafkaTopicResources"], kafka_topic_resources_sha256=RESOURCES_DIGEST))
+    assert "approved by ordinary (the requester re-typed every original topic name); " in typed[0]
+    assert typed[1] == (
+        "original name: declarative owners looked for in kafkaTopicResources: none found; "
+        f"KafkaTopic resources {RESOURCES_DIGEST}"
+    )
 
 
 # ---------------------------------------------------------------------------

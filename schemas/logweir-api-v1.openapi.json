@@ -7698,6 +7698,11 @@
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
+          "originalNameConfirmation": {
+            "description": "**OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged.",
+            "$ref": "#/components/schemas/OriginalNameConfirmationRequest",
+            "nullable": true
+          },
           "planBytes": {
             "description": "The exact plan document bytes the approval will bind, at most 256 KiB.",
             "type": "string"
@@ -10055,6 +10060,27 @@
             ]
           }
         ]
+      },
+      "OriginalNameConfirmationRequest": {
+        "description": "**OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation namespace.",
+        "type": "object",
+        "required": [
+          "typedTopics"
+        ],
+        "properties": {
+          "typedTopics": {
+            "description": "Every original topic name, as the requester re-typed it: exactly the plan's `source.topics`, each once, nothing else, byte for byte.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 249,
+              "minLength": 1
+            },
+            "maxItems": 1000,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
       },
       "Page": {
         "description": "One page of a list.",

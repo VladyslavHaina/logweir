@@ -730,6 +730,10 @@ fn show_names_an_original_name_restore_in_the_qualifiers_footer() {
             found_in: "kafkaTopicResources".into(),
         }],
         owner_path: true,
+        confirmation: None,
+        kafka_topic_resources_sha256: Some(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
     });
     let table = logweir::show::render_table(&sc);
     assert_eq!(

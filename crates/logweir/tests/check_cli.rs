@@ -9234,3 +9234,54 @@ fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
         assert_eq!(listed, entry["schemaDependency"], "{}", record["name"]);
     }
 }
+
+/// **PROD-15.1 review L6.** The readiness check's `plan.parse` refuses an
+/// original-name block in a shape phase 0 refuses — in scratch mode, or
+/// beside a prefix — in the runner's own words, and nothing after it runs;
+/// the opted-in plan parses. KILLS: a preview that says ready for a plan the
+/// runner refuses at phase 0.
+#[test]
+fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
+    let point = ms_to_rfc3339(INSIDE_MS);
+    let base = restore_yaml(&point, &["orders"], "newTopic");
+    for (label, yaml, token) in [
+        (
+            "in scratch mode",
+            restore_yaml(&point, &["orders"], "scratch").replace(
+                "  topic_mapping_prefix: 'restore-'\n",
+                "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+            ),
+            "OriginalNameNotNewTopic",
+        ),
+        (
+            "beside a prefix",
+            base.replace(
+                "  topic_mapping_prefix: 'restore-'\n",
+                "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: 'x-'\n    original_name: {owners: []}\n",
+            ),
+            "OriginalNamePrefixNotEmpty",
+        ),
+    ] {
+        assert!(yaml.contains("original_name"), "{label}: the fixture carries the block");
+        let m = mount(&restore_plan(&yaml, None));
+        let run = drive(
+            &m,
+            &restore_wiring(&yaml, &manifest_json(), FakeProbe::new()),
+        );
+        let row = run.row(CheckId::PlanParse);
+        assert_eq!(row.state, CheckState::NotReady, "{label}");
+        assert_eq!(row.code, CheckCode::TopicMappingIdentity, "{label}");
+        assert!(row.message.starts_with(token), "{label}: {}", row.message);
+        assert!(!run.has(CheckId::ArchiveCoverage), "{label}: nothing after plan.parse runs");
+    }
+    let opted_in = base.replace(
+        "  topic_mapping_prefix: 'restore-'\n",
+        "  topic_mapping_prefix: 'restore-'\n  topic_naming:\n    prefix: ''\n    original_name: {owners: []}\n",
+    );
+    let m = mount(&restore_plan(&opted_in, None));
+    let run = drive(
+        &m,
+        &restore_wiring(&opted_in, &manifest_json(), FakeProbe::new()),
+    );
+    assert_eq!(run.row(CheckId::PlanParse).state, CheckState::Ready);
+}

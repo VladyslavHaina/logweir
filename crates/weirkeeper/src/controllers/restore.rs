@@ -330,6 +330,14 @@ pub const OFFSET_REPORT_KEY_PREFIX: &str = "offset-report-key=";
 /// none.
 pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 
+/// **PROD-15.1 review M4.** The runner's one line about a creation race it
+/// lost (`logweir::drill::phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX`),
+/// printed with `failure-reason=TargetTopicAppeared` on exit 1.
+pub const TARGET_TOPICS_APPEARED_KEY_PREFIX: &str = "target-topics-appeared=";
+
+/// The most names one list of `status.targetTopicsAppeared` carries.
+pub const TARGET_TOPICS_APPEARED_MAX_NAMES: usize = 100;
+
 /// How long before an unfinished Job is looked at again. Fifteen seconds, as
 /// on the `Backup` path: a Job's own events wake this controller, so the
 /// requeue exists for the one transition no watch delivers.
@@ -667,6 +675,46 @@ pub fn approval_subject_of(
             "the approval document's {field} is {other}, not a string"
         )),
     }
+}
+
+/// **OD-10 (PROD-15.1 review M1).** Whether an Approval is a ONE-PERSON
+/// confirmation — an authorization document v2 signed under an `Ordinary`
+/// policy — and the typed topic names its signed bytes carry. A v1 approval
+/// and a `Governed` document have a second person and carry none.
+///
+/// # Errors
+///
+/// A v2 document that does not parse (the admission's signature and binding
+/// checks refuse it too).
+pub fn typed_confirmation_of(
+    approval: &Approval,
+) -> Result<
+    (
+        bool,
+        Option<logweir_core::original_name::OriginalNameConfirmation>,
+    ),
+    String,
+> {
+    if !is_authorization_v2(approval) {
+        return Ok((false, None));
+    }
+    let doc = logweir_core::approval_policy::RestoreAuthorization::from_bytes(
+        approval.spec.approval_bytes.as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((
+        doc.authorization_mode == logweir_core::approval_policy::ApprovalMode::Ordinary,
+        doc.original_name_confirmation,
+    ))
+}
+
+/// **OD-10.** The plan's source topics, the names a typed confirmation is
+/// held to; empty for a plan that does not parse (the runner refuses it).
+#[must_use]
+pub fn plan_source_topics(restore: &Restore) -> Vec<String> {
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+        .map(|plan| plan.source.topics)
+        .unwrap_or_default()
 }
 
 /// **PROD-15.1.** The approval subject a `Restore` needs: `originalName` when
@@ -1026,6 +1074,15 @@ pub fn admit_with_policy(
         logweir_core::original_name::check_approval_subject(
             plan_approval_subject(restore),
             approved,
+        )?;
+        // OD-10: a one-person confirmation of an original-name plan carries
+        // every original topic name re-typed, exactly, in its signed bytes.
+        let (one_person, confirmation) = typed_confirmation_of(approval)?;
+        logweir_core::original_name::check_typed_confirmation(
+            &plan_source_topics(restore),
+            approved,
+            one_person,
+            confirmation.as_ref(),
         )
     });
     if let Err(detail) = subject_refusal {
@@ -6025,6 +6082,94 @@ pub fn finished_status_patch(
     json!({ "status": Value::Object(status) })
 }
 
+/// **PROD-15.1 review M4.** The race line, scanned by NAME out of the same
+/// bounded tail as every other key — the LAST occurrence — and FILTERED: only
+/// the three lists, only names a broker accepts, at most
+/// [`TARGET_TOPICS_APPEARED_MAX_NAMES`] each, so a noisy log cannot put an
+/// arbitrary string on the object. `None` when the line is absent or is not
+/// an object.
+#[must_use]
+pub fn target_topics_appeared(log: &str) -> Option<Value> {
+    let mut raw: Option<&str> = None;
+    for line in backup::tail_lines(log) {
+        if let Some(v) = line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX) {
+            raw = Some(v);
+        }
+    }
+    let doc: Value = serde_json::from_str(raw?).ok()?;
+    let doc = doc.as_object()?;
+    let mut out = serde_json::Map::new();
+    for key in ["appeared", "removed", "left"] {
+        let names: Vec<&str> = doc
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|n| logweir_core::guard::topic_name_is_kafka_legal(n))
+                    .take(TARGET_TOPICS_APPEARED_MAX_NAMES)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(key.to_string(), json!(names));
+    }
+    Some(Value::Object(out))
+}
+
+/// **PROD-15.1 review M4.** The terminal patch of a run whose creation step
+/// lost a race: `status.targetTopicsAppeared` carries the three lists, and
+/// the `Failed` condition's message says, in words, which names appeared and
+/// what this run removed or left — so the operator reads it on the object
+/// and not in a pod log that is garbage-collected with the Job.
+#[must_use]
+pub fn with_target_topics_appeared(mut patch: Value, race: &Value) -> Value {
+    let list = |key: &str| -> String {
+        race.get(key)
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".to_string())
+    };
+    let words = format!(
+        "; the runner lost a creation race (TargetTopicAppeared): mapped target topic(s) {} were \
+         created by someone else after phase 0 proved them absent, and nothing was written into \
+         them; this run removed {} (its own and empty) and left {} — remove those after checking \
+         who writes to them",
+        list("appeared"),
+        list("removed"),
+        list("left")
+    );
+    if let Some(status) = patch.get_mut("status").and_then(Value::as_object_mut) {
+        status.insert("targetTopicsAppeared".to_string(), race.clone());
+        // The scalar the REASON column reads stays the terminal condition's
+        // (review finding M2): this only adds words to its message.
+        let reason = status
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| json!(reason_for_exit(1)));
+        status.insert("reason".to_string(), reason);
+        if let Some(message) = status
+            .get_mut("conditions")
+            .and_then(Value::as_array_mut)
+            .and_then(|c| c.first_mut())
+            .and_then(|c| c.get_mut("message"))
+        {
+            if let Some(text) = message.as_str() {
+                *message = json!(format!("{text}{words}"));
+            }
+        }
+    }
+    patch
+}
+
 /// `status.objectives` — interface **I34**, first half.
 ///
 /// The scorecard's four values, camelCased field names, **verbatim values**;
@@ -7792,8 +7937,15 @@ async fn reconcile_restore_inner(
                 .unwrap_or_else(|| TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON.to_string()),
         )
     } else {
-        None
+        // PROD-15.1 review M4: an exit-1 run that named a state on the closed
+        // `failure-reason=` list (a lost creation race) says so on
+        // `status.exitReason`; every other exit 1 keeps the wire reason.
+        backup::failure_state(exit_code, &log).map(str::to_string)
     };
+    let race = (refusal.as_deref()
+        == Some(logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED))
+    .then(|| target_topics_appeared(&log))
+    .flatten();
     // THE SCORECARD, THROUGH THE READ-ONLY ARCHIVE HANDLE. AWAITED: the real
     // oracle's `Store` read happens inside one `spawn_blocking` (interface
     // I13, see `ScorecardOracle`), so this is the one point in the reconcile
@@ -7885,17 +8037,22 @@ async fn reconcile_restore_inner(
     // this one carries: a JSON merge patch REPLACES arrays, and after this
     // PATCH returns the in-memory `restore` is stale and no longer says what
     // the object says. See `verification::second_patch`.
+    let finished = finished_status_patch(
+        restore,
+        exit_code,
+        &keys,
+        refusal.as_deref(),
+        observed.as_ref(),
+        topics.as_ref(),
+        preflight.as_ref(),
+        now,
+    );
+    let finished = match race.as_ref() {
+        Some(race) => with_target_topics_appeared(finished, race),
+        None => finished,
+    };
     let terminal = diagnostics::apply_finished(
-        finished_status_patch(
-            restore,
-            exit_code,
-            &keys,
-            refusal.as_deref(),
-            observed.as_ref(),
-            topics.as_ref(),
-            preflight.as_ref(),
-            now,
-        ),
+        finished,
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );

@@ -13,9 +13,13 @@
 //! | `a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster` | backed up on the default broker, deleted there, restored under its own name into `cluster2`: exit 0, `pass`, every record on `cluster2`, the topic still there after the run (teardown never deletes it), scorecard 1.8.0 `target.original_name` with `targetIsNotSource` and the receipt's source id; both readers accept and print the same `original name:` lines; the approval was minted by `drill approve --approval-subject original-name` | the same plan under an ORDINARY approval is refused, exit 3, `ApprovalSubjectMismatch`, nothing created; `drill approve` without the flag refuses to sign it |
 //! | `a_deleted_topic_is_recovered_under_its_name_on_the_same_cluster` | the default broker (auto-creation off) is both source and target: refused while the name exists (exit 3, records untouched), then after the delete recovered with a COMPLETE verification (phase 7's complete lane, exact counts), `autoCreateDisabled` | the run while the name exists |
 //! | `the_same_cluster_with_auto_creation_enabled_is_refused` | backed up on `autocreate`, deleted, restored into `autocreate`: exit 3 `OriginalNameAutoCreateEnabled`, the name stays absent | the assertion that the name is absent fails if anything was written |
-//! | `a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name` | target `autocreate` (another cluster, so admitted): when the runner announces phase 5 a producer sends one record to the name, which the broker auto-creates; the restore stops at creation, exit 1, `TargetTopicAppeared`, and the topic holds the producer's ONE record and nothing restored | a build that wrote into the existing topic leaves more than one record |
+//! | `a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name` | target `autocreate` (another cluster, so admitted): when the runner announces phase 5 a producer sends one record to the name, which the broker auto-creates; the restore stops at creation, exit 1, its LAST line `failure-reason=TargetTopicAppeared` and the line before it naming the topic as `appeared` (review M4), and the topic holds the producer's ONE record and nothing restored | a build that wrote into the existing topic leaves more than one record |
+//! | `a_producer_writing_during_the_restore_fails_its_verification` | review M5: the runner is suspended at phase 6 while a producer writes 6 records into the topic the restore created; the engine restores 30, phase 7's count bound finds 36 against a bound of 30, and the run signs `fail-integrity` (exit 2), the topic holding both | a phase 7 that passed the topic |
 //! | `a_declarative_owner_blocks_unless_the_owner_path_is_chosen` | a Strimzi `KafkaTopic` for the name given with `--kafka-topic-resources` (simulated: no Strimzi in the lab) refuses, exit 3 `OriginalNameOwnerPresent`; with `owner_path: true` the restore runs and signs the owner and the path; a plan that states no owner and has no resources refuses `OriginalNameOwnerNotChecked` | the two refusals |
 //! | `scratch_mode_keeps_the_identity_ban` | an `original_name` block in a scratch drill: exit 3 `OriginalNameNotNewTopic`, nothing created | — |
+//!
+//! Scorecard versions are asserted as a FLOOR (`harness::assert_format_at_least`),
+//! never pinned exactly.
 //!
 //! # Running it
 //!
@@ -833,7 +837,12 @@ fn a_deleted_topic_is_recovered_under_its_name_on_a_second_cluster() {
     let r = restore(&spec, &approval, &s.cluster2, None, "second");
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     assert_eq!(r.scorecard["outcome"], "pass");
-    assert_eq!(r.scorecard["format_version"], "1.8.0");
+    // At least the version that defines the block — never an exact pin.
+    harness::assert_format_at_least(
+        r.scorecard["format_version"].as_str().unwrap_or_default(),
+        "1.8.0",
+        "an original-name scorecard",
+    );
     let on = &r.scorecard["target"]["original_name"];
     assert_eq!(on["approval_subject"], "originalName");
     assert_eq!(on["approval_mode"], "v1Approval");
@@ -1060,6 +1069,20 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
     );
     assert_eq!(status.code(), Some(1), "{all}");
     assert!(all.contains("TargetTopicAppeared"), "{all}");
+    // Review M4: the race is NAMED where a controller reads it — the LAST
+    // stdout line, and the bounded line before it naming what appeared.
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("failure-reason=TargetTopicAppeared"),
+        "{all}"
+    );
+    let race_line: Value = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("target-topics-appeared="))
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_else(|| panic!("no target-topics-appeared= line:\n{all}"));
+    assert_eq!(race_line["appeared"], json!([topic.clone()]), "{race_line}");
+    assert_eq!(race_line["removed"], json!([]), "{race_line}");
     // The broker is the oracle: the topic holds the producer's ONE record and
     // nothing the restore would have written.
     assert_eq!(record_count(&s.autocreate, &topic), 1, "{all}");
@@ -1071,7 +1094,148 @@ fn a_producer_that_creates_the_name_after_phase_0_loses_the_race_by_name() {
             "produced_after": produced_at,
             "exit": status.code(),
             "message": said(&all, "TargetTopicAppeared"),
+            "failure_reason_line": lines.last(),
+            "target_topics_appeared_line": race_line,
             "records_on_target": record_count(&s.autocreate, &topic),
+        }),
+    );
+}
+
+/// `n` unkeyed records to an EXISTING topic, as an application's producer
+/// sends them (no partition named).
+fn produce_n(c: &Cluster, topic: &str, n: usize) {
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    let producer: BaseProducer = rdkafka::config::ClientConfig::new()
+        .set("bootstrap.servers", &c.bootstrap)
+        .set("message.timeout.ms", "30000")
+        .set("acks", "all")
+        .create()
+        .expect("a producer");
+    for i in 0..n {
+        let payload = format!("live-{i}");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match producer.send(BaseRecord::<str, str>::to(topic).payload(&payload)) {
+                Ok(()) => break,
+                Err((e, _)) => {
+                    assert!(Instant::now() < deadline, "produce to {topic}: {e}");
+                    producer.poll(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    producer
+        .flush(Duration::from_secs(30))
+        .unwrap_or_else(|e| panic!("flush {topic}: {e}"));
+}
+
+/// **Review M5: a producer still writing to the name during the restore.**
+/// The restore creates `<topic>` and, when it announces phase 6, the runner
+/// is suspended while an application's producer writes 6 records into it;
+/// then the engine restores the 30 archived ones. The product's answer is
+/// DETECT AND FAIL: phase 7's count bound finds 36 records where the manifest
+/// bounds the window at 30, the run signs `fail-integrity` (exit 2), and the
+/// topic holds both — which is why the runbook says stop every producer of a
+/// restored name first. KILLS: a phase 7 that passes a topic another writer
+/// wrote into.
+#[test]
+#[ignore = "needs the compose stack with the cluster2 and autocreate profiles"]
+fn a_producer_writing_during_the_restore_fails_its_verification() {
+    let s = stack();
+    let topic = format!("on-live-{}", nonce());
+    create_topic(&s.broker, &topic);
+    produce(&s.broker, &topic, 10);
+    let b = backup(&format!("prod151-live-{}", nonce()), &s.broker, &topic);
+    let spec_text = restore_spec(&b, &topic, &s.cluster2, Naming::Original(NO_OWNER), false);
+    let spec = write_spec(&spec_text, "live");
+    let approval = hand_approval(&spec_text, Some("originalName"), "live");
+    let out_json = demo_dir().join("prod151-live-scorecard.json");
+    let mut c = restore_command(&spec, &approval, &s.cluster2, None, &out_json);
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().expect("spawn the restore");
+    let pid = child.id();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut se = child.stderr.take().expect("piped stderr");
+    let t_err = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = se.read_to_end(&mut b);
+        b
+    });
+    let watchdog = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(900);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            let alive = Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                return false;
+            }
+        }
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        true
+    });
+    let mut lines = Vec::new();
+    let mut produced = false;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.expect("a stdout line");
+        if !produced && line.starts_with("progress-phase=6") {
+            let stop = Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status();
+            assert!(stop.is_ok_and(|s| s.success()), "SIGSTOP the runner");
+            produce_n(&s.cluster2, &topic, 6);
+            let cont = Command::new("kill")
+                .args(["-CONT", &pid.to_string()])
+                .status();
+            assert!(cont.is_ok_and(|s| s.success()), "SIGCONT the runner");
+            produced = true;
+        }
+        lines.push(line);
+    }
+    let status = child.wait().expect("the restore exits");
+    assert!(
+        !watchdog.join().unwrap_or(true),
+        "the restore ran past 900 s"
+    );
+    let stderr = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).into_owned();
+    let all = format!("{}\n{stderr}", lines.join("\n"));
+    assert!(produced, "the runner never announced phase 6:\n{all}");
+    assert_eq!(status.code(), Some(2), "{all}");
+    let scorecard: Value =
+        serde_json::from_slice(&std::fs::read(&out_json).expect("signed")).expect("a scorecard");
+    assert_eq!(scorecard["outcome"], "fail-integrity", "{scorecard}");
+    // The broker is the oracle: both writers' records are in the topic.
+    assert_eq!(record_count(&s.cluster2, &topic), 36);
+    let r = Restore {
+        out: Output {
+            status,
+            stdout: lines.join("\n").into_bytes(),
+            stderr: stderr.into_bytes(),
+        },
+        scorecard: scorecard.clone(),
+        scorecard_path: out_json,
+    };
+    let readers = readers(&r);
+    assert_eq!(
+        readers["rust_exit"],
+        json!(0),
+        "the signed failure verifies: {readers}"
+    );
+    write_evidence(
+        "producer-during-restore",
+        &json!({
+            "topic": topic,
+            "exit": status.code(),
+            "outcome": scorecard["outcome"],
+            "partial_reason": scorecard["integrity"]["partial_reason"],
+            "original_name": scorecard["target"]["original_name"],
+            "records_on_target": record_count(&s.cluster2, &topic),
+            "readers": readers,
         }),
     );
 }

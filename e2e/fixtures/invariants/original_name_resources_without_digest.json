@@ -34,22 +34,13 @@
     "original_name": {
       "approval_subject": "originalName",
       "approval_mode": "governed",
-      "cluster_condition": "autoCreateDisabled",
-      "source_cluster_id": null,
+      "cluster_condition": "targetIsNotSource",
+      "source_cluster_id": "SOURCE0000000000000000",
       "owner_detection": [
-        "plan",
         "kafkaTopicResources"
       ],
-      "owners": [
-        {
-          "topic": "orders",
-          "kind": "strimzi",
-          "reference": "kafka/orders",
-          "found_in": "kafkaTopicResources"
-        }
-      ],
-      "owner_path": true,
-      "kafka_topic_resources_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      "owners": [],
+      "owner_path": false
     }
   },
   "approval": {

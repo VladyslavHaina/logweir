@@ -809,6 +809,13 @@
   "reason": ""
  },
  {
+  "id": "original_name_1_8_typed_confirmation",
+  "file": "original_name_1_8_typed_confirmation.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
   "id": "original_name_under_format_1_7_0",
   "file": "original_name_under_format_1_7_0.json",
   "rust_exit": 4,
@@ -887,5 +894,21 @@
   "python_exit": 1,
   "reason": "target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path",
   "arm": "target.original_name.owners is not empty and owner_path is false; an owned "
+ },
+ {
+  "id": "original_name_ordinary_without_typed_names",
+  "file": "original_name_ordinary_without_typed_names.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed",
+  "arm": "target.original_name.confirmation is not "
+ },
+ {
+  "id": "original_name_resources_without_digest",
+  "file": "original_name_resources_without_digest.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest",
+  "arm": "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest "
  }
 ]

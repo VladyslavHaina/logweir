@@ -91,6 +91,51 @@ fn original_body() -> Value {
     body
 }
 
+/// OD-10: the same request with the original topic names re-typed (the
+/// golden plan restores `orders` and `payments`).
+fn typed_original_body(names: &[&str]) -> Value {
+    let mut body = original_body();
+    body["originalNameConfirmation"] = json!({"typedTopics": names});
+    body
+}
+
+/// `team-a` (`NS_A`) bound to `binding` under an explicit policy document, and
+/// a console key.
+fn bound_app(binding: &str) -> TestApp {
+    let key = SigningKey::generate_ed25519();
+    let policies = ApprovalPolicySet::parse(&format!(
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: \
+         Ordinary\n  - name: prod-governed\n    mode: Governed\nnamespaces:\n  {NS_A}: {binding}\n"
+    ))
+    .expect("valid");
+    TestApp::with(
+        FakeKube::new(),
+        Options {
+            approval: Arc::new(ApprovalSettings {
+                policies,
+                confirmation: Some(ConfirmationKey::from_key(key).expect("key")),
+                ..ApprovalSettings::default()
+            }),
+            ..Options::default()
+        },
+    )
+}
+
+fn errors_of(response: &support::TestResponse) -> Vec<(String, String, String)> {
+    response.json()["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["field"].as_str().unwrap_or_default().to_string(),
+                e["code"].as_str().unwrap_or_default().to_string(),
+                e["message"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
 async fn post(app: &TestApp, ns: &str, key: &str, body: &Value) -> support::TestResponse {
     app.post(
         &format!("/api/v1/namespaces/{ns}/restores"),
@@ -115,7 +160,13 @@ fn last_approval_posted(fake: &FakeKube) -> Value {
 #[tokio::test]
 async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subject() {
     let app = fresh_install();
-    let created = post(&app, NS_B, "original-name-0001", &original_body()).await;
+    let created = post(
+        &app,
+        NS_B,
+        "original-name-0001",
+        &typed_original_body(&["payments", "orders"]),
+    )
+    .await;
     assert_eq!(
         created.status,
         201,
@@ -143,7 +194,147 @@ async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subjec
     )
     .expect("a v2 document");
     assert_eq!(doc.approval_subject.as_deref(), Some("originalName"));
+    // OD-10: what the requester typed is signed beside the subject.
+    assert_eq!(
+        doc.original_name_confirmation
+            .as_ref()
+            .map(|c| c.typed_topics.clone()),
+        Some(vec!["payments".to_string(), "orders".to_string()])
+    );
     app.fake.assert_strict();
+}
+
+/// **OD-10 (review M1): a one-person confirmation needs every original topic
+/// name re-typed, exactly**, refused by name before anything is created: no
+/// typed names, a missing name, a name typed in another case. KILLS: the API
+/// signing an original-name confirmation without the typed names, or with
+/// names that are not the plan's.
+#[tokio::test]
+async fn a_one_person_confirmation_needs_the_original_names_typed_exactly() {
+    let app = fresh_install();
+    let refused = post(&app, NS_B, "original-typed-0001", &original_body()).await;
+    refused.assert_problem(422, "validation_failed");
+    assert!(
+        errors_of(&refused).iter().any(|(field, code, _)| field
+            == "originalNameConfirmation.typedTopics"
+            && code == "typed_topics_required"),
+        "{:?}",
+        errors_of(&refused)
+    );
+    for (i, (names, words)) in [
+        (vec!["orders"], "not typed: \"payments\""),
+        (vec!["orders", "Payments"], "not typed: \"payments\""),
+        (
+            vec!["orders", "payments", "audit"],
+            "typed but not restored by this plan: \"audit\"",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = post(
+            &app,
+            NS_B,
+            &format!("original-typed-{:04}", i + 2),
+            &typed_original_body(&names),
+        )
+        .await;
+        refused.assert_problem(422, "validation_failed");
+        let errors = errors_of(&refused);
+        assert!(
+            errors.iter().any(|(field, code, message)| field
+                == "originalNameConfirmation.typedTopics"
+                && code == "typed_topics_mismatch"
+                && message.contains(words)),
+            "{names:?}: {errors:?}"
+        );
+    }
+    assert_eq!(app.fake.count("restores", NS_B), 0, "nothing was created");
+    assert_eq!(app.fake.count("approvals", NS_B), 0);
+}
+
+/// Typed names never stand in for anything else: refused on an ordinary
+/// restore, and in an unbound namespace (which signs nothing). KILLS: a typed
+/// list accepted where it would be signed beside nothing it confirms.
+#[tokio::test]
+async fn typed_names_are_refused_where_they_would_replace_nothing() {
+    let app = fresh_install();
+    let mut ordinary = support::restore_body(&support::golden_plan());
+    ordinary["originalNameConfirmation"] = json!({"typedTopics": ["orders", "payments"]});
+    let refused = post(&app, NS_B, "typed-ordinary-0001", &ordinary).await;
+    refused.assert_problem(422, "validation_failed");
+    assert!(errors_of(&refused)
+        .iter()
+        .any(|(field, code, _)| field == "originalNameConfirmation" && code == "not_accepted"));
+
+    let legacy = TestApp::new();
+    let refused = post(
+        &legacy,
+        NS_A,
+        "typed-legacy-0001",
+        &typed_original_body(&["orders", "payments"]),
+    )
+    .await;
+    refused.assert_problem(422, "validation_failed");
+    assert!(errors_of(&refused)
+        .iter()
+        .any(|(field, code, _)| field == "originalNameConfirmation" && code == "not_accepted"));
+    assert_eq!(legacy.fake.count("restores", NS_A), 0);
+}
+
+/// **OD-10: a strict (Governed) namespace still needs the second person.**
+/// An original-name request is stored and confirmed by the console only as
+/// `<approvalRef>-confirmation`, which authorises nothing; the Approval the
+/// Restore references does not exist until an approver countersigns. Typed
+/// names are refused there: they never replace the second person. KILLS:
+/// typed names admitted as the approval in a strict namespace; the console
+/// storing an authorising Approval for an original-name restore under strict.
+#[tokio::test]
+async fn a_strict_namespace_still_needs_the_second_person_for_an_original_name_restore() {
+    let app = bound_app("prod-governed");
+    let mut body = original_body();
+    body["ticket"] = json!("CHG-4711");
+    let created = post(&app, NS_A, "original-strict-0001", &body).await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let answer = created.json();
+    assert_eq!(
+        answer["authorization"]["state"], "awaitingApproval",
+        "{answer}"
+    );
+    let approval_ref = answer["item"]["approvalRef"]["name"]
+        .as_str()
+        .unwrap_or("approval-1234abcd")
+        .to_string();
+    let posted: Vec<String> = app
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/approvals"))
+        .map(|r| {
+            serde_json::from_str::<Value>(&r.body).expect("json")["metadata"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        posted,
+        vec![format!("{approval_ref}-confirmation")],
+        "only the confirmation, which authorises nothing"
+    );
+
+    let mut typed = typed_original_body(&["orders", "payments"]);
+    typed["ticket"] = json!("CHG-4711");
+    let refused = post(&app, NS_A, "original-strict-0002", &typed).await;
+    refused.assert_problem(422, "validation_failed");
+    assert!(errors_of(&refused)
+        .iter()
+        .any(|(field, code, _)| field == "originalNameConfirmation" && code == "not_accepted"));
 }
 
 /// The control: an ordinary request is stored, shown and signed exactly as

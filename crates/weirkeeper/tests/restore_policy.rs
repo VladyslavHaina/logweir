@@ -167,6 +167,7 @@ fn document(policy: &str, mode: ApprovalMode) -> RestoreAuthorization {
         // D0: required under Governed, optional under Ordinary.
         ticket: (mode == ApprovalMode::Governed).then(|| "CHG-4711".to_string()),
         approval_subject: None,
+        original_name_confirmation: None,
     }
 }
 
@@ -1022,4 +1023,139 @@ async fn an_approval_that_expires_in_the_queue_is_refused_saying_so() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PROD-15.1 review M1, OD-10: the typed confirmation, at admission
+// ---------------------------------------------------------------------------
+
+const ORIGINAL_NAME: &str = "rst-original-1";
+const ORIGINAL_UID: &str = "5c2e7b91-0000-4000-8000-00000000151a";
+
+/// The same plan restored under the ORIGINAL topic names (`newTopic`,
+/// `prefix: ""`, the no-owner statement).
+fn original_plan() -> String {
+    PLAN_BYTES
+        .replace("  mode: scratch\n", "  mode: newTopic\n")
+        .replace("  marker_topic: logweir.scratch\n", "")
+        .replace("  teardown: delete\n", "")
+        .replace(
+            "  default_replication_factor: 1\n",
+            "  default_replication_factor: 1\n  topic_naming:\n    prefix: \"\"\n    original_name: {owners: []}\n",
+        )
+}
+
+fn original_restore() -> Restore {
+    let mut v: Value = serde_json::to_value(restore()).expect("serialises");
+    v["metadata"]["name"] = serde_json::json!(ORIGINAL_NAME);
+    v["metadata"]["uid"] = serde_json::json!(ORIGINAL_UID);
+    v["spec"]["planBytes"] = serde_json::json!(original_plan());
+    v["spec"]["target"] = serde_json::json!({"clusterRef": {"name": "scratch"}, "mode": "newTopic",
+                                            "topicNaming": {"prefix": "", "originalName": true}});
+    serde_json::from_value(v).expect("a Restore")
+}
+
+/// A verified v2 Approval for the original-name Restore, under `policy` in
+/// `mode`, carrying the `originalName` subject and, when given, the typed
+/// topic names the console signed.
+fn original_approval(
+    policy: &str,
+    mode: ApprovalMode,
+    matched: &str,
+    typed: Option<&[&str]>,
+) -> Approval {
+    let mut doc = document(policy, mode);
+    doc.subject.name = ORIGINAL_NAME.into();
+    doc.subject.uid = ORIGINAL_UID.into();
+    doc.plan_hash = sha256_prefixed(original_plan().as_bytes());
+    doc.approval_subject = Some("originalName".into());
+    doc.original_name_confirmation =
+        typed.map(
+            |names| logweir_core::original_name::OriginalNameConfirmation {
+                typed_topics: names.iter().map(|n| (*n).to_string()).collect(),
+            },
+        );
+    let mut v: Value =
+        serde_json::to_value(v2_approval(&doc, policy, matched)).expect("serialises");
+    v["spec"]["subjectRef"]["name"] = serde_json::json!(ORIGINAL_NAME);
+    v["spec"]["planHash"] = serde_json::json!(doc.plan_hash);
+    v["status"]["verifiedSubjectRef"]["name"] = serde_json::json!(ORIGINAL_NAME);
+    v["status"]["verifiedSubjectRef"]["uid"] = serde_json::json!(ORIGINAL_UID);
+    serde_json::from_value(v).expect("an Approval")
+}
+
+fn admit_original(approval: &Approval, policy: &str) -> RestoreAdmission {
+    admit_with_policy(
+        &original_restore(),
+        Some(approval),
+        Some(&cluster()),
+        None,
+        Some(&PolicyAdmission {
+            policy: &effective(policy),
+            now: now(),
+        }),
+    )
+}
+
+/// **OD-10 at admission.** On a one-person-confirmation (`Ordinary`)
+/// namespace an original-name Restore is admitted only when its signed
+/// confirmation carries every original topic name re-typed, exactly; a
+/// missing or wrong list is refused terminally, by name, before any Job.
+/// KILLS: admitting a one-person confirmation without the typed names, or
+/// with names that are not the plan's.
+#[test]
+fn a_one_person_confirmation_of_an_original_name_restore_needs_the_names_typed() {
+    let typed = |names: Option<&[&str]>| {
+        admit_original(
+            &original_approval(
+                "team-ordinary",
+                ApprovalMode::Ordinary,
+                CONSOLE_KEY_ID,
+                names,
+            ),
+            "team-ordinary",
+        )
+    };
+    assert_eq!(typed(Some(&["orders"])), RestoreAdmission::Ok);
+    for (names, token) in [
+        (None, "OriginalNameConfirmationMissing"),
+        (Some(&["Orders"][..]), "OriginalNameConfirmationMismatch"),
+        (
+            Some(&["orders", "payments"][..]),
+            "OriginalNameConfirmationMismatch",
+        ),
+    ] {
+        let refused = typed(names);
+        assert!(refused.is_terminal(), "{names:?}: {refused:?}");
+        assert_eq!(refused.reason(), "ApprovalSubjectMismatch", "{refused}");
+        assert!(refused.to_string().contains(token), "{refused}");
+    }
+}
+
+/// **OD-10: two-person and strict still need the second person.** Under a
+/// `Governed` binding the requester's own confirmation (console key only)
+/// admits nothing — typed names or not — and the countersigned document
+/// admits the original-name Restore without typed names. KILLS: letting typed
+/// names stand in for the second person.
+#[test]
+fn a_governed_namespace_still_needs_the_second_person_for_an_original_name_restore() {
+    // The requester's confirmation alone, even with the names typed: refused.
+    let alone = admit_original(
+        &original_approval(
+            "prod-governed",
+            ApprovalMode::Governed,
+            CONSOLE_KEY_ID,
+            Some(&["orders"]),
+        ),
+        "prod-governed",
+    );
+    assert_ne!(alone, RestoreAdmission::Ok, "{alone:?}");
+    // The approver's countersignature, no typed names: admitted.
+    assert_eq!(
+        admit_original(
+            &original_approval("prod-governed", ApprovalMode::Governed, BOB_KEY_ID, None),
+            "prod-governed",
+        ),
+        RestoreAdmission::Ok
+    );
 }

@@ -92,6 +92,7 @@ fn document(mode: ApprovalMode) -> RestoreAuthorization {
         expires_at: Utc::now() + Duration::minutes(5),
         ticket: Some("CHG-1".into()),
         approval_subject: None,
+        original_name_confirmation: None,
     }
 }
 

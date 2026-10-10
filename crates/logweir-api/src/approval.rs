@@ -398,6 +398,7 @@ pub fn document(
     issued_at: DateTime<Utc>,
     ticket: Option<String>,
     approval_subject: logweir_core::original_name::ApprovalSubject,
+    original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
         format_version: RESTORE_AUTHORIZATION_FORMAT_VERSION.to_string(),
@@ -423,6 +424,11 @@ pub fn document(
         // declaration and nothing else — absent for an ordinary restore, so
         // its document is byte for byte what it was.
         approval_subject: approval_subject.wire().map(str::to_string),
+        // OD-10: the topic names the requester re-typed, signed beside the
+        // subject — only on a one-person confirmation of an original-name
+        // restore (`routes::restores::refuse_typed_confirmation` admitted the
+        // request only then).
+        original_name_confirmation,
     }
 }
 
@@ -530,6 +536,7 @@ mod tests {
             at,
             None,
             logweir_core::original_name::ApprovalSubject::Ordinary,
+            None,
         );
         assert_eq!(
             doc.expires_at - doc.issued_at,

@@ -371,6 +371,13 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The requested point in time is newer than anything this backup set covers. Pick an \
              earlier point, or take a newer backup."
         }
+        // PROD-15.1 review L6: the original-name block in a shape phase 0
+        // refuses.
+        CheckCode::TopicMappingIdentity => {
+            "The plan maps a topic onto its own name in a shape the runner refuses. A restore \
+             under the original topic names is mode newTopic with topic_naming.prefix \"\" and \
+             the original_name block; every other restore sets a prefix nothing has used."
+        }
         CheckCode::SelectionInvalid => {
             "The plan's replay selection is refused: a partition subset (restore.partitions), which \
              is not accepted until the owner decides how its scorecard is versioned, or a window \

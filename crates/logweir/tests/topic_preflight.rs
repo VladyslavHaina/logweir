@@ -403,6 +403,7 @@ fn phase0_calls_broker_configs_and_never_topic_configs_before_creation() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -442,6 +443,7 @@ fn every_mapped_target_topic_is_created_with_the_pinned_config_set() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -647,6 +649,7 @@ fn every_created_target_topic_is_served_before_the_restore_runs() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -701,6 +704,7 @@ fn a_created_target_topic_that_is_never_served_is_operational() {
     let e = phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -1149,6 +1153,7 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts_for(&[("orders", 3), ("payments", 1)]),
         spec.target.default_replication_factor,
@@ -1339,6 +1344,7 @@ fn topics_created_names_only_the_topics_this_run_created() {
     phase0_admit::create_target_topics(
         &creator,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,
@@ -1380,6 +1386,7 @@ fn topics_created_names_only_the_topics_this_run_created() {
     let e = phase0_admit::create_target_topics(
         &racing,
         &reader,
+        &deleter,
         &admitted.topic_mapping,
         &facts,
         spec.target.default_replication_factor,

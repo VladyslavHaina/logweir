@@ -24,7 +24,7 @@ use logweir_kafka::reader::{
     ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicDeleter, TopicMeta,
 };
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The target cluster the doubles report.
 const TARGET: &str = "TARGET0000000000000000";
@@ -112,6 +112,12 @@ struct Broker {
     auto_create: Vec<(i32, Option<String>)>,
     log_append_time: bool,
     reads_of_auto_create: Mutex<usize>,
+    /// Topics a `Creator` sharing this list created: listed from then on, as
+    /// a real cluster would (review M4's cleanup reads them back).
+    created: Arc<Mutex<Vec<TopicMeta>>>,
+    /// A created topic's configuration is not the one Logweir set (someone
+    /// deleted and recreated it, or it was auto-created).
+    foreign_configs: bool,
 }
 
 impl Broker {
@@ -125,6 +131,8 @@ impl Broker {
                 .collect(),
             log_append_time: false,
             reads_of_auto_create: Mutex::new(0),
+            created: Arc::new(Mutex::new(Vec::new())),
+            foreign_configs: false,
         }
     }
     fn disabled() -> Self {
@@ -145,17 +153,28 @@ impl ClusterReader for Broker {
         Ok(TARGET.to_string())
     }
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(self.topics.clone())
+        let mut topics = self.topics.clone();
+        topics.extend(self.created.lock().unwrap().iter().cloned());
+        Ok(topics)
     }
     fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
         Ok(vec![])
     }
     fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        // The probe's read-back: the broker honours the per-topic override.
-        Ok(BTreeMap::from([(
-            "message.timestamp.type".to_string(),
-            "CreateTime".to_string(),
-        )]))
+        // The probe's read-back (the broker honours the per-topic override),
+        // and what a topic Logweir created carries: both pinned entries.
+        let retention = if self.foreign_configs {
+            "604800000"
+        } else {
+            "-1"
+        };
+        Ok(BTreeMap::from([
+            (
+                "message.timestamp.type".to_string(),
+                "CreateTime".to_string(),
+            ),
+            ("retention.ms".to_string(), retention.to_string()),
+        ]))
     }
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
         let ts_type = if self.log_append_time {
@@ -193,6 +212,13 @@ impl ClusterReader for Broker {
 struct Creator {
     calls: Mutex<Vec<NewTopicSpec>>,
     taken: Vec<String>,
+    /// Where created topics are listed (the `Broker`'s `created`).
+    lists_into: Option<Arc<Mutex<Vec<TopicMeta>>>>,
+    /// Created with this many partitions instead of the asked count (a
+    /// topic someone recreated differently).
+    partitions_override: Option<i32>,
+    /// Answer only for these names (review L1's short answer).
+    answers_only: Option<Vec<String>>,
 }
 
 impl TopicCreator for Creator {
@@ -203,10 +229,21 @@ impl TopicCreator for Creator {
         self.calls.lock().unwrap().extend_from_slice(topics);
         Ok(topics
             .iter()
+            .filter(|t| {
+                self.answers_only
+                    .as_ref()
+                    .is_none_or(|only| only.contains(&t.name))
+            })
             .map(|t| {
                 if self.taken.contains(&t.name) {
                     (t.name.clone(), Err(rdkafka_already_exists()))
                 } else {
+                    if let Some(list) = &self.lists_into {
+                        list.lock().unwrap().push(TopicMeta::new(
+                            &t.name,
+                            self.partitions_override.unwrap_or(t.num_partitions),
+                        ));
+                    }
                     (t.name.clone(), Ok(()))
                 }
             })
@@ -233,6 +270,10 @@ fn rdkafka_already_exists() -> String {
 #[derive(Default)]
 struct Deleter {
     calls: Mutex<Vec<String>>,
+    /// Every name handed to the review-M4 cleanup.
+    unwritten_calls: Mutex<Vec<String>>,
+    /// Records a topic holds when the cleanup re-reads its end offsets.
+    records: BTreeMap<String, i64>,
 }
 
 impl TopicDeleter for Deleter {
@@ -243,6 +284,27 @@ impl TopicDeleter for Deleter {
         self.calls.lock().unwrap().extend_from_slice(names);
         Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
     }
+    fn delete_unwritten_created(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.unwritten_calls
+            .lock()
+            .unwrap()
+            .extend_from_slice(names);
+        Ok(names
+            .iter()
+            .map(|n| match self.records.get(n) {
+                Some(r) if *r > 0 => (
+                    n.clone(),
+                    Err(format!(
+                        "left: it holds {r} record(s) this run did not write"
+                    )),
+                ),
+                _ => (n.clone(), Ok(())),
+            })
+            .collect())
+    }
 }
 
 struct Run {
@@ -251,9 +313,27 @@ struct Run {
     deleted: Vec<String>,
 }
 
+/// Phase 0 over the doubles. `source` is the source cluster id the bound
+/// point's VERIFIED receipt measured (review L3: the only source id that
+/// counts); `inputs` may name its own, which wins.
 fn admit(
     spec: &DrillSpec,
     source: Option<&str>,
+    broker: &Broker,
+    inputs: &phase0_admit::OriginalNameInputs,
+) -> Run {
+    let mut inputs = inputs.clone();
+    if inputs.receipt_source_cluster_id.is_none() {
+        inputs.receipt_source_cluster_id = source.map(str::to_string);
+    }
+    admit_with_allowlist(spec, None, broker, &inputs)
+}
+
+/// Phase 0 with the allowlist file naming `allowlist_source` as its
+/// `source_cluster_id` — unsigned runner input.
+fn admit_with_allowlist(
+    spec: &DrillSpec,
+    allowlist_source: Option<&str>,
     broker: &Broker,
     inputs: &phase0_admit::OriginalNameInputs,
 ) -> Run {
@@ -262,7 +342,7 @@ fn admit(
     let result = phase0_admit::run_with_original_name(
         spec,
         &serde_yaml::to_string(spec).expect("the spec serialises"),
-        &allowed(source),
+        &allowed(allowlist_source),
         broker,
         &creator,
         &deleter,
@@ -414,23 +494,57 @@ fn the_verified_receipts_source_makes_the_target_another_cluster() {
     );
 }
 
-/// One known source equal to the target makes it the same cluster, whatever
-/// another says. KILLS: `any` for `all` in "every known id differs".
+/// The verified receipt naming the target as its source makes it the same
+/// cluster, and the allowlist naming another cluster changes nothing (review
+/// L3). KILLS: reading the allowlist's id beside the receipt's (`any` for
+/// `all` over the known ids is the core row
+/// `the_target_is_not_the_source_only_when_a_known_id_differs_and_none_equals`).
 #[test]
 fn a_known_source_equal_to_the_target_is_the_same_cluster() {
     let inputs = phase0_admit::OriginalNameInputs {
-        receipt_source_cluster_id: Some(OTHER.into()),
+        receipt_source_cluster_id: Some(TARGET.into()),
         ..no_inputs()
     };
     refused(
-        admit(
+        admit_with_allowlist(
             &plan_no_owner(),
-            Some(TARGET),
+            Some(OTHER),
             &Broker::with_auto_create(&[Some("true")]),
             &inputs,
         ),
         "OriginalNameAutoCreateEnabled",
     );
+}
+
+/// Review L3: the allowlist file's `source_cluster_id` is unsigned runner
+/// input and never makes the target "another cluster" — without a verified
+/// receipt the source is unknown, and auto-creation must be proven disabled.
+/// KILLS: counting the allowlist's id again (the auto-creation read would be
+/// skipped).
+#[test]
+fn the_allowlist_source_id_never_makes_the_target_another_cluster() {
+    refused(
+        admit_with_allowlist(
+            &plan_no_owner(),
+            Some(OTHER),
+            &Broker::with_auto_create(&[Some("true")]),
+            &no_inputs(),
+        ),
+        "OriginalNameAutoCreateEnabled",
+    );
+    let (a, _, _) = admitted(admit_with_allowlist(
+        &plan_no_owner(),
+        Some(OTHER),
+        &Broker::disabled(),
+        &no_inputs(),
+    ));
+    let proved = a
+        .original_name
+        .expect("admitted as an original-name restore");
+    assert!(matches!(
+        proved.relation,
+        logweir_core::original_name::SourceRelation::SourceUnknown
+    ));
 }
 
 /// The same cluster with auto-creation disabled on every broker: admitted,
@@ -713,6 +827,7 @@ fn mapping() -> BTreeMap<String, String> {
 fn create(
     broker: &Broker,
     creator: &Creator,
+    deleter: &Deleter,
 ) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
     let facts = logweir_core::engine::BackupSetFacts {
         backup_id: "b".into(),
@@ -739,43 +854,197 @@ fn create(
         configs_set: Vec::new(),
         topics_created: Vec::new(),
     };
-    let r =
-        phase0_admit::create_target_topics(creator, broker, &mapping(), &facts, 1, &mut preflight);
+    let r = phase0_admit::create_target_topics(
+        creator,
+        broker,
+        deleter,
+        &mapping(),
+        &facts,
+        1,
+        &mut preflight,
+    );
     (r, preflight)
 }
 
-/// A name that appeared after phase 0 refuses BEFORE any create, by name.
-/// KILLS: deleting the pre-create look (the creator would then be called).
+fn race(e: DrillError) -> phase0_admit::TargetTopicRace {
+    assert_eq!(e.exit_code(), ExitCode::Operational, "{e}");
+    match e {
+        DrillError::TargetTopicAppeared(race) => *race,
+        other => panic!("expected the named race, got: {other}"),
+    }
+}
+
+/// A name that appeared after phase 0 refuses BEFORE any create, by name, and
+/// nothing is created or deleted. KILLS: deleting the pre-create look (the
+/// creator would then be called); routing the race through a plain exit 1
+/// with no names.
 #[test]
 fn a_name_that_appeared_since_phase_0_loses_before_anything_is_created() {
     let broker = Broker::disabled().having("payments");
     let creator = Creator::default();
-    let (r, preflight) = create(&broker, &creator);
-    let e = r.expect_err("the race is lost");
-    assert_eq!(e.exit_code(), ExitCode::Operational);
-    let message = e.to_string();
-    assert!(message.contains("TargetTopicAppeared"), "{message}");
-    assert!(message.contains("`payments`"), "{message}");
+    let deleter = Deleter::default();
+    let (r, preflight) = create(&broker, &creator, &deleter);
+    let race = race(r.expect_err("the race is lost"));
+    assert!(
+        race.message.starts_with("TargetTopicAppeared: "),
+        "{}",
+        race.message
+    );
+    assert!(race.message.contains("`payments`"), "{}", race.message);
+    assert!(
+        race.message.contains("This run created no topic."),
+        "{}",
+        race.message
+    );
+    assert_eq!(race.appeared, vec!["payments".to_string()]);
+    assert!(race.removed.is_empty() && race.left.is_empty());
     assert!(creator.calls.lock().unwrap().is_empty());
+    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
     assert!(preflight.topics_created.is_empty());
+    assert_eq!(
+        race.status_line_value(),
+        r#"{"appeared":["payments"],"removed":[],"left":[]}"#
+    );
 }
 
-/// `CreateTopics` itself answering "already exists" is the same named loss,
-/// and names what THIS run created in the same request. KILLS: treating the
-/// answer as an ordinary failure, or as success (a write into someone else's
-/// topic would follow).
+/// Review M4. `CreateTopics` answering "already exists" for one name is the
+/// same named loss; the topic THIS run created in the same request is removed
+/// — its own answer, its partition count and its pinned configuration prove
+/// it this run's, and it holds no record — and the name that appeared is
+/// NEVER handed to any deleter. KILLS: leaving an empty production-named topic
+/// behind; deleting the topic someone else created; skipping the proof.
 #[test]
-fn create_topics_answering_already_exists_is_the_named_loss() {
+fn a_lost_race_removes_only_what_this_run_created_and_proved_empty() {
     let broker = Broker::disabled();
     let creator = Creator {
         taken: vec!["payments".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
         ..Creator::default()
     };
-    let (r, preflight) = create(&broker, &creator);
-    let message = r.expect_err("the race is lost").to_string();
-    assert!(message.contains("TargetTopicAppeared"), "{message}");
-    assert!(message.contains("This run created `orders`"), "{message}");
-    assert_eq!(preflight.topics_created, vec!["orders".to_string()]);
+    let deleter = Deleter::default();
+    let (r, preflight) = create(&broker, &creator, &deleter);
+    let race = race(r.expect_err("the race is lost"));
+    assert_eq!(race.appeared, vec!["payments".to_string()]);
+    assert_eq!(race.removed, vec!["orders".to_string()]);
+    assert!(race.left.is_empty(), "{:?}", race.left);
+    assert_eq!(
+        *deleter.unwritten_calls.lock().unwrap(),
+        vec!["orders".to_string()]
+    );
+    assert!(
+        deleter.calls.lock().unwrap().is_empty(),
+        "the scratch deleter is never used"
+    );
+    assert!(
+        race.message.contains("removed them again"),
+        "{}",
+        race.message
+    );
+    assert!(
+        preflight.topics_created.is_empty(),
+        "a removed topic is not reported created"
+    );
+    assert_eq!(
+        race.status_line_value(),
+        r#"{"appeared":["payments"],"removed":["orders"],"left":[]}"#
+    );
+}
+
+/// Review M4's controls: a created topic is LEFT, and named with the reason,
+/// whenever ownership or emptiness cannot be proved — it holds a record, its
+/// configuration is not the one this run set, or its partition count is not.
+/// KILLS: deleting a topic a producer already wrote into; deleting one that
+/// was recreated by someone else; dropping either proof.
+#[test]
+fn a_created_topic_that_cannot_be_proved_its_own_and_empty_is_left_and_named() {
+    // A record arrived before the cleanup.
+    let broker = Broker::disabled();
+    let creator = Creator {
+        taken: vec!["payments".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let deleter = Deleter {
+        records: BTreeMap::from([("orders".to_string(), 1)]),
+        ..Deleter::default()
+    };
+    let race_1 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
+    assert!(race_1.removed.is_empty());
+    assert_eq!(race_1.left.len(), 1);
+    assert!(
+        race_1.left[0].1.contains("holds 1 record"),
+        "{:?}",
+        race_1.left
+    );
+    assert!(
+        race_1.message.contains("LEFT `orders`"),
+        "{}",
+        race_1.message
+    );
+
+    // Another configuration: never handed to the deleter.
+    let mut broker = Broker::disabled();
+    broker.foreign_configs = true;
+    let creator = Creator {
+        taken: vec!["payments".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
+        ..Creator::default()
+    };
+    let deleter = Deleter::default();
+    let race_2 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
+    assert!(race_2.removed.is_empty());
+    assert!(
+        race_2.left[0].1.contains("configuration is not the one"),
+        "{:?}",
+        race_2.left
+    );
+    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
+
+    // Another partition count: never handed to the deleter.
+    let broker = Broker::disabled();
+    let creator = Creator {
+        taken: vec!["payments".into()],
+        lists_into: Some(Arc::clone(&broker.created)),
+        partitions_override: Some(1),
+        ..Creator::default()
+    };
+    let deleter = Deleter::default();
+    let race_3 = race(create(&broker, &creator, &deleter).0.expect_err("lost"));
+    assert!(
+        race_3.left[0].1.contains("1 partition(s), not the 3"),
+        "{:?}",
+        race_3.left
+    );
+    assert!(deleter.unwritten_calls.lock().unwrap().is_empty());
+    assert_eq!(
+        race_3.status_line_value(),
+        r#"{"appeared":["payments"],"removed":[],"left":["orders"]}"#
+    );
+}
+
+/// Review L1. A `CreateTopics` answer that names fewer topics than asked is
+/// refused by name before the engine starts — a name without an answer was
+/// neither created nor refused. KILLS: accepting a short answer (the engine
+/// would be handed `payments`).
+#[test]
+fn a_create_answer_without_one_result_per_name_is_refused() {
+    let broker = Broker::disabled();
+    let creator = Creator {
+        answers_only: Some(vec!["orders".into()]),
+        ..Creator::default()
+    };
+    let deleter = Deleter::default();
+    let (r, _) = create(&broker, &creator, &deleter);
+    let e = r.expect_err("a short answer");
+    assert_eq!(e.exit_code(), ExitCode::Operational);
+    let message = e.to_string();
+    assert!(
+        message.contains(
+            "CreateTopics answered for [orders] when this run asked for [orders, payments]"
+        ),
+        "{message}"
+    );
+    assert!(message.contains("left in place: [`orders`]"), "{message}");
 }
 
 // ---------------------------------------------------------------------------

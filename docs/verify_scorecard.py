@@ -502,7 +502,7 @@ FORMAT_VERSION = "1.4.0"
 # and `schema_dependency` lines say, per topic, what the Rust reader says.
 # 1.25.0 (PROD-15.1) knows scorecard format 1.8.0 and its optional
 # `target.original_name`: a restore under the source's ORIGINAL topic names,
-# into absent topics (OD-2). Ten arms, ON-1 to ON-10, mirrored byte for byte
+# into absent topics (OD-2). Twelve arms, ON-1 to ON-12, mirrored byte for byte
 # and in position from `Scorecard::validate_invariants`: the block only under a
 # version of at least 1.8.0, only in a newTopic document with the empty prefix,
 # the approval subject `originalName`, the approval mode and the cluster
@@ -959,8 +959,9 @@ def _original_name_shape_ok(block) -> bool:
     (PROD-15.1, format 1.8.0): strings `approval_subject`, `approval_mode` and
     `cluster_condition`; `source_cluster_id` absent, null or a string;
     `owner_detection` an array of strings; `owners` an array of objects of four
-    strings `topic`, `kind`, `reference`, `found_in`; and a bool `owner_path`.
-    Unknown keys are ignored, as serde ignores them."""
+    strings `topic`, `kind`, `reference`, `found_in`; a bool `owner_path`; and
+    `confirmation` and `kafka_topic_resources_sha256` absent, null or strings
+    (OD-10 and review L2). Unknown keys are ignored, as serde ignores them."""
     if not isinstance(block, dict):
         return False
     for name in ("approval_subject", "approval_mode", "cluster_condition"):
@@ -979,7 +980,20 @@ def _original_name_shape_ok(block) -> bool:
             isinstance(owner.get(k), str) for k in ("topic", "kind", "reference", "found_in")
         ):
             return False
+    for name in ("confirmation", "kafka_topic_resources_sha256"):
+        value = block.get(name)
+        if value is not None and not isinstance(value, str):
+            return False
     return isinstance(block.get("owner_path"), bool)
+
+
+def _is_sha256_prefixed(value) -> bool:
+    """`sha256:` and 64 lowercase hex characters -- the twin of
+    `logweir_core::check_contract::is_sha256_prefixed`."""
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        return False
+    digest = value[len("sha256:"):]
+    return len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
 
 
 def _int_in(x, bits) -> bool:
@@ -1500,7 +1514,7 @@ def check_invariants(doc) -> str:
     # Also shape (PROD-15.1, scorecard 1.8.0): `target.original_name` is an
     # `Option<OriginalNameInfo>` over there, so `null` is ABSENT and anything
     # that is not the writer's shape is refused at DESERIALISATION. Arms ON-1
-    # to ON-10 below compare its fields, so the shape is asserted first. The
+    # to ON-12 below compare its fields, so the shape is asserted first. The
     # bad shapes are cases in `shape-index.json`.
     original_name = target.get("original_name")
     if original_name is not None and not _original_name_shape_ok(original_name):
@@ -2228,7 +2242,7 @@ def check_invariants(doc) -> str:
                     "the expected output is selected by the plan's own start and end"
                 )
 
-    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-10,
+    # `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to ON-12,
     # mirrored ARM FOR ARM, IN THIS POSITION (after `source.selection`, before
     # `redactions`) and with the same words from `Scorecard::validate_invariants`.
     # They fire ONLY on a document carrying the block, so every document before
@@ -2317,6 +2331,29 @@ def check_invariants(doc) -> str:
             return (
                 "target.original_name.owners is not empty and owner_path is false; an owned "
                 "name is restored only on the owner path"
+            )
+        # ON-11 (OD-10). A one-person confirmation is signed only with the
+        # topic names typed, and nothing else claims a typed confirmation.
+        confirmation = original_name.get("confirmation")
+        typed = confirmation == "typedTopicNames"
+        if (original_name["approval_mode"] == "ordinary") != typed or (
+            confirmation is not None and not typed
+        ):
+            return (
+                "target.original_name.confirmation is not \"typedTopicNames\" exactly when "
+                "approval_mode is \"ordinary\"; a one-person confirmation of an original-name "
+                "restore is signed only with every original topic name re-typed"
+            )
+        # ON-12. The resources file a runner looked in is named by digest,
+        # exactly when it is a place that was looked in.
+        digest = original_name.get("kafka_topic_resources_sha256")
+        listed = "kafkaTopicResources" in original_name["owner_detection"]
+        digest_ok = _is_sha256_prefixed(digest)
+        if listed != digest_ok or (digest is not None and not digest_ok):
+            return (
+                "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest "
+                "exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic "
+                "resources a runner looked in are named by their digest"
             )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
@@ -3324,12 +3361,20 @@ def _original_name_lines(block):
         if owners
         else "none found"
     )
+    confirmed = (
+        " (the requester re-typed every original topic name)"
+        if block.get("confirmation") == "typedTopicNames"
+        else ""
+    )
+    digest = block.get("kafka_topic_resources_sha256")
     return [
         "original name: restored under the source's own topic names, into topics this run "
         "created (a new generation of each name, not the original topic); approval subject "
-        f"{block['approval_subject']}, approved by {block['approval_mode']}; {cluster}",
+        f"{block['approval_subject']}, approved by {block['approval_mode']}{confirmed}; {cluster}",
         f"original name: declarative owners looked for in {', '.join(block['owner_detection'])}: "
-        f"{found}" + ("; the approved plan chose the owner path" if block["owner_path"] else ""),
+        f"{found}"
+        + ("; the approved plan chose the owner path" if block["owner_path"] else "")
+        + (f"; KafkaTopic resources {digest}" if digest is not None else ""),
     ]
 
 
@@ -3732,8 +3777,9 @@ def main(
             "target.original_name only from 1.8.0, only in a newTopic document with the empty "
             "prefix, its subject originalName, its approval mode and cluster condition from "
             "their closed sets, targetIsNotSource only beside a known other source cluster id, "
-            "somewhere looked for an owner, each owner from a place looked in, and an owned name "
-            "only on the owner path; "
+            "somewhere looked for an owner, each owner from a place looked in, an owned name "
+            "only on the owner path, a one-person confirmation only with the names typed, and "
+            "the KafkaTopic resources looked in named by digest; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

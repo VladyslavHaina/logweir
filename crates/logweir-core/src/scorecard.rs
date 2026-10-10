@@ -366,7 +366,7 @@ pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
 /// **PROD-15.1.** The `format_version` of a scorecard that carries
 /// `target.original_name` — a restore under the source's ORIGINAL topic names
 /// into absent topics (OD-2). A MINOR bump for a new optional block, under
-/// OD-7 (a): arms ON-1 to ON-10 read only that block (ON-2, ON-3 and ON-7 judge
+/// OD-7 (a): arms ON-1 to ON-12 read only that block (ON-2, ON-3 and ON-7 judge
 /// existing `target` fields against it) and can only refuse. Written only for
 /// an original-name restore ([`format_version_with_original_name`]), so every
 /// other document is the one it was. The newest minor: the current schema
@@ -426,8 +426,9 @@ pub struct OriginalNameInfo {
     /// `auto.create.topics.enable=false`).
     pub cluster_condition: String,
     /// The source cluster id the condition compared, when one was known: the
-    /// bound point's verified receipt, else the allowlist file's. Required
-    /// beside `targetIsNotSource` (arm ON-7).
+    /// bound point's verified receipt, measured at backup time (an unsigned
+    /// runner input never counts). Required beside `targetIsNotSource` (arm
+    /// ON-7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_cluster_id: Option<String>,
     /// Where the run looked for declarative owners of the restored names
@@ -439,6 +440,19 @@ pub struct OriginalNameInfo {
     /// Whether the approved plan chose the owner path. Required for any owner
     /// found (arm ON-10).
     pub owner_path: bool,
+    /// **OD-10.** How a one-person confirmation was made:
+    /// [`crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES`] — the
+    /// requester re-typed every original topic name, exactly, and the console
+    /// signed what was typed. Present exactly when `approval_mode` is
+    /// `ordinary` (arm ON-11): every other mode has a second person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<String>,
+    /// `sha256:<64 hex>` of the `KafkaTopic` resources file the runner was
+    /// given (`--kafka-topic-resources`): an unsigned runner input, so the
+    /// document names exactly which file it looked in. Present exactly when
+    /// `owner_detection` lists `kafkaTopicResources` (arm ON-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_topic_resources_sha256: Option<String>,
 }
 
 /// One declarative owner an original-name restore found for a restored name.
@@ -476,10 +490,16 @@ impl OriginalNameInfo {
                     .to_string(),
             },
         };
+        let confirmed = match self.confirmation.as_deref() {
+            Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES) => {
+                " (the requester re-typed every original topic name)"
+            }
+            _ => "",
+        };
         let mut lines = vec![format!(
             "original name: restored under the source's own topic names, into topics this run \
              created (a new generation of each name, not the original topic); approval subject \
-             {}, approved by {}; {cluster}",
+             {}, approved by {}{confirmed}; {cluster}",
             self.approval_subject, self.approval_mode
         )];
         let owners = if self.owners.is_empty() {
@@ -497,12 +517,16 @@ impl OriginalNameInfo {
                 .join(", ")
         };
         lines.push(format!(
-            "original name: declarative owners looked for in {}: {owners}{}",
+            "original name: declarative owners looked for in {}: {owners}{}{}",
             self.owner_detection.join(", "),
             if self.owner_path {
                 "; the approved plan chose the owner path"
             } else {
                 ""
+            },
+            match self.kafka_topic_resources_sha256.as_deref() {
+                Some(digest) => format!("; KafkaTopic resources {digest}"),
+                None => String::new(),
             }
         ));
         lines
@@ -2332,7 +2356,7 @@ impl Scorecard {
             }
         }
         // `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to
-        // ON-10. They fire ONLY on a document that CARRIES the block, so every
+        // ON-12. They fire ONLY on a document that CARRIES the block, so every
         // document without it is decided exactly as before: MINOR under the
         // owner's OD-7 (a). ON-2, ON-3 and ON-7 judge existing `target` fields
         // against the block and can only refuse.
@@ -2445,6 +2469,36 @@ impl Scorecard {
                 return Err(InvariantError(
                     "target.original_name.owners is not empty and owner_path is false; an owned \
                      name is restored only on the owner path"
+                        .into(),
+                ));
+            }
+            // ON-11 (OD-10). A one-person confirmation is signed only with the
+            // topic names typed, and nothing else claims a typed confirmation.
+            let typed = on.confirmation.as_deref()
+                == Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES);
+            if (on.approval_mode == "ordinary") != typed || (on.confirmation.is_some() && !typed) {
+                return Err(InvariantError(
+                    "target.original_name.confirmation is not \"typedTopicNames\" exactly when \
+                     approval_mode is \"ordinary\"; a one-person confirmation of an original-name \
+                     restore is signed only with every original topic name re-typed"
+                        .into(),
+                ));
+            }
+            // ON-12. The resources file a runner looked in is named by digest,
+            // exactly when it is a place that was looked in.
+            let listed = on
+                .owner_detection
+                .iter()
+                .any(|p| p == crate::original_name::OWNER_FOUND_IN_KAFKA_TOPIC_RESOURCES);
+            let digest_ok = on
+                .kafka_topic_resources_sha256
+                .as_deref()
+                .is_some_and(crate::check_contract::is_sha256_prefixed);
+            if listed != digest_ok || (on.kafka_topic_resources_sha256.is_some() && !digest_ok) {
+                return Err(InvariantError(
+                    "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest \
+                     exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic \
+                     resources a runner looked in are named by their digest"
                         .into(),
                 ));
             }
@@ -4805,7 +4859,7 @@ mod tests {
         }
     }
 
-    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-10 ----
+    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-12 ----
 
     fn original_name_block() -> OriginalNameInfo {
         OriginalNameInfo {
@@ -4816,8 +4870,13 @@ mod tests {
             owner_detection: vec!["plan".into()],
             owners: Vec::new(),
             owner_path: false,
+            confirmation: None,
+            kafka_topic_resources_sha256: None,
         }
     }
+
+    const RESOURCES_DIGEST: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
     /// A valid original-name document: newTopic, the empty prefix, 1.8.0.
     fn with_original_name() -> Scorecard {
@@ -4860,7 +4919,18 @@ mod tests {
         block.owner_path = true;
         block.cluster_condition = "autoCreateDisabled".into();
         block.source_cluster_id = None;
+        block.kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
         assert!(owned.validate_invariants().is_ok());
+        // OD-10: a one-person confirmation, with the names typed.
+        let mut typed = with_original_name();
+        let block = typed.target.original_name.as_mut().unwrap();
+        block.approval_mode = "ordinary".into();
+        block.confirmation = Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+        assert!(
+            typed.validate_invariants().is_ok(),
+            "{:?}",
+            typed.validate_invariants()
+        );
         assert_eq!(
             format_version_with_original_name("1.6.0", sc.target.original_name.as_ref()),
             "1.8.0"
@@ -5002,7 +5072,63 @@ mod tests {
         );
     }
 
-    /// ON-1 to ON-10 sit after SEL-1 to SEL-3 and before `redactions`.
+    /// ON-11 (OD-10) and ON-12. KILLS: a one-person confirmation signed
+    /// without the typed names; a typed confirmation claimed for a mode with a
+    /// second person; an unknown confirmation; a resources file looked in
+    /// without its digest, or a digest for a file nobody looked in.
+    #[test]
+    fn on11_and_on12_tie_the_confirmation_and_the_resources_digest_to_their_facts() {
+        let confirmation = "target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed";
+        assert_eq!(
+            on_err(
+                |sc| sc.target.original_name.as_mut().unwrap().approval_mode = "ordinary".into()
+            ),
+            confirmation
+        );
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().confirmation =
+                    Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+            }),
+            confirmation
+        );
+        assert_eq!(
+            on_err(|sc| {
+                let block = sc.target.original_name.as_mut().unwrap();
+                block.approval_mode = "ordinary".into();
+                block.confirmation = Some("clicked".into());
+            }),
+            confirmation
+        );
+        let digest = "target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest";
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().owner_detection =
+                    vec!["kafkaTopicResources".into()];
+            }),
+            digest
+        );
+        assert_eq!(
+            on_err(|sc| {
+                sc.target
+                    .original_name
+                    .as_mut()
+                    .unwrap()
+                    .kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
+            }),
+            digest
+        );
+        assert_eq!(
+            on_err(|sc| {
+                let block = sc.target.original_name.as_mut().unwrap();
+                block.owner_detection = vec!["kafkaTopicResources".into()];
+                block.kafka_topic_resources_sha256 = Some("sha256:XYZ".into());
+            }),
+            digest
+        );
+    }
+
+    /// ON-1 to ON-12 sit after SEL-1 to SEL-3 and before `redactions`.
     /// KILLS: moving the block.
     #[test]
     fn the_original_name_arms_sit_between_the_selection_arms_and_redactions() {
@@ -5057,6 +5183,23 @@ mod tests {
         assert_eq!(
             lines[1],
             "original name: declarative owners looked for in plan: orders (strimzi kafka/orders, from plan); the approved plan chose the owner path"
+        );
+        // OD-10 and the resources digest, each in its line.
+        let mut typed = original_name_block();
+        typed.approval_mode = "ordinary".into();
+        typed.confirmation = Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
+        typed.owner_detection = vec!["kafkaTopicResources".into()];
+        typed.kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
+        let lines = typed.lines();
+        assert!(
+            lines[0].contains(
+                "approved by ordinary (the requester re-typed every original topic name); "
+            ),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[1],
+            format!("original name: declarative owners looked for in kafkaTopicResources: none found; KafkaTopic resources {RESOURCES_DIGEST}")
         );
     }
 

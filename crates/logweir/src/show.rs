@@ -391,10 +391,15 @@ fn qualifiers(sc: &Scorecard) -> String {
     if let Some(on) = sc.target.original_name.as_ref() {
         o.push_str(&format!(
             "    target.original_name      restored under the original topic names (a new \
-             generation of each name); approval subject {} ({}); {}; owners looked for in {}: \
+             generation of each name); approval subject {} ({}{}); {}; owners looked for in {}: \
              {}{}\n",
             on.approval_subject,
             on.approval_mode,
+            if on.confirmation.is_some() {
+                ", names typed"
+            } else {
+                ""
+            },
             on.cluster_condition,
             on.owner_detection.join(", "),
             if on.owners.is_empty() {

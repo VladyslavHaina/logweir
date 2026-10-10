@@ -103,6 +103,15 @@ pub enum DrillError {
     /// or network side effect at all.
     #[error("signing or lock proof failed: {0}")]
     SigningPrerequisite(String),
+    /// **PROD-15.1 review M4: the creation step lost the race, by name.** A
+    /// mapped target name phase 0 proved absent existed when the run came to
+    /// create it. Exit 1 (phases 0–5 ran), like [`Self::Operational`], but
+    /// carried apart so the runner can say WHICH names appeared, which topics
+    /// this execution created and removed, and which it left (and why) — on
+    /// stdout as `failure-reason=TargetTopicAppeared` and one bounded
+    /// `target-topics-appeared=` line the controller lifts onto the Restore.
+    #[error("operational: {}", .0.message)]
+    TargetTopicAppeared(Box<phase0_admit::TargetTopicRace>),
 }
 
 impl DrillError {
@@ -137,8 +146,12 @@ impl DrillError {
                 "RestoreNoOp must be intercepted in the orchestrator before reaching \
                  ExitCode conversion — see task-21a-addendum.md ruling A8"
             ),
-            // A Kafka or engine failure says nothing about the archive.
-            DrillError::Operational(_) | DrillError::Kafka(_) | DrillError::Engine(_) => {
+            // A Kafka or engine failure says nothing about the archive; nor
+            // does a lost creation race (PROD-15.1), which is named apart.
+            DrillError::Operational(_)
+            | DrillError::Kafka(_)
+            | DrillError::Engine(_)
+            | DrillError::TargetTopicAppeared(_) => {
                 ExitCode::Operational // 1
             }
         }
@@ -1316,6 +1329,12 @@ fn report_with(
         Ok(o) => Some(&o.topic_preflight),
         Err(_) => None,
     };
+    // PROD-15.1 review M4: a lost creation race says which names appeared and
+    // what this run removed or left, by name, where a controller reads it.
+    let race = match &outcome {
+        Err(DrillError::TargetTopicAppeared(race)) => Some(race.as_ref()),
+        _ => None,
+    };
     exiting(
         run_id,
         code,
@@ -1323,6 +1342,7 @@ fn report_with(
         evidence,
         preflight,
         sc,
+        race,
     )
 }
 
@@ -1369,6 +1389,7 @@ fn exiting(
     evidence: Option<&EvidenceKeys>,
     topic_preflight: Option<&phase0_admit::TopicPreflight>,
     scorecard: Option<&Scorecard>,
+    race: Option<&phase0_admit::TargetTopicRace>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
@@ -1393,6 +1414,25 @@ fn exiting(
     // instead of printing nothing.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
+    // **PROD-15.1 review M4: the lost creation race, named.** Exit 1 like any
+    // operational failure, but the controller lifts `failure-reason=` (the
+    // RECEIPT-DUP mechanism, `logweir_core::guard::FAILURE_REASONS`) onto
+    // `status.exitReason`, and the one bounded line before it onto
+    // `status.targetTopicsAppeared` — the names that appeared, and the topics
+    // this run created and removed or left. The reason is the LAST line.
+    if let (ExitCode::Operational, Some(race)) = (code, race) {
+        println!(
+            "{}{}",
+            phase0_admit::TARGET_TOPICS_APPEARED_KEY_PREFIX,
+            race.status_line_value()
+        );
+        println!(
+            "{}",
+            logweir_core::guard::failure_reason_line(
+                logweir_core::guard::TERMINAL_STATE_TARGET_TOPIC_APPEARED
+            )
+        );
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
@@ -2743,6 +2783,7 @@ fn standing_approved_from(
         // PROD-15.1: a standing scope is never the original-name subject.
         approval_subject: logweir_core::original_name::ApprovalSubject::Ordinary,
         approval_mode: phase1_approval::APPROVAL_MODE_STANDING,
+        original_name_confirmation: None,
         approval: logweir_core::scorecard::ApprovalInfo {
             approver: format!("standing-authorization/{}", doc.subject_ref.name),
             ticket: String::new(),
@@ -2816,6 +2857,22 @@ pub fn execute_with_outcome(
     // boundary: validate before the first method call on the client or engine.
     let signer = load_signer(&args.signing_key)?;
     execute_with_signer(args, run_id, c, &signer)
+}
+
+/// **PROD-15.1 review M3.** [`execute_with`] for an authorization ALREADY
+/// verified — the shape `execute_for_reporting` hands the phases after its
+/// startup checks. Public so a test can drive the pre-phase-0 hold of the
+/// approval subject over doubles: that check is the one `execute_for_reporting`
+/// relies on for every caller it does not cover itself, and no other public
+/// path reaches it.
+pub fn execute_with_approved(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    approved: phase1_approval::Approved,
+) -> Result<RestoreOutcome, DrillError> {
+    let signer = load_signer(&args.signing_key)?;
+    execute_with_prevalidated(args, run_id, c, &signer, approved)
 }
 
 fn execute_with_signer(
@@ -3224,6 +3281,7 @@ fn execute_with_validated_approval(
     phase0_admit::create_target_topics(
         creator,
         reader,
+        deleter,
         &admitted.topic_mapping,
         &facts,
         c.spec.target.default_replication_factor,
@@ -4220,7 +4278,19 @@ fn check_original_name_subject(
         Some(approved) => approved.approval_subject,
         None => ApprovalSubject::Ordinary,
     };
-    check_approval_subject(needed, signed).map_err(|e| GuardRefusal(e).into())
+    check_approval_subject(needed, signed).map_err(GuardRefusal)?;
+    // OD-10: a one-person confirmation (v2 under `Ordinary`) of an
+    // original-name plan carries every original topic name re-typed, exactly,
+    // inside the signed bytes; held here to the plan this run executes.
+    let one_person =
+        approved.is_some_and(|a| a.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY);
+    logweir_core::original_name::check_typed_confirmation(
+        &spec.source.topics,
+        signed,
+        one_person,
+        approved.and_then(|a| a.original_name_confirmation.as_ref()),
+    )
+    .map_err(|e| GuardRefusal(e).into())
 }
 
 /// **PROD-15.1.** What only the runner holds about an original-name restore,
@@ -4255,19 +4325,69 @@ fn original_name_inputs(
                     ))
                 },
             )?;
-            Some(logweir_core::topic_configuration::strimzi_owners(
+            let scan = logweir_core::topic_configuration::strimzi_owner_scan(
                 &docs,
                 &spec.source.topics,
                 args.strimzi_cluster.as_deref(),
+            );
+            refuse_unreadable_owners(path, &scan)?;
+            Some((
+                scan.owners,
+                logweir_core::ids::sha256_prefixed(text.as_bytes()),
             ))
         }
         _ => None,
+    };
+    let (kafka_topic_owners, kafka_topic_resources_sha256) = match kafka_topic_owners {
+        Some((owners, digest)) => (Some(owners), Some(digest)),
+        None => (None, None),
     };
     Ok(phase0_admit::OriginalNameInputs {
         receipt_source_cluster_id,
         receipt_owners,
         kafka_topic_owners,
+        kafka_topic_resources_sha256,
     })
+}
+
+/// **PROD-15.1 review M2 and L2: the owner condition fails CLOSED.** A
+/// `KafkaTopic` that manages a restored name but whose reference cannot be
+/// recorded, a `KafkaTopic` whose topic cannot be read, and a file holding no
+/// `KafkaTopic` at all (unless it is the explicit empty `List` `kubectl`
+/// writes) are refused by name — never dropped into "looked, none found".
+fn refuse_unreadable_owners(
+    path: &std::path::Path,
+    scan: &logweir_core::topic_configuration::StrimziOwnerScan,
+) -> Result<(), DrillError> {
+    use logweir_core::original_name::ORIGINAL_NAME_OWNER_UNREADABLE;
+    let mut why: Vec<String> = Vec::new();
+    for (topic, reference) in &scan.unrecordable {
+        why.push(format!(
+            "a KafkaTopic manages `{topic}` and its reference ({reference}) is longer than the {} \
+             characters an owner is recorded with",
+            logweir_core::topic_configuration::MAX_OWNER_REFERENCE_CHARS
+        ));
+    }
+    why.extend(scan.unreadable.iter().cloned());
+    if scan.kafka_topics == 0 && !scan.explicit_empty_list {
+        why.push(
+            "the file holds no KafkaTopic resource (and is not the explicit empty List \
+             `kubectl get kafkatopics -A -o yaml` writes when there are none)"
+                .to_string(),
+        );
+    }
+    if why.is_empty() {
+        return Ok(());
+    }
+    Err(GuardRefusal(format!(
+        "{ORIGINAL_NAME_OWNER_UNREADABLE}: --kafka-topic-resources {} cannot be read as the \
+         declarative owners of the restored names: {}. An owner this runner cannot see is never \
+         read as no owner; give it the target's KafkaTopic resources as `kubectl get kafkatopics \
+         -A -o yaml` writes them; nothing was written",
+        path.display(),
+        why.join("; ")
+    ))
+    .into())
 }
 
 /// **PROD-15.1.** The signed `target.original_name` block: what phase 0
@@ -4298,6 +4418,11 @@ fn original_name_info(
             })
             .collect(),
         owner_path: proved.owners.owner_path,
+        // OD-10: the check above admitted a one-person confirmation only with
+        // every name typed, so the document says how it was confirmed.
+        confirmation: (approved.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY)
+            .then(|| logweir_core::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.to_string()),
+        kafka_topic_resources_sha256: proved.kafka_topic_resources_sha256.clone(),
     })
 }
 
@@ -5693,7 +5818,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None, None, None, None),
+                exiting("01TEST", c, None, None, None, None, None),
                 c,
                 "exiting must not alter the code"
             );
@@ -6204,6 +6329,7 @@ mod original_name_subject_tests {
             validated_at: chrono::Utc::now(),
             approval_subject: subject,
             approval_mode: mode,
+            original_name_confirmation: None,
         }
     }
 
@@ -6251,5 +6377,87 @@ mod original_name_subject_tests {
             &plan(true),
             Some(&approved(ApprovalSubject::OriginalName, standing)),
         ));
+    }
+
+    /// OD-10, the runner's half: a one-person confirmation (v2 under
+    /// `Ordinary`) of an original-name plan needs every original topic name
+    /// re-typed, exactly, inside the signed bytes; a v1 or `Governed` approval
+    /// has a second person and needs none. KILLS: dropping the typed check
+    /// from the runner; reading "ordinary" as a mode with a second person.
+    #[test]
+    fn a_one_person_confirmation_reaches_the_runner_only_with_the_names_typed() {
+        use logweir_core::original_name::{
+            OriginalNameConfirmation, ORIGINAL_NAME_CONFIRMATION_MISMATCH,
+            ORIGINAL_NAME_CONFIRMATION_MISSING,
+        };
+        let ordinary = phase1_approval::APPROVAL_MODE_ORDINARY;
+        let typed = |names: &[&str]| {
+            let mut a = approved(ApprovalSubject::OriginalName, ordinary);
+            a.original_name_confirmation = Some(OriginalNameConfirmation {
+                typed_topics: names.iter().map(|n| (*n).to_string()).collect(),
+            });
+            a
+        };
+        assert!(check_original_name_subject(&plan(true), Some(&typed(&["orders"]))).is_ok());
+        let e = check_original_name_subject(
+            &plan(true),
+            Some(&approved(ApprovalSubject::OriginalName, ordinary)),
+        )
+        .expect_err("no typed names");
+        assert!(
+            e.to_string().contains(ORIGINAL_NAME_CONFIRMATION_MISSING),
+            "{e}"
+        );
+        let e =
+            check_original_name_subject(&plan(true), Some(&typed(&["order"]))).expect_err("a typo");
+        assert!(
+            e.to_string().contains(ORIGINAL_NAME_CONFIRMATION_MISMATCH),
+            "{e}"
+        );
+        // A second person needs no typed names.
+        for mode in [
+            phase1_approval::APPROVAL_MODE_V1,
+            phase1_approval::APPROVAL_MODE_GOVERNED,
+        ] {
+            assert!(check_original_name_subject(
+                &plan(true),
+                Some(&approved(ApprovalSubject::OriginalName, mode))
+            )
+            .is_ok());
+        }
+    }
+}
+
+// =======================================================================
+// PROD-15.1 review L5 (R05) — the run's reader protects the source names
+// =======================================================================
+
+#[cfg(test)]
+mod protected_names_pin {
+    /// The ONE construction site of the run's target reader (`context`, the
+    /// only place interface I1 lets a client be built) hands it the source
+    /// topics' own names to protect, after the scratch scope — so teardown,
+    /// the probe and any later caller can never delete one. The behaviour of
+    /// the protection itself is `rdkafka_reader::tests::
+    /// a_protected_source_name_is_refused_before_the_broker_even_inside_the_namespace`;
+    /// this pins that the run's reader carries it. KILLS: dropping
+    /// `.with_protected_names(...)` from `context`.
+    #[test]
+    fn the_runs_reader_is_built_with_the_source_names_protected() {
+        let src = include_str!("mod.rs");
+        let start = src.find("fn context(").expect("context exists");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("context ends");
+        let body = &body[..end];
+        let scoped = body
+            .find(".with_scratch_prefix(spec.target.topic_mapping_prefix.clone())")
+            .expect("the scratch scope");
+        let protected = body
+            .find(".with_protected_names(spec.source.topics.iter().cloned())")
+            .expect("the run's reader protects the source topics' own names");
+        assert!(
+            protected > scoped,
+            "protected after the scratch scope, on the same reader"
+        );
     }
 }

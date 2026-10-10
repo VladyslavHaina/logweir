@@ -339,6 +339,24 @@ export function approvalSubjectOf(approval) {
   return subject === "originalName" ? "originalName" : "unknown";
 }
 
+/** OD-10 (PROD-15.1): the topic names a one-person confirmation's SIGNED
+ *  bytes carry (`originalNameConfirmation.typedTopics`), or `null` when the
+ *  document carries none or cannot be read. */
+export function typedTopicsOf(approval) {
+  const bytes = (((approval || {}).spec) || {}).approvalBytes;
+  if (typeof bytes !== "string") {
+    return null;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(bytes);
+  } catch (_unreadable) {
+    return null;
+  }
+  const typed = (((doc || {}).originalNameConfirmation) || {}).typedTopics;
+  return Array.isArray(typed) && typed.every((t) => typeof t === "string") ? typed : null;
+}
+
 /** PROD-15.1: an approval subject in words, the original-name one distinct. */
 export function approvalSubjectWords(subject) {
   if (subject === "originalName") {
@@ -385,7 +403,12 @@ export function renderApprovalStatus(object) {
       // PROD-15.1: what the signed document authorises.
       ["approval subject", "<span class=\"approval-subject-value\">" +
         approvalSubjectWords(approvalSubjectOf(object)) + "</span>"],
-    ]) +
+    ].concat(typedTopicsOf(object) === null ? [] : [
+      // OD-10: how a one-person confirmation was made, from the signed bytes.
+      ["confirmation", "<span class=\"approval-typed-value\">confirmed by one person with " +
+        "every original topic name re-typed: " +
+        typedTopicsOf(object).map((t) => "<code>" + esc(t) + "</code>").join(", ") + "</span>"],
+    ])) +
     "<p class=\"self-attested\">" + selfAttestedSentence(status) + "</p>" +
     "</section>"
   );

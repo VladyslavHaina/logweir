@@ -449,6 +449,12 @@ pub const TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClai
 /// ignored): exit 4, no engine run, nothing signed. Not retryable.
 pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
 
+/// **PROD-15.1 review M4.** A restore whose creation step lost a race: a
+/// mapped target name phase 0 proved absent existed when the run came to
+/// create it. Exit 1 (phases 0–5 ran); the runner names what appeared and
+/// what it created and removed or left on its `target-topics-appeared=` line.
+pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TARGET_TOPIC_APPEARED;
+
 /// The stdout line a runner prints, LAST, when a non-refusal failure (exit 1
 /// or 4) has a state more specific than its code — the exit-1/4 twin of I9's
 /// `refusal-reason=`, and read by the controller the same way: by prefix, off
@@ -460,9 +466,10 @@ pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 /// into `status.exitReason` only when the pair is on this list, so a noisy or
 /// newer runner cannot put an arbitrary string on the object, and a claimed
 /// execution can never be reported under the exit code of an unproven one.
-pub const FAILURE_REASONS: [(&str, i32); 2] = [
+pub const FAILURE_REASONS: [(&str, i32); 3] = [
     (TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, 1),
     (TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN, 4),
+    (TERMINAL_STATE_TARGET_TOPIC_APPEARED, 1),
 ];
 
 /// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.

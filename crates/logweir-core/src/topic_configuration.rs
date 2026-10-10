@@ -555,6 +555,118 @@ pub fn strimzi_owners(
     found
 }
 
+/// **PROD-15.1 review M2 and L2: what a restore under the original topic
+/// names reads from a `--kafka-topic-resources` file, failing CLOSED.**
+///
+/// [`strimzi_owners`] serves a backup's RECORD, where an owner it cannot
+/// record is said so separately ([`strimzi_unrecordable`]). A restore under
+/// the original names decides with it, so nothing the file holds may be
+/// dropped silently: this scan returns the owners AND every `KafkaTopic` it
+/// could not read or whose reference it could not record, and says whether
+/// the file held any `KafkaTopic` at all, so the caller can refuse
+/// (`crate::original_name::ORIGINAL_NAME_OWNER_UNREADABLE`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrimziOwnerScan {
+    /// Every restored topic a readable, recordable `KafkaTopic` manages.
+    pub owners: BTreeMap<String, TopicOwner>,
+    /// `(topic, reference)` of a `KafkaTopic` that manages a restored topic
+    /// but whose reference does not fit [`MAX_OWNER_REFERENCE_CHARS`] (shown
+    /// truncated to its first 64 characters).
+    pub unrecordable: Vec<(String, String)>,
+    /// A `KafkaTopic` resource whose topic name cannot be read (no
+    /// `metadata.name`, or a `spec.topicName` that is not a string), in words.
+    pub unreadable: Vec<String>,
+    /// How many `KafkaTopic` resources the file held.
+    pub kafka_topics: usize,
+    /// The file is exactly one `List` whose `items` is an empty sequence —
+    /// the explicit "there are no `KafkaTopic` resources" `kubectl` writes.
+    pub explicit_empty_list: bool,
+}
+
+/// See [`StrimziOwnerScan`].
+#[must_use]
+pub fn strimzi_owner_scan(
+    resources: &[serde_yaml::Value],
+    topics: &[String],
+    cluster: Option<&str>,
+) -> StrimziOwnerScan {
+    let mut scan = StrimziOwnerScan {
+        explicit_empty_list: resources.len() == 1
+            && resources[0]
+                .get("kind")
+                .and_then(serde_yaml::Value::as_str)
+                .is_some_and(|k| k.ends_with("List"))
+            && resources[0]
+                .get("items")
+                .and_then(serde_yaml::Value::as_sequence)
+                .is_some_and(Vec::is_empty),
+        ..StrimziOwnerScan::default()
+    };
+    for resource in flatten_lists(resources) {
+        let api = resource
+            .get("apiVersion")
+            .and_then(serde_yaml::Value::as_str);
+        let kind = resource.get("kind").and_then(serde_yaml::Value::as_str);
+        if !(api.is_some_and(|a| a.starts_with("kafka.strimzi.io/")) && kind == Some("KafkaTopic"))
+        {
+            continue;
+        }
+        scan.kafka_topics += 1;
+        let name = resource
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(serde_yaml::Value::as_str)
+            .filter(|n| !n.trim().is_empty());
+        let topic_name = resource.get("spec").and_then(|s| s.get("topicName"));
+        if name.is_none() || topic_name.is_some_and(|t| !t.is_string() && !t.is_null()) {
+            scan.unreadable.push(format!(
+                "KafkaTopic #{} names no readable topic (metadata.name {}, spec.topicName {})",
+                scan.kafka_topics,
+                if name.is_some() {
+                    "present"
+                } else {
+                    "absent or not a string"
+                },
+                match topic_name {
+                    Some(t) if !t.is_string() && !t.is_null() => "not a string",
+                    Some(_) => "present",
+                    None => "absent",
+                }
+            ));
+            continue;
+        }
+        let Some((topic, reference)) = strimzi_topic_of(resource, cluster) else {
+            continue;
+        };
+        if !topics.contains(&topic) {
+            continue;
+        }
+        if !reference_fits(&reference) {
+            let shown: String = reference
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(64)
+                .collect();
+            scan.unrecordable.push((topic, format!("{shown}…")));
+            continue;
+        }
+        let candidate = TopicOwner {
+            kind: OWNER_KINDS[0].to_string(),
+            basis: OWNER_BASES[0].to_string(),
+            reference,
+        };
+        scan.owners
+            .entry(topic)
+            .and_modify(|kept| {
+                if candidate.reference < kept.reference {
+                    *kept = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+    scan
+}
+
 /// The `KafkaTopic` resources that WOULD own a named topic but whose
 /// `<namespace>/<name>` the receipt cannot record (longer than
 /// [`MAX_OWNER_REFERENCE_CHARS`]: a namespace and a name can reach 317
@@ -884,6 +996,62 @@ mod tests {
             strimzi_unrecordable(&docs, &topics, None),
             vec![("orders".to_string(), format!("kafka/{name}"))]
         );
+    }
+
+    /// PROD-15.1 review M2 and L2: the restore's scan drops nothing. An
+    /// unrecordable reference and an unreadable `KafkaTopic` are reported, the
+    /// file's `KafkaTopic` count is kept, and only an explicit empty `List` is
+    /// "no resources". KILLS: dropping an over-long owner (the review's P1
+    /// probe: 63-character namespace, 200-character name); reading a
+    /// `KafkaTopic` with no name as nothing; a file of other kinds read as an
+    /// empty look.
+    #[test]
+    fn the_restore_scan_reports_what_it_cannot_read_and_drops_nothing() {
+        let topics = vec!["orders".to_string()];
+        let long = yaml(&format!(
+            "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n  name: {}\n  namespace: {}\n  labels:\n    strimzi.io/cluster: prod\nspec:\n  topicName: orders\n",
+            "n".repeat(200),
+            "k".repeat(63)
+        ));
+        let scan = strimzi_owner_scan(&long, &topics, None);
+        assert!(scan.owners.is_empty());
+        assert_eq!(scan.unrecordable.len(), 1, "{scan:?}");
+        assert_eq!(scan.unrecordable[0].0, "orders");
+        assert_eq!(scan.kafka_topics, 1);
+
+        let nameless = yaml(
+            "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n  namespace: kafka\n  labels: {strimzi.io/cluster: prod}\nspec: {topicName: orders}\n",
+        );
+        assert_eq!(
+            strimzi_owner_scan(&nameless, &topics, None)
+                .unreadable
+                .len(),
+            1
+        );
+        let odd_topic = yaml(
+            "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n  name: orders\n  namespace: kafka\n  labels: {strimzi.io/cluster: prod}\nspec: {topicName: [orders]}\n",
+        );
+        assert_eq!(
+            strimzi_owner_scan(&odd_topic, &topics, None)
+                .unreadable
+                .len(),
+            1
+        );
+
+        let kafka_cr =
+            yaml("apiVersion: kafka.strimzi.io/v1beta2\nkind: Kafka\nmetadata: {name: prod}\n");
+        let scan = strimzi_owner_scan(&kafka_cr, &topics, None);
+        assert_eq!((scan.kafka_topics, scan.explicit_empty_list), (0, false));
+        let empty = yaml("apiVersion: v1\nkind: List\nitems: []\n");
+        let scan = strimzi_owner_scan(&empty, &topics, None);
+        assert_eq!((scan.kafka_topics, scan.explicit_empty_list), (0, true));
+
+        let owned = yaml(
+            "apiVersion: kafka.strimzi.io/v1beta2\nkind: KafkaTopic\nmetadata:\n  name: orders\n  namespace: kafka\n  labels: {strimzi.io/cluster: prod}\n",
+        );
+        let scan = strimzi_owner_scan(&owned, &topics, None);
+        assert_eq!(scan.owners["orders"].reference, "kafka/orders");
+        assert!(scan.unrecordable.is_empty() && scan.unreadable.is_empty());
     }
 
     #[test]

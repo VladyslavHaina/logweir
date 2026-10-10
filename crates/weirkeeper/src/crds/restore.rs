@@ -455,6 +455,29 @@ pub struct TopicPreflight {
     pub timestamp_bound: Option<i64>,
 }
 
+/// A lost creation race, as the runner named it. Every list is at most 100
+/// topic names a broker accepts.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetTopicsAppeared {
+    /// Mapped target names someone else created after phase 0: never touched.
+    #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub appeared: Vec<String>,
+    /// Topics this run created in the same request and removed again: its own
+    /// creation answer, partition count and configuration proved them its own,
+    /// and each held no record.
+    #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub removed: Vec<String>,
+    /// Topics this run created and LEFT under these names, because it could
+    /// not prove them its own and empty — remove them after checking who
+    /// writes to them.
+    #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 249)))]
+    pub left: Vec<String>,
+}
+
 /// Where the signed evidence is, and what the controller made of it.
 ///
 /// KEYS AND DIGESTS ONLY, NEVER CONTENT — as on `Backup`.
@@ -790,6 +813,13 @@ pub struct RestoreStatus {
     /// rather than flattened to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflight>,
+    /// A creation race the run lost (`exitReason: TargetTopicAppeared`, exit
+    /// 1): mapped target names someone else created after phase 0 proved them
+    /// absent, and the topics this run created in the same request — removed
+    /// when it could prove them its own and empty, left otherwise. Read off
+    /// the runner's `target-topics-appeared=` line; absent on every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_topics_appeared: Option<TargetTopicsAppeared>,
     /// The signed scorecard, the offset report, and the controller's
     /// verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]

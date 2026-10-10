@@ -19,6 +19,7 @@
 //! | 3 | the target is not the source cluster, OR every broker reports `auto.create.topics.enable=false` | phase 0 ([`source_relation`], [`require_auto_create_disabled`]) | [`ORIGINAL_NAME_AUTO_CREATE_ENABLED`], [`ORIGINAL_NAME_AUTO_CREATE_UNKNOWN`] |
 //! | 4 | somewhere was looked for a declarative owner, and none was found unless the owner path is chosen | phase 0 ([`owner_verdict`]) | [`ORIGINAL_NAME_OWNER_NOT_CHECKED`], [`ORIGINAL_NAME_OWNER_PRESENT`], [`ORIGINAL_NAME_OWNERS_INVALID`] |
 //! | 5 | the approval names the separate subject `originalName` | runner startup and phase 1, controller admission ([`check_approval_subject`]) | [`APPROVAL_SUBJECT_MISMATCH`] |
+//! | 5b | on a one-person-confirmation (`Ordinary`) authorization, the requester RE-TYPED every original topic name, exactly, and the console signed what was typed (the owner's decision OD-10) | the product API before it signs, controller admission, runner startup and phase 1 ([`check_typed_confirmation`]) | [`ORIGINAL_NAME_CONFIRMATION_MISSING`], [`ORIGINAL_NAME_CONFIRMATION_MISMATCH`], [`ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED`] |
 //! | 6 | creation is exclusive: `CreateTopics` fails on an existing name, and a name that appears after phase 0 loses the race by name | the creation step | [`TARGET_TOPIC_APPEARED`] |
 //! | 7 | the `LogAppendTime` probe and teardown never touch an original name | phase 0 ([`probe_topic_name`]) and phase 9 | — |
 //!
@@ -46,7 +47,9 @@
 //! (PROD-05.1a, which needs a `kafka.strimzi.io` grant), so on Kubernetes the
 //! approved plan's statement is the place.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
 
 use crate::backup_receipt::TopicOwner;
 use crate::spec::{DrillSpec, TargetMode};
@@ -86,6 +89,17 @@ pub const APPROVAL_SUBJECT_MISMATCH: &str = "ApprovalSubjectMismatch";
 /// to create it: the race is lost by name, and nothing is written into it.
 /// Both modes: the creation step is one step.
 pub const TARGET_TOPIC_APPEARED: &str = "TargetTopicAppeared";
+/// OD-10: a one-person confirmation of an original-name restore that carries
+/// no typed topic names.
+pub const ORIGINAL_NAME_CONFIRMATION_MISSING: &str = "OriginalNameConfirmationMissing";
+/// OD-10: the typed topic names are not exactly the plan's source topics.
+pub const ORIGINAL_NAME_CONFIRMATION_MISMATCH: &str = "OriginalNameConfirmationMismatch";
+/// OD-10: typed topic names on an authorization that is not a one-person
+/// confirmation of an original-name restore — a field nothing else reads.
+pub const ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED: &str = "OriginalNameConfirmationNotAccepted";
+/// A `KafkaTopic` resource the runner was given that it cannot read, or whose
+/// reference it cannot record: an owner it cannot see is never dropped.
+pub const ORIGINAL_NAME_OWNER_UNREADABLE: &str = "OriginalNameOwnerUnreadable";
 
 // ---------------------------------------------------------------------------
 // The approval subject
@@ -215,6 +229,140 @@ pub fn check_approval_subject(
 }
 
 // ---------------------------------------------------------------------------
+// Condition 5b: the typed confirmation (OD-10, 2026-10-09)
+// ---------------------------------------------------------------------------
+
+/// The scorecard's `target.original_name.confirmation` for an authorization
+/// the requester confirmed alone by re-typing every original topic name.
+pub const CONFIRMATION_TYPED_TOPIC_NAMES: &str = "typedTopicNames";
+
+/// The most typed names a confirmation may carry: the product API's own
+/// `topicMapping` bound.
+pub const MAX_TYPED_TOPICS: usize = 1000;
+
+/// **OD-10 (a), decided by the owner on 2026-10-09.** On an install using
+/// one-person confirmation (an `Ordinary` policy), the requester may confirm
+/// an original-name restore alone, but only after RE-TYPING every original
+/// topic name, exactly; the console signs what was typed into the
+/// authorization document v2, beside the approval subject. Two-person and
+/// strict namespaces still need the second person, and carry no typed names.
+///
+/// INSIDE THE SIGNED BYTES (`RestoreAuthorization::original_name_confirmation`,
+/// wire `originalNameConfirmation`), so the runner and the controller can hold
+/// the typed names to the plan they execute — not to a request field the
+/// console could have filled in itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OriginalNameConfirmation {
+    /// The original topic names as the requester typed them, in the order
+    /// typed. They must be EXACTLY the plan's `source.topics`: each once,
+    /// nothing else, byte for byte.
+    pub typed_topics: Vec<String>,
+}
+
+/// What a typed list gets wrong against the plan's topics, in words, or
+/// `None` when it is exactly them. Names are quoted (`{:?}`) and each list is
+/// bounded, so a hostile typed name cannot reach a log or a status unescaped.
+#[must_use]
+pub fn typed_topics_mismatch(plan_topics: &[String], typed: &[String]) -> Option<String> {
+    let expected: BTreeSet<&str> = plan_topics.iter().map(String::as_str).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut repeated: BTreeSet<&str> = BTreeSet::new();
+    for t in typed {
+        if !seen.insert(t.as_str()) {
+            repeated.insert(t.as_str());
+        }
+    }
+    let missing: Vec<&str> = expected.difference(&seen).copied().collect();
+    let extra: Vec<&str> = seen.difference(&expected).copied().collect();
+    if missing.is_empty()
+        && extra.is_empty()
+        && repeated.is_empty()
+        && typed.len() <= MAX_TYPED_TOPICS
+    {
+        return None;
+    }
+    let shown = |names: &[&str]| {
+        let mut out: Vec<String> = names.iter().take(5).map(|n| format!("{n:?}")).collect();
+        if names.len() > 5 {
+            out.push(format!("and {} more", names.len() - 5));
+        }
+        out.join(", ")
+    };
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!("not typed: {}", shown(&missing)));
+    }
+    if !extra.is_empty() {
+        parts.push(format!(
+            "typed but not restored by this plan: {}",
+            shown(&extra)
+        ));
+    }
+    if !repeated.is_empty() {
+        let repeated: Vec<&str> = repeated.into_iter().collect();
+        parts.push(format!("typed more than once: {}", shown(&repeated)));
+    }
+    if typed.len() > MAX_TYPED_TOPICS {
+        parts.push(format!(
+            "{} names typed, at most {MAX_TYPED_TOPICS}",
+            typed.len()
+        ));
+    }
+    Some(parts.join("; "))
+}
+
+/// Condition 5b, at every boundary that reads an authorization: the API
+/// before it signs, the controller's admission, the runner at startup and
+/// phase 1.
+///
+/// `one_person` is whether the authorization is a one-person confirmation (an
+/// authorization document v2 under an `Ordinary` policy). A v1 approval or a
+/// `Governed` document has a second person — the approver's own key — and
+/// carries no typed names.
+///
+/// # Errors
+///
+/// [`ORIGINAL_NAME_CONFIRMATION_MISSING`] — a one-person confirmation of an
+/// original-name plan without typed names; [`ORIGINAL_NAME_CONFIRMATION_MISMATCH`]
+/// — typed names that are not exactly the plan's topics, naming the
+/// difference; [`ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED`] — typed names on
+/// any other authorization.
+pub fn check_typed_confirmation(
+    plan_topics: &[String],
+    subject: ApprovalSubject,
+    one_person: bool,
+    confirmation: Option<&OriginalNameConfirmation>,
+) -> Result<(), String> {
+    let needed = subject == ApprovalSubject::OriginalName && one_person;
+    match (needed, confirmation) {
+        (true, Some(c)) => match typed_topics_mismatch(plan_topics, &c.typed_topics) {
+            None => Ok(()),
+            Some(why) => Err(format!(
+                "{ORIGINAL_NAME_CONFIRMATION_MISMATCH}: the topic names the requester typed to \
+                 confirm this restore under the ORIGINAL topic names are not exactly the ones \
+                 the plan restores ({why}). A one-person confirmation of an original-name \
+                 restore needs every original topic name re-typed, exactly (the owner's decision \
+                 OD-10); no data operation was started"
+            )),
+        },
+        (true, None) => Err(format!(
+            "{ORIGINAL_NAME_CONFIRMATION_MISSING}: this restore under the ORIGINAL topic names \
+             was confirmed by its requester alone (a one-person confirmation), and the \
+             confirmation carries no typed topic names. On such an install the requester must \
+             re-type every original topic name, exactly, before confirming (the owner's \
+             decision OD-10); no data operation was started"
+        )),
+        (false, Some(_)) => Err(format!(
+            "{ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED}: the authorization carries typed topic \
+             names, which only a one-person confirmation of a restore under the ORIGINAL topic \
+             names carries; no data operation was started"
+        )),
+        (false, None) => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Condition 1: the plan's shape
 // ---------------------------------------------------------------------------
 
@@ -311,9 +459,11 @@ impl SourceRelation {
 }
 
 /// Condition 3's first half. `known` are the source cluster ids the runner
-/// holds as MEASURED or operator-supplied facts — the bound point's verified
-/// receipt (`source.cluster_id`, read from the broker at backup) and the
-/// allowlist file's `source_cluster_id` — never a value from the plan.
+/// holds as MEASURED facts — the bound point's verified receipt
+/// (`source.cluster_id`, read from the broker at backup). Never a value from
+/// the plan, and never the allowlist file's `source_cluster_id`: that is
+/// unsigned runner input, and a wrong value would skip the auto-creation read
+/// (PROD-15.1 review L3).
 ///
 /// "Not the source" needs a known id and every known id to differ: one that
 /// equals the target makes it the same cluster, and none at all is unknown.
@@ -358,8 +508,8 @@ pub fn require_auto_create_disabled(
         ),
         SourceRelation::SourceUnknown => format!(
             "no source cluster id is known for this archive (the plan is bound to no recovery \
-             point and the allowlist names no source_cluster_id), so the target cluster {target} \
-             may be the cluster it was taken from"
+             point, whose verified receipt is the only source id that counts), so the target \
+             cluster {target} may be the cluster it was taken from"
         ),
         SourceRelation::TargetIsNotSource { .. } => return Ok(()),
     };
@@ -645,6 +795,75 @@ mod tests {
 
     fn names() -> Vec<String> {
         vec!["orders".into(), "payments".into()]
+    }
+
+    /// OD-10. A one-person confirmation of an original-name plan needs every
+    /// original topic name typed, exactly; anything else is refused by name.
+    /// KILLS: accepting a missing list; accepting a list missing a name, with
+    /// an extra name, a repeated name, a name differing in case or padding;
+    /// requiring names of an authorization with a second person; accepting
+    /// names on one.
+    #[test]
+    fn a_one_person_confirmation_needs_every_original_name_typed_exactly() {
+        let plan = vec!["orders".to_string(), "payments".to_string()];
+        let typed = |names: &[&str]| OriginalNameConfirmation {
+            typed_topics: names.iter().map(|n| (*n).to_string()).collect(),
+        };
+        let on = ApprovalSubject::OriginalName;
+        assert!(
+            check_typed_confirmation(&plan, on, true, Some(&typed(&["payments", "orders"])))
+                .is_ok()
+        );
+        let refused = |r: Result<(), String>, token: &str| {
+            let e = r.expect_err("refused");
+            assert!(e.starts_with(&format!("{token}: ")), "{e}");
+            e
+        };
+        refused(
+            check_typed_confirmation(&plan, on, true, None),
+            ORIGINAL_NAME_CONFIRMATION_MISSING,
+        );
+        for (bad, says) in [
+            (vec!["orders"], "not typed: \"payments\""),
+            (
+                vec!["orders", "payments", "audit"],
+                "typed but not restored by this plan: \"audit\"",
+            ),
+            (
+                vec!["orders", "payments", "orders"],
+                "typed more than once: \"orders\"",
+            ),
+            (vec!["orders", "Payments"], "not typed: \"payments\""),
+            (vec!["orders", "payments "], "not typed: \"payments\""),
+        ] {
+            let e = refused(
+                check_typed_confirmation(&plan, on, true, Some(&typed(&bad))),
+                ORIGINAL_NAME_CONFIRMATION_MISMATCH,
+            );
+            assert!(e.contains(says), "{bad:?}: {e}");
+        }
+        // A second person (v1, Governed, standing): no names, and none accepted.
+        assert!(check_typed_confirmation(&plan, on, false, None).is_ok());
+        refused(
+            check_typed_confirmation(&plan, on, false, Some(&typed(&["orders", "payments"]))),
+            ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED,
+        );
+        // An ordinary restore never carries them.
+        assert!(check_typed_confirmation(&plan, ApprovalSubject::Ordinary, true, None).is_ok());
+        refused(
+            check_typed_confirmation(
+                &plan,
+                ApprovalSubject::Ordinary,
+                true,
+                Some(&typed(&["orders", "payments"])),
+            ),
+            ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED,
+        );
+        // The wire shape is closed.
+        assert!(serde_json::from_str::<OriginalNameConfirmation>(
+            r#"{"typedTopics":["orders"],"clicked":true}"#
+        )
+        .is_err());
     }
 
     /// KILLS: an ordinary approval admitted for an original-name plan (the

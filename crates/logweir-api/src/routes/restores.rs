@@ -543,6 +543,7 @@ pub async fn create(
         .await
         .map_err(KubeFailure::into_api_error)?;
     let effective = policies.resolve(&ns);
+    refuse_typed_confirmation(&effective, &request)?;
     refuse_before_create(&state, &ns, &effective, &request)?;
     if effective.mode() == ApprovalMode::Governed
         && !effective.is_legacy()
@@ -590,6 +591,7 @@ pub async fn create(
         &request.approval_ref.name,
         &effective,
         request.ticket.as_deref(),
+        typed_confirmation(&request),
     )
     .await?;
     Ok(json(
@@ -601,6 +603,93 @@ pub async fn create(
             authorization: Some(authorization),
         },
     ))
+}
+
+/// **OD-10 (PROD-15.1 review M1), decided by the owner on 2026-10-09.** On a
+/// one-person-confirmation namespace (`confirm`, internal `Ordinary`) the
+/// requester may confirm a restore under the ORIGINAL topic names alone, but
+/// only by RE-TYPING every original topic name, exactly; the console signs
+/// what was typed into the authorization document. Refused BEFORE the
+/// Restore exists, each by name:
+///
+/// * `originalNameConfirmation.typedTopics` / `typed_topics_required` — an
+///   original-name request in such a namespace without the typed names;
+/// * `originalNameConfirmation.typedTopics` / `typed_topics_mismatch` — names
+///   that are not exactly the plan's `source.topics` (the message names what
+///   is missing, extra or repeated);
+/// * `originalNameConfirmation` / `not_accepted` — typed names on any other
+///   request: an ordinary restore, or a namespace where a second person
+///   approves (`strict`) or nothing is signed (unbound), which typed names
+///   never replace.
+///
+/// # Errors
+///
+/// `validation_failed`.
+fn refuse_typed_confirmation(
+    effective: &EffectivePolicy,
+    request: &CreateRestoreRequest,
+) -> Result<(), ApiError> {
+    use logweir_core::original_name::{typed_topics_mismatch, MAX_TYPED_TOPICS};
+    let original = request.target.topic_naming.original_name == Some(true);
+    let one_person = effective
+        .bound()
+        .is_some_and(|p| p.mode == ApprovalMode::Ordinary);
+    match (
+        original && one_person,
+        request.original_name_confirmation.as_ref(),
+    ) {
+        (true, None) => Err(ApiError::validation(vec![FieldError::new(
+            "originalNameConfirmation.typedTopics",
+            "typed_topics_required",
+            "this namespace is confirmed by one person (confirm): a restore under the ORIGINAL \
+             topic names is confirmed only with every original topic name re-typed, exactly \
+             (the owner's decision OD-10); nothing was created",
+        )])),
+        (true, Some(confirmation)) => {
+            let plan = serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&request.plan_bytes)
+                .map_err(|e| {
+                ApiError::validation(vec![FieldError::new(
+                    "planBytes",
+                    "invalid",
+                    format!(
+                        "the plan does not parse, so the typed topic names cannot be \
+                             compared with the topics it restores: {e}"
+                    ),
+                )])
+            })?;
+            match typed_topics_mismatch(&plan.source.topics, &confirmation.typed_topics) {
+                None => Ok(()),
+                Some(why) => Err(ApiError::validation(vec![FieldError::new(
+                    "originalNameConfirmation.typedTopics",
+                    "typed_topics_mismatch",
+                    format!(
+                        "the typed topic names are not exactly the ones this plan restores \
+                         ({why}); re-type every original topic name, exactly (at most \
+                         {MAX_TYPED_TOPICS}); nothing was created"
+                    ),
+                )])),
+            }
+        }
+        (false, Some(_)) => Err(ApiError::validation(vec![FieldError::new(
+            "originalNameConfirmation",
+            "not_accepted",
+            "typed topic names confirm only a restore under the original topic names in a \
+             namespace confirmed by one person; here they would replace nothing (an ordinary \
+             restore, or a namespace where a second person approves or nothing is signed)",
+        )])),
+        (false, None) => Ok(()),
+    }
+}
+
+/// The typed confirmation a request carries, as the console signs it.
+fn typed_confirmation(
+    request: &CreateRestoreRequest,
+) -> Option<logweir_core::original_name::OriginalNameConfirmation> {
+    request.original_name_confirmation.as_ref().map(|c| {
+        logweir_core::original_name::OriginalNameConfirmation {
+            typed_topics: c.typed_topics.clone(),
+        }
+    })
 }
 
 /// PLAT-19.2's refusals that must come BEFORE the Restore exists, so a refused
@@ -714,6 +803,7 @@ fn existing_is_ours(
     restore: &Restore,
     policy: &logweir_core::approval_policy::ApprovalPolicy,
     ticket: Option<Option<&str>>,
+    confirmation: Option<Option<&logweir_core::original_name::OriginalNameConfirmation>>,
 ) -> Option<RestoreAuthorization> {
     let doc = RestoreAuthorization::from_bytes(existing.spec.approval_bytes.as_bytes()).ok()?;
     let ours = existing.spec.subject_ref.kind == SubjectKind::Restore
@@ -728,7 +818,9 @@ fn existing_is_ours(
         && doc.approval_subject.as_deref() == restore_approval_subject(restore).wire()
         // A replay must also carry the ticket it signed; `None` is "any"
         // (the approval route, which reads the confirmation as it is).
-        && ticket.is_none_or(|t| doc.ticket.as_deref() == t);
+        && ticket.is_none_or(|t| doc.ticket.as_deref() == t)
+        // OD-10: and the typed names it signed; `None` is "any", as above.
+        && confirmation.is_none_or(|c| doc.original_name_confirmation.as_ref() == c);
     ours.then_some(doc)
 }
 
@@ -776,6 +868,7 @@ async fn authorize_submission(
     approval_name: &str,
     effective: &EffectivePolicy,
     ticket: Option<&str>,
+    confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> Result<RestoreRoutingView, ApiError> {
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
@@ -842,8 +935,14 @@ async fn authorize_submission(
     };
     match state.kube().get::<Approval>(namespace, &target).await {
         Ok(existing) => {
-            let doc =
-                existing_is_ours(&existing, restore, policy, Some(ticket)).ok_or_else(conflict)?;
+            let doc = existing_is_ours(
+                &existing,
+                restore,
+                policy,
+                Some(ticket),
+                Some(confirmation.as_ref()),
+            )
+            .ok_or_else(conflict)?;
             actor.audit.note("requester", &doc.requester.principal_id());
             return Ok(view(&doc));
         }
@@ -864,6 +963,7 @@ async fn authorize_submission(
         state.now(),
         ticket.map(str::to_string),
         restore_approval_subject(restore),
+        confirmation.clone(),
     );
     let bytes = doc.to_bytes();
     let sidecar = key
@@ -927,8 +1027,14 @@ async fn authorize_submission(
                 .get::<Approval>(namespace, &target)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
-            let doc =
-                existing_is_ours(&existing, restore, policy, Some(ticket)).ok_or_else(conflict)?;
+            let doc = existing_is_ours(
+                &existing,
+                restore,
+                policy,
+                Some(ticket),
+                Some(confirmation.as_ref()),
+            )
+            .ok_or_else(conflict)?;
             Ok(view(&doc))
         }
         Err(other) => Err(other.into_api_error()),
@@ -1068,7 +1174,7 @@ pub async fn submit_approval(
         }
         Err(other) => return Err(other.into_api_error()),
     };
-    let Some(doc) = existing_is_ours(&confirmation, &restore, policy, None) else {
+    let Some(doc) = existing_is_ours(&confirmation, &restore, policy, None, None) else {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(

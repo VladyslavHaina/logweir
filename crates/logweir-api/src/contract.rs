@@ -1242,6 +1242,17 @@ pub enum RestoreCoverage {
     Complete,
 }
 
+/// **OD-10.** The typed confirmation of a restore under the original topic
+/// names on a one-person-confirmation namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OriginalNameConfirmationRequest {
+    /// Every original topic name, as the requester re-typed it: exactly the
+    /// plan's `source.topics`, each once, nothing else, byte for byte.
+    #[schemars(length(min = 1, max = 1000), inner(length(min = 1, max = 249)))]
+    pub typed_topics: Vec<String>,
+}
+
 /// How restored topics are named.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -1359,6 +1370,17 @@ pub struct CreateRestoreRequest {
     /// `coverage: complete`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complete_max_records: Option<i64>,
+    /// **OD-10 (PROD-15.1 review M1).** The original topic names the
+    /// requester RE-TYPED to confirm a restore under the ORIGINAL topic names
+    /// alone. REQUIRED for a request declaring `target.topicNaming.originalName`
+    /// in a namespace confirmed by one person (`confirm`, internal
+    /// `Ordinary`), where it must be exactly the plan's `source.topics`
+    /// (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere
+    /// else (`not_accepted`). The console signs it into the authorization
+    /// document, and the controller and the runner hold it to the plan again.
+    /// Absent keeps the idempotency hash unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name_confirmation: Option<OriginalNameConfirmationRequest>,
 }
 
 /// A restore target, as stored.

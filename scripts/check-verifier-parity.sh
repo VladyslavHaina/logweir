@@ -1799,17 +1799,18 @@ done
 echo "check-verifier-parity: both readers accept $SCORECARD_SELECTION_VERSION scorecards, say the same about the selection, what a narrowed sampled pass proves and what each lane proves before the start, and refuse each of the three selection arms with the same words"
 
 # ---------------------------------------------------------------------------
-# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-10
+# PROD-15.1: `target.original_name` (scorecard 1.8.0), arms ON-1 to ON-12
 # ---------------------------------------------------------------------------
 # Two documents both readers ACCEPT, and the two `original name:` lines they
 # print compared line for line:
 #
 #   plain       targetIsNotSource, owners looked for in the plan, none found
 #   owner-path  autoCreateDisabled with no known source, an owner found in
-#               KafkaTopic resources, on the owner path
+#               KafkaTopic resources (named by digest), on the owner path
+#   typed       a one-person confirmation with the names typed (OD-10)
 #
-# and ten both readers REFUSE with the same full text, one per arm ON-1 to
-# ON-10. Generated and signed here with the throwaway fixture key, like the
+# and twelve both readers REFUSE with the same full text, one per arm ON-1 to
+# ON-12. Generated and signed here with the throwaway fixture key, like the
 # selection loop above.
 #
 # The scorecard format that defines `target.original_name` —
@@ -1831,6 +1832,7 @@ der = key.public_key().public_bytes(
 keyid = hashlib.sha256(der).hexdigest()
 base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
 OWNER = {"topic": "orders", "kind": "strimzi", "reference": "kafka/orders", "found_in": "plan"}
+DIGEST = "sha256:" + "0" * 64
 
 
 def block(**over):
@@ -1858,7 +1860,8 @@ cases = {
     "owner-path": doc(block(cluster_condition="autoCreateDisabled", source_cluster_id=None,
                             owner_detection=["plan", "kafkaTopicResources"],
                             owners=[dict(OWNER, found_in="kafkaTopicResources")],
-                            owner_path=True)),
+                            owner_path=True, kafka_topic_resources_sha256=DIGEST)),
+    "typed": doc(block(approval_mode="ordinary", confirmation="typedTopicNames")),
     "on1-under-1.7.0": doc(version="1.7.0"),
     "on2-scratch": doc(mode="scratch", marker_topic="logweir.scratch"),
     "on3-prefix": doc(topic_mapping_prefix="restore-"),
@@ -1869,6 +1872,8 @@ cases = {
     "on8-nowhere": doc(block(owner_detection=[])),
     "on9-place": doc(block(owners=[dict(OWNER, found_in="pointReceipt")], owner_path=True)),
     "on10-owner-path": doc(block(owners=[OWNER])),
+    "on11-untyped": doc(block(approval_mode="ordinary")),
+    "on12-no-digest": doc(block(owner_detection=["kafkaTopicResources"])),
 }
 for name, d in cases.items():
     payload = (json.dumps(d, indent=2) + "\n").encode()
@@ -1883,7 +1888,7 @@ for name, d in cases.items():
 PYEOF
 
 on_head="original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by governed; "
-for name in plain owner-path; do
+for name in plain owner-path typed; do
     doc="$tmp/scorecard-on/$name.json"
     sig="$tmp/scorecard-on/$name.sig"
     set +e
@@ -1910,7 +1915,9 @@ for name in plain owner-path; do
         plain) want="${on_head}the target cluster is not the source cluster (SOURCE-CLUSTER)
 original name: declarative owners looked for in plan: none found" ;;
         owner-path) want="${on_head}no source cluster id was known and every broker reported auto.create.topics.enable=false
-original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path" ;;
+original name: declarative owners looked for in plan, kafkaTopicResources: orders (strimzi kafka/orders, from kafkaTopicResources); the approved plan chose the owner path; KafkaTopic resources sha256:0000000000000000000000000000000000000000000000000000000000000000" ;;
+        typed) want="original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by ordinary (the requester re-typed every original topic name); the target cluster is not the source cluster (SOURCE-CLUSTER)
+original name: declarative owners looked for in plan: none found" ;;
     esac
     if [ "$rust_lines" != "$want" ]; then
         fail "scorecard/$name: expected the original-name lines to be
@@ -1921,7 +1928,7 @@ $rust_lines"
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name)"
 done
 
-for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path; do
+for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-condition on7-own-source on8-nowhere on9-place on10-owner-path on11-untyped on12-no-digest; do
     doc="$tmp/scorecard-on/$name.json"
     sig="$tmp/scorecard-on/$name.sig"
     set +e
@@ -1950,6 +1957,8 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
         on8-nowhere) want_msg="target.original_name.owner_detection is empty, repeats a place, or names one outside \"plan\", \"kafkaTopicResources\", \"pointReceipt\"; an owner nobody looked for is never read as no owner" ;;
         on9-place) want_msg="target.original_name.owners names a place owner_detection does not list, a kind outside \"strimzi\" and \"external\", or a blank topic" ;;
         on10-owner-path) want_msg="target.original_name.owners is not empty and owner_path is false; an owned name is restored only on the owner path" ;;
+        on11-untyped) want_msg="target.original_name.confirmation is not \"typedTopicNames\" exactly when approval_mode is \"ordinary\"; a one-person confirmation of an original-name restore is signed only with every original topic name re-typed" ;;
+        on12-no-digest) want_msg="target.original_name.kafka_topic_resources_sha256 is not a sha256 digest exactly when owner_detection lists \"kafkaTopicResources\"; the KafkaTopic resources a runner looked in are named by their digest" ;;
     esac
     if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
         fail "scorecard/$name: the refusal differs between the two readers or from its arm.
@@ -1959,4 +1968,4 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
     fi
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name refused)"
 done
-echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the ten original-name arms with the same words"
+echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the twelve original-name arms with the same words"

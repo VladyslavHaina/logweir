@@ -1013,6 +1013,35 @@ spec:
                   `exitReason` is UNCHANGED and still the honest home of GC11's wire string and of the runner's own `refusal-reason=` terminal state, which is the more specific answer whenever a pod actually ran. Two fields, two questions: *what did the run exit with* and *what state is this object in*.
                 nullable: true
                 type: string
+              targetTopicsAppeared:
+                description: 'A creation race the run lost (`exitReason: TargetTopicAppeared`, exit 1): mapped target names someone else created after phase 0 proved them absent, and the topics this run created in the same request — removed when it could prove them its own and empty, left otherwise. Read off the runner''s `target-topics-appeared=` line; absent on every other run.'
+                nullable: true
+                properties:
+                  appeared:
+                    default: []
+                    description: 'Mapped target names someone else created after phase 0: never touched.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  left:
+                    default: []
+                    description: Topics this run created and LEFT under these names, because it could not prove them its own and empty — remove them after checking who writes to them.
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                  removed:
+                    default: []
+                    description: 'Topics this run created in the same request and removed again: its own creation answer, partition count and configuration proved them its own, and each held no record.'
+                    items:
+                      maxLength: 249
+                      type: string
+                    maxItems: 100
+                    type: array
+                type: object
               teardown:
                 description: What phase 9 removed, and what it could not.
                 nullable: true

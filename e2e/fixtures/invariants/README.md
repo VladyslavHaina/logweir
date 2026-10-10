@@ -677,7 +677,7 @@ a value outside `i64`) are pinned by
 
 ## PROD-15.1: `target.original_name` (scorecard format 1.8.0)
 
-Ten arms, ON-1 to ON-10, which both readers state in the same position
+Twelve arms, ON-1 to ON-12, which both readers state in the same position
 (after `source.selection`, before `redactions`). Every case is
 `e2e/fixtures/scorecard-pass.json` turned into a `newTopic` document with an
 empty `target.topic_mapping_prefix`, no `marker_topic`, `format_version`
@@ -688,7 +688,7 @@ for in `plan`, none found), with the one field each case names changed.
 | case | what it pins |
 |---|---|
 | `original_name_1_8_accepted` | ACCEPT: the block as described |
-| `original_name_1_8_owner_path` | ACCEPT: `autoCreateDisabled` with no source id, a Strimzi owner found in `kafkaTopicResources`, on the owner path |
+| `original_name_1_8_owner_path` | ACCEPT: `autoCreateDisabled` with no source id, a Strimzi owner found in `kafkaTopicResources` (the file named by its digest), on the owner path |
 | `original_name_under_format_1_7_0` | ON-1: the block under `1.7.0` |
 | `original_name_in_scratch_mode` | ON-2: a scratch document carrying it |
 | `original_name_with_a_prefix` | ON-3: a non-empty `topic_mapping_prefix` |
@@ -699,6 +699,9 @@ for in `plan`, none found), with the one field each case names changed.
 | `original_name_looked_nowhere` | ON-8: an empty `owner_detection` |
 | `original_name_owner_from_a_place_not_looked` | ON-9: an owner `found_in` a place not listed |
 | `original_name_owned_off_the_owner_path` | ON-10: an owner found with `owner_path: false` |
+| `original_name_1_8_typed_confirmation` | ACCEPT: a one-person confirmation (`ordinary`) signed with `confirmation: typedTopicNames` (OD-10) |
+| `original_name_ordinary_without_typed_names` | ON-11: `ordinary` with no `confirmation` |
+| `original_name_resources_without_digest` | ON-12: `kafkaTopicResources` looked in, with no `kafka_topic_resources_sha256` |
 
 ON-1's message interpolates the document's `format_version`, so its `arm` is
 the literal text before the placeholder; every other `arm` is the text of the

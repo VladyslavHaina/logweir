@@ -695,6 +695,16 @@
           "description": "Which of OD-2's two cluster conditions admitted the identity mapping (`crate::original_name::CLUSTER_CONDITIONS`, arm ON-6): `targetIsNotSource` (a known source cluster id differs from `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be, the source cluster, and every broker reported `auto.create.topics.enable=false`).",
           "type": "string"
         },
+        "confirmation": {
+          "description": "**OD-10.** How a one-person confirmation was made: [`crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES`] — the requester re-typed every original topic name, exactly, and the console signed what was typed. Present exactly when `approval_mode` is `ordinary` (arm ON-11): every other mode has a second person.",
+          "type": "string",
+          "nullable": true
+        },
+        "kafka_topic_resources_sha256": {
+          "description": "`sha256:<64 hex>` of the `KafkaTopic` resources file the runner was given (`--kafka-topic-resources`): an unsigned runner input, so the document names exactly which file it looked in. Present exactly when `owner_detection` lists `kafkaTopicResources` (arm ON-12).",
+          "type": "string",
+          "nullable": true
+        },
         "owner_detection": {
           "description": "Where the run looked for declarative owners of the restored names (`crate::original_name::OWNER_DETECTION_PLACES`): never empty, each place once (arm ON-8).",
           "type": "array",
@@ -714,7 +724,7 @@
           }
         },
         "source_cluster_id": {
-          "description": "The source cluster id the condition compared, when one was known: the bound point's verified receipt, else the allowlist file's. Required beside `targetIsNotSource` (arm ON-7).",
+          "description": "The source cluster id the condition compared, when one was known: the bound point's verified receipt, measured at backup time (an unsigned runner input never counts). Required beside `targetIsNotSource` (arm ON-7).",
           "type": "string",
           "nullable": true
         }

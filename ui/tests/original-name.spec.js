@@ -19,6 +19,12 @@ import { fileURLToPath } from "node:url";
 import {
   ORIGINAL_NAME_NO_OWNER_STATEMENT,
   applyWizardDraft,
+  parseTypedTopics,
+  renderTypedConfirmation,
+  selectedTopics,
+  submitRestore,
+  typedConfirmationRequired,
+  typedTopicsProblem,
   approvalSubjectText,
   draftFrom,
   initialState,
@@ -39,6 +45,7 @@ import {
   approvalSubjectOf,
   renderApprovalStatus,
   restoreApprovalSubject,
+  typedTopicsOf,
 } from "../pages/approvals.js";
 import { renderPlanBytes } from "../plan.js";
 import { decodeConsoleItem } from "../contract.js";
@@ -217,4 +224,108 @@ test("prod151_the_console_decodes_the_new_fields", () => {
   const item = decoded.value.item || decoded.value;
   assert.equal(item.approvalSubject, "ordinary");
   assert.equal(item.target.originalName, false);
+});
+
+// ------------------------------------------------------------ OD-10, typed
+
+const ORDINARY = Object.freeze({
+  name: "team-ordinary", mode: "ordinary", legacy: false,
+  ordinaryConfirmationAvailable: true, ticketRequired: false,
+});
+const GOVERNED = Object.freeze({
+  name: "prod-governed", mode: "governed", legacy: false,
+  ordinaryConfirmationAvailable: false, ticketRequired: true,
+});
+
+/** An API double: records every create; every read is a 404. */
+function recorder() {
+  const creates = [];
+  return {
+    creates: creates,
+    async create(ns, plural, body) {
+      creates.push({ ns: ns, plural: plural, body: body });
+      return Object.assign({}, body, { metadata: Object.assign({ uid: "u-1" }, body.metadata) });
+    },
+    async get() {
+      const error = new Error("not found");
+      error.status = 404;
+      throw error;
+    },
+    async list() {
+      return { items: [] };
+    },
+  };
+}
+
+function confirmState(policy) {
+  const state = wizardState();
+  setOriginalName(state, true, true);
+  state.approvalPolicy = policy;
+  return state;
+}
+
+test("od10_a_one_person_confirmation_asks_for_the_original_names_and_sends_them_typed", async () => {
+  // KILLS: the field not offered on a one-person confirmation; a request
+  // sent without the typed names; the names sent case-folded.
+  const state = confirmState(ORDINARY);
+  const topics = selectedTopics(state);
+  assert.ok(topics.length > 0);
+  assert.equal(typedConfirmationRequired(state), true);
+  assert.match(renderTypedConfirmation(state), /id="original-name-typed"/);
+  assert.match(visible(renderTypedConfirmation(state)), /RE-TYPING every original topic name/);
+
+  // Nothing typed: refused before anything is sent.
+  const nothing = recorder();
+  await assert.rejects(() => submitRestore(state, nothing), (error) => {
+    assert.match(JSON.stringify(error) + String(error.message), /re-type every original topic name/);
+    return true;
+  });
+  assert.equal(nothing.creates.length, 0);
+
+  // A mistyped name: refused by name.
+  state.originalNameTyped = topics.slice(1).join("\n") + "\n" + topics[0].toUpperCase();
+  assert.match(String(typedTopicsProblem(state)), /not typed: /);
+  const mistyped = recorder();
+  await assert.rejects(() => submitRestore(state, mistyped));
+  assert.equal(mistyped.creates.length, 0);
+
+  // Exactly the names, in any order, one per line: sent beside the body.
+  state.originalNameTyped = topics.slice().reverse().join("\n") + "\n";
+  assert.equal(typedTopicsProblem(state), null);
+  const sent = recorder();
+  await submitRestore(state, sent);
+  assert.equal(sent.creates.length, 1);
+  assert.deepEqual(sent.creates[0].body.originalNameConfirmation,
+    { typedTopics: topics.slice().reverse() });
+  assert.equal(sent.creates[0].body.spec.originalNameConfirmation, undefined,
+    "never inside Restore.spec");
+});
+
+test("od10_a_namespace_with_a_second_person_asks_for_no_typed_names", async () => {
+  // KILLS: typed names offered (or sent) where a second person approves, or
+  // for an ordinary restore.
+  const strict = confirmState(GOVERNED);
+  assert.equal(typedConfirmationRequired(strict), false);
+  assert.equal(renderTypedConfirmation(strict), "");
+  const prepared = await preparePlanOrProblem(strict);
+  assert.equal(restoreBody(strict, prepared).originalNameConfirmation, undefined);
+
+  const plain = wizardState();
+  plain.approvalPolicy = ORDINARY;
+  assert.equal(typedConfirmationRequired(plain), false);
+  assert.deepEqual(parseTypedTopics(" orders ,payments\n\n"), ["orders", "payments"]);
+});
+
+test("od10_the_approvals_page_says_a_confirmation_was_made_with_the_names_typed", () => {
+  // KILLS: a one-person confirmation shown like any other approval.
+  const cr = (doc) => ({ metadata: { name: "a1" }, spec: { subjectRef: { kind: "Restore",
+    name: "r" }, planHash: "sha256:x", approvalBytes: JSON.stringify(doc) }, status: {} });
+  const typed = cr({ approvalSubject: "originalName",
+    originalNameConfirmation: { typedTopics: ["orders", "payments"] } });
+  assert.deepEqual(typedTopicsOf(typed), ["orders", "payments"]);
+  assert.match(visible(renderApprovalStatus(typed)),
+    /confirmation\s*confirmed by one person with every original topic name re-typed: orders, payments/);
+  const plain = cr({ approvalSubject: "originalName" });
+  assert.equal(typedTopicsOf(plain), null);
+  assert.doesNotMatch(visible(renderApprovalStatus(plain)), /re-typed/);
 });

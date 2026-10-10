@@ -1192,6 +1192,16 @@ pub struct RestoreAuthorization {
     /// major would buy, for the documents that need it and none of the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_subject: Option<String>,
+    /// **OD-10 (2026-10-09): the typed confirmation.** On a one-person
+    /// confirmation (`authorizationMode: Ordinary`) of a restore under the
+    /// ORIGINAL topic names, the topic names the requester re-typed, as the
+    /// console received them; ABSENT on every other document. Every boundary
+    /// that reads the document holds them to the plan's `source.topics`
+    /// (`crate::original_name::check_typed_confirmation`). Added without a
+    /// new `formatVersion` for `approval_subject`'s reason: an older reader
+    /// refuses a document carrying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name_confirmation: Option<crate::original_name::OriginalNameConfirmation>,
 }
 
 impl RestoreAuthorization {
@@ -1383,8 +1393,21 @@ pub fn check_binding(
     // boundary; whether it is the PLAN's subject is the caller's comparison
     // (`crate::original_name::check_approval_subject`), because the plan is
     // not in this function's hands.
-    crate::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref())
+    let subject = crate::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref())
         .map_err(AuthorizationRefusal::DocumentInvalid)?;
+    // OD-10: typed names belong ONLY to a one-person confirmation of an
+    // original-name restore. Whether they are the plan's topics is, again,
+    // the caller's comparison; their presence anywhere else is refused here.
+    if doc.original_name_confirmation.is_some()
+        && !(subject == crate::original_name::ApprovalSubject::OriginalName
+            && doc.authorization_mode == ApprovalMode::Ordinary)
+    {
+        return Err(AuthorizationRefusal::DocumentInvalid(format!(
+            "{}: the document carries typed topic names, which only a one-person confirmation \
+             (Ordinary) of a restore under the original topic names carries",
+            crate::original_name::ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED
+        )));
+    }
     check_ticket(doc.authorization_mode, doc.ticket.as_deref())
         .map_err(AuthorizationRefusal::DocumentInvalid)
 }
@@ -1582,6 +1605,7 @@ namespaces:
             expires_at: at("2026-09-22T10:10:00Z"),
             ticket: (policy.mode == ApprovalMode::Governed).then(|| "CHG-1".to_string()),
             approval_subject: None,
+            original_name_confirmation: None,
         }
     }
 
