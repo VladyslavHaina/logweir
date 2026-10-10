@@ -7291,7 +7291,7 @@ spec:
                     nullable: true
                     type: integer
                   candidates:
-                    description: The points this plan would remove.
+                    description: The points this plan would remove, the first 500.
                     items:
                       description: One point the evaluation would remove.
                       properties:
@@ -7324,7 +7324,8 @@ spec:
                     nullable: true
                     type: array
                   kept:
-                    description: The point ids that stay. `keptCount` is their number.
+                    description: The point ids that stay, the first 500. `keptCount`
+                      is their number.
                     items:
                       type: string
                     maxItems: 500
@@ -7371,12 +7372,12 @@ spec:
                     description: 'How many points were considered: every point of
                       this destination in the catalog view the evaluation read. Each
                       is counted once, in `keptCount`, `candidateCount`, `truncatedByCap`
-                      or `skipped`.'
+                      or `skippedCount`.'
                     format: int64
                     nullable: true
                     type: integer
                   protected:
-                    description: The points something protected.
+                    description: The points something protected, the first 500.
                     items:
                       description: One point the rules selected and something else
                         protected.
@@ -7397,8 +7398,15 @@ spec:
                     maxItems: 500
                     nullable: true
                     type: array
+                  protectedCount:
+                    description: 'How many points something protected: the length
+                      of `protected` before it was cut at 500. Absent on an evaluation
+                      written by a controller that did not record it.'
+                    format: int64
+                    nullable: true
+                    type: integer
                   skipped:
-                    description: What could not be classified.
+                    description: What could not be classified, the first 500.
                     items:
                       description: One point or key the evaluation could not classify.
                       properties:
@@ -7419,6 +7427,14 @@ spec:
                     maxItems: 500
                     nullable: true
                     type: array
+                  skippedCount:
+                    description: 'How many points could not be classified: the length
+                      of `skipped` before it was cut at 500. Absent on an evaluation
+                      written by a controller that did not record it; `skipped` is
+                      then whole.'
+                    format: int64
+                    nullable: true
+                    type: integer
                   truncatedByCap:
                     description: 'How many more points the rules would remove, that
                       nothing protects and that the per-run ceiling (`maxDeletionsPerRun`)

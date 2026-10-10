@@ -1782,6 +1782,10 @@ fn whole_catalog_body(destination: Option<&str>, pages: Value) -> String {
         serde_json::from_str(&catalog_body(destination, pages)).expect("the catalog fixture");
     catalog["status"]["truncated"] = json!(false);
     catalog["status"]["cursor"] = json!({"complete": true});
+    // And `viewExpiresAt`, which production writes with the pages (FX-40: an
+    // `Enforce` run refuses a view past it or without it). Later than every
+    // instant a row runs at.
+    catalog["status"]["viewExpiresAt"] = json!(now() + chrono::Duration::days(60));
     catalog.to_string()
 }
 

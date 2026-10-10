@@ -493,7 +493,7 @@ It is `NotRecorded` when the status does not record an accounting that closes:
 an evaluation an older controller wrote, one whose members an older CRD pruned,
 or one where two controllers' numbers stand in one block after a rollback of
 the controller image alone (the counts do not add up, or the status's `kept`
-list is not `keptCount` long). That controller's `kept` list holds the points
+list is not `keptCount` long, up to the status's bound of 500). That controller's `kept` list holds the points
 the ceiling held back, so the API does not pass it on as kept and derives no
 count from it. `candidateCount` and `candidates` are this plan in both cases.
 
