@@ -533,10 +533,20 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all forty backup-receipt invariants"),
+        stdout.contains("the signature AND all forty-five backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout (twenty-nine since \
          PROD-03.0's eight schema_dependency arms, forty since PROD-04.1's six \
-         consumer_positions arms and PROD-01.4a's five generations arms), got: {stdout}"
+         consumer_positions arms and PROD-01.4a's five generations arms, forty-five since \
+         PROD-02.1's five source_watermarks arms), got: {stdout}"
+    );
+    // PROD-02.1 (R3): the checked-in receipt predates source_watermarks, so
+    // its coverage reads NOT RECORDED — never complete.
+    assert!(
+        stdout.contains(
+            "source_watermarks: coverage not recorded, so this receipt does not say what the \
+             source held at capture and never reads as complete"
+        ),
+        "{stdout}"
     );
     // PROD-01.4a: the checked-in receipt is a 1.0.0 document, so no topic ID
     // is known from it — said, never left to read as "the same generation".
@@ -1219,4 +1229,30 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
             "{result:?} {v:?}"
         );
     }
+}
+
+/// **PROD-02.1, R3's control.** A receipt with `source_watermarks` reads
+/// "coverage recorded" and names its empty partitions; without the block it
+/// reads "coverage not recorded" (the row above, over the signed fixture).
+#[test]
+fn source_coverage_reads_recorded_only_from_the_block() {
+    use logweir::verify::source_watermark_lines;
+    let block = std::collections::BTreeMap::from([("orders".to_string(), vec![[0, 9], [4, 4]])]);
+    assert_eq!(
+        source_watermark_lines(Some(&block), false),
+        vec![
+            "source_watermarks[\"orders\"]: coverage recorded over 2 partition(s), 1 empty at \
+             capture (low == high): 1"
+                .to_string()
+        ]
+    );
+    let lines = source_watermark_lines(None, false);
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].starts_with("source_watermarks: coverage not recorded"),
+        "{lines:?}"
+    );
+    let empty = std::collections::BTreeMap::from([("orders".to_string(), vec![[4, 4]])]);
+    assert!(source_watermark_lines(Some(&empty), true)[0]
+        .starts_with("source_watermarks: an EMPTY CAPTURE"));
 }
