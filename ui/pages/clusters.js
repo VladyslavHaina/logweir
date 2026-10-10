@@ -83,6 +83,8 @@ import {
   listFooter,
   messageText,
   mutationStatus,
+  notPublishedCell,
+  notPublishedIn,
   phaseBadge,
   preflightVerdict,
   replace,
@@ -417,10 +419,18 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
       ["marker topic", cell(spec.markerTopic)],
       ["auth", authCell(spec)],
       ["credential Secret", cell(ref.name)],
+      // THE DATA KEY OF THE CREDENTIAL SECRET. A shared console is sent the
+      // Secret's name and never its key (`__contract.absent` names the field),
+      // so for a connection that names a Secret the cell says the key is not
+      // published. "Absent means the key every earlier release projected" is a
+      // statement about the object, and only the mode that reads the object
+      // may make it (FX-48: the class of the Restore detail's Integrity table).
       ["credential key", typeof ref.passwordKey === "string" && ref.passwordKey.length > 0
         ? esc(ref.passwordKey)
         : (typeof ref.name === "string" && ref.name.length > 0
-          ? "- (absent means the key every earlier release projected)"
+          ? (notPublishedIn(object, "spec.auth.secretRef.passwordKey")
+            ? notPublishedCell("spec.auth.secretRef.passwordKey")
+            : "- (absent means the key every earlier release projected)")
           : cell(null))],
       ["TLS", auth.tls === true ? "on" : "off"],
       ["private CA", caWords(auth.tlsCa).length === 0 ? cell(null) : caWords(auth.tlsCa)],

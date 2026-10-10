@@ -35,6 +35,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   ADJUSTMENT_WORDS,
@@ -199,7 +200,7 @@ test("a_preset_with_a_parameter_missing_produces_no_query_at_all", () => {
 });
 
 test("the_preset_a_saved_expression_is_comes_from_the_server_and_not_from_this_page", () => {
-  const matched = console_("schedule-preset.json").item;
+  const matched = decoded("schedule-preset.json").item;
   assert.equal(cadenceModeOf({ __preset: matched.preset }), "daily");
   // AND AN UNMATCHED EXPRESSION IS ADVANCED CRON, which is what every schedule
   // in legacy mode is: there is no preview route in front of kubectl proxy, so
@@ -944,7 +945,7 @@ async function legacyMode() {
   return selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
 }
 
-const NS = () => console_("session-manual-backups.json").namespaces[0].name;
+const NS = () => decoded("session-manual-backups.json").namespaces[0].name;
 
 test("the_console_projection_carries_the_policy_the_revision_and_the_previews", async () => {
   await consoleMode();

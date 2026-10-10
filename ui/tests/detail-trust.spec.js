@@ -28,7 +28,7 @@ import { HISTORICAL_SUFFIX, VERIFICATION_CASES } from "../render.js";
 import { renderBackupDetail } from "../pages/backups.js";
 import { renderRestoreDetail } from "../pages/history.js";
 import { evidenceGreen, operationFacts, renderEvidence, renderResult } from "../pages/operation.js";
-import { decodeD3Operation, decodeOperationTrust } from "../contract.js";
+import { decodeD3Operation, decodeOperation } from "../contract.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
@@ -170,7 +170,8 @@ test("a_console_detail_from_a_server_with_no_trust_block_keeps_the_pre_existing_
   // is the frozen sixteen with no `trust`; its Valid, exit-0 run stays green.
   await consoleMode();
   const body = fixture("console/operation-backup.json");
-  assert.equal(decodeOperationTrust(body), null);
+  assert.equal(decodeOperation(body).value.item.trust, null,
+    "the detail decode reads an absent trust block as absent, never as a default");
   const object = await consoleDetail("backups", "orders-hourly-20260912-080000",
     "console/backup.json", body);
   assert.equal(object.status.evidence.verification.trust, undefined);

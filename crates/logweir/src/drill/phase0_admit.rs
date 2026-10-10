@@ -93,8 +93,14 @@ pub struct OriginalNameAdmission {
 /// `Restore.status.topicPreflight` (spec §10 G-TS) by the operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPreflight {
-    /// The broker's effective `log.message.timestamp.type`.
-    pub timestamp_type: String,
+    /// The broker's `log.message.timestamp.type`, AS IT REPORTED IT.
+    ///
+    /// `None` when the broker's configuration answer does not carry the key
+    /// (PROD-01.2; measured on Redpanda v26.2.4, whose broker resource
+    /// answers nine keys and not this one): NOT RECORDED, and never the
+    /// Apache default written down as though it had been read. Until
+    /// PROD-01.2 an absent key was published as `CreateTime`.
+    pub timestamp_type: Option<String>,
     /// The broker's `log.retention.ms`, as reported — a STRING, not an `i64`,
     /// because that is what DescribeConfigs returns and because a value this
     /// build cannot parse is a fact worth carrying verbatim rather than
@@ -173,10 +179,15 @@ impl TopicPreflight {
     #[must_use]
     pub fn status_line_value(&self) -> String {
         let mut o = serde_json::Map::new();
-        o.insert(
-            "timestampType".to_string(),
-            serde_json::Value::String(self.timestamp_type.clone()),
-        );
+        // OMITTED when the broker did not report it, like the two fields
+        // below: an absent field is truthful, and `CreateTime` for a value
+        // nobody read is not.
+        if let Some(t) = &self.timestamp_type {
+            o.insert(
+                "timestampType".to_string(),
+                serde_json::Value::String(t.clone()),
+            );
+        }
         if let Ok(ms) = self.retention_ms.trim().parse::<i64>() {
             o.insert("retentionMs".to_string(), serde_json::Value::from(ms));
         }
@@ -619,10 +630,19 @@ pub fn run_with_original_name(
                     .into());
                 }
                 None => {
+                    // PROD-01.2: ABSENT FROM THE LISTING IS TWO THINGS. Kafka
+                    // lists only the topics a principal may Describe, so a
+                    // marker that exists and is not describable is missing
+                    // from it exactly as one that was never created is.
+                    // Measured on the `acl` profile: with Describe on the
+                    // marker removed this said only "does not exist … Create
+                    // it", which sends an operator to create a topic that is
+                    // already there. The refusal stands either way.
                     return Err(GuardRefusal(format!(
-                        "marker topic `{}` does not exist on cluster {target_cluster_id}. \
-                         Create it on the SCRATCH cluster only — its existence is the v0.1 \
-                         segregation proof.",
+                        "marker topic `{}` does not exist on cluster {target_cluster_id}, or \
+                         this principal may not Describe it (a topic a principal cannot \
+                         describe is not listed). Create it on the SCRATCH cluster only, or \
+                         grant Describe on it — its existence is the v0.1 segregation proof.",
                         spec.target.marker_topic
                     ))
                     .into());
@@ -870,16 +890,24 @@ fn target_topic_preflight(
 ) -> Result<TopicPreflight, DrillError> {
     // 1 — read the BROKER's defaults.
     let broker = reader.broker_configs()?;
-    let timestamp_type = broker
-        .get(BROKER_TIMESTAMP_TYPE)
-        .cloned()
-        // The Apache default [VERIFIED kafka 3.7 server.properties reference].
-        // An absent key is not a positive observation of a hostile setting, and
-        // the per-topic `message.timestamp.type = CreateTime` this task pins on
-        // every created topic is what actually decides the topic's behaviour;
-        // refusing on absence would refuse every broker that does not surface
-        // the key while protecting nothing extra.
-        .unwrap_or_else(|| CREATE_TIME.to_string());
+    // AS REPORTED, OR NOT RECORDED (PROD-01.2). An absent key is not a
+    // positive observation of a hostile setting, so it refuses nothing: the
+    // per-topic `message.timestamp.type = CreateTime` this task pins on every
+    // created topic is what decides the topic's behaviour. But it is not an
+    // observation of `CreateTime` either, and until PROD-01.2 it was written
+    // down as one (`Restore.status.topicPreflight.timestampType: CreateTime`
+    // for a broker that never said so).
+    let timestamp_type = broker.get(BROKER_TIMESTAMP_TYPE).cloned();
+    if timestamp_type.is_none() {
+        tracing::warn!(
+            reported_keys = broker.len(),
+            "the target's broker configuration does not report {BROKER_TIMESTAMP_TYPE}: its \
+             timestamp type is NOT RECORDED for this run (never assumed to be {CREATE_TIME}). \
+             Every target topic is still created with {TOPIC_TIMESTAMP_TYPE}={CREATE_TIME} \
+             pinned; whether this endpoint honours that per-topic setting is not probed unless \
+             its broker reports {LOG_APPEND_TIME}"
+        );
+    }
     let retention_ms = broker.get(BROKER_RETENTION_MS).cloned().unwrap_or_default();
     // `before.max.ms` first: on Kafka >= 3.6 BOTH keys are reported and
     // `difference.max.ms` is the deprecated one.
@@ -939,7 +967,7 @@ fn target_topic_preflight(
     }
 
     // 3 — `LogAppendTime`, and the per-topic override.
-    if timestamp_type != LOG_APPEND_TIME {
+    if timestamp_type.as_deref() != Some(LOG_APPEND_TIME) {
         return Ok(preflight);
     }
     // PROD-15.1: an original-name restore's probe is its own scratch name
@@ -1009,7 +1037,9 @@ fn target_topic_preflight(
     let effective = readback?
         .get(TOPIC_TIMESTAMP_TYPE)
         .cloned()
-        .unwrap_or_else(|| timestamp_type.clone());
+        // This arm runs only when the broker REPORTED `LogAppendTime`, so a
+        // read-back that names no type inherits exactly that.
+        .unwrap_or_else(|| LOG_APPEND_TIME.to_string());
     if effective == LOG_APPEND_TIME {
         return Err(target_topic_refusal(format!(
             "the target broker reports {BROKER_TIMESTAMP_TYPE}={LOG_APPEND_TIME} and REFUSED a \
@@ -1610,8 +1640,8 @@ mod tests {
             Ok(BTreeMap::new())
         }
         /// An empty broker-config map: `target_topic_preflight` then reads no
-        /// `log.message.timestamp.type` (so it treats the broker as the Apache
-        /// default, `CreateTime`) and no timestamp bound, which is exactly what
+        /// `log.message.timestamp.type` (so the type is not recorded, and the
+        /// `LogAppendTime` probe does not run) and no timestamp bound, which is exactly what
         /// the identity, marker and anchor tests in this module want — they
         /// prove the checks that run BEFORE the preflight, and would be worse
         /// tests if a hostile broker value could interfere. Guard **G-TS**'s

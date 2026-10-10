@@ -231,9 +231,13 @@ fn every_host_facing_advertisement_moves_with_its_published_port() {
     for (name, svc) in services {
         let name = name.as_str().unwrap_or("?");
         let env = &svc["environment"];
-        let Some(adv) = env
-            .get("KAFKA_ADVERTISED_LISTENERS")
-            .and_then(|v| v.as_str())
+        // Apache Kafka and Confluent Platform read `KAFKA_ADVERTISED_LISTENERS`;
+        // the `redpanda` profile's start script passes `ADVERTISED` to
+        // `--advertise-kafka-addr` (PROD-01.2). One `NAME://host:port` list
+        // either way.
+        let Some(adv) = ADVERTISEMENT_KEYS
+            .iter()
+            .find_map(|k| env.get(*k).and_then(|v| v.as_str()))
         else {
             continue;
         };
@@ -282,6 +286,90 @@ fn every_host_facing_advertisement_moves_with_its_published_port() {
         checked >= 3,
         "checked only {checked} host-facing advertisement(s) — kafka-broker-1 alone has three"
     );
+    // The Redpanda node's advertisement really is read by this test: its two
+    // host-facing names are among the ones checked above only if the service
+    // spells them in a key this test knows.
+    let redpanda = &services
+        .iter()
+        .find(|(n, _)| n.as_str() == Some("redpanda"))
+        .expect("the `redpanda` service")
+        .1["environment"];
+    assert!(
+        ADVERTISEMENT_KEYS
+            .iter()
+            .any(|k| redpanda.get(*k).and_then(|v| v.as_str()).is_some()),
+        "the `redpanda` service advertises through none of {ADVERTISEMENT_KEYS:?}, so its \
+         host-facing names are unchecked"
+    );
+    let start = read("e2e/compose/profiles/redpanda/start.sh");
+    assert!(
+        start.contains("--advertise-kafka-addr \"$ADVERTISED\""),
+        "profiles/redpanda/start.sh must advertise exactly the compose file's ADVERTISED"
+    );
+}
+
+/// The environment keys a broker service spells its advertised listeners in.
+const ADVERTISEMENT_KEYS: [&str; 2] = ["KAFKA_ADVERTISED_LISTENERS", "ADVERTISED"];
+
+/// **The two non-Apache endpoints are pinned by digest and never in the
+/// default set** (PROD-01.2). Every service running a Redpanda or Confluent
+/// Platform broker image names it as `repository:tag@sha256:<64 hex>` and
+/// carries its own profile, so `just e2e-up` with no profile, which is what
+/// CI's e2e job runs beside `auth`, never starts one; and the digest is the
+/// one `docs/support-matrix.md` records.
+///
+/// Mutants: drop the `@sha256:…` from the `redpanda` image, or remove
+/// `profiles: [confluent]` from `kafka-cp` → fails naming the service.
+#[test]
+fn the_other_endpoints_are_pinned_by_digest_and_opt_in() {
+    let doc = compose_yaml();
+    let matrix = read("docs/support-matrix.md");
+    let mut seen = BTreeSet::new();
+    for (name, svc) in doc["services"].as_mapping().expect("services:") {
+        let name = name.as_str().expect("a service name");
+        let image = svc["image"].as_str().unwrap_or("");
+        let profile = match image {
+            i if i.starts_with("redpandadata/redpanda:") => "redpanda",
+            i if i.starts_with("confluentinc/cp-kafka:") => "confluent",
+            _ => continue,
+        };
+        let digest = image
+            .split_once("@sha256:")
+            .map(|(_, d)| d)
+            .unwrap_or_else(|| panic!("{name}: {image} is not pinned by digest"));
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{name}: {image} does not end in a sha256 digest"
+        );
+        let profiles: Vec<&str> = svc["profiles"]
+            .as_sequence()
+            .map(|p| p.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            profiles,
+            vec![profile],
+            "{name}: a {profile} image must be opt-in under profile `{profile}` only"
+        );
+        assert!(
+            matrix.contains(&format!("sha256:{digest}")),
+            "{name}: docs/support-matrix.md does not record {image}'s digest"
+        );
+        seen.insert(profile);
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from(["confluent", "redpanda"]),
+        "the scan found both endpoints' services"
+    );
+    // CI's default e2e job names its profile set in one place, and neither
+    // endpoint is in it.
+    let ci = read(".github/workflows/ci.yml");
+    for line in ci.lines().filter(|l| l.contains("COMPOSE_PROFILES")) {
+        assert!(
+            !line.contains("redpanda") && !line.contains("confluent"),
+            "ci.yml's default profile set must not start another vendor's broker: {line}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

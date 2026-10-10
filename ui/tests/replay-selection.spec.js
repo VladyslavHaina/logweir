@@ -21,6 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { wireItem } from "./console-fixture.js";
 
 import {
   completeCoverageSentence,
@@ -174,7 +175,7 @@ test("prod111b_the_apis_selection_decodes_and_reaches_every_console_surface", as
     text: () => Promise.resolve(JSON.stringify(String(url).includes("/operations")
       ? fixture("console/operation-restore-subset-pass.json")
       : String(url).split("?")[0].endsWith("/restores")
-        ? { requestId: "r", items: [fixture("console/restore-subset-pass.json").item],
+        ? { requestId: "r", items: [wireItem("restore-subset-pass.json")],
           page: { limit: 50, nextCursor: null, snapshot: null } }
         : fixture("console/restore-subset-pass.json"))),
   });

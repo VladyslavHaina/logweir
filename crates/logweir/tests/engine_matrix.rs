@@ -640,7 +640,10 @@ fn every_test_the_matrix_names_exists() {
             sources.push_str(&std::fs::read_to_string(path).unwrap());
         }
     }
-    let lines = run_lines(&workflow("engine-matrix.yml")["jobs"]["matrix"]);
+    let doc = workflow("engine-matrix.yml");
+    let mut lines = run_lines(&doc["jobs"]["matrix"]);
+    // PROD-01.2: the broker-lines job names tests too.
+    lines.extend(run_lines(&doc["jobs"]["broker-lines"]));
     // The names end at the first shell token (a redirection, `||`, ...).
     let named: Vec<&str> = lines
         .iter()
@@ -653,8 +656,9 @@ fn every_test_the_matrix_names_exists() {
         })
         .collect();
     assert!(
-        named.len() >= 2,
-        "the matrix names its reduced row and its control"
+        named.len() >= 4,
+        "the matrix names its reduced row and its control, and the broker-lines job its two \
+         compatibility rows: {named:?}"
     );
     for name in named {
         assert!(
@@ -1832,6 +1836,13 @@ fn supported_broker_lines() -> Vec<String> {
         .collect()
 }
 
+/// PROD-01.2: the rows `docs/support-matrix.md` cites for each supported
+/// broker line. The second is `#[ignore]`d (a whole backup and drill).
+const COMPAT_ROWS: [&str; 2] = [
+    "the_default_broker_answers_every_capability_check",
+    "the_default_broker_backs_up_restores_and_verifies",
+];
+
 /// What keeps a `broker-lines` job from asserting PROD-01.1's and PROD-01.4's
 /// suites on every supported line with the engine Logweir ships; empty when
 /// nothing does.
@@ -1894,6 +1905,39 @@ fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
     if down.is_none_or(|d| d <= suites) {
         out.push("the stack is not torn down after the suites".to_string());
     }
+    // PROD-01.2: the compatibility contract's rows, BY NAME and with the
+    // ignored one included. `docs/support-matrix.md` calls each supported
+    // line `supported` on these two rows, so a step that ran neither (a bare
+    // filter, or `--exact` on an `#[ignore]`d test without
+    // `--include-ignored`: both exit 0 having run nothing) would leave that
+    // word standing on no run.
+    let compat = steps(job).into_iter().position(|s| {
+        let run = s["run"].as_str().unwrap_or_default();
+        let named: Vec<&str> = run
+            .split_once("./scripts/run-named-tests.sh ")
+            .map(|(_, names)| names.split_whitespace().collect())
+            .unwrap_or_default();
+        COMPAT_ROWS.iter().all(|row| named.contains(row))
+            && s["env"]["CARGO_TEST_ARGS"].as_str().is_some_and(|a| {
+                a.contains("--features e2e") && a.contains("--test compat_contract")
+            })
+            && s["env"]["LIBTEST_ARGS"]
+                .as_str()
+                .is_some_and(|a| a.contains("--include-ignored") && a.contains("--test-threads=1"))
+    });
+    let step_of = |needle: &str| {
+        steps(job)
+            .into_iter()
+            .position(|s| s["run"].as_str().is_some_and(|r| r.trim() == needle))
+    };
+    match (compat, step_of("just e2e-up"), step_of("just e2e-down")) {
+        (Some(c), Some(u), Some(d)) if u < c && c < d => {}
+        _ => out.push(format!(
+            "no step runs the compatibility contract's rows {COMPAT_ROWS:?} by name \
+             (`run-named-tests.sh`, `--test compat_contract`, `--include-ignored`) between \
+             `just e2e-up` and `just e2e-down`"
+        )),
+    }
     if serde_yaml::to_string(&job["env"])
         .unwrap()
         .contains("KAFKA_")
@@ -1942,6 +1986,33 @@ fn the_broker_lines_job_runs_both_suites_on_every_supported_line_with_the_shippe
     }
     let mut hand_pinned = job.clone();
     hand_pinned["env"]["KAFKA_VERSION"] = Value::from("${{ matrix.line }}");
+    // PROD-01.2's step, three ways of running nothing: the ignored row
+    // filtered out, one row un-named, and the step gone.
+    let compat_step = |change: &dyn Fn(&mut Value)| {
+        let mut j = job.clone();
+        let mut changed = 0;
+        for s in j["steps"].as_sequence_mut().unwrap() {
+            if s["run"]
+                .as_str()
+                .is_some_and(|r| r.contains("run-named-tests.sh"))
+            {
+                change(s);
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 1, "exactly one step names tests");
+        j
+    };
+    let not_included = compat_step(&|s| {
+        s["env"]["LIBTEST_ARGS"] = Value::from("--test-threads=1");
+    });
+    let one_row = compat_step(&|s| {
+        let run = s["run"].as_str().unwrap().replace(COMPAT_ROWS[1], "");
+        s["run"] = Value::from(run);
+    });
+    let wrong_binary = compat_step(&|s| {
+        s["env"]["CARGO_TEST_ARGS"] = Value::from("--locked -p e2e --features e2e --test smoke");
+    });
     let mut fail_fast = job.clone();
     fail_fast["strategy"]["fail-fast"] = Value::from(true);
     for (control, names) in [
@@ -1960,6 +2031,13 @@ fn the_broker_lines_job_runs_both_suites_on_every_supported_line_with_the_shippe
         ),
         (drop_step("just e2e-down"), "torn down"),
         (one_suite, "runs both suites"),
+        (not_included, "compatibility contract's rows"),
+        (one_row, "compatibility contract's rows"),
+        (wrong_binary, "compatibility contract's rows"),
+        (
+            drop_step("run-named-tests.sh"),
+            "compatibility contract's rows",
+        ),
         (hand_pinned, "by hand"),
         (fail_fast, "fail-fast"),
     ] {

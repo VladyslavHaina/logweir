@@ -301,9 +301,19 @@ pub fn classify(e: &StoreError) -> CheckCode {
 /// Remove object_store's retry bookkeeping from an error's text before it is
 /// classified.
 ///
+/// **Since PROD-01.2's fix round the classifier no longer needs this for an
+/// HTTP failure**: it reads `object_store`'s own account of a failure, which
+/// starts AFTER the request line the retry clause is part of
+/// (`logweir_store`'s `own_accounts`), so `retry_timeout:` is never scanned
+/// there, and its bare word `timeout` is matched only as a word of its own.
+/// The strip is kept for a text that carries the clause without a request
+/// line in front of it, and because its rows pin the outcome; the request
+/// line is still recognised after it (`request_line_end`'s own row). What
+/// follows is the history, in the classifier's words of the time.
+///
 /// # Why this exists, and why it belongs here rather than in the classifier
 ///
-/// `StoreErrorClass::classify` is a token scan, and its `TIMEOUT` list
+/// `StoreErrorClass::classify` was a token scan, and its `TIMEOUT` list
 /// (`"timeout"`, `"timed out"`, …) is tested BEFORE its `UNREACHABLE` list
 /// (`"error sending request"`, `"connection refused"`, …). That order is right:
 /// a call that really timed out and then reported a transport symptom is a

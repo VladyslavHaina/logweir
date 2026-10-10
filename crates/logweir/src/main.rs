@@ -171,19 +171,25 @@ fn main() -> std::process::ExitCode {
             kafka_topic_resources,
             strimzi_cluster,
             consumer_groups,
-        }) => logweir::backup::run(&logweir::backup::BackupRunArgs {
-            store_contract_version,
-            spec,
-            allowed_clusters,
-            signing_key,
-            triggered_by,
-            out,
-            receipt_out,
-            backup_id_override,
-            kafka_topic_resources,
-            strimzi_cluster,
-            consumer_groups,
-        }),
+            line_token,
+        }) => {
+            // FX-34: the Job's line token, held for the one line that carries
+            // it. Set here, once, before anything runs.
+            logweir::exit::set_line_token(line_token);
+            logweir::backup::run(&logweir::backup::BackupRunArgs {
+                store_contract_version,
+                spec,
+                allowed_clusters,
+                signing_key,
+                triggered_by,
+                out,
+                receipt_out,
+                backup_id_override,
+                kafka_topic_resources,
+                strimzi_cluster,
+                consumer_groups,
+            })
+        }
         // Task 15c, interface I14. Dispatched here for the structural reason
         // the comment at the end of this match records: the arm list is
         // exhaustive with no catch-all, so a subcommand added to `cli.rs` and
@@ -297,9 +303,12 @@ fn main() -> std::process::ExitCode {
         // is printed on stderr. There is deliberately no second code path for
         // the alias — an alias that could behave differently is not an alias.
         cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
+            // FX-34: see the `backup run` arm.
+            logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::Restore)
         }
         cli::Command::Drill(cli::DrillCmd::Run(a)) => {
+            logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
         }
         // Task 22 (carried obligation 1). `show::run` has been implemented and

@@ -1322,10 +1322,7 @@ impl Store {
                 .inner
                 .get(&OPath::from(key))
                 .await
-                .map_err(|e| match e {
-                    object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
-                    other => StoreError::Io(format!("{key}: {other}")),
-                })?;
+                .map_err(|e| not_found_or_io(key, e))?;
             let r = self.as_answered(r);
             let vid = match &self.versions {
                 // The test double's version log: see `versions`.
@@ -1354,10 +1351,7 @@ impl Store {
                 .inner
                 .head(&OPath::from(key))
                 .await
-                .map_err(|e| match e {
-                    object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
-                    other => StoreError::Io(format!("{key}: {other}")),
-                })?;
+                .map_err(|e| not_found_or_io(key, e))?;
             let version = match &self.versions {
                 // The test double's version log: see `versions`.
                 Some(log) => log.current(key),
@@ -1391,10 +1385,7 @@ impl Store {
         let rt = &self.rt;
         rt.block_on(async {
             let path = OPath::from(key);
-            let not_found_or_io = |e: object_store::Error| match e {
-                object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
-                other => StoreError::Io(format!("{key}: {other}")),
-            };
+            let not_found_or_io = |e: object_store::Error| not_found_or_io(key, e);
             let read = async {
                 let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
                 if size > max_bytes {
@@ -2829,22 +2820,422 @@ async fn read_within(
 fn version_read_error(key: &str, version: &str, error: object_store::Error) -> StoreError {
     let at = format!("{key}?versionId={version}");
     match error {
+        // C6: a 404 that is about the credential is not an absence.
+        object_store::Error::NotFound { .. } if refuses_the_credential(&error) => {
+            StoreError::Io(format!("{at}: {error}"))
+        }
         object_store::Error::NotFound { .. } => StoreError::NotFound(at),
-        object_store::Error::Generic { ref source, .. }
-            if names_a_version_never_issued(&source.to_string()) =>
-        {
+        object_store::Error::Generic { .. } if names_a_version_never_issued(&error) => {
             StoreError::NotFound(at)
         }
         other => StoreError::Io(format!("{at}: {other}")),
     }
 }
 
-/// The `400 InvalidArgument` half of [`version_read_error`], as a token scan of
-/// `object_store`'s text — the status line `RequestError::Status` prints
-/// (`400 Bad Request`) and the S3 error code of the XML body.
-fn names_a_version_never_issued(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("400 bad request") && lower.contains("<code>invalidargument</code>")
+/// **C6: whether a 404's own answer says the CREDENTIAL was refused**, not
+/// that the object is absent.
+///
+/// `object_store` maps every HTTP 404 to `Error::NotFound`, and S3 answers an
+/// unknown access key id with 403 `InvalidAccessKeyId`, so on S3, MinIO,
+/// SeaweedFS and RustFS a 404 is always about the object. versitygw answers
+/// an unknown key id with `404 XAdminUserNotFound` (measured on v1.8.0,
+/// PROD-01.5 §3.1). Read as an absence, that turned "this credential is
+/// wrong" into "this receipt, manifest or segment does not exist": a missing
+/// backup set, an empty catalog, a point reported gone.
+///
+/// **Decided from the answer's own `<Code>`, and from nothing else**
+/// ([`Answer::of`]). PROD-01.2's review, M1: the first version of this
+/// function scanned the error's whole text for credential words, and that
+/// text echoes the request: MinIO's `404 NoSuchKey` body carries `<Key>`,
+/// `<BucketName>` and `<Resource>`, and `object_store` prints the path and
+/// the URL in front of it. A backup id, a prefix or a bucket containing
+/// `expiredtoken` or `invalidsecurity` therefore turned every "this object is
+/// not there yet" into a refused credential, and every backup to it exited 4.
+/// The codes are [`code_class`]'s, so a credential code the table learns is
+/// honoured here with no second list.
+fn refuses_the_credential(error: &object_store::Error) -> bool {
+    Answer::of(error).and_then(|a| a.code_class()) == Some(StoreErrorClass::InvalidCredentials)
+}
+
+/// A read's failure as [`StoreError`]: `NotFound` for a 404 about the object,
+/// `Io` for everything else, **including a 404 about the credential** (C6,
+/// [`refuses_the_credential`]). `Io` keeps the store's text, so
+/// [`StoreErrorClass::classify`] names it `InvalidCredentials`.
+///
+/// Every read that turns `object_store`'s `NotFound` into ours ends here: a
+/// read, a bounded read, a `HEAD`. A `HEAD`'s answer has no body and so no
+/// code: on a store that refuses a credential with 404 it reads as an
+/// absence, which is why a caller that must classify a refusal keeps a GET
+/// ([`Store::head`]).
+fn not_found_or_io(key: &str, error: object_store::Error) -> StoreError {
+    match error {
+        object_store::Error::NotFound { .. } if refuses_the_credential(&error) => {
+            StoreError::Io(format!("{key}: {error}"))
+        }
+        object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+        other => StoreError::Io(format!("{key}: {other}")),
+    }
+}
+
+/// The `400 InvalidArgument` half of [`version_read_error`]: the answer's own
+/// status and code ([`Answer::of`]), never a search of text that carries the
+/// key and the version id asked for.
+fn names_a_version_never_issued(error: &object_store::Error) -> bool {
+    Answer::of(error).is_some_and(|a| {
+        a.status == Some(400)
+            && a.code
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case("InvalidArgument"))
+    })
+}
+
+// ------------------------------------------------- the backend's own answer
+
+/// `object_store`'s words for an answer whose status is not 2xx
+/// (`RequestError::Status`'s `Display`, object_store 0.14.1
+/// `src/client/retry.rs:116`): the status, a colon, and the response body
+/// verbatim to the end of the text.
+const STATUS_LINE: &str = "Server returned non-2xx status code: ";
+
+/// `object_store`'s words for an error document sent with a 2xx status
+/// (`RequestError::Response`, `retry.rs:122`): the body to the end of the
+/// text.
+const RESPONSE_LINE: &str = "Server returned error response: ";
+
+/// The words `object_store` opens its account of one HTTP request with
+/// (`RetryError`'s `Display`, `retry.rs:50-67`):
+/// `Error performing GET <url> in 2.5ms - `, with
+/// `, after 2 retries, max_retries: 2, retry_timeout: 5s ` before the dash
+/// when it retried. What the request was ANSWERED with follows the dash.
+const REQUEST_LINE: &str = "Error performing ";
+
+/// **What a backend said about a request, apart from everything that echoes
+/// the request** (PROD-01.2 review, M1).
+///
+/// An object store's error reaches this crate as text that is mostly an echo.
+/// `object_store` prints the path it asked for and the URL it sent; an S3
+/// error document repeats the key in `<Key>`, the bucket in `<BucketName>`
+/// and both in `<Resource>`; this crate puts the key in front of all of it.
+/// An operator chooses every one of those names. So a word found SOMEWHERE in
+/// the text says nothing about what the store answered, and the two facts
+/// that do are read from where the store put them and from nowhere else:
+///
+/// * the HTTP **status**, from `object_store`'s own status line;
+/// * the error **code**, the `<Code>` element that is a direct child of the
+///   error document's root ([`error_code`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Answer {
+    /// The HTTP status, when `object_store` printed one.
+    status: Option<u16>,
+    /// The error document's own code, when the body is one error document
+    /// with exactly one.
+    code: Option<String>,
+}
+
+impl Answer {
+    /// The answer a raw `object_store::Error` carries, read off the error's
+    /// SOURCE CHAIN and never off its own `Display`.
+    ///
+    /// The variant's `Display` begins with the path (`Object at location
+    /// <path> not found: …`), which is the caller's key. Its sources do not:
+    /// the retry error begins with [`REQUEST_LINE`] and the request error
+    /// inside it with [`STATUS_LINE`], so each link is read only where it
+    /// STARTS with words `object_store` wrote, and what follows those words
+    /// is the status and the body. No link is searched.
+    ///
+    /// `None` when no link is an HTTP answer: a transport failure, a local
+    /// backend, a builder error.
+    fn of(error: &object_store::Error) -> Option<Self> {
+        let mut link = std::error::Error::source(error);
+        while let Some(e) = link {
+            if let Some(answer) = Self::opening(&e.to_string()) {
+                return Some(answer);
+            }
+            link = e.source();
+        }
+        None
+    }
+
+    /// The answer `text` OPENS with: `text` is a status or response line, or
+    /// a request line and then one. Anchored at the first byte; nothing
+    /// before it is skipped.
+    fn opening(text: &str) -> Option<Self> {
+        Self::at_start(text).or_else(|| {
+            let answered = request_line_end(text)?;
+            Self::at_start(&text[answered..])
+        })
+    }
+
+    /// The answer `text` starts with, where `text` begins with
+    /// [`STATUS_LINE`] or [`RESPONSE_LINE`].
+    fn at_start(text: &str) -> Option<Self> {
+        if let Some(body) = text.strip_prefix(RESPONSE_LINE) {
+            return Some(Self {
+                status: None,
+                code: error_code(body).map(str::to_string),
+            });
+        }
+        let rest = text.strip_prefix(STATUS_LINE)?;
+        // "<three digits> <reason>: <body>". `http::StatusCode` prints the
+        // number and its canonical reason, and no reason holds a colon.
+        let digits = rest.get(..3)?;
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let status: u16 = digits.parse().ok()?;
+        let body = rest.split_once(':').map_or("", |(_, body)| body);
+        Some(Self {
+            status: Some(status),
+            code: error_code(body).map(str::to_string),
+        })
+    }
+
+    /// The answer in a FLATTENED message: one that has already been through
+    /// `Display` ([`StoreError::Io`]'s text, an `EngineError`'s), so its
+    /// source chain is gone.
+    ///
+    /// Such a text opens with this crate's key and `object_store`'s path, and
+    /// the answer follows `object_store`'s request line, so that is where it
+    /// is read: at each of the text's [`own_accounts`], and only as what an
+    /// account OPENS with.
+    ///
+    /// # What an echo can do to a flattened text, and the one limit
+    ///
+    /// A flattened text cannot say where the echo ends: a key may itself spell
+    /// a request line and a status line. So EVERY request line in the text is
+    /// read, and they must agree. The real one is always among them, so on a
+    /// store that speaks HTTP an echo can at most make the text read as "no
+    /// one answer" (`None` here, unclassified in [`classify_text`]); it can
+    /// never put its own status or code in the real one's place.
+    ///
+    /// The limit: a backend that speaks no HTTP (a directory archive, the
+    /// in-memory double) prints no request line of its own, so a key that
+    /// spells one whole (`Error performing GET x in 1ms - Server returned
+    /// non-2xx status code: 403 Forbidden: `) is then the only one and is
+    /// read. It needs spaces and a colon, which no `BackupDestination` admits
+    /// in a bucket or a prefix (R5, R6) and no Logweir key layout adds. The
+    /// sites that DECIDE something on a raw error ([`not_found_or_io`],
+    /// [`version_read_error`], [`StoreErrorClass::classify_object_store`])
+    /// use [`Answer::of`], which reads no text a key is printed in.
+    fn in_flattened(text: &str) -> Option<Self> {
+        let accounts = own_accounts(text);
+        let (first, rest) = accounts.split_first()?;
+        let answer = Self::at_start(first)?;
+        rest.iter()
+            .all(|other| Self::at_start(other).as_ref() == Some(&answer))
+            .then_some(answer)
+    }
+
+    /// The class the answer's CODE names, `None` for no code or one the table
+    /// does not hold.
+    fn code_class(&self) -> Option<StoreErrorClass> {
+        self.code.as_deref().and_then(code_class)
+    }
+
+    /// The class of the answer: its code's, or else its status's. `None` for
+    /// an answer that is neither (a 500, a 400 with a code nobody has a row
+    /// for): "the store answered, and not in a way this table names".
+    fn class(&self) -> Option<StoreErrorClass> {
+        self.code_class().or(match self.status {
+            Some(401) => Some(StoreErrorClass::InvalidCredentials),
+            Some(403) => Some(StoreErrorClass::AccessDenied),
+            Some(404) => Some(StoreErrorClass::ObjectNotFound),
+            _ => None,
+        })
+    }
+}
+
+/// Where the text after `object_store`'s request line starts, when `text`
+/// OPENS with one: `Error performing <METHOD> <url> in <elapsed>[, after …
+/// retries, …] - `. `None` for any other text.
+///
+/// Each part is checked for its shape, so words that merely begin
+/// `Error performing` (the list client's "Error performing list request: ")
+/// are not a request line: the method is upper-case letters, the URL is one
+/// run without a space (`object_store` percent-encodes it, or prints
+/// `REDACTED`), and nothing but the retry clause stands before the dash.
+fn request_line_end(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix(REQUEST_LINE)?;
+    let (method, rest) = rest.split_once(' ')?;
+    if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    let (url, rest) = rest.split_once(' ')?;
+    if url.is_empty() {
+        return None;
+    }
+    let rest = rest.strip_prefix("in ")?;
+    let (before_dash, answered) = rest.split_once(" - ")?;
+    // The elapsed time and, after a retry, the retry clause: digits, units
+    // and the clause's own lower-case words. `check::store::strip_retry_noise`
+    // may already have removed the clause's numbers, which leaves its commas.
+    let plain = |c: char| {
+        c.is_ascii_lowercase()
+            || c.is_ascii_digit()
+            || matches!(c, ' ' | ',' | '.' | ':' | '_' | 'µ')
+    };
+    if before_dash.len() > 160 || !before_dash.chars().all(plain) {
+        return None;
+    }
+    Some(text.len() - answered.len())
+}
+
+/// **`object_store`'s own accounts of a failure inside a flattened text**:
+/// what follows each request line it printed, in order. Empty when the text
+/// holds none.
+///
+/// For a failed HTTP request an account is the status line and the body, or
+/// the HTTP client's own words (`HTTP error: error sending request`). What
+/// stands BEFORE a request line is this crate's key, `object_store`'s path
+/// and the URL, all three the operator's names, and none of it is returned.
+///
+/// A real failure has one request line. More than one means the text quotes
+/// one, and [`classify_text`] and [`Answer::in_flattened`] then require them
+/// to agree.
+fn own_accounts(text: &str) -> Vec<&str> {
+    let mut accounts = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(REQUEST_LINE) {
+        let start = from + at;
+        if let Some(end) = request_line_end(&text[start..]) {
+            accounts.push(&text[start + end..]);
+        }
+        from = start + REQUEST_LINE.len();
+    }
+    accounts
+}
+
+/// **The error document's own code**: the text of the `<Code>` element that
+/// is a DIRECT CHILD of the root, when `body` is one `<Error>` document and
+/// nothing else, and the root has exactly one such child.
+///
+/// Read as a document, not searched as text, because the document echoes the
+/// request. MinIO's answer for an absent object:
+///
+/// ```text
+/// <Error><Code>NoSuchKey</Code><Message>The specified key does not
+/// exist.</Message><Key>expiredtoken-2026/manifest.json</Key><BucketName>…
+/// ```
+///
+/// So: a `<Code>` anywhere deeper (inside a `<Key>` a store did not escape)
+/// is not the code; two codes at the root are no code, because a document
+/// that says two things about itself says nothing reliable; and anything that
+/// is not a well-formed run of elements (a comment, a CDATA section, a
+/// mismatched tag, text after the root closes) is `None`. `None` is "this
+/// body names no code", and the caller falls back to the HTTP status. It is
+/// never a guess.
+fn error_code(body: &str) -> Option<&str> {
+    let mut rest = body.trim();
+    if rest.starts_with("<?") {
+        rest = rest[rest.find("?>")? + 2..].trim_start();
+    }
+    let mut open: Vec<&str> = Vec::new();
+    let mut code: Option<&str> = None;
+    let mut codes = 0usize;
+    // The start of the text of a root-level `<Code>` whose close is awaited.
+    let mut code_text_from: Option<usize> = None;
+    let mut at = 0usize;
+    loop {
+        let lt = at + rest[at..].find('<')?;
+        if open.is_empty() && !rest[at..lt].trim().is_empty() {
+            return None;
+        }
+        let gt = lt + rest[lt..].find('>')?;
+        let tag = &rest[lt + 1..gt];
+        at = gt + 1;
+        if tag.starts_with(['!', '?']) {
+            return None;
+        }
+        if let Some(name) = tag.strip_prefix('/') {
+            if open.pop() != Some(name.trim()) {
+                return None;
+            }
+            if let Some(from) = code_text_from.take() {
+                // Closed by the very next tag, so its content is text alone.
+                code = Some(rest[from..lt].trim());
+                codes += 1;
+            }
+            if open.is_empty() {
+                break;
+            }
+            continue;
+        }
+        // An element opening inside an awaited `<Code>`: not a plain code.
+        if code_text_from.take().is_some() {
+            codes += 1;
+            code = None;
+        }
+        let name = tag.split_whitespace().next()?;
+        if tag.ends_with('/') {
+            if open.is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if open.is_empty() && name != "Error" {
+            return None;
+        }
+        if open.len() == 1 && name == "Code" {
+            code_text_from = Some(at);
+        }
+        open.push(name);
+    }
+    if !rest[at..].trim().is_empty() || codes != 1 {
+        return None;
+    }
+    code.filter(|c| !c.is_empty())
+}
+
+/// **The code table**: what an error document's own code means, compared
+/// whole and without regard to case. Never matched as a substring of
+/// anything.
+///
+/// Credential codes come before `AccessDenied` in meaning as well as in this
+/// list: `SignatureDoesNotMatch` arrives with a 403, and a wrong key is not
+/// the same problem as a missing grant.
+fn code_class(code: &str) -> Option<StoreErrorClass> {
+    use StoreErrorClass as C;
+    const CODES: [(&str, StoreErrorClass); 15] = [
+        ("InvalidAccessKeyId", C::InvalidCredentials),
+        ("SignatureDoesNotMatch", C::InvalidCredentials),
+        ("ExpiredToken", C::InvalidCredentials),
+        ("TokenRefreshRequired", C::InvalidCredentials),
+        ("InvalidSecurity", C::InvalidCredentials),
+        // C6 (PROD-01.5, closed by PROD-01.2): versitygw's code for an access
+        // key id it does not know, answered with **404** (measured on v1.8.0).
+        ("XAdminUserNotFound", C::InvalidCredentials),
+        // A wrong region answers 301 `PermanentRedirect` (path-style) or 400
+        // `AuthorizationHeaderMalformed` naming the expected region.
+        ("PermanentRedirect", C::RegionMismatch),
+        ("AuthorizationHeaderMalformed", C::RegionMismatch),
+        ("IllegalLocationConstraintException", C::RegionMismatch),
+        ("NoSuchBucket", C::BucketNotFound),
+        ("AccessDenied", C::AccessDenied),
+        ("AllAccessDisabled", C::AccessDenied),
+        ("NoSuchKey", C::ObjectNotFound),
+        ("NoSuchVersion", C::ObjectNotFound),
+        ("RequestTimeout", C::Timeout),
+    ];
+    CODES
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(code))
+        .map(|(_, class)| *class)
+}
+
+/// **The HTTP status a store answered with**, when `e` is a failure that
+/// carries one: `Some(503)` for a throttled read, `None` for a transport
+/// failure, a structural variant, or text with no answer in it.
+///
+/// For a caller that must tell a 5xx or a 429 from every other unclassified
+/// failure without searching text that carries the key
+/// (`logweir::backup::phase_run`'s retry hint). Read as
+/// [`Answer::in_flattened`] reads it, with that function's stated limit.
+#[must_use]
+pub fn answered_status(e: &StoreError) -> Option<u16> {
+    match e {
+        StoreError::Backend(m) | StoreError::Io(m) => Answer::in_flattened(m)?.status,
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------- error classification
@@ -2912,14 +3303,18 @@ impl StoreErrorClass {
     /// genuine absence, established by the backend, and never a denial (that
     /// distinction is what `StoreError::NotFound`'s own doc comment exists
     /// for). Everything else arrives as [`StoreError::Io`], whose message is
-    /// `object_store::Error`'s `Display` — which carries the structured
-    /// variant's wording, the HTTP status and, for S3, the `<Code>` element of
-    /// the XML body. So the rest is a TOKEN SCAN over that text.
+    /// `object_store::Error`'s `Display` behind this crate's key: a flattened
+    /// text, read as `classify_text` reads one.
     ///
-    /// A token scan is a tripwire on spellings, not a proof. What makes it
-    /// trustworthy enough to act on is that every token below is pinned by a
-    /// REAL message in `tests/options.rs::the_classifier_table`, and that the
-    /// unmatched case is its own answer rather than a guess.
+    /// **A store's answer is read from its status and its code, never found
+    /// by searching** (PROD-01.2 review, M1): the text echoes the key, the
+    /// bucket and the URL, so a word somewhere in it says nothing. Only a
+    /// failure with no answer in it at all (a transport error, a TLS failure,
+    /// `object_store`'s own wording for a local backend) is matched against
+    /// the wording table, and then only `object_store`'s own account of it.
+    /// Every row of both tables is pinned by a message in
+    /// `tests/options.rs::the_classifier_table`, and the unmatched case is its
+    /// own answer rather than a guess.
     #[must_use]
     pub fn classify(e: &StoreError) -> Self {
         match e {
@@ -2935,121 +3330,122 @@ impl StoreErrorClass {
         }
     }
 
-    /// Classifies a raw `object_store::Error`, using its STRUCTURED variants
-    /// where they exist and the token scan otherwise. Callers that still hold
-    /// the raw error should prefer this.
+    /// Classifies a raw `object_store::Error`: its STRUCTURED variant, and the
+    /// answer its source chain carries ([`Answer::of`]). Callers that still
+    /// hold the raw error should prefer this: it reads no text that names the
+    /// path or the URL.
     #[must_use]
     pub fn classify_object_store(e: &object_store::Error) -> Self {
+        let answer = Answer::of(e);
+        let named = answer.as_ref().and_then(Answer::code_class);
         match e {
-            object_store::Error::NotFound { source, .. } => {
-                // A `NoSuchBucket` arrives as NotFound too, and "the bucket is
-                // not there" is a different remedy from "the key is not
-                // there".
-                let text = source.to_string();
-                if text.contains("NoSuchBucket") || text.contains("bucket does not exist") {
-                    Self::BucketNotFound
-                } else {
-                    Self::ObjectNotFound
-                }
+            // A `NoSuchBucket` arrives as NotFound too, and "the bucket is
+            // not there" is a different remedy from "the key is not there".
+            // So does a credential refusal on a store that answers one with
+            // 404 (C6, `refuses_the_credential`).
+            object_store::Error::NotFound { .. } => named.unwrap_or(Self::ObjectNotFound),
+            // A wrong key is not a missing grant: `SignatureDoesNotMatch`
+            // arrives as a 403.
+            object_store::Error::PermissionDenied { .. } => named.unwrap_or(Self::AccessDenied),
+            object_store::Error::Unauthenticated { .. } => {
+                named.unwrap_or(Self::InvalidCredentials)
             }
-            object_store::Error::PermissionDenied { source, .. } => {
-                let c = classify_text(&source.to_string());
-                if c == Self::StoreErrorUnclassified {
-                    Self::AccessDenied
-                } else {
-                    c
-                }
-            }
-            object_store::Error::Unauthenticated { source, .. } => {
-                let c = classify_text(&source.to_string());
-                if c == Self::StoreErrorUnclassified {
-                    Self::InvalidCredentials
-                } else {
-                    c
-                }
-            }
-            other => classify_text(&other.to_string()),
+            other => match answer {
+                Some(answer) => answer.class().unwrap_or(Self::StoreErrorUnclassified),
+                None => classify_text(&other.to_string()),
+            },
         }
     }
 }
 
-/// The token table. Order matters: the credential codes are checked before the
-/// generic `AccessDenied`, because `SignatureDoesNotMatch` arrives with a 403
-/// and a wrong key is not the same problem as a missing grant.
+/// **A flattened failure text, classified.**
+///
+/// 1. `object_store`'s own account of the failure is taken
+///    ([`own_accounts`]): what follows its request line. The key, the path
+///    and the URL in front of it are not read. A text with no request line
+///    (a builder error, a backend that speaks no HTTP, a message some caller
+///    composed) is its own account.
+/// 2. If the account is a store's ANSWER, the class is the answer's
+///    ([`Answer::class`]): its code, or else its status. The body is not
+///    searched, and an answer the tables do not name is unclassified.
+/// 3. Otherwise nothing answered, and the account is the HTTP client's or
+///    `object_store`'s own wording, matched against [`wording_class`].
+/// 4. A text with more than one request line quotes one (a key can spell
+///    one). They must all give the same class, or the text is unclassified:
+///    the real one is among them, so an echo can turn a class into "could
+///    not classify" and never into another class
+///    ([`Answer::in_flattened`] states the one limit).
 fn classify_text(text: &str) -> StoreErrorClass {
-    let lower = text.to_ascii_lowercase();
+    let class_of = |own: &str| match Answer::at_start(own) {
+        Some(answer) => answer
+            .class()
+            .unwrap_or(StoreErrorClass::StoreErrorUnclassified),
+        None => wording_class(own),
+    };
+    let accounts = own_accounts(text);
+    let Some((first, rest)) = accounts.split_first() else {
+        return class_of(text);
+    };
+    let class = class_of(first);
+    if rest.iter().all(|other| class_of(other) == class) {
+        class
+    } else {
+        StoreErrorClass::StoreErrorUnclassified
+    }
+}
+
+/// **The wording table**, for a failure that carries no answer: the words of
+/// the HTTP client, the TLS library and `object_store` itself. No S3 error
+/// code is here: a code is read from an error document
+/// ([`code_class`]) and from nowhere else.
+///
+/// Order matters: TLS before anything that can also say "connect", a timeout
+/// before a transport symptom.
+///
+/// What is scanned is one of [`own_accounts`] with any `for url (…)` clause
+/// removed. When `object_store` printed a request line that excludes every
+/// echo of the request. When it printed none (a builder error, a local backend, a
+/// message some caller composed) the text may still name a path, and these
+/// words would be found in one; none of them is a code, and a
+/// `BackupDestination`'s bucket and prefix (R5, R6: no space) can spell only
+/// the bare word `timeout`, which is therefore matched as a word of its own.
+fn wording_class(own: &str) -> StoreErrorClass {
+    let lower = without_urls(own).to_ascii_lowercase();
+    let says = |words: &[&str]| words.iter().any(|w| lower.contains(w));
 
     // A private CA that the process does not trust. Checked first: a TLS
     // failure can also carry the word "connect", and "add the CA bundle" is a
     // very different remedy from "open the port".
-    const TLS: [&str; 6] = [
+    if says(&[
         "invalid peer certificate",
         "certificate verify failed",
-        "unknownissuer",
+        "certificate: unknownissuer",
         "self-signed certificate",
         "self signed certificate",
         "certificate is not trusted",
-    ];
-    if TLS.iter().any(|t| lower.contains(t)) {
+    ]) {
         return StoreErrorClass::TlsTrustFailed;
     }
-
-    const CREDENTIAL: [&str; 6] = [
-        "invalidaccesskeyid",
-        "signaturedoesnotmatch",
-        "expiredtoken",
-        "tokenrefreshrequired",
-        "invalidsecurity",
-        "lacked valid authentication credentials",
-    ];
-    if CREDENTIAL.iter().any(|t| lower.contains(t)) {
+    // `object_store`'s wording for its `Unauthenticated` variant (a 401).
+    if says(&["lacked valid authentication credentials"]) {
         return StoreErrorClass::InvalidCredentials;
     }
-
-    // A wrong region answers 301 `PermanentRedirect` (path-style) or 400
-    // `AuthorizationHeaderMalformed` naming the expected region.
-    const REGION: [&str; 4] = [
-        "permanentredirect",
-        "authorizationheadermalformed",
-        "the region",
-        "illegallocationconstraint",
-    ];
-    if REGION.iter().any(|t| lower.contains(t)) {
-        return StoreErrorClass::RegionMismatch;
-    }
-
-    const BUCKET: [&str; 2] = ["nosuchbucket", "bucket does not exist"];
-    if BUCKET.iter().any(|t| lower.contains(t)) {
-        return StoreErrorClass::BucketNotFound;
-    }
-
-    const DENIED: [&str; 5] = [
-        "accessdenied",
-        "lacked the necessary privileges",
-        "all access to this object has been disabled",
-        "403 forbidden",
-        "status: 403",
-    ];
-    if DENIED.iter().any(|t| lower.contains(t)) {
+    // Its wording for `PermissionDenied` (a 403).
+    if says(&["lacked the necessary privileges"]) {
         return StoreErrorClass::AccessDenied;
     }
-
-    const NOT_FOUND: [&str; 3] = ["nosuchkey", "not found: ", "status: 404"];
-    if NOT_FOUND.iter().any(|t| lower.contains(t)) {
+    // Its wording for `NotFound`, from a backend that speaks no HTTP.
+    if says(&["not found: "]) {
         return StoreErrorClass::ObjectNotFound;
     }
-
-    const TIMEOUT: [&str; 4] = [
-        "timed out",
-        "timeout",
-        "operation timed out",
-        "deadline has elapsed",
-    ];
-    if TIMEOUT.iter().any(|t| lower.contains(t)) {
+    if says(&["timed out", "operation timed out", "deadline has elapsed"])
+        || lower
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/')))
+            .any(|word| word == "timeout")
+    {
         return StoreErrorClass::Timeout;
     }
-
-    const UNREACHABLE: [&str; 8] = [
+    if says(&[
         "connection refused",
         "dns error",
         "failed to lookup address",
@@ -3058,12 +3454,27 @@ fn classify_text(text: &str) -> StoreErrorClass {
         "error sending request",
         "connection reset",
         "url scheme is not allowed",
-    ];
-    if UNREACHABLE.iter().any(|t| lower.contains(t)) {
+    ]) {
         return StoreErrorClass::EndpointUnreachable;
     }
-
     StoreErrorClass::StoreErrorUnclassified
+}
+
+/// `text` with every `for url (…)` clause the HTTP client prints replaced by
+/// `for url`: the URL names the bucket and the key.
+fn without_urls(text: &str) -> String {
+    const OPEN: &str = "for url (";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        let after = &rest[at + OPEN.len()..];
+        let Some(close) = after.find(')') else { break };
+        out.push_str(&rest[..at]);
+        out.push_str("for url");
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// What the S3 client a store would build is ACTUALLY configured with, read
@@ -3159,6 +3570,502 @@ mod version_read_tests {
             version_read_error(KEY, "v", e),
             StoreError::NotFound(_)
         ));
+    }
+
+    /// versitygw v1.8.0's answer to an unknown access key id, as `object_store`
+    /// carries it (the text is PROD-01.5's recorded run, request id removed).
+    const VERSITYGW_UNKNOWN_KEY: &str = "Server returned non-2xx status code: 404 Not Found: \
+        <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code>\
+        <Message>No user exists with the provided access key ID.</Message></Error>";
+
+    fn not_found(source: &str) -> object_store::Error {
+        object_store::Error::NotFound {
+            path: KEY.to_string(),
+            source: source.to_string().into(),
+        }
+    }
+
+    /// **C6: a 404 about the credential is never an absence**, at each place a
+    /// read turns `object_store`'s `NotFound` into ours: a plain read, a
+    /// bounded read and a `HEAD` (all three through `not_found_or_io`) and a
+    /// read by version id.
+    ///
+    /// CONTROL, in the same test: a genuine `404 NoSuchKey` and a genuine
+    /// `404 NoSuchVersion` stay `NotFound`, so the rule is about the code and
+    /// not about every 404.
+    ///
+    /// Mutant: drop `XAdminUserNotFound` from the code table and all three
+    /// credential arms answer `NotFound`.
+    #[test]
+    fn a_404_that_refuses_the_credential_is_never_not_found() {
+        for (site, e) in [
+            (
+                "a read",
+                not_found_or_io(KEY, not_found(VERSITYGW_UNKNOWN_KEY)),
+            ),
+            (
+                "a read by version id",
+                version_read_error(KEY, "v", not_found(VERSITYGW_UNKNOWN_KEY)),
+            ),
+        ] {
+            match &e {
+                StoreError::Io(message) => {
+                    assert!(message.contains("XAdminUserNotFound"), "{site}: {message}");
+                }
+                other => panic!("{site}: a refused credential must be Io, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(VERSITYGW_UNKNOWN_KEY)),
+            StoreErrorClass::InvalidCredentials
+        );
+
+        // CONTROL: a 404 about the object.
+        let no_such_key = "Server returned non-2xx status code: 404 Not Found: <Error><Code>\
+                           NoSuchKey</Code><Message>The specified key does not exist.</Message>\
+                           </Error>";
+        assert!(matches!(
+            not_found_or_io(KEY, not_found(no_such_key)),
+            StoreError::NotFound(_)
+        ));
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(no_such_key)),
+            StoreErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(
+                "Server returned non-2xx status code: 404 Not Found: <Error><Code>NoSuchBucket\
+                 </Code></Error>"
+            )),
+            StoreErrorClass::BucketNotFound
+        );
+        assert!(matches!(
+            version_read_error(
+                KEY,
+                "v",
+                not_found(
+                    "Server returned non-2xx status code: 404 Not Found: <Error><Code>\
+                     NoSuchVersion</Code></Error>"
+                )
+            ),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    /// The seven words the first classifier matched as substrings: six S3
+    /// credential codes or phrases and versitygw's. Lower case, as it matched
+    /// them, and as a bucket name must be.
+    const CREDENTIAL_WORDS: [&str; 7] = [
+        "invalidaccesskeyid",
+        "signaturedoesnotmatch",
+        "expiredtoken",
+        "tokenrefreshrequired",
+        "invalidsecurity",
+        "lacked valid authentication credentials",
+        "xadminusernotfound",
+    ];
+
+    /// MinIO's `404 NoSuchKey` for `key` in `bucket`, in the words
+    /// `object_store` 0.14.1 hands over: the retry error's request line with
+    /// the URL, the status line, and MinIO's body with its `<Key>`,
+    /// `<BucketName>` and `<Resource>` (captured on the compose stack by
+    /// PROD-01.2's review; the ids are placeholders).
+    fn minio_no_such_key(bucket: &str, key: &str) -> object_store::Error {
+        let url_key = key.replace(' ', "%20");
+        object_store::Error::NotFound {
+            path: key.to_string(),
+            source: format!(
+                "Error performing GET http://minio:9000/{bucket}/{url_key} in 2.523042ms - \
+                 Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" \
+                 encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The specified key \
+                 does not exist.</Message><Key>{key}</Key><BucketName>{bucket}</BucketName>\
+                 <Resource>/{bucket}/{key}</Resource><RequestId>18DD1B6AA58ED4B2</RequestId>\
+                 <HostId>dd9025ba</HostId></Error>"
+            )
+            .into(),
+        }
+    }
+
+    /// **PROD-01.2 review, M1: an absent object is absent, whatever it is
+    /// called.** A `404 NoSuchKey` whose text echoes a key, a prefix and a
+    /// bucket spelling EACH of the seven credential words is `NotFound` at
+    /// every read site, and its class is `ObjectNotFound`.
+    ///
+    /// The first classifier matched those words anywhere in the lowercased
+    /// text, so a backup id containing `expiredtoken` made the "is this set
+    /// new?" read answer `Io`, and every backup to it exited 4
+    /// (`ExecutionClaimUnproven`), with a remedy about IAM grants.
+    ///
+    /// CONTROL: the same shape with versitygw's own code still refuses, under
+    /// the same echoing names, so the row is not passing because nothing is
+    /// a credential refusal any more.
+    ///
+    /// Mutants: the substring match restored (`refuses_the_credential`
+    /// answering from the whole text) fails every one of the 21 arms.
+    #[test]
+    fn an_absent_object_is_not_found_whatever_its_key_prefix_or_bucket_spell() {
+        for word in CREDENTIAL_WORDS {
+            // A bucket cannot hold a space: the one phrase is tried in the key
+            // and the prefix, and as a hyphenated bucket.
+            let as_bucket = word.replace(' ', "-");
+            let cases = [
+                (
+                    "the key",
+                    "kafka-backups".to_string(),
+                    format!("team-a/set-1/{word}.json"),
+                ),
+                (
+                    "the prefix",
+                    "kafka-backups".to_string(),
+                    format!("{word}-2026/set-1/manifest.json"),
+                ),
+                (
+                    "the bucket",
+                    format!("{as_bucket}-archive"),
+                    "team-a/set-1/manifest.json".to_string(),
+                ),
+            ];
+            for (where_, bucket, key) in cases {
+                let what = format!("`{word}` in {where_}");
+                let error = || minio_no_such_key(&bucket, &key);
+                assert!(
+                    !refuses_the_credential(&error()),
+                    "{what}: a NoSuchKey is not a refused credential"
+                );
+                assert!(
+                    matches!(not_found_or_io(&key, error()), StoreError::NotFound(k) if k == key),
+                    "{what}: a read"
+                );
+                assert!(
+                    matches!(
+                        version_read_error(&key, "v1", error()),
+                        StoreError::NotFound(_)
+                    ),
+                    "{what}: a read by version id"
+                );
+                assert_eq!(
+                    StoreErrorClass::classify_object_store(&error()),
+                    StoreErrorClass::ObjectNotFound,
+                    "{what}: the class of the raw error"
+                );
+                // The flattened text, as a caller that kept only `Display`
+                // would hold it: still the object's absence.
+                assert_eq!(
+                    StoreErrorClass::classify(&StoreError::Io(format!("{key}: {}", error()))),
+                    StoreErrorClass::ObjectNotFound,
+                    "{what}: the class of the flattened text"
+                );
+
+                // CONTROL: the same names, and the store really refuses the
+                // credential.
+                let refused = object_store::Error::NotFound {
+                    path: key.clone(),
+                    source: format!(
+                        "Error performing GET http://gw:7070/{bucket}/{} in 1.7745ms - \
+                         {VERSITYGW_UNKNOWN_KEY}",
+                        key.replace(' ', "%20")
+                    )
+                    .into(),
+                };
+                assert!(refuses_the_credential(&refused), "{what}: the control");
+                let e = not_found_or_io(&key, refused);
+                assert!(matches!(e, StoreError::Io(_)), "{what}: the control: {e:?}");
+                assert_eq!(
+                    StoreErrorClass::classify(&e),
+                    StoreErrorClass::InvalidCredentials,
+                    "{what}: the control's flattened class"
+                );
+            }
+        }
+    }
+
+    /// **The code is the error document's own, not a `<Code>` found in the
+    /// text.** Three shapes of one absence, each `NotFound`:
+    ///
+    /// 1. a key literally named `<Code>ExpiredToken</Code>`, echoed by a store
+    ///    that escapes it (MinIO, S3) and by one that does not, where it then
+    ///    sits INSIDE `<Key>`, before or after the real code;
+    /// 2. a body with no `<Code>` at all (a proxy's page, an empty body);
+    /// 3. a body with two codes at its root, which names none.
+    ///
+    /// Mutants: a code taken from the first `<Code>` anywhere in the text, or
+    /// from any `<Code>` anywhere, each fail an arm of (1).
+    #[test]
+    fn the_code_is_the_error_documents_own_and_never_one_found_in_the_text() {
+        let key = "team-a/<Code>ExpiredToken</Code>";
+        let status = "Error performing GET http://minio:9000/kafka-backups/team-a/%3CCode%3E\
+                      ExpiredToken%3C/Code%3E in 1.2ms - Server returned non-2xx status code: \
+                      404 Not Found: ";
+        let bodies = [
+            (
+                "escaped, as MinIO and S3 answer",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code>\
+                 <Message>The specified key does not exist.</Message><Key>team-a/&lt;Code&gt;\
+                 ExpiredToken&lt;/Code&gt;</Key><BucketName>kafka-backups</BucketName></Error>"
+                    .to_string(),
+            ),
+            (
+                "not escaped, the key after the code",
+                format!("<Error><Code>NoSuchKey</Code><Key>{key}</Key></Error>"),
+            ),
+            (
+                "not escaped, the key BEFORE the code",
+                format!("<Error><Key>{key}</Key><Code>NoSuchKey</Code></Error>"),
+            ),
+            (
+                "not escaped, and the only code in the body",
+                format!("<Error><Key>{key}</Key><Message>absent</Message></Error>"),
+            ),
+            ("no code at all: an empty body", String::new()),
+            (
+                "no code at all: a proxy's page",
+                "<html><body><h1>404 Not Found</h1>ExpiredToken</body></html>".to_string(),
+            ),
+            (
+                "no code at all: an error document without one",
+                "<Error><Message>ExpiredToken</Message></Error>".to_string(),
+            ),
+            (
+                "two codes at the root",
+                "<Error><Code>NoSuchKey</Code><Code>ExpiredToken</Code></Error>".to_string(),
+            ),
+            (
+                "a code after the document closed",
+                "<Error><Message>absent</Message></Error><Code>ExpiredToken</Code>".to_string(),
+            ),
+        ];
+        for (what, body) in bodies {
+            let error = || object_store::Error::NotFound {
+                path: key.to_string(),
+                source: format!("{status}{body}").into(),
+            };
+            assert!(!refuses_the_credential(&error()), "{what}");
+            assert!(
+                matches!(not_found_or_io(key, error()), StoreError::NotFound(_)),
+                "{what}: a read"
+            );
+            assert!(
+                matches!(
+                    version_read_error(key, "v1", error()),
+                    StoreError::NotFound(_)
+                ),
+                "{what}: a read by version id"
+            );
+            assert_eq!(
+                StoreErrorClass::classify_object_store(&error()),
+                StoreErrorClass::ObjectNotFound,
+                "{what}"
+            );
+            // Flattened, with this crate's own key in front: the key's
+            // `<Code>` is the FIRST one in the text.
+            assert_eq!(
+                StoreErrorClass::classify(&StoreError::Io(format!("{key}: {}", error()))),
+                StoreErrorClass::ObjectNotFound,
+                "{what}: flattened"
+            );
+        }
+
+        // CONTROL: the document's own code, under the same key, refuses.
+        let refused = object_store::Error::NotFound {
+            path: key.to_string(),
+            source: format!(
+                "{status}<Error><Key>{key}</Key><Code>XAdminUserNotFound</Code></Error>"
+            )
+            .into(),
+        };
+        assert!(refuses_the_credential(&refused));
+        assert!(matches!(not_found_or_io(key, refused), StoreError::Io(_)));
+    }
+
+    /// [`error_code`] reads a document and nothing looser.
+    #[test]
+    fn an_error_code_is_the_one_root_level_code_of_a_whole_document() {
+        for (body, want) in [
+            ("<Error><Code>NoSuchKey</Code></Error>", Some("NoSuchKey")),
+            (
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error>\n  <Code> AccessDenied \
+                 </Code>\n  <Message>m</Message>\n</Error>\n",
+                Some("AccessDenied"),
+            ),
+            (
+                "<Error xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Message>a > b\
+                 </Message><Code>SlowDown</Code><HostId/></Error>",
+                Some("SlowDown"),
+            ),
+            ("", None),
+            ("NoSuchKey", None),
+            ("<Code>NoSuchKey</Code>", None),
+            ("<Error><Code></Code></Error>", None),
+            ("<Error><Code/></Error>", None),
+            ("<Error><Code><b>NoSuchKey</b></Code></Error>", None),
+            ("<Error><Code>NoSuchKey</Code>", None),
+            ("<Error><Code>NoSuchKey</Message></Error>", None),
+            ("<Error><Code>NoSuchKey</Code></Error> and more", None),
+            ("words <Error><Code>NoSuchKey</Code></Error>", None),
+            ("<Error><!-- c --><Code>NoSuchKey</Code></Error>", None),
+            (
+                "<Error><Message><![CDATA[<Code>X</Code>]]></Message></Error>",
+                None,
+            ),
+            ("<Errors><Code>NoSuchKey</Code></Errors>", None),
+        ] {
+            assert_eq!(error_code(body), want, "{body:?}");
+        }
+    }
+
+    /// Where `object_store`'s request line ends, and what is not one.
+    #[test]
+    fn a_request_line_is_read_only_in_its_own_shape() {
+        for line in [
+            "Error performing GET http://minio:9000/b/k in 2.523042ms - ",
+            "Error performing HEAD http://minio:9000/b/k in 942.667µs - ",
+            "Error performing PUT REDACTED in 3s - ",
+            "Error performing GET http://minio:9000/b/k in 6.2s, after 2 retries, max_retries: \
+             2, retry_timeout: 5s  - ",
+            // What `check::store::strip_retry_noise` leaves of the clause.
+            "Error performing GET http://minio:9000/b/k in 6.2s, , ,   - ",
+        ] {
+            let text = format!("{line}HTTP error: error sending request");
+            assert_eq!(request_line_end(&text), Some(line.len()), "{line:?}");
+            assert_eq!(
+                own_accounts(&format!("k: Generic S3 error: {text}")),
+                ["HTTP error: error sending request"],
+                "{line:?}"
+            );
+        }
+        for not_one in [
+            "Error performing list request: Error performing GET http://m/b in 1ms - x",
+            "Error performing get http://minio:9000/b/k in 1ms - x",
+            "Error performing GET http://minio:9000/b/k within 1ms - x",
+            "Error performing GET http://minio:9000/b/k in 1ms; <Code>X</Code> - x",
+            "Error performing GET",
+            "error performing GET http://minio:9000/b/k in 1ms - x",
+        ] {
+            assert_eq!(request_line_end(not_one), None, "{not_one:?}");
+        }
+        // The list client's lead-in is skipped and the request line after it
+        // is found.
+        assert_eq!(
+            own_accounts(
+                "Generic S3 error: Error performing list request: Error performing GET \
+                 http://m/b?list-type=2 in 1ms - Server returned non-2xx status code: 403 \
+                 Forbidden: "
+            ),
+            ["Server returned non-2xx status code: 403 Forbidden: "]
+        );
+        // No request line: no account, and the classifier reads the text.
+        assert!(own_accounts("Generic S3 error: builder error").is_empty());
+    }
+
+    /// A key that spells a whole request line and status line of its own, the
+    /// one echo a flattened text cannot tell from `object_store`'s words.
+    const SPELLS_A_REFUSAL: &str = "Error performing GET x in 1ms - Server returned non-2xx \
+        status code: 403 Forbidden: <Error><Code>ExpiredToken</Code></Error>";
+
+    /// **What a key that spells `object_store`'s own request line can do: on
+    /// a store that speaks HTTP, make a flattened text unclassified, and
+    /// nothing else.** Every request line in the text is read and they must
+    /// agree; the real one is among them.
+    ///
+    /// The raw error is not moved at all: its answer is read off the source
+    /// chain, where no key is printed.
+    ///
+    /// THE LIMIT, pinned so it is a stated fact and not a surprise: with no
+    /// request line of `object_store`'s own (a backend that speaks no HTTP),
+    /// the key's is the only one and is read.
+    #[test]
+    fn a_key_that_spells_a_request_line_can_only_make_a_flattened_text_unclassified() {
+        let key = SPELLS_A_REFUSAL;
+        // An absent object under that key: the raw error is an absence.
+        let absent = || minio_no_such_key("kafka-backups", key);
+        assert!(!refuses_the_credential(&absent()));
+        assert!(matches!(
+            not_found_or_io(key, absent()),
+            StoreError::NotFound(_)
+        ));
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&absent()),
+            StoreErrorClass::ObjectNotFound
+        );
+        // Flattened, the key is printed before the real request line (this
+        // crate's prefix, object_store's path) and after it (the body's
+        // `<Key>` and `<Resource>`): the lines disagree, so no class and no
+        // status is taken from any of them.
+        let flattened = StoreError::Io(format!("{key}: {}", absent()));
+        assert_eq!(
+            StoreErrorClass::classify(&flattened),
+            StoreErrorClass::StoreErrorUnclassified
+        );
+        assert_eq!(answered_status(&flattened), None);
+
+        // A transport failure under that key: the same.
+        let refused_connection = StoreError::Io(format!(
+            "{key}: Generic S3 error: Error performing GET http://minio:9000/kafka-backups/k in \
+             2ms - HTTP error: error sending request"
+        ));
+        assert_eq!(
+            StoreErrorClass::classify(&refused_connection),
+            StoreErrorClass::StoreErrorUnclassified
+        );
+        assert_eq!(answered_status(&refused_connection), None);
+
+        // CONTROL: the same two failures under an ordinary key classify.
+        assert_eq!(
+            StoreErrorClass::classify(&StoreError::Io(format!(
+                "k: {}",
+                minio_no_such_key("kafka-backups", "k")
+            ))),
+            StoreErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            StoreErrorClass::classify(&StoreError::Io(
+                "k: Generic S3 error: Error performing GET http://minio:9000/kafka-backups/k in \
+                 2ms - HTTP error: error sending request"
+                    .to_string()
+            )),
+            StoreErrorClass::EndpointUnreachable
+        );
+
+        // THE LIMIT: no request line but the key's.
+        let directory = StoreError::Io(format!(
+            "{key}: Generic LocalFileSystem error: Unable to open file: Permission denied (os \
+             error 13)"
+        ));
+        assert_eq!(
+            StoreErrorClass::classify(&directory),
+            StoreErrorClass::AccessDenied,
+            "read from the key's own words: the stated limit of a flattened text"
+        );
+    }
+
+    /// The status a caller may act on is the answer's, not a number in a key.
+    #[test]
+    fn the_answered_status_is_the_status_lines() {
+        let io = |text: &str| StoreError::Io(text.to_string());
+        assert_eq!(
+            answered_status(&io(
+                "logs-503/k: Generic S3 error: Error performing GET http://m/b/logs-503/k in \
+                 1ms - Server returned non-2xx status code: 404 Not Found: "
+            )),
+            Some(404)
+        );
+        assert_eq!(
+            answered_status(&io(
+                "k: Generic S3 error: Error performing GET http://m/b/k in 6s, after 2 retries, \
+                 max_retries: 2, retry_timeout: 5s  - Server returned non-2xx status code: 503 \
+                 Service Unavailable: <Error><Code>SlowDown</Code></Error>"
+            )),
+            Some(503)
+        );
+        assert_eq!(
+            answered_status(&io(
+                "non-2xx status code: 503/k: Generic S3 error: Error performing GET \
+                 http://m/b/k in 1ms - HTTP error: error sending request"
+            )),
+            None,
+            "a transport failure answered with no status, whatever the key spells"
+        );
+        assert_eq!(answered_status(&StoreError::NotFound("k".into())), None);
     }
 
     /// Every other failure is "could not tell", never "not here".

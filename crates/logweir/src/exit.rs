@@ -28,10 +28,12 @@ impl From<ExitCode> for std::process::ExitCode {
     }
 }
 
-/// [I9] Prints `refusal-reason=<TerminalState>` on STDOUT, as the process's
-/// FINAL stdout line, for exit 3 only.
+/// **The one printer of a guard refusal** (interface I9, and FX-34): both
+/// lines an exit 3 prints, on STDOUT, as the process's last two stdout lines:
+/// `refusal-detail=<one JSON object>` and then
+/// `refusal-reason=<TerminalState>`, which stays the FINAL one.
 ///
-/// # Why stdout, and why last
+/// # Why stdout, and why last (I9)
 ///
 /// The pod log API has no stream selector: `GET /api/v1/namespaces/{ns}/pods/
 /// {pod}/log` returns the container's stdout and stderr interleaved into one
@@ -47,31 +49,97 @@ impl From<ExitCode> for std::process::ExitCode {
 /// The state is derived, never passed in: `logweir_core::guard::
 /// refusal_reason_line` owns the mapping from a refusal message to a terminal
 /// state, so a caller cannot invent a fourth state or spell an existing one
-/// differently. `logweir-core` does no I/O, which is why the `println!` is
-/// here and the string is there.
+/// differently. `logweir-core` does no I/O, which is why the write is here
+/// and the strings are there.
 ///
 /// Rust's `Stdout` is a `LineWriter`, so the newline flushes; this shares the
 /// one global stdout handle with the tracing subscriber's writer, which is
 /// what makes "after the tracing line" an ordering and not a race.
-pub fn print_refusal_reason(message: &str) {
+///
+/// # Why a second line, and why it is first (FX-34)
+///
+/// `refusal-reason=` names a state from a closed list, and most refusals have
+/// none: the sentence that says WHY was only on the human line, in a pod log
+/// that is gone with the pod. The detail line carries the reason code and
+/// that sentence in a form a controller can validate before it stores them,
+/// and it goes BEFORE the state line so every reader of "the final line",
+/// this build's or an older one's, still finds the state there.
+///
+/// # The line carries the Job's token, when this process was given one
+///
+/// Text this process did not write can start a line of its own in a pod log.
+/// [`one_line`] escapes every line break in the error text the runner prints
+/// itself (PROD-15.1), but the Kafka client inside this process logs to the
+/// same stderr by itself, unescaped, and what it logs can repeat a plan value
+/// that holds a line break (FX-43). Nothing about where a line stands tells
+/// the two apart in one merged log, so a controller honours a
+/// `refusal-detail=` line only when it carries the token that controller
+/// made for this Job and passed as `--line-token` ([`set_line_token`]). The
+/// plan was written before the Job existed and cannot hold it. A run started
+/// by hand has no token and prints the line without one.
+///
+/// Both lines go out in ONE write, at EVERY exit 3 (a refusal that says
+/// nothing prints `logweir_core::refusal_detail::NO_SENTENCE`), and the
+/// callers (`drill::exiting`, `backup::exiting`) print nothing after them.
+/// The human line on stderr and the tracing lines are unchanged.
+///
+/// # There is no printer of the state line alone
+///
+/// `print_refusal_reason` and its writer seam printed `refusal-reason=` by
+/// itself. They are gone (FX-34's review, L5): an exit-3 path that reached
+/// for them would have printed a state line and no detail line.
+pub fn print_refusal(run: logweir_core::refusal_detail::RefusingRun, message: &str) {
     // `expect`-free: a closed stdout is not a reason to change the exit code,
     // which GC11 has already decided by the time this is reached.
-    let _ = print_refusal_reason_to(&mut std::io::stdout().lock(), message);
+    let _ = print_refusal_to(&mut std::io::stdout().lock(), run, line_token(), message);
 }
 
-/// The writer seam `print_refusal_reason` prints through, so a test can assert
-/// the EXACT BYTES — the line and its newline — instead of trusting a
-/// `println!` nobody can observe.
+/// The writer seam [`print_refusal`] prints through, so a test asserts the
+/// exact bytes instead of trusting a `println!` nobody can observe: the
+/// detail line (with `token` in it when there is one), the state line, each
+/// with its newline, in one `write_all`.
 ///
-/// It is `pub` rather than `#[cfg(test)]` deliberately: the assertion that
-/// matters lives in an integration test
-/// (`crates/logweir/tests/topic_preflight.rs`'s
-/// `a_target_topic_refusal_prints_its_terminal_state`), which is a separate
-/// crate and cannot see a `#[cfg(test)]` item. Task 8 added it; before it,
-/// `print_refusal_reason` was a bare `println!` and the "on stdout, last"
-/// half of interface **I9** had no in-process coverage at all.
-pub fn print_refusal_reason_to<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
-    writeln!(w, "{}", logweir_core::guard::refusal_reason_line(message))
+/// It is `pub` rather than `#[cfg(test)]` deliberately: the assertions that
+/// matter live in integration tests (`crates/logweir/tests/refusal_detail.rs`,
+/// and `crates/logweir/tests/topic_preflight.rs`'s
+/// `a_target_topic_refusal_prints_its_terminal_state`), which are separate
+/// crates and cannot see a `#[cfg(test)]` item.
+pub fn print_refusal_to<W: std::io::Write>(
+    w: &mut W,
+    run: logweir_core::refusal_detail::RefusingRun,
+    token: Option<&logweir_core::refusal_detail::LineToken>,
+    message: &str,
+) -> std::io::Result<()> {
+    let both = format!(
+        "{}\n{}\n",
+        logweir_core::refusal_detail::refusal_detail_line(run, token, message),
+        logweir_core::guard::refusal_reason_line(message)
+    );
+    w.write_all(both.as_bytes())
+}
+
+/// The line token this process was started with, if any.
+///
+/// # Why a process-wide value, set once
+///
+/// The token is a fact about the PROCESS (the Job it is the runner of), read
+/// off the command line before anything runs, and used at exactly one place,
+/// the last thing a refused run prints. Carrying it there as a parameter
+/// would thread it through `report_with`, `report` and both `exiting`s for
+/// one use. Set once and never changed: [`set_line_token`] after the first is
+/// ignored.
+static LINE_TOKEN: std::sync::OnceLock<Option<logweir_core::refusal_detail::LineToken>> =
+    std::sync::OnceLock::new();
+
+/// Hold `--line-token`'s value for [`print_refusal`]. `main` calls it once,
+/// before dispatch, for the two commands that take the flag. A later call
+/// changes nothing.
+pub fn set_line_token(token: Option<logweir_core::refusal_detail::LineToken>) {
+    let _ = LINE_TOKEN.set(token);
+}
+
+fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
+    LINE_TOKEN.get().and_then(Option::as_ref)
 }
 
 /// **One line, whatever the text holds** (PROD-15.1 review 2, M1): every

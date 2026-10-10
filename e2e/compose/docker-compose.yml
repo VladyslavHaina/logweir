@@ -948,3 +948,138 @@ services:
       timeout: 10s
       retries: 36
       start_period: 10s
+
+  # --- profile `redpanda`: a Kafka-compatible endpoint that is not Apache Kafka
+  # (PROD-01.2) ----------------------------------------------------------------
+  # One Redpanda node, pinned by its index digest, as a reachable row of the
+  # compatibility contract: Redpanda speaks the Kafka protocol from its own
+  # implementation, so what it answers differently from Apache Kafka is a
+  # finding (docs/to-do/decisions/PROD-01.2-compatibility-contract.md).
+  # Three listeners (profiles/redpanda/start.sh): in-network `internal` :9094,
+  # the published PLAINTEXT `external`, and the published `sasl` listener,
+  # which authenticates SCRAM-SHA-256 (user `logweir`) and SCRAM-SHA-512 (user
+  # `logweir512`) with the stack's fixture password. Redpanda holds one
+  # mechanism per user, hence two users. Authorization is off, so every
+  # authenticated user may do everything; the ACL rows stay on `acl`.
+  # Its cluster id is `redpanda.<uuid>`, generated at first start, so no two
+  # stacks share one and no id file is needed. Topic auto-creation is off, as
+  # on every other fixture broker.
+  # LICENCE: Redpanda is under the Business Source License 1.1 (non-production
+  # use is granted; the image is pulled, never redistributed). Never part of
+  # the default profile set.
+  redpanda:
+    image: redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89
+    hostname: redpanda
+    profiles: [redpanda]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_REDPANDA_PORT:-9124}:9092"
+      - "${LOGWEIR_E2E_REDPANDA_SASL_PORT:-9125}:9093"
+    environment:
+      ADVERTISED: internal://redpanda:9094,external://localhost:${LOGWEIR_E2E_REDPANDA_PORT:-9124},sasl://localhost:${LOGWEIR_E2E_REDPANDA_SASL_PORT:-9125}
+    entrypoint: ["/bin/bash", "/start.sh"]
+    volumes:
+      - ./profiles/redpanda/start.sh:/start.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=redpanda:9644 | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 10s
+
+  # Cluster settings, the two SCRAM users, `orders` and the marker topic,
+  # written once the node is healthy; long-running with a readiness marker, like
+  # kafka-auth-setup, so `up --wait` waits for them and fails if one fails.
+  redpanda-setup:
+    image: redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89
+    profiles: [redpanda]
+    networks: [kafka-net]
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        rpk cluster config set auto_create_topics_enabled false -X admin.hosts=redpanda:9644
+        && (rpk security user create logweir -p 'logweir-e2e-not-a-secret' --mechanism SCRAM-SHA-256 -X admin.hosts=redpanda:9644
+        || rpk security user update logweir --new-password 'logweir-e2e-not-a-secret' --mechanism SCRAM-SHA-256 -X admin.hosts=redpanda:9644)
+        && (rpk security user create logweir512 -p 'logweir-e2e-not-a-secret' --mechanism SCRAM-SHA-512 -X admin.hosts=redpanda:9644
+        || rpk security user update logweir512 --new-password 'logweir-e2e-not-a-secret' --mechanism SCRAM-SHA-512 -X admin.hosts=redpanda:9644)
+        && (rpk topic describe orders -X brokers=redpanda:9094 >/dev/null 2>&1
+        || rpk topic create orders -p 3 -r 1 -X brokers=redpanda:9094)
+        && (rpk topic describe logweir.scratch -X brokers=redpanda:9094 >/dev/null 2>&1
+        || rpk topic create logweir.scratch -p 1 -r 1 -X brokers=redpanda:9094)
+        && touch /tmp/ready && exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  # --- profile `confluent`: a Confluent Platform broker (PROD-01.2) -----------
+  # One combined KRaft node from Confluent's community image `cp-kafka`, pinned
+  # by its index digest: Confluent's build of Apache Kafka (`8.3.2-ccs`), whose
+  # Kafka components the image licenses under Apache-2.0. A reachable row of
+  # the compatibility contract; `cp-server` (Confluent's enterprise broker) is
+  # not this image and has no row. PLAINTEXT only: in-network :9094 and the
+  # published EXTERNAL port. Its CLUSTER_ID is one per stack, loaded like
+  # kafka-auth's. Never part of the default profile set.
+  # A third listener, OFFNET, is the ADVERTISED-ADDRESS FAILURE fixture: it is
+  # published and answers a bootstrap, and it advertises `127.0.0.1:1`, where
+  # nothing listens, so every request a client must send to the broker it was
+  # just told about is refused at once (no name lookup, nothing off the
+  # loopback). A connection test over it passes; a backup cannot.
+  kafka-cp:
+    image: confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48
+    hostname: kafka-cp
+    profiles: [confluent]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_CP_PORT:-9128}:9092"
+      - "${LOGWEIR_E2E_CP_OFFNET_PORT:-9129}:9095"
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-cp.env
+        required: true
+    environment:
+      KAFKA_NODE_ID: 5001
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 5001@kafka-cp:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-cp:9094,CONTROLLER://kafka-cp:9093,EXTERNAL://kafka-cp:9092,OFFNET://kafka-cp:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cp:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CP_PORT:-9128},OFFNET://127.0.0.1:1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,OFFNET:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka-cp:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-cp-setup:
+    image: confluentinc/cp-kafka:8.3.2@sha256:5e8f3ab5b4977c9a8fd6137d26af2caad878aca316f24c55f08206217e3cec48
+    profiles: [confluent]
+    networks: [kafka-net]
+    depends_on:
+      kafka-cp: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        kafka-topics --bootstrap-server kafka-cp:9094 --create
+        --if-not-exists --topic orders --partitions 3 --replication-factor 1
+        && kafka-topics --bootstrap-server kafka-cp:9094 --create
+        --if-not-exists --topic logweir.scratch --partitions 1 --replication-factor 1
+        && touch /tmp/ready && exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90

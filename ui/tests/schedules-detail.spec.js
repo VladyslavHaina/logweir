@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded, handedPoint, handedPoints } from "./console-fixture.js";
 
 import {
   ARCHIVED_SCHEDULE_SENTENCE,
@@ -109,8 +110,11 @@ function run(name, phase, extra) {
   };
 }
 
-/** The catalog's view entries, in each of the states D3 section 5.4 keeps apart. */
-const POINTS = Object.freeze([
+/** The catalog's view entries, in each of the states D3 section 5.4 keeps
+ *  apart -- AS THE PAGE IS HANDED THEM: written here as the product API
+ *  publishes them, and read through the catalog's own decoder
+ *  (`handedPoints`), which is what stands between the API and this page. */
+const POINTS = Object.freeze(handedPoints([
   Object.freeze({
     backupId: "set-healthy", pointId: "lwp1-healthy", runId: "r1",
     availability: "Available", verification: "Verified", selectable: true,
@@ -133,7 +137,7 @@ const POINTS = Object.freeze([
     receiptKey: "k", receiptSha256: "sha256:dd",
     signerKeyId: "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
   }),
-]);
+]).items.map((point) => Object.freeze(point)));
 
 // ===========================================================================
 // Empty history
@@ -212,7 +216,7 @@ test("fx17_a_scheduled_run_joins_its_whole_catalog_row_and_a_redacted_row_does_n
   const SET = SCHEDULE_UID + "-20260920-023000";
   const RUN = "01M4CKTADX268PREVHJAAYXEMZ";
   const scheduled = run("logweir-backup-nightly-20260920-023000", "Succeeded", { backupId: SET });
-  const row = (redacted, selectable) => ({
+  const row = (redacted, selectable) => handedPoint({
     pointId: "lwp1-324e405be6e21da94338e90966d61884", runId: RUN,
     backupId: redacted ? "[redacted]" : SET,
     receiptKey: redacted
@@ -365,12 +369,14 @@ test("the_join_is_on_the_backup_set_id_and_takes_every_point_of_the_set", () => 
   // NEGATIVE CONTROL 2: A SET IS NOT ITS FIRST POINT. Two points under one
   // backup set id, the first healthy and the second missing, is not a healthy
   // set -- and taking the first would have said it was.
-  const mixed = [
-    { backupId: "set-mixed", pointId: "p1", availability: "Available",
-      verification: "Verified", selectable: true },
-    { backupId: "set-mixed", pointId: "p2", availability: "Missing",
-      verification: "Verified", selectable: false },
-  ];
+  const mixed = handedPoints([
+    { backupId: "set-mixed", pointId: "p1", runId: "r1", receiptKey: "k",
+      receiptSha256: "sha256:aa", availability: "Available", verification: "Verified",
+      selectable: true },
+    { backupId: "set-mixed", pointId: "p2", runId: "r2", receiptKey: "k",
+      receiptSha256: "sha256:bb", availability: "Missing", verification: "Verified",
+      selectable: false },
+  ]).items;
   const verdicts = verdictCells(mixed);
   assert.ok(verdicts[0].indexOf("Available") !== -1 && verdicts[0].indexOf("Missing") !== -1,
     "both words are shown rather than a severity this page invented");
@@ -628,7 +634,7 @@ test("the_catalog_fixture_the_console_ships_renders_through_these_columns", () =
   // point documents `ui/tests/fixtures/console/catalog-points-states.json`
   // carries for the catalog page, so the two surfaces cannot disagree about
   // what `Missing` or `NotAttempted` looks like.
-  const points = fixture("console/catalog-points-states.json").items;
+  const points = decoded("catalog-points-states.json").items;
   assert.ok(points.length > 0);
   const runs = points.map((point, i) =>
     run("fixture-" + String(i), "Succeeded", { backupId: point.backupId }));

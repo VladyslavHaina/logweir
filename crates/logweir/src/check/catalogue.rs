@@ -158,6 +158,32 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Some(EXPIRY_DEFAULT),
     ),
     (CheckId::TargetLogAppendTime, Gating::ExecutionOnly, None),
+    // PROD-01.2, the capability rows (`kinds::capability`), each emitted only
+    // when the plan lists it. The two engine-protocol rows are BLOCKING: an
+    // endpoint that does not serve a request version the engine sends cannot
+    // be backed up from, or restored into, at all. The other two are
+    // ADVISORY: the backup runs, and records what it could not capture as not
+    // captured, with the reason.
+    (
+        CheckId::ConnectionEngineProtocol,
+        Gating::Blocking,
+        Some(EXPIRY_DEFAULT),
+    ),
+    (
+        CheckId::ConnectionTopicConfigsReadable,
+        Gating::Advisory,
+        Some(EXPIRY_TOPICS_DESCRIBABLE),
+    ),
+    (
+        CheckId::ConnectionGroupTypes,
+        Gating::Advisory,
+        Some(EXPIRY_DEFAULT),
+    ),
+    (
+        CheckId::TargetEngineProtocol,
+        Gating::Blocking,
+        Some(EXPIRY_DEFAULT),
+    ),
 ];
 
 /// This row's catalogue entry, or `None` for a row the runner does not own.

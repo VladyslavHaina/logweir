@@ -93,11 +93,14 @@
     "observedAt": "2026-10-09T13:01:35Z",
     "operation": "destinationAccess",
     "reason": "NotReady",
+    "resourceVersion": "1",
     "stale": false,
     "staleBasis": [],
     "staleReasons": [],
     "state": "notReady",
     "terminal": true,
+    "uid": "uid-pf-fx20c-thief",
     "warnings": []
-  }
+  },
+  "requestId": "fx20c-destination-test-read"
 }

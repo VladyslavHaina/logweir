@@ -25,9 +25,10 @@ use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
     ConnectionPlan, OperationReadinessRequest,
 };
-use logweir_kafka::inventory::{InventoryProbe, TopicPresence};
+use logweir_kafka::inventory::{CheckFailure, InventoryProbe, TopicPresence};
 
 use super::access::{credential_bound_row, destination_checks, DestinationProbe};
+use super::capability;
 use super::{execution_only, from_broker_failure, ready, remedy_for, runner_contract, Wiring};
 use crate::check::{catalogue, Deadline, Emission};
 
@@ -53,6 +54,15 @@ pub fn connection_ids(operation: CheckOperation) -> (CheckId, Option<CheckId>) {
         ),
     }
 }
+
+/// What to do when a cluster's bootstrap address answers and the brokers it
+/// advertises do not (PROD-01.2): the remedy [`authenticated`] gives in place
+/// of `BrokerUnreachable`'s generic one, which is about the bootstrap address.
+pub const ADVERTISED_UNREACHABLE_REMEDY: &str =
+    "A connection test that only reads the cluster id passes here and nothing else can. Check \
+     advertised.listeners for the listener this bootstrap address belongs to: every broker must \
+     advertise a host and port this runner can resolve and reach. Use the bootstrap address of \
+     a listener meant for this network, or fix its advertisement.";
 
 /// `connection.authenticated` / `target.authenticated`: the cluster id and the
 /// broker count, off ONE metadata read.
@@ -82,7 +92,30 @@ pub fn authenticated(
     };
     let listing = match probe.list_topics() {
         Ok(l) => l,
-        Err(f) => return (scoped(from_broker_failure(id, &f, now)), cluster_id),
+        Err(f) => {
+            let mut row = scoped(from_broker_failure(id, &f, now));
+            // PROD-01.2: THE BOOTSTRAP ANSWERED AND THE ADVERTISED BROKERS DID
+            // NOT. The cluster id above came off the bootstrap connection; a
+            // listing that then cannot reach a broker is the cluster telling
+            // this client to dial an address it cannot reach. Measured on the
+            // `confluent` profile's OFFNET listener (it advertises
+            // `127.0.0.1:1`): `cluster-probe` reads the id and answers
+            // `reachable=true`, this row is `BrokerUnreachable`, and a backup
+            // fails after a minute with only "kafka-backup backup exited 1".
+            // The generic remedy for that code talks about the BOOTSTRAP
+            // address, which is the one thing that works here.
+            if let (Some(cluster), CheckCode::BrokerUnreachable) = (cluster_id.as_deref(), f.code) {
+                row = row
+                    .with_message(&format!(
+                        "the bootstrap address answered and named cluster {cluster}, and the \
+                         brokers that cluster advertises did not answer a metadata request: the \
+                         advertised listeners are not reachable from here"
+                    ))
+                    .with_remedy(ADVERTISED_UNREACHABLE_REMEDY)
+                    .with_fact("clusterId", cluster);
+            }
+            return (row, cluster_id);
+        }
     };
     let mut row = ready(id, CheckCode::Authenticated, now)
         .with_message("the broker answered a metadata request for this principal")
@@ -228,6 +261,9 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
 
     let (auth_id, topics_id) = connection_ids(req.operation);
     let scope = connection_scope(&req.connection, req.operation);
+    // PROD-01.2: the capability rows the plan lists, and only those. The plan
+    // validation has already refused an id that is not this operation's.
+    let capabilities: Vec<CheckId> = req.capability_checks.clone();
     // The broker half gets half the budget; the destination half gets the
     // rest. Neither can spend the whole check on an unreachable endpoint.
     let broker_budget = deadline.slice(2);
@@ -245,11 +281,24 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                     &mut checks,
                 );
             }
+            for id in &capabilities {
+                push(
+                    capability::blocked(
+                        *id,
+                        "the connection did not authenticate, so this check did not run",
+                        now,
+                    )
+                    .with_scope(scope.clone()),
+                    &skip,
+                    &mut checks,
+                );
+            }
         }
         Ok(probe) => {
             let (row, _) = authenticated(auth_id, probe.as_ref(), Some(scope.clone()), now);
             let authenticated_ok = row.state == CheckState::Ready;
             push(row, &skip, &mut checks);
+            let mut topics_ok = authenticated_ok;
             if let Some(tid) = topics_id {
                 let row = if !authenticated_ok {
                     blocked(tid, now)
@@ -259,6 +308,18 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 } else {
                     topics_describable(tid, probe.as_ref(), &req.topics, deadline, now)
                 };
+                topics_ok = row.state == CheckState::Ready;
+                push(row.with_scope(scope.clone()), &skip, &mut checks);
+            }
+            for row in capability_rows(
+                &capabilities,
+                &req.connection,
+                probe.as_ref(),
+                &req.topics,
+                (authenticated_ok, topics_ok),
+                deadline,
+                now,
+            ) {
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
         }
@@ -313,6 +374,86 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     let mut result = CheckResult::new(CheckPlanKind::OperationReadiness);
     result.checks = checks;
     Emission::of(result)
+}
+
+/// PROD-01.2: the capability rows `listed`, in the plan's order, over one
+/// authenticated connection.
+///
+/// ONE ApiVersions observation serves every row that reads it, and it is
+/// made only when such a row is listed. `passed` is whether the connection
+/// authenticated and whether every selected topic is describable: a
+/// capability row about a connection that did not authenticate, or about
+/// topics the principal cannot even describe, has no honest answer of its own
+/// and says which row to fix first.
+#[must_use]
+pub fn capability_rows(
+    listed: &[CheckId],
+    connection: &ConnectionPlan,
+    probe: &dyn InventoryProbe,
+    topics: &[String],
+    passed: (bool, bool),
+    deadline: Deadline,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<CheckOutcome> {
+    let (authenticated_ok, topics_ok) = passed;
+    if !authenticated_ok {
+        return listed
+            .iter()
+            .map(|id| {
+                capability::blocked(
+                    *id,
+                    "the connection did not authenticate, so this check did not run",
+                    now,
+                )
+            })
+            .collect();
+    }
+    let reads_api_versions = |id: &CheckId| {
+        matches!(
+            id,
+            CheckId::ConnectionEngineProtocol
+                | CheckId::TargetEngineProtocol
+                | CheckId::ConnectionGroupTypes
+        )
+    };
+    // ONE observation, inside what is left of the check's own budget, and not
+    // started with none left (review L9): a dial begun after the deadline
+    // would overrun the check and report the clock as a broker problem.
+    let observed = listed.iter().any(reads_api_versions).then(|| {
+        if deadline.has_room() {
+            probe.api_versions(deadline.remaining())
+        } else {
+            Err(CheckFailure::new(
+                CheckCode::ApiVersionsNotObserved,
+                "the check's time budget was spent before the ApiVersions observation could \
+                 start, so the endpoint was not asked which request versions it serves",
+            ))
+        }
+    });
+    let sasl = capability::engine_uses_sasl(connection);
+    listed
+        .iter()
+        .filter_map(|id| match (id, observed.as_ref()) {
+            (CheckId::ConnectionEngineProtocol | CheckId::TargetEngineProtocol, Some(observed)) => {
+                Some(capability::engine_protocol(*id, observed, sasl, now))
+            }
+            (CheckId::ConnectionGroupTypes, Some(observed)) => {
+                Some(capability::group_types(observed, now))
+            }
+            (CheckId::ConnectionTopicConfigsReadable, _) => Some(if topics_ok {
+                capability::topic_configs_readable(probe, topics, deadline, now)
+            } else {
+                capability::blocked(
+                    *id,
+                    "a selected topic is not describable by this principal, so its \
+                     configuration read was not attempted",
+                    now,
+                )
+            }),
+            // Not a capability row: the plan validation refused it already.
+            _ => None,
+        })
+        .collect()
 }
 
 /// The `KafkaCluster` scope a connection row carries.

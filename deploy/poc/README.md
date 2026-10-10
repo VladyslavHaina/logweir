@@ -422,7 +422,20 @@ first), then:
 
 ```bash
 . deploy/poc/versions.env
-# 1. The CRDs, from the NEW chart (Helm never upgrades crds/ itself).
+# 0. Only Helm may own a field the chart renders. Prints one line for each
+#    manager other than Helm that has written to a Deployment or StatefulSet of
+#    the release outside its status, and nothing when there is none. If such a
+#    manager owns a field the chart renders, step 2 stops half-way: read "If
+#    step 0 prints a line" below and run its dry run BEFORE going on.
+for o in $(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get deploy,statefulset \
+    -l app.kubernetes.io/instance=logweir -o name); do
+  kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get "$o" --show-managed-fields \
+    -o jsonpath='{range .metadata.managedFields[*]}{.manager}{" "}{.operation}{" "}{.subresource}{"\n"}{end}' \
+    | awk -v o="$o" '$1 != "helm" && $3 != "status" { print o ": " $1 " (" $2 ")" }'
+done
+# 1. The CRDs, from the NEW chart (Helm never upgrades crds/ itself). A CRD this
+#    step changes ends every open watch on its kind: anything watching a Logweir
+#    object across this step must open its watch again.
 helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --untar -d poc-secrets/chart
 kubectl --context "$CTX" apply --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 for crd in $(ls poc-secrets/chart/logweir-chart/crds | sed 's/\.yaml$//'); do
@@ -432,23 +445,84 @@ done
 kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 # 1b. The demo brokers keep their data in an emptyDir. If the new chart changes
 #     either Kafka StatefulSet's pod template, step 2 replaces the pod and EVERY
-#     topic is lost. Prints nothing when the brokers are untouched. A change to
-#     the objects' own labels (helm.sh/chart) is harmless; ANY line under
-#     spec.template is not: stop, or accept losing the demo topics and re-seed
-#     them afterwards.
+#     topic is lost. Between two publications this DOES print, and exits 1: the
+#     helm.sh/chart label of the six demo-Kafka objects changes, twelve changed
+#     lines in all (the old label and the new one for each). That is harmless,
+#     and it is all that may change. ANY changed line under spec.template is
+#     not harmless: stop, or accept losing the demo topics and re-seed them
+#     afterwards.
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
   -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
   | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
 # 2. Controller, runner and console images TOGETHER. The approval bindings are
-#    lifted for this step (the namespaces resolve to the strict legacy mode, never
-#    a weaker one) and come back in step 3.
+#    lifted for this step: a namespace that HAS a binding is unbound from here
+#    until step 3 (it resolves to the strict legacy mode, never a weaker one).
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
   --set-json 'approvalPolicy.namespaces={}' --wait --timeout 15m
-# 3. Then the approval-policy binding.
+# 3. Then the approval-policy binding. This rolls the controller and both
+#    console pods a second time.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml --wait --timeout 15m
 ```
+
+**If step 0 prints a line, or step 2 stops on a conflict.** Helm 4 (v4.0.1 on
+the PoC) applies the release server-side, and the API server records which
+manager owns each field. A command that writes a field the chart renders —
+`kubectl set image` on a chart-managed Deployment is the one that happened
+here — makes that command's manager the owner of the field, and the next
+`helm upgrade` is refused that field. On the PoC, one `kubectl set image` on
+the controller's Deployment made `kubectl-set` the owner of the controller
+container's image, and the next upgrade's step 2 ended (one line, wrapped
+here):
+
+```text
+Error: UPGRADE FAILED: conflict occurred while applying object logweir-system/weirkeeper
+apps/v1, Kind=Deployment: Apply failed with 1 conflict: conflict with "kubectl-set" using
+apps/v1: .spec.template.spec.containers[name="weirkeeper"].image
+```
+
+Before that upgrade the Deployment carried three managers: `helm`,
+`kubectl-set` and `kube-controller-manager` (on `status`), for which step 0
+prints `deployment.apps/weirkeeper: kubectl-set (Update)`. After it the
+Deployment carried `helm` and `kube-controller-manager` (on `status`), for
+which step 0 prints nothing.
+
+**The upgrade stops half-way, and that is the part that matters.** Helm does
+not apply the release's Deployments as one unit. By the time it was refused the
+controller's, it had already applied the console's: the console ran the new
+build beside the old controller and the old runner image for about two
+minutes, until step 2 was run again, and Helm recorded the revision `failed`.
+No backup or restore ran on the PoC in that window. "Controller, runner and
+console together" is therefore what a step 2 that *completes* gives you, not
+what one `helm upgrade` guarantees — so change a field the chart renders
+through a Helm value, never with a command against the object, and run step 0
+before every upgrade.
+
+To see every conflict the step would meet before deciding, apply the same
+render as Helm's manager in a server-side dry run. It changes nothing and
+prints one line per object:
+
+```bash
+helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  -f deploy/poc/logweir.values.yaml --set-json 'approvalPolicy.namespaces={}' \
+  | kubectl --context "$CTX" apply --server-side --field-manager=helm --dry-run=server -f -
+```
+
+Do not save that render to a file: it carries the demo MinIO's root credential
+(*The demo archive*, step 7). On the PoC the dry run reported 61 objects
+`serverside-applied (server dry run)` and the one conflict above.
+
+- **Every conflict is a field you know a command wrote, and the chart's value
+  is the one you want:** run step 2 again with `--force-conflicts` added. Helm
+  takes the field back. On the PoC that run succeeded, `kubectl-set` was no
+  longer a manager of the Deployment afterwards, and step 3 needed nothing
+  extra.
+- **Any conflict you cannot account for** — a manager you do not recognise, or
+  a field nobody remembers changing: **stop.** `--force-conflicts` replaces
+  that value with the chart's, and somebody set it for a reason you do not
+  have. Find out first; the release is as the failed step left it, and Helm's
+  history records the failed revision.
 
 **How "controller, then console, then binding" is staged inside ONE Helm
 release.** Every Logweir component is in the one release, so the release notes'
@@ -456,10 +530,27 @@ order is successive `helm upgrade`s of it. Step 2 moves the controller, the
 runner image the controller hands its Jobs and the console **together** — they
 are one chart version naming one commit's images, and the probes and console
 configuration of this chart need images of the same build — while leaving
-`approvalPolicy.namespaces` empty, so no namespace changes approval semantics
-under a Restore in flight. Step 3 adds the binding once step 2 is Ready. An
-installation with no binding to add stops after step 2 without the `--set-json`
-override.
+`approvalPolicy.namespaces` empty. Step 3 adds the binding once step 2 is
+Ready. An installation with no binding to add stops after step 2 without the
+`--set-json` override.
+
+**What the empty binding means depends on whether the install already had
+one.** On the FIRST upgrade that adds a binding, step 2 leaves every namespace
+as it was, so no namespace changes approval semantics under a Restore in
+flight. On an install that already has a binding — this profile's, since its
+first one — step 2's override **removes** it: from the moment step 2's
+controller starts until step 3's does, the workload namespace is unbound and
+resolves to the strict legacy mode, where a restore submitted in the console
+would wait for an approver's key instead of following the namespace's own
+policy. On the PoC's four upgrades of this kind that window was between about
+fifty seconds and three minutes. It is the stricter direction, but a restore
+started in it does not behave as the namespace's policy says: start none
+between step 2 and step 3.
+
+**Step 3 is a second restart, not only a setting.** The approval-policy
+document is mounted into the controller and the console, and it changes in
+step 3, so the controller and both console pods are replaced again. Wait for
+step 3's `--wait` to return before checking anything below.
 
 **An install that predates `logweir-evidence-ro` in step 5** (the first PoC
 round's) creates it before step 2, exactly as step 5 now does; step 2's

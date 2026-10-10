@@ -14,6 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   applyWizardDraft,
@@ -32,6 +33,7 @@ import {
   wizardDraftValues,
 } from "../pages/restore-wizard.js";
 import { CONSOLE, resetMode, selectMode } from "../client.js";
+import { decodeConsoleList } from "../contract.js";
 import { destinationBody, validateDestination } from "../pages/destinations.js";
 import { dropDraft, formKey, readDraft } from "../lifecycle.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
@@ -62,7 +64,7 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-const PRIMARY = () => fixture("console/destination.json").item;
+const PRIMARY = () => decoded("destination.json").item;
 
 const EVIDENCE_B = () => Object.assign(clone(PRIMARY()), {
   name: "evidence-b",
@@ -198,6 +200,22 @@ const DESTINATIONS = () => [
   EVIDENCE_B(),
 ];
 
+/** THE LIST IS SUMMARIES (found live, run 3), AND THIS IS ONE AS THE LIST READ
+ *  HANDS IT ON: the `DestinationSummary` the product API's list projects for
+ *  a destination, inside a `DestinationList`, through `api.destinations()`'s
+ *  own decoder. A hand-built object here was a summary the page is never
+ *  given (FX-48): a full destination served as a list item rendered its
+ *  `transport` object where the selector prints the summary's word. */
+const summaryOf = (d) => decodeConsoleList("destinations", {
+  requestId: "storage-choices", page: { limit: 200 },
+  items: [{
+    name: d.name, uid: d.uid, generation: d.generation, canonicalUrl: d.canonicalUrl,
+    endpoint: (d.storage || {}).endpoint, transport: (d.transport || {}).security,
+    addressing: (d.storage || {}).addressing, status: clone(d.status),
+    default: d.default === true,
+  }],
+}).value.items[0];
+
 const INLINE_SCHEDULE = () => ({
   metadata: { name: "nightly", generation: 3 },
   spec: {
@@ -289,7 +307,7 @@ test("the_create_submit_confirms_the_destination_before_anything_is_sent", async
     (e) => /different object now answers/.test((e.fields || {}).destination));
   assert.equal(created.length, 0, "a recreated destination sends nothing");
   // NEGATIVE CONTROL: the same draft against the destination it chose is sent.
-  api.destinations = async () => ({ items: DESTINATIONS() });
+  api.destinations = async () => ({ items: DESTINATIONS().map(summaryOf) });
   await confirmThenCreate("team-a", values, api, null);
   assert.equal(created.length, 1);
   assert.deepEqual(created[0].spec.destinationRef, { name: "primary" });
@@ -381,7 +399,7 @@ test("choosing_a_destination_on_the_mounted_forms_pins_its_uid_and_guards_a_move
       }
       return Promise.resolve({ items: [] });
     },
-    destinations() { return Promise.resolve({ items: DESTINATIONS() }); },
+    destinations() { return Promise.resolve({ items: DESTINATIONS().map(summaryOf) }); },
     editSchedulePolicy(_ns, _name, body) { sent.push(body); return Promise.resolve(body); },
   };
   try {
@@ -442,12 +460,10 @@ test("a_custom_endpoint_needs_path_style_and_the_page_says_so_without_changing_e
 });
 
 // ------------------------------------ the list is summaries (found live, run 3)
+//
+// `summaryOf` is declared with `DESTINATIONS` above: the mounted rows' list
+// read answers with summaries too.
 
-const summaryOf = (d) => ({
-  name: d.name, uid: d.uid, generation: d.generation, canonicalUrl: d.canonicalUrl,
-  endpoint: (d.storage || {}).endpoint, transport: (d.transport || {}).security,
-  addressing: (d.storage || {}).addressing, status: d.status, default: d.default === true,
-});
 
 test("the_schedule_form_reads_the_inherited_endpoint_and_transport_off_a_destination_summary", () => {
   const html = renderScheduleForm({ draft: null, clusters: { items: [] },

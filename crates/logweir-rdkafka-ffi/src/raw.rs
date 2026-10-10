@@ -209,7 +209,7 @@ impl Drop for Options {
 pub(crate) struct Queue(NonNull<rd::rd_kafka_queue_t>);
 
 impl Queue {
-    fn new<C: ClientContext>(client: &Client<C>) -> Result<Queue, CallError> {
+    pub(crate) fn new<C: ClientContext>(client: &Client<C>) -> Result<Queue, CallError> {
         // SAFETY: `client.native_ptr()` is the live `rd_kafka_t` that `client`
         // borrows for this whole call. The result is a new queue or NULL.
         let raw = unsafe { rd::rd_kafka_queue_new(client.native_ptr()) };
@@ -227,7 +227,7 @@ impl Queue {
     }
 
     /// Waits at most `timeout_ms` for one event.
-    fn poll(&self, timeout_ms: c_int) -> Option<Event> {
+    pub(crate) fn poll(&self, timeout_ms: c_int) -> Option<Event> {
         // SAFETY: the queue is live (owned by `self`); `timeout_ms` is finite
         // and positive, so the wait is bounded. The result is NULL or an event
         // the application owns and must destroy, which `Event` takes at once.
@@ -259,7 +259,7 @@ impl Event {
         self.0.as_ptr()
     }
 
-    fn event_type(&self) -> c_int {
+    pub(crate) fn event_type(&self) -> c_int {
         // SAFETY: the event is live (owned by `self`); the accessor only reads
         // its type field, an `int` in the binding.
         unsafe { rd::rd_kafka_event_type(self.as_ptr()) }
