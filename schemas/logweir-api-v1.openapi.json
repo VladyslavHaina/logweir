@@ -14179,6 +14179,50 @@
           }
         }
       },
+      "ScopeOwnerStatementView": {
+        "description": "PROD-16.2 (review S-1): the requester's owner statement for an original-name restore, as the plan signs it.",
+        "type": "object",
+        "required": [
+          "ownerPath"
+        ],
+        "properties": {
+          "ownerPath": {
+            "description": "Whether the plan chooses the owner path: restore although an owner manages a name, with its reconciliation paused.",
+            "type": "boolean"
+          },
+          "owners": {
+            "description": "The owners stated. ABSENT: the plan states nothing (the run has nowhere to look from the console and refuses). EMPTY: the requester states no declarative owner manages any restored name.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeOwnerView"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "ScopeOwnerView": {
+        "description": "PROD-16.2: one declarative owner the requester states.",
+        "type": "object",
+        "required": [
+          "kind",
+          "reference",
+          "topic"
+        ],
+        "properties": {
+          "kind": {
+            "description": "`strimzi` or `external`.",
+            "type": "string"
+          },
+          "reference": {
+            "description": "Where it is defined.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "The restored name it manages.",
+            "type": "string"
+          }
+        }
+      },
       "ScopeRecoveryView": {
         "description": "PROD-16.2: the instant restored to, and the window restored from.",
         "type": "object",
@@ -14301,6 +14345,11 @@
           "mode": {
             "description": "`scratch` or `newTopic`.",
             "type": "string"
+          },
+          "ownerStatement": {
+            "description": "For a restore under the original topic names only: the requester's statement about declarative owners, which alone decides whether such a run writes. Absent for every other restore.",
+            "$ref": "#/components/schemas/ScopeOwnerStatementView",
+            "nullable": true
           },
           "replicationFactor": {
             "description": "The replication factor of every topic the run creates.",

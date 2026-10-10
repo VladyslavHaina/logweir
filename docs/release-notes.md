@@ -2544,7 +2544,7 @@ for a partition subset) with `approval.console`, and both verifiers
 (`verify_scorecard.py` 1.29.0) print who asked and who approved. Product API:
 `GET .../restores/{name}/approval-request` and `POST
 .../restores/{name}/console-approval` (OpenAPI additive: 58 → 60 operations,
-280 → 293 schemas).
+280 → 295 schemas).
 **Do:** nothing, until you bind a namespace `two-person` (`docs/install.md`
 §5f): bind the approver the console role Approver there. A two-person request
 names at most 1024 topics; split a larger restore or bind it `strict`.

@@ -612,9 +612,10 @@ PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
 is optional there (absent: the window started at the archive's floor). The
 schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
 which pins `format_version` to `2.x.y`; every 1.x schema up to 1.7.0 is frozen
-beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest
-minor ([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)),
-describes every other document this build writes. The media type keeps `version=1.0.0`, so an older
+beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`
+([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151))
+was format 1's newest minor until PROD-16.2 froze it; 1.9.0 is format 1's
+newest, generated, and 2.1.0 format 2's. The media type keeps `version=1.0.0`, so an older
 reader reaches its major refusal rather than a payload-type mismatch
 ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
@@ -828,8 +829,9 @@ into topics that do not exist, created by the run itself, exclusively
   fields with the subset meaning", `schemas/logweir-drill-scorecard-2.0.0.json`
   is byte for byte the file PROD-11.1b published and does not describe the
   block, and `schemas/logweir-drill-scorecard-1.8.0.json` (the frozen 1.7.0
-  file plus the block) is format 1's newest minor. Both are generated and
-  diffed by `just schema-check`. Arm ON-1 reads major 1 on purpose, where
+  file plus the block) was format 1's newest minor. Both are frozen since
+  PROD-16.2, which generates `-1.9.0.json` and `-2.1.0.json` in their place
+  (`just schema-check`). Arm ON-1 reads major 1 on purpose, where
   format 1's older optional blocks are also defined under major 2, and arm
   ON-14 refuses the block beside `source.selection.partitions` in either
   reader. A later 1.x minor that IS meant for subset restores too says so, and
@@ -988,9 +990,12 @@ into topics that do not exist, created by the run itself, exclusively
   PROD-01.3 split `target.auth.mode`, so a 1.8.0 document is judged in the same
   words as before. `-1.8.0.json` and `-2.0.0.json` are frozen; `-1.9.0.json`
   and `-2.1.0.json` are generated. A partition-subset restore approved in the
-  console is allowed (2.1.0). A reader before these minors accepts such a
-  document and ignores the block; a 1.28.0 reader refuses an original-name
-  document naming `consoleApproval` by its own ON-5. No MAJOR.
+  console is allowed (2.1.0). An older `logweir drill verify` accepts a 1.9.0
+  document and prints `approval:  <issuer>#<subject> (<ticket>)` (no key id);
+  `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line;
+  a 1.28.0 reader refuses an original-name document naming `consoleApproval`
+  by its own ON-5; readers before 1.27.0 refuse a 2.1.0 document by its
+  major. No MAJOR.
 - **The approval-mode vocabulary is one set** (`logweir_core::scorecard`'s
   constants); `docs/verify_scorecard.py` holds a copy that
   `two_reader_parity.rs::the_approval_mode_vocabulary_is_the_same_set_in_both_readers`

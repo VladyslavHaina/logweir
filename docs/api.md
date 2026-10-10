@@ -301,6 +301,7 @@ addition to the rows above:
 | through the administrator (`localAdmin`) console, whose one identity cannot be two people | `409 policy_mismatch` |
 | a requester whose identity a console approval cannot compare — an issuer or a subject that is empty, longer than 255 characters or not visible ASCII, an issuer containing `#`, a Kubernetes system identity | `409 policy_mismatch`; the sentence carries the identity bounded and escaped, never raw |
 | no change ticket (the policy is `Governed`) | `422`, field `ticket`, `required` |
+| a ticket the approver could not be shown faithfully (not printable ASCII, or over 1024 characters) | `422`, field `ticket`, `not_showable` (not echoed) |
 | a plan whose approval scope cannot be shown in full — more than 1024 topics, more than 8192 listed partitions, a topic that is not a Kafka name before or after its mapping, a value that is not printable ASCII of at most 1024 characters, a plan that does not parse | `422`, field `planBytes`, `scope_incomplete` |
 
 **`GET .../restores/{name}/approval-request`** (`getApprovalRequest`) answers
@@ -312,7 +313,7 @@ anything. `state` is:
 | `state` | meaning | fields beside it |
 |---|---|---|
 | `pending` | this console's request for exactly this Restore, plan and policy, inside its window, not approved | `requester`, `planHash`, `approvalSubject`, `ticket`, `issuedAt`, `expiresAt`, `confirmationSha256`, `scopeComplete` and `scope` (below) |
-| `approved` | an `Approval` this console signed exists under the Restore's `approvalRef` | the same, and `approver`, `approvedAt` |
+| `approved` | an `Approval` exists under the Restore's `approvalRef` (whoever wrote it; the controller judges it) | the same; `approver` and `approvedAt` only when this console signed it |
 | `expired` | the window closed; submit the Restore again | the same |
 | `notConfirmed` | none stored, or the stored object does not carry this console's signature, or it names another Restore, plan or policy | **none**: nothing of such an object is shown |
 
@@ -321,7 +322,9 @@ names by hash (never from the Restore object's other fields): `source`
 (archive location, endpoint, region, plain HTTP, backup set, bound point),
 `recovery` (point in time, window start, time basis), `target` (bootstrap
 servers, auth mode and principal, mode, topic prefix, replication factor,
-teardown), **`topics` — every one, `{source,
+teardown, and for an original-name restore `ownerStatement`: the requester's
+`owners` — absent when the plan states nothing, `[]` when it states none — and
+`ownerPath`), **`topics` — every one, `{source,
 target, originalName, partitions?}`, never a slice** — `topicsCount`,
 `verification` and `evidence`. It is present exactly when `scopeComplete` is
 `true`; otherwise `scopeIncomplete` (`tooManyTopics`, `planUnreadable`,

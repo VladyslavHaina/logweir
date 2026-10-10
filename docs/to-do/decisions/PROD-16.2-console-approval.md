@@ -19,10 +19,10 @@ The **controller** (Approval verdict, then Restore admission, then the bundle wr
 
 ## 2. What the approver is shown (the coordinator's addition 6)
 
-What is approved is what was shown, and the server enforces it. `logweir_core::approval_scope::approval_scope` is a pure function of the verified request and the plan it names by hash (it checks the hash first; nothing is read from the Restore object's other fields): requester, Restore and UID, plan hash, subject, policy, ticket, expiry, **source archive and backup set, recovery point, target cluster (bootstrap servers, auth mode and principal, mode, prefix, replication factor, teardown), every topic and the name it is restored under (original names marked, partition subsets listed), verification coverage and window, evidence location**.
+What is approved is what was shown, and the server enforces it. `logweir_core::approval_scope::approval_scope` is a pure function of the verified request and the plan it names by hash (it checks the hash first; nothing is read from the Restore object's other fields): requester, Restore and UID, plan hash, subject, policy, ticket, expiry, **source archive and backup set, recovery point, target cluster (bootstrap servers, auth mode and principal, mode, prefix, replication factor, teardown, and for an original-name restore the requester's owner statement — `owners` not declared, `[]` or each owner, and `owner_path`, which alone decide from the console whether such a run writes; review S-1), every topic and the name it is restored under (original names marked, partition subsets listed), verification coverage and window, evidence location**.
 
 - **Complete or nothing.** At most 1024 topics and 8192 listed partitions; every topic a Kafka name before and after mapping; every other value — the request's own text included (requester, Restore, policy, ticket) — printable ASCII of at most 1024 characters, so no right-to-left override or control character can change what the approver reads. Otherwise the scope is incomplete, with a stable reason and a sentence saying what to do.
-- The view carries `scopeComplete` and the whole scope; an incomplete one is offered to nobody. The **click re-derives it** and refuses an incomplete one (`409`, `scope_incomplete`), whatever a page did. The create refuses a two-person request whose plan could not be shown in full (`422`, `planBytes`, `scope_incomplete`), so the largest restore this mode accepts is 1024 topics: a larger one is split, or bound `strict`.
+- The view carries `scopeComplete` and the whole scope; an incomplete one is offered to nobody. The **click re-derives it** and refuses an incomplete one (`409`, `scope_incomplete`), whatever a page did. The create refuses a two-person request whose plan could not be shown in full (`422`, `planBytes`, `scope_incomplete`) or whose ticket could not (`422`, `ticket`, `not_showable`; review S-2), so the largest restore this mode accepts is 1024 topics: a larger one is split, or bound `strict`.
 - The page renders every topic (a list that scrolls and wraps, never sliced) and draws no button beside a scope that is not complete and whole.
 - The approval's audit record notes `scope: complete`, the topics shown and the topics in the plan.
 
@@ -65,7 +65,7 @@ Shared-mode install, Dex users `alice` (Operator) and `bob` (Approver) in a name
 5. Past `maxAgeSeconds`: expired; POST 409.
 6. `helm template` with `localAdmin` and a two-person policy fails by name.
 7. A `strict` namespace on the same install: countersign flow and 2.0.0 bytes unchanged.
-8. An original-name restore: `bob` sees the names marked original; scorecard 1.9.0 with `consoleApproval`.
+8. An original-name restore: `bob` sees the names marked original and the requester's owner statement (the wizard's "no declarative owner" is `owners: []`); scorecard 1.9.0 with `consoleApproval`.
 9. A 1025-topic plan in the two-person namespace: the create is refused `scope_incomplete`, nothing created.
 10. Rollback: an older controller refuses to start on a document carrying `approverSignature`; removing the policy lets it start.
 

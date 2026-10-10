@@ -1459,6 +1459,53 @@ function scopeStorageWords(storage) {
     (st.plaintextHttp === true ? " <strong>(over plain HTTP)</strong>" : "");
 }
 
+/** PROD-16.2: what the two-person panel says about an original-name
+ *  restore. NOT the v1 page's sentence: that one names a `logweir drill
+ *  approve` command and says the runner refuses if a declarative owner
+ *  manages a name -- which, for a console request, is decided by the
+ *  requester's own statement shown below it (review S-1). */
+export const TWO_PERSON_ORIGINAL_NAME_SENTENCE =
+  "This Restore writes under the ORIGINAL topic names, into topics that do not exist. The " +
+  "runner refuses again if a name exists, or if the target may be the source cluster and any " +
+  "broker auto-creates topics. Whether a declarative owner manages a name is decided by what " +
+  "the requester states below: approving accepts that statement.";
+
+/** REVIEW S-1: the requester's owner statement, as the plan signs it, in
+ *  plain sentences -- the three cases of `owners`, and the owner path. Every
+ *  value is escaped text. */
+export function ownerStatementBlock(statement) {
+  const st = statement || {};
+  const owners = Array.isArray(st.owners) ? st.owners : null;
+  const listed = owners === null ? "" : owners.map((o) => {
+    const w = o || {};
+    return "<li><code>" + esc(w.topic) + "</code> (" + esc(w.kind) + " <code>" +
+      esc(w.reference) + "</code>)</li>";
+  }).join("");
+  let words;
+  if (st.ownerPath === true) {
+    words = "<strong>Owner path:</strong> the requester states that each declarative owner's " +
+      "reconciliation is paused for this restore and that it adopts the topic afterwards; the " +
+      "restore writes under these names although an owner manages them" +
+      (owners !== null && owners.length > 0
+        ? ". The owners stated:</p><ul class=\"sets\">" + listed + "</ul><p class=\"note\">"
+        : " (no owner is listed).");
+  } else if (owners === null) {
+    words = "The requester states nothing about declarative owners of these names. This " +
+      "console gives the run nowhere else to look, so the run will refuse before it writes " +
+      "anything.";
+  } else if (owners.length === 0) {
+    words = "The requester states that <strong>no declarative owner</strong> (a Strimzi " +
+      "KafkaTopic, a GitOps or Terraform definition) manages any of these names. Nothing in " +
+      "the console checks this statement: approving accepts it.";
+  } else {
+    words = "The requester states these declarative owners and does not choose the owner path, " +
+      "so the run will refuse before it writes anything:</p><ul class=\"sets\">" + listed +
+      "</ul><p class=\"note\">";
+  }
+  return "<div class=\"caveat\" id=\"scope-owner-statement\"><p class=\"note\">" + words +
+    "</p></div>";
+}
+
 /** THE APPROVAL SCOPE, ALL OF IT (PROD-16.2). Source, recovery point, target
  *  cluster, EVERY topic and the name it is restored under -- original names
  *  marked, partition subsets listed number by number -- the verification and
@@ -1522,7 +1569,8 @@ export function renderApprovalScope(scope) {
     "approves all of it.</p>" +
     facts(rows) +
     (original ? "<p class=\"caveat\" id=\"request-original-topics\">" +
-      esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>" : "") +
+      esc(TWO_PERSON_ORIGINAL_NAME_SENTENCE) + "</p>" +
+      ownerStatementBlock(target.ownerStatement) : "") +
     "<p class=\"note\" id=\"scope-topic-count\">" + esc(String(topics.length)) +
     " topic(s), every one listed:</p>" +
     "<ol class=\"approval-scope-topics\" id=\"scope-topics\" tabindex=\"0\" " +

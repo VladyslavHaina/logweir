@@ -875,13 +875,20 @@ const SCOPE_RECOVERY = shapeOf(
   { pointInTime: str, pointInTimeStated: bool },
   { windowStart: str, timeBasis: str },
 );
+// Review S-1: the requester's owner statement for an original-name restore,
+// as the plan signs it. `owners` ABSENT is "not declared", EMPTY is "the
+// requester states there is none".
+const SCOPE_OWNER = shapeOf("ScopeOwnerView", { topic: str, kind: str, reference: str });
+const SCOPE_OWNER_STATEMENT = shapeOf(
+  "ScopeOwnerStatementView", { ownerPath: bool }, { owners: listOf(objectOf(SCOPE_OWNER)) },
+);
 const SCOPE_TARGET = shapeOf(
   "ScopeTargetView",
   {
     bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str,
     replicationFactor: int, teardown: str,
   },
-  { authUsername: str },
+  { authUsername: str, ownerStatement: objectOf(SCOPE_OWNER_STATEMENT) },
 );
 const SCOPE_TOPIC = shapeOf(
   "ScopeTopicView",
@@ -1834,6 +1841,8 @@ export const CONSOLE_SHAPES = Object.freeze({
   ScopeSourceView: SCOPE_SOURCE,
   ScopeRecoveryView: SCOPE_RECOVERY,
   ScopeTargetView: SCOPE_TARGET,
+  ScopeOwnerView: SCOPE_OWNER,
+  ScopeOwnerStatementView: SCOPE_OWNER_STATEMENT,
   ScopeTopicView: SCOPE_TOPIC,
   ScopeVerificationView: SCOPE_VERIFICATION,
   ApprovalScopeView: APPROVAL_SCOPE,

@@ -63,8 +63,8 @@ use crate::authz::Action;
 use crate::contract::{
     ApprovalRequestResponse, ApprovalRequestState, ApprovalRequestView, ApprovalResponse,
     ApprovalScopeView, ApprovalSubjectView, ApproveOfferView, ApproveRefusal,
-    ConsoleApprovalRequest, ScopeRecoveryView, ScopeSourceView, ScopeStorageView, ScopeTargetView,
-    ScopeTopicView, ScopeVerificationView,
+    ConsoleApprovalRequest, ScopeOwnerStatementView, ScopeOwnerView, ScopeRecoveryView,
+    ScopeSourceView, ScopeStorageView, ScopeTargetView, ScopeTopicView, ScopeVerificationView,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::kube::KubeFailure;
@@ -428,6 +428,21 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             auth_username: scope.target.auth_username.clone(),
             replication_factor: scope.target.replication_factor,
             teardown: scope.target.teardown.clone(),
+            owner_statement: scope.target.owner_statement.as_ref().map(|statement| {
+                ScopeOwnerStatementView {
+                    owners: statement.owners.as_ref().map(|owners| {
+                        owners
+                            .iter()
+                            .map(|o| ScopeOwnerView {
+                                topic: o.topic.clone(),
+                                kind: o.kind.clone(),
+                                reference: o.reference.clone(),
+                            })
+                            .collect()
+                    }),
+                    owner_path: statement.owner_path,
+                }
+            }),
             mode: scope.target.mode.to_string(),
             topic_prefix: scope.target.topic_prefix.clone(),
         },

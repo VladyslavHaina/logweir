@@ -151,6 +151,37 @@ pub struct ScopeTarget {
     /// ([`crate::spec::target_topic_prefix`]); empty for a restore under the
     /// original topic names.
     pub topic_prefix: String,
+    /// **For a restore under the original topic names only** (review S-1):
+    /// the requester's statement about declarative owners
+    /// (`target.topic_naming.original_name`), which alone decides whether
+    /// such a run writes — the console gives the runner nothing else to look
+    /// in. Absent for every other restore.
+    pub owner_statement: Option<ScopeOwnerStatement>,
+}
+
+/// One declarative owner the requester states (`{topic, kind, reference}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeOwner {
+    /// The restored name it manages.
+    pub topic: String,
+    /// `strimzi` or `external`.
+    pub kind: String,
+    /// Where it is defined (a `KafkaTopic`, a repository path, …).
+    pub reference: String,
+}
+
+/// The requester's owner statement for an original-name restore, as signed
+/// in the plan: three cases for `owners` — NOT DECLARED (`None`: the run has
+/// nowhere to look from the console and refuses), DECLARED EMPTY (`Some([])`:
+/// the requester states no owner manages any name), or each owner — and
+/// whether the owner path is chosen (restore although an owner manages a
+/// name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeOwnerStatement {
+    /// The owners stated, or `None` when the plan states nothing.
+    pub owners: Option<Vec<ScopeOwner>>,
+    /// Whether the plan chooses the owner path.
+    pub owner_path: bool,
 }
 
 /// One source topic, and the name it is restored under.
@@ -279,6 +310,8 @@ pub enum ScopeIncomplete {
     PartitionsNotShowable,
     /// The plan names no bootstrap server, or more than a scope lists.
     BootstrapServersNotShowable,
+    /// The plan states more declarative owners than it restores topics.
+    OwnersNotShowable,
     /// A text value is longer than a scope shows, or is not printable ASCII.
     ValueNotShowable {
         /// Which value, in fixed words.
@@ -301,6 +334,7 @@ impl ScopeIncomplete {
             Self::TooManyPartitions { .. } => "tooManyPartitions",
             Self::PartitionsNotShowable => "partitionsNotShowable",
             Self::BootstrapServersNotShowable => "bootstrapServersNotShowable",
+            Self::OwnersNotShowable => "ownersNotShowable",
             Self::ValueNotShowable { .. } => "valueNotShowable",
         }
     }
@@ -359,11 +393,21 @@ impl ScopeIncomplete {
                  than the {MAX_SCOPE_BOOTSTRAP_SERVERS} a request shows, so the cluster it \
                  writes into cannot be shown"
             ),
+            Self::OwnersNotShowable => format!(
+                "{WAY_OUT}, and this Restore's plan states more declarative owners than it \
+                 restores topics, so its owner statement cannot be shown as a statement about \
+                 these names. Correct target.topic_naming.original_name.owners"
+            ),
             Self::ValueNotShowable { what } => format!(
-                "{WAY_OUT}, and {what} in this Restore's plan is longer than \
-                 {MAX_SCOPE_TEXT_CHARS} characters or is not printable ASCII, so what a \
-                 reviewer would see is not what the runner would read. Correct it, or approve \
-                 the restore under a strict (personal-key) policy"
+                "{WAY_OUT}, and {what} in this {} is longer than {MAX_SCOPE_TEXT_CHARS} \
+                 characters or is not printable ASCII, so what a reviewer would see is not what \
+                 was signed. Correct it, or approve the restore under a strict (personal-key) \
+                 policy",
+                if REQUEST_VALUES.contains(&what) {
+                    "request"
+                } else {
+                    "Restore's plan"
+                }
             ),
         }
     }
@@ -375,10 +419,25 @@ impl std::fmt::Display for ScopeIncomplete {
     }
 }
 
+/// The values of a scope that come from the REQUEST, not from its plan.
+const REQUEST_VALUES: [&str; 8] = [
+    "the requester's issuer",
+    "the requester's subject",
+    "the namespace",
+    "the Restore's name",
+    "the Restore's UID",
+    "the policy's name",
+    "the policy's digest",
+    "the change ticket",
+];
+
 /// Whether `text` is printable ASCII (space to `~`) of at most
 /// [`MAX_SCOPE_TEXT_CHARS`] characters: no control character, no
-/// right-to-left override, no look-alike outside ASCII.
-fn showable(text: &str) -> bool {
+/// right-to-left override, no look-alike outside ASCII. The create holds a
+/// two-person request's ticket to it (review S-2), so no request is made
+/// that its scope would refuse.
+#[must_use]
+pub fn showable(text: &str) -> bool {
     text.len() <= MAX_SCOPE_TEXT_CHARS && text.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
@@ -453,6 +512,34 @@ fn storage(
         endpoint: shown_opt(endpoint, what)?,
         region: shown_opt(region, what)?,
         plaintext_http,
+    })
+}
+
+/// The owner statement of an original-name plan, each value by the showable
+/// rule and the list bounded by the topic count.
+fn owner_statement(
+    statement: &crate::spec::OriginalNameSpec,
+    topics: usize,
+) -> Result<ScopeOwnerStatement, ScopeIncomplete> {
+    let owners = match &statement.owners {
+        None => None,
+        Some(owners) if owners.len() > topics => return Err(ScopeIncomplete::OwnersNotShowable),
+        Some(owners) => Some(
+            owners
+                .iter()
+                .map(|o| {
+                    Ok(ScopeOwner {
+                        topic: shown(&o.topic, "a declared owner")?,
+                        kind: shown(&o.kind, "a declared owner")?,
+                        reference: shown(&o.reference, "a declared owner")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ScopeIncomplete>>()?,
+        ),
+    };
+    Ok(ScopeOwnerStatement {
+        owners,
+        owner_path: statement.owner_path,
     })
 }
 
@@ -573,6 +660,11 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
             auth_username: shown_opt(plan.target.auth.username(), "the target's SASL principal")?,
             replication_factor: plan.target.default_replication_factor,
             teardown: shown(&plan.target.teardown, "the target's teardown")?,
+            owner_statement: plan
+                .target
+                .original_name()
+                .map(|statement| owner_statement(statement, count))
+                .transpose()?,
             mode: match plan.target.mode {
                 TargetMode::Scratch => "scratch",
                 TargetMode::NewTopic => "newTopic",
@@ -1103,6 +1195,77 @@ mod tests {
         assert!(approval_scope(&policy, text.as_bytes()).is_err());
     }
 
+    /// **The requester's owner statement is part of what the second person
+    /// approves** (review S-1, HIGH). For an original-name restore the
+    /// console gives the runner nowhere else to look, so the plan's
+    /// `original_name.owners` / `owner_path` alone decide whether it writes:
+    /// the scope carries them as signed, in their three cases, and an owner
+    /// that cannot be shown leaves no scope.
+    ///
+    /// NEGATIVE CONTROLS: a plan with `owner_path: true` shows it, with its
+    /// owners; `owners: []` shows the empty statement (not "not declared");
+    /// a prefixed restore carries no statement at all.
+    /// KILLS: a scope that drops the statement (mutant M13).
+    #[test]
+    fn the_owner_statement_of_an_original_name_plan_is_shown_as_signed() {
+        let topics = vec!["orders".to_string(), "payments".to_string()];
+        let statement = |naming: &str| {
+            plan_scope(plan_with(&topics, naming, AT, "kafka-backups").as_bytes())
+                .map(|scope| scope.target.owner_statement)
+        };
+        // `owners: []`: the requester states no owner manages any name.
+        assert_eq!(
+            statement(ORIGINAL),
+            Ok(Some(ScopeOwnerStatement {
+                owners: Some(vec![]),
+                owner_path: false
+            }))
+        );
+        // Not declared: nothing stated (the run will refuse from the console).
+        let undeclared = "  topic_naming:\n    prefix: \"\"\n    original_name: {}\n";
+        assert_eq!(
+            statement(undeclared),
+            Ok(Some(ScopeOwnerStatement {
+                owners: None,
+                owner_path: false
+            }))
+        );
+        // The owner path, with its owner: shown as signed.
+        let path =
+            "  topic_naming:\n    prefix: \"\"\n    original_name:\n      owners:\n        - \
+                    topic: \"orders\"\n          kind: \"strimzi\"\n          reference: \
+                    \"kafka/orders\"\n      owner_path: true\n";
+        assert_eq!(
+            statement(path),
+            Ok(Some(ScopeOwnerStatement {
+                owners: Some(vec![ScopeOwner {
+                    topic: "orders".into(),
+                    kind: "strimzi".into(),
+                    reference: "kafka/orders".into(),
+                }]),
+                owner_path: true
+            }))
+        );
+        // An owner reference that cannot be shown faithfully: no scope.
+        let hostile = path.replace("kafka/orders", "kafka/\\u202Esredro");
+        assert_eq!(
+            statement(&hostile),
+            Err(ScopeIncomplete::ValueNotShowable {
+                what: "a declared owner"
+            })
+        );
+        // More owners than topics: no scope.
+        let many = "  topic_naming:\n    prefix: \"\"\n    original_name:\n      owners:\n\
+                    {o}{o}{o}      owner_path: true\n"
+            .replace(
+                "{o}",
+                "        - topic: \"orders\"\n          kind: \"external\"\n          reference: \"r\"\n",
+            );
+        assert_eq!(statement(&many), Err(ScopeIncomplete::OwnersNotShowable));
+        // A prefixed restore carries no statement.
+        assert_eq!(statement(PREFIXED), Ok(None));
+    }
+
     /// Every reason has a stable word and a sentence of fixed words that
     /// says what to do.
     #[test]
@@ -1118,6 +1281,7 @@ mod tests {
             ScopeIncomplete::TooManyPartitions { count: 9000 },
             ScopeIncomplete::PartitionsNotShowable,
             ScopeIncomplete::BootstrapServersNotShowable,
+            ScopeIncomplete::OwnersNotShowable,
             ScopeIncomplete::ValueNotShowable {
                 what: "the backup set",
             },

@@ -825,6 +825,26 @@ fn refuse_before_create(
         // So the largest restore this mode accepts is the largest one it can
         // show (`logweir_core::approval_scope::MAX_SCOPE_TOPICS`); a larger
         // one is split, or approved under a strict policy.
+        // Review S-2: the ticket is shown to the approver as well, by the same
+        // rule; a ticket the scope would refuse would make a request nobody
+        // can ever approve. Refused here, by name, without echoing it.
+        if let Some(ticket) = request.ticket.as_deref() {
+            if !logweir_core::approval_scope::showable(ticket) {
+                actor.audit.set_failure("ticket_not_showable");
+                return Err(ApiError::validation(vec![FieldError::new(
+                    "ticket",
+                    "not_showable",
+                    format!(
+                        "Namespace {ns} is bound to approval policy {} (two-person), and the \
+                         approver is shown the change ticket: it must be printable ASCII (no \
+                         character outside ASCII, no control character) of at most {} \
+                         characters. Nothing was created.",
+                        policy.name,
+                        logweir_core::approval_scope::MAX_SCOPE_TEXT_CHARS
+                    ),
+                )]));
+            }
+        }
         if let Err(incomplete) =
             logweir_core::approval_scope::plan_scope(request.plan_bytes.as_bytes())
         {

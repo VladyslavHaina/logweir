@@ -913,14 +913,15 @@ wrote under the original names, nor which condition admitted it; the document
 does, and this release's readers print it (`drill show` in its footer).
 `verify_scorecard.py` 1.27.0 (the last before this item) does the same over
 six later live 1.8.0 scorecards: `VALID`, and no `original name:` line.
-A verifier older than `1.29.0`, and a `logweir` built before PROD-16.2, accept
-a 1.9.0 or 2.1.0 scorecard of a restore approved in the console, ignore
-`approval.console` and print no `console approval:` line; they then show the
-approver's `<issuer>#<subject>` beside the console's key id, the shape of a
-console-signed approval and never that of a personal key. A 1.28.0 reader
-refuses such an original-name scorecard (`approval_mode` is not one of the
-three it knows). Measured on signed corpus documents, recorded in the row's
-report.
+What older readers do with a scorecard of a restore approved in the console
+(measured on signed corpus documents, recorded in the row's report): an older
+`logweir drill verify` accepts a 1.9.0 document and prints
+`approval:  <issuer>#<subject> (<ticket>)`, with no key id and no word about
+the console; `verify_scorecard.py` before 1.29.0 accepts it and prints no
+approval line at all. Neither prints a `console approval:` line. A 1.28.0
+reader refuses such an original-name scorecard (`approval_mode` is not one of
+the three it knows). A 2.1.0 document is accepted from 1.27.0 and refused by
+older readers by its major.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print

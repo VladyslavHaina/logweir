@@ -4117,8 +4117,9 @@ approval page (`GET .../restores/{name}/approval-request`): the console
 verifies its own signature over the stored request, and shows it with **the
 whole approval scope** — the source archive and backup set, the recovery
 point, the target cluster, every topic and the name it is restored under
-(original names marked), the verification — all from the plan the request
-names by hash. The click (`POST .../console-approval`, Approver role, never the
+(original names marked, with the requester's statement about declarative
+owners, which alone decides from the console whether such a write goes
+ahead), the verification — all from the plan the request names by hash. The click (`POST .../console-approval`, Approver role, never the
 requester) adds `approver` and `approvedAt` to the verified document, signs it
 with the same console key (format `2.2.0`) and stores it as the `Approval` the
 Restore references. The controller, at the verdict and at admission, and the
@@ -4147,7 +4148,7 @@ approver is shown every one; a larger plan is refused at the create
 | a confirmation not signed by this console | console: "not confirmed by this console", nothing shown; controller and runner again |
 | a confirmation of another Restore, UID, plan or policy | console 409; controller; runner |
 | an expired request; `approvedAt` outside the window | console 409; controller; runner |
-| a scope that cannot be shown in full | console: not offered, click 409 `scope_incomplete`, create 422 |
+| a scope that cannot be shown in full, or a ticket that cannot | console: not offered, click 409 `scope_incomplete`, create 422 |
 | a second approver | console 409 (create-only) |
 | a personal-key countersignature here; a console approval in a strict namespace | console 409; controller; runner |
 | another origin, no CSRF token, a `GET` | console 403 |

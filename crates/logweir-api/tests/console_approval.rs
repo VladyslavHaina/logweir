@@ -1992,6 +1992,12 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     );
     assert_eq!(item["scope"]["topicsCount"], 2);
     assert_eq!(item["scope"]["target"]["topicPrefix"], "");
+    // Review S-1: the requester's owner statement, as the plan signs it
+    // (the golden states `owners: []`, the wizard's "no declarative owner").
+    assert_eq!(
+        item["scope"]["target"]["ownerStatement"],
+        json!({"owners": [], "ownerPath": false})
+    );
     let clicked = click(
         &app,
         &bob,
@@ -2648,4 +2654,46 @@ async fn the_click_refuses_a_request_whose_scope_is_incomplete_whatever_the_view
     let sha = stored_sha(&app, "approval-tab-confirmation");
     let clicked = click(&app, &bob, &restore, &sha).await;
     assert_eq!(clicked.status, 201, "{}", clicked.text());
+}
+
+/// **Review S-2: a two-person request is made only with a ticket its scope
+/// can show.** A ticket outside printable ASCII (an en dash, an accented
+/// letter, a right-to-left override) is refused at the create, by name,
+/// with nothing created and the ticket not echoed: otherwise the request
+/// would exist and no second person could ever be offered it.
+/// NEGATIVE CONTROL: the plain ticket is created.
+#[tokio::test]
+async fn a_two_person_request_is_made_only_with_a_ticket_its_scope_can_show() {
+    let (app, _console) = pair_app();
+    let alice = signed_in(&app, "alice", &["ops"]);
+    for (tag, ticket) in [
+        ("dash", "CHG-42 \u{2013} rollback"),
+        ("accent", "CHG-42 \u{e9}"),
+        ("bidi", "CHG-42\u{202e}"),
+    ] {
+        let mut body = restore_request(&format!("approval-ticket-{tag}"));
+        body["ticket"] = json!(ticket);
+        let refused = request_as(&app, &alice, &format!("ticket-{tag}"), body).await;
+        refused.assert_problem(422, "validation_failed");
+        let text = refused.text();
+        assert!(
+            text.contains("not_showable") && text.contains("ticket"),
+            "{text}"
+        );
+        assert!(!text.contains("CHG-42"), "the ticket is not echoed: {text}");
+    }
+    assert_eq!(
+        app.app.fake.count("restores", NS_A),
+        0,
+        "nothing was created"
+    );
+    // NEGATIVE CONTROL.
+    let created = request_as(
+        &app,
+        &alice,
+        "ticket-plain",
+        restore_request("approval-ticket-plain"),
+    )
+    .await;
+    assert_eq!(created.status, 201, "{}", created.text());
 }

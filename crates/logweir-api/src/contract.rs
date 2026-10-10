@@ -4210,6 +4210,38 @@ pub struct ScopeTargetView {
     /// The prefix every source topic is mapped through; empty for a restore
     /// under the original topic names.
     pub topic_prefix: String,
+    /// For a restore under the original topic names only: the requester's
+    /// statement about declarative owners, which alone decides whether such
+    /// a run writes. Absent for every other restore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_statement: Option<ScopeOwnerStatementView>,
+}
+
+/// PROD-16.2 (review S-1): the requester's owner statement for an
+/// original-name restore, as the plan signs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeOwnerStatementView {
+    /// The owners stated. ABSENT: the plan states nothing (the run has
+    /// nowhere to look from the console and refuses). EMPTY: the requester
+    /// states no declarative owner manages any restored name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<ScopeOwnerView>>,
+    /// Whether the plan chooses the owner path: restore although an owner
+    /// manages a name, with its reconciliation paused.
+    pub owner_path: bool,
+}
+
+/// PROD-16.2: one declarative owner the requester states.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeOwnerView {
+    /// The restored name it manages.
+    pub topic: String,
+    /// `strimzi` or `external`.
+    pub kind: String,
+    /// Where it is defined.
+    pub reference: String,
 }
 
 /// PROD-16.2: one source topic and the name it is restored under.

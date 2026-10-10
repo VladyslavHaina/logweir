@@ -20,8 +20,9 @@ and `integrity.verification.complete.partitions[]` and the sampled lane's
 fields naming the SELECTED partitions. Every reader before it refuses a 2.0.0
 document as an unsupported major. Every other document this build writes is
 1.x, described by
-[`schemas/logweir-drill-scorecard-1.8.0.json`](../../schemas/logweir-drill-scorecard-1.8.0.json),
-format 1's newest minor, which CI diffs against the code the same way. Format
+[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json),
+format 1's newest minor (generated, and diffed by CI the same way; 1.8.0 is
+frozen since PROD-16.2). Format
 **1.8.0** (PROD-15.1) adds the nested optional
 [`target.original_name`](#targetoriginal_name-format-180): a restore under the
 source's original topic names, into topics the run created. That block is
@@ -492,7 +493,8 @@ none of these, exactly as before.
 A plan may restore under the ORIGINAL topic names, into topics that do not
 exist (`target.topic_naming.original_name`,
 [the plan field](drill-spec.md#targettopic_namingoriginal_name-prod-151); the
-owner's decision OD-2). Such a restore is format 1.8.0 and carries this block,
+owner's decision OD-2). Such a restore is format 1.8.0 (1.9.0 when a second
+person approved it in the console) and carries this block,
 which records what the run proved before it wrote. **The restored topic is a
 new generation of its name, never the original topic**: Kafka assigns a new
 topic id at creation, and none can be preserved.
@@ -500,7 +502,7 @@ topic id at creation, and none can be preserved.
 | Field | Type | Meaning |
 |---|---|---|
 | `approval_subject` | string | `originalName`: the separate approval subject phase 1 verified in the signed approval. An ordinary approval never authorises this restore. |
-| `approval_mode` | string | The approval document it was verified in: `v1Approval` (a per-run approval document v1), `governed` or `ordinary` (an authorization document v2 under that policy; `ordinary` is a one-person confirmation). A standing rehearsal authorization never authorises one. |
+| `approval_mode` | string | The approval document it was verified in: `v1Approval` (a per-run approval document v1), `governed` or `ordinary` (an authorization document v2 under that policy; `ordinary` is a one-person confirmation), or — from 1.9.0 — `consoleApproval` (a second person approved in the console, beside `approval.console`). A standing rehearsal authorization never authorises one. |
 | `cluster_condition` | string | Which condition admitted the identity mapping: `targetIsNotSource` (a known source cluster id differs from `target.cluster_id`) or `autoCreateDisabled` (the target is, or may be, the source cluster, and every broker reported `auto.create.topics.enable=false`). |
 | `source_cluster_id` | string, optional | The source cluster id compared: the bound point's verified receipt, measured at backup time. An unsigned runner input (the allowlist file's) never counts. Required beside `targetIsNotSource`. |
 | `owner_detection` | string[] | Where the run looked for a declarative owner of a restored name: `plan` (the approved plan's `owners`), `kafkaTopicResources` (the `KafkaTopic` resources given with `--kafka-topic-resources`), `pointReceipt` (the owners the bound point's receipt recorded at backup; it adds owners and is only ever listed beside one of the other two, or beside an owner it found). Never empty: an owner nobody looked for is never read as no owner. |
@@ -520,7 +522,7 @@ carrying the block. ON-14 is judged first, then ON-1 to ON-13 in order:
 | ON-2 | the block in a `scratch` document (the identity ban stays there) |
 | ON-3 | a non-empty `target.topic_mapping_prefix` |
 | ON-4 | an `approval_subject` other than `originalName` |
-| ON-5 | an `approval_mode` outside the three above |
+| ON-5 | an `approval_mode` outside `v1Approval`, `governed` and `ordinary` under 1.8.0, or outside those and `consoleApproval` from 1.9.0 (under 1.8.0 `consoleApproval` is refused by the version) |
 | ON-6 | a `cluster_condition` outside the two above |
 | ON-7 | `targetIsNotSource` with no `source_cluster_id`, or one equal to `target.cluster_id` |
 | ON-8 | an empty `owner_detection`, a repeated place, or one outside the three above |
@@ -559,10 +561,10 @@ refuses the pair.
 
 **The number.** 1.8.0; 1.7.0 is PROD-11.1's, and 2.0.0 is PROD-11.1b's
 partition-subset format, which this block is never part of. The schema file is
-`schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest minor: the
-frozen 1.7.0 file plus this block as the type derives it
-(`logweir_core::schema::scorecard_format_1_schema`), regenerated and diffed by
-`just schema` beside the 2.0.0 file. A renumber moves
+`schemas/logweir-drill-scorecard-1.8.0.json`: the frozen 1.7.0 file plus this
+block. It is itself FROZEN since PROD-16.2; format 1's newest, generated file is
+`schemas/logweir-drill-scorecard-1.9.0.json` (the frozen 1.8.0 file plus
+`approval.console`, `logweir_core::schema::scorecard_format_1_schema`). A renumber moves
 `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and
 `scorecard::ORIGINAL_NAME_SINCE_MINOR` together, the justfile's
 `scorecard_format_1_schema_version` and this schema file's name,
@@ -626,8 +628,13 @@ readers print one line:
 console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key c0c0… signed the request and the approval, which is expected in this mode: no personal key is involved
 ```
 
-A reader before 1.9.0 accepts a 1.9.0 or 2.1.0 document and ignores the block;
-a 1.28.0 reader refuses an original-name document naming `consoleApproval`.
+What older readers print (measured): an older `logweir drill verify` prints
+`approval:  <issuer>#<subject> (<ticket>)` with no key id and no word about
+the console; `verify_scorecard.py` before 1.29.0 prints no approval line. A
+1.9.0 document is accepted by both and the block ignored; a 1.28.0 reader
+refuses an original-name document naming `consoleApproval` (ON-5). A 2.1.0
+document is accepted by readers from 1.27.0 (`verify_scorecard.py`) and
+refused by older ones by its major.
 
 ## `phases`
 

@@ -359,6 +359,40 @@ test("an_approved_request_names_the_approver_and_is_never_green", () => {
   assert.ok(!/id="request-approver"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
 });
 
+test("an_original_name_request_shows_the_requesters_owner_statement", () => {
+  // REVIEW S-1 (HIGH): the plan's owner statement alone decides whether an
+  // original-name write goes ahead from the console, so it is shown.
+  const named = request("original-name");
+  const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: named }));
+  assert.match(html, /id="scope-owner-statement"/);
+  assert.ok(html.includes("<strong>no declarative owner</strong>"), html);
+  assert.ok(!html.includes("logweir drill approve"), "no v1 command in the two-person panel");
+  assert.ok(!html.includes("if a declarative owner manages a name"),
+    "no claim that the runner checks owners itself");
+  // NEGATIVE CONTROL: the owner path, with its owner, is shown as such.
+  const path = structuredClone(named);
+  path.scope.target.ownerStatement = {
+    ownerPath: true,
+    owners: [{ topic: "orders", kind: "strimzi", reference: "kafka/<orders>" }],
+  };
+  const pathHtml = renderConsoleApprovalPanel(view(TWO_PERSON, { request: path }));
+  assert.ok(pathHtml.includes("<strong>Owner path:</strong>"), pathHtml);
+  assert.ok(pathHtml.includes("<li><code>orders</code> (strimzi <code>kafka/&lt;orders&gt;</code>)" +
+    "</li>"), pathHtml);
+  assert.ok(!pathHtml.includes("<strong>no declarative owner</strong>"));
+  // Not declared, and owners declared without the path: the run will refuse.
+  const undeclared = structuredClone(named);
+  undeclared.scope.target.ownerStatement = { ownerPath: false };
+  assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: undeclared }))
+    .includes("states nothing about declarative owners"));
+  const owned = structuredClone(path);
+  owned.scope.target.ownerStatement.ownerPath = false;
+  assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: owned }))
+    .includes("does not choose the owner path, so the run will refuse"));
+  // An ordinary restore carries no statement and shows none.
+  assert.ok(!/id="scope-owner-statement"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
+});
+
 test("an_original_name_request_marks_every_name_it_writes_under", () => {
   const named = request("original-name");
   const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: named }));

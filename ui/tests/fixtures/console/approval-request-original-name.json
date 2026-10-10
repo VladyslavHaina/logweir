@@ -46,7 +46,11 @@
         "mode": "newTopic",
         "topicPrefix": "",
         "replicationFactor": 1,
-        "teardown": "delete"
+        "teardown": "delete",
+        "ownerStatement": {
+          "owners": [],
+          "ownerPath": false
+        }
       },
       "topics": [
         {
