@@ -63,7 +63,7 @@ pub fn engine_uses_sasl(plan: &ConnectionPlan) -> bool {
 fn engine_requests(id: CheckId, sasl: bool) -> (Vec<EngineRequest>, &'static str) {
     match id {
         CheckId::TargetEngineProtocol => (replay_requests(sasl), "restore into"),
-        _ => (capture_requests(sasl), "backup from"),
+        _ => (capture_requests(sasl), "back up from"),
     }
 }
 

@@ -2476,7 +2476,10 @@ mod version_read_tests {
     #[test]
     fn a_404_that_refuses_the_credential_is_never_not_found() {
         for (site, e) in [
-            ("a read", not_found_or_io(KEY, not_found(VERSITYGW_UNKNOWN_KEY))),
+            (
+                "a read",
+                not_found_or_io(KEY, not_found(VERSITYGW_UNKNOWN_KEY)),
+            ),
             (
                 "a read by version id",
                 version_read_error(KEY, "v", not_found(VERSITYGW_UNKNOWN_KEY)),

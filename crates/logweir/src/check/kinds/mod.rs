@@ -468,7 +468,7 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
         CheckCode::EngineProtocolUnsupported => {
             "This operation cannot run against this endpoint with this engine: the endpoint \
              closes the connection on a request version it does not serve. Use an endpoint that \
-             serves the versions named above (every supported Apache Kafka line does; \
+             serves the versions the message names (every supported Apache Kafka line does; \
              docs/support-matrix.md lists what each endpoint was measured to serve). An endpoint \
              that cannot be a restore target can still be a backup source when \
              connection.engineProtocol is ready: restore its archive into a cluster that serves \

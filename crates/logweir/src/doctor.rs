@@ -561,9 +561,13 @@ fn evaluate_target(
         Err(e) => return CheckResult::Failed(format!("target: {e}")),
     };
     match topics.iter().find(|t| t.name == sp.target.marker_topic) {
+        // PROD-01.2: absent from the listing is "does not exist" OR "not
+        // describable by this principal" (`phase0_admit`'s twin of this arm).
         None => CheckResult::Failed(format!(
-            "target marker topic `{}` does not exist. Create it on the SCRATCH \
-             cluster only — its existence is the v0.1 segregation proof.",
+            "target marker topic `{}` does not exist, or this principal may not Describe it \
+             (a topic a principal cannot describe is not listed). Create it on the SCRATCH \
+             cluster only, or grant Describe on it — its existence is the v0.1 segregation \
+             proof.",
             sp.target.marker_topic
         )),
         Some(t) if t.error.is_some() => CheckResult::Failed(format!(

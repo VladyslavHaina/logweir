@@ -3243,7 +3243,7 @@ fn connection_engine_protocol_names_the_request_an_endpoint_does_not_serve() {
             && row
                 .message
                 .contains("DescribeConfigs v1 and this endpoint serves DescribeConfigs not served")
-            && row.message.contains("cannot backup from this endpoint"),
+            && row.message.contains("cannot back up from this endpoint"),
         "{}",
         row.message
     );
@@ -3482,6 +3482,81 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
         "{row:?}"
     );
     assert!(hidden.topic_config_calls().is_empty());
+}
+
+/// **PROD-01.2: a bootstrap that answers and advertised brokers that do not**
+/// (measured on the `confluent` profile's OFFNET listener, which advertises
+/// `127.0.0.1:1`). The cluster id is read off the bootstrap connection and the
+/// listing then cannot reach a broker: the row stays `BrokerUnreachable` and
+/// blocking, and says it is the ADVERTISED address, with a remedy about
+/// `advertised.listeners` instead of the generic one about the bootstrap
+/// address, which is the one thing that works.
+///
+/// CONTROLS: a connection whose cluster id read fails too keeps the generic
+/// remedy; and a listing that fails for another reason (authorization) keeps
+/// its own.
+#[test]
+fn an_unreachable_advertised_address_is_named_as_one() {
+    let m = mount(&readiness_plan(vec!["orders"], false, None));
+    let advertised_away = FakeProbe::new().failing_listing(
+        CheckCode::BrokerUnreachable,
+        "all-topics metadata reported BrokerUnreachable",
+    );
+    let run = drive(&m, &capability_wiring(advertised_away));
+    let row = run.row(CheckId::ConnectionAuthenticated);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::BrokerUnreachable,
+            Gating::Blocking
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("named cluster M29I2S7FQPyHBEX12Vx7XA")
+            && row
+                .message
+                .contains("advertised listeners are not reachable"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.contains("advertised.listeners") && !row.remedy.ends_with('…'),
+        "{}",
+        row.remedy
+    );
+    assert_eq!(
+        row.facts.get("clusterId").map(String::as_str),
+        Some("M29I2S7FQPyHBEX12Vx7XA")
+    );
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicsDescribable).code,
+        CheckCode::BlockedByPrerequisite
+    );
+
+    // CONTROL: nothing answered at all. The generic remedy, about the
+    // bootstrap address, is the right one.
+    let dead = FakeProbe::new().failing_cluster_id(CheckCode::BrokerUnreachable, "no route");
+    let row = drive(&m, &capability_wiring(dead)).row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.code, CheckCode::BrokerUnreachable);
+    assert!(
+        row.remedy.contains("bootstrap addresses") && !row.remedy.contains("advertised.listeners"),
+        "{}",
+        row.remedy
+    );
+    // CONTROL: the listing failed for another reason.
+    let denied = FakeProbe::new().failing_listing(
+        CheckCode::ClusterAuthorizationFailed,
+        "all-topics metadata reported ClusterAuthorizationFailed",
+    );
+    let row = drive(&m, &capability_wiring(denied)).row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.code, CheckCode::ClusterAuthorizationFailed);
+    assert!(
+        !row.remedy.contains("advertised.listeners"),
+        "{}",
+        row.remedy
+    );
 }
 
 /// A connection that does not authenticate leaves every listed capability row

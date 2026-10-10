@@ -55,6 +55,15 @@ pub fn connection_ids(operation: CheckOperation) -> (CheckId, Option<CheckId>) {
     }
 }
 
+/// What to do when a cluster's bootstrap address answers and the brokers it
+/// advertises do not (PROD-01.2): the remedy [`authenticated`] gives in place
+/// of `BrokerUnreachable`'s generic one, which is about the bootstrap address.
+pub const ADVERTISED_UNREACHABLE_REMEDY: &str =
+    "A connection test that only reads the cluster id passes here and nothing else can. Check \
+     advertised.listeners for the listener this bootstrap address belongs to: every broker must \
+     advertise a host and port this runner can resolve and reach. Use the bootstrap address of \
+     a listener meant for this network, or fix its advertisement.";
+
 /// `connection.authenticated` / `target.authenticated`: the cluster id and the
 /// broker count, off ONE metadata read.
 ///
@@ -83,7 +92,30 @@ pub fn authenticated(
     };
     let listing = match probe.list_topics() {
         Ok(l) => l,
-        Err(f) => return (scoped(from_broker_failure(id, &f, now)), cluster_id),
+        Err(f) => {
+            let mut row = scoped(from_broker_failure(id, &f, now));
+            // PROD-01.2: THE BOOTSTRAP ANSWERED AND THE ADVERTISED BROKERS DID
+            // NOT. The cluster id above came off the bootstrap connection; a
+            // listing that then cannot reach a broker is the cluster telling
+            // this client to dial an address it cannot reach. Measured on the
+            // `confluent` profile's OFFNET listener (it advertises
+            // `127.0.0.1:1`): `cluster-probe` reads the id and answers
+            // `reachable=true`, this row is `BrokerUnreachable`, and a backup
+            // fails after a minute with only "kafka-backup backup exited 1".
+            // The generic remedy for that code talks about the BOOTSTRAP
+            // address, which is the one thing that works here.
+            if let (Some(cluster), CheckCode::BrokerUnreachable) = (cluster_id.as_deref(), f.code) {
+                row = row
+                    .with_message(&format!(
+                        "the bootstrap address answered and named cluster {cluster}, and the \
+                         brokers that cluster advertises did not answer a metadata request: the \
+                         advertised listeners are not reachable from here"
+                    ))
+                    .with_remedy(ADVERTISED_UNREACHABLE_REMEDY)
+                    .with_fact("clusterId", cluster);
+            }
+            return (row, cluster_id);
+        }
     };
     let mut row = ready(id, CheckCode::Authenticated, now)
         .with_message("the broker answered a metadata request for this principal")

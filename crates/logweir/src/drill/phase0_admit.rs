@@ -550,10 +550,19 @@ pub fn run(
                     .into());
                 }
                 None => {
+                    // PROD-01.2: ABSENT FROM THE LISTING IS TWO THINGS. Kafka
+                    // lists only the topics a principal may Describe, so a
+                    // marker that exists and is not describable is missing
+                    // from it exactly as one that was never created is.
+                    // Measured on the `acl` profile: with Describe on the
+                    // marker removed this said only "does not exist … Create
+                    // it", which sends an operator to create a topic that is
+                    // already there. The refusal stands either way.
                     return Err(GuardRefusal(format!(
-                        "marker topic `{}` does not exist on cluster {target_cluster_id}. \
-                         Create it on the SCRATCH cluster only — its existence is the v0.1 \
-                         segregation proof.",
+                        "marker topic `{}` does not exist on cluster {target_cluster_id}, or \
+                         this principal may not Describe it (a topic a principal cannot \
+                         describe is not listed). Create it on the SCRATCH cluster only, or \
+                         grant Describe on it — its existence is the v0.1 segregation proof.",
                         spec.target.marker_topic
                     ))
                     .into());
