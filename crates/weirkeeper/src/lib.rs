@@ -155,14 +155,15 @@ pub mod policy;
 /// vocabulary and the deduplication ledger, as pure functions over objects the
 /// caller already read. `controllers::protection_policy` is the thin half.
 pub mod protection;
-/// FX-34: why a guard refused a run, read off the runner's one
-/// `refusal-detail=` line by a bounded read made once, validated and cleaned
-/// before it reaches a `Restore`'s or a `Backup`'s terminal condition.
-pub mod refusal;
 /// PLAT-14.3 / decision D3 §4: the pure half of a recurring recovery rehearsal
 /// — the template digest a standing authorization binds, the qualifying-point
 /// filter chain, the rendered plan and the scope the controller proves it falls
 /// inside. `controllers::rehearsal_schedule` is the thin half.
+pub mod read_budget;
+/// FX-34: why a guard refused a run, read off the runner's one
+/// `refusal-detail=` line by a bounded read made once, validated and cleaned
+/// before it reaches a `Restore`'s or a `Backup`'s terminal condition.
+pub mod refusal;
 pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;

@@ -9228,6 +9228,187 @@ mod p12_controller_read_retry {
             ));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // FX-31 review F3 — the over-cap scorecard, through the reconcile
+    // -----------------------------------------------------------------------
+
+    /// A scorecard oracle that reads through the REAL `observe_scorecard`
+    /// over a store reporting every object at five gibibytes (the
+    /// misreporting double), on a blocking thread as the controller's own
+    /// oracle does; or, while `readable` is false, reads nothing.
+    fn oversized_oracle(
+        store: &Arc<Store>,
+        readable: &Arc<AtomicBool>,
+    ) -> impl Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> {
+        let store = Arc::clone(store);
+        let readable = Arc::clone(readable);
+        move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+            let store = Arc::clone(&store);
+            let readable = readable.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if !readable {
+                    return None;
+                }
+                tokio::task::spawn_blocking(move || {
+                    weirkeeper::controllers::restore::observe_scorecard(&store, &key)
+                })
+                .await
+                .ok()
+                .flatten()
+            })
+        }
+    }
+
+    /// The store whose scorecard is over the controller's cap.
+    ///
+    /// Built on a plain thread (a `Store` drives its own runtime, which this
+    /// async test's thread cannot), and kept alive for the process, as the
+    /// controller keeps its handle: the last `Arc` dropped inside the async
+    /// test would drop that runtime where blocking is not allowed.
+    fn oversized_store() -> Arc<Store> {
+        let store = std::thread::spawn(|| {
+            let (store, _meter) = Store::in_memory_misreporting_size("logweir/", 5 << 30);
+            store
+                .put_create_only(SCORECARD_KEY, &signed_fixture_scorecard())
+                .expect("the scorecard is written");
+            Arc::new(store)
+        })
+        .join()
+        .expect("the store is built");
+        std::mem::forget(Arc::clone(&store));
+        store
+    }
+
+    async fn pass_over(
+        restore: &Restore,
+        oracle: &(dyn Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> + Send + Sync),
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Restore, Vec<Value>, RestoreOutcome) {
+        let terminal = restore
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|p| p == "Succeeded" || p == "Failed");
+        let routes = if terminal {
+            terminal_routes()
+        } else {
+            finished_routes(pod_list_terminated(0), log_body(&i8_tail()), "Complete")
+        };
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore_rereading(
+            restore,
+            &client,
+            oracle,
+            &verdict_oracle(VerificationVerdict::Valid),
+            at,
+            &job::RunnerImage::default(),
+            &logweir_core::approval_policy::ApprovalPolicySet::default(),
+            Some(LEGACY_HANDLE),
+            memory,
+        )
+        .await
+        .expect("the reconcile completes");
+        let statuses = patched_statuses(&bodies.lock().expect("readable"));
+        (fold(restore, &statuses), statuses, outcome)
+    }
+
+    fn inline_restore() -> Restore {
+        serde_json::from_str(&restore_json(
+            &legacy_plan_with_evidence_in("kafka-backups"),
+            APPROVAL,
+            NAME,
+        ))
+        .expect("the fixture is a Restore")
+    }
+
+    /// **THE TERMINAL PASS** (`restore.rs`, the `(Some(detail), Record(_))`
+    /// arm). The scorecard is over the controller's cap: the verdict is
+    /// `NotAttempted` naming the cap, FINAL — no `retryAfter`, no requeue for a
+    /// retry — and no completion, rather than the transient "read no such
+    /// document" that would name the wrong reason and be read again on the
+    /// schedule.
+    ///
+    /// KILLS: the reviewer's C1 (the terminal arm disabled).
+    #[tokio::test]
+    async fn an_oversized_scorecard_at_the_terminal_pass_is_not_attempted_naming_the_cap() {
+        let readable = Arc::new(AtomicBool::new(true));
+        let oracle = oversized_oracle(&oversized_store(), &readable);
+        let memory = ReadMemory::new();
+        let (r, _, outcome) = pass_over(&inline_restore(), &oracle, &memory, now()).await;
+        let status = status_json(&r);
+        let v = &status["evidence"]["verification"];
+        assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("1048576-byte cap weirkeeper reads") && detail.contains(SCORECARD_KEY),
+            "the detail names the cap and the key: {detail}"
+        );
+        assert!(
+            !detail.contains("attempt 2"),
+            "a final verdict schedules no attempt: {detail}"
+        );
+        assert!(
+            status["evidence"]["observation"]["retryAfter"].is_null(),
+            "{status}"
+        );
+        assert_eq!(
+            outcome.requeue,
+            Requeue::AwaitChange,
+            "nothing to come back for"
+        );
+        assert!(status["completion"].is_null(), "{status}");
+    }
+
+    /// **THE CONTROLLER READ PASS** (`restore.rs`, the `(_, None) if
+    /// refused.is_some()` arm). Attempt 1 read nothing and scheduled attempt 2;
+    /// by attempt 2 the scorecard is there and over the cap. Attempt 2 records
+    /// `NotAttempted` naming the cap, FINAL: no `retryAfter`, and no attempt 3.
+    ///
+    /// KILLS: the reviewer's C2 (the read-pass arm disabled: attempt 2 would
+    /// write the transient sentence and schedule attempt 3).
+    #[tokio::test]
+    async fn an_oversized_scorecard_at_a_scheduled_read_is_not_attempted_naming_the_cap() {
+        let readable = Arc::new(AtomicBool::new(false));
+        let oracle = oversized_oracle(&oversized_store(), &readable);
+        let memory = ReadMemory::new();
+        // PASS 1 — the terminal pass reads nothing: attempt 2 is scheduled.
+        let (r, _, _) = pass_over(&inline_restore(), &oracle, &memory, now()).await;
+        let status = status_json(&r);
+        assert_eq!(
+            status["evidence"]["observation"]["retryAfter"],
+            json!(stamp(now() + secs(60))),
+            "{status}"
+        );
+        // PASS 2 — attempt 2 meets the oversized scorecard.
+        readable.store(true, Ordering::SeqCst);
+        let (done, written, outcome) = pass_over(&r, &oracle, &memory, now() + secs(61)).await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        let status = status_json(&done);
+        let v = &status["evidence"]["verification"];
+        assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("1048576-byte cap weirkeeper reads"),
+            "attempt 2 names the cap: {detail}"
+        );
+        assert_eq!(
+            status["evidence"]["observation"]["attempt"],
+            json!(2),
+            "{status}"
+        );
+        assert!(
+            status["evidence"]["observation"]["retryAfter"].is_null(),
+            "no attempt 3: {status}"
+        );
+        assert!(status["completion"].is_null(), "{status}");
+        let _ = outcome;
+        // PASS 3 — an hour later: nothing is read or written again.
+        let (_, written, outcome) = pass_over(&done, &oracle, &memory, now() + secs(3_600)).await;
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(outcome.requeue, Requeue::AwaitChange);
+    }
 }
 
 // ===========================================================================
@@ -12473,4 +12654,190 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
         assert!(!admission.to_string().contains("spec.approvalRef"));
     }
     assert_eq!(naming.len() + neutral.len(), 9, "every variant is in a row");
+}
+
+// ===========================================================================
+// FX-19 CLASS SWEEP — the reaping of a finished runner Job flaps nothing here
+// ===========================================================================
+
+/// **FX-19 CLASS SWEEP, `Restore`: THE REAPING OF A FINISHED RUNNER JOB
+/// CANNOT FLAP THE STATUS OR LOG A WARN.** The TTL is patched only after the
+/// terminal status write (`controllers/restore.rs`, "ONLY NOW" after the
+/// terminal `patch_status_if_changed`), so the Job the TTL controller's
+/// foreground delete leaves — TTL set, `deletionTimestamp`, pod gone — belongs
+/// to a TERMINAL `Restore`, and step 2b (`status_is_terminal` before
+/// `find_pod`) reads nothing from it: no pod list, no status write, no TTL
+/// patch, nothing above debug.
+///
+/// NEGATIVE CONTROL: `a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched`
+/// is the same guard with its KILLS line (the guard removed, the pass takes
+/// the crashed branch and patches); this row adds the Job's deletion and the
+/// log level, and its own control below: the non-terminal copy writes.
+#[tokio::test]
+async fn fx19_a_terminal_restore_whose_job_is_being_collected_is_not_rejudged() {
+    let (settled, _) = settled_verified_restore().await;
+    let no_pods = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string();
+    let routes = || {
+        let mut routes = finished_routes(no_pods.clone(), log_body(""), "Complete");
+        for route in &mut routes {
+            if route.path_suffix == "/jobs/logweir-restore-incident-4471" {
+                let mut job: Value =
+                    serde_json::from_str(&job_body("Complete")).expect("the fixture is JSON");
+                job["spec"]["ttlSecondsAfterFinished"] =
+                    serde_json::json!(weirkeeper::controllers::backup::TTL_SECONDS_AFTER_FINISHED);
+                job["metadata"]["deletionTimestamp"] = serde_json::json!("2026-09-17T12:30:00Z");
+                job["metadata"]["finalizers"] = serde_json::json!(["foregroundDeletion"]);
+                route.body = job.to_string();
+            }
+        }
+        routes
+    };
+
+    let log = weirkeeper::testing::CapturedLog::start();
+    let (client, rec, bodies) = mock_client_recording_bodies(routes());
+    let outcome = reconcile_restore(
+        &settled,
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 17, 12, 30),
+    )
+    .await
+    .expect("a Job being collected is not a reconcile error");
+    let seen = bodies.lock().expect("readable").clone();
+    assert!(
+        patched_statuses(&seen).is_empty(),
+        "nothing written: {seen:?}"
+    );
+    let requests = rec.lock().expect("readable").clone();
+    assert!(
+        !requests.iter().any(|r| path(&r.uri).ends_with("/pods")),
+        "the pod list is not read"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.method == "PATCH" && r.uri.contains("/jobs/")),
+        "the Job already carries its TTL"
+    );
+    assert_eq!(outcome.exit_code, Some(0), "the code already on the object");
+    assert!(
+        log.at("WARN").is_empty(),
+        "no WARN: {:?}",
+        log.messages_at("WARN")
+    );
+    drop(log);
+
+    // NEGATIVE CONTROL: the non-terminal copy is judged, and writes.
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes());
+    reconcile_restore(
+        &restore(),
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 11, 18, 45)),
+        utc(2026, 9, 17, 12, 30),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    let written = patched_statuses(&seen);
+    assert!(
+        written.iter().any(|s| s.to_string().contains("NoExitCode")),
+        "without the terminal guard the same Job IS judged a crash: {written:?}"
+    );
+}
+
+/// **FX-19 FIX ROUND (review M2): A `Restore` DOES NOT ADMIT ON A PROBE READING
+/// TOO OLD TO VOUCH FOR.** The target's probe Job is stuck mid-deletion (its
+/// name is fixed, so no newer probe can run). The `KafkaCluster` reconciler is
+/// driven over it at two instants and its status write folded onto the object;
+/// admission is then asked about the result. Inside the bound
+/// (`STALE_AFTER_SECS` after the 11:59 reading) the last reading stands and the
+/// Restore is admitted; past it the probe has cleared `reachable`
+/// (`ProbeStale`) and the Restore is refused `ClusterNotReachable`.
+///
+/// NEGATIVE CONTROL: the first instant — the same object, the same stuck Job —
+/// admits, so the refusal is the bound's and not the fixture's.
+///
+/// KILLS: the probe's staleness bound removed (the old `reachable: true`
+/// stands and admission passes at the second instant).
+#[tokio::test]
+async fn fx19_a_restore_does_not_admit_on_a_probe_reading_too_old_to_vouch_for() {
+    use weirkeeper::conditions::apply_merge_patch;
+    use weirkeeper::controllers::kafka_cluster::{
+        reconcile_cluster, REASON_PROBE_STALE, STALE_AFTER_SECS, VERDICT_RECORDED_ANNOTATION,
+    };
+
+    let mut object: Value =
+        serde_json::from_str(&cluster_json(true, PLAINTEXT_AUTH)).expect("JSON");
+    object["metadata"]["resourceVersion"] = serde_json::json!("77");
+    object["metadata"]["generation"] = serde_json::json!(1);
+    object["status"]["observedAt"] = serde_json::json!("2026-09-10T11:59:00Z");
+    object["status"]["reason"] = serde_json::json!("Reachable");
+    let target: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(object.clone()).expect("a KafkaCluster");
+    let stuck = serde_json::json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": "logweir-probe-scratch", "namespace": NS,
+            "uid": "5a5a5a5a-0000-4000-8000-00000000005a",
+            "deletionTimestamp": "2026-09-10T12:04:00Z",
+            "finalizers": ["foregroundDeletion"],
+            "annotations": {
+                VERDICT_RECORDED_ANNOTATION: "5a5a5a5a-0000-4000-8000-00000000005a"
+            }
+        },
+        "spec": {"ttlSecondsAfterFinished": 300,
+                 "template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+        "status": {"conditions": [{"type": "Complete", "status": "True",
+                                   "lastTransitionTime": "2026-09-10T11:59:00Z"}]}
+    })
+    .to_string();
+    let reading = utc(2026, 9, 10, 11, 59);
+    for (at, admitted) in [
+        (reading + chrono::Duration::seconds(60), true),
+        (
+            reading + chrono::Duration::seconds(STALE_AFTER_SECS + 1),
+            false,
+        ),
+    ] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-probe-scratch",
+                status: 200,
+                body: stuck.clone(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/kafkaclusters/scratch/status",
+                status: 200,
+                body: object.to_string(),
+            },
+        ];
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&target, &client, at)
+            .await
+            .expect("the probe reconcile completes");
+        let mut folded = object.clone();
+        for patch in patched_statuses(&bodies.lock().expect("readable")) {
+            apply_merge_patch(&mut folded["status"], &patch);
+        }
+        let folded: weirkeeper::crds::kafka_cluster::KafkaCluster =
+            serde_json::from_value(folded).expect("a KafkaCluster");
+        let verdict = admit(&restore(), Some(&approval(true)), Some(&folded), None);
+        if admitted {
+            assert_eq!(outcome.reason, None, "inside the bound nothing is written");
+            assert_eq!(verdict, RestoreAdmission::Ok, "at {at}");
+        } else {
+            assert_eq!(outcome.reason.as_deref(), Some(REASON_PROBE_STALE));
+            assert_eq!(
+                verdict,
+                RestoreAdmission::ClusterNotReachable {
+                    cluster: "scratch".to_string()
+                },
+                "at {at}: a reading nobody has repeated admits nothing"
+            );
+        }
+    }
 }

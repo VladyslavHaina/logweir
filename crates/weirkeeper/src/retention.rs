@@ -355,7 +355,38 @@ impl RetentionReport {
 /// still fails hard. An individual manifest read never fails this function;
 /// the `NotAManifest`-versus-`Backend` distinction Task 13 landed travels into
 /// [`SkippedManifest::reason`] instead.
+///
+/// # Out of the controller's one read budget (FX-31 review F2)
+///
+/// Each manifest is read under one
+/// [`crate::read_budget::MANIFEST_READ_COST_BYTES`] reservation, held while
+/// its window is folded, so concurrent schedule reconciles cannot together
+/// hold more than the budget in manifest bytes.
 pub fn evaluate(
+    store: &Store,
+    archive_url: &str,
+    prefix: &str,
+    retention: &Retention,
+    now: DateTime<Utc>,
+) -> Result<RetentionReport, StoreError> {
+    evaluate_within(
+        crate::read_budget::ReadBudget::controller(),
+        store,
+        archive_url,
+        prefix,
+        retention,
+        now,
+    )
+}
+
+/// [`evaluate`] under `budget` rather than the controller's own, for a row that
+/// compares the two.
+///
+/// # Errors
+///
+/// As [`evaluate`].
+pub fn evaluate_within(
+    budget: &crate::read_budget::ReadBudget,
     store: &Store,
     archive_url: &str,
     prefix: &str,
@@ -392,7 +423,13 @@ pub fn evaluate(
     let mut sets: Vec<(String, DateTime<Utc>)> = Vec::with_capacity(keys.len());
     let mut skipped: Vec<SkippedManifest> = Vec::new();
     for key in &keys {
-        match store.manifest_facts(key) {
+        // FX-31: under `caps::CONTROLLER_MANIFEST`, parsed as a stream. A
+        // manifest over the cap is skipped below with the sentence naming
+        // the cap: neither kept nor listed as removable.
+        let reservation = budget.reserve(crate::read_budget::MANIFEST_READ_COST_BYTES);
+        let facts = store.manifest_facts(key, logweir_store::caps::CONTROLLER_MANIFEST);
+        drop(reservation);
+        match facts {
             Ok(facts) => sets.push((facts.backup_id, from_ms(facts.newest_record_ms))),
             Err(e) => {
                 tracing::warn!(

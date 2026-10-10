@@ -107,6 +107,14 @@ impl TrustedProxies {
         self.service.as_ref()
     }
 
+    /// Whether either source names a proxy at all. Without one the console
+    /// cannot tell its ingress from any other peer, so the per-peer connection
+    /// cap (`crate::transport::PeerLimit`, FX-24c) stays off.
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        !self.cidrs.is_empty() || self.service.is_some()
+    }
+
     /// Whether `peer` is a trusted proxy right now.
     ///
     /// An IPv4-mapped IPv6 peer is the IPv4 address it maps to, for both
@@ -218,7 +226,9 @@ impl TrustedProxies {
     }
 }
 
-fn canonical(ip: IpAddr) -> IpAddr {
+/// An IPv4-mapped IPv6 address as the IPv4 address it maps to; anything else
+/// unchanged. Every per-peer decision keys on this form.
+pub(crate) fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         IpAddr::V4(_) => ip,

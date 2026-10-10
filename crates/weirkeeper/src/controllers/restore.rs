@@ -150,7 +150,7 @@ use logweir_core::approval_policy::{
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
-use logweir_store::Store;
+use logweir_store::{caps, Store};
 
 // ---------------------------------------------------------------------------
 // The plan ConfigMap, and the one key in it
@@ -3764,6 +3764,12 @@ pub struct ScorecardObservation {
     /// cannot read is still a selection, copied empty, so a narrowed restore
     /// is never shown as a full one ([`restore_selection`]).
     pub selection: Option<crate::crds::restore::RestoreSelection>,
+    /// **FX-31.** `Some` when the scorecard was NOT read because it is larger
+    /// than the controller's read cap: the `NotAttempted` detail that names
+    /// the cap ([`crate::verification::over_read_cap_detail`]). Every other
+    /// field is `None` then, and [`split_refused`] turns such an observation
+    /// into NOT OBSERVED before any fact is taken from it.
+    pub read_refused: Option<String>,
 }
 
 /// **PROD-11.1b.** A signed `source.selection` read as the status'
@@ -3826,6 +3832,23 @@ pub fn restore_selection(block: &Value) -> crate::crds::restore::RestoreSelectio
         }),
         partitions: rows.filter(|r| !r.is_empty()),
         engine_runs: o.get("engine_runs").and_then(Value::as_i64),
+    }
+}
+
+/// **FX-31.** An observation that is only a refusal is NOT OBSERVED for every
+/// fact a pass copies, exactly as an unread scorecard is; its sentence is
+/// returned beside it, to be the verdict's `NotAttempted` detail instead of
+/// the "read no such document" sentence that would name the wrong reason.
+#[must_use]
+pub fn split_refused(
+    observed: Option<ScorecardObservation>,
+) -> (Option<ScorecardObservation>, Option<String>) {
+    match observed {
+        Some(ScorecardObservation {
+            read_refused: Some(detail),
+            ..
+        }) => (None, Some(detail)),
+        other => (other, None),
     }
 }
 
@@ -4077,6 +4100,7 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
             .pointer("/source/selection")
             .filter(|v| !v.is_null())
             .map(restore_selection),
+        read_refused: None,
     })
 }
 
@@ -4115,7 +4139,7 @@ fn is_rfc3339(value: &str) -> bool {
 ///
 /// # WHY IT IS ASYNC, AND WHY THAT IS NOT DECORATION
 ///
-/// `Store::get` is a **blocking** method that drives its own current-thread
+/// `Store::get_capped` is a **blocking** method that drives its own current-thread
 /// runtime, and `kube` drives every reconciler ON a runtime: a direct call
 /// COMPILES CLEANLY and panics with *Cannot start a runtime from within a
 /// runtime* at the first reconcile. So every `Store` call in this crate goes
@@ -4160,12 +4184,44 @@ pub fn unobserved_scorecard(_key: String) -> BoxFuture<'static, Option<Scorecard
 /// OBSERVED — and never an error the reconcile returns: a run whose scorecard
 /// cannot be fetched still has an exit code, and that exit code is the fact
 /// the status exists to record.
+///
+/// **FX-31: under `caps::CONTROLLER_DOCUMENT`.** The bytes are parsed into a
+/// `serde_json::Value` before anything can check them (a `Restore` has no
+/// runner digest to check them against: this read's own digest is the
+/// anchor), so the cap bounds that parse as well as the read. A scorecard
+/// over it is an observation carrying only
+/// [`ScorecardObservation::read_refused`], the sentence naming the cap.
+///
+/// **Out of the controller's one read budget** (FX-31 review F2): the bytes
+/// and the `Value` parsed from them are held under one
+/// [`crate::read_budget::DOCUMENT_READ_COST_BYTES`] reservation.
 #[must_use]
 pub fn observe_scorecard(store: &Store, key: &str) -> Option<ScorecardObservation> {
+    observe_scorecard_within(crate::read_budget::ReadBudget::controller(), store, key)
+}
+
+/// [`observe_scorecard`] under `budget` rather than the controller's own,
+/// for a row that compares the two.
+#[must_use]
+pub fn observe_scorecard_within(
+    budget: &crate::read_budget::ReadBudget,
+    store: &Store,
+    key: &str,
+) -> Option<ScorecardObservation> {
     if key.trim().is_empty() {
         return None;
     }
-    let (bytes, _version) = store.get(key).ok()?;
+    let _reservation = budget.reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
+    let (bytes, _version) = match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {
+        Ok(read) => read,
+        Err(e @ logweir_store::StoreError::TooLarge { .. }) => {
+            return Some(ScorecardObservation {
+                read_refused: Some(crate::verification::store_detail(&e)),
+                ..ScorecardObservation::default()
+            })
+        }
+        Err(_) => return None,
+    };
     scorecard_observation(&bytes)
 }
 
@@ -5239,6 +5295,9 @@ async fn controller_read_pass(
             None
         }
     };
+    // FX-31: a scorecard over the read cap is NOT OBSERVED, and its sentence
+    // is the verdict.
+    let (observed, refused) = split_refused(observed);
     let digest = observed.as_ref().and_then(|o| o.scorecard_sha256.clone());
     let result = match (&source, digest) {
         (backup::EvidenceSource::NotAttempted { detail }, _) => {
@@ -5269,6 +5328,9 @@ async fn controller_read_pass(
                 client,
             )
             .await
+        }
+        (_, None) if refused.is_some() => {
+            VerificationResult::not_attempted(payload_type, refused.unwrap_or_default())
         }
         (source, None) => unread_scorecard_verdict(source, true, &payload_key, destination)
             .unwrap_or_else(|| {
@@ -7893,6 +7955,9 @@ async fn reconcile_restore_inner(
             backup::EvidenceSource::NotAttempted { .. } | backup::EvidenceSource::FetchJob { .. },
         ) => None,
     };
+    // FX-31: a scorecard over the read cap is NOT OBSERVED for every fact
+    // below, and its sentence is the verdict (see `verdict`).
+    let (observed, refused) = split_refused(observed);
     let topics = topic_mapping(restore);
     // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
     // out of the same bounded tail as the evidence keys.
@@ -8014,22 +8079,34 @@ async fn reconcile_restore_inner(
     // THE CHOICE IS PURE AND TABLED (`terminal_evidence`, review T1/R1): which
     // verdict is recorded without a read, which reference is verified, and
     // which pass writes nothing.
-    let verdict = match terminal_evidence(
-        &evidence_from,
-        reference,
-        keys.mandatory_complete(),
-        keys.scorecard.as_deref().unwrap_or_default(),
-        restore
-            .spec
-            .evidence_destination_ref
-            .as_ref()
-            .map(|r| r.name.as_str()),
+    let verdict = match (
+        refused,
+        terminal_evidence(
+            &evidence_from,
+            reference,
+            keys.mandatory_complete(),
+            keys.scorecard.as_deref().unwrap_or_default(),
+            restore
+                .spec
+                .evidence_destination_ref
+                .as_ref()
+                .map(|r| r.name.as_str()),
+        ),
     ) {
-        TerminalEvidence::Record(result) => Some(*result),
-        TerminalEvidence::Verify(reference) => {
+        // FX-31: the table recorded "read no such document" for a read that
+        // produced no digest; when the cap is why, the sentence naming the cap
+        // is recorded instead — FINAL, so the object is not read again.
+        (Some(detail), TerminalEvidence::Record(_)) => {
+            Some(crate::verification::VerificationResult::not_attempted(
+                logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                detail,
+            ))
+        }
+        (_, TerminalEvidence::Record(result)) => Some(*result),
+        (_, TerminalEvidence::Verify(reference)) => {
             Some(read_verdict(&evidence_from, reference, verify, client).await)
         }
-        TerminalEvidence::Nothing => None,
+        (_, TerminalEvidence::Nothing) => None,
     };
     // PoC P12: THE CONTROLLER'S OWN READ IS ATTEMPT 1 OF A SCHEDULE — the
     // `Backup` twin's rule. A transient failure records
@@ -8412,7 +8489,7 @@ async fn reconcile_with_trust(
                         crate::verification::SigningTime::NotNeeded
                     }
                     // THE BACKOFF SHORT-CIRCUITS BEFORE `evidence_source`, so a
-                    // deferred pass costs neither a `Store::get` NOR the
+                    // deferred pass costs neither a `Store::get_capped` NOR the
                     // destination read that resolving the handle would need.
                     crate::verification::ReadPlan::Deferred => {
                         crate::verification::SigningTime::Deferred

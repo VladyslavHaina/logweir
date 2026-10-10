@@ -1436,6 +1436,8 @@ spec:
                               `absent` once the bounded re-read COMPLETED and the document itself carried no signing time.
 
                               **THE PERMANENT SETTLE, AND IT IS A FACT ABOUT THE DOCUMENT.** A block with no `signedAt` and no `basis` that compared one is re-read, because nothing on the status says whether the absence is this installation's or the document's. Once a read has answered, it IS the document's, and asking the archive again can only get the same answer — so this records the answer instead of the question. It is never written for a read that failed, and never beside a `signedAt`.
+
+                              `overCap` (FX-31) when the store answered with a document larger than the controller's read cap: also settled, because the next read would answer the same, and the stored verdict is kept on an unverified basis.
                             nullable: true
                             type: string
                         type: object
@@ -5942,6 +5944,8 @@ spec:
                               `absent` once the bounded re-read COMPLETED and the document itself carried no signing time.
 
                               **THE PERMANENT SETTLE, AND IT IS A FACT ABOUT THE DOCUMENT.** A block with no `signedAt` and no `basis` that compared one is re-read, because nothing on the status says whether the absence is this installation's or the document's. Once a read has answered, it IS the document's, and asking the archive again can only get the same answer — so this records the answer instead of the question. It is never written for a read that failed, and never beside a `signedAt`.
+
+                              `overCap` (FX-31) when the store answered with a document larger than the controller's read cap: also settled, because the next read would answer the same, and the stored verdict is kept on an unverified basis.
                             nullable: true
                             type: string
                         type: object

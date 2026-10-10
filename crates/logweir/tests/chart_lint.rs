@@ -5436,8 +5436,13 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // PROSE: `identity.bootstrapFeatures.consoleKey` and its mapping line —
     // what the pinned bootstrap image can run, flipped only with its re-pin,
     // so main never passes a pinned image a flag it does not know.
+    //
+    // RAISED FROM 247 TO 248 BY THE FX-24c FIX ROUND, ONE LINE AND NO PROSE:
+    // `api.console.trustedProxy`, the deliberate opt-out a shared console with
+    // the chart's Ingress needs when it names no trusted proxy (the chart
+    // refuses to leave that proxy unnamed by accident).
     assert!(
-        lines <= 247,
+        lines <= 248,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
@@ -6858,4 +6863,105 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
     // check-chart.sh renders them (a #[test] may not shell out to helm).
     let gate = read("scripts/check-chart.sh");
     assert!(gate.contains("operator mode names render as the internal ones"));
+}
+
+/// **A shared console the chart publishes names the proxy in front of it, or
+/// opts out by name (FX-24c).**
+///
+/// The console caps the connections one peer outside its trusted-proxy set may
+/// hold, and FX-13's sign-in limiter counts each client behind a trusted proxy;
+/// with no trusted proxy configured neither can tell the ingress from any other
+/// peer, so the cap is off and every sign-in shares one budget. So with
+/// `api.console.ingress.enabled` the chart refuses to render unless
+/// `trustedProxyService` or `trustedProxyCidrs` names the proxy, or
+/// `api.console.trustedProxy` is `none`. This half reads the checked-in values,
+/// schema, `fail`s and every values file the repository renders with the chart
+/// today; `scripts/check-chart.sh` runs the refusal, the opt-out, the
+/// contradiction and the localAdmin rows through `helm`.
+///
+/// MUTANTS: default `trustedProxy` to `none` in `values.yaml` (an install
+/// would opt out by accident); widen the schema enum; delete the `fail` or its
+/// `none` condition; drop the proxy from the PoC or the shared example.
+#[test]
+fn chart_lint_a_published_shared_console_names_its_trusted_proxy_or_opts_out() {
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    assert_eq!(
+        values["api"]["console"]["trustedProxy"].as_str(),
+        Some(""),
+        "api.console.trustedProxy must default to empty: the opt-out is never the default"
+    );
+
+    let schema: serde_json::Value =
+        serde_json::from_str(&read("charts/logweir/values.schema.json"))
+            .expect("the schema parses");
+    let opt_out =
+        &schema["properties"]["api"]["properties"]["console"]["properties"]["trustedProxy"];
+    assert_eq!(
+        opt_out["enum"],
+        serde_json::json!(["", "none"]),
+        "api.console.trustedProxy must be typed as exactly \"\" or \"none\""
+    );
+
+    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    for needle in [
+        "{{- if and (not $c.trustedProxyCidrs) (not $proxySvc.name) (ne (toString $c.trustedProxy) \"none\") -}}",
+        "api.console.ingress.enabled in shared mode needs the trusted proxy named",
+        "api.console.trustedProxy=none says the console trusts no proxy",
+        "api.console.trustedProxy belongs to api.console.mode=shared.",
+    ] {
+        assert!(
+            template.contains(needle),
+            "templates/ui/api-config.yaml must still carry `{needle}`"
+        );
+    }
+    // The requirement lives inside the Ingress arm: a shared console with no
+    // Ingress of the chart's own is not refused for it.
+    let ingress_arm = template
+        .find("{{- if $c.ingress.enabled -}}\n{{- if not $c.ingress.host -}}")
+        .expect("the shared Ingress arm");
+    let requirement = template
+        .find("api.console.ingress.enabled in shared mode needs the trusted proxy named")
+        .expect("the requirement");
+    let arm_end = template[ingress_arm..]
+        .find("{{- else -}}\n{{- fail (printf \"api.console.mode is %q.")
+        .map(|offset| ingress_arm + offset)
+        .expect("the end of the shared arm");
+    assert!(
+        ingress_arm < requirement && requirement < arm_end,
+        "the trusted-proxy requirement must sit inside the shared mode's Ingress arm"
+    );
+
+    // Every values file this repository renders with the current chart that
+    // publishes a shared console names its proxy (or opts out by name), so
+    // none of them stops rendering. The R2 rehearsal file is rendered with
+    // f49849d's chart, not this one, and is out of scope.
+    let mut files = files_under("charts/logweir/examples");
+    files.push("deploy/poc/logweir.values.yaml".to_owned());
+    let mut published = 0;
+    for file in files.iter().filter(|f| f.ends_with(".values.yaml")) {
+        let v: Value = serde_yaml::from_str(&read(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let c = &v["api"]["console"];
+        if c["mode"].as_str() != Some("shared") || c["ingress"]["enabled"].as_bool() != Some(true) {
+            continue;
+        }
+        published += 1;
+        let cidrs = c["trustedProxyCidrs"]
+            .as_sequence()
+            .is_some_and(|s| !s.is_empty());
+        let service = c["trustedProxyService"]["name"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty());
+        let none = c["trustedProxy"].as_str() == Some("none");
+        assert!(
+            cidrs || service || none,
+            "{file} publishes a shared console without naming its trusted proxy: the chart \
+             now refuses to render it"
+        );
+    }
+    assert!(
+        published >= 2,
+        "expected the shared example and the PoC values to publish a shared console; found \
+         {published}"
+    );
 }

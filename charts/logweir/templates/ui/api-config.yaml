@@ -138,6 +138,9 @@ laptop with no cluster.
 {{- if ($c.trustedProxyService | default dict).name -}}
 {{- fail "api.console.trustedProxyService belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust, and no Role in the ingress namespace should be granted for one." -}}
 {{- end -}}
+{{- if $c.trustedProxy -}}
+{{- fail "api.console.trustedProxy belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to name or to opt out of." -}}
+{{- end -}}
 {{- if $c.ingress.enabled -}}
 {{- fail "api.console.ingress.enabled with api.console.mode=localAdmin is refused. D0: the local administrator path \"must not bind 0.0.0.0, get an Ingress, or be described as shared-console mode\" — it authenticates nobody, so an Ingress in front of it is an unauthenticated shared console. Set api.console.mode=shared and configure OIDC and TLS, or reach localAdmin mode with `kubectl port-forward`." -}}
 {{- end -}}
@@ -194,6 +197,9 @@ isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
 {{- if or (and $proxySvc.name (not $proxySvc.namespace)) (and $proxySvc.namespace (not $proxySvc.name)) -}}
 {{- fail (printf "api.console.trustedProxyService names only half a Service (namespace %q, name %q). Name both — the ingress controller's Service and the namespace it runs in — or neither." (toString $proxySvc.namespace) (toString $proxySvc.name)) -}}
 {{- end -}}
+{{- if and (eq (toString $c.trustedProxy) "none") (or $c.trustedProxyCidrs $proxySvc.name) -}}
+{{- fail "api.console.trustedProxy=none says the console trusts no proxy, but api.console.trustedProxyService or api.console.trustedProxyCidrs names one. Remove one side: name the ingress controller (and leave trustedProxy empty), or opt out." -}}
+{{- end -}}
 {{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) (not $proxySvc.name) -}}
 {{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyService (the ingress controller's Service, whose serving pods are then trusted) or api.console.trustedProxyCidrs: with nothing to trust, the entry point would refuse every request (421) and the console would look like an outage." -}}
 {{- end -}}
@@ -245,6 +251,18 @@ isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
 {{- end -}}
 {{- if ne $c.ingress.host (trimPrefix "https://" $c.publicBaseUrl) -}}
 {{- fail (printf "api.console.ingress.host is %q but api.console.publicBaseUrl is %q. They must name the SAME authority. The OIDC redirect URI is publicBaseUrl plus /auth/callback, and the service answers 421 misdirected_request to any Host it does not serve — so a mismatched pair renders, lints and installs clean, and then refuses every browser that arrives through the Ingress it just published. Every other way to get this wrong is refused here by name; so is this one." $c.ingress.host $c.publicBaseUrl) -}}
+{{- end -}}
+{{- /*
+FX-24c: THE INGRESS IS NAMED, OR THE OPT-OUT IS DELIBERATE. The console caps
+the connections one peer outside its trusted-proxy set may hold, and the
+sign-in limiter counts each client behind a trusted proxy (FX-13); with no
+trusted proxy configured neither can tell the ingress from any other peer, so
+the cap is off and every sign-in through the ingress shares one budget. A
+chart that renders the Ingress knows there is a proxy, so it refuses to leave
+it unnamed by accident.
+*/ -}}
+{{- if and (not $c.trustedProxyCidrs) (not $proxySvc.name) (ne (toString $c.trustedProxy) "none") -}}
+{{- fail "api.console.ingress.enabled in shared mode needs the trusted proxy named: set api.console.trustedProxyService to the ingress controller's Service (namespace and name; its serving pods are then trusted), or api.console.trustedProxyCidrs to its pods' range. Without it the console cannot tell the ingress from any pod that dials it directly, so one in-cluster address may hold every one of its 256 connections (the per-peer cap, FX-24c, is off) and every sign-in through the ingress shares one rate-limit budget (FX-13). To run without a named proxy deliberately — a service mesh that re-originates every connection, say — set api.console.trustedProxy=none." -}}
 {{- end -}}
 {{- end -}}
 {{- else -}}

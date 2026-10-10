@@ -42,8 +42,13 @@ deadline), 48 (FX-20c, a destination's Test access compares every grant's
 binding), 49 (PROD-01.4a, each topic's ID in the receipt and the catalog
 point), 50 (PROD-04.1, consumer position evidence for selected groups), 51
 (PROD-11.1b, a restore can select a partition subset, signed as scorecard
-format 2.0.0 and named on every surface) and 52 (FX-34, a guard-refused Restore
-or Backup says why in its status) so far. Items continue the next entry's
+format 2.0.0 and named on every surface), 52 (FX-31, every object-store
+read has a size cap), 53 (FX-24c, one peer's share of the console's
+connections, and a rate floor on request bodies), 54 (FX-19, a probe Job
+Kubernetes is collecting no longer clears `reachable`), 55 (FX-13a and
+FX-32, a sign-in state is single-use on each replica, and a refused callback
+really clears the login cookie) and 56 (FX-34, a guard-refused Restore or
+Backup says why in its status) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -144,7 +149,26 @@ preview, both verifiers, the controller's `Restore` status, the product API,
 the console and the runner's notification, and the PoC upgrade that carries
 it runs a subset `Restore`, reads its scorecard with both readers, and reads
 the selection on its status, the API, the console and the notification.
-Item 52 is fix-now row FX-34 (PoC batch 5's findings F-1 and F-2), proven by
+Item 52 is fix-now row FX-31, proven by store, controller and check rows, by a
+child-process peak-RSS measurement, and on the compose stack against MinIO; it
+changes the controller, the runner and the check Jobs, and the PoC upgrade that
+carries it plants an oversized object at a receipt key in a scratch namespace's
+bucket and reads the controller's verdict and memory.
+Item 53 is fix-now row FX-24c, proven by rows on the built console binary in
+both modes, by chart rows, and live on the host; it changes the console and
+the chart (a shared console behind the chart's Ingress must name its trusted
+proxy), and the PoC upgrade that carries it runs the per-peer probe against
+one shared-mode console pod and a burst through the ingress (the PoC profile
+already names Traefik's Service).
+Item 54 is fix-now row FX-19, proven by controller rows over a fake API with
+the controller's own log captured; it changes the controller only, and the PoC
+upgrade that carries it watches every connection's `reachable` and the
+controller's WARN lines across fifteen minutes of probe cycles.
+Item 55 is fix-now rows FX-13a and FX-32, proven by router rows over one and
+two console processes; it changes the console only, and the PoC upgrade that
+carries it signs in through Dex and replays the callback URL against both
+replicas.
+Item 56 is fix-now row FX-34 (PoC batch 5's findings F-1 and F-2), proven by
 unit rows, rows over the shipped runner binary, controller rows over a recording
 API double with goldens captured at the base commit, and console rows; it
 changes the runner (one more stdout line at exit 3 and one more flag,
@@ -1210,15 +1234,15 @@ client stops reading is held to its own 300-second ceiling instead, up to
 mutation body must also arrive whole within **sixty seconds**
 (`JSON_BODY_DEADLINE`), so one that trickles a byte at a time is ended too.
 A body that stops, or misses the total, is answered `400 malformed_request`
-("The request body stopped arriving before it was complete." or "The request
-body was not received within 60 seconds.") and the connection is closed after
-the answer. These bounds end abandoned and stalled clients, not slow ones: a
-client that reads, or sends, as little as one byte every thirty seconds keeps
-its connection, so 256 such clients can still hold every connection. In shared
-mode only an enforcing NetworkPolicy keeps such peers away from the API pod,
-and `api.console.networkPolicy.enabled` is off by default; the ingress does
-not relay pipelined requests, so clients that come through it can do far
-less. **That case is open as FX-24c** ([api.md](api.md#conventions)).
+("The request body stopped arriving before it was complete." — item 53 adds
+"or arrived too slowly" — or "The request body was not received within 60
+seconds.") and the connection is closed after the answer. This item said these
+bounds end abandoned and stalled clients but not a client that reads, or sends,
+one byte every thirty seconds; item 53 re-measured that: the stall ends such a
+reader at 35.1 s, a body sent that way is now ended at thirty seconds, and what
+remains — a client that reads fast enough to keep the kernel taking its answer
+— is held to one peer's share of the connections
+([api.md](api.md#conventions)).
 **Do:** nothing is required. A client that pauses mid-transfer for more than
 thirty seconds, or sends a mutation body over more than sixty, sees its
 connection closed and retries; the console's own browser client does neither.
@@ -1226,8 +1250,8 @@ In shared mode on a cluster whose network plugin enforces NetworkPolicy,
 consider `api.console.networkPolicy.enabled: true`, with the ingress
 controller's selectors and the identity provider's egress (`oidcCIDRs` or
 `oidcPeers`; [chart README](../charts/logweir/README.md)), so that only the
-ingress controller can reach the API pod: until FX-24c it is the one bound on
-slow-rate clients.
+ingress controller can reach the API pod: beside item 53's per-peer share, it
+is the bound on slow-rate clients from many addresses.
 **Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`):
 256 clients that pipeline requests for a 156 KiB asset and read nothing hold
 every connection slot, then a request queued behind them is answered no
@@ -1731,7 +1755,353 @@ console do not carry `integrity.selection`, so after a rollback they show a
 subset restore without its selection again: read the subset restores' signed
 scorecards (2.0.0) with this release's verifiers.
 
-#### 52. A guard-refused Restore or Backup says why in its status (FX-34)
+#### 52. Every object-store read has a size cap; the controller reads evidence under the relay's 1 MiB (FX-31)
+
+**Changed.** A read from an object store took the whole object, so the memory
+it used was whatever the bucket held. In shared mode a namespace whose bucket
+held a multi-gigabyte object at its receipt or sidecar key could OOM-kill the
+controller that serves every namespace, and each restart read it again. The
+check Job's evidence fetch read the whole object before it truncated. Now
+every read names a cap ([kubernetes.md](kubernetes.md) §7b.4). It refuses on
+the size the store reports before a body byte is read, then holds a running
+cap over the stream, so a store that reports a small size and streams more is
+cut off. Existence tests read no body: the sidecar's presence is a `HEAD`, and
+the readiness probe and the backup set check GET with a 0-byte cap. The caps:
+
+- The controller reads a receipt or scorecard under **1 MiB** and a sidecar
+  under **64 KiB**. These are the evidence relay's own caps, so a document is
+  verifiable through the controller's handle exactly when a relay can carry
+  it.
+- The controller's retention report reads a manifest under 64 MiB, folded as
+  it streams, never as a tree.
+- Runner, CLI and check Jobs read documents under 64 MiB, manifests under
+  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB.
+- The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
+  it relayed a prefix the controller refused anyway).
+- Concurrent controller reads share ONE 128 MiB budget, a quarter of the
+  chart's 512Mi limit. Each read reserves its worst case before it reads
+  (a document 40 MiB with its parse, a manifest 64 MiB), and a read that does
+  not fit waits. Eight concurrent retention evaluations of 60 MiB manifests add
+  126 MB of peak memory with the budget, against 504 MB without it.
+
+Over a cap, the controller writes `NotAttempted`, naming the key and the cap.
+That verdict is final, never re-read on the schedule; a signing-time re-read
+of such a document settles as `trust.signingTimeRead: overCap` (a CRD
+description gains the value). The retention report
+lists the set under `skipped`, and the CLI and runner fail operationally,
+naming the cap. Never a crash, never a pass.
+
+**Do:** nothing is required. Know the limit it makes visible. A 1.5.0 receipt
+is about 3.4 KB per topic, so a run that selects more than about **250–300 topics**
+(fewer with per-topic configuration overrides)
+writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
+is not a recovery point. Before this item, the controller's own handle verified
+it, and an evidence-fetch relay did not. This moves a verdict only to the safer
+side (OD-7's third case), and no signed format changes.
+**Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
+- the two fences, including a store whose meter shows no body byte was taken;
+- the version read;
+- `head`;
+- the streaming manifest fold, which answers what the old `Value` walk answered
+  over 39 bodies.
+
+Controller rows (`crates/weirkeeper/tests/read_caps.rs`):
+- an oversized receipt, sidecar, scorecard, signing-time re-read and manifest
+  each name the cap, while the signed fixture verifies;
+- in a child process, the five controller read paths over 512 MiB objects add
+  0 B of peak RSS, while a read under a cap far too large adds hundreds of MiB. Over a 16 MiB
+  manifest of tiny values, the streaming fold adds the bytes, while a
+  `serde_json::Value` of them adds 37 times their size.
+
+Check rows (`crates/logweir/tests/check_cli.rs`): the fetch, the probe, the
+catalog walk and the restore preflight read under their caps.
+
+The live row on compose slot 3 (MinIO) is recorded in
+`claude/fx-31.result.md` §5. The PoC upgrade repeats it on the controller
+image.
+**Rollback:** an older build reads whole objects again; nothing is stored
+differently. A final `NotAttempted` this build wrote for an oversized document
+is treated by an older controller as it treats any final `NotAttempted`.
+
+#### 53. One peer outside the trusted proxy holds at most 32 of the console's connections, and a request body must keep up 32 KiB a window (FX-24c) — required action
+
+**Changed.** Item 44 said that a client reading, or sending, one byte every
+thirty seconds keeps a console connection, so 256 of them could hold every
+connection (the FX-24b review measured "still open at 100 s" for one byte
+every twenty seconds). Re-measured on the built binary, that does not hold for
+a reader: the stall deadline ends one that reads one byte, or 16 KiB, every
+twenty seconds at 35.1 s, because the kernel stops taking an answer for a
+client that takes almost nothing. The review's probe read a byte at a time out
+of the half megabyte the kernel had buffered and never reached the
+end-of-stream behind it; re-run against item 44's binary it still prints
+"still open" while that server logs both connections ended at 35.1 s. What does
+keep a connection is a client that reads fast enough to keep the kernel taking
+its answer — one reading a steady 16 KiB/s kept its connection to the end of
+82 s of pipelined answers — and a signed-in client that sends its request body
+a byte at a time, until the sixty-second total. So:
+- **One peer's share.** In shared mode, once `trustedProxyService` or
+  `trustedProxyCidrs` names a proxy, any other peer — a pod dialling the
+  console's pod IP, a kubelet probe, a `kubectl port-forward` — may hold at
+  most **32** of the console's 256 connections at once
+  (`MAX_CONNECTIONS_PER_PEER`). Its next connection is closed as soon as it is
+  accepted, before anything is read, and the console logs `closed a connection
+  at once` (at most once every ten seconds). Holding all 256 now takes eight
+  addresses. The trusted proxy is never capped, because every browser behind
+  the ingress arrives from its address; with no trusted proxy configured — the
+  chart's default — nobody is capped, because the console cannot then tell its
+  ingress from any other peer; localAdmin mode has no cap.
+- **A body's floor.** A request body the console is reading must bring at
+  least **32 KiB in every thirty-second window** while it is still arriving
+  (`BODY_MIN_PROGRESS`). One that trickles a byte every twenty seconds is
+  answered `400 malformed_request` at thirty seconds, not sixty, with the
+  detail "The request body stopped arriving, or arrived too slowly, before it
+  was complete."; a body that ends inside its window is never cut, however
+  small. The `malformed_request` description in the OpenAPI document says so.
+- **The answer keeps item 44's stall.** A 32 KiB window on answers was built and
+  measured: the server sees a reader's progress only when the kernel lets it
+  write again, in bursts the size of a send buffer, and that window cut a steady
+  16 KiB/s reader at 32.5 s which the stall serves to the end.
+- **The chart requires the trusted proxy of a console it publishes.** With
+  `api.console.mode: shared` and `api.console.ingress.enabled: true`, the chart
+  refuses to render unless `api.console.trustedProxyService` (the ingress
+  controller's Service) or `api.console.trustedProxyCidrs` names the proxy, or
+  the new `api.console.trustedProxy: none` opts out by name — "api.console.
+  ingress.enabled in shared mode needs the trusted proxy named". `none` beside
+  a named proxy, any other value, and the key in localAdmin mode are refused.
+- **The start line says whether the cap is on.** `logweir-api started`
+  carries `per_peer_cap` (32, or 0 when off), and a shared console with no
+  trusted proxy warns at start that the cap is off.
+**Do:** before `helm upgrade`, a shared console the chart publishes through
+its Ingress names its trusted proxy — `api.console.trustedProxyService:
+{namespace, name}` of the ingress controller's Service (it also makes
+`/readyz` depend on reading that Service's EndpointSlices: [api.md](api.md),
+*The ingress controller by its Service*) — or opts out with
+`api.console.trustedProxy: none`; otherwise the upgrade's render fails, naming
+the value (Required operator actions, below). A shared console without the
+chart's Ingress is not refused, but set `trustedProxyService` there too:
+without a trusted proxy the per-peer share is off. If another proxy (an L7
+load balancer, a second ingress) carries many clients to the console's pods,
+name it too, or those clients share 32 connections; behind a service-mesh
+sidecar that re-originates every connection (Istio from `127.0.0.6`, Linkerd
+from `127.0.0.1`) every client is one peer, so name the sidecar's address or
+opt out. A wide `trustedProxyCidrs` range never caps anything inside it. An
+enforcing NetworkPolicy (`api.console.networkPolicy.enabled`) remains the bound
+on clients from many addresses ([api.md](api.md#conventions); [chart
+README](../charts/logweir/README.md)).
+**Scope:** rows on the built binary (`crates/logweir-api/tests/local_admin.rs`).
+In shared mode: one peer outside the trusted set holds 32 connections and its
+33rd is closed within two seconds, unanswered and logged, and a connection it
+drops gives a place back before its other connections' own ten-second
+deadline; a trusted proxy holds 40, and with no trusted proxy configured a
+peer holds 40, neither refused; and, at CI scale, 256 clients of one address
+of which exactly 32 are held and 224 closed (where the host can dial from
+`127.0.0.2`, Linux, a second address is answered at once). In localAdmin mode:
+a client reading one byte every twenty seconds is ended at the stall deadline
+(drained after the bound, short of its answers), and 256 of them, at CI scale,
+let a queued request through between 29 s and 45 s; a signed-in body sent a
+byte every twenty seconds is answered "arrived too slowly" and closed at
+thirty seconds; one that keeps 8 KiB every four seconds still runs to the
+sixty-second total. The floor and the cap are pinned at their call sites.
+Unit rows over the clock, the guards and the cap in `src/transport.rs`. The
+256-socket rows ran at eight and forty clients on the worker's host (the flood
+rule) and run at 256 in CI. Mutants, all killed: the body floor off (at the
+call site and in the clock), the window at 300 s, the cap off (served, and
+never reached), the trusted proxy capped, a cap with no trusted proxy, places
+that never come back, the cap off by one, IPv4-mapped peers counted apart, a
+window that outlives its operation, the 32 KiB floor on answers, a body floor
+of 1 MiB, and an output clock that restarts on every poll. The review's fix
+round added: a row that holds 32 connections each with its own
+`X-Forwarded-For` (four claiming the trusted range) and requires the 33rd,
+claiming the trusted proxy, to be closed unanswered (killing a cap re-keyed on
+the forwarded client); 240 sequential refusals after the first, each closed at
+once, before the place-back (killing a refusal that keeps its permit, which
+leaves the 224th unaccepted); the start line's `per_peer_cap` and warning, read
+by the cap rows; and the chart's refusal, opt-out, contradiction, localAdmin
+and enum rows in `scripts/check-chart.sh`, the FX-10 values row, and a
+`chart_lint` row over every values file that publishes a shared console (the
+PoC profile names Traefik's Service), each with its mutant killed. Live, the built
+binary on the host, before and after: in shared mode one peer outside the
+trusted proxy kept 32 of 40 connections and its 41st request was reset at
+once, with one warning logged (before: all 40 kept and the 41st answered); as
+the trusted proxy it kept all 40 on both builds; a body sent a byte every
+twenty seconds was answered at 30.0 s, "arrived too slowly" (before: at 60.0
+s, "not received within 60 seconds"); a reader of one byte, or of 16 KiB,
+every twenty seconds was ended at 35.1 s on both builds, and a steady 16 KiB/s
+reader completed in 82.0 s on both. The PoC upgrade that carries this item
+runs the per-peer probe against one console pod (it passed against this build
+on the host and failed against the one before it).
+**Rollback:** an older console caps no peer and reads a body a byte at a time
+until its sixty-second total; nothing is stored, so nothing needs converting.
+Remove `api.console.trustedProxy` from the values before rolling the chart back:
+an older chart's schema refuses the key it does not know.
+
+#### 54. A probe Job Kubernetes is collecting no longer clears `reachable`, and the probe's WARN lines stop (FX-19)
+
+**Changed.** The `KafkaCluster` probe re-reads its probe Job on every
+reconcile, and the TTL controller deletes a finished probe Job five minutes
+after it finished with foreground propagation: the Job gains a
+`metadata.deletionTimestamp`, its pod goes first, and the Job stays readable,
+finished and pod-less, until the pod is gone. The controller read that Job as
+a crashed probe, wrote `Reachable=Unknown` / `NoExitCode` and cleared
+`status.reachable` until the next probe answered. PoC batch 2 measured about
+17 s on one healthy connection, a window in which a `Restore` against it is
+refused `ClusterNotReachable` (item 26). The races around it — the pod gone by
+the log read, the Job gone by its TTL patch, and a status write preconditioned
+on an older copy of the object than the API server held — logged about twelve
+`KafkaCluster probe reconcile failed; requeueing` WARN lines per cadence for
+twelve connections, about 3,000 a day. Now:
+
+- a probe Job with a `deletionTimestamp` is not read at all and nothing is
+  written; the next probe is created once it is gone;
+- a finished probe Job that carries the controller's own marker — the
+  annotation `logweir.dev/probe-verdict-recorded` = the Job's UID, sent in the
+  same patch as its TTL and only after the status write that recorded its
+  verdict — is not re-judged when its pod is gone. A TTL alone is never the
+  marker: a Job that a mutating admission policy gave a TTL at creation is
+  still judged, and its TTL is overwritten with the five-minute re-probe timer;
+- `NotFound` on the pod log or the TTL patch and `Conflict` on a status write
+  are debug lines and ordinary outcomes, not reconcile errors, and a verdict
+  write that lost its precondition is never followed by its TTL; every other
+  error, a `404` or `409` from another call included, is still a WARN;
+- a crash, an unreadable probe log and a refused probe pod are logged at WARN
+  once per Job, on the pass whose write first recorded them.
+
+The last recorded verdict therefore stands until the next probe answers — **for
+at most 630 s** (twice the 315 s re-probe interval, the console's freshness
+budget). A probe Job stuck mid-deletion (a pod `Terminating` on a node that
+went away, a foreign finalizer) or judged and never collected keeps its fixed
+name, so no newer probe can run; once the reading is older than the bound,
+`reachable` is cleared with the new reason `ProbeStale` (`Reachable=Unknown`,
+`observedAt` and `clusterId` kept) and logged at WARN once, so a `Restore` or a
+rehearsal is refused `ClusterNotReachable` rather than admitted on a reading
+nobody repeated. The sweep of every other Job-owning controller (`Backup`,
+`Restore`, the catalog sync, retention, a `ProtectionPolicy` delivery,
+`Preflight` and `TopicDiscovery`; a `RehearsalSchedule` owns `Restore`s, not
+Jobs) found none that reads a collected Job: each records a Job's verdict
+before it gives the Job a TTL (the catalog sync's TTL, from creation, is at
+least an hour) and stops at that record before it reads a pod
+([kubernetes.md](kubernetes.md), *The crashed Job*).
+**Do:** nothing is required. A `KafkaCluster probe reconcile failed` WARN line
+now means a failure other than the collection of a probe Job; an alert that
+ignored the line for its noise can use it again. A connection that reads
+`ProbeStale` has a probe Job Kubernetes has not collected: look for a pod stuck
+`Terminating` or a finalizer on `logweir-probe-<name>`.
+**Scope:** controller rows over the fake API with the controller's log
+captured (`crates/weirkeeper/tests/kafka_cluster_controller.rs`, `fx19_*`): a
+probe Job being deleted, in four shapes (recorded with its pod gone or still
+terminating, deleted before any verdict, still running), costs one Job read,
+writes nothing and logs no WARN; a recorded verdict whose pod was collected
+writes nothing; a crashed Job created with a foreign TTL is judged and gets
+the TTL and the marker, a marker naming another UID is not this Job's, and a
+reading under a foreign day-long TTL keeps the five-minute cadence; a
+deletion stalled past the bound clears `reachable` (`ProbeStale`, one WARN
+over three passes) while one inside it is deferred and silent; a judged Job
+its TTL never collects is bounded the same way and is looked at again before
+the bound; a reading older than the bound is not written as a verdict, and a
+running probe clears a stale `reachable`; a `Restore` over the target the
+probe left is admitted inside the bound and refused `ClusterNotReachable`
+past it; the pod gone by the log read and the Job gone by its TTL patch are
+outcomes with no WARN, and a `500` on the log read is still an error; a `409`
+on a status write is an outcome on every write path, and a verdict's TTL is
+not patched after it (and is after a `200`); an `AlreadyExists` on the probe
+Job's `POST` is a reconcile error and a WARN; one whole probe cycle — the read
+Job re-read, its deletion with the pod terminating and then gone, a stale read
+of it, the next probe's creation, a `409` from a stale copy, the new probe
+running and then read — keeps `reachable: true` after every pass and logs no
+WARN. Negative controls: a real crash clears `reachable` and logs exactly one
+WARN over three passes; a refused probe pod, an unreadable log and a crash
+whose TTL patch failed log one WARN each over their passes. The class-sweep
+rows (`backup_controller.rs`, `restore_controller.rs`,
+`recovery_catalog_controller.rs`, `retention_policy_controller.rs`,
+`protection_controller.rs`, `fx19_*`) hand each other controller a Job in its
+being-collected shape and assert no write and no WARN, each with a control
+showing that the read its gate prevents is reachable. Forty-two mutants of the controller change, all
+killed: among them deletion read as a crash, a WARN on `NotFound` or
+`Conflict`, a `404` or a `409` propagated as an error, clearing on an
+already-recorded verdict, the marker read as "has a TTL", the staleness bound
+removed at the deferrals, at a re-read and at a running probe, a requeue that
+sleeps past it, a superseded write ignored on each of its ten paths, a WARN
+on every pass at each of five sites, and `error_policy` demoting what it is
+handed (three survived a first run and got their rows).
+Not proven live in this branch: the PoC upgrade that carries it watches every
+connection's `reachable` across fifteen minutes of probe cycles (it must never
+leave `true` on a healthy connection), checks that new probe Jobs carry no
+TTL before their verdict, records the longest any probe Job stays mid-deletion,
+and counts the controller's `KafkaCluster` WARN lines (about zero, against
+about twelve a cadence before).
+**Rollback:** an older controller brings the flap and the WARN lines back and
+drops the 630 s bound; the marker annotation it does not read is harmless,
+and nothing stored needs converting.
+
+#### 55. A sign-in state is single-use on each replica; a refused callback really clears the login cookie (FX-13a, FX-32)
+
+**Changed.** The login cookie is sealed and stateless and opens for 600
+seconds, and nothing recorded that its `state` had been used: anyone who kept
+a copy could drive `/auth/callback` again and again, and each callback was a
+token request to the provider authenticated as this console's client. Now,
+once the cookie has opened and its `state` matched and **before the code is
+exchanged**, the callback redeems the state in the console process's own
+record, in memory. A replay on the same replica — later, with another code,
+or racing the first — is refused `401 unauthenticated` ("This sign-in was
+already used. Start again at /auth/login.") with audit failure
+`login_state_replayed`, a warning, the login cookie cleared and **no token
+request**. Nothing is written to Kubernetes and the console's RBAC is
+unchanged. Across replicas the provider is the backstop: an authorization
+code is single-use (RFC 6749 §4.1.2), so a replay cannot obtain a second
+sign-in from a code the provider has exchanged. It costs one token request
+per replica, and again after that replica restarts or evicts the entry: the
+provider refuses it (`code_exchange_failed`), and that replica's record
+refuses it from then on. A code the provider has not consumed is not covered:
+when the first callback's exchange fails without the provider consuming the
+code, the same cookie and URL still sign in on another replica, exactly as
+before this change. The record holds 65,536 states per process; an entry is
+forgotten once its login state could no longer open and the entries redeemed
+before it have gone, or earlier when the record is full: then the oldest is
+forgotten, never a sign-in refused (audit note `usedSignInStates: full`, one
+warning a minute), and a replay of a forgotten state meets the same backstop.
+Separately (FX-32), the problem
+rendering kept only `Allow` from a handler's headers, so the callback's
+`Set-Cookie` clearing `__Host-logweir_login` on a refusal never reached the
+browser; every header now survives except those describing the replaced body
+and its caching ([api.md](api.md#sign-in)).
+**Do:** nothing is required. Alert on `login_state_replayed` (someone
+driving callbacks with a copied cookie) beside `code_exchange_failed`.
+**Scope:** rows through the whole router (`crates/logweir-api/tests/sign_in_state.rs`):
+a replay on one replica — the same code, another code, and 599 s later — is
+refused by name with no token request while the first callback signs in,
+against a provider double that would have accepted the code twice; two
+callbacks with one state at once on one replica, the provider taking 150 ms
+per token request, give one sign-in and one token request; with the provider
+double's codes single-use, a replay on a second console process reaches the
+token request once, is refused by the provider with no session, and is then
+refused by that process's record, and two callbacks at once on two processes
+give exactly one sign-in; a record shrunk to two forgets its oldest entries
+and still signs in every new login, announces it once, and a replay of a
+forgotten state meets the provider's refusal. Each row also asserts the
+callback made no Kubernetes write, and the replay and refused-exchange rows
+find no `state`, authorization code, nonce or sealed cookie in the console's
+logs. `tests/oidc_login.rs` drives seven
+callback refusals and reads the clearing `Set-Cookie` on the response the
+browser gets; unit rows hold what the rendering keeps and drops (the deny
+list's fifteen names are written out and pinned), the record's expiry,
+eviction and bound, and that of eight threads redeeming one state at once
+exactly one is first, 300 times over. Mutants, all killed: the record not
+consulted, the record written after the exchange, a check-then-write race, a
+check and a mark under two lock acquisitions, a
+full record that refuses, no eviction, eviction of the newest, no expiry, the
+eviction announced every time or not reported, a record keyed on the code or
+on nothing, one record shared by both processes, a replay warning that logs
+the authorization code, a refusal without the
+clear, the deny list losing `Cache-Control` or `Content-Length`, and the
+rendering dropping `Set-Cookie` again, keeping a short list,
+carrying the old body's headers or doubling its own.
+[UNVERIFIED — no PoC sign-in has replayed a callback URL against the deployed console yet; the PoC upgrade that carries this item does.]
+**Rollback:** an older console keeps no record (a copied cookie replays
+within its 600 s again, each replay a token request) and
+drops a refusal's `Set-Cookie` again; nothing is stored, so nothing needs
+converting.
+
+#### 56. A guard-refused Restore or Backup says why in its status (FX-34)
 
 **Changed.** When a `Restore`'s or a `Backup`'s runner exits 3, the `Failed`
 condition's message now ends with the runner's own reason code and sentence,
@@ -1826,6 +2196,12 @@ Statuses already written keep the text they have.
 
 In addition to the next entry's six, in its order:
 
+- **Before `helm upgrade`, name the trusted proxy of a shared console the
+  chart publishes** (item 53): with `api.console.mode: shared` and
+  `api.console.ingress.enabled: true`, set `api.console.trustedProxyService`
+  to the ingress controller's Service (or `api.console.trustedProxyCidrs` to
+  its pods' range), or `api.console.trustedProxy: none` to run without one
+  deliberately. Otherwise the upgrade's render fails, naming the value.
 - **Before the runner image rolls, read the plan preview of every `Enforce`
   `RetentionPolicy` with `requireApprovedPlan: false`**, or set it to `true`
   until you have read its first plan after the re-sync below: scheduled sets
@@ -1839,7 +2215,7 @@ In addition to the next entry's six, in its order:
   engine, as the next entry's step 6 already orders; a standalone CLI install
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
-  endpoint says `allow_http: true` (item 28). The same roll is what item 52
+  endpoint says `allow_http: true` (item 28). The same roll is what item 56
   needs: this controller gives every `Restore` and `Backup` Job a
   `--line-token` argument, and a runner image that predates the flag exits 1
   on it, so a `runnerImage` pinned to an older release must move with the
@@ -1891,7 +2267,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51 and 52, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55 and 56, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -1932,7 +2308,13 @@ item 51 changes the runner, the restore preview, both verifiers, the
 controller's `Restore` status (and the CRD's schema, additively), the product
 API, the console and the runner's notification, and needs nothing for a plan
 without a partition subset (an older runner refuses a subset plan, and an
-older verifier a subset scorecard); item 52 changes the runner, the
+older verifier a subset scorecard); item 52 changes the controller
+(and two CRD descriptions), the runner and the check Jobs and needs nothing; item 53 changes the console and
+the chart, and needs a shared console the chart publishes through its Ingress
+to name its trusted proxy (or set `api.console.trustedProxy: none`) before
+the upgrade renders; item 54 changes the controller
+only and needs nothing; item 55 changes the console
+only and needs nothing; item 56 changes the runner, the
 controller and the console's text, and needs the controller and the runner
 image rolled together, which item 28 already orders: this controller passes
 `--line-token` to every `Restore` and `Backup` Job, and a runner image that

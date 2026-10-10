@@ -780,7 +780,10 @@ fn backup(backup_id: &str, topics: &[&str], scram: bool) -> Backup {
     let catalog_key = line("catalog-key=");
     let store = archive_store(backup_id);
     let (receipt_bytes, _) = store
-        .get(&receipt_key)
+        .get_capped(
+            &receipt_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .unwrap_or_else(|e| panic!("read {receipt_key}: {e}"));
     let receipt: BackupReceipt = serde_json::from_slice(&receipt_bytes).expect("a receipt");
     Backup {
@@ -814,7 +817,7 @@ fn catalog_record(b: &Backup) -> Value {
         return Value::Null;
     };
     let (bytes, _) = archive_store(&b.backup_id)
-        .get(key)
+        .get_capped(key, logweir_engine_oso::storage::caps::SIGNED_DOCUMENT)
         .unwrap_or_else(|e| panic!("read {key}: {e}"));
     serde_json::from_slice(&bytes).expect("a catalog record")
 }
@@ -827,7 +830,10 @@ fn verify_receipt_both_readers(b: &Backup) -> Value {
     let sig = dir.join("receipt.sig");
     std::fs::write(&doc, &b.receipt_bytes).expect("written");
     let (sidecar, _) = archive_store(&b.backup_id)
-        .get(&b.receipt_key.replace(".receipt.json", ".receipt.sig"))
+        .get_capped(
+            &b.receipt_key.replace(".receipt.json", ".receipt.sig"),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the sidecar");
     std::fs::write(&sig, sidecar).expect("written");
     let pubkey = root().join("e2e/fixtures/signed/public.pem");
@@ -2063,7 +2069,10 @@ fn fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt() {
         .as_ref()
         .map(|v| (v.value.clone(), v.source.clone()));
     let (manifest_bytes, _) = archive_store(&b.backup_id)
-        .get(&b.receipt.archive.manifest_key)
+        .get_capped(
+            &b.receipt.archive.manifest_key,
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
         .expect("the manifest");
     let manifest: Value = serde_json::from_slice(&manifest_bytes).expect("the manifest is JSON");
     let manifest_configurations = manifest["topics"]

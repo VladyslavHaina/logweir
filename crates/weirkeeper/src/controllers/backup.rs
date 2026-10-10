@@ -117,7 +117,7 @@ use crate::verification::{
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
-use logweir_store::Store;
+use logweir_store::{caps, Store};
 
 /// `ttlSecondsAfterFinished`, **patched on after the status write** and never
 /// set at creation time.
@@ -2501,7 +2501,7 @@ pub struct ArchiveObservation {
 ///
 /// # WHY IT IS ASYNC, AND WHY THAT IS NOT DECORATION
 ///
-/// `Store::get` is a **blocking** method that drives its own current-thread
+/// `Store::get_capped` is a **blocking** method that drives its own current-thread
 /// runtime, and `kube` drives every reconciler ON a runtime: a direct call
 /// COMPILES CLEANLY and panics with *Cannot start a runtime from within a
 /// runtime* at the first reconcile. So every `Store` call in this crate goes
@@ -2560,10 +2560,15 @@ pub fn unobserved_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<Arch
 /// [`ArchiveOracle`]): two round trips against the same bucket for two facts
 /// that are decided together, rather than two hops on and off the runtime.
 ///
-/// `Store` EXPOSES NO `head`, so presence is "a `get` that returned bytes".
-/// That is strictly more work than a `HEAD` for the sidecar, whose bytes are
-/// discarded — and it is the only capability the read-only handle has. The
-/// receipt's bytes are needed anyway, for `covered`.
+/// **FX-31: the sidecar's presence is a `HEAD`, and the receipt is read
+/// under `caps::CONTROLLER_DOCUMENT`.** Presence needs no byte of the
+/// sidecar, and reading a whole object to discard it is exactly the unbounded
+/// read FX-31 ends: a tenant's multi-gigabyte object at the sidecar key cost
+/// this shared process its whole size, on every pass and every restart. The
+/// receipt's bytes are needed for `covered`; one over the cap is PRESENT (the
+/// store answered with its size) and unread, so `covered`, `records`,
+/// `capture` and `receipt_sha256` are not observed, and the verifier's own
+/// capped read names the cap in the verdict.
 ///
 /// The two booleans are INDEPENDENT, because the whole point of the exit-4
 /// check is the asymmetric case: a payload that exists without its sidecar.
@@ -2578,15 +2583,25 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     if keys.receipt.is_none() && keys.sidecar.is_none() {
         return None;
     }
-    let receipt = keys
-        .receipt
-        .as_deref()
-        .and_then(|key| store.get(key).ok())
-        .map(|(bytes, _version)| bytes);
+    // Out of the controller's one read budget (FX-31 review F2): the receipt
+    // and the `Value` parsed from it below are held under this reservation.
+    let _reservation = keys.receipt.as_ref().map(|_| {
+        crate::read_budget::ReadBudget::controller()
+            .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
+    });
+    let (receipt, payload) = match keys.receipt.as_deref() {
+        None => (None, false),
+        Some(key) => match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {
+            Ok((bytes, _version)) => (Some(bytes), true),
+            // There, and over the cap: present, and not read.
+            Err(logweir_store::StoreError::TooLarge { .. }) => (None, true),
+            Err(_) => (None, false),
+        },
+    };
     let sidecar = keys
         .sidecar
         .as_deref()
-        .is_some_and(|key| store.get(key).is_ok());
+        .is_some_and(|key| store.head(key).is_ok());
     let document = receipt
         .as_deref()
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
@@ -2599,10 +2614,7 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     // observation is never published as a fallback claim.
     let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
     Some(ArchiveObservation {
-        presence: EvidencePresence {
-            payload: receipt.is_some(),
-            sidecar,
-        },
+        presence: EvidencePresence { payload, sidecar },
         covered,
         receipt_sha256,
         records,
@@ -6112,7 +6124,7 @@ async fn reconcile_with_trust(
                         crate::verification::SigningTime::NotNeeded
                     }
                     // THE BACKOFF SHORT-CIRCUITS BEFORE `evidence_source`, so a
-                    // deferred pass costs neither a `Store::get` NOR the
+                    // deferred pass costs neither a `Store::get_capped` NOR the
                     // destination read that resolving the handle would need.
                     crate::verification::ReadPlan::Deferred => {
                         crate::verification::SigningTime::Deferred

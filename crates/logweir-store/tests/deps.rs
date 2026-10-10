@@ -77,6 +77,7 @@ fn logweir_store_depends_on_nothing_oso() {
         "futures",
         "logweir-core",
         "object_store",
+        "serde",
         "serde_json",
         "thiserror",
         "tokio",
@@ -87,8 +88,9 @@ fn logweir_store_depends_on_nothing_oso() {
     assert_eq!(
         deps, expected,
         "logweir-store's declared dependency set changed. `serde_json` is REQUIRED \
-         (the untyped `serde_json::Value` reads in `segments_in_manifest` and \
-         `manifest_facts`); `tracing` is deliberately ABSENT and cannot be \
+         (the untyped `serde_json::Value` read in `segments_in_manifest` and the \
+         streaming parse in `manifest_facts`), and so is `serde` (FX-31: that \
+         parse's `Visitor` traits); `tracing` is deliberately ABSENT and cannot be \
          inherited. Adding a dependency here is a reviewable event: change this \
          list in the same commit and say why."
     );
