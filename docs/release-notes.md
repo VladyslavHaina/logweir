@@ -1768,11 +1768,12 @@ the readiness probe and the backup set check GET with a 0-byte cap. The caps:
 - The controller reads a receipt or scorecard under **1 MiB** and a sidecar
   under **64 KiB**. These are the evidence relay's own caps, so a document is
   verifiable through the controller's handle exactly when a relay can carry
-  it.
+  it. (Since item 56 a backup receipt is read under 5,131,072 bytes.)
 - The controller's retention report reads a manifest under 64 MiB, folded as
   it streams, never as a tree.
 - Runner, CLI and check Jobs read documents under 64 MiB, manifests under
-  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB.
+  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB
+  (item 56 replaces it with a cap for each document).
 - The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
   it relayed a prefix the controller refused anyway).
 - Concurrent controller reads share ONE 128 MiB budget, a quarter of the
@@ -1794,7 +1795,9 @@ is about 3.4 KB per topic, so a run that selects more than about **250–300 top
 writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
 is not a recovery point. Before this item, the controller's own handle verified
 it, and an evidence-fetch relay did not. This moves a verdict only to the safer
-side (OD-7's third case), and no signed format changes.
+side (OD-7's third case), and no signed format changes. **Item 56 lifts this
+limit**: a backup receipt has its own cap, 5,131,072 bytes, and one backup
+names at most 1,000 topics.
 **Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
 - the two fences, including a store whose meter shows no body byte was taken;
 - the version read;
@@ -2179,7 +2182,25 @@ bytes of pod log under the 8 MiB the controller reads; and, in child
 processes, the memory figures above with a control beside each. The
 controller's reconcilers verify a relayed 500-topic receipt and refuse a
 5 MiB relay where a scorecard is expected.
-[UNVERIFIED — no cluster has run this build: the controller, API and console rows are unit and mock-cluster rows, and the live row is the runner's on the compose stack. The PoC upgrade that carries this item runs the controller's.]
+
+Live row (`e2e/tests/topic_budget.rs`, compose stack, Logweir's engine build
+`0.23.3+logweir.2` from the runner image): one `logweir backup run` of 500
+one-partition topics, 188 of them with real overrides, took 16 s and signed a
+receipt of 1,650,142 bytes (3,300 a topic) and a record of 1,691,726 bytes.
+`catalogSync` over the real store listed the point `Available` with its
+signature verified. `evidenceFetch` relayed the receipt whole in 2,234,101
+bytes of log, and relayed nothing when asked under the old 1 MiB. Both
+verifiers accepted the receipt. The controller's verification code, run over
+those bytes outside a cluster
+(`the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller`),
+answered `Valid` through its own handle and through a relay, and
+`NotAttempted` under the old cap. A point-bound `newTopic` restore of all 500
+topics under a prefix passed in 526 s; its scorecard is 133,861 bytes, both
+verifiers accept it, every restored topic holds its source's records, and the
+receipt's recorded configuration was judged for every topic (nothing is
+`not_assessed`). A `newTopic` restore does not apply a source's overrides: it
+signs them as not reconstructed (172 here), as before this item.
+[UNVERIFIED — no cluster has run this build: the controller, API and console rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
 **Rollback:** an older runner accepts larger selections again and an older
 controller reads a receipt under 1 MiB again; nothing is stored differently.
 An older controller skips a catalog entry that carries `factsFrom` (it has no
