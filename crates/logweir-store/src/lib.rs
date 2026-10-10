@@ -662,10 +662,7 @@ impl Store {
                 .inner
                 .get(&OPath::from(key))
                 .await
-                .map_err(|e| match e {
-                    object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
-                    other => StoreError::Io(format!("{key}: {other}")),
-                })?;
+                .map_err(|e| not_found_or_io(key, e))?;
             let vid = match &self.versions {
                 // The test double's version log: see `versions`.
                 Some(log) => log.current(key),
@@ -699,10 +696,7 @@ impl Store {
         let rt = &self.rt;
         rt.block_on(async {
             let path = OPath::from(key);
-            let not_found_or_io = |e: object_store::Error| match e {
-                object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
-                other => StoreError::Io(format!("{key}: {other}")),
-            };
+            let not_found_or_io = |e: object_store::Error| not_found_or_io(key, e);
             let read = async {
                 let size = self.inner.head(&path).await.map_err(not_found_or_io)?.size;
                 if size > max_bytes {
@@ -2077,6 +2071,12 @@ fn backend_name(u: &StorageUrl) -> &'static str {
 fn version_read_error(key: &str, version: &str, error: object_store::Error) -> StoreError {
     let at = format!("{key}?versionId={version}");
     match error {
+        // C6: a 404 that is about the credential is not an absence.
+        object_store::Error::NotFound { ref source, .. }
+            if refuses_the_credential(&source.to_string()) =>
+        {
+            StoreError::Io(format!("{at}: {error}"))
+        }
         object_store::Error::NotFound { .. } => StoreError::NotFound(at),
         object_store::Error::Generic { ref source, .. }
             if names_a_version_never_issued(&source.to_string()) =>
@@ -2084,6 +2084,39 @@ fn version_read_error(key: &str, version: &str, error: object_store::Error) -> S
             StoreError::NotFound(at)
         }
         other => StoreError::Io(format!("{at}: {other}")),
+    }
+}
+
+/// **C6: whether a 404's own text says the CREDENTIAL was refused**, not that
+/// the object is absent.
+///
+/// `object_store` maps every HTTP 404 to `Error::NotFound`, and S3 answers an
+/// unknown access key id with 403 `InvalidAccessKeyId`, so on S3, MinIO,
+/// SeaweedFS and RustFS a 404 is always about the object. versitygw answers
+/// an unknown key id with `404 XAdminUserNotFound` (measured on v1.8.0,
+/// PROD-01.5 §3.1). Read as an absence, that turned "this credential is
+/// wrong" into "this receipt, manifest or segment does not exist": a missing
+/// backup set, an empty catalog, a point reported gone.
+///
+/// The decision is [`classify_text`]'s, so a credential code the classifier
+/// learns is honoured here with no second list.
+fn refuses_the_credential(source: &str) -> bool {
+    classify_text(source) == StoreErrorClass::InvalidCredentials
+}
+
+/// A read's failure as [`StoreError`]: `NotFound` for a 404 about the object,
+/// `Io` for everything else, **including a 404 about the credential** (C6,
+/// [`refuses_the_credential`]). `Io` keeps the store's text, so
+/// [`StoreErrorClass::classify`] names it `InvalidCredentials`.
+fn not_found_or_io(key: &str, error: object_store::Error) -> StoreError {
+    match error {
+        object_store::Error::NotFound { ref source, .. }
+            if refuses_the_credential(&source.to_string()) =>
+        {
+            StoreError::Io(format!("{key}: {error}"))
+        }
+        object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
+        other => StoreError::Io(format!("{key}: {other}")),
     }
 }
 
@@ -2187,9 +2220,12 @@ impl StoreErrorClass {
             object_store::Error::NotFound { source, .. } => {
                 // A `NoSuchBucket` arrives as NotFound too, and "the bucket is
                 // not there" is a different remedy from "the key is not
-                // there".
+                // there". So does a credential refusal on a store that
+                // answers one with 404 (C6, `refuses_the_credential`).
                 let text = source.to_string();
-                if text.contains("NoSuchBucket") || text.contains("bucket does not exist") {
+                if refuses_the_credential(&text) {
+                    Self::InvalidCredentials
+                } else if text.contains("NoSuchBucket") || text.contains("bucket does not exist") {
                     Self::BucketNotFound
                 } else {
                     Self::ObjectNotFound
@@ -2237,13 +2273,22 @@ fn classify_text(text: &str) -> StoreErrorClass {
         return StoreErrorClass::TlsTrustFailed;
     }
 
-    const CREDENTIAL: [&str; 6] = [
+    // C6 (PROD-01.5, closed by PROD-01.2): `xadminusernotfound` is versitygw's
+    // code for an access key id it does not know, answered with **404**
+    // (measured on v1.8.0: `404 Not Found: … <Code>XAdminUserNotFound</Code>
+    // <Message>No user exists with the provided access key ID.`). It is a
+    // credential answer, and it must be matched HERE, before the not-found
+    // tokens below: its text carries "404 Not Found: ", so without this entry
+    // an unknown key id read as "the object is not there" and sent an operator
+    // to the prefix instead of to the credential.
+    const CREDENTIAL: [&str; 7] = [
         "invalidaccesskeyid",
         "signaturedoesnotmatch",
         "expiredtoken",
         "tokenrefreshrequired",
         "invalidsecurity",
         "lacked valid authentication credentials",
+        "xadminusernotfound",
     ];
     if CREDENTIAL.iter().any(|t| lower.contains(t)) {
         return StoreErrorClass::InvalidCredentials;
@@ -2400,6 +2445,84 @@ mod version_read_tests {
         };
         assert!(matches!(
             version_read_error(KEY, "v", e),
+            StoreError::NotFound(_)
+        ));
+    }
+
+    /// versitygw v1.8.0's answer to an unknown access key id, as `object_store`
+    /// carries it (the text is PROD-01.5's recorded run, request id removed).
+    const VERSITYGW_UNKNOWN_KEY: &str = "Server returned non-2xx status code: 404 Not Found: \
+        <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code>\
+        <Message>No user exists with the provided access key ID.</Message></Error>";
+
+    fn not_found(source: &str) -> object_store::Error {
+        object_store::Error::NotFound {
+            path: KEY.to_string(),
+            source: source.to_string().into(),
+        }
+    }
+
+    /// **C6: a 404 about the credential is never an absence**, at each of the
+    /// three places a read turns `object_store`'s `NotFound` into ours: a
+    /// plain read, a bounded read (both through `not_found_or_io`) and a read
+    /// by version id.
+    ///
+    /// CONTROL, in the same test: a genuine `404 NoSuchKey` and a genuine
+    /// `404 NoSuchVersion` stay `NotFound`, so the rule is about the code and
+    /// not about every 404.
+    ///
+    /// Mutant: drop `xadminusernotfound` from the classifier's credential
+    /// tokens and all three credential arms answer `NotFound`.
+    #[test]
+    fn a_404_that_refuses_the_credential_is_never_not_found() {
+        for (site, e) in [
+            ("a read", not_found_or_io(KEY, not_found(VERSITYGW_UNKNOWN_KEY))),
+            (
+                "a read by version id",
+                version_read_error(KEY, "v", not_found(VERSITYGW_UNKNOWN_KEY)),
+            ),
+        ] {
+            match &e {
+                StoreError::Io(message) => {
+                    assert!(message.contains("XAdminUserNotFound"), "{site}: {message}");
+                    assert_eq!(
+                        StoreErrorClass::classify(&e),
+                        StoreErrorClass::InvalidCredentials,
+                        "{site}: the class an operator is shown"
+                    );
+                }
+                other => panic!("{site}: a refused credential must be Io, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(VERSITYGW_UNKNOWN_KEY)),
+            StoreErrorClass::InvalidCredentials
+        );
+
+        // CONTROL: a 404 about the object.
+        let no_such_key = "Server returned non-2xx status code: 404 Not Found: <Error><Code>\
+                           NoSuchKey</Code><Message>The specified key does not exist.</Message>\
+                           </Error>";
+        assert!(matches!(
+            not_found_or_io(KEY, not_found(no_such_key)),
+            StoreError::NotFound(_)
+        ));
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(no_such_key)),
+            StoreErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            StoreErrorClass::classify_object_store(&not_found(
+                "404 Not Found: <Error><Code>NoSuchBucket</Code></Error>"
+            )),
+            StoreErrorClass::BucketNotFound
+        );
+        assert!(matches!(
+            version_read_error(
+                KEY,
+                "v",
+                not_found("404 Not Found: <Error><Code>NoSuchVersion</Code></Error>")
+            ),
             StoreError::NotFound(_)
         ));
     }

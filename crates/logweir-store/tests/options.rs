@@ -880,7 +880,21 @@ fn the_new_constructors_do_not_widen_the_write_surface() {
 #[test]
 fn the_classifier_table() {
     use StoreErrorClass as C;
-    let cases: [(&str, C); 14] = [
+    let cases: [(&str, C); 16] = [
+        // C6: versitygw v1.8.0's answer to an unknown access key id, as
+        // PROD-01.5 recorded it from a LIST (request and host ids removed).
+        // A 404, and a credential problem: it must not reach the not-found
+        // tokens its own "404 Not Found: " would match.
+        (
+            "Generic S3 error: Error performing list request: Error performing GET http://localhost:19130/kafka-backups?list-type=2 in 1.7745ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code><Message>No user exists with the provided access key ID.</Message></Error>",
+            C::InvalidCredentials,
+        ),
+        // ...and its NEGATIVE CONTROL: the same 404 shape about a key stays
+        // not-found.
+        (
+            "Generic S3 error: Error performing GET http://localhost:19130/kafka-backups/k in 1.2ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>",
+            C::ObjectNotFound,
+        ),
         (
             "Generic S3 error: Error performing GET https://minio:9000/b/k: response error \"<?xml version=\\\"1.0\\\"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>\", after 0 retries: HTTP status client error (403 Forbidden)",
             C::AccessDenied,
