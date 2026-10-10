@@ -65,7 +65,7 @@ use logweir_core::destination::DestinationRole;
 use crate::catalog_view::{self as view, PageConflict, SyncTrigger, TrustView, ViewLimits};
 use crate::check::{self, CheckPhase};
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
-use crate::crds::recovery_catalog::{LastSyncJob, RecoveryCatalog, SyncCursor};
+use crate::crds::recovery_catalog::{LastSyncJob, RecoveryCatalog, SyncCursor, SyncMode};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError};
 use crate::job::RunnerOwner;
@@ -1238,6 +1238,16 @@ impl Pass<'_> {
             )
         };
 
+        // A RESUMED FULL RESCAN LISTED ONLY THE KEYS AFTER ITS CURSOR, so its
+        // view is the archive's tail, never the whole (FX-40 review D1).
+        let resumed = self.catalog.spec.sync.mode == SyncMode::Full
+            && self
+                .catalog
+                .status
+                .as_ref()
+                .and_then(|s| s.cursor.as_ref())
+                .is_some_and(|c| c.rescan_start_after.is_some());
+        let truncated = materialised.truncated || resumed;
         let expires_at = view::view_expires_at(finished_at, self.interval());
         let mut status = json!({
             "observedGeneration": self.generation(),
@@ -1249,7 +1259,7 @@ impl Pass<'_> {
                 complete: Some(complete),
             },
             "counts": tally.counts,
-            "truncated": materialised.truncated,
+            "truncated": truncated,
             "histogram": view::histogram(&counts),
             "signers": signers,
             "pages": materialised
@@ -1287,7 +1297,7 @@ impl Pass<'_> {
             synced_reason,
             pages: materialised.pages.len(),
             entries: materialised.entries,
-            truncated: materialised.truncated,
+            truncated,
             job_name: Some(job_name),
         })
     }

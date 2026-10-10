@@ -281,6 +281,16 @@ fn counts_value(total: i64, available: i64) -> Value {
 }
 
 fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool) -> String {
+    body_with_cursor(
+        pages,
+        counts,
+        signers,
+        json!({"indexShard": "2026/09/16", "complete": complete}),
+    )
+}
+
+/// [`body_for`] with the runner's cursor line spelled by the caller.
+fn body_with_cursor(pages: &[Vec<Value>], counts: Value, signers: Value, cursor: Value) -> String {
     let mut out = format!(
         "{}{}\n",
         view::FORMAT_LINE_PREFIX,
@@ -295,11 +305,7 @@ fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool)
         ));
     }
     out.push_str(&format!("{}{counts}\n", view::COUNTS_LINE_PREFIX));
-    out.push_str(&format!(
-        "{}{}\n",
-        view::CURSOR_LINE_PREFIX,
-        json!({"indexShard": "2026/09/16", "complete": complete})
-    ));
+    out.push_str(&format!("{}{cursor}\n", view::CURSOR_LINE_PREFIX));
     out.push_str(&format!("{}{signers}\n", view::SIGNERS_LINE_PREFIX));
     out
 }
@@ -4327,4 +4333,188 @@ fn a_schema_dependency_over_its_id_or_side_cap_is_a_malformed_entry() {
         assert_eq!(parsed.skipped_entries, 1, "{what}");
         assert_eq!(parsed.pages[0].skipped, 1, "{what}");
     }
+}
+
+// ===========================================================================
+// FX-40 review D1: a resumed Full rescan is the archive's tail, not the whole
+// ===========================================================================
+
+/// A runner entry for point `i` of a Full walk, in its own backup set.
+fn full_entry(i: usize) -> Value {
+    let mut entry = ok_entry(
+        &format!("lwp1-{i:032}"),
+        1_758_000_000_000 - i64::try_from(i).expect("small") * 3_600_000,
+    );
+    entry["backupId"] = json!(format!("set-{i}"));
+    entry["manifestKey"] = json!(format!("team-a/set-{i}/manifest.json"));
+    entry
+}
+
+/// One harvest of a `mode: Full` catalog (`maxObjectsPerRun: 1000`) whose
+/// status in hand carries `cursor_in_hand`, over the runner's `entries` and
+/// its cursor line. Returns the published status and the page `ConfigMap`s.
+async fn full_harvest(
+    cursor_in_hand: Option<Value>,
+    entries: &[Value],
+    cursor: Value,
+) -> (Value, Vec<Value>) {
+    let total = i64::try_from(entries.len()).expect("small");
+    let body = body_with_cursor(
+        &[entries.to_vec()],
+        counts_value(total, total),
+        json!([{"keyId": TRUSTED_KEY, "points": total, "principalHint": "runner"}]),
+        cursor,
+    );
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    let mut status = tracked_status(&periodic_stem());
+    if let Some(cursor) = cursor_in_hand {
+        status["cursor"] = cursor;
+    }
+    let spec = json!({"sync": {"intervalSeconds": 3600, "mode": "Full",
+        "maxObjectsPerRun": 1000, "deepCheck": "ManifestDigest", "viewLimit": 2000}});
+    run(&f, &catalog(spec.clone(), status)).await;
+    (
+        f.patched_status()["status"].clone(),
+        f.posted("/configmaps"),
+    )
+}
+
+/// The `Enforced` reason of one `Enforce` retention pass over the catalog that
+/// published `status` and `pages`, the points it evaluated, and the methods it
+/// sent. No digest is
+/// approved, so no pass creates a Job; the reason says which gate stopped it
+/// (`fx40_` in `retention_policy_controller.rs` approve one).
+async fn retention_over(status: &Value, pages: &[Value]) -> (String, Value, Vec<String>) {
+    use weirkeeper::controllers::retention_policy as retention;
+    let catalog_body = catalog_value(json!({}), status.clone()).to_string();
+    let list = |kind: &str| {
+        json!({"apiVersion": "v1", "kind": format!("{kind}List"),
+               "metadata": {"resourceVersion": "1"}, "items": []})
+        .to_string()
+    };
+    let policy = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RetentionPolicy",
+        "metadata": {"name": "retain", "namespace": NS,
+                     "uid": "16161616-0000-4000-8000-000000000016",
+                     "generation": 1, "resourceVersion": "9"},
+        "spec": {
+            "destinationRef": {"name": DEST}, "catalogRef": {"name": NAME},
+            "scope": {"prefix": "team-a"},
+            "rules": {"keepLast": 2, "minUsablePoints": 3},
+            "mode": "Enforce",
+            "enforcement": {"credentialSecretRef": {"name": "retention-delete"},
+                "schedule": "17 4 * * *", "requireApprovedPlan": true,
+                "planMaxAgeSeconds": 3600, "maxDeletionsPerRun": 50,
+                "maxObjectsPerRun": 20000, "deadlineSeconds": 1800}
+        },
+        "status": {}
+    });
+    let mut routes = vec![
+        route("GET", "/retentionpolicies", list("RetentionPolicy")),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("GET", "/recoverycatalogs/primary", catalog_body),
+        route("GET", "/backups", list("Backup")),
+        route("GET", "/restores", list("Restore")),
+        route(
+            "PATCH",
+            "/retentionpolicies/retain/status",
+            policy.to_string(),
+        ),
+    ];
+    for page in pages {
+        let name = page["metadata"]["name"].as_str().expect("a page name");
+        let suffix: &'static str = Box::leak(format!("/configmaps/{name}").into_boxed_str());
+        routes.push(route("GET", suffix, page.to_string()));
+    }
+    let f = fixture(routes);
+    let installation = check::policy::Policy::defaults();
+    let image = RunnerImage::default();
+    let outcome = retention::reconcile_policy(
+        &serde_json::from_value(policy).expect("a RetentionPolicy"),
+        &retention::PolicyContext {
+            client: &f.client,
+            policy: &installation,
+            runner_image: &image,
+            now: now(),
+        },
+    )
+    .await
+    .expect("the retention pass reaches a verdict");
+    let evaluated = f
+        .bodies
+        .lock()
+        .expect("the body recorder")
+        .iter()
+        .filter(|b| b.method == "PATCH")
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("JSON"))
+        .find_map(|p| {
+            p["status"]["lastEvaluation"]
+                .get("pointsEvaluated")
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    let methods = f.seen().into_iter().map(|(m, _)| m).collect();
+    (outcome.enforced_reason.to_string(), evaluated, methods)
+}
+
+/// **A `mode: Full` catalog whose walk its budget stops (`maxObjectsPerRun:
+/// 1000`, about 199 points of a 300-point archive) is refused by an `Enforce`
+/// retention policy on the budget-stopped sync AND on the resumed one.** The
+/// resumed sync lists only the keys after its cursor and reaches the end, so
+/// its walk is `complete` and its 101 points fit `viewLimit`; it published
+/// that tail with `truncated: false`, and the run guard let a run start on
+/// 101 of 300 points. It is now published as a window.
+///
+/// CONTROL: a Full walk that finishes in one sync (no cursor in hand) is not
+/// a window, and the run guard passes it.
+///
+/// MUTANT: `"truncated": materialised.truncated` (the resumed flag dropped).
+#[tokio::test]
+async fn fx40_a_resumed_full_rescan_is_a_window_and_starts_no_run() {
+    let head: Vec<Value> = (0..199).map(full_entry).collect();
+    let tail: Vec<Value> = (199..300).map(full_entry).collect();
+    let cursor_key = "logweir/backups/set-198/r.receipt.json";
+
+    let (stopped, stopped_pages) = full_harvest(
+        None,
+        &head,
+        json!({"rescanStartAfter": cursor_key, "complete": false}),
+    )
+    .await;
+    assert_eq!(stopped["cursor"]["complete"], false);
+    assert_eq!(stopped["cursor"]["rescanStartAfter"], cursor_key);
+    let (reason, evaluated, methods) = retention_over(&stopped, &stopped_pages).await;
+    assert_eq!(reason, "ViewIncomplete", "the budget-stopped sync");
+    assert_eq!(evaluated, 199, "the evaluation is still published");
+    assert!(!methods.iter().any(|m| m == "POST"), "{methods:?}");
+
+    let (resumed, resumed_pages) = full_harvest(
+        Some(stopped["cursor"].clone()),
+        &tail,
+        json!({"complete": true}),
+    )
+    .await;
+    assert_eq!(resumed["cursor"]["complete"], true);
+    assert_eq!(resumed["counts"]["total"], 101, "the tail alone");
+    assert_eq!(resumed["truncated"], true, "the tail is a window");
+    let (reason, evaluated, methods) = retention_over(&resumed, &resumed_pages).await;
+    assert_eq!(reason, "ViewIncomplete", "the resumed sync");
+    assert_eq!(evaluated, 101);
+    assert!(!methods.iter().any(|m| m == "POST"), "{methods:?}");
+
+    // CONTROL: the same 300 points in one sync.
+    let all: Vec<Value> = (0..300).map(full_entry).collect();
+    let (whole, whole_pages) = full_harvest(None, &all, json!({"complete": true})).await;
+    assert_eq!(whole["truncated"], false);
+    let (reason, evaluated, _) = retention_over(&whole, &whole_pages).await;
+    assert_eq!(evaluated, 300);
+    assert_eq!(
+        reason, "NothingToDo",
+        "past the view gate, stopped by the cadence (04:17 is older than planMaxAgeSeconds)"
+    );
 }
