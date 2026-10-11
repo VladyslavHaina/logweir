@@ -3726,13 +3726,17 @@ console and the chart, and needs nothing until a namespace is bound
 `two-person`; item 67 changes the
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
-transaction markers; items 69 and 71 change the runner and the controller and
-need nothing, in either order; item 70 changes the console only; item 72
-changes only how the repository is tested and needs nothing; item 73
-removes a kind, a route and a flag, and leaves the `RehearsalSchedule` CRD for
-the operator to delete; item 74 withdraws what its own section lists; item 75
-changes the product API, the console, the chart and the published image set,
-and needs any `ui` block removed from values files first; item 76 changes no image, and a bundle
+transaction markers; item 68 changes the runner, the controller and both
+verifiers, and needs nothing: an older runner fails a backup of an emptied
+source exit 1 again, the receipts already signed keep verifying, and an older
+verifier refuses an empty capture's receipt, the safer verdict; items 69 and
+71 change the runner and the controller and need nothing, in either order;
+item 70 changes the console only; item 72 changes only how the repository is
+tested and needs nothing; item 73 removes a kind, a route and a flag, and
+leaves the `RehearsalSchedule` CRD for the operator to delete; item 74
+withdraws what its own section lists; item 75 changes the product API, the
+console, the chart and the published image set, and needs any `ui` block
+removed from values files first; item 76 changes no image, and a bundle
 install moves to the chart once. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
