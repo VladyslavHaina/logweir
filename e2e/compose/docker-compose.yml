@@ -43,6 +43,8 @@ networks:
 volumes:
   minio-data:
   objectstore-data:
+  rustfs-data:
+  versitygw-data:
 
 services:
   kafka-broker-1:
@@ -336,7 +338,9 @@ services:
   # --- profile `auth`: PLAIN over TLS, SCRAM-SHA-256 and mTLS listeners -------
   # (PROD-01.3 extends it: SCRAM-SHA-256 also on the TLS listener, the marker
   # topic `logweir.scratch` so a drill can restore into this cluster, and a
-  # self-signed `wrong-client` identity for the mTLS refusal row.)
+  # self-signed `wrong-client` identity for the mTLS refusal row. PROD-01.2a
+  # adds SCRAM512TLS: SCRAM-SHA-512 over TLS and nothing else, the shape of
+  # Amazon MSK's SASL/SCRAM endpoint.)
   # A SEPARATE single-node cluster (its own CLUSTER_ID) so the default broker's
   # five listeners, which the whole suite depends on, never change. Clients
   # reach it from the HOST (or through e2e/fixtures/engine-docker.sh, which
@@ -373,6 +377,7 @@ services:
       - "${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102}:9102"
       - "${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103}:9103"
       - "${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}:9104"
+      - "${LOGWEIR_E2E_AUTH_SCRAM512_TLS_PORT:-9105}:9105"
     # Its CLUSTER_ID, one per stack (PROD-01.5): never in `environment:`, which
     # would override the file. REQUIRED, so a project with no ids of its own
     # fails to start instead of sharing another stack's.
@@ -389,18 +394,22 @@ services:
       # configure script demands its own keystore-credential files when an
       # advertised listener name contains either, and these listeners are
       # configured directly instead.
-      KAFKA_LISTENERS: PLAINTEXT://kafka-auth:9094,CONTROLLER://kafka-auth:9093,PLAINTLS://kafka-auth:9102,SCRAM256://kafka-auth:9103,MTLS://kafka-auth:9104
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-auth:9094,PLAINTLS://localhost:${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102},SCRAM256://localhost:${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103},MTLS://localhost:${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTLS:SASL_SSL,SCRAM256:SASL_PLAINTEXT,MTLS:SSL
+      KAFKA_LISTENERS: PLAINTEXT://kafka-auth:9094,CONTROLLER://kafka-auth:9093,PLAINTLS://kafka-auth:9102,SCRAM256://kafka-auth:9103,MTLS://kafka-auth:9104,SCRAM512TLS://kafka-auth:9105
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-auth:9094,PLAINTLS://localhost:${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102},SCRAM256://localhost:${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103},MTLS://localhost:${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104},SCRAM512TLS://localhost:${LOGWEIR_E2E_AUTH_SCRAM512_TLS_PORT:-9105}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTLS:SASL_SSL,SCRAM256:SASL_PLAINTEXT,MTLS:SSL,SCRAM512TLS:SASL_SSL
       KAFKA_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256
       # PROD-01.3: the SASL_SSL listener serves SCRAM-SHA-256 beside PLAIN, so
       # SCRAM-SHA-256 OVER TLS (what managed services offer) and its wrong-CA
       # refusal run without another published port.
       KAFKA_LISTENER_NAME_PLAINTLS_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256
       KAFKA_LISTENER_NAME_SCRAM256_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      # PROD-01.2a: one mechanism on this listener, so a client asking for any
+      # other is refused by the broker (the row's control).
+      KAFKA_LISTENER_NAME_SCRAM512TLS_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
       KAFKA_LISTENER_NAME_PLAINTLS_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required user_logweir="logweir-e2e-not-a-secret";'
       KAFKA_LISTENER_NAME_PLAINTLS_SCRAM___SHA___256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       KAFKA_LISTENER_NAME_SCRAM256_SCRAM___SHA___256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+      KAFKA_LISTENER_NAME_SCRAM512TLS_SCRAM___SHA___512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
       # PEM stores (KIP-651): the key+chain file and the test CA, no passwords.
       KAFKA_SSL_KEYSTORE_TYPE: PEM
       KAFKA_SSL_KEYSTORE_LOCATION: /certs/broker.keystore.pem
@@ -424,10 +433,13 @@ services:
       retries: 12
       start_period: 20s
 
-  # SCRAM-SHA-256 credentials are metadata records a client writes once the
-  # quorum serves (the same reason `scram-setup` exists), over the in-network
-  # PLAINTEXT listener. Long-running with a readiness marker, so `up --wait`
-  # waits for the credential and fails if the alter fails.
+  # SCRAM-SHA-256 and (PROD-01.2a) SCRAM-SHA-512 credentials are metadata
+  # records a client writes once the quorum serves (the same reason
+  # `scram-setup` exists), over the in-network PLAINTEXT listener, one
+  # mechanism per alter: the broker refuses a user's two credentials in one
+  # request (DuplicateResourceException, measured on 4.3.1). Long-running with
+  # a readiness marker, so `up --wait` waits for the credentials and fails if
+  # an alter fails.
   kafka-auth-setup:
     image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [auth]
@@ -439,6 +451,9 @@ services:
       - >-
         /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-auth:9094 --alter
         --add-config 'SCRAM-SHA-256=[password=logweir-e2e-not-a-secret]'
+        --entity-type users --entity-name logweir
+        && /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-auth:9094 --alter
+        --add-config 'SCRAM-SHA-512=[password=logweir-e2e-not-a-secret]'
         --entity-type users --entity-name logweir
         && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-auth:9094 --create
         --if-not-exists --topic orders --partitions 3 --replication-factor 1
@@ -1151,3 +1166,78 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # --- profiles `rustfs` and `versitygw`: two more S3 servers (PROD-01.2a) ---
+  # The runners-up of PROD-01.5's object-store evaluation (the decision record
+  # PROD-01.5-fixture-profiles.md, §3), each opt-in and BESIDE MinIO, so the
+  # compatibility contract's archive-backend rows run against them by name
+  # (`tests/compat_contract.rs`; weekly in .github/workflows/compat-weekly.yml).
+  # Both serve plain HTTP with the stack's fixture pair, and each setup creates
+  # `kafka-backups` and `logweir-evidence` once the server answers: neither
+  # image carries a client a healthcheck could use, so the setup is the
+  # readiness gate, long-running with a marker as `objectstore-setup` is.
+  rustfs:
+    image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+    hostname: rustfs
+    profiles: [rustfs]
+    networks: [kafka-net]
+    environment:
+      RUSTFS_ACCESS_KEY: minioadmin
+      RUSTFS_SECRET_KEY: minioadmin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+    volumes: [rustfs-data:/data]
+    ports:
+      - "${LOGWEIR_E2E_RUSTFS_PORT:-9131}:9000"
+
+  rustfs-setup:
+    image: amazon/aws-cli:2.37.5@sha256:fb7ccfc7b4e3a05017e6c9ded4ba959b99af622130e211fb976c68c2f4d3f224
+    profiles: [rustfs]
+    networks: [kafka-net]
+    depends_on:
+      rustfs: { condition: service_started }
+    environment: &store-setup-env
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      STORE: http://rustfs:9000
+    entrypoint: &store-setup ["/bin/bash", "-c"]
+    command: &store-setup-command
+      - >-
+        for i in $$(seq 1 90); do aws --endpoint-url "$$STORE" s3api list-buckets >/dev/null 2>&1 && break; sleep 2; done;
+        set -e;
+        mk() { aws --endpoint-url "$$STORE" s3api head-bucket --bucket "$$1" 2>/dev/null
+        || aws --endpoint-url "$$STORE" s3api create-bucket --bucket "$$1"; };
+        mk kafka-backups; mk logweir-evidence;
+        touch /tmp/ready; exec sleep 2147483647
+    healthcheck: &store-setup-health
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 120
+
+  versitygw:
+    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    hostname: versitygw
+    profiles: [versitygw]
+    networks: [kafka-net]
+    # Its POSIX backend over one volume, with a versioning directory, as
+    # PROD-01.5 measured it.
+    entrypoint: ["sh", "-c", "mkdir -p /data/objects /data/versions && exec versitygw --access minioadmin --secret minioadmin --port :7070 posix --versioning-dir /data/versions /data/objects"]
+    volumes: [versitygw-data:/data]
+    ports:
+      - "${LOGWEIR_E2E_VERSITYGW_PORT:-9132}:7070"
+
+  versitygw-setup:
+    image: amazon/aws-cli:2.37.5@sha256:fb7ccfc7b4e3a05017e6c9ded4ba959b99af622130e211fb976c68c2f4d3f224
+    profiles: [versitygw]
+    networks: [kafka-net]
+    depends_on:
+      versitygw: { condition: service_started }
+    environment:
+      <<: *store-setup-env
+      STORE: http://versitygw:7070
+    entrypoint: *store-setup
+    command: *store-setup-command
+    healthcheck: *store-setup-health

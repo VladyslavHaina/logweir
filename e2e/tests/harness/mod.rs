@@ -97,7 +97,7 @@ pub use stack::{
     bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_autocreate, bootstrap_c3,
     bootstrap_cluster2, bootstrap_confluent, bootstrap_confluent_offnet, bootstrap_faultproxy,
     bootstrap_k8s, bootstrap_redpanda, bootstrap_redpanda_sasl, bootstrap_sasl, faultproxy_control,
-    objectstore_endpoint, s3_endpoint,
+    objectstore_endpoint, rustfs_endpoint, s3_endpoint, versitygw_endpoint,
 };
 
 /// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,

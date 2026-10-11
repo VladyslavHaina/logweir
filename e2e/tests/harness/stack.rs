@@ -57,6 +57,9 @@ pub const CP_OFFNET_PORT: &str = "LOGWEIR_E2E_CP_OFFNET_PORT";
 /// Profile `objectstore` (PROD-01.5; PROD-01.2 is its first Rust reader):
 /// SeaweedFS's S3 port.
 pub const OBJSTORE_PORT: &str = "LOGWEIR_E2E_OBJSTORE_PORT";
+/// Profiles `rustfs` and `versitygw` (PROD-01.2a): each S3 server's port.
+pub const RUSTFS_PORT: &str = "LOGWEIR_E2E_RUSTFS_PORT";
+pub const VERSITYGW_PORT: &str = "LOGWEIR_E2E_VERSITYGW_PORT";
 /// Profile `faultproxy` (PROD-01.5d): the proxy's host port, which is the
 /// address `kafka-faulty` advertises, and the proxy's control port.
 pub const FAULTPROXY_PORT: &str = "LOGWEIR_E2E_FAULTPROXY_PORT";
@@ -353,6 +356,17 @@ pub fn bootstrap_confluent_offnet() -> String {
 /// reaches it.
 pub fn objectstore_endpoint() -> String {
     format!("http://localhost:{}", port(OBJSTORE_PORT))
+}
+
+/// Profile `rustfs`: RustFS's S3 endpoint as a host-side client reaches it.
+pub fn rustfs_endpoint() -> String {
+    format!("http://localhost:{}", port(RUSTFS_PORT))
+}
+
+/// Profile `versitygw`: versitygw's S3 endpoint as a host-side client
+/// reaches it.
+pub fn versitygw_endpoint() -> String {
+    format!("http://localhost:{}", port(VERSITYGW_PORT))
 }
 
 /// Profile `faultproxy`: the host-side bootstrap of `kafka-faulty`, which is

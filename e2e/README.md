@@ -185,11 +185,13 @@ container with `timeout` or `gtimeout` when present (this host's
 
 | Profile | Services | What it provides | Ports (default) | Owner (first consumers) |
 |---|---|---|---|---|
-| `auth` | `kafka-auth` (+ certs, setup) | A separate single-node cluster: SASL_SSL/PLAIN on 9102, SASL_PLAINTEXT/SCRAM-SHA-256 on 9103, SSL with a required client certificate on 9104, all advertised as `localhost:<port>`. User `logweir`, password `logweir-e2e-not-a-secret`. A throwaway test CA, broker and client certificates and a wrong CA in `.e2e/auth/<project>/`. | 9102-9104 | PROD-01.3 |
+| `auth` | `kafka-auth` (+ certs, setup) | A separate single-node cluster: SASL_SSL/PLAIN on 9102, SASL_PLAINTEXT/SCRAM-SHA-256 on 9103, SSL with a required client certificate on 9104, and SASL_SSL with SCRAM-SHA-512 and no other mechanism on 9105 (PROD-01.2a: Amazon MSK's SCRAM shape), all advertised as `localhost:<port>`. User `logweir`, password `logweir-e2e-not-a-secret`, with a SCRAM-SHA-256 and a SCRAM-SHA-512 credential. A throwaway test CA, broker and client certificates and a wrong CA in `.e2e/auth/<project>/`. | 9102-9105 | PROD-01.3 |
 | `cluster3` | `kafka-c3-1..3` | A three-node KRaft cluster, replication factor 3 and `min.insync.replicas` 2 by default | 9112-9114 | the orchestrator until PROD-10.1 starts (FX-5 and PROD-05.1 use it first; FX-3's `new_topic_parity.rs` and FX-21's `replication_factor_parity.rs`). PROD-01.2's `compat_contract.rs::a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` reads it and FREEZES one node that is not the active controller (`docker compose pause`) for about a minute, then unfreezes it and waits for three brokers again: do not run it beside another row on the same stack |
 | `cluster2` | `kafka-cluster2` (+ setup) | A second single-node cluster with its own cluster id and the marker topic | 9122 | PROD-11.1 (PROD-04.2, PROD-12.1) |
 | `autocreate` | `kafka-autocreate` | A single-node cluster that AUTO-CREATES topics (`auto.create.topics.enable=true`, Kafka's default, which every other broker here turns off), with its own cluster id and no marker topic. Harness: `bootstrap_autocreate()` | 9126 | PROD-15.1 (`e2e/tests/original_name.rs`) |
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
+| `rustfs` | `rustfs` (+ setup) | RustFS 1.0.0, pinned by digest, beside MinIO: `kafka-backups` and `logweir-evidence`, credentials `minioadmin`/`minioadmin`. Harness: `rustfs_endpoint()` | 9131 | PROD-01.2a (`tests/compat_contract.rs`) |
+| `versitygw` | `versitygw` (+ setup) | versitygw v1.8.0, pinned by digest, its POSIX backend with a versioning directory, beside MinIO: the same two buckets and credentials. Harness: `versitygw_endpoint()` | 9132 | PROD-01.2a (`tests/compat_contract.rs`) |
 | `registry` | `registry`, `registry-rest` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility; and its REST proxy (Confluent REST v2: `POST /topics/<t>` in `avro`, `jsonschema` or `protobuf` writes records in the Confluent wire format, registering their schemas in `registry`). Logweir never talks to either: PROD-03.0's row (`tests/schema_dependency.rs`) produces through the proxy, then stops both before the backup | 9141, 9142 | PROD-03.0 (PROD-03.1, 03.2) |
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
 | `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d (PROD-04.1, 04.2, 06.1, 06.x) |
@@ -306,6 +308,16 @@ the ACLs, both groups and the topic.
 Owner: PROD-04.0d; PROD-04.1, 04.2 and 05.3 are the first consumers. Extend it
 as a profile is extended; a new member or group goes in `groups.sh`'s `SET`
 and in `smoke_groups`.
+
+## The weekly compatibility job
+
+`.github/workflows/compat-weekly.yml` (PROD-01.2a) runs the compatibility
+contract's rows that need a profile CI's e2e job does not start, by name, every
+Monday and on `workflow_dispatch`: one runner and one default stack per entry
+(`confluent`; `redpanda`; `objectstore,rustfs,versitygw` with the directory
+archive row; `registry`), with the engine built from the vendored source as CI
+builds it. It needs no secret. A new hand-run row that needs a profile goes in
+one entry's `rows`.
 
 ## CI's e2e job: four shards
 
