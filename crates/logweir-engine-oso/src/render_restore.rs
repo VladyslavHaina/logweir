@@ -374,6 +374,8 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // header_preflight_external (Global Constraint 4). `reset_consumer_offsets`
     // and `auto_consumer_groups` USED to be on that list; they are above now,
     // pinned at `false`, which is the same invariant stated instead of assumed.
+    s.push('\n');
+    s.push_str(crate::yaml::METRICS_OFF);
     Ok(s)
 }
 

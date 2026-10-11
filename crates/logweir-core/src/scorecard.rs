@@ -530,12 +530,252 @@ pub fn format_version_with_original_name<'a>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// THE APPROVAL-MODE VOCABULARY — ONE DEFINITION (PROD-16.2)
+//
+// How a run was authorised, in the words a scorecard signs. A closed set
+// inside signed evidence: every holder of it is listed here, and the two that
+// cannot share this definition are held to it by a row.
+//
+// * the runner's writer takes its words from here
+//   (`logweir::drill::phase1_approval::APPROVAL_MODE_*` are these constants);
+// * `logweir_core::approval_policy::ApprovalRoute::approval_mode` maps a
+//   policy's row to its word;
+// * this file's arms ON-5, ON-11 and CA-2, CA-8 read the set;
+// * `docs/verify_scorecard.py` holds its own copy (it shares no code with
+//   this crate, on purpose), and
+//   `crates/logweir/tests/two_reader_parity.rs` reads that copy out of the
+//   script and compares it with this one, member for member;
+// * the JSON schemas type both fields as strings and enumerate nothing;
+// * nothing else holds it: the controller copies no approval mode into
+//   `Restore.status`, the product API and the console show the POLICY's mode
+//   (`confirm`, `two-person`, `strict`; `Governed`, `Ordinary` in the audit
+//   record), which is `logweir_core::approval_policy`'s vocabulary, and no
+//   metric is labelled with either.
+// ---------------------------------------------------------------------------
+
+/// A per-run approval document v1: an approver's personal key, through the
+/// CLI or in a namespace on `legacy-governed-v1`.
+pub const APPROVAL_MODE_V1: &str = "v1Approval";
+/// An authorization document v2 under a `Governed` policy whose approval a
+/// personal `GovernedApproval` key countersigns (`strict`).
+pub const APPROVAL_MODE_GOVERNED: &str = "governed";
+/// An authorization document v2 under an `Ordinary` policy: the requester's
+/// own confirmation in the console (`confirm`; OD-10).
+pub const APPROVAL_MODE_ORDINARY: &str = "ordinary";
+/// **PROD-16.2.** An authorization document v2 under a `Governed` policy
+/// whose `approverSignature` is `Console`: a second person signed in to the
+/// console and approved, and the console signed who and when
+/// (`two-person`). Defined from scorecard format 1.9.0 (and 2.1.0): never
+/// [`APPROVAL_MODE_GOVERNED`], because no personal key countersigned and a
+/// reader must not be told one did.
+pub const APPROVAL_MODE_CONSOLE: &str = "consoleApproval";
+/// A standing rehearsal authorization. Never signed into
+/// `target.original_name.approval_mode`: it never authorises an original-name
+/// restore.
+pub const APPROVAL_MODE_STANDING: &str = "standing";
+
+/// Every word phase 1 can report for the document that authorised a run.
+pub const APPROVAL_MODES: [&str; 5] = [
+    APPROVAL_MODE_V1,
+    APPROVAL_MODE_GOVERNED,
+    APPROVAL_MODE_ORDINARY,
+    APPROVAL_MODE_CONSOLE,
+    APPROVAL_MODE_STANDING,
+];
+
 /// `target.original_name.approval_mode`'s closed set (arm ON-5): the approval
 /// document phase 1 verified — a per-run approval document v1 (the CLI, or a
 /// namespace on `legacy-governed-v1`), or an authorization document v2 under
-/// a `Governed` or an `Ordinary` policy. A standing rehearsal authorization
-/// never authorises an original-name restore.
-pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 3] = ["v1Approval", "governed", "ordinary"];
+/// a `Governed` policy (a personal key, or — PROD-16.2, from 1.9.0 — a second
+/// person in the console) or an `Ordinary` one. A standing rehearsal
+/// authorization never authorises an original-name restore.
+///
+/// **The set is four from 1.9.0, and was three at 1.8.0**
+/// ([`ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0`]): [`APPROVAL_MODE_CONSOLE`] is
+/// the member PROD-16.2 added, a value of 1.9.0 and later. ON-5 is split by
+/// version, as PROD-01.3 split `target.auth.mode`'s arm: under 1.8.0 the new
+/// member is refused as a value that version does not define (the sentence
+/// names the version), every 1.8.0 document is judged exactly as before, and
+/// from 1.9.0 the closed set is these four. A reader built at 1.8.0 refuses a
+/// 1.9.0 document naming the new member through its own closed-set sentence
+/// (the safer verdict: OD-7's third case), and this build accepts the member
+/// only beside the `approval.console` block that says who approved (arm
+/// CA-8).
+pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 4] = [
+    APPROVAL_MODE_V1,
+    APPROVAL_MODE_GOVERNED,
+    APPROVAL_MODE_ORDINARY,
+    APPROVAL_MODE_CONSOLE,
+];
+
+/// `target.original_name.approval_mode`'s closed set under scorecard 1.8.0,
+/// PROD-15.1's: every member of [`ORIGINAL_NAME_APPROVAL_MODES`] but the one
+/// 1.9.0 added.
+pub const ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0: [&str; 3] = [
+    APPROVAL_MODE_V1,
+    APPROVAL_MODE_GOVERNED,
+    APPROVAL_MODE_ORDINARY,
+];
+
+/// **PROD-16.2.** The first minor of scorecard format 1 that defines
+/// `approval.console` (arm CA-1). A renumber changes this and
+/// [`FORMAT_VERSION_WITH_CONSOLE_APPROVAL`] together, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR`
+/// follows it.
+pub const CONSOLE_APPROVAL_SINCE_MINOR: u64 = 9;
+
+/// **PROD-16.2.** The first minor of scorecard format 2 that defines
+/// `approval.console`. Format 2 is a partition-subset restore's, and such a
+/// restore may be approved in the console like any other, so the block is
+/// defined in BOTH lines: this is the 2.x minor that "moves with" 1.9.0
+/// (`docs/stability.md`).
+pub const CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2: u64 = 1;
+
+/// **PROD-16.2.** The `format_version` of a scorecard that carries
+/// `approval.console` — a restore a second person approved in the console —
+/// when it is a format 1 document. A MINOR bump for a new optional block and
+/// one new member of an existing closed set, under OD-7: arms CA-1 to CA-8
+/// read only the block, or judge an existing field against it, and can only
+/// refuse; a reader that knows `target.original_name` and not this refuses
+/// the new member of `approval_mode` (the safer verdict). Written only for
+/// such a restore ([`format_version_with_console_approval`]), so every other
+/// document is the one it was. Format 1's newest minor:
+/// `schemas/logweir-drill-scorecard-1.9.0.json`.
+pub const FORMAT_VERSION_WITH_CONSOLE_APPROVAL: &str = "1.9.0";
+
+/// **PROD-16.2.** The same, for a PARTITION-SUBSET restore approved in the
+/// console: format 2's first minor. 2.1.0 is 2.0.0's fields plus the
+/// optional block, and is written only for that pair.
+/// `schemas/logweir-drill-scorecard-2.1.0.json`.
+pub const FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL: &str = "2.1.0";
+
+/// Whether a document of `format_version` defines `approval.console` (arm
+/// CA-1): a 1.x document from 1.9.0 on, or a 2.x document from 2.1.0 on.
+#[must_use]
+pub fn defines_console_approval(format_version: &str) -> bool {
+    let Some(minor) = minor_version(format_version) else {
+        return false;
+    };
+    match major_version(format_version) {
+        Some(1) => minor >= CONSOLE_APPROVAL_SINCE_MINOR,
+        Some(PARTITION_SUBSETS_MAJOR) => minor >= CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2,
+        _ => false,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its approval is
+/// known (PROD-16.2): when it carries `approval.console`, at least
+/// [`FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`] for a major-2 document
+/// (a partition subset) and at least [`FORMAT_VERSION_WITH_CONSOLE_APPROVAL`]
+/// for any other; else `current` unchanged. Monotonic within the major: it
+/// never lowers `current` and never changes its major.
+///
+/// THE LAST VERSION STEP. It reads the major the earlier steps chose, so it
+/// runs after [`format_version_with_selection`]; a document that carried the
+/// block under a version that does not define it would be refused at signing
+/// by arm CA-1, never signed.
+#[must_use]
+pub fn format_version_with_console_approval<'a>(
+    current: &'a str,
+    console: Option<&ConsoleApprovalInfo>,
+) -> &'a str {
+    if console.is_none() {
+        return current;
+    }
+    if major_version(current) == Some(PARTITION_SUBSETS_MAJOR) {
+        newer_format_version(current, FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL)
+    } else {
+        newer_format_version(current, FORMAT_VERSION_WITH_CONSOLE_APPROVAL)
+    }
+}
+
+/// One of the two people of a console approval, as the console attested
+/// them: an identity provider's issuer and its subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsolePrincipal {
+    /// The identity issuer.
+    pub issuer: String,
+    /// The subject within that issuer.
+    pub subject: String,
+}
+
+impl ConsolePrincipal {
+    /// `<issuer>#<subject>`, the form `approval.approver` carries.
+    #[must_use]
+    pub fn principal_id(&self) -> String {
+        format!("{}#{}", self.issuer, self.subject)
+    }
+}
+
+/// **PROD-16.2, scorecard format 1.9.0 (and 2.1.0): the run was approved by a
+/// SECOND PERSON IN THE CONSOLE.** Present exactly on such a run's documents.
+///
+/// It says WHO approved and HOW, so a reader does not have to infer it from a
+/// key id: the mode, the requester, the approver, when the request was made,
+/// when it was approved and when it would have expired, and the console key
+/// that signed both the request and the approval.
+///
+/// **What it changes about the fields beside it**, which is why both readers
+/// hold them to it (arms CA-5 to CA-7): under this mode `approval.approver`
+/// is the approver's `<issuer>#<subject>`, `approval.approved_at` is the
+/// instant they approved, and `approval.key_id` is the CONSOLE's key id — the
+/// console signs the approval, so the approver's key is the console key, and
+/// that is expected here and nowhere else.
+///
+/// **What it does not say.** That two different people exist: the console
+/// attested two identities of one issuer, and whoever controls the console,
+/// its key or the identity provider can produce both (`SECURITY.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleApprovalInfo {
+    /// [`APPROVAL_MODE_CONSOLE`] (arm CA-2).
+    pub mode: String,
+    /// Who asked, as the console attested them (arm CA-3).
+    pub requester: ConsolePrincipal,
+    /// Who approved, as the console attested them: a second person of the
+    /// requester's own issuer (arm CA-3).
+    pub approver: ConsolePrincipal,
+    /// When the console signed the request.
+    pub requested_at: DateTime<Utc>,
+    /// When the approver approved: not before the request and before its
+    /// expiry (arm CA-4).
+    pub approved_at: DateTime<Utc>,
+    /// When the request would have stopped being approvable.
+    pub request_expires_at: DateTime<Utc>,
+    /// The console key that signed the request and the approval.
+    pub confirmation_key_id: String,
+}
+
+impl ConsoleApprovalInfo {
+    /// The `console approval:` line both readers print for a console approval
+    /// (`logweir::verify::console_approval_lines`,
+    /// `docs/verify_scorecard.py::_console_approval_lines`;
+    /// `scripts/check-verifier-parity.sh` compares every line starting
+    /// `console approval:` between the two). It says WHO approved and HOW:
+    /// the mode, both people, both instants, the request's expiry, and that
+    /// the console key signed both documents, which is expected in this mode.
+    /// Called only on a document whose invariants hold, so both principals
+    /// are bounded, visible ASCII (arm CA-3). Instants are printed in UTC, to
+    /// the precision the document carries.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        vec![format!(
+            "console approval: mode {}; requested by {} at {}; approved in the console by {} at \
+             {} (the request expired at {}); the console key {} signed the request and the \
+             approval, which is expected in this mode: no personal key is involved",
+            self.mode,
+            self.requester.principal_id(),
+            self.requested_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            self.approver.principal_id(),
+            self.approved_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            self.request_expires_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            self.confirmation_key_id
+        )]
+    }
+}
 
 /// **PROD-15.1, scorecard format 1.8.0: the restore wrote under the source's
 /// ORIGINAL topic names**, into topics phase 0 proved absent and the run
@@ -942,6 +1182,24 @@ pub struct ApprovalInfo {
     /// true when the approval key equals the signing key. Labelled, never
     /// refused (spec §10).
     pub self_attested: bool,
+    /// **PROD-16.2 (format 1.9.0, and 2.1.0 for a partition subset).**
+    /// Present exactly when a second person approved this run in the console:
+    /// see [`ConsoleApprovalInfo`]. ABSENT on every other document, which is
+    /// every document before 1.9.0; arms CA-1 to CA-8 judge it.
+    ///
+    /// **What the three fields above mean, by mode** (they are one field
+    /// each, and what the writer puts there has always depended on the
+    /// document that authorised the run):
+    ///
+    /// | mode | `approver` | `approved_at` | `key_id` |
+    /// |---|---|---|---|
+    /// | `v1Approval` | the approval document's own `approver` text | its `approved_at`, the human's out-of-band timestamp | the approver's personal key |
+    /// | `governed` | `governed approver key <id>` | when the console signed the REQUEST (`issuedAt`): the document records no countersigning time | the approver's personal key |
+    /// | `ordinary` | the requester's `<issuer>#<subject>` | when the console signed the confirmation (`issuedAt`) | the console key |
+    /// | `consoleApproval` | the approver's `<issuer>#<subject>` | when the second person approved (`approvedAt`), never the request's time | the console key |
+    /// | `standing` | the standing authorization's approver | its own | the approver's personal key |
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console: Option<ConsoleApprovalInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1670,6 +1928,35 @@ fn major_version(v: &str) -> Option<u64> {
 /// (FX-3's NR-1, FX-8's TB-1).
 fn minor_version(v: &str) -> Option<u64> {
     v.split('.').nth(1)?.parse().ok()
+}
+
+/// What arm CA-3 says after its fixed opening, for one fault: the people it
+/// is about and the fault's fixed clause
+/// (`crate::approval_policy::SeparationFault::clause`). No part of it is the
+/// document's. `docs/verify_scorecard.py::_console_separation_words` returns
+/// the same words.
+#[must_use]
+pub fn console_separation_words(fault: crate::approval_policy::SeparationFault) -> String {
+    use crate::approval_policy::SeparationFault;
+    let who = match fault {
+        SeparationFault::NotComparable(party)
+        | SeparationFault::LocalAdmin(party)
+        | SeparationFault::SystemIdentity(party) => format!("the {}", party.as_str()),
+        SeparationFault::TwoIssuers => "the approver and the requester".to_string(),
+        SeparationFault::SamePerson => "the approver".to_string(),
+    };
+    format!("{who} {}", fault.clause())
+}
+
+/// Arm CA-3's whole message for one fault, as `validate_invariants` returns
+/// it (its opening is a literal in that function's body, where the corpus
+/// accounting reads it).
+#[must_use]
+pub fn console_separation_message(fault: crate::approval_policy::SeparationFault) -> String {
+    format!(
+        "approval.console does not name two people: {}",
+        console_separation_words(fault)
+    )
 }
 
 impl Scorecard {
@@ -2714,8 +3001,36 @@ impl Scorecard {
                         .into(),
                 ));
             }
-            // ON-5.
-            if !ORIGINAL_NAME_APPROVAL_MODES.contains(&on.approval_mode.as_str()) {
+            // ON-5. PROD-16.2 (format 1.9.0) SPLITS THIS ARM BY VERSION, as
+            // PROD-01.3 split `target.auth.mode`'s, and leaves every document
+            // below 1.9.0 judged exactly as before: `consoleApproval` is a
+            // value of 1.9.0 and later, so under an older minor it is refused
+            // as a value that version does not define (the first statement,
+            // which names the version and never the document's word), and
+            // from 1.9.0 the closed set is four (the second). A reader built
+            // at 1.8.0 refuses a 1.9.0 document naming the new member through
+            // the third statement, its own, unchanged — the SAFER verdict,
+            // OD-7's third case — so the change is MINOR. This build accepts
+            // the member only beside the block that says who approved (arm
+            // CA-8, below). NOT INTERPOLATED but for the version.
+            let four_defined = defines_console_approval(&self.format_version);
+            if on.approval_mode == APPROVAL_MODE_CONSOLE {
+                if !four_defined {
+                    return Err(InvariantError(format!(
+                        "target.original_name.approval_mode is a value defined from \
+                         1.{CONSOLE_APPROVAL_SINCE_MINOR}.0 and format_version {:?} predates it",
+                        self.format_version
+                    )));
+                }
+            } else if !ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0.contains(&on.approval_mode.as_str()) {
+                if four_defined {
+                    return Err(InvariantError(
+                        "target.original_name.approval_mode is not one of the four values this \
+                         format defines; it is \"v1Approval\", \"governed\", \"ordinary\" or \
+                         \"consoleApproval\" and nothing else"
+                            .into(),
+                    ));
+                }
                 return Err(InvariantError(
                     "target.original_name.approval_mode is not one of \"v1Approval\", \
                      \"governed\", \"ordinary\""
@@ -2834,6 +3149,116 @@ impl Scorecard {
                 ));
             }
         }
+        // `approval.console` (format 1.9.0, and 2.1.0; PROD-16.2): arms CA-1
+        // to CA-8. CA-1 to CA-7 fire ONLY on a document that CARRIES the
+        // block, so every document without it is decided exactly as before:
+        // MINOR under the owner's OD-7 (a). CA-5, CA-6 and CA-7 judge existing
+        // fields (`approval.approver`, `approval.key_id`,
+        // `approval.approved_at`) against the block and can only refuse. CA-8
+        // ties the block to `target.original_name.approval_mode`, whose new
+        // member only this build writes.
+        //
+        // NOT INTERPOLATED, except CA-1's version: no message carries a
+        // principal, an instant or a key id from the document, so the
+        // messages join `index.json`'s `arm` fields by literal substring and
+        // nothing a document's author chose reaches a reader's output through
+        // a refusal.
+        //
+        // Mirrored arm for arm, in this order and this position (after the
+        // ON arms, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(console) = &self.approval.console {
+            // CA-1. The block is defined from 1.9.0 of format 1 and from
+            // 2.1.0 of format 2.
+            if !defines_console_approval(&self.format_version) {
+                return Err(InvariantError(format!(
+                    "approval.console is present but format_version {:?} does not define it: \
+                     the block is defined from 1.{CONSOLE_APPROVAL_SINCE_MINOR}.0 of format 1 and \
+                     from 2.{CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2}.0 of format 2",
+                    self.format_version
+                )));
+            }
+            // CA-2. The block describes one mode.
+            if console.mode != APPROVAL_MODE_CONSOLE {
+                return Err(InvariantError(
+                    "approval.console.mode is not \"consoleApproval\"".into(),
+                ));
+            }
+            // CA-3. Two people: each in a form that can be compared, neither
+            // the local administrator nor a system identity, of one issuer,
+            // with different subjects — the rule the console, the controller
+            // and the runner applied before this was signed
+            // (`crate::approval_policy::separation_fault`).
+            if let Some(fault) = crate::approval_policy::separation_fault(
+                &console.requester.issuer,
+                &console.requester.subject,
+                &console.approver.issuer,
+                &console.approver.subject,
+            ) {
+                return Err(InvariantError(format!(
+                    "approval.console does not name two people: {}",
+                    console_separation_words(fault)
+                )));
+            }
+            // CA-4. No fabricated time: the approval lies inside the
+            // request's own window.
+            if console.approved_at < console.requested_at
+                || console.approved_at >= console.request_expires_at
+            {
+                return Err(InvariantError(
+                    "approval.console.approved_at is before requested_at or not before \
+                     request_expires_at; an approval is given after the request was made and \
+                     before it expires"
+                        .into(),
+                ));
+            }
+            // CA-5. The approver the scorecard names IS the second person.
+            if self.approval.approver != console.approver.principal_id() {
+                return Err(InvariantError(
+                    "approval.approver is not approval.console.approver as \
+                     \"<issuer>#<subject>\"; under a console approval the approver a scorecard \
+                     names is the second person the console attested"
+                        .into(),
+                ));
+            }
+            // CA-6. The console's key signs the approval, so the approver's
+            // key IS the console key in this mode — and a distinct personal
+            // key is another mode.
+            if console.confirmation_key_id.trim().is_empty()
+                || self.approval.key_id != console.confirmation_key_id
+            {
+                return Err(InvariantError(
+                    "approval.key_id is not approval.console.confirmation_key_id; under a \
+                     console approval the console's key signs the approval, so the approver's \
+                     key is the console key (expected in this mode), and a distinct personal key \
+                     is not a console approval"
+                        .into(),
+                ));
+            }
+            // CA-7. The approval time is the instant the second person
+            // approved, and no other.
+            if self.approval.approved_at != console.approved_at {
+                return Err(InvariantError(
+                    "approval.approved_at is not approval.console.approved_at; under a console \
+                     approval the approval time is the instant the second person approved, never \
+                     the request's"
+                        .into(),
+                ));
+            }
+        }
+        // CA-8. A restore under the original topic names that a second person
+        // approved in the console says so in BOTH places, and no other
+        // original-name restore says so in either.
+        if let Some(on) = &self.target.original_name {
+            if (on.approval_mode == APPROVAL_MODE_CONSOLE) != self.approval.console.is_some() {
+                return Err(InvariantError(
+                    "target.original_name.approval_mode is \"consoleApproval\" exactly when \
+                     approval.console is present; a console approval names who approved, and a \
+                     governed, ordinary or v1 approval carries no console approver"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -2939,6 +3364,7 @@ mod tests {
                 approved_at: t("2026-09-02T17:40:00Z"),
                 key_id: "a".repeat(64),
                 self_attested: false,
+                console: None,
             },
             phases: vec![],
             measured: Measured {
@@ -5437,11 +5863,40 @@ mod tests {
                 "target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject"
             );
         }
-        for mode in ["standing", "Governed", ""] {
+        // PROD-16.2: ON-5 is split by version. A 1.8.0 document (what
+        // `on_err` builds) is judged exactly as before, in the same words...
+        for mode in ["standing", "Governed", "", "consoleapproval", "two-person"] {
             assert_eq!(
                 on_err(|sc| sc.target.original_name.as_mut().unwrap().approval_mode = mode.into()),
                 "target.original_name.approval_mode is not one of \"v1Approval\", \"governed\", \"ordinary\""
             );
+        }
+        // ... the member 1.9.0 added is refused under 1.8.0 BY THE VERSION,
+        // in a sentence that names it and never the document's word...
+        assert_eq!(
+            on_err(|sc| {
+                sc.target.original_name.as_mut().unwrap().approval_mode =
+                    APPROVAL_MODE_CONSOLE.into();
+            }),
+            "target.original_name.approval_mode is a value defined from 1.9.0 and format_version \"1.8.0\" predates it"
+        );
+        // ... and from 1.9.0 the closed set is four.
+        for mode in ["standing", "Governed", "", "consoleapproval", "two-person"] {
+            assert_eq!(
+                on_err(|sc| {
+                    sc.format_version = "1.9.0".into();
+                    sc.target.original_name.as_mut().unwrap().approval_mode = mode.into();
+                }),
+                "target.original_name.approval_mode is not one of the four values this format defines; it is \"v1Approval\", \"governed\", \"ordinary\" or \"consoleApproval\" and nothing else"
+            );
+        }
+        // NEGATIVE CONTROL: the three members of 1.8.0 are still accepted
+        // under 1.9.0 (a newer minor defines everything an older one did).
+        for mode in ["governed", "v1Approval"] {
+            let mut sc = with_original_name();
+            sc.format_version = "1.9.0".into();
+            sc.target.original_name.as_mut().unwrap().approval_mode = mode.into();
+            assert!(sc.validate_invariants().is_ok(), "{mode}");
         }
         assert_eq!(
             on_err(|sc| sc.target.original_name.as_mut().unwrap().cluster_condition = "sameCluster".into()),
@@ -6057,6 +6512,535 @@ mod tests {
                 .unwrap()
                 .sentence(BeforeTheStart::Expected, OutsideTheSubset::ProvedNoneRestored),
             "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); no record before the start was expected"
+        );
+    }
+
+    // ---- PROD-16.2: `approval.console` (format 1.9.0 and 2.1.0), CA-1 to CA-8 ----
+
+    fn instant(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("an instant")
+            .with_timezone(&Utc)
+    }
+
+    const CONSOLE_KEY_ID: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+    fn console_block() -> ConsoleApprovalInfo {
+        ConsoleApprovalInfo {
+            mode: APPROVAL_MODE_CONSOLE.into(),
+            requester: ConsolePrincipal {
+                issuer: "https://idp.example".into(),
+                subject: "alice".into(),
+            },
+            approver: ConsolePrincipal {
+                issuer: "https://idp.example".into(),
+                subject: "bob".into(),
+            },
+            requested_at: instant("2026-10-10T12:00:00Z"),
+            approved_at: instant("2026-10-10T12:04:00Z"),
+            request_expires_at: instant("2026-10-10T13:00:00Z"),
+            confirmation_key_id: CONSOLE_KEY_ID.into(),
+        }
+    }
+
+    /// Give `sc` the approval a console-approved run signs: the block, and
+    /// the three fields beside it that the block changes the meaning of.
+    fn approve_in_console(sc: &mut Scorecard) {
+        let block = console_block();
+        sc.approval.approver = block.approver.principal_id();
+        sc.approval.approved_at = block.approved_at;
+        sc.approval.key_id = block.confirmation_key_id.clone();
+        sc.approval.self_attested = false;
+        sc.approval.console = Some(block);
+    }
+
+    /// A valid console-approved document of format 1: an ordinary restore.
+    fn with_console_approval() -> Scorecard {
+        let mut sc = with_verification(sampled_verification());
+        approve_in_console(&mut sc);
+        sc.format_version = format_version_with_console_approval(
+            &sc.format_version.clone(),
+            sc.approval.console.as_ref(),
+        )
+        .to_string();
+        sc
+    }
+
+    fn ca_err(mutate: impl FnOnce(&mut Scorecard)) -> String {
+        let mut sc = with_console_approval();
+        mutate(&mut sc);
+        sc.validate_invariants().unwrap_err().0
+    }
+
+    /// **THE VOCABULARY IS ONE SET.** Every word phase 1 can report is here
+    /// once; the original-name subset is the set minus the one word that
+    /// never authorises such a restore; and each row of the approval table
+    /// maps to a member. KILLS: a member added to one list and not the other;
+    /// a route that signs a word the readers do not hold.
+    #[test]
+    fn the_approval_mode_vocabulary_is_one_set() {
+        use crate::approval_policy::ApprovalRoute;
+        let all: std::collections::BTreeSet<&str> = APPROVAL_MODES.into_iter().collect();
+        assert_eq!(all.len(), APPROVAL_MODES.len(), "no word twice");
+        assert_eq!(
+            all,
+            [
+                "v1Approval",
+                "governed",
+                "ordinary",
+                "consoleApproval",
+                "standing"
+            ]
+            .into_iter()
+            .collect()
+        );
+        let original: std::collections::BTreeSet<&str> =
+            ORIGINAL_NAME_APPROVAL_MODES.into_iter().collect();
+        let mut expected = all.clone();
+        expected.remove(APPROVAL_MODE_STANDING);
+        assert_eq!(original, expected, "every word but `standing`");
+        // The set at 1.8.0 is the set from 1.9.0 without the one new member,
+        // in the same order.
+        assert_eq!(
+            ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0.to_vec(),
+            ORIGINAL_NAME_APPROVAL_MODES
+                .into_iter()
+                .filter(|m| *m != APPROVAL_MODE_CONSOLE)
+                .collect::<Vec<_>>()
+        );
+        for route in [
+            ApprovalRoute::RequesterConfirms,
+            ApprovalRoute::SecondPersonInConsole,
+            ApprovalRoute::PersonalKey,
+        ] {
+            assert!(
+                original.contains(route.approval_mode()),
+                "{route:?} signs a word the readers hold"
+            );
+        }
+        assert_eq!(
+            ApprovalRoute::SecondPersonInConsole.approval_mode(),
+            APPROVAL_MODE_CONSOLE
+        );
+        assert_eq!(
+            ApprovalRoute::PersonalKey.approval_mode(),
+            APPROVAL_MODE_GOVERNED
+        );
+        assert_eq!(
+            ApprovalRoute::RequesterConfirms.approval_mode(),
+            APPROVAL_MODE_ORDINARY
+        );
+    }
+
+    /// **The version step.** 1.9.0 exactly when the block is present on a
+    /// format-1 document; 2.1.0 exactly when it is present on a
+    /// partition-subset one; `current` otherwise, whatever it is. Monotonic,
+    /// and the major is never changed. KILLS: 1.9.0 for every document; a
+    /// subset document lowered to 1.9.0 or left at 2.0.0; a later minor
+    /// lowered.
+    #[test]
+    fn a_console_approval_is_written_as_1_9_0_or_as_2_1_0_for_a_partition_subset() {
+        let block = console_block();
+        let with = Some(&block);
+        for (current, expected) in [
+            ("1.4.0", "1.9.0"),
+            ("1.6.0", "1.9.0"),
+            ("1.8.0", "1.9.0"),
+            ("1.9.0", "1.9.0"),
+            ("1.12.0", "1.12.0"),
+            ("2.0.0", "2.1.0"),
+            ("2.1.0", "2.1.0"),
+            ("2.3.0", "2.3.0"),
+        ] {
+            assert_eq!(
+                format_version_with_console_approval(current, with),
+                expected,
+                "{current}"
+            );
+            assert_eq!(
+                format_version_with_console_approval(current, None),
+                current,
+                "no block, no step: {current}"
+            );
+        }
+        assert_eq!(FORMAT_VERSION_WITH_CONSOLE_APPROVAL, "1.9.0");
+        assert_eq!(FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL, "2.1.0");
+        for (version, defines) in [
+            ("1.8.0", false),
+            ("1.9.0", true),
+            ("1.10.0", true),
+            ("2.0.0", false),
+            ("2.1.0", true),
+            ("2.2.0", true),
+            ("3.1.0", false),
+            ("0.9.0", false),
+            ("1", false),
+            ("x.9.0", false),
+        ] {
+            assert_eq!(defines_console_approval(version), defines, "{version}");
+        }
+        // The writer's documents are accepted: an ordinary restore, a
+        // partition subset, and an original-name restore.
+        let ordinary = with_console_approval();
+        assert_eq!(ordinary.format_version, "1.9.0");
+        assert!(
+            ordinary.validate_invariants().is_ok(),
+            "{:?}",
+            ordinary.validate_invariants()
+        );
+        let mut subset = with_subset(None);
+        approve_in_console(&mut subset);
+        subset.format_version =
+            format_version_with_console_approval("2.0.0", subset.approval.console.as_ref()).into();
+        assert_eq!(subset.format_version, "2.1.0");
+        assert!(
+            subset.validate_invariants().is_ok(),
+            "{:?}",
+            subset.validate_invariants()
+        );
+        let mut original = with_original_name();
+        approve_in_console(&mut original);
+        original
+            .target
+            .original_name
+            .as_mut()
+            .unwrap()
+            .approval_mode = APPROVAL_MODE_CONSOLE.into();
+        original.format_version = format_version_with_console_approval(
+            FORMAT_VERSION_WITH_ORIGINAL_NAME,
+            original.approval.console.as_ref(),
+        )
+        .into();
+        assert_eq!(original.format_version, "1.9.0");
+        assert!(
+            original.validate_invariants().is_ok(),
+            "{:?}",
+            original.validate_invariants()
+        );
+    }
+
+    /// **A document without the block is the document it was**: the field is
+    /// not serialised when absent, so no existing scorecard's bytes move.
+    #[test]
+    fn a_scorecard_without_a_console_approval_serialises_no_console_key() {
+        let plain = serde_json::to_value(valid_scorecard()).unwrap();
+        assert!(
+            plain["approval"].get("console").is_none(),
+            "{}",
+            plain["approval"]
+        );
+        let approved = serde_json::to_value(with_console_approval()).unwrap();
+        assert_eq!(approved["approval"]["console"]["mode"], "consoleApproval");
+        assert_eq!(
+            approved["approval"]["console"]["approver"],
+            serde_json::json!({"issuer": "https://idp.example", "subject": "bob"})
+        );
+    }
+
+    /// CA-1. KILLS: deleting it; a reader that accepts the block under 1.8.0
+    /// or 2.0.0; one that refuses 1.9.0 or 2.1.0.
+    #[test]
+    fn ca1_refuses_the_block_under_a_version_that_predates_it() {
+        // 1.8.0, and the version this document had before the console step
+        // (older versions meet the arms of the blocks they predate first).
+        let before = with_verification(sampled_verification()).format_version;
+        assert!(!defines_console_approval(&before), "{before}");
+        for version in ["1.8.0", before.as_str()] {
+            assert_eq!(
+                ca_err(|sc| sc.format_version = version.into()),
+                format!(
+                    "approval.console is present but format_version {version:?} does not define \
+                     it: the block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2"
+                )
+            );
+        }
+        let mut subset = with_subset(None);
+        approve_in_console(&mut subset);
+        assert_eq!(
+            subset.validate_invariants().unwrap_err().0,
+            "approval.console is present but format_version \"2.0.0\" does not define it: the \
+             block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2"
+        );
+        subset.format_version = "2.1.0".into();
+        assert!(subset.validate_invariants().is_ok());
+        let mut later = with_console_approval();
+        later.format_version = "1.10.0".into();
+        assert!(later.validate_invariants().is_ok());
+    }
+
+    /// CA-2. The block describes one mode.
+    #[test]
+    fn ca2_holds_the_blocks_mode_to_console_approval() {
+        for mode in ["governed", "ordinary", "", "ConsoleApproval", "two-person"] {
+            assert_eq!(
+                ca_err(|sc| sc.approval.console.as_mut().unwrap().mode = mode.into()),
+                "approval.console.mode is not \"consoleApproval\""
+            );
+        }
+    }
+
+    /// CA-3: THE IDENTITY RULE in the readers, in the fixed words of
+    /// `approval_policy::SeparationFault`. KILLS: deleting it; a reader that
+    /// compares exact strings (case, a trailing slash), or subjects alone
+    /// (two issuers), or accepts what it cannot compare.
+    #[test]
+    fn ca3_needs_two_people_the_same_issuer_vouches_for() {
+        use crate::approval_policy::{Party, SeparationFault};
+        let set = |sc: &mut Scorecard, who: Party, issuer: &str, subject: &str| {
+            let block = sc.approval.console.as_mut().unwrap();
+            let principal = ConsolePrincipal {
+                issuer: issuer.into(),
+                subject: subject.into(),
+            };
+            match who {
+                Party::Requester => block.requester = principal,
+                Party::Approver => {
+                    block.approver = principal;
+                    // Keep CA-5 satisfied, so only CA-3 can refuse.
+                    sc.approval.approver = sc
+                        .approval
+                        .console
+                        .as_ref()
+                        .unwrap()
+                        .approver
+                        .principal_id();
+                }
+            }
+        };
+        let idp = "https://idp.example";
+        type Case = (
+            &'static str,
+            Party,
+            &'static str,
+            &'static str,
+            SeparationFault,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "the requester",
+                Party::Approver,
+                idp,
+                "alice",
+                SeparationFault::SamePerson,
+            ),
+            (
+                "another case",
+                Party::Approver,
+                idp,
+                "ALICE",
+                SeparationFault::SamePerson,
+            ),
+            (
+                "a trailing slash",
+                Party::Approver,
+                "https://idp.example/",
+                "alice",
+                SeparationFault::SamePerson,
+            ),
+            (
+                "another issuer",
+                Party::Approver,
+                "https://other.example",
+                "alice",
+                SeparationFault::TwoIssuers,
+            ),
+            (
+                "whitespace",
+                Party::Approver,
+                idp,
+                "alice ",
+                SeparationFault::NotComparable(Party::Approver),
+            ),
+            (
+                "a decomposed letter",
+                Party::Approver,
+                idp,
+                "jose\u{301}",
+                SeparationFault::NotComparable(Party::Approver),
+            ),
+            (
+                "a blank requester",
+                Party::Requester,
+                idp,
+                "",
+                SeparationFault::NotComparable(Party::Requester),
+            ),
+            (
+                "the local admin approving",
+                Party::Approver,
+                "urn:logweir:local-admin",
+                "admin",
+                SeparationFault::LocalAdmin(Party::Approver),
+            ),
+            (
+                "the local admin requesting",
+                Party::Requester,
+                "urn:logweir:local-admin",
+                "admin",
+                SeparationFault::LocalAdmin(Party::Requester),
+            ),
+            (
+                "a service account requesting",
+                Party::Requester,
+                idp,
+                "system:serviceaccount:team-a:deployer",
+                SeparationFault::SystemIdentity(Party::Requester),
+            ),
+        ];
+        for (label, who, issuer, subject, fault) in cases {
+            let message = ca_err(|sc| set(sc, who, issuer, subject));
+            assert_eq!(message, console_separation_message(fault), "{label}");
+            assert!(
+                message.starts_with("approval.console does not name two people: the "),
+                "{label}: {message}"
+            );
+            // No part of the message is the document's.
+            if !subject.is_empty() {
+                assert!(
+                    !message.contains(subject) || subject == "admin",
+                    "{label}: {message}"
+                );
+            }
+        }
+        assert_eq!(
+            console_separation_message(SeparationFault::SamePerson),
+            "approval.console does not name two people: the approver is the requester (the \
+             issuer and the subject are compared without case); a two-person approval needs a \
+             second person, and no role changes that"
+        );
+        assert_eq!(
+            console_separation_message(SeparationFault::TwoIssuers),
+            "approval.console does not name two people: the approver and the requester come \
+             from two issuers; whether a subject of one is a subject of the other cannot be \
+             known, so a principal of another issuer is never a second person"
+        );
+        // THE CONTROL: a second subject behind a trailing slash is accepted.
+        let mut ok = with_console_approval();
+        set(&mut ok, Party::Approver, "https://idp.example/", "bob");
+        assert!(
+            ok.validate_invariants().is_ok(),
+            "{:?}",
+            ok.validate_invariants()
+        );
+    }
+
+    /// CA-4: no fabricated time. The approval lies inside the request's own
+    /// window: not before it, and before its expiry.
+    #[test]
+    fn ca4_holds_the_approval_inside_the_requests_window() {
+        let message = "approval.console.approved_at is before requested_at or not before request_expires_at; an approval is given after the request was made and before it expires";
+        for at in [
+            "2026-10-10T11:59:59Z",
+            "2026-10-10T13:00:00Z",
+            "2026-10-10T13:00:01Z",
+        ] {
+            assert_eq!(
+                ca_err(|sc| {
+                    sc.approval.console.as_mut().unwrap().approved_at = instant(at);
+                    sc.approval.approved_at = instant(at);
+                }),
+                message,
+                "{at}"
+            );
+        }
+        let mut at_request = with_console_approval();
+        at_request.approval.console.as_mut().unwrap().approved_at = instant("2026-10-10T12:00:00Z");
+        at_request.approval.approved_at = instant("2026-10-10T12:00:00Z");
+        assert!(at_request.validate_invariants().is_ok());
+    }
+
+    /// CA-5, CA-6, CA-7: the three fields beside the block are what the block
+    /// says. KILLS: an approver label that is not the second person (the
+    /// requester, a key label); a distinct personal key under a console
+    /// approval; the request's time written as the approval's.
+    #[test]
+    fn ca5_to_ca7_hold_the_approver_the_key_and_the_time_to_the_block() {
+        for label in [
+            "https://idp.example#alice",
+            "governed approver key abc",
+            "bob",
+            "https://idp.example#bob ",
+        ] {
+            assert_eq!(
+                ca_err(|sc| sc.approval.approver = label.into()),
+                "approval.approver is not approval.console.approver as \"<issuer>#<subject>\"; under a console approval the approver a scorecard names is the second person the console attested",
+                "{label}"
+            );
+        }
+        let key = "approval.key_id is not approval.console.confirmation_key_id; under a console approval the console's key signs the approval, so the approver's key is the console key (expected in this mode), and a distinct personal key is not a console approval";
+        assert_eq!(
+            ca_err(|sc| sc.approval.key_id = "a".repeat(64)),
+            key,
+            "a distinct personal key"
+        );
+        assert_eq!(
+            ca_err(|sc| {
+                sc.approval.key_id = String::new();
+                sc.approval.console.as_mut().unwrap().confirmation_key_id = String::new();
+            }),
+            key,
+            "no key at all"
+        );
+        assert_eq!(
+            ca_err(|sc| sc.approval.approved_at = instant("2026-10-10T12:00:00Z")),
+            "approval.approved_at is not approval.console.approved_at; under a console approval the approval time is the instant the second person approved, never the request's",
+            "the request's time written as the approval's"
+        );
+    }
+
+    /// CA-8: an original-name restore says `consoleApproval` exactly when it
+    /// carries the block. KILLS: `governed` beside a console approver (a
+    /// reader would be told a personal key countersigned); `consoleApproval`
+    /// with nobody named.
+    #[test]
+    fn ca8_ties_the_original_name_mode_to_the_block() {
+        let message = "target.original_name.approval_mode is \"consoleApproval\" exactly when approval.console is present; a console approval names who approved, and a governed, ordinary or v1 approval carries no console approver";
+        // `consoleApproval` and no block, under 1.9.0 (under 1.8.0 the word
+        // itself is refused first, by ON-5's version rule).
+        assert_eq!(
+            on_err(|sc| {
+                sc.format_version = "1.9.0".into();
+                sc.target.original_name.as_mut().unwrap().approval_mode =
+                    APPROVAL_MODE_CONSOLE.into();
+            }),
+            message
+        );
+        // The block beside each other mode.
+        for mode in ["governed", "v1Approval"] {
+            let mut sc = with_original_name();
+            approve_in_console(&mut sc);
+            sc.format_version = "1.9.0".into();
+            sc.target.original_name.as_mut().unwrap().approval_mode = mode.into();
+            assert_eq!(sc.validate_invariants().unwrap_err().0, message, "{mode}");
+        }
+        // NEGATIVE CONTROL: a governed original-name document without the
+        // block is the 1.8.0 document it was.
+        assert!(with_original_name().validate_invariants().is_ok());
+    }
+
+    /// **What a reader prints.** One `console approval:` line that says who
+    /// approved and how: the mode, both people, both instants, and that the
+    /// console key signed both documents, which is expected in this mode. An
+    /// instant is printed in UTC to the precision the document carries (the
+    /// Python twin normalises the same way).
+    #[test]
+    fn a_console_approval_prints_who_approved_and_how() {
+        assert_eq!(
+            console_block().lines(),
+            vec![format!(
+                "console approval: mode consoleApproval; requested by https://idp.example#alice \
+                 at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at \
+                 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console \
+                 key {CONSOLE_KEY_ID} signed the request and the approval, which is expected in \
+                 this mode: no personal key is involved"
+            )]
+        );
+        let mut precise = console_block();
+        precise.approved_at = "2026-10-10T14:04:00.250+02:00".parse().unwrap();
+        assert!(
+            precise.lines()[0].contains("#bob at 2026-10-10T12:04:00.250Z (the request"),
+            "{:?}",
+            precise.lines()
         );
     }
 }

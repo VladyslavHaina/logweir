@@ -654,6 +654,20 @@ impl EvidenceClaim {
             Err(absence) => Self::absent(absence),
         }
     }
+
+    /// **FX-33.** [`Self::from_document`] for a backup receipt whose facts
+    /// were folded from its bytes instead of parsed into a tree
+    /// (`crate::receipt_facts::ReceiptFacts::fold`): `None` is bytes that are
+    /// not JSON, which is `Unparseable`. The same claim, by the same rule —
+    /// `tests/receipt_facts.rs` holds the two readings together.
+    #[must_use]
+    pub fn from_receipt_facts(facts: Option<&crate::receipt_facts::ReceiptFacts>) -> Self {
+        match facts.map(crate::receipt_facts::ReceiptFacts::signing_time) {
+            Some(Ok(at)) => Self::at(at),
+            Some(Err(absence)) => Self::absent(absence),
+            None => Self::absent(ClaimAbsence::Unparseable),
+        }
+    }
 }
 
 /// The controller-written observation that a document existed at a given
@@ -1020,6 +1034,19 @@ pub fn decide(
 /// signing time", which under [`decide`]'s fail-closed rule would refuse every
 /// document of that version.
 const BACKUP_RECEIPT: &str = "application/vnd.logweir.backup-receipt+json";
+
+/// Whether `payload_type` is a backup receipt's media type — on the base
+/// type, for the reason [`BACKUP_RECEIPT`] gives.
+///
+/// **FX-33.** A reader that holds a receipt under its own bound and takes its
+/// facts without building a tree (`crate::receipt_facts`) asks this to know
+/// that the document in hand is one. Every other type keeps the smaller
+/// bound and the whole parse.
+#[must_use]
+pub fn is_backup_receipt(payload_type: &str) -> bool {
+    payload_type.split(';').next().unwrap_or("").trim() == BACKUP_RECEIPT
+}
+
 /// See [`BACKUP_RECEIPT`].
 const SCORECARD: &str = "application/vnd.logweir.drill-scorecard+json";
 /// See [`BACKUP_RECEIPT`].

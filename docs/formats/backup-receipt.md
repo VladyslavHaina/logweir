@@ -517,9 +517,12 @@ document.
 ### Two documents: the receipt's summary and the positions document
 
 **The receipt stays small however many partitions the groups hold** (PROD-04.1
-review H1). The catalog reads a receipt whole and refuses one over 256 KiB
-(`Unreadable`, so the console stops offering the point), and the evidence fetch
-relays at most 1 MiB; positions grow with groups × partitions. So the receipt
+review H1). The catalog, the controller and the evidence fetch read a receipt
+under one bound (5,131,072 bytes since FX-33, the topic budget of
+[kubernetes.md](../kubernetes.md) §7b.5; it was 256 KiB for the catalog and 1
+MiB for the other two) and a receipt over it is `Unreadable` in the catalog,
+so the console stops offering the point; positions grow with groups ×
+partitions. So the receipt
 carries only a per-group SUMMARY — outcome, type, states, members, `active` and
 the position COUNTS — the capture window, and the positions document's key,
 SHA-256 and length. Its size depends on the selection alone, and its cap,

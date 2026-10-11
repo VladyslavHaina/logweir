@@ -1,0 +1,19 @@
+{
+  "item": {
+    "namespace": "team-a",
+    "name": "prod-pair",
+    "mode": "governed",
+    "legacy": false,
+    "operatorMode": "two-person",
+    "basis": "binding",
+    "requireDistinctPrincipal": true,
+    "installationDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "ordinaryConfirmationAvailable": false,
+    "ticketRequired": true,
+    "consoleApprovalAvailable": true,
+    "maxAgeSeconds": 3600,
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "confirmationKeyId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6J"
+}

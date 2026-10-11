@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import {
   decodeApprovalPacket,
   decodeApprovalPolicy,
+  decodeApprovalRequest,
   decodeCadencePreview,
   decodeCancel,
   decodeCatalogPoints,
@@ -105,6 +106,7 @@ const READERS = Object.freeze({
   ApprovalList: (body) => decodeConsoleList("approvals", body),
   ApprovalPacketResponse: decodeApprovalPacket,
   ApprovalPolicyResponse: decodeApprovalPolicy,
+  ApprovalRequestResponse: decodeApprovalRequest,
   CadencePreviewResponse: decodeCadencePreview,
   ManualBackupResponse: decodeManualBackup,
   Problem: decodeProblem,
@@ -231,6 +233,14 @@ export const CONSOLE_FIXTURES = Object.freeze({
   // `fixtures/retention-held-back.json`, held to it by
   // `logweir-api/tests/retention_accounting.rs`.
   "retention-policies-held-back.json": { schema: "RetentionPolicyList" },
+  // PROD-16.2: a two-person request as the approver is shown it, in each
+  // state the page renders, and the policy view of such a namespace.
+  "approval-request-pending.json": { schema: "ApprovalRequestResponse" },
+  "approval-request-original-name.json": { schema: "ApprovalRequestResponse" },
+  "approval-request-approved.json": { schema: "ApprovalRequestResponse" },
+  "approval-request-not-confirmed.json": { schema: "ApprovalRequestResponse" },
+  "approval-request-scope-incomplete.json": { schema: "ApprovalRequestResponse" },
+  "approval-policy-two-person.json": { schema: "ApprovalPolicyResponse" },
   "trust-policy.json": { schema: "TrustPolicyResponse" },
   "trust-policies-list.json": { schema: "TrustPolicyList" },
   "catalog-point-schema-dependency.json": {

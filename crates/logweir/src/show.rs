@@ -384,6 +384,17 @@ fn qualifiers(sc: &Scorecard) -> String {
             topics.join(", ")
         ));
     }
+    // PROD-16.2: a second person approved this run in the console (scorecard
+    // 1.9.0, or 2.1.0 for a partition subset). The `approval` row above shows
+    // the approver and the ticket either way; this says HOW: the mode, who
+    // asked, both instants, and that the approval's key is the console's,
+    // which is expected in this mode. Printed only for a document carrying
+    // the block, so every other table is unchanged.
+    if let Some(console) = sc.approval.console.as_ref() {
+        for line in console.lines() {
+            o.push_str(&format!("    approval.console          {line}\n"));
+        }
+    }
     // PROD-15.1: the restore wrote under the source's ORIGINAL topic names
     // (scorecard 1.8.0). A qualifier in this footer's sense — the `target`
     // row reads `mode=newTopic` either way — printed only for a document

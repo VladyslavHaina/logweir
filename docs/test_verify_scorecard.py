@@ -905,7 +905,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.28.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.29.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -988,6 +988,14 @@ def test_the_version_line_names_the_current_invariant_set():
             "somewhere looked for an owner, each owner from a place looked in, an owned name "
             "only on the owner path, a one-person confirmation only with the names typed, "
             "the KafkaTopic resources looked in named by digest, and a complete verification"
+        ) in r.stdout, r.stdout
+        # 1.29.0's addition (PROD-16.2): `approval.console`'s arms.
+        assert (
+            "approval.console only from 1.9.0 of format 1 or 2.1.0 of format 2, its mode "
+            "consoleApproval, a requester and an approver who are two people of one issuer, the "
+            "approval inside the request's window, approval.approver the approver's principal, "
+            "approval.key_id the console's key, approval.approved_at the instant of the "
+            "approval, and target.original_name.approval_mode consoleApproval exactly beside it"
         ) in r.stdout, r.stdout
 
 
@@ -2312,9 +2320,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.28.0 (PROD-15.1) adds the scorecard's fourteen `target.original_name`
     # arms (ON-1 to ON-14, format 1.8.0), its shape check and the two
     # `original name:` lines. Map still five.
+    #
+    # 1.29.0 (PROD-16.2) adds the scorecard's eight `approval.console` arms
+    # (CA-1 to CA-8, format 1.9.0 and 2.1.0), its shape check, the member
+    # `consoleApproval` of `target.original_name.approval_mode` and the
+    # `console approval:` line. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.28.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.29.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -4458,11 +4471,31 @@ def test_the_original_name_minor_is_the_rust_readers():
     assert mod.ORIGINAL_NAME_CLUSTER_CONDITIONS == ("targetIsNotSource", "autoCreateDisabled")
     assert mod.ORIGINAL_NAME_OWNER_DETECTION_PLACES == (
         "plan", "kafkaTopicResources", "pointReceipt")
-    assert (
-        'pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 3] = ["v1Approval", "governed", '
-        '"ordinary"];' in rust
-    )
-    assert mod.ORIGINAL_NAME_APPROVAL_MODES == ("v1Approval", "governed", "ordinary")
+    # The approval-mode vocabulary is ONE definition in the Rust reader
+    # (PROD-16.2): named constants, and the set built from them. Resolved here
+    # to their values and compared member for member, in order.
+    assert mod.ORIGINAL_NAME_APPROVAL_MODES == _rust_original_name_approval_modes(rust)
+    assert mod.ORIGINAL_NAME_APPROVAL_MODES == (
+        "v1Approval", "governed", "ordinary", "consoleApproval")
+    assert mod.ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0 == _rust_original_name_approval_modes(
+        rust, "ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0")
+    assert mod.ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0 == ("v1Approval", "governed", "ordinary")
+
+
+def _rust_original_name_approval_modes(rust: str, name="ORIGINAL_NAME_APPROVAL_MODES"):
+    """`ORIGINAL_NAME_APPROVAL_MODES` (or its 1.8.0 set) as `scorecard.rs`
+    declares it, each named constant resolved to its string."""
+    m = re.search(
+        rf"pub const {name}: \[&str; (\d+)\] = \[([A-Z0-9_,\s]+)\];", rust)
+    assert m, f"scorecard.rs no longer declares {name} from named constants"
+    names = [n.strip() for n in m.group(2).split(",") if n.strip()]
+    assert len(names) == int(m.group(1))
+    values = []
+    for name in names:
+        value = re.search(rf'pub const {name}: &str = "([A-Za-z0-9]+)";', rust)
+        assert value, f"scorecard.rs no longer declares {name}"
+        values.append(value.group(1))
+    return tuple(values)
 
 
 def test_an_original_name_block_is_accepted_as_the_writer_writes_it():
@@ -4674,6 +4707,343 @@ def test_the_original_name_lines_are_the_rust_readers():
         "original name: declarative owners looked for in kafkaTopicResources: none found; "
         f"KafkaTopic resources {RESOURCES_DIGEST}"
     )
+
+
+# ---- PROD-16.2: `approval.console` (scorecard 1.9.0 and 2.1.0), arms CA-1 to CA-8 ----
+
+
+CONSOLE_KEY_ID = "c0" * 32
+IDP = "https://idp.example"
+
+
+def _console_block(**over):
+    block = {
+        "mode": "consoleApproval",
+        "requester": {"issuer": IDP, "subject": "alice"},
+        "approver": {"issuer": IDP, "subject": "bob"},
+        "requested_at": "2026-10-10T12:00:00Z",
+        "approved_at": "2026-10-10T12:04:00Z",
+        "request_expires_at": "2026-10-10T13:00:00Z",
+        "confirmation_key_id": CONSOLE_KEY_ID,
+    }
+    block.update(over)
+    return block
+
+
+def _approve_in_console(doc, block=None, version="1.9.0"):
+    """`doc`, approved in the console as the writer signs it: the block, and
+    the three fields beside it that it governs (CA-5 to CA-7)."""
+    block = _console_block() if block is None else block
+    doc["format_version"] = version
+    doc["approval"]["console"] = block
+    if isinstance(block, dict):
+        approver = block.get("approver")
+        if isinstance(approver, dict):
+            doc["approval"]["approver"] = f"{approver.get('issuer')}#{approver.get('subject')}"
+        doc["approval"]["key_id"] = block.get("confirmation_key_id")
+        doc["approval"]["approved_at"] = block.get("approved_at")
+    return doc
+
+
+def _scorecard_1_9(block=None, version="1.9.0"):
+    return _approve_in_console(_scorecard_1_4(_sampled_block()), block, version)
+
+
+def _rust_text(rel):
+    """A Rust source file with its string continuations and line breaks
+    folded, so a sentence can be looked for as one line."""
+    return " ".join((ROOT / rel).read_text().replace("\\\n", " ").split())
+
+
+def test_the_console_approval_minors_are_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const CONSOLE_APPROVAL_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares CONSOLE_APPROVAL_SINCE_MINOR"
+    assert mod.SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR == int(m.group(1))
+    m = re.search(r'pub const FORMAT_VERSION_WITH_CONSOLE_APPROVAL: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR
+    m = re.search(r"pub const CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2"
+    assert mod.SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2 == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL: &str = "2\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2
+    assert f'pub const APPROVAL_MODE_CONSOLE: &str = "{mod.APPROVAL_MODE_CONSOLE}";' in rust
+    # The version rule, value for value with `defines_console_approval`'s row.
+    for version, defines in (
+        ("1.9.0", True), ("1.10.0", True), ("2.1.0", True), ("2.7.3", True),
+        ("1.8.0", False), ("1.0.0", False), ("2.0.0", False), ("3.1.0", False),
+        ("0.9.0", False), ("1.x.0", False), ("1", False), ("", False), (None, False),
+    ):
+        assert mod._defines_console_approval(version) is defines, version
+
+
+def test_the_console_identity_rule_is_the_rust_readers():
+    # The constants and every fixed clause of arm CA-3, read from the Rust
+    # source: one rule, in one set of words, in both readers.
+    mod = _verifier_module()
+    policy = (ROOT / "crates/logweir-core/src/approval_policy.rs").read_text()
+    assert f'pub const LOCAL_ADMIN_ISSUER: &str = "{mod.CONSOLE_LOCAL_ADMIN_ISSUER}";' in policy
+    assert (
+        f'pub const KUBERNETES_SYSTEM_SUBJECT_PREFIX: &str = "{mod.CONSOLE_SYSTEM_SUBJECT_PREFIX}";'
+        in policy
+    )
+    for name in ("MAX_COMPARABLE_ISSUER_LEN", "MAX_COMPARABLE_SUBJECT_LEN"):
+        m = re.search(rf"pub const {name}: usize = (\d+);", policy)
+        assert m and int(m.group(1)) == mod.CONSOLE_MAX_COMPARABLE_LEN, name
+    folded = _rust_text("crates/logweir-core/src/approval_policy.rs")
+    alice = {"issuer": IDP, "subject": "alice"}
+    cases = {
+        "the requester is not in a form": ({"issuer": IDP, "subject": ""}, alice),
+        "the approver is not in a form": (alice, {"issuer": IDP, "subject": "bob "}),
+        "the requester is the in-cluster": (
+            {"issuer": "urn:logweir:local-admin", "subject": "admin"}, alice),
+        "the approver is a Kubernetes": (
+            alice, {"issuer": IDP, "subject": "system:serviceaccount:a:b"}),
+        "the approver and the requester come": (
+            alice, {"issuer": "https://other.example", "subject": "bob"}),
+        "the approver is the requester": (alice, {"issuer": IDP, "subject": "ALICE"}),
+    }
+    for opening, (requester, approver) in cases.items():
+        words = mod._console_separation_words(requester, approver)
+        assert words is not None and words.startswith(opening), (opening, words)
+        # The clause after the people it is about is the Rust reader's own.
+        for who in ("the requester ", "the approver and the requester ", "the approver "):
+            if words.startswith(who):
+                clause = words[len(who):]
+                break
+        assert clause in folded, clause
+    assert mod._console_separation_words(alice, {"issuer": IDP, "subject": "bob"}) is None
+
+
+def test_a_console_approval_block_is_accepted_as_the_writer_writes_it():
+    mod = _verifier_module()
+    # An ordinary restore, 1.9.0.
+    assert mod.check_invariants(_scorecard_1_9()) == ""
+    # A partition-subset restore, 2.1.0: ALLOWED, and the same block.
+    subset = _approve_in_console(_scorecard_1_7(_subset(), version="2.1.0"), version="2.1.0")
+    assert mod.check_invariants(subset) == ""
+    # A restore under the original topic names, 1.9.0: both places say so.
+    named = _approve_in_console(_scorecard_1_8(_original_name_block(approval_mode="consoleApproval")))
+    assert mod.check_invariants(named) == ""
+    # An issuer behind a trailing slash is the same issuer; another subject is
+    # another person.
+    slash = _scorecard_1_9(_console_block(approver={"issuer": IDP + "/", "subject": "bob"}))
+    assert mod.check_invariants(slash) == ""
+    # `null` is absent, as serde reads an `Option`: the document it was.
+    doc = _scorecard_1_4(_sampled_block())
+    doc["approval"]["console"] = None
+    assert mod.check_invariants(doc) == ""
+    # NEGATIVE CONTROLS: without the block, the three fields beside it mean
+    # what they always meant and are judged by nothing new.
+    plain = _scorecard_1_4(_sampled_block(), version="1.9.0")
+    assert mod.check_invariants(plain) == ""
+    assert mod.check_invariants(_scorecard_1_8()) == ""
+
+
+def test_each_console_approval_arm_refuses_with_the_rust_readers_words():
+    mod = _verifier_module()
+    rust = _rust_text("crates/logweir-core/src/scorecard.rs")
+
+    def says(doc, message, in_rust=None):
+        assert mod.check_invariants(doc) == message, mod.check_invariants(doc)
+        assert (in_rust or message).replace('"', '\\"') in rust, "the Rust reader's words"
+
+    # CA-1: the block under a version that does not define it, in each line.
+    for version in ("1.8.0", "2.0.0"):
+        doc = _scorecard_1_9(version=version)
+        if version == "2.0.0":
+            doc = _approve_in_console(_scorecard_1_7(_subset(), version=version), version=version)
+        says(
+            doc,
+            f'approval.console is present but format_version "{version}" does not define it: '
+            "the block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2",
+            in_rust="approval.console is present but format_version {:?} does not define it:",
+        )
+    # CA-2.
+    says(_scorecard_1_9(_console_block(mode="governed")),
+         'approval.console.mode is not "consoleApproval"')
+    # CA-3: each fault, with its fixed words and nothing of the document's.
+    opening = "approval.console does not name two people: "
+    assert opening + "{}" in rust
+    alice = {"issuer": IDP, "subject": "alice"}
+    for requester, approver, starts in (
+        (alice, alice, "the approver is the requester"),
+        (alice, {"issuer": IDP, "subject": "Alice"}, "the approver is the requester"),
+        (alice, {"issuer": IDP.upper() + "/", "subject": "alice"}, "the approver is the requester"),
+        (alice, {"issuer": "https://other.example", "subject": "bob"},
+         "the approver and the requester come from two issuers"),
+        (alice, {"issuer": IDP, "subject": "bo b"}, "the approver is not in a form"),
+        (alice, {"issuer": IDP, "subject": "jose\u0301"}, "the approver is not in a form"),
+        (alice, {"issuer": IDP + "#x", "subject": "bob"}, "the approver is not in a form"),
+        (alice, {"issuer": IDP, "subject": "b" * 256}, "the approver is not in a form"),
+        ({"issuer": IDP, "subject": ""}, alice, "the requester is not in a form"),
+        ({"issuer": "URN:logweir:local-admin", "subject": "admin"}, alice,
+         "the requester is the in-cluster administrator console's one identity"),
+        (alice, {"issuer": "urn:logweir:local-admin", "subject": "admin"},
+         "the approver is the in-cluster administrator console's one identity"),
+        ({"issuer": IDP, "subject": "System:serviceaccount:team-a:deployer"}, alice,
+         "the requester is a Kubernetes system identity"),
+    ):
+        message = mod.check_invariants(
+            _scorecard_1_9(_console_block(requester=requester, approver=approver)))
+        assert message.startswith(opening + starts), message
+        for chosen in (requester["subject"], approver["subject"]):
+            assert len(chosen) < 6 or chosen not in message, message
+    # CA-4: before the request, at its expiry, and after it.
+    ca4 = ("approval.console.approved_at is before requested_at or not before "
+           "request_expires_at; an approval is given after the request was made and before it "
+           "expires")
+    for approved_at in ("2026-10-10T11:59:59Z", "2026-10-10T13:00:00Z", "2026-10-11T00:00:00Z",
+                        "2026-10-10T15:00:00+02:00"):
+        says(_scorecard_1_9(_console_block(approved_at=approved_at)), ca4)
+    # ... and the two ends that are inside: the request's own instant, and the
+    # last instant before the expiry, whatever offset it is written with.
+    for approved_at in ("2026-10-10T12:00:00Z", "2026-10-10T12:59:59.999999999Z",
+                        "2026-10-10T14:30:00+02:00"):
+        assert mod.check_invariants(_scorecard_1_9(_console_block(approved_at=approved_at))) == ""
+    # CA-5: the approver the scorecard names is the block's.
+    doc = _scorecard_1_9()
+    doc["approval"]["approver"] = "governed approver key " + CONSOLE_KEY_ID
+    says(doc, 'approval.approver is not approval.console.approver as "<issuer>#<subject>"; '
+              "under a console approval the approver a scorecard names is the second person the "
+              "console attested")
+    # CA-6: a distinct personal key is not a console approval; nor is no key.
+    ca6 = ("approval.key_id is not approval.console.confirmation_key_id; under a console "
+           "approval the console's key signs the approval, so the approver's key is the console "
+           "key (expected in this mode), and a distinct personal key is not a console approval")
+    doc = _scorecard_1_9()
+    doc["approval"]["key_id"] = "aa" * 32
+    says(doc, ca6)
+    says(_scorecard_1_9(_console_block(confirmation_key_id="  ")), ca6)
+    # CA-7: no fabricated time -- never the request's.
+    doc = _scorecard_1_9()
+    doc["approval"]["approved_at"] = doc["approval"]["console"]["requested_at"]
+    says(doc, "approval.approved_at is not approval.console.approved_at; under a console "
+              "approval the approval time is the instant the second person approved, never the "
+              "request's")
+    # ... the same INSTANT written with another offset is the same time.
+    doc = _scorecard_1_9()
+    doc["approval"]["approved_at"] = "2026-10-10T14:04:00+02:00"
+    assert mod.check_invariants(doc) == ""
+    # ON-5, split by version (PROD-01.3's pattern): under 1.8.0 the new
+    # member is refused by the version, a 1.8.0 document is judged as before,
+    # and from 1.9.0 the closed set is four.
+    says(_scorecard_1_8(_original_name_block(approval_mode="consoleApproval")),
+         'target.original_name.approval_mode is a value defined from 1.9.0 and format_version '
+         '"1.8.0" predates it',
+         in_rust="target.original_name.approval_mode is a value defined from "
+                 "1.{CONSOLE_APPROVAL_SINCE_MINOR}.0 and format_version {:?} predates it")
+    for mode in ("standing", "two-person", "ConsoleApproval", ""):
+        says(_scorecard_1_8(_original_name_block(approval_mode=mode)),
+             'target.original_name.approval_mode is not one of "v1Approval", "governed", '
+             '"ordinary"')
+        says(_scorecard_1_8(_original_name_block(approval_mode=mode), version="1.9.0"),
+             "target.original_name.approval_mode is not one of the four values this format "
+             'defines; it is "v1Approval", "governed", "ordinary" or "consoleApproval" and '
+             "nothing else")
+    assert mod.check_invariants(_scorecard_1_8(version="1.9.0")) == ""
+    # CA-8, both ways: the mode without the block, and the block beside
+    # another mode.
+    ca8 = ('target.original_name.approval_mode is "consoleApproval" exactly when '
+           "approval.console is present; a console approval names who approved, and a governed, "
+           "ordinary or v1 approval carries no console approver")
+    says(_scorecard_1_8(_original_name_block(approval_mode="consoleApproval"), version="1.9.0"),
+         ca8)
+    for mode in ("governed", "v1Approval"):
+        says(_approve_in_console(_scorecard_1_8(_original_name_block(approval_mode=mode))), ca8)
+
+
+def test_a_malformed_console_approval_block_is_refused_at_the_shape_layer():
+    mod = _verifier_module()
+    shape = "approval.console is not an object of the shape the writer gives it"
+    for bad in (
+        "bob", [], {"mode": "consoleApproval"},
+        _console_block(mode=7),
+        _console_block(approver="https://idp.example#bob"),
+        _console_block(approver={"issuer": IDP}),
+        _console_block(requester={"issuer": IDP, "subject": 7}),
+        _console_block(approved_at=None),
+        _console_block(approved_at=1760000000),
+        _console_block(approved_at="2026-10-10"),
+        _console_block(approved_at="2026-02-30T12:04:00Z"),
+        _console_block(requested_at="yesterday"),
+        _console_block(request_expires_at="2026-10-10T25:00:00Z"),
+        _console_block(confirmation_key_id=None),
+    ):
+        doc = _scorecard_1_9()
+        doc["approval"]["console"] = bad
+        assert mod.check_invariants(doc).startswith(shape), bad
+    # The three fields beside the block, which CA-5 to CA-7 read.
+    beside = ("approval.console is present but approval.approver, approval.key_id and "
+              "approval.approved_at are not two strings and an instant")
+    for name, value in (("approver", None), ("key_id", 7), ("approved_at", "soon"),
+                        ("approved_at", None)):
+        doc = _scorecard_1_9()
+        doc["approval"][name] = value
+        assert mod.check_invariants(doc) == beside, (name, value)
+
+
+def test_an_instant_is_compared_and_printed_as_chrono_does():
+    mod = _verifier_module()
+    same = [mod._instant(t) for t in (
+        "2026-10-10T12:04:00Z", "2026-10-10t12:04:00z", "2026-10-10T14:04:00+02:00",
+        "2026-10-10T07:34:00.000-04:30")]
+    assert len(set(same)) == 1 and same[0] is not None
+    assert mod._instant("2026-10-10T12:04:00.5Z") > same[0]
+    # A leap second sorts after :59.999 and before the next minute, and is
+    # printed as itself.
+    leap = mod._instant("2026-12-31T23:59:60Z")
+    assert mod._instant("2026-12-31T23:59:59.999999999Z") < leap < mod._instant(
+        "2027-01-01T00:00:00Z")
+    assert mod._instant_shown(leap) == "2026-12-31T23:59:60Z"
+    for bad in ("2026-02-29T00:00:00Z", "2026-13-01T00:00:00Z", "2026-10-10T24:00:00Z",
+                "2026-10-10 12:04:00Z", "2026-10-10T12:04:00", 7, None):
+        assert mod._instant(bad) is None, bad
+    assert mod._instant("2024-02-29T00:00:00Z") is not None
+    # UTC, `Z`, and the precision the text carries: none, 3, 6 or 9 digits.
+    for text, shown in (
+        ("2026-10-10T14:04:00+02:00", "2026-10-10T12:04:00Z"),
+        ("2026-10-10T12:04:00.25Z", "2026-10-10T12:04:00.250Z"),
+        ("2026-10-10T12:04:00.000250Z", "2026-10-10T12:04:00.000250Z"),
+        ("2026-10-10T12:04:00.0000002Z", "2026-10-10T12:04:00.000000200Z"),
+        ("2026-01-01T00:30:00+01:00", "2025-12-31T23:30:00Z"),
+        ("1969-12-31T23:59:59Z", "1969-12-31T23:59:59Z"),
+        ("2000-02-29T12:00:00Z", "2000-02-29T12:00:00Z"),
+    ):
+        assert mod._instant_shown(mod._instant(text)) == shown, text
+
+
+def test_the_console_approval_line_is_the_rust_readers():
+    mod = _verifier_module()
+    assert mod._console_approval_lines(None) == []
+    line = (
+        "console approval: mode consoleApproval; requested by https://idp.example#alice at "
+        "2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at "
+        "2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key "
+        f"{CONSOLE_KEY_ID} signed the request and the approval, which is expected in this mode: "
+        "no personal key is involved"
+    )
+    assert mod._console_approval_lines(_console_block()) == [line]
+    # The Rust writer's sentence, format string for format string.
+    rust = _rust_text("crates/logweir-core/src/scorecard.rs")
+    assert (
+        '"console approval: mode {}; requested by {} at {}; approved in the console by {} at {} '
+        "(the request expired at {}); the console key {} signed the request and the approval, "
+        'which is expected in this mode: no personal key is involved"'
+    ) in rust
+    # Printed by the script itself, for a signed document, and not otherwise.
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        sc, sig = _write_signed(d, "console", SCORECARD_TYPE, _scorecard_1_9())
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert f"       approval: {line}\n" in r.stdout, r.stdout
+        sc, sig = _write_signed(d, "plain", SCORECARD_TYPE, _scorecard_1_4(_sampled_block()))
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert "console approval:" not in r.stdout, r.stdout
 
 
 # ---------------------------------------------------------------------------

@@ -90,9 +90,9 @@ pub enum ApprovedPlanState {
 pub enum RetentionAccountingState {
     /// The status records `keptCount`, `candidateCount` and `truncatedByCap`,
     /// they add up to `pointsEvaluated` with the skipped points, and its
-    /// `kept` list is `keptCount` long. The counts and the `kept` rows in
-    /// this response are that status's own. `keptCount: 0` with no `kept`
-    /// member then means nothing is kept.
+    /// `kept` list is `keptCount` long (its first 500 when more are kept).
+    /// The counts and the `kept` rows in this response are that status's
+    /// own. `keptCount: 0` with no `kept` member then means nothing is kept.
     Recorded,
     /// The status does not record that accounting: an older controller wrote
     /// the evaluation, a newer controller's members were pruned by an older
@@ -203,9 +203,9 @@ pub struct RetentionEvaluationView {
     /// record what the per-run ceiling held back lists those points under
     /// `kept`, so its list is not published as kept and no count is derived
     /// from it. The same holds when the status's counts do not add up to
-    /// `pointsEvaluated`, or its `kept` list is not `keptCount` long, which is
-    /// what an older controller leaves behind after a rollback of its image
-    /// alone.
+    /// `pointsEvaluated`, or its `kept` list is not `keptCount` long (up to
+    /// 500), which is what an older controller leaves behind after a rollback
+    /// of its image alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_count: Option<i64>,
     /// How many points THIS plan would remove, which may exceed the rows
@@ -546,8 +546,9 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
     let evaluation = status.and_then(|s| s.last_evaluation.as_ref());
     // THE ACCOUNTING IS READ ONCE, THROUGH THE CRD'S OWN RULE (FX-22):
     // `Some` only when the block records the four counts, they add up to
-    // `pointsEvaluated`, and its `kept` list is `keptCount` long. Without it
-    // this projection publishes no kept count, no held-back count and NO
+    // `pointsEvaluated`, and its `kept` list is `keptCount` long (up to
+    // 500, FX-39). Without it this projection publishes no kept count, no
+    // held-back count and NO
     // `kept` LIST — the list of a controller that did not record the
     // ceiling's effect holds the held-back points, and a response that passed
     // it on would be calling them kept. AND IT SAYS SO (review M1):

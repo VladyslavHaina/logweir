@@ -153,21 +153,33 @@ golden:
 # this build writes 1.8.0 only for a restore under the original topic names.
 # The block never appears in a 2.x document (an original-name restore restores
 # whole topics), so `-2.0.0.json` is byte for byte PROD-11.1b's and the scorecard
-# has TWO generated files: `-2.0.0.json` from the type, and `-1.8.0.json`, which
-# is the frozen `-1.7.0.json` plus the block as the type derives it
-# (`logweir_core::schema::scorecard_format_1_schema`,
-# `the_format_1_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`).
+# had TWO generated files at that row: `-2.0.0.json` from the type, and
+# `-1.8.0.json`, the frozen `-1.7.0.json` plus the block as the type derived it
+# (`logweir_core::schema::scorecard_format_1_schema`).
+#
+# PROD-16.2 added `approval.console` (a restore a second person approved in the
+# console), an optional block in BOTH lines: scorecard 1.9.0, format 1's newest
+# MINOR, and 2.1.0, format 2's first MINOR (a partition-subset restore approved
+# in the console). PROD-15.1's `-1.8.0.json` and PROD-11.1b's `-2.0.0.json` are
+# frozen beside the new files
+# (`the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`,
+# `the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
+# The two generated files are now `-2.1.0.json`, from the type, and
+# `-1.9.0.json`, which is the frozen `-1.8.0.json` plus the block as the type
+# derives it
+# (`the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block`).
+# This build writes 1.9.0 or 2.1.0 only for such a restore.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`,
+# (`scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new. The scorecard's format-1 file is named by
-# `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` the same way.
-scorecard_schema_version := "2.0.0"
-scorecard_format_1_schema_version := "1.8.0"
+# `scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL` the same way.
+scorecard_schema_version := "2.1.0"
+scorecard_format_1_schema_version := "1.9.0"
 receipt_schema_version := "1.7.0"
 catalog_schema_version := "1.7.0"
 

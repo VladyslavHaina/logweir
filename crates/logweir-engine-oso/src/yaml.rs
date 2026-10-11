@@ -125,6 +125,11 @@ pub const ENGINE_SCRAM_SHA_256: &str = "SCRAM-SHA256";
 /// mechanism both clients spell alike.
 pub const ENGINE_PLAIN: &str = "PLAIN";
 
+/// **FX-27.** The engine's Prometheus server defaults ON, unauthenticated, at
+/// `0.0.0.0:8080` (engine 0.23.3 `config.rs:93-103`), and nothing scrapes it,
+/// so the backup and restore documents both end with this top-level block.
+pub const METRICS_OFF: &str = "metrics:\n  enabled: false\n";
+
 /// The `security:` block, as all THREE rendered documents carry it — the
 /// engine's `KafkaConfig.security` under a `source:` or a `target:` key.
 ///

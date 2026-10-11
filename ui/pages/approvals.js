@@ -2,13 +2,26 @@
 // and the create form that records an approval for ONE chosen Restore from two
 // documents an approver's own machine produced.
 //
-// THERE IS NO "APPROVE" BUTTON HERE, AND THERE MUST NOT BE. This page renders
-// nothing that produces a signature. The approver runs `logweir drill approve`
-// where their private key lives, and this form takes the two files it wrote --
-// `approval.json` and `approval.sig` -- as UTF-8 text, VERBATIM, and does one
-// `create` on `approvals` with them (interface I18: the document text, never
-// base64). An encoding step between the approver's file and the hashed bytes
-// is the class of transformation `planBytes` exists to forbid.
+// THIS PAGE PRODUCES NO SIGNATURE, AND IT MUST NOT. Nothing here holds a key
+// or signs. Under a strict or an unbound namespace the approver runs `logweir
+// drill approve` (or `countersign`) where their private key lives, and this
+// form takes the two files it wrote -- `approval.json` and `approval.sig` --
+// as UTF-8 text, VERBATIM, and does one `create` on `approvals` with them
+// (interface I18: the document text, never base64). An encoding step between
+// the approver's file and the hashed bytes is the class of transformation
+// `planBytes` exists to forbid.
+//
+// THE ONE "APPROVE" BUTTON (PROD-16.2) IS A TWO-PERSON NAMESPACE'S, AND IT
+// SIGNS NOTHING EITHER. Under a `two-person` policy a SECOND person, signed in
+// to the shared console, is shown the request -- every fact of it the
+// server's, read from bytes the console verified its own signature on -- and
+// clicks Approve. The click sends ONE value: the hash of the request that was
+// shown. It carries no field of an authorization, no document and no key; the
+// console decides who the approver is from the sign-in, refuses the requester
+// and anyone who is not an Approver, and signs who approved and when. The
+// button is rendered only when the SERVER said this login may approve, and
+// the server checks every rule again on the click. There is nothing to copy,
+// sign or paste in that mode, and the page offers no field to paste into.
 //
 // IT REFUSES KEY MATERIAL, BY NAME AND BY CONTENT, AND SAYS WHICH. A file
 // named the way a key file is named -- ending `.pem`, `.key`, `.p8`, `.p12`,
@@ -268,6 +281,11 @@ export function noApprovalSentence(policy) {
     return "No Approval in this namespace yet. Its approval mode is confirm: creating a " +
       "Restore in the wizard is the confirmation, no key is involved, and nothing is recorded " +
       "here by hand.";
+  }
+  if (twoPersonPolicy(policy)) {
+    return "No Approval in this namespace yet. Its approval mode is two-person: a second " +
+      "person, signed in to this console as an approver and not the requester, opens a " +
+      "Restore waiting above and approves it there. No key is involved.";
   }
   if (mode === "governed") {
     return "No Approval in this namespace yet. Its approval mode is strict: an approver " +
@@ -862,7 +880,11 @@ export function renderApprovalSubject(view, now) {
       ["Restore phase", phaseBadge(((v.restore.status || {}).phase))],
       ["progress", restoreProgressSentence(v.restore)],
     ]) +
-    (restoreApprovalSubject(v.restore) === "originalName"
+    // NOT UNDER TWO-PERSON (review P2-1): this sentence names the v1
+    // `logweir drill approve` command and says the runner checks owners; for
+    // a console request the requester's own statement decides that, and the
+    // two-person panel below says so in its own words.
+    (restoreApprovalSubject(v.restore) === "originalName" && !twoPersonPolicy(v.policy)
       ? "<p class=\"caveat\" id=\"original-name-approval\">" +
         esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
       : "") +
@@ -879,6 +901,9 @@ export function renderApprovalSubject(view, now) {
 /** What this page offers to DO for the subject, by the namespace's policy. */
 function subjectAction(v) {
   const mode = policyMode(v.policy);
+  if (twoPersonPolicy(v.policy)) {
+    return renderConsoleApprovalPanel(v);
+  }
   if (mode === "governed") {
     return countersignOffered(v) ? renderCountersignPanel(v) : "";
   }
@@ -1157,7 +1182,24 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
   const policy = await readPolicy(api, ns, lifecycle);
   let confirmation = null;
   let confirmationError = null;
-  if (policyMode(policy) === "governed" && subject.approvalName.length > 0) {
+  // PROD-16.2: under a two-person policy the page reads the REQUEST AS THE
+  // SERVER SHOWS IT, and never the stored confirmation's documents: there is
+  // nothing to copy or countersign in that mode, and every fact rendered is
+  // one the console verified before answering.
+  let request = null;
+  let requestError = null;
+  if (twoPersonPolicy(policy)) {
+    if (typeof (api || {}).approvalRequest === "function") {
+      try {
+        request = await api.approvalRequest(ns, subject.name, readOptions(lifecycle));
+      } catch (error) {
+        if (cancelled(error, lifecycle)) {
+          throw error;
+        }
+        requestError = error;
+      }
+    }
+  } else if (policyMode(policy) === "governed" && subject.approvalName.length > 0) {
     try {
       confirmation = await api.get(
         ns, PLURAL, confirmationNameFor(subject.approvalName), readOptions(lifecycle),
@@ -1183,7 +1225,19 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
     policy: policy,
     confirmation: confirmation,
     confirmationError: confirmationError,
+    request: request,
+    requestError: requestError,
   };
+}
+
+/** PROD-16.2: whether the namespace's policy takes its approval from a SECOND
+ *  PERSON IN THE CONSOLE: an explicit Governed binding whose operator mode is
+ *  `two-person`. Anything else -- strict, confirm, legacy, unbound, unread, or
+ *  a mode word this page does not know -- is `false`, and the page keeps the
+ *  flow it had: a word nobody recognises never turns a key-based approval
+ *  into a click. */
+export function twoPersonPolicy(policy) {
+  return policyMode(policy) === "governed" && policy.operatorMode === "two-person";
 }
 
 /** PLAT-19.2: `ordinary` or `governed` for an EXPLICIT binding the console
@@ -1222,6 +1276,11 @@ async function readPolicy(api, ns, lifecycle) {
 export function countersignOffered(view) {
   const v = view || {};
   if (policyMode(v.policy) !== "governed" || v.restore === null || v.restore === undefined) {
+    return false;
+  }
+  // PROD-16.2: a two-person namespace takes NO countersignature (the product
+  // API refuses one), so the panel that asks for one is never offered there.
+  if (twoPersonPolicy(v.policy)) {
     return false;
   }
   if (Array.isArray(v.mismatches) && v.mismatches.length > 0) {
@@ -1324,6 +1383,382 @@ export async function submitCountersignature(subject, sidecarBytes, deps) {
   return { outcome: "created", object: await api.submitGovernedApproval(s.ns, s.name, text) };
 }
 
+// ---------------------------------------------- PROD-16.2: two-person approval
+
+/** The console-approval form's mutation-record key suffix (PROD-16.2). */
+export const CONSOLE_APPROVAL_FORM = "console-approval-form";
+
+/** The words for each state of a two-person request. A table with no
+ *  prototype, read by the server's state word; a word this page does not know
+ *  reads `undefined` and is shown as the server's own sentence alone. */
+const REQUEST_STATE_WORDS = Object.freeze(Object.assign(Object.create(null), {
+  pending: "waiting for a second person",
+  approved: "approved",
+  expired: "expired",
+  notConfirmed: "not confirmed by this console",
+}));
+
+const SHA256 = /^sha256:[0-9a-f]{64}$/;
+
+/** Whether the Approve button is rendered: the SERVER offered it to this
+ *  login for a PENDING request it named by a well-formed hash, the login
+ *  holds the approver capability, the route agrees with the Restore, and this
+ *  console takes approvals at all. Every condition is one the server checks
+ *  again on the click; this decides what is DRAWN, never what is allowed. */
+export function consoleApprovalOffered(view) {
+  const v = view || {};
+  if (!twoPersonPolicy(v.policy) || v.policy.consoleApprovalAvailable !== true) {
+    return false;
+  }
+  if (v.restore === null || v.restore === undefined || v.maySubmit === false) {
+    return false;
+  }
+  if (Array.isArray(v.mismatches) && v.mismatches.length > 0) {
+    return false;
+  }
+  const r = v.request;
+  if (r === null || r === undefined || typeof r !== "object" || r.state !== "pending") {
+    return false;
+  }
+  if (((r.approve || {}).offered) !== true) {
+    return false;
+  }
+  // The request the server showed is THIS Restore's, now: its name and its UID.
+  const s = v.subject || {};
+  if (r.restore !== s.name || r.restoreUid !== s.uid) {
+    return false;
+  }
+  // WHAT IS APPROVED IS WHAT WAS SHOWN (PROD-16.2, the coordinator's
+  // addition 6). The server says whether the scope it sent is the whole of
+  // what is approved; the page draws the button only beside a scope it can
+  // render in full, every topic of it. The approve route refuses an
+  // incomplete scope on its own: this decides what is DRAWN.
+  if (scopeShowable(r) === null) {
+    return false;
+  }
+  return typeof r.confirmationSha256 === "string" && SHA256.test(r.confirmationSha256);
+}
+
+/** The scope a request view carries, when the SERVER said it is complete and
+ *  it is whole on arrival: a topic list as long as the count the server
+ *  stated, and not empty. `null` otherwise -- and then nothing is offered. */
+export function scopeShowable(request) {
+  const r = request || {};
+  const scope = r.scope;
+  if (r.scopeComplete !== true || scope === null || typeof scope !== "object") {
+    return null;
+  }
+  const topics = scope.topics;
+  if (!Array.isArray(topics) || topics.length === 0 || topics.length !== scope.topicsCount) {
+    return null;
+  }
+  return scope;
+}
+
+/** AN END OF THE RESTORE WINDOW, TO THE MILLISECOND THE RUN USES (review
+ *  P2-2). The engine applies both ends to the millisecond, inclusively, and
+ *  `when` shows whole seconds: a `.999` end would read as the second before
+ *  it. A whole-second instant reads as `when` shows it; any other shows its
+ *  milliseconds, in UTC. The exact recorded value stays in `datetime`. */
+export function exactInstant(value) {
+  const at = typeof value === "string" ? Date.parse(value) : NaN;
+  if (isNaN(at) || at % 1000 === 0) {
+    return when(value);
+  }
+  const iso = new Date(at).toISOString();
+  return "<time class=\"ts\" datetime=\"" + esc(value) + "\" title=\"" + esc(value) + "\">" +
+    esc(iso.slice(0, 10) + " " + iso.slice(11, 23) + " UTC") + "</time>";
+}
+
+/** One object-store location of a scope, as text. */
+function scopeStorageWords(storage) {
+  const st = storage || {};
+  return "<code>" + esc(st.location) + "</code>" +
+    (typeof st.endpoint === "string" ? " at <code>" + esc(st.endpoint) + "</code>" : "") +
+    (typeof st.region === "string" ? ", region <code>" + esc(st.region) + "</code>" : "") +
+    (st.plaintextHttp === true ? " <strong>(over plain HTTP)</strong>" : "");
+}
+
+/** PROD-16.2: what the two-person panel says about an original-name
+ *  restore. NOT the v1 page's sentence: that one names a `logweir drill
+ *  approve` command and says the runner refuses if a declarative owner
+ *  manages a name -- which, for a console request, is decided by the
+ *  requester's own statement shown below it (review S-1). */
+export const TWO_PERSON_ORIGINAL_NAME_SENTENCE =
+  "This Restore writes under the ORIGINAL topic names, into topics that do not exist. The " +
+  "runner refuses again if a name exists, or if the target may be the source cluster and any " +
+  "broker auto-creates topics. Whether a declarative owner manages a name is decided by what " +
+  "the requester states below: approving accepts that statement.";
+
+/** REVIEW S-1: the requester's owner statement, as the plan signs it, in
+ *  plain sentences -- the three cases of `owners`, and `owner_path`. Every
+ *  value is escaped text. */
+export function ownerStatementBlock(statement) {
+  const st = statement || {};
+  const owners = Array.isArray(st.owners) ? st.owners : null;
+  const listed = owners === null ? "" : owners.map((o) => {
+    const w = o || {};
+    return "<li><code>" + esc(w.topic) + "</code> (" + esc(w.kind) + " <code>" +
+      esc(w.reference) + "</code>)</li>";
+  }).join("");
+  let words;
+  // Not declared reads as the run acts, WHATEVER owner_path says: from the
+  // console the run has nowhere to look and refuses (review P2-4).
+  if (owners === null) {
+    words = "The requester states nothing about declarative owners of these names. This " +
+      "console gives the run nowhere else to look, so the run will refuse before it writes " +
+      "anything.";
+  } else if (st.ownerPath === true) {
+    words = "<strong>Restore despite an owner (owner_path):</strong> the requester states that " +
+      "each declarative owner's " +
+      "reconciliation is paused for this restore and that it adopts the topic afterwards; the " +
+      "restore writes under these names although an owner manages them" +
+      (owners !== null && owners.length > 0
+        ? ". The owners stated:</p><ul class=\"sets\">" + listed + "</ul><p class=\"note\">"
+        : " (no owner is listed).");
+  } else if (owners.length === 0) {
+    words = "The requester states that <strong>no declarative owner</strong> (a Strimzi " +
+      "KafkaTopic, a GitOps or Terraform definition) manages any of these names. Nothing in " +
+      "the console checks this statement: approving accepts it.";
+  } else {
+    words = "The requester states these declarative owners and does not set owner_path, " +
+      "so the run will refuse before it writes anything:</p><ul class=\"sets\">" + listed +
+      "</ul><p class=\"note\">";
+  }
+  return "<div class=\"caveat\" id=\"scope-owner-statement\"><p class=\"note\">" + words +
+    "</p></div>";
+}
+
+/** THE APPROVAL SCOPE, ALL OF IT (PROD-16.2). Source, recovery point, target
+ *  cluster, EVERY topic and the name it is restored under -- original names
+ *  marked, partition subsets listed number by number -- the verification and
+ *  where the evidence goes. Never a slice and never "and N more": the list
+ *  scrolls inside the panel (`.approval-scope-topics`) and a long name wraps;
+ *  nothing clips or ellipsizes it. Every value is escaped text. */
+export function renderApprovalScope(scope) {
+  const sc = scope || {};
+  const source = sc.source || {};
+  const recovery = sc.recovery || {};
+  const target = sc.target || {};
+  const verification = sc.verification || {};
+  const topics = Array.isArray(sc.topics) ? sc.topics : [];
+  const original = topics.some((t) => (t || {}).originalName === true);
+  const servers = Array.isArray(target.bootstrapServers) ? target.bootstrapServers : [];
+  const rows = [
+    ["plan", typeof sc.planName === "string" ? "<code>" + esc(sc.planName) + "</code>" : cell(null)],
+    ["source archive", scopeStorageWords(source.storage)],
+    ["backup set", "<code>" + esc(source.backup) + "</code>"],
+    ["recovery point", typeof source.pointId === "string"
+      ? "<code>" + esc(source.pointId) + "</code> (receipt <code>" + esc(source.receiptSha256) +
+        "</code>)"
+      : cell(null)],
+    ["restored to", exactInstant(recovery.pointInTime) +
+      (recovery.pointInTimeStated === true ? "" : " (the end of the check window)")],
+    ["restored from", typeof recovery.windowStart === "string"
+      ? exactInstant(recovery.windowStart)
+      : "the archive's floor"],
+    ["time basis", typeof recovery.timeBasis === "string" ? esc(recovery.timeBasis) : cell(null)],
+    ["target cluster", "<span id=\"scope-target-cluster\">" +
+      servers.map((b) => "<code>" + esc(b) + "</code>").join(", ") + "</span>"],
+    ["target authentication", esc(target.authMode) +
+      (typeof target.authUsername === "string" ? " as <code>" + esc(target.authUsername) +
+        "</code>" : "")],
+    ["target mode", esc(target.mode)],
+    ["replication factor", esc(String(target.replicationFactor))],
+    ["afterwards", target.mode === "scratch" && target.teardown === "delete"
+      ? "<strong id=\"scope-teardown\">the topics this run creates are deleted</strong>"
+      : "nothing is deleted (teardown " + esc(target.teardown) + ")"],
+    ["topic prefix", typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
+      ? "<code>" + esc(target.topicPrefix) + "</code>"
+      : "none: every topic is written under its own name"],
+    ["verification", esc(verification.coverage) + " over " +
+      exactInstant(verification.windowStart) + " to " + exactInstant(verification.windowEnd)],
+    ["evidence", scopeStorageWords(sc.evidence)],
+  ];
+  const list = topics.map((t) => {
+    const topic = t || {};
+    return "<li><code>" + esc(topic.source) + "</code> restored as <code>" + esc(topic.target) +
+      "</code>" +
+      (topic.originalName === true ? " <strong class=\"original-name\">original name</strong>" : "") +
+      (Array.isArray(topic.partitions)
+        ? ", partitions " + topic.partitions.map((n) => esc(String(n))).join(", ")
+        : ", every partition") +
+      "</li>";
+  }).join("");
+  return (
+    "<div class=\"approval-scope\" id=\"approval-scope\"><h4>What you approve</h4>" +
+    "<p class=\"note\">Everything below is read from the plan this request names by hash, " +
+    "which the console's signature covers; none of it from the Restore object. Approving " +
+    "approves all of it.</p>" +
+    facts(rows) +
+    (original ? "<p class=\"caveat\" id=\"request-original-topics\">" +
+      esc(TWO_PERSON_ORIGINAL_NAME_SENTENCE) + "</p>" +
+      ownerStatementBlock(target.ownerStatement) : "") +
+    "<p class=\"note\" id=\"scope-topic-count\">" + esc(String(topics.length)) +
+    " topic(s), every one listed:</p>" +
+    "<ol class=\"approval-scope-topics\" id=\"scope-topics\" tabindex=\"0\" " +
+    "aria-label=\"every topic restored and the name it is restored under\">" + list + "</ol>" +
+    "</div>"
+  );
+}
+
+/** THE SECOND PERSON'S PANEL (PROD-16.2). What is being approved -- who asked,
+ *  for which Restore and plan, under which policy, with which ticket, until
+ *  when, and THE WHOLE SCOPE: the source, the recovery point, the target
+ *  cluster, every topic and the name it is restored under -- and ONE button,
+ *  or the sentence saying why this login has none.
+ *
+ *  EVERY FACT IS THE SERVER'S, AND EVERY ONE IS TEXT. The request view carries
+ *  them from bytes the console verified its own signature on; a request that
+ *  does not verify carries none, and none is shown. Each value goes through
+ *  `esc` -- a requester's identity, a ticket and a topic name are all text
+ *  somebody else chose. Nothing is parsed out of a stored document here, no
+ *  document or signature is displayed, and there is no field to paste into:
+ *  in this mode there is nothing to copy, sign or paste. */
+export function renderConsoleApprovalPanel(view) {
+  const v = view || {};
+  const s = v.subject || {};
+  const p = v.policy || {};
+  const state = v.consoleApproval || {};
+  const pending = state.phase === "pending";
+  const open = "<section class=\"step\" id=\"console-approval-section\"><h3>Two-person approval" +
+    "</h3><p class=\"blurb\">Namespace policy <code>" + esc(p.name || "") + "</code> is " +
+    "two-person: this Restore runs only after a second person, signed in to this console as " +
+    "an approver and NOT its requester, approves the request below. No key is involved, and " +
+    "there is nothing to copy, sign or paste: the console records who approved and when, and " +
+    "signs that.</p>";
+  if (p.consoleApprovalAvailable !== true) {
+    return open + "<p class=\"complaint\" id=\"console-approval-unavailable\">This console " +
+      "cannot take a two-person approval: it is the in-cluster administrator console, whose one " +
+      "identity cannot be two people, or its confirmation key is not there yet. A second person " +
+      "approves in the shared console.</p></section>";
+  }
+  if (v.requestError) {
+    return open + "<p class=\"note\" id=\"console-approval-unread\">The request could not be " +
+      "read, so nothing about it is shown and nothing can be approved from here:</p>" +
+      errorLine(v.requestError) + "</section>";
+  }
+  const r = v.request;
+  if (r === null || r === undefined || typeof r !== "object") {
+    return open + "<p class=\"note\" id=\"console-approval-unread\">This login may not read " +
+      "approval requests in this namespace, so nothing about the request is shown here.</p>" +
+      "</section>";
+  }
+  const words = REQUEST_STATE_WORDS[r.state];
+  const stateLine = "<div class=\"approval-state\" id=\"console-approval-state\">" +
+    // NEVER GREEN HERE. "approved" is the console's own record that a second
+    // person approved; whether that authorises anything is weirkeeper's
+    // verdict, which is the state block above this panel.
+    badge(r.state === "approved" ? "info" : (r.state === "pending" ? "warn" : "danger"),
+      words === undefined ? "unknown" : words) +
+    "<p class=\"note\">" + esc(r.stateSentence) + "</p></div>";
+  // A request this console did not confirm shows NONE of its fields: the
+  // server sent none, and none is looked for anywhere else.
+  if (r.state === "notConfirmed" || typeof r.requester !== "string") {
+    return open + stateLine + "</section>";
+  }
+  const original = r.approvalSubject === "originalName";
+  const rows = [
+    ["requested by", "<code id=\"request-requester\">" + esc(r.requester) + "</code>"],
+    ["Restore", "<code>" + esc(r.restore) + "</code>"],
+    ["Restore uid", "<code>" + esc(r.restoreUid) + "</code>"],
+    ["plan hash", "<code id=\"request-plan-hash\">" + esc(r.planHash) + "</code>"],
+    ["what is approved", "<span id=\"request-approval-subject\">" +
+      approvalSubjectWords(original ? "originalName" : "ordinary") + "</span>"],
+    ["policy", "<code>" + esc(r.policy) + "</code>"],
+    ["policy digest", "<code>" + esc(r.policyDigest) + "</code>"],
+    ["change ticket", typeof r.ticket === "string" ? esc(r.ticket) : cell(null)],
+    ["requested at", when(r.issuedAt)],
+    ["expires at", "<span id=\"request-expires-at\">" + when(r.expiresAt) + "</span>"],
+  ];
+  if (r.state === "approved") {
+    rows.push(["approved by", "<code id=\"request-approver\">" + esc(r.approver) + "</code>"]);
+    rows.push(["approved at", when(r.approvedAt)]);
+  }
+  // THE SCOPE, WHOLE, or the server's sentence saying why it cannot be
+  // shown -- never a part of it.
+  const shownScope = scopeShowable(r);
+  const scopeBlock = shownScope !== null
+    ? renderApprovalScope(shownScope)
+    : "<p class=\"complaint\" id=\"scope-incomplete\">" +
+      esc(typeof r.scopeSentence === "string" && r.scopeSentence.length > 0
+        ? r.scopeSentence
+        : "What this request approves could not be shown in full, so it cannot be approved " +
+          "here.") + "</p>";
+  const offer = r.approve || {};
+  const action = consoleApprovalOffered(v)
+    ? "<form id=\"console-approval-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") +
+      "><fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+      "<p class=\"note\" id=\"approve-sentence\">" + esc(offer.sentence) + "</p>" +
+      "<div class=\"actions\"><button type=\"submit\" class=\"primary\" " +
+      "id=\"approve-in-console\">Approve this Restore</button></div></fieldset>" +
+      "<div class=\"form-status\" id=\"console-approval-status\" tabindex=\"-1\">" +
+      mutationStatus(state, { kind: "Approval", name: s.approvalName }) + "</div></form>"
+    : "<p class=\"note\" id=\"approve-not-offered\">" +
+      esc(v.maySubmit === false && offer.offered === true
+        ? "This login may read the request and not approve it: that needs the approver role " +
+          "in this namespace, held by someone other than the requester."
+        : (typeof offer.sentence === "string" && offer.sentence.length > 0
+          ? offer.sentence
+          : "This login is not offered an approval for this request.")) + "</p>";
+  return open + stateLine + facts(rows) + scopeBlock + action + "</section>";
+}
+
+/** Sends the second person's approval, or refuses before anything is sent:
+ *  the server did not offer one to this login, or the request it showed
+ *  carries no well-formed hash. ONE value leaves the page -- the hash of the
+ *  request that was shown -- and it is the server's own, unchanged. */
+export async function submitConsoleApproval(view, deps) {
+  const v = view || {};
+  if (!consoleApprovalOffered(v)) {
+    throw refusal(
+      "this login is not offered an approval for this request; nothing was sent",
+    );
+  }
+  const api = deps || API;
+  return {
+    outcome: "created",
+    object: await api.approveInConsole(v.ns, v.subject.name, v.request.confirmationSha256),
+  };
+}
+
+/** Wires the two-person panel: one submit runs one mutation, and a success
+ *  re-reads the page (the request now reads `approved`, and the button is
+ *  gone). There is no field to wire: nothing is typed or pasted in this mode. */
+function wireConsoleApproval(node, view, parse, api, lifecycle) {
+  const form = node.querySelector("#console-approval-form");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(view.ns, CONSOLE_APPROVAL_FORM, view.subject.name);
+  const mutation = mutationFor(key);
+  watchMutation(node, key, mutation, (state) => {
+    if (state.phase === "succeeded") {
+      mountApprovals(node, view.ns, view.route, parse, api, lifecycle);
+      return;
+    }
+    const body = form.querySelector("fieldset");
+    if (body !== null) {
+      disableKeepingFocus(body, state.phase === "pending",
+        node.querySelector("#console-approval-status"));
+    }
+    const slot = node.querySelector("#console-approval-status");
+    if (slot !== null) {
+      replace(slot, parse(mutationStatus(state, { kind: "Approval", name: view.subject.approvalName })));
+      if (state.phase === "failed" && typeof slot.focus === "function") {
+        slot.focus();
+      }
+    }
+  }, lifecycle);
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    mutation.run(() => submitConsoleApproval(view, api));
+  }, lifecycle);
+}
+
 /** What the subject page's form renders from: the record and its messages. */
 export function approvalFormView(view) {
   const v = view || {};
@@ -1333,6 +1768,8 @@ export function approvalFormView(view) {
     state: state,
     errors: state.phase === "failed" ? fieldErrors(state.error, APPROVAL_FIELD_PATHS) : null,
     countersign: mutationFor(formKey(v.ns, COUNTERSIGN_FORM, ((v.subject || {}).name) || "")).state,
+    consoleApproval:
+      mutationFor(formKey(v.ns, CONSOLE_APPROVAL_FORM, ((v.subject || {}).name) || "")).state,
   });
 }
 
@@ -1427,7 +1864,9 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
     const view = approvalFormView(loaded);
     view.maySubmit = granted(ns, "approvalSubmit");
     replace(node, parse(renderApprovalSubject(view)));
-    if (countersignOffered(view)) {
+    if (twoPersonPolicy(view.policy)) {
+      wireConsoleApproval(node, view, parse, api, lifecycle);
+    } else if (countersignOffered(view)) {
       wireCountersign(node, view, parse, api, lifecycle);
     } else if (policyMode(view.policy) === null && formOffered(view)) {
       wire(node, view, parse, api, lifecycle);

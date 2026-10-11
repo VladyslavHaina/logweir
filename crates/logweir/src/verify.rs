@@ -171,6 +171,27 @@ pub struct VerifyReport {
     /// Boxed: the block is the largest optional one, and `Verdict`'s variants
     /// stay comparable in size.
     pub original_name: Option<Box<logweir_core::scorecard::OriginalNameInfo>>,
+    /// `approval.console` (scorecard 1.9.0 and 2.1.0, PROD-16.2), carried as
+    /// read: `None` is a run no second person approved in the console.
+    pub console_approval: Option<Box<logweir_core::scorecard::ConsoleApprovalInfo>>,
+}
+
+/// The `console approval:` line both readers print for a restore a SECOND
+/// PERSON APPROVED IN THE CONSOLE (PROD-16.2): the writer's sentence
+/// (`ConsoleApprovalInfo::lines`) — the mode, who asked and when, who approved
+/// and when, when the request would have expired, and that the console key
+/// signed both documents, which is expected in this mode and no other. Nothing
+/// for a document without `approval.console`, so every other verdict prints
+/// what it always did. `docs/verify_scorecard.py::_console_approval_lines`
+/// prints the same line, and `scripts/check-verifier-parity.sh` compares every
+/// line starting `console approval:` between the two readers.
+#[must_use]
+pub fn console_approval_lines(
+    block: Option<&logweir_core::scorecard::ConsoleApprovalInfo>,
+) -> Vec<String> {
+    block
+        .map(logweir_core::scorecard::ConsoleApprovalInfo::lines)
+        .unwrap_or_default()
 }
 
 /// The two `original name:` lines both readers print for a restore under the
@@ -1239,6 +1260,7 @@ pub fn verify_scorecard_with(
         ),
         format_version: sc.format_version.clone(),
         original_name: sc.target.original_name.clone().map(Box::new),
+        console_approval: sc.approval.console.clone().map(Box::new),
     }))
 }
 
@@ -1256,6 +1278,13 @@ fn print_report(r: &VerifyReport) {
         println!("approval:  SELF-ATTESTED — the approval key equals the signing key");
     } else {
         println!("approval:  {} ({})", r.approver, r.ticket);
+    }
+    // PROD-16.2: who approved and HOW, when a second person approved in the
+    // console — the approver above is then a principal the console attested,
+    // and the approval's key is the console's, which this line says is
+    // expected in this mode. Printed only for a document carrying the block.
+    for line in console_approval_lines(r.console_approval.as_deref()) {
+        println!("approval:  {line}");
     }
     // The offset report, printed only when the document records one — so a
     // scorecard signed before this field existed prints exactly what it always

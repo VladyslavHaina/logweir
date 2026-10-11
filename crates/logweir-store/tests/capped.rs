@@ -270,12 +270,30 @@ fn too_large_is_unclassified_and_names_the_cap_through_engine_error() {
 /// is verifiable by the controller's own handle exactly when it is verifiable
 /// through a relay; every controller cap is at most its runner twin; the probe
 /// reads no body.
+///
+/// FX-33: a RECEIPT has one cap for the controller, the relay and the catalog
+/// walk, and it is the topic budget's sum; a scorecard keeps the 1 MiB every
+/// document had.
 #[test]
 fn the_cap_table_holds_its_own_relations() {
-    use logweir_core::check_contract::{MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES};
-    assert_eq!(caps::CONTROLLER_DOCUMENT, MAX_EVIDENCE_PAYLOAD_BYTES);
+    use logweir_core::check_contract::{
+        MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SCORECARD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES,
+    };
+    use logweir_core::topic_budget;
+    assert_eq!(caps::CONTROLLER_DOCUMENT, MAX_EVIDENCE_SCORECARD_BYTES);
+    assert_eq!(caps::CONTROLLER_DOCUMENT, 1 << 20);
+    assert_eq!(caps::CONTROLLER_RECEIPT, MAX_EVIDENCE_PAYLOAD_BYTES);
+    assert_eq!(caps::CONTROLLER_RECEIPT, topic_budget::MAX_RECEIPT_BYTES);
+    assert_eq!(
+        caps::CATALOG_RECEIPT,
+        caps::CONTROLLER_RECEIPT,
+        "a point the catalog lists Available must be one the controller can verify"
+    );
+    assert_eq!(caps::CATALOG_RECORD, topic_budget::MAX_RECORD_BYTES);
     assert_eq!(caps::SIDECAR, MAX_EVIDENCE_SIDECAR_BYTES);
     const _: () = assert!(caps::CONTROLLER_DOCUMENT <= caps::SIGNED_DOCUMENT);
+    const _: () = assert!(caps::CONTROLLER_RECEIPT <= caps::SIGNED_DOCUMENT);
+    const _: () = assert!(caps::CATALOG_RECORD <= caps::SIGNED_DOCUMENT);
     const _: () = assert!(caps::CONTROLLER_MANIFEST <= caps::MANIFEST);
     assert_eq!(caps::PROBE, 0);
     // A probe GET of a present, non-empty object is answered and refused
@@ -627,10 +645,13 @@ fn call_arguments(after_open: &str) -> (&str, usize) {
 /// "far too large" (review F4: per crate, and by shape).
 ///
 /// - In `crates/weirkeeper/src`, the SHARED controller, a read may name only
-///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_MANIFEST`,
-///   `SIDECAR`, `PROBE`.
-/// - Elsewhere it names any `caps::` row, the catalog walk's
-///   `CATALOG_DOCUMENT_READ_CAP`, or a `max_bytes` its own caller chose.
+///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_RECEIPT`
+///   (FX-33), `CONTROLLER_MANIFEST`, `SIDECAR`, `PROBE`, or the cap its own
+///   payload type selects (`controller_cap_for`, which answers one of the
+///   first two and nothing else: `weirkeeper`'s
+///   `the_controllers_document_cap_is_one_of_its_two_rows`).
+/// - Elsewhere it names any `caps::` row or a `max_bytes` its own caller
+///   chose.
 /// - Nowhere `u64::MAX`.
 ///
 /// The compiler holds the rest: `clippy.toml` forbids `object_store`'s own
@@ -652,11 +673,13 @@ fn every_production_read_names_a_cap_from_the_table() {
     );
     let controller = [
         "caps::CONTROLLER_DOCUMENT",
+        "caps::CONTROLLER_RECEIPT",
         "caps::CONTROLLER_MANIFEST",
         "caps::SIDECAR",
         "caps::PROBE",
+        "controller_cap_for(",
     ];
-    let elsewhere = ["caps::", "CATALOG_DOCUMENT_READ_CAP", "max_bytes"];
+    let elsewhere = ["caps::", "max_bytes"];
     let bad: Vec<&(String, String)> = reads
         .iter()
         .filter(|(at, args)| {

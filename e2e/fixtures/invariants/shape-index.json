@@ -727,5 +727,68 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected struct OriginalNameInfo",
   "python_reason": "target.original_name is not an object of the shape the writer gives it: three strings, an optional source cluster id, the places looked in, the owners found and a bool owner_path"
+ },
+ {
+  "id": "console_approval_not_an_object",
+  "file": "console_approval_not_an_object.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"bob\", expected struct ConsoleApprovalInfo",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_without_an_approver",
+  "file": "console_approval_without_an_approver.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: missing field `approver`",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_approver_not_a_principal",
+  "file": "console_approval_approver_not_a_principal.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"https://idp.example#bob\", expected struct ConsolePrincipal",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_without_approved_at",
+  "file": "console_approval_without_approved_at.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: missing field `approved_at`",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_approved_at_null",
+  "file": "console_approval_approved_at_null.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected an RFC 3339 formatted date and time string",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_approved_on_a_day_that_does_not_exist",
+  "file": "console_approval_approved_on_a_day_that_does_not_exist.json",
+  "check": "message:approval.console is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: input is out of range",
+  "python_reason": "approval.console is not an object of the shape the writer gives it: a string mode, a requester and an approver of a string issuer and a string subject each, three instants and a string confirmation key id"
+ },
+ {
+  "id": "console_approval_beside_a_malformed_approval_time",
+  "file": "console_approval_beside_a_malformed_approval_time.json",
+  "check": "message:approval.console is present but approval.approver, approval.key_id and ",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: input contains invalid characters",
+  "python_reason": "approval.console is present but approval.approver, approval.key_id and approval.approved_at are not two strings and an instant"
  }
 ]

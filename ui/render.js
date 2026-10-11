@@ -3573,6 +3573,9 @@ export const ENFORCEMENT_DEGRADED_SENTENCE =
 export const ACCOUNTING_RECORDED = "Recorded";
 export const ACCOUNTING_NOT_RECORDED_WORD = "NotRecorded";
 
+/** The CRD's `maxItems` on each `status.lastEvaluation` list (FX-39). */
+const EVALUATION_LIST_BOUND = 500;
+
 /** THE FOUR COUNTS OF A RETENTION EVALUATION, OR `null` WHEN THEY ARE NOT
  *  RECORDED (FX-22).
  *
@@ -3602,8 +3605,10 @@ export const ACCOUNTING_NOT_RECORDED_WORD = "NotRecorded";
  *  lists in hand are whole -- which is every legacy read, and every console
  *  read whose `truncated` is not `true`:
  *
- *  - the four counts add up; and
- *  - the `kept` list is `keptCount` long (review M2).
+ *  - the four counts add up, with `skippedCount` where the status has it;
+ *    and
+ *  - the `kept` and `skipped` lists are as long as their counts, up to the
+ *    status's bound of 500 (review M2, FX-39, FX-39 review S1).
  *
  *  A block that fails either is two writers' numbers: after a rollback of the
  *  controller image alone the older controller rewrites the lists and cannot
@@ -3625,14 +3630,21 @@ export function evaluationAccounting(evaluation) {
     return null;
   }
   if (e.truncated !== true) {
-    const skipped = Array.isArray(e.skipped) ? e.skipped.length : 0;
-    if (e.keptCount + e.candidateCount + e.truncatedByCap + skipped !== e.pointsEvaluated) {
+    // FX-39: the controller cuts each status list at 500 and writes its count.
+    const skipped = e.skippedCount == null
+      ? (Array.isArray(e.skipped) ? e.skipped.length : 0)
+      : e.skippedCount;
+    if (!whole(skipped) ||
+      e.keptCount + e.candidateCount + e.truncatedByCap + skipped !== e.pointsEvaluated) {
       return null;
     }
-    // FX-39 will cut the status lists at the CRD's bound; this comparison
-    // must then be with `min(keptCount, bound)`, as the controller's is.
     const listed = Array.isArray(e.kept) ? e.kept.length : 0;
-    if (listed !== e.keptCount) {
+    if (listed !== Math.min(e.keptCount, EVALUATION_LIST_BOUND)) {
+      return null;
+    }
+    // And `skipped` beside a `skippedCount` (review S1).
+    const skippedListed = Array.isArray(e.skipped) ? e.skipped.length : 0;
+    if (skippedListed !== Math.min(skipped, EVALUATION_LIST_BOUND)) {
       return null;
     }
   }

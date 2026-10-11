@@ -334,6 +334,19 @@ pub const ROUTES: &[RouteAccess] = &[
         "/api/v1/namespaces/{ns}/restores/{name}/approval",
         ns(&[Action::SubmitApproval]),
     ),
+    // PROD-16.2: two-person approval in the console. The read shows a
+    // request; the POST is the second person's click, and only the Approver
+    // role holds `approval.submit` (an Administrator does not).
+    route(
+        "GET",
+        "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+        ns(&[Action::ReadApprovals]),
+    ),
+    route(
+        "POST",
+        "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
+        ns(&[Action::SubmitApproval]),
+    ),
     // -------------------------------------------------------- approvals
     // PLAT-19.2: the namespace's approval-policy binding, as the console
     // routes a submission by it. The handler keeps its own role check.

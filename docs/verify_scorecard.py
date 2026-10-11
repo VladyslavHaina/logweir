@@ -567,7 +567,40 @@ FORMAT_VERSION = "1.4.0"
 # it is decided exactly as before (OD-7 (a)). The shape layer refuses a block
 # that is not the writer's shape; two `original name:` lines say what admitted
 # the restore, in the Rust reader's words.
-SCRIPT_VERSION = "1.28.0"
+#
+# 1.29.0 (PROD-16.2) knows scorecard format 1.9.0, and 2.1.0 of format 2, and
+# their optional `approval.console`: a restore a SECOND PERSON APPROVED IN THE
+# CONSOLE (no personal key: the console attests who asked and who approved,
+# and signs both). The block says who approved and how -- the mode, the
+# requester, the approver, when the request was made, when it was approved,
+# when it would have expired, and the console key that signed both. Eight
+# arms, CA-1 to CA-8, mirrored byte for byte and in position (after the ON
+# arms, before `redactions`) from `Scorecard::validate_invariants`: the block
+# only from 1.9.0 of format 1 or 2.1.0 of format 2; its mode `consoleApproval`;
+# two people -- each an issuer and a subject of visible ASCII, neither the
+# in-cluster administrator nor a Kubernetes system identity, of one issuer,
+# with different subjects (compared without case); the approval inside the
+# request's own window; `approval.approver` the approver's `<issuer>#<subject>`;
+# `approval.key_id` the console's key, which is EXPECTED in this mode and is
+# said so in the printed line; `approval.approved_at` the instant the second
+# person approved, never the request's; and `target.original_name.approval_mode`
+# `consoleApproval` exactly when the block is present. That closed set gains
+# the member `consoleApproval` FROM 1.9.0: ON-5 is split by version, as
+# PROD-01.3 split `target.auth.mode`'s arm -- under 1.8.0 the new member is
+# refused as a value that version does not define, every 1.8.0 document is
+# judged exactly as before, and from 1.9.0 the set is four. A 1.28.0 reader
+# refuses a 1.9.0 document naming the new member by its own closed-set
+# sentence, which is the safer verdict (OD-7's third case), and accepts every
+# other 1.9.0 or 2.1.0 document, ignoring the block: it then reads the
+# approver's principal beside the console's key, the shape of a one-person
+# confirmation, never of a personal-key approval. CA-1 to CA-7 fire only
+# on a document carrying the block, and CA-8 only on one carrying
+# `target.original_name`, so every other document is decided exactly as before
+# (OD-7 (a)). No arm's message carries a principal, an instant or a key id.
+# The shape layer refuses a block that is not the writer's shape; one
+# `console approval:` line says who approved and how, in the Rust reader's
+# words.
+SCRIPT_VERSION = "1.29.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -610,10 +643,40 @@ SCORECARD_ORIGINAL_NAME_SINCE_MINOR = 8
 # in `scorecard.rs`, `CLUSTER_CONDITIONS` and `OWNER_DETECTION_PLACES` in
 # `crates/logweir-core/src/original_name.rs`, and `OWNER_KINDS` in
 # `topic_configuration.rs`, which they must equal.
-ORIGINAL_NAME_APPROVAL_MODES = ("v1Approval", "governed", "ordinary")
+ORIGINAL_NAME_APPROVAL_MODES = ("v1Approval", "governed", "ordinary", "consoleApproval")
+# The same set under 1.8.0, before PROD-16.2 added its fourth member --
+# `ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0` in `scorecard.rs`. ON-5 is split by
+# version: a 1.8.0 document is judged against these three, exactly as before.
+ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0 = ("v1Approval", "governed", "ordinary")
 ORIGINAL_NAME_CLUSTER_CONDITIONS = ("targetIsNotSource", "autoCreateDisabled")
 ORIGINAL_NAME_OWNER_DETECTION_PLACES = ("plan", "kafkaTopicResources", "pointReceipt")
 ORIGINAL_NAME_OWNER_KINDS = ("strimzi", "external")
+
+# PROD-16.2: `approval.console`, a restore a second person approved in the
+# console. The first minor of format 1, and of format 2, that defines the
+# block (arm CA-1) -- `CONSOLE_APPROVAL_SINCE_MINOR` and
+# `CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`, which they must equal
+# (`docs/test_verify_scorecard.py::test_the_console_approval_minors_are_the_rust_readers`).
+SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR = 9
+SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2 = 1
+
+# The block's one mode, and the new member of `ORIGINAL_NAME_APPROVAL_MODES`
+# above -- `APPROVAL_MODE_CONSOLE` in `scorecard.rs`. THE VOCABULARY IS HELD TO
+# THE RUST READER'S BY A ROW, member for member and in order:
+# `crates/logweir/tests/two_reader_parity.rs::
+# the_approval_mode_vocabulary_is_the_same_set_in_both_readers` reads the two
+# assignments out of this file's text.
+APPROVAL_MODE_CONSOLE = "consoleApproval"
+
+# The identity rule of a console approval (arm CA-3) -- `LOCAL_ADMIN_ISSUER`,
+# `KUBERNETES_SYSTEM_SUBJECT_PREFIX`, `MAX_COMPARABLE_ISSUER_LEN` and
+# `MAX_COMPARABLE_SUBJECT_LEN` in `crates/logweir-core/src/approval_policy.rs`,
+# which they must equal
+# (`docs/test_verify_scorecard.py::test_the_console_identity_rule_is_the_rust_readers`).
+CONSOLE_LOCAL_ADMIN_ISSUER = "urn:logweir:local-admin"
+CONSOLE_SYSTEM_SUBJECT_PREFIX = "system:"
+CONSOLE_MAX_COMPARABLE_LEN = 255
 
 # The first minor of SCORECARD format 1 that defines `sample.unsampled_topics`
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
@@ -1221,6 +1284,185 @@ def _defines_original_name(version) -> bool:
     )
 
 
+def _defines_console_approval(version) -> bool:
+    """Whether a document of `version` defines `approval.console` -- the twin
+    of `logweir_core::scorecard::defines_console_approval` (arm CA-1): a 1.x
+    document from 1.9.0 on, or a 2.x document from 2.1.0 on. A partition-subset
+    restore may be approved in the console like any other, so the block is
+    defined in both lines."""
+    minor = _minor(version)
+    if minor is None:
+        return False
+    major = _major(version)
+    if major == 1:
+        return minor >= SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    """Days since 1970-01-01 of a proleptic Gregorian date (any year)."""
+    year -= month <= 2
+    era = year // 400
+    yoe = year - era * 400
+    doy = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def _civil_from_days(days: int):
+    """The inverse of `_days_from_civil`: (year, month, day)."""
+    days += 719468
+    era = days // 146097
+    doe = days - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    year = yoe + era * 400
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    day = doy - (153 * mp + 2) // 5 + 1
+    month = mp + (3 if mp < 10 else -9)
+    return year + (month <= 2), month, day
+
+
+def _instant(value):
+    """An RFC 3339 instant as `(seconds, fraction)`, or None -- what chrono's
+    `DateTime<Utc>` holds, so two of them compare as the Rust reader compares
+    them (arms CA-4 and CA-7): `seconds` since the epoch in UTC, whatever
+    offset the text carries, and `fraction` in nanoseconds. A leap second
+    (`:60`) is second 59 with a fraction of a whole second or more, exactly as
+    chrono keeps it, so it sorts after `:59.999` and before the next minute.
+    A date that does not exist (the 30th of February) is None: serde refuses it
+    over there."""
+    if not isinstance(value, str):
+        return None
+    m = _RFC3339.fullmatch(value)
+    if not m:
+        return None
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    if not (1 <= month <= 12 and hour <= 23 and minute <= 59 and second <= 60):
+        return None
+    leap_year = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days_in_month = (31, 29 if leap_year else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    if not 1 <= day <= days_in_month[month - 1]:
+        return None
+    frac = m.group(7) or "."
+    nanos = int((frac[1:] + "000000000")[:9])
+    tz = m.group(8)
+    offset = 0
+    if tz not in ("Z", "z"):
+        offset = (1 if tz[0] == "+" else -1) * (int(tz[1:3]) * 3600 + int(tz[4:6]) * 60)
+    seconds = (
+        _days_from_civil(year, month, day) * 86400
+        + hour * 3600 + minute * 60 + min(second, 59) - offset
+    )
+    return seconds, nanos + (10**9 if second == 60 else 0)
+
+
+def _instant_shown(instant) -> str:
+    """An instant as the Rust reader prints it:
+    `to_rfc3339_opts(SecondsFormat::AutoSi, true)` -- UTC with `Z`, and the
+    fraction to the precision it carries (none, 3, 6 or 9 digits)."""
+    seconds, fraction = instant
+    leap = fraction >= 10**9
+    if leap:
+        fraction -= 10**9
+    days, rest = divmod(seconds, 86400)
+    year, month, day = _civil_from_days(days)
+    hour, rest = divmod(rest, 3600)
+    minute, second = divmod(rest, 60)
+    if fraction == 0:
+        shown = ""
+    elif fraction % 10**6 == 0:
+        shown = f".{fraction // 10**6:03d}"
+    elif fraction % 10**3 == 0:
+        shown = f".{fraction // 10**3:06d}"
+    else:
+        shown = f".{fraction:09d}"
+    return (
+        f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:"
+        f"{second + (1 if leap else 0):02d}{shown}Z"
+    )
+
+
+def _visible_ascii(text) -> bool:
+    """Non-empty, and every character visible ASCII (0x21 to 0x7E): no space,
+    no control character, nothing outside ASCII -- the twin of
+    `approval_policy::is_visible_ascii`."""
+    return bool(text) and all(0x21 <= ord(c) <= 0x7E for c in text)
+
+
+def _ascii_lower(text: str) -> str:
+    """Rust's `to_ascii_lowercase`: A to Z only. Python's `str.lower` also
+    folds letters outside ASCII, which the form check has already refused; this
+    folds what the Rust reader folds and nothing else."""
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in text)
+
+
+def _fold_issuer(issuer: str) -> str:
+    """`approval_policy::fold_issuer`: trailing `/` removed, ASCII lower case."""
+    return _ascii_lower(issuer.rstrip("/"))
+
+
+def _principal_fault(party, issuer, subject):
+    """`approval_policy::principal_fault`'s fixed clause for one principal, or
+    None: a comparable form, then not the local administrator, then not a
+    Kubernetes system identity."""
+    if (
+        not _visible_ascii(issuer)
+        or not _visible_ascii(subject)
+        or "#" in issuer
+        or len(issuer) > CONSOLE_MAX_COMPARABLE_LEN
+        or len(subject) > CONSOLE_MAX_COMPARABLE_LEN
+    ):
+        return (
+            f"the {party} is not in a form that can be compared: a console approval compares "
+            "an issuer and a subject made of visible ASCII characters only (no space, no "
+            "control character, nothing outside ASCII; the issuer without `#`; each at most "
+            "255 characters, as OpenID Connect bounds `sub`), and an identity it cannot "
+            "compare cannot be shown to be a second person"
+        )
+    if _fold_issuer(issuer) == CONSOLE_LOCAL_ADMIN_ISSUER:
+        return (
+            f"the {party} is the in-cluster administrator console's one identity, which "
+            "cannot be one of two people; a console approval needs two people the same "
+            "identity provider vouches for"
+        )
+    if _ascii_lower(subject).startswith(CONSOLE_SYSTEM_SUBJECT_PREFIX):
+        return (
+            f"the {party} is a Kubernetes system identity (a service account, a node or a "
+            "system user), not a person; a console approval is between two people"
+        )
+    return None
+
+
+def _console_separation_words(requester, approver):
+    """Why the two principals of `approval.console` are not two people, in
+    arm CA-3's fixed words, or None when they are -- the twin of
+    `approval_policy::separation_fault` and `scorecard::
+    console_separation_words`: each a principal a console approval can compare
+    and a person (the requester first), then one issuer, then two subjects.
+    It compares the issuer and the subject and nothing else. No part of what it
+    returns is the document's."""
+    fault = _principal_fault("requester", requester["issuer"], requester["subject"])
+    if fault is None:
+        fault = _principal_fault("approver", approver["issuer"], approver["subject"])
+    if fault is not None:
+        return fault
+    if _fold_issuer(requester["issuer"]) != _fold_issuer(approver["issuer"]):
+        return (
+            "the approver and the requester come from two issuers; whether a subject of one "
+            "is a subject of the other cannot be known, so a principal of another issuer is "
+            "never a second person"
+        )
+    if _ascii_lower(requester["subject"]) == _ascii_lower(approver["subject"]):
+        return (
+            "the approver is the requester (the issuer and the subject are compared without "
+            "case); a two-person approval needs a second person, and no role changes that"
+        )
+    return None
+
+
 def _narrows_partitions(block) -> bool:
     """`SelectionLabel::narrows_partitions`: the block names a partition
     subset (a non-empty `partitions` list). The shape layer has proved the
@@ -1342,6 +1584,30 @@ def _original_name_shape_ok(block) -> bool:
         if value is not None and not isinstance(value, str):
             return False
     return isinstance(block.get("owner_path"), bool)
+
+
+def _console_approval_shape_ok(block) -> bool:
+    """`approval.console` has the shape `ConsoleApprovalInfo` deserialises
+    (PROD-16.2, format 1.9.0 and 2.1.0): strings `mode` and
+    `confirmation_key_id`; `requester` and `approver` each an object of two
+    strings, `issuer` and `subject`; and three RFC 3339 instants,
+    `requested_at`, `approved_at` and `request_expires_at`. Unknown keys are
+    ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    for name in ("mode", "confirmation_key_id"):
+        if not isinstance(block.get(name), str):
+            return False
+    for name in ("requester", "approver"):
+        principal = block.get(name)
+        if not isinstance(principal, dict) or not all(
+            isinstance(principal.get(k), str) for k in ("issuer", "subject")
+        ):
+            return False
+    return all(
+        _instant(block.get(name)) is not None
+        for name in ("requested_at", "approved_at", "request_expires_at")
+    )
 
 
 def _is_sha256_prefixed(value) -> bool:
@@ -1838,6 +2104,7 @@ def check_invariants(doc) -> str:
     engine = doc["engine"]
     source = doc["source"]
     target = doc["target"]
+    approval = doc["approval"]
     measured = doc["measured"]
     objectives = doc["objectives"]
     sample = doc["sample"]
@@ -1882,6 +2149,34 @@ def check_invariants(doc) -> str:
             "strings, an optional source cluster id, the places looked in, the owners found and "
             "a bool owner_path"
         )
+
+    # Also shape (PROD-16.2, scorecard 1.9.0 and 2.1.0): `approval.console` is
+    # an `Option<ConsoleApprovalInfo>` over there, so `null` is ABSENT and
+    # anything that is not the writer's shape is refused at DESERIALISATION.
+    # Arms CA-1 to CA-8 below compare its fields, and CA-5 to CA-7 compare the
+    # three fields of `approval` beside it, which the Rust reader's type has
+    # always required (a string, a string and an instant); so both shapes are
+    # asserted first, and only on a document carrying the block -- every
+    # other document is decided exactly as before. After `target`'s, because
+    # serde meets `approval` after `target`. The bad shapes are cases in
+    # `shape-index.json`.
+    console = approval.get("console")
+    if console is not None:
+        if not _console_approval_shape_ok(console):
+            return (
+                "approval.console is not an object of the shape the writer gives it: a string "
+                "mode, a requester and an approver of a string issuer and a string subject "
+                "each, three instants and a string confirmation key id"
+            )
+        if (
+            not isinstance(approval.get("approver"), str)
+            or not isinstance(approval.get("key_id"), str)
+            or _instant(approval.get("approved_at")) is None
+        ):
+            return (
+                "approval.console is present but approval.approver, approval.key_id and "
+                "approval.approved_at are not two strings and an instant"
+            )
 
     # Also shape, and also the Rust reader's type doing the work over there:
     # `sample.records_expected` is a `u64`, so `null`, a string or an absent
@@ -2678,8 +2973,27 @@ def check_invariants(doc) -> str:
                 "target.original_name.approval_subject is not \"originalName\"; an "
                 "original-name restore is authorised only by its own approval subject"
             )
-        # ON-5.
-        if original_name["approval_mode"] not in ORIGINAL_NAME_APPROVAL_MODES:
+        # ON-5. PROD-16.2 (format 1.9.0) SPLITS THIS ARM BY VERSION, as
+        # PROD-01.3 split `target.auth.mode`'s, and leaves every document
+        # below 1.9.0 judged exactly as before: `consoleApproval` is a value
+        # of 1.9.0 and later, so under an older minor it is refused as a value
+        # that version does not define (naming the version, never the
+        # document's word), and from 1.9.0 the closed set is four.
+        four_defined = _defines_console_approval(version)
+        if original_name["approval_mode"] == APPROVAL_MODE_CONSOLE:
+            if not four_defined:
+                return (
+                    "target.original_name.approval_mode is a value defined from "
+                    f"1.{SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR}.0 and format_version "
+                    f"{_rust_debug_str(version)} predates it"
+                )
+        elif original_name["approval_mode"] not in ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0:
+            if four_defined:
+                return (
+                    "target.original_name.approval_mode is not one of the four values this "
+                    "format defines; it is \"v1Approval\", \"governed\", \"ordinary\" or "
+                    "\"consoleApproval\" and nothing else"
+                )
             return (
                 "target.original_name.approval_mode is not one of \"v1Approval\", "
                 "\"governed\", \"ordinary\""
@@ -2768,6 +3082,86 @@ def check_invariants(doc) -> str:
                 "\"complete\", or a pass records no verification; a restore under the original "
                 "topic names is verified completely, never by sample"
             )
+
+    # `approval.console` (format 1.9.0, and 2.1.0; PROD-16.2): arms CA-1 to
+    # CA-8, mirrored ARM FOR ARM, IN THIS POSITION (after the ON arms, before
+    # `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. CA-1 to CA-7 fire ONLY on a document
+    # carrying the block, so every document without it is decided exactly as
+    # before. CA-5, CA-6 and CA-7 judge existing fields against the block and
+    # can only refuse. Not interpolated except CA-1's version: no message
+    # carries a principal, an instant or a key id from the document. The shape
+    # layer above has proved the block's types and the three fields beside it.
+    if console is not None:
+        # CA-1. The block is defined from 1.9.0 of format 1 and from 2.1.0 of
+        # format 2.
+        if not _defines_console_approval(version):
+            return (
+                f"approval.console is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is defined from "
+                f"1.{SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR}.0 of format 1 and from "
+                f"2.{SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+            )
+        # CA-2. The block describes one mode.
+        if console["mode"] != APPROVAL_MODE_CONSOLE:
+            return "approval.console.mode is not \"consoleApproval\""
+        # CA-3. Two people: each in a form that can be compared, neither the
+        # local administrator nor a system identity, of one issuer, with
+        # different subjects.
+        not_two_people = _console_separation_words(console["requester"], console["approver"])
+        if not_two_people is not None:
+            return f"approval.console does not name two people: {not_two_people}"
+        # CA-4. No fabricated time: the approval lies inside the request's own
+        # window.
+        console_approved_at = _instant(console["approved_at"])
+        if console_approved_at < _instant(console["requested_at"]) or (
+            console_approved_at >= _instant(console["request_expires_at"])
+        ):
+            return (
+                "approval.console.approved_at is before requested_at or not before "
+                "request_expires_at; an approval is given after the request was made and "
+                "before it expires"
+            )
+        # CA-5. The approver the scorecard names IS the second person.
+        console_approver = console["approver"]
+        if approval["approver"] != f"{console_approver['issuer']}#{console_approver['subject']}":
+            return (
+                "approval.approver is not approval.console.approver as "
+                "\"<issuer>#<subject>\"; under a console approval the approver a scorecard "
+                "names is the second person the console attested"
+            )
+        # CA-6. The console's key signs the approval, so the approver's key IS
+        # the console key in this mode -- and a distinct personal key is
+        # another mode.
+        if (
+            not console["confirmation_key_id"].strip(RUST_WHITESPACE)
+            or approval["key_id"] != console["confirmation_key_id"]
+        ):
+            return (
+                "approval.key_id is not approval.console.confirmation_key_id; under a "
+                "console approval the console's key signs the approval, so the approver's "
+                "key is the console key (expected in this mode), and a distinct personal key "
+                "is not a console approval"
+            )
+        # CA-7. The approval time is the instant the second person approved,
+        # and no other.
+        if _instant(approval["approved_at"]) != console_approved_at:
+            return (
+                "approval.approved_at is not approval.console.approved_at; under a console "
+                "approval the approval time is the instant the second person approved, never "
+                "the request's"
+            )
+    # CA-8. A restore under the original topic names that a second person
+    # approved in the console says so in BOTH places, and no other
+    # original-name restore says so in either.
+    if original_name is not None and (
+        (original_name["approval_mode"] == APPROVAL_MODE_CONSOLE) != (console is not None)
+    ):
+        return (
+            "target.original_name.approval_mode is \"consoleApproval\" exactly when "
+            "approval.console is present; a console approval names who approved, and a "
+            "governed, ordinary or v1 approval carries no console approver"
+        )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -4584,6 +4978,31 @@ def _original_name_lines(block):
     ]
 
 
+def _console_approval_lines(block):
+    """`approval.console` as a line -- the twin of `crates/logweir/src/
+    verify.rs::console_approval_lines` (PROD-16.2): the writer's sentence
+    (`ConsoleApprovalInfo::lines`), which says WHO approved and HOW: the mode,
+    who asked and when, who approved and when, when the request would have
+    expired, and that the console key signed both documents, which is expected
+    in this mode and no other. Absent prints nothing: no second person
+    approved this run in the console. Called only on a document whose
+    invariants hold, so both principals are bounded, visible ASCII (arm CA-3).
+    Instants are printed in UTC, to the precision the document carries."""
+    if block is None:
+        return []
+    requester, approver = block["requester"], block["approver"]
+    return [
+        f"console approval: mode {block['mode']}; requested by "
+        f"{requester['issuer']}#{requester['subject']} at "
+        f"{_instant_shown(_instant(block['requested_at']))}; approved in the console by "
+        f"{approver['issuer']}#{approver['subject']} at "
+        f"{_instant_shown(_instant(block['approved_at']))} (the request expired at "
+        f"{_instant_shown(_instant(block['request_expires_at']))}); the console key "
+        f"{block['confirmation_key_id']} signed the request and the approval, which is expected "
+        "in this mode: no personal key is involved"
+    ]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -4880,6 +5299,13 @@ def main(
             # so. The wording is unchanged; what changed is what stands behind
             # it.
             print("       approval: SELF-ATTESTED — the approval key equals the signing key")
+        # PROD-16.2: who approved and HOW, when a second person approved in
+        # the console -- the approval's key is then the console's, which this
+        # line says is expected in this mode. The same line `logweir drill
+        # verify` prints (`crates/logweir/src/verify.rs::console_approval_lines`);
+        # nothing for a document without the block.
+        for line in _console_approval_lines(doc["approval"].get("console")):
+            print(f"       approval: {line}")
         # The four `evidence` fields are zeroed BEFORE signing, because they
         # describe an upload that has not happened yet. Say so, so nobody reads
         # the zeroes as a finding about their bucket.
@@ -5002,6 +5428,11 @@ def main(
             "somewhere looked for an owner, each owner from a place looked in, an owned name "
             "only on the owner path, a one-person confirmation only with the names typed, "
             "the KafkaTopic resources looked in named by digest, and a complete verification; "
+            "approval.console only from 1.9.0 of format 1 or 2.1.0 of format 2, its mode "
+            "consoleApproval, a requester and an approver who are two people of one issuer, the "
+            "approval inside the request's window, approval.approver the approver's principal, "
+            "approval.key_id the console's key, approval.approved_at the instant of the "
+            "approval, and target.original_name.approval_mode consoleApproval exactly beside it; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

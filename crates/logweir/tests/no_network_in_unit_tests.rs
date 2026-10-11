@@ -115,7 +115,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 34] = [
+const ALLOWED: [(&str, &str); 35] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -335,6 +335,12 @@ const ALLOWED: [(&str, &str); 34] = [
          directory, for the child-process peak-RSS row — no endpoint, no network; and one \
          `#[ignore]`d LIVE row that builds an S3 handle only when `FX31_LIVE_S3_ENDPOINT` names \
          the compose MinIO, which the default suite never runs",
+    ),
+    (
+        "crates/weirkeeper/tests/topic_budget.rs",
+        "FX-33: read-only handles over a filesystem evidence tree in a scratch directory (one \
+         receipt at the bound, its sidecar and hard links to them), for the two child-process \
+         peak-RSS rows, as `read_caps.rs` does for FX-31 — no endpoint, no network",
     ),
     (
         "crates/logweir-store/tests/capped.rs",

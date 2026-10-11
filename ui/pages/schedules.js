@@ -431,14 +431,20 @@ export function renderRetentionPanel(object, policy, policies) {
   // namespace is not recommendation-only, the panel says that it cannot tell,
   // names the policies, and prints neither the "own recommendation and
   // nothing else" line nor the no-deletion sentence.
+  // FX-42: a failed read of the namespace's policies is not "no policy". The
+  // panel says the read failed and prints neither line above.
+  const readFailed = policies !== null && typeof policies === "object" &&
+    !Array.isArray(policies);
   const unproven = (policy === null || policy === undefined) &&
     !(((report || {}).supersededBy || {}).name)
     ? deletingPolicies(policies)
     : [];
-  const enforcement = unproven.length > 0
-    ? renderCoverageUnknown(unproven)
-    : renderEnforcement(report, policy);
-  const sentence = unproven.length > 0 ? "" : retentionSentenceFor(report, policy);
+  const enforcement = readFailed
+    ? renderPoliciesUnread(policies.readFailed)
+    : unproven.length > 0
+      ? renderCoverageUnknown(unproven)
+      : renderEnforcement(report, policy);
+  const sentence = readFailed || unproven.length > 0 ? "" : retentionSentenceFor(report, policy);
   if (!report) {
     return (
       "<section class=\"retention\"><h3>Retention</h3>" +
@@ -539,6 +545,22 @@ export function renderCoverageUnknown(policies) {
     "<p class=\"caveat\">" + esc(RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
     table(["RETENTION POLICY", "DESTINATION", "ENFORCEMENT"], rows, "") +
     "</div>"
+  );
+}
+
+/** The sentence a schedule's retention panel carries when the namespace's
+ *  RetentionPolicies could not be read (FX-42). */
+export const RETENTION_POLICIES_UNREAD_SENTENCE =
+  "The RetentionPolicies in this namespace could not be read, so this page cannot say " +
+  "whether one deletes from this schedule's archive.";
+
+/** The panel's enforcement block when the policy read failed: the sentence
+ *  above and why the read failed. */
+export function renderPoliciesUnread(why) {
+  return (
+    "<div class=\"enforcement\" data-enforcement=\"policies-unread\">" +
+    "<p class=\"caveat\">" + esc(RETENTION_POLICIES_UNREAD_SENTENCE) + " The read failed: " +
+    esc(String(why)) + "</p></div>"
   );
 }
 
@@ -2126,8 +2148,10 @@ async function readReadiness(api, ns, lifecycle, clusters) {
   }
 }
 
-/** Every RetentionPolicy in `ns`, or an empty list when the read is refused. */
-async function readRetentionPolicies(ns, lifecycle, readers) {
+/** Every RetentionPolicy in `ns`. A failed read (a refusal, a 5xx, an answer
+ *  the decoder rejects) is not an empty list (FX-42): it is
+ *  `{readFailed: <why>}`, and the retention panel then says so. */
+export async function readRetentionPolicies(ns, lifecycle, readers) {
   const listRetention = ((readers || {}).listRetention) ||
     (() => listD3("retention", ns, readOptions(lifecycle)));
   try {
@@ -2136,7 +2160,7 @@ async function readRetentionPolicies(ns, lifecycle, readers) {
     if (cancelled(error, lifecycle)) {
       throw error;
     }
-    return [];
+    return { readFailed: String((error && error.message) || error) };
   }
 }
 
@@ -2460,8 +2484,7 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     // THE RETENTION POLICIES ARE A FIFTH READ AND ITS FAILURE IS NOT THE
     // PAGE'S EITHER. A build whose API has no retention route yet, or an
     // identity with no grant on the kind, must not take the schedules page
-    // down with it: the panel then shows this schedule's own recommendation
-    // and says that is what it is.
+    // down with it: the panel then says the read failed (FX-42).
     const extra = {
       cards: cards,
       destinations: readiness.destinations,

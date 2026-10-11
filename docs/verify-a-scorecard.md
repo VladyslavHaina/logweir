@@ -819,7 +819,7 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.28.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.29.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
 `format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
 since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
@@ -861,6 +861,7 @@ history is:
 | `1.26.0` | Knows backup-receipt and catalog-point format `1.7.0` (PROD-04.1). Adds the receipt's six `consumer_positions` arms (30–35, after PROD-03.0's 22–29): the block only from 1.7.0; a capture window that ends at or after it starts (compared as instants), a closed listing word and at least one group; this run's positions document named by a well-formed digest over at least one byte; each group's outcome and reason from the closed sets; what a captured (never `Dead` with no member, counts over at least one partition), a `GroupTypeNotCaptured` and any other group records; and an `active` the two states derive. With `--consumer-positions <file>` (backup receipts only) it checks the positions document the receipt binds — fourteen arms, CP-1 to CP-14: the receipt's digest and length, its backup and run, the named topics with their partitions in order and well-formed marks, a derived changed flag, exactly the captured groups, no kept position on a changed topic, no capture over an unread topic, every partition accounted for so absence is never offset 0, each position's status, value, reason and derived coverage, and the receipt's counts — and prints each position. Adds their shape checks and prints the `consumer_positions` lines: the document and whether it was verified, per group its outcome and counts, and with the document one line per position. Every document without the block is decided exactly as before. |
 | `1.27.0` | Knows scorecard format `2.0.0` (PROD-11.1b, the owner's decision OD-9 (a)), the format's first MAJOR, written only for a restore that states a partition subset. Reads major 2 for that shape alone: a 2.x document without `source.selection.partitions` is refused before any arm (PS-1), and every arm of major 1 holds for a 2.0.0 one. PS-2 holds a 1.x `source.selection` to a start and its end (a block without a start, or with `partitions` or `engine_runs`, is refused); PS-3 to PS-5 judge the subset list, the engine runs and a complete block that expects records from an unselected partition. The shape layer reads the 2.0.0 block (an optional start, the subsets, the runs). The `replay selection:` line names the subset (`ONLY orders partitions [0, 2] (every partition of any other restored topic), …, in N engine run(s); …`), saying no record of another partition was RESTORED only over a verification that passed; a sampled `pass` over a subset prints `a sampled pass over a partition subset from … to …: every selected partition was held to its own count bound over that window, every other partition of a narrowed topic was held empty, …`. A newer major is refused naming `2.0.0`. Every 1.x document is decided exactly as before, except a 1.7.0 block that is not a start and its end, which no writer produces and which 1.23.0 refused at its shape layer when the start was missing. |
 | `1.28.0` | Knows scorecard format `1.8.0` (PROD-15.1). Adds `target.original_name`'s fourteen arms (ON-1 to ON-14: only from 1.8.0 of format 1, and never beside a partition subset (ON-14, judged first: a restore under the original topic names restores whole topics, so no 2.x document carries the block); never in scratch mode; only beside an empty `target.topic_mapping_prefix`; the `originalName` approval subject; the approval mode, cluster condition and owner-detection places from their closed sets; `targetIsNotSource` beside a different, known source cluster id; every owner found in a place looked in, of a known kind, and only on the owner path; a one-person confirmation (`ordinary`) exactly with `confirmation: typedTopicNames`; the `KafkaTopic` resources looked in named by their sha256; and only beside a COMPLETE `integrity.verification`, never a sampled one and never a pass that records none) and its shape check, and prints the two `original name:` lines. Every document without the block is decided exactly as before. |
+| `1.29.0` | Knows scorecard format `1.9.0` and `2.1.0` (PROD-16.2): the optional `approval.console` of a restore a second person approved in the console. Adds arms CA-1 to CA-8 (only from 1.9.0 of format 1 or 2.1.0 of format 2; its mode `consoleApproval`; two people of one issuer, neither the local administrator nor a `system:` subject; the approval inside the request's window; `approval.approver`, `approval.key_id` and `approval.approved_at` held to the block; `target.original_name.approval_mode` `consoleApproval` exactly beside it) and its shape check, splits ON-5 by version (the member `consoleApproval` from 1.9.0), and prints one `console approval:` line saying who asked, who approved, both instants and that the console key signed both. Every document without the block is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
@@ -912,6 +913,15 @@ wrote under the original names, nor which condition admitted it; the document
 does, and this release's readers print it (`drill show` in its footer).
 `verify_scorecard.py` 1.27.0 (the last before this item) does the same over
 six later live 1.8.0 scorecards: `VALID`, and no `original name:` line.
+What older readers do with a scorecard of a restore approved in the console
+(measured on signed corpus documents, recorded in the row's report): an older
+`logweir drill verify` accepts a 1.9.0 document and prints
+`approval:  <issuer>#<subject> (<ticket>)`, with no key id and no word about
+the console; `verify_scorecard.py` before 1.29.0 accepts it and prints no
+approval line at all. Neither prints a `console approval:` line. A 1.28.0
+reader refuses such an original-name scorecard (`approval_mode` is not one of
+the three it knows). A 2.1.0 document is accepted from 1.27.0 and refused by
+older readers by its major.
 
 A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
 1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print

@@ -1418,6 +1418,63 @@ pub struct RunnerCounts {
     /// Points per day, newest day first. Bounded by [`MAX_HISTOGRAM_DAYS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_day: Vec<DayCount>,
+    /// **FX-33.** How many of `unreadable` are a document over its read
+    /// bound: a SIZE, never a permission or transport failure. Absent (zero)
+    /// from an older runner, which then says nothing about why.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_over_read_cap: i64,
+    /// **FX-33.** How many of `unreadable` are a document that is not what
+    /// its key names.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_malformed: i64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes `&T`.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+/// **FX-33 — why points could not be read, in words that fit the cause.**
+/// The `Synced` condition's message for a walk whose `unreadable` is not
+/// zero.
+///
+/// It used to be one sentence, "a permission or transport failure", for
+/// every unreadable point — including a backup of 110 topics whose record
+/// was over the walk's read cap, which no grant and no network change would
+/// ever list. A document's SIZE and a document's CONTENT are named as what
+/// they are; only what is left is called a permission or transport failure,
+/// and an older runner's body, which carries no sub-counts, reads as before.
+#[must_use]
+pub fn unreadable_message(counts: &RunnerCounts) -> String {
+    let over = counts.unreadable_over_read_cap.clamp(0, counts.unreadable);
+    let malformed = counts
+        .unreadable_malformed
+        .clamp(0, counts.unreadable - over);
+    let rest = counts.unreadable - over - malformed;
+    let mut parts: Vec<String> = Vec::new();
+    if over > 0 {
+        parts.push(format!(
+            "{over} because a document is larger than the bound Logweir reads for one (its \
+             size: no permission or network change lists it; the point's entry states the size \
+             and the bound)"
+        ));
+    }
+    if malformed > 0 {
+        parts.push(format!(
+            "{malformed} because an object is not the document its key names"
+        ));
+    }
+    if rest > 0 {
+        parts.push(format!(
+            "{rest} for a permission or transport failure, which is NOT the same as absent"
+        ));
+    }
+    format!(
+        "{} of {} points could not be read: {}; those entries say Unreadable and never Missing",
+        counts.unreadable,
+        counts.total,
+        parts.join("; ")
+    )
 }
 
 /// The signature half of [`RunnerCounts`].

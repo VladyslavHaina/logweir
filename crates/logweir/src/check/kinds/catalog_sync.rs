@@ -34,6 +34,14 @@
 //!    `NotFound` is [`Availability::Missing`]; every other storage failure is
 //!    [`Availability::Unreadable`]. That distinction is the reason there are
 //!    seven availability states and not two.
+//! 5. **It never drops a point it counted (FX-33).** A point whose record
+//!    could not be read, is over its read bound, or is not a record at all
+//!    used to be counted and listed by NO entry: the console then offered no
+//!    restore for it and showed no reason. Every counted point now has an
+//!    entry: one whose record gave no facts carries its point id and a remedy
+//!    stating which document stopped the examination and why ([`EntryCause`])
+//!    — a document's SIZE never sends an operator to a grant. See
+//!    [`build_entry`].
 //!
 //! # The body is emitted, or it is not emitted at all
 //!
@@ -222,10 +230,11 @@ pub const OBJECTS_PER_POINT: i64 = 5;
 /// rather than a position in a page — see [`archive_floor`].
 pub const ARCHIVE_FLOOR_PAGE_KEYS: usize = 8;
 
-/// How many keys one day shard's listing asks for.
+/// How many keys one page of a day shard's listing asks for.
 ///
-/// The shard holds one UTC day of points; a day with more than this many is a
-/// day whose tail is counted through the next page.
+/// The shard holds one UTC day of points; a day with more than this many is
+/// listed page after page until a short page ([`walk_index`]), each page one
+/// object of the walk's budget.
 pub const SHARD_PAGE_KEYS: usize = 1_000;
 
 /// How many keys one `Full` rescan page asks for.
@@ -298,9 +307,85 @@ wire_vocabulary! {
     }
 }
 
+wire_vocabulary! {
+    /// **FX-33.** The document an examination stopped at.
+    CauseDocument {
+        Record => "record",
+        Receipt => "receipt",
+        Manifest => "manifest",
+    }
+}
+
+wire_vocabulary! {
+    /// **FX-33.** Why that document could not be used. Five different facts,
+    /// with different remedies: only `readFailed` is about a grant, an
+    /// endpoint or a network.
+    ///
+    /// | value | meaning |
+    /// |---|---|
+    /// | `overReadCap` | larger than the bound this build reads it under; refused on the size the store reported, unread |
+    /// | `readFailed` | the store did not answer the read: a denial, a timeout, an outage |
+    /// | `notFound` | the store answered `NotFound` |
+    /// | `malformed` | the bytes are not the document the key names: not JSON, or another document |
+    /// | `unsupportedFormat` | a catalog record of a major this build does not implement |
+    CauseReason {
+        OverReadCap => "overReadCap",
+        ReadFailed => "readFailed",
+        NotFound => "notFound",
+        Malformed => "malformed",
+        UnsupportedFormat => "unsupportedFormat",
+    }
+}
+
 // ===========================================================================
 // The documents
 // ===========================================================================
+
+/// **FX-33.** Which document stopped a point's examination, and why — with
+/// its size against the bound when the reason is a size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryCause {
+    pub document: CauseDocument,
+    pub reason: CauseReason,
+    /// The object's size as the store reported it, for `overReadCap`. Absent
+    /// when the store reported a size within the bound and streamed more.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// The bound the object is over, for `overReadCap`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_bytes: Option<u64>,
+}
+
+impl EntryCause {
+    const fn of(document: CauseDocument, reason: CauseReason) -> Self {
+        Self {
+            document,
+            reason,
+            bytes: None,
+            cap_bytes: None,
+        }
+    }
+
+    /// The cause a failed read of `document` names: `NotFound` is a definite
+    /// absence, `TooLarge` a size (with the store's own number and the cap),
+    /// and everything else a read that did not answer.
+    fn of_read(document: CauseDocument, error: &StoreError) -> Self {
+        match error {
+            StoreError::NotFound(_) => Self::of(document, CauseReason::NotFound),
+            StoreError::TooLarge { cap, observed, .. } => Self {
+                document,
+                reason: CauseReason::OverReadCap,
+                bytes: match observed {
+                    logweir_engine_oso::storage::OverCap::Reported(size) => Some(*size),
+                    logweir_engine_oso::storage::OverCap::Streamed { .. } => None,
+                },
+                cap_bytes: Some(*cap),
+            },
+            _ => Self::of(document, CauseReason::ReadFailed),
+        }
+    }
+}
 
 /// One place a point's bytes were looked for, and what was found there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -443,6 +528,11 @@ pub struct EntryPositionCounts {
 }
 
 /// One point, as this Job reports it.
+///
+/// FX-33: a point whose RECORD gave no facts is listed too, with its point id
+/// (from its key), `availability`, `signature: notAttempted` and a remedy
+/// that states why; its receipt-derived fields are empty strings and zeros,
+/// so no reader can take a set, a receipt or a window from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {
@@ -545,9 +635,36 @@ pub struct CatalogCounts {
     pub signature: SignatureCounts,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub by_day: Vec<DayCount>,
+    /// **FX-33.** How many of `unreadable` are a document over its read
+    /// bound. A SIZE, so a reader of the counts never calls it a permission
+    /// failure. Skipped when zero: a walk with none writes the line it wrote.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unreadable_over_read_cap: i64,
+    /// **FX-33.** How many of `unreadable` are a document that is not what
+    /// its key names. Skipped when zero.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unreadable_malformed: i64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes `&T`.
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 impl CatalogCounts {
+    /// FX-33: an unreadable point's cause, counted beside `unreadable`.
+    fn count_cause(&mut self, availability: Availability, cause: Option<&EntryCause>) {
+        if availability != Availability::Unreadable {
+            return;
+        }
+        let slot = match cause.map(|c| c.reason) {
+            Some(CauseReason::OverReadCap) => &mut self.unreadable_over_read_cap,
+            Some(CauseReason::Malformed) => &mut self.unreadable_malformed,
+            _ => return,
+        };
+        *slot = slot.saturating_add(1);
+    }
+
     fn count_availability(&mut self, a: Availability) {
         let slot = match a {
             Availability::Available => &mut self.available,
@@ -667,6 +784,10 @@ pub fn remedy_for(availability: Availability, signature: SignatureVerdict) -> Op
             "The archive does not hold the objects this recovery point names. Restore from \
              another point, or recover the objects from your own backup of the bucket.",
         ),
+        // A READ THAT DID NOT ANSWER, and only that (FX-33). A document over
+        // its read bound, or one that is not what its key names, is
+        // `Unreadable` too and has its own sentence ([`cause_remedy`]):
+        // neither is helped by a grant, an endpoint or a network.
         Availability::Unreadable => Some(
             "The objects could not be read — this is \"could not tell\", not \"is not there\". \
              Check the destination's archiveRead grant, the endpoint and the network path, then \
@@ -708,9 +829,70 @@ pub fn remedy_for(availability: Availability, signature: SignatureVerdict) -> Op
     }
 }
 
+/// **FX-33.** The remedy for a cause that is a fact about a DOCUMENT and not
+/// about reaching it — its size against the bound, or its content — or
+/// `None` for every other cause, whose remedy is [`remedy_for`]'s.
+///
+/// Fixed sentences with two numbers in them (the store's size and the bound),
+/// so no adopter bytes reach an entry. **Neither names a grant, an endpoint
+/// or a network**: no change to any of them lists the point, and telling an
+/// operator to check one is how a backup of 110 topics came to look like a
+/// broken credential. `a_size_or_a_content_remedy_never_sends_anyone_to_a_grant`
+/// holds every sentence here to that.
+#[must_use]
+pub fn cause_remedy(cause: &EntryCause) -> Option<String> {
+    let (what, kind) = match cause.document {
+        CauseDocument::Record => ("catalog record", "catalog point record"),
+        CauseDocument::Receipt => ("backup receipt", "backup receipt"),
+        CauseDocument::Manifest => ("archive manifest", "archive manifest"),
+    };
+    match cause.reason {
+        CauseReason::OverReadCap => {
+            let cap = cause.cap_bytes.unwrap_or_default();
+            let size = cause
+                .bytes
+                .map(|bytes| format!(" (it is {bytes} bytes)"))
+                .unwrap_or_default();
+            Some(if cause.document == CauseDocument::Manifest {
+                format!(
+                    "The {what} of this recovery point is larger than the {cap}-byte bound \
+                     Logweir reads for one{size}. This is the document's size; no permission \
+                     or network change lists the point."
+                )
+            } else {
+                format!(
+                    "The {what} of this recovery point is larger than the {cap}-byte bound \
+                     Logweir reads for one{size}: its backup named more topics, or recorded more \
+                     configuration, than one backup may ({} topics). This is the document's \
+                     size; no permission or network change lists the point. The archive is \
+                     intact and can be restored from the command line.",
+                    logweir_core::topic_budget::MAX_BACKUP_TOPICS
+                )
+            })
+        }
+        CauseReason::Malformed => Some(format!(
+            "The object at this recovery point's {what} key is not a {kind}: it is not JSON, or \
+             it is another document. This is the object's content; no permission or network \
+             change lists the point. Nothing under logweir/ is rewritten, so find which writer \
+             produced the object before relying on this point."
+        )),
+        CauseReason::ReadFailed | CauseReason::NotFound | CauseReason::UnsupportedFormat => None,
+    }
+}
+
 // ===========================================================================
 // The walk
 // ===========================================================================
+
+/// The object a walk hands to [`examine`]: the record's key, and what the key
+/// itself already says about the point.
+struct Subject<'a> {
+    /// `logweir/catalog/v1/points/<pointId>/record.json`.
+    record_key: &'a str,
+    /// The point id the key carries: a well-formed `lwp1-` id
+    /// ([`point_id_of_log_key`], [`point_id_of_record_key`]).
+    point_id: &'a str,
+}
 
 /// What one point's examination established.
 struct Observation {
@@ -737,10 +919,24 @@ struct Observation {
     /// separately so the entry's remedy is [`pin::UNREADABLE_REMEDY`], which
     /// names that grant, rather than the generic one.
     pin_unreadable: bool,
+    /// **FX-33.** The document the examination stopped at, and why.
+    cause: Option<EntryCause>,
+    /// **FX-33.** The point id the object's KEY carries — known for every
+    /// point, whatever its record said or did not say.
+    point_id: String,
 }
 
 impl Observation {
-    fn bare(availability: Availability) -> Self {
+    /// A point whose RECORD gave no facts: could not be read, is over its
+    /// bound, is not a record, is absent, or is of another major.
+    ///
+    /// **It is still a point, and it is still listed** (FX-33), with the point
+    /// id its key carries and nothing else: no other object is read for it.
+    fn without_record(
+        subject: &Subject<'_>,
+        availability: Availability,
+        cause: EntryCause,
+    ) -> Self {
         Self {
             availability,
             signature: SignatureVerdict::NotAttempted,
@@ -750,7 +946,18 @@ impl Observation {
             superseded: false,
             pin_unchecked: false,
             pin_unreadable: false,
+            cause: Some(cause),
+            point_id: subject.point_id.to_string(),
         }
+    }
+}
+
+/// `Missing` for a definite `NotFound`, `Unreadable` for every other failure
+/// of a read — rule 4 of this module, in one place.
+fn availability_of_read(error: &StoreError) -> Availability {
+    match error {
+        StoreError::NotFound(_) => Availability::Missing,
+        _ => Availability::Unreadable,
     }
 }
 
@@ -805,6 +1012,9 @@ impl WalkStop {
 /// The state one walk accumulates.
 struct Walk {
     entries: Vec<CatalogEntry>,
+    /// FX-33: beside each entry, whether it may give its place in a full
+    /// window to an `Available` point ([`displaceable`]).
+    displaceable: Vec<bool>,
     counts: CatalogCounts,
     by_day: BTreeMap<String, i64>,
     signers: BTreeMap<String, i64>,
@@ -817,15 +1027,27 @@ struct Walk {
     last_record_key: Option<String>,
     /// How many index rows could not be read at all.
     unreadable_rows: i64,
+    /// FX-33 (review finding M1): how many points' RECORD reads did not
+    /// answer. Such a point is listed with no set, so a view with one in it
+    /// is not whole until a sync reads the record: the walk is not complete.
+    records_unread: i64,
     /// Why the walk ended. The walk's own outcome, and never a point's
     /// (review findings F3 and F5).
     stop: WalkStop,
 }
 
 impl Walk {
+    /// Whether the walk saw the whole archive: its range finished, and every
+    /// point's record answered (a point whose record read failed is listed
+    /// by its id only, and is the `ShardUnreadable` rule for one point).
+    fn complete(&self) -> bool {
+        self.stop.complete() && self.records_unread == 0
+    }
+
     fn new() -> Self {
         Self {
             entries: Vec::new(),
+            displaceable: Vec::new(),
             counts: CatalogCounts::default(),
             by_day: BTreeMap::new(),
             signers: BTreeMap::new(),
@@ -834,6 +1056,7 @@ impl Walk {
             oldest_day: None,
             last_record_key: None,
             unreadable_rows: 0,
+            records_unread: 0,
             stop: WalkStop::Range,
         }
     }
@@ -916,7 +1139,7 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
         "the durable catalog was walked: {} points examined, {} relayed, walk {}",
         walk.counts.total,
         walk.entries.len(),
-        if walk.stop.complete() {
+        if walk.complete() {
             "complete"
         } else {
             "incomplete — the cursor says where it stopped"
@@ -927,13 +1150,16 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     .with_fact("catalogEntries", &walk.entries.len().to_string())
     .with_fact("catalogPages", &body.pages.to_string())
     .with_fact("catalogObjectsRead", &walk.objects.to_string())
-    .with_fact("catalogWalkComplete", &walk.stop.complete().to_string())
+    .with_fact("catalogWalkComplete", &walk.complete().to_string())
     .with_fact("catalogTrustKeys", &trust.len().to_string());
     if walk.unreadable_rows > 0 {
         row = row.with_fact(
             "catalogUnreadableIndexRows",
             &walk.unreadable_rows.to_string(),
         );
+    }
+    if walk.records_unread > 0 {
+        row = row.with_fact("catalogRecordsUnread", &walk.records_unread.to_string());
     }
     // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED (review findings F3 and
     // F5). `catalog-cursor.complete: false` says only THAT the walk did not
@@ -1177,19 +1403,40 @@ fn walk_index(
             day.month(),
             day.day()
         );
-        walk.objects = walk.objects.saturating_add(1);
-        let keys = match access.list_page(&shard, None, SHARD_PAGE_KEYS) {
-            Ok(k) => k,
-            // A SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT SEE,
-            // not a sync that failed: the days already read are true. The
-            // walk cannot be `complete` with a day missing from it.
-            Err(_) => {
-                walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
-                walk.stop = WalkStop::ShardUnreadable;
-                walk.oldest_day = Some(day);
+        // THE WHOLE SHARD, PAGE AFTER PAGE (FX-33, review finding D4). A day
+        // with more than one page of points (per-minute backups are 1,440 a
+        // day) used to be read to its first page and reported complete. Each
+        // page is one object of the budget; a budget or a clock that stops the
+        // walk inside a shard ends it `ObjectBudget`, so the view says it is
+        // incomplete.
+        let mut keys: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            walk.objects = walk.objects.saturating_add(1);
+            let page = match access.list_page(&shard, after.as_deref(), SHARD_PAGE_KEYS) {
+                Ok(k) => k,
+                // A SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT
+                // SEE, not a sync that failed: the days already read are true.
+                // The walk cannot be `complete` with a day missing from it.
+                Err(_) => {
+                    walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
+                    walk.stop = WalkStop::ShardUnreadable;
+                    walk.oldest_day = Some(day);
+                    return Ok(());
+                }
+            };
+            let last_page = page.len() < SHARD_PAGE_KEYS;
+            after = page.last().cloned();
+            keys.extend(page);
+            if last_page {
                 break;
             }
-        };
+            if !walk.affordable(req.max_objects_per_run, deadline) {
+                walk.stop = WalkStop::ObjectBudget;
+                walk.oldest_day = Some(day);
+                return Ok(());
+            }
+        }
         walk.oldest_day = Some(day);
         // Newest first WITHIN the shard: the log key's fixed-width millisecond
         // makes the largest key the newest one.
@@ -1213,21 +1460,24 @@ fn walk_index(
                 walk.stop = WalkStop::ObjectBudget;
                 return Ok(());
             }
+            let record_key = record::record_key(&point_id);
+            let observation = examine(
+                req,
+                access,
+                walk,
+                trust,
+                &Subject {
+                    record_key: &record_key,
+                    point_id: &point_id,
+                },
+            );
             walk.seen.insert(point_id.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
             *walk
                 .by_day
                 .entry(day.format("%Y-%m-%d").to_string())
                 .or_insert(0) += 1;
-            let emit = walk.entries.len() < view_limit;
-            examine_and_push(
-                req,
-                access,
-                trust,
-                walk,
-                &record::record_key(&point_id),
-                emit,
-            );
+            push(req, walk, observation, view_limit);
         }
     }
     Ok(())
@@ -1246,6 +1496,16 @@ pub fn point_id_of_log_key(key: &str) -> Option<String> {
     let stem = file.strip_suffix(".json")?;
     let (_ms, point_id) = stem.split_once('-')?;
     reader::is_point_id(point_id).then(|| point_id.to_string())
+}
+
+/// **FX-33.** The point id a `Full` rescan's record key carries:
+/// `logweir/catalog/v1/points/<pointId>/record.json`. The key's own
+/// component, whatever it is — a rescan lists what the prefix holds, and an
+/// object there that is not a record is still listed, as what it is.
+fn point_id_of_record_key(key: &str) -> &str {
+    key.strip_prefix(record::POINTS_PREFIX)
+        .and_then(|rest| rest.strip_suffix("/record.json"))
+        .unwrap_or(key)
 }
 
 /// `Full`: a resumable rescan of `logweir/catalog/v1/points/`.
@@ -1293,6 +1553,12 @@ fn walk_full(
             if walk.seen.contains(&key) {
                 continue;
             }
+            // A KEY THAT NAMES NO POINT ID IS NOT A POINT (FX-33): every
+            // record this product writes is at `points/lwp1-<32 hex>/
+            // record.json`, the rule an `Index` walk applies to a log key.
+            if !reader::is_point_id(point_id_of_record_key(&key)) {
+                continue;
+            }
             // EXAMINATION IS BOUNDED BY THE OBJECT BUDGET AND BY NOTHING ELSE
             // (review finding F1). It used to stop at `viewLimit` — a VIEW
             // parameter — while the walk kept counting and then reported
@@ -1306,8 +1572,12 @@ fn walk_full(
             walk.last_record_key = Some(key.clone());
             walk.seen.insert(key.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
-            let emit = walk.entries.len() < view_limit;
-            examine_and_push(req, access, trust, walk, &key, emit);
+            let subject = Subject {
+                record_key: &key,
+                point_id: point_id_of_record_key(&key),
+            };
+            let observation = examine(req, access, walk, trust, &subject);
+            push(req, walk, observation, view_limit);
         }
         if exhausted {
             return Ok(());
@@ -1327,21 +1597,14 @@ fn listing_failure(e: &StoreError, destination: &str) -> check_store::StoreFailu
     )
 }
 
-/// Examine one point and, if it fits the window, push its entry.
-/// `emit` is whether this point's entry line still fits the body's
-/// `viewLimit`. It bounds the LINES and never the examination: the buckets
+/// Count one examined point and, if it fits the window, push its entry.
+/// `view_limit` bounds the LINES and never the examination: the buckets
 /// cover every point the walk counted, by construction (review findings F1 and
 /// F2).
-fn examine_and_push(
-    req: &CatalogSyncRequest,
-    access: &dyn ObjectAccess,
-    trust: &[VerifyingKey],
-    walk: &mut Walk,
-    record_key: &str,
-    emit: bool,
-) {
-    let observation = examine(req, access, walk, trust, record_key);
+fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, view_limit: usize) {
     walk.counts.count_availability(observation.availability);
+    walk.counts
+        .count_cause(observation.availability, observation.cause.as_ref());
     walk.counts.count_signature(observation.signature);
     if req.mode == CatalogSyncMode::Full {
         // A `Full` rescan's keys carry no instant — `points/<pointId>/
@@ -1363,10 +1626,71 @@ fn examine_and_push(
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    if emit {
-        if let Some(entry) = build_entry(&observation) {
+    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and a point
+    // with a record is not kept out of it by points that only failed to be
+    // read. The window is `viewLimit` entries in walk order, and an archive can
+    // hold many points nobody can take — an older build's oversized points,
+    // reads that failed. When the window is full, a point with a record —
+    // `Available` or not, since either may name a set retention keeps — takes
+    // the place of the last-listed DISPLACEABLE entry ([`displaceable`]), so
+    // the listed points with a record are a walk-order prefix (review HUNT-1:
+    // a newer receipt of a set is never overtaken by its older sibling).
+    // Either way the walk counted more than it listed, so the view says it is
+    // a window (`truncated`), and the counts name every point.
+    if observation.point.is_none()
+        && observation.cause.is_some_and(|c| {
+            c.document == CauseDocument::Record && c.reason == CauseReason::ReadFailed
+        })
+    {
+        walk.records_unread = walk.records_unread.saturating_add(1);
+    }
+    let can_give_way = displaceable(&observation);
+    let entry = build_entry(&observation);
+    if walk.entries.len() < view_limit {
+        walk.entries.push(entry);
+        walk.displaceable.push(can_give_way);
+    } else if observation.point.is_some() {
+        if let Some(at) = walk.displaceable.iter().rposition(|d| *d) {
+            walk.entries.remove(at);
+            walk.displaceable.remove(at);
             walk.entries.push(entry);
+            walk.displaceable.push(can_give_way);
         }
+    }
+}
+
+/// **FX-33.** Whether a listed entry may give its place in a full window to a
+/// point with a record: only an entry whose RECORD gave no facts, and of those
+/// only one that carries no evidence about the archive's integrity.
+///
+/// - **May**: a point whose record is `Missing`, could not be read (a store
+///   error), is over its read bound (a size) or is of a newer format. Such an
+///   entry names no set and no location, so it protects nothing a reader
+///   could lose, and it says nothing about bytes other than what was written.
+/// - **Never**: any entry with a record (review finding H1): whatever its
+///   state, it may name a backup set that retention must keep for it (a
+///   newer receipt of a set whose older receipt is `Available`), and it
+///   carries the signature and `Conflict` verdicts; nor a record whose bytes
+///   are not a record (`malformed`), which is what tampered bytes look like
+///   and also a crashed run's half-written record, which the walk cannot tell
+///   apart. A signature verdict exists only beside a record, so the record
+///   rule covers it.
+fn displaceable(observation: &Observation) -> bool {
+    if observation.point.is_some() {
+        return false;
+    }
+    match observation.availability {
+        Availability::Missing
+        | Availability::Deleted
+        | Availability::Partial
+        | Availability::UnsupportedFormat => true,
+        Availability::Unreadable => observation.cause.is_some_and(|c| {
+            matches!(
+                c.reason,
+                CauseReason::ReadFailed | CauseReason::OverReadCap | CauseReason::NotFound
+            )
+        }),
+        Availability::Available | Availability::Conflict => false,
     }
 }
 
@@ -1386,89 +1710,126 @@ fn examine(
     access: &dyn ObjectAccess,
     walk: &mut Walk,
     trust: &[VerifyingKey],
-    record_key: &str,
+    subject: &Subject<'_>,
 ) -> Observation {
+    // -- the record ----------------------------------------------------------
+    //
+    // FOUR WAYS IT CAN GIVE NO FACTS, AND EACH IS AN ENTRY (FX-33): the read
+    // failed, the object is over its bound, the bytes are not a record, or
+    // they are a record of another major. Each used to be a bare observation
+    // that `build_entry` dropped.
     walk.objects = walk.objects.saturating_add(1);
-    let record_bytes = match access.get(record_key, CATALOG_DOCUMENT_READ_CAP) {
+    let record_bytes = match access.get(subject.record_key, caps::CATALOG_RECORD) {
         Ok(b) => b,
-        Err(StoreError::NotFound(_)) => return Observation::bare(Availability::Missing),
-        Err(_) => return Observation::bare(Availability::Unreadable),
+        Err(e) => {
+            return Observation::without_record(
+                subject,
+                availability_of_read(&e),
+                EntryCause::of_read(CauseDocument::Record, &e),
+            )
+        }
     };
-    if oversized(&record_bytes) {
-        return Observation::bare(Availability::Unreadable);
-    }
     let point = match reader::read_record(&record_bytes) {
-        RecordVerdict::Point(p) => p,
+        // A RECORD IS A POINT'S ONLY AT THAT POINT'S OWN KEY (FX-33). A record
+        // that parses and names ANOTHER point — a copy of a real point's
+        // record put under this key — is "another document" here: this point
+        // is listed without a record, and the point the copy describes is
+        // listed once, from its own key, and never a second time from this
+        // one.
+        RecordVerdict::Point(p) if p.point_id == subject.point_id => p,
+        RecordVerdict::Point(_) | RecordVerdict::Unreadable(_) => {
+            return Observation::without_record(
+                subject,
+                Availability::Unreadable,
+                EntryCause::of(CauseDocument::Record, CauseReason::Malformed),
+            )
+        }
         RecordVerdict::UnsupportedFormat { format_version } => {
-            let mut o = Observation::bare(Availability::UnsupportedFormat);
+            let mut o = Observation::without_record(
+                subject,
+                Availability::UnsupportedFormat,
+                EntryCause::of(CauseDocument::Record, CauseReason::UnsupportedFormat),
+            );
             o.format_version = Some(format_version);
             return o;
         }
-        RecordVerdict::Unreadable(_) => return Observation::bare(Availability::Unreadable),
     };
+    // The record's bytes are parsed; nothing below reads them again.
+    drop(record_bytes);
 
-    let mut observation = Observation {
+    // WHAT THIS POINT HOLDS AT ONCE (FX-33), by construction and not by the
+    // caps alone: the parsed record, for as long as the point is examined,
+    // and beside it ONE of — the receipt's bytes with their parse; the
+    // receipt's bytes with the sidecar and the signature's copy of them; the
+    // manifest's bytes. Each is released before the next is read, and the
+    // whole observation is dropped when its entry has been built, before the
+    // walk begins another point. `the_walks_peak_memory_is_one_points` holds
+    // the peak of a walk over many maximum-size points to that of one.
+    let mut found = Found {
         availability: Availability::Available,
         signature: SignatureVerdict::NotAttempted,
         signer_key_id: None,
-        format_version: Some(point.format_version.clone()),
-        point: Some(point),
         superseded: false,
         pin_unchecked: false,
         pin_unreadable: false,
+        cause: None,
     };
-    let point = observation
-        .point
-        .as_ref()
-        .expect("the record was just parsed")
-        .clone();
 
     // -- the receipt: the verification root (D3 §5.2 rule 3) ---------------
     //
-    // ITS THREE OUTCOMES ARE THREE DIFFERENT FACTS, and review finding F4 is
-    // that only one of them had a test: a `NotFound` is `Missing`, ANY OTHER
-    // failure is `Unreadable`, and bytes that are not a receipt are
-    // `Unreadable` too. `a_receipt_that_cannot_be_read_is_never_missing`
-    // exercises each with a key-scoped fault.
+    // ITS OUTCOMES ARE DIFFERENT FACTS, and review finding F4 is that only
+    // one of them had a test: a `NotFound` is `Missing`, an object over its
+    // bound and bytes that are not a receipt are `Unreadable` for what they
+    // ARE (FX-33: `cause` says which), and any other failure is `Unreadable`
+    // because the read did not answer.
+    // `a_receipt_that_cannot_be_read_is_never_missing` exercises each with a
+    // key-scoped fault.
+    //
+    // UNDER THE CONTROLLER'S OWN BOUND (`caps::CATALOG_RECEIPT` equals
+    // `caps::CONTROLLER_RECEIPT`): a receipt this walk listed `Available`
+    // but the controller could not verify is the defect this cap closes.
     walk.objects = walk.objects.saturating_add(1);
-    let receipt_bytes = match access.get(&point.receipt.key, CATALOG_DOCUMENT_READ_CAP) {
+    let receipt_bytes = match access.get(&point.receipt.key, caps::CATALOG_RECEIPT) {
         Ok(b) => b,
-        Err(StoreError::NotFound(_)) => {
-            observation.availability = Availability::Missing;
-            return observation;
-        }
-        Err(_) => {
-            observation.availability = Availability::Unreadable;
-            return observation;
+        Err(e) => {
+            found.stop_at(
+                availability_of_read(&e),
+                EntryCause::of_read(CauseDocument::Receipt, &e),
+            );
+            return found.observed(point, subject);
         }
     };
-    if oversized(&receipt_bytes) {
-        observation.availability = Availability::Unreadable;
-        return observation;
-    }
-    let Ok(receipt) = serde_json::from_slice::<BackupReceipt>(&receipt_bytes) else {
-        observation.availability = Availability::Unreadable;
-        return observation;
-    };
-    match reader::cross_check(&point, &receipt, &receipt_bytes) {
-        CrossCheck::Agrees => {}
-        // D3 §5.4 as amended: a `RecordMismatch` IS a `Conflict`, and so is a
-        // record that names a receipt whose digest is not the one it claims.
-        CrossCheck::RecordMismatch(_) | CrossCheck::WrongReceipt { .. } => {
-            observation.availability = Availability::Conflict;
+    // The receipt's parse lives for the cross-check and no longer: what the
+    // manifest stage needs of it is the pin, taken here.
+    let pinned_version = {
+        let Ok(receipt) = serde_json::from_slice::<BackupReceipt>(&receipt_bytes) else {
+            found.stop_at(
+                Availability::Unreadable,
+                EntryCause::of(CauseDocument::Receipt, CauseReason::Malformed),
+            );
+            return found.observed(point, subject);
+        };
+        match reader::cross_check(&point, &receipt, &receipt_bytes) {
+            CrossCheck::Agrees => {}
+            // D3 §5.4 as amended: a `RecordMismatch` IS a `Conflict`, and so is
+            // a record that names a receipt whose digest is not the one it
+            // claims.
+            CrossCheck::RecordMismatch(_) | CrossCheck::WrongReceipt { .. } => {
+                found.availability = Availability::Conflict;
+            }
         }
-    }
+        receipt.archive.manifest_version_id.clone()
+    };
 
     // -- the signature: a verdict and a key id, never a trust decision ------
     walk.objects = walk.objects.saturating_add(1);
-    let (verdict, key_id) = classify_signature(access, &point, &receipt_bytes, trust);
-    observation.signature = verdict;
-    observation.signer_key_id = key_id;
+    (found.signature, found.signer_key_id) =
+        classify_signature(access, &point, &receipt_bytes, trust);
+    // The receipt's bytes are verified; the manifest is read without them.
+    drop(receipt_bytes);
 
     // -- the manifest digest -----------------------------------------------
-    if observation.availability == Availability::Available
-        && req.deep_check != CatalogDeepCheck::None
-    {
+    if found.availability == Availability::Available && req.deep_check != CatalogDeepCheck::None {
         walk.objects = walk.objects.saturating_add(1);
         match access.get_with_version(&point.archive.manifest_key, caps::MANIFEST) {
             Ok((bytes, answered)) => {
@@ -1483,7 +1844,7 @@ fn examine(
                 // belongs to one bucket and a COPY of the archive carries the
                 // pin without the version (review H-1).
                 let verdict = pin::judge(
-                    receipt.archive.manifest_version_id.as_deref(),
+                    pinned_version.as_deref(),
                     answered.as_deref(),
                     &point.archive.manifest_sha256,
                     |version| {
@@ -1501,62 +1862,94 @@ fn examine(
                         // version — and a restore reads only the current
                         // version, so the point is not selectable whatever the
                         // bytes hash to.
-                        observation.availability = Availability::Conflict;
-                        observation.superseded = true;
+                        found.availability = Availability::Conflict;
+                        found.superseded = true;
                     }
                     PinVerdict::Unreadable { .. } => {
                         // "Could not tell" — never "not here" and never a pass
                         // over a rewrite nobody could rule out.
-                        observation.availability = Availability::Unreadable;
-                        observation.pin_unreadable = true;
+                        found.stop_at(
+                            Availability::Unreadable,
+                            EntryCause::of(CauseDocument::Manifest, CauseReason::ReadFailed),
+                        );
+                        found.pin_unreadable = true;
                     }
                     PinVerdict::Unpinned | PinVerdict::Current | PinVerdict::Unchecked { .. } => {
-                        observation.pin_unchecked = matches!(verdict, PinVerdict::Unchecked { .. });
+                        found.pin_unchecked = matches!(verdict, PinVerdict::Unchecked { .. });
                         let got = logweir_core::ids::sha256_prefixed(&bytes);
                         if got != point.archive.manifest_sha256 {
                             // The bytes in the bucket are not the bytes the
                             // signed receipt describes. The receipt is the
                             // authority, so this is a contradiction about the
                             // point and not a fact about the record.
-                            observation.availability = Availability::Conflict;
+                            found.availability = Availability::Conflict;
                         }
                     }
                 }
             }
-            Err(StoreError::NotFound(_)) => observation.availability = Availability::Missing,
-            Err(_) => observation.availability = Availability::Unreadable,
+            Err(e) => found.stop_at(
+                availability_of_read(&e),
+                EntryCause::of_read(CauseDocument::Manifest, &e),
+            ),
         }
     }
 
-    observation
+    found.observed(point, subject)
 }
 
-/// The most bytes a catalog RECORD, a receipt or a DSSE sidecar may carry
-/// before this walk refuses to parse it — review question **F12**.
-///
-/// A record is about 1.5 KiB and a sidecar a few hundred bytes, so 256 KiB is
-/// generous by two orders of magnitude and is a ceiling only a planted object
-/// reaches. An oversized document is `Unreadable`: "this build could not tell",
-/// which is what it is.
-///
-/// **It is also the READ cap (FX-31)**, [`CATALOG_DOCUMENT_READ_CAP`]: the walk
-/// reads a record, a receipt and a sidecar through `ObjectAccess::get` with it,
-/// so a planted multi-gigabyte object under `logweir/catalog/v1/points/…` is
-/// refused on the size the store reports, before a body byte is read, and a
-/// store that streams past the cap is cut off at it. Until FX-31 the object
-/// was read whole and only THEN measured, so only the Job's memory limit
-/// bounded it. The manifest is read under `caps::MANIFEST`, a ceiling and not
-/// a refusal of legitimate manifests: its size is the adopter's backup set, a
-/// legitimate manifest is megabytes, and the read is inherently whole-object
-/// because the check IS its digest.
-pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
-
-/// [`MAX_CATALOG_DOCUMENT_BYTES`] as the cap `ObjectAccess::get` takes.
-const CATALOG_DOCUMENT_READ_CAP: u64 = MAX_CATALOG_DOCUMENT_BYTES as u64;
-
-fn oversized(bytes: &[u8]) -> bool {
-    bytes.len() > MAX_CATALOG_DOCUMENT_BYTES
+/// What the examination of a point WITH a parsed record has established so
+/// far — everything of an [`Observation`] but the record itself, which
+/// [`examine`] holds once and hands over at the end.
+struct Found {
+    availability: Availability,
+    signature: SignatureVerdict,
+    signer_key_id: Option<String>,
+    superseded: bool,
+    pin_unchecked: bool,
+    pin_unreadable: bool,
+    cause: Option<EntryCause>,
 }
+
+impl Found {
+    /// Stop at a document the record names: its availability and why.
+    fn stop_at(&mut self, availability: Availability, cause: EntryCause) {
+        self.availability = availability;
+        self.cause = Some(cause);
+    }
+
+    /// The observation, taking the record.
+    fn observed(self, point: Box<CatalogPoint>, subject: &Subject<'_>) -> Observation {
+        Observation {
+            availability: self.availability,
+            signature: self.signature,
+            signer_key_id: self.signer_key_id,
+            format_version: Some(point.format_version.clone()),
+            point: Some(point),
+            superseded: self.superseded,
+            pin_unchecked: self.pin_unchecked,
+            pin_unreadable: self.pin_unreadable,
+            cause: self.cause,
+            point_id: subject.point_id.to_string(),
+        }
+    }
+}
+
+// THE WALK'S READ CAPS ARE ROWS OF `logweir_store::caps` (FX-33), each named
+// at its read: `CATALOG_RECORD` and `CATALOG_RECEIPT` — the largest record
+// and receipt Logweir writes (`logweir_core::topic_budget`), the second equal
+// to the controller's own — `SIDECAR` and `MANIFEST`.
+//
+// There used to be ONE constant here, `MAX_CATALOG_DOCUMENT_BYTES` = 256 KiB,
+// for a record, a receipt and a sidecar alike (review question F12, made the
+// read cap by FX-31). It was written when a record was "about 1.5 KiB"; the
+// receipt and the record have since gained four per-topic blocks and cost
+// about 3 KB a topic, so a backup of about 80 topics crossed it and vanished
+// from the catalog. The caps are still what F12 asked for — a planted
+// multi-gigabyte object under `logweir/catalog/v1/points/…` is refused on the
+// size the store reports, before a body byte is read, and a store that
+// streams past its cap is cut off at it — but they are now derived from what
+// a backup may legitimately sign, in one place, with a test that fails when
+// a format outgrows its budget.
 
 /// The signature verdict and the key id it belongs to.
 ///
@@ -1615,14 +2008,23 @@ fn classify_signature(
 
 /// One observation as an entry line's value.
 ///
-/// `None` for an observation with no record — a `Missing`, an `Unreadable` or
-/// a record of a major this build does not implement. **Such a point is
-/// COUNTED and not listed**, which is deliberate: an entry line's required
-/// fields are the receipt-derived facts, and there is no honest value for any
-/// of them when the record could not be read. The counts carry the fact; a row
-/// of zeroes would carry a fiction.
-fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
-    let point = observation.point.as_ref()?;
+/// **EVERY observation has one (FX-33).** It returned `None` for an
+/// observation with no parsed record — a record that could not be read, was
+/// over its read bound, was not a record, or was of another major — on the
+/// argument that an entry's required fields are receipt-derived and there is
+/// no honest value for them without a record. The argument was right about
+/// the VALUES and wrong about the conclusion: such a point was counted and
+/// listed by no entry, so the console offered no restore for it and showed
+/// no reason, and a backup of 110 topics looked like a backup that never
+/// ran. So the fields are optional instead, and an entry says what is known:
+/// the point id always (it is in the object's key), the recovery instant
+/// when the key carries one, and the index row's facts when the walk has a
+/// row ([`without_record_entry`]). It is never `Available`, so it is never
+/// selectable and nothing binds a restore to it.
+fn build_entry(observation: &Observation) -> CatalogEntry {
+    let Some(point) = observation.point.as_ref() else {
+        return without_record_entry(observation);
+    };
     let availability = observation.availability;
     // THREE CLASSES, AND EACH FIELD IS IN THE NARROWEST ONE IT CAN BE
     // (review question F11):
@@ -1704,7 +2106,41 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     // PROD-04.1: the consumer position summary, from a record the cross-check
     // let stand.
     entry.consumer_positions = entry_consumer_positions(point, availability);
-    Some(entry)
+    entry
+}
+
+/// **FX-33.** The entry of a point whose RECORD gave no facts: the point id
+/// its key carries, what the examination found, and a remedy saying why.
+/// Nothing else — no set, run, instant, window, receipt, manifest or location
+/// (empty strings and zeros), so no reader can bind, select or join on it.
+/// It is never `Available` ([`Observation::without_record`] is reached only
+/// with `Missing`, `Unreadable` or `UnsupportedFormat`), so never selectable.
+fn without_record_entry(observation: &Observation) -> CatalogEntry {
+    CatalogEntry {
+        point_id: redact(&observation.point_id),
+        backup_id: String::new(),
+        run_id: String::new(),
+        recovery_point_at_ms: 0,
+        covered_from_ms: 0,
+        covered_to_ms: 0,
+        locations: Vec::new(),
+        receipt_key: String::new(),
+        receipt_sha256: String::new(),
+        manifest_key: None,
+        manifest_sha256: None,
+        recorded_at: None,
+        format_version: observation.format_version.as_deref().map(redact),
+        availability: observation.availability,
+        signature: observation.signature,
+        signer_key_id: None,
+        remedy: entry_remedy(observation)
+            .map(|r| redact(&r))
+            .filter(|r| !r.is_empty()),
+        topics: Vec::new(),
+        topics_omitted: None,
+        owner_detection: None,
+        consumer_positions: None,
+    }
 }
 
 /// **PROD-04.1.** An entry's `consumerPositions`, from the record: only for an
@@ -1807,9 +2243,19 @@ fn entry_remedy(observation: &Observation) -> Option<String> {
     if observation.pin_unreadable {
         return Some(pin::UNREADABLE_REMEDY.to_string());
     }
-    let remedy = remedy_for(observation.availability, observation.signature);
+    // FX-33: A SIZE OR A CONTENT FAULT HAS ITS OWN SENTENCE, before the
+    // table's — which for `Unreadable` names the grant, the endpoint and the
+    // network, none of which is at fault for a document that is too large or
+    // is not what its key names.
+    let remedy = observation
+        .cause
+        .as_ref()
+        .and_then(cause_remedy)
+        .or_else(|| {
+            remedy_for(observation.availability, observation.signature).map(str::to_string)
+        });
     if !observation.pin_unchecked {
-        return remedy.map(str::to_string);
+        return remedy;
     }
     Some(match remedy {
         Some(remedy) => format!("{remedy} {}", pin::UNCHECKED_NOTE),
@@ -2058,7 +2504,7 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
         CatalogSyncMode::Index => CursorReport {
             index_shard: walk.oldest_day.map(|d| d.format("%Y-%m-%d").to_string()),
             rescan_start_after: None,
-            complete: walk.stop.complete(),
+            complete: walk.complete(),
         },
         CatalogSyncMode::Full => CursorReport {
             index_shard: None,
@@ -2066,12 +2512,15 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
             // finished walk would make the next one resume past the whole
             // archive and publish an empty view of a full one. An INCOMPLETE
             // one always reports where it got to, whatever stopped it.
+            // (A rescan that finished its range with a record it could not
+            // read is incomplete and resumes from the START: a cursor here
+            // would skip the whole archive.)
             rescan_start_after: if walk.stop.complete() {
                 None
             } else {
                 walk.last_record_key.clone().map(|k| redact_path(&k))
             },
-            complete: walk.stop.complete(),
+            complete: walk.complete(),
         },
     }
 }
@@ -2232,5 +2681,98 @@ mod tests {
         entry.consumer_positions.as_mut().unwrap().groups.clear();
         let (a, b) = entry_renderings(&entry);
         assert_eq!(a, b);
+    }
+
+    /// FX-33: every cause whose remedy is this module's own — a size, or a
+    /// content fault — is a sentence that names NO grant, endpoint or
+    /// network, states the size against the bound when it is a size, and
+    /// fits the 512 characters the API publishes. The read that did not
+    /// answer is the only cause that keeps the table's grant sentence.
+    ///
+    /// KILLS: the remedy names the grant (the size or content sentence
+    /// replaced by the `Unreadable` one, or `cause_remedy` answering `None`).
+    #[test]
+    fn a_size_or_a_content_remedy_never_sends_anyone_to_a_grant() {
+        let grant_words = ["grant", "archiveRead", "endpoint", "credential"];
+        let mut own = 0;
+        for document in CauseDocument::ALL {
+            for reason in CauseReason::ALL {
+                let cause = EntryCause {
+                    document: *document,
+                    reason: *reason,
+                    bytes: Some(15_841_474),
+                    cap_bytes: Some(6_131_072),
+                };
+                let Some(remedy) = cause_remedy(&cause) else {
+                    assert!(
+                        matches!(
+                            reason,
+                            CauseReason::ReadFailed
+                                | CauseReason::NotFound
+                                | CauseReason::UnsupportedFormat
+                        ),
+                        "{document}/{reason} is a fact about the document and has no sentence"
+                    );
+                    continue;
+                };
+                own += 1;
+                for word in grant_words {
+                    assert!(
+                        !remedy.contains(word),
+                        "{document}/{reason}: a size or content remedy names `{word}`: {remedy}"
+                    );
+                }
+                // With the largest sizes a store can report: still within the
+                // 512 characters the API publishes.
+                let longest = cause_remedy(&EntryCause {
+                    bytes: Some(u64::MAX),
+                    cap_bytes: Some(u64::MAX),
+                    ..cause
+                })
+                .expect("the same cause has the same sentence");
+                assert!(longest.len() <= 512, "{} chars: {longest}", longest.len());
+                assert_eq!(redact(&remedy), remedy, "the redactor changes it: {remedy}");
+                if *reason == CauseReason::OverReadCap {
+                    assert!(
+                        remedy.contains("15841474 bytes") && remedy.contains("6131072-byte bound"),
+                        "a size remedy states the size against the bound: {remedy}"
+                    );
+                }
+            }
+        }
+        assert_eq!(own, 6, "three documents, two own reasons each");
+        // NEGATIVE CONTROL: the table's sentence for a read that did not
+        // answer DOES name the grant, so the word list above can fail.
+        let read_failed = remedy_for(Availability::Unreadable, SignatureVerdict::NotAttempted)
+            .expect("an Unreadable point has a remedy");
+        assert!(read_failed.contains("archiveRead grant"), "{read_failed}");
+        // A size the store did not report whole is stated without a number.
+        let streamed = cause_remedy(&EntryCause {
+            document: CauseDocument::Receipt,
+            reason: CauseReason::OverReadCap,
+            bytes: None,
+            cap_bytes: Some(5_131_072),
+        })
+        .expect("a size has a sentence");
+        assert!(
+            streamed.contains("5131072-byte bound") && !streamed.contains("(it is"),
+            "{streamed}"
+        );
+    }
+
+    /// FX-33: the two keys a walk reads a point's id from.
+    #[test]
+    fn a_log_key_and_a_record_key_carry_the_point_id() {
+        let id = "lwp1-0123456789abcdef0123456789abcdef";
+        let log = format!("logweir/catalog/v1/log/2026/09/16/1757991600000-{id}.json");
+        assert_eq!(point_id_of_log_key(&log).as_deref(), Some(id));
+        assert_eq!(
+            point_id_of_record_key(&format!("logweir/catalog/v1/points/{id}/record.json")),
+            id
+        );
+        assert_eq!(
+            point_id_of_record_key("elsewhere/record.json"),
+            "elsewhere/record.json"
+        );
     }
 }

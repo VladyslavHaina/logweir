@@ -558,7 +558,7 @@ pub async fn create(
         .map_err(KubeFailure::into_api_error)?;
     let effective = policies.resolve(&ns);
     refuse_typed_confirmation(&effective, &request)?;
-    refuse_before_create(&state, &ns, &effective, &request)?;
+    refuse_before_create(&state, &actor, &ns, &effective, &request)?;
     if effective.mode() == ApprovalMode::Governed
         && !effective.is_legacy()
         && request.approval_ref.name.len() > approval::MAX_GOVERNED_APPROVAL_NAME
@@ -733,12 +733,17 @@ fn typed_confirmation(
 /// * **No `approvalRef.name` ending in `-confirmation` under Governed**
 ///   (review L4): it would collide with another Restore's confirmation
 ///   object.
+/// * **A requester a two-person approval can compare** (PROD-16.2): under a
+///   policy whose approval the console signs, the requester is one of the two
+///   people every reader tells apart
+///   (`logweir_core::approval_policy::console_principal`).
 ///
 /// # Errors
 ///
 /// `policy_mismatch` or `validation_failed`.
 fn refuse_before_create(
     state: &AppState,
+    actor: &Actor,
     ns: &str,
     effective: &EffectivePolicy,
     request: &CreateRestoreRequest,
@@ -758,8 +763,12 @@ fn refuse_before_create(
         }
         return Ok(());
     };
-    let operator_mode = OperatorMode::of(effective);
-    if state.shared().is_none() && !operator_mode.allowed_in_local_admin() {
+    // PROD-16.2: THE ROW OF THE APPROVAL TABLE, and what THIS console may do
+    // under it. Nothing below reads the policy's mode or its approver
+    // signature on its own.
+    let route = approval::route_of(policy)?;
+    let operator_mode = route.operator_mode();
+    if !route.console_may_request(state.console_kind()) {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
@@ -786,6 +795,73 @@ fn refuse_before_create(
             ))
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
+    }
+    // PROD-16.2: under a two-person policy the requester is one of the two
+    // people every reader compares. An identity that cannot be compared (or
+    // is a machine's) could never be told apart from an approver's, so no
+    // request is made for it: nothing would ever be able to approve it.
+    if route == logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole {
+        if let Err(reason) = logweir_core::approval_policy::console_principal(
+            logweir_core::approval_policy::Party::Requester,
+            &actor.issuer,
+            &actor.subject,
+        ) {
+            actor.audit.set_failure("requester_not_comparable");
+            return Err(ApiError::new(
+                ProblemCode::PolicyMismatch,
+                format!(
+                    "Namespace {ns} is bound to approval policy {} (two-person), and {reason}. \
+                     Nothing was created.",
+                    policy.name
+                ),
+            ));
+        }
+        // PROD-16.2 (the coordinator's addition 6): NOTHING IS REQUESTED HERE
+        // THAT A SECOND PERSON COULD NOT BE SHOWN IN FULL. The approver sees
+        // every topic and the name it is restored under, the source, the
+        // target cluster, the window and the coverage, from this plan; a plan
+        // too large for that, unreadable, or carrying a value a page cannot
+        // show faithfully would wait for an approval nobody is ever offered.
+        // So the largest restore this mode accepts is the largest one it can
+        // show (`logweir_core::approval_scope::MAX_SCOPE_TOPICS`); a larger
+        // one is split, or approved under a strict policy.
+        // Review S-2: the ticket is shown to the approver as well, by the same
+        // rule; a ticket the scope would refuse would make a request nobody
+        // can ever approve. Refused here, by name, without echoing it.
+        if let Some(ticket) = request.ticket.as_deref() {
+            if !logweir_core::approval_scope::showable(ticket) {
+                actor.audit.set_failure("ticket_not_showable");
+                return Err(ApiError::validation(vec![FieldError::new(
+                    "ticket",
+                    "not_showable",
+                    format!(
+                        "Namespace {ns} is bound to approval policy {} (two-person), and the \
+                         approver is shown the change ticket: it must be printable ASCII (no \
+                         character outside ASCII, no control character) of at most {} \
+                         characters. Nothing was created.",
+                        policy.name,
+                        logweir_core::approval_scope::MAX_SCOPE_TEXT_CHARS
+                    ),
+                )]));
+            }
+        }
+        if let Err(incomplete) =
+            logweir_core::approval_scope::plan_scope(request.plan_bytes.as_bytes())
+        {
+            actor.audit.set_failure("scope_incomplete");
+            actor
+                .audit
+                .note("scope", &format!("incomplete:{}", incomplete.code()));
+            return Err(ApiError::validation(vec![FieldError::new(
+                "planBytes",
+                "scope_incomplete",
+                format!(
+                    "Namespace {ns} is bound to approval policy {} (two-person). {incomplete}. \
+                     Nothing was created.",
+                    policy.name
+                ),
+            )]));
+        }
     }
     if let Err(reason) =
         logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())
@@ -927,7 +1003,9 @@ async fn authorize_submission(
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     };
-    let governed = approval::awaits_approver(policy.mode);
+    // By the table: `confirm` is authorised by the console's signature
+    // alone; `two-person` and `strict` leave a REQUEST and wait.
+    let governed = approval::route_of(policy)?.awaits_an_approver();
     let target = if governed {
         approval::confirmation_name(approval_name)
     } else {
@@ -1172,11 +1250,8 @@ pub async fn submit_approval(
              signed; submit only the countersigned sidecar",
         )]));
     }
-    let Some(policy) = effective
-        .bound()
-        .filter(|p| p.mode == ApprovalMode::Governed)
-    else {
-        return Err(ApiError::new(
+    let not_governed = || {
+        ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
                 "Namespace {ns} is bound to {} ({}), not an explicit Governed policy, so there is \
@@ -1184,8 +1259,37 @@ pub async fn submit_approval(
                 effective.name(),
                 effective.mode()
             ),
-        ));
+        )
     };
+    let Some(policy) = effective.bound() else {
+        return Err(not_governed());
+    };
+    // BY THE TABLE (PROD-16.2): only the personal-key row takes a
+    // countersignature.
+    match approval::route_of(policy)? {
+        logweir_core::approval_policy::ApprovalRoute::PersonalKey => {}
+        logweir_core::approval_policy::ApprovalRoute::RequesterConfirms => {
+            return Err(not_governed())
+        }
+        // A TWO-PERSON NAMESPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE. Its
+        // policy snapshot says the console signs the approval, and a request
+        // made under one setting is not approved under the other: accepting a
+        // countersignature here would keep the personal-key roster as a
+        // second, standing way in. The controller and the runner refuse it
+        // too.
+        logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole => {
+            actor.audit.set_failure("countersignature_not_accepted");
+            return Err(ApiError::new(
+                ProblemCode::PolicyMismatch,
+                format!(
+                    "Namespace {ns} is bound to {} (two-person): a second person approves in \
+                     the console, and a personal-key countersignature is not accepted here. \
+                     Nothing was stored.",
+                    policy.name
+                ),
+            ));
+        }
+    }
     let approval_name = restore.spec.approval_ref_name().to_string();
     let confirmation_name = approval::confirmation_name(&approval_name);
     let confirmation = match state.kube().get::<Approval>(&ns, &confirmation_name).await {

@@ -29,17 +29,24 @@ use crate::scorecard::Scorecard;
 /// required in it, and `format_version` pinned to `2.x.y`. The 1.7.0 file is
 /// FROZEN beside it. The generator emits the 2.0.0 file: the Rust type
 /// reads both majors, so the requirements that make a document 2.0.0's are
-/// added here, on top of what the type derives. The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS`], the newest
-/// version.
+/// added here, on top of what the type derives.
+///
+/// **2.1.0 since PROD-16.2** (`approval.console`), format 2's first MINOR,
+/// written ONLY for a partition-subset restore that a second person approved
+/// in the console: 2.0.0's fields plus that one optional block and its two
+/// definitions, exactly as the type derives them. The 2.0.0 file is FROZEN
+/// beside it and is this file without the block
+/// (`the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
+/// The `$id` is built from
+/// [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`], the
+/// newest version.
 ///
 /// **PROD-15.1's `target.original_name` is NOT in this file, on purpose.** An
 /// original-name restore restores whole topics (`crate::original_name`,
 /// `OriginalNameNeedsWholeTopics`; arm ON-14), so the block never appears in a
-/// 2.x document, and the file stays byte for byte the one PROD-11.1b
-/// published. The block is format 1's, from 1.8.0:
-/// [`scorecard_format_1_schema`] writes that file, which describes every 1.x
-/// document this build writes.
+/// 2.x document. The block is format 1's, from 1.8.0:
+/// [`scorecard_format_1_schema`] writes format 1's newest file, which describes
+/// every 1.x document this build writes.
 pub fn scorecard_schema() -> String {
     use schemars::schema::{Schema, SchemaObject};
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
@@ -51,7 +58,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
     ));
     fn def<'a>(
         definitions: &'a mut schemars::Map<String, Schema>,
@@ -122,24 +129,33 @@ const ORIGINAL_NAME_PROPERTY: &str = "original_name";
 /// The two definitions PROD-15.1's block brings with it.
 const ORIGINAL_NAME_DEFINITIONS: [&str; 2] = ["OriginalNameInfo", "OriginalNameOwner"];
 
+/// `ApprovalInfo`'s property for PROD-16.2's block.
+const CONSOLE_APPROVAL_PROPERTY: &str = "console";
+
+/// The two definitions PROD-16.2's block brings with it.
+const CONSOLE_APPROVAL_DEFINITIONS: [&str; 2] = ["ConsoleApprovalInfo", "ConsolePrincipal"];
+
 /// Pretty-printed JSON Schema of the NEWEST MINOR OF SCORECARD FORMAT 1:
-/// **1.8.0 since PROD-15.1** (`target.original_name`), written only for a
-/// restore under the original topic names. It describes every 1.x document
-/// this build writes; the 1.7.0 file is frozen beside it.
+/// **1.9.0 since PROD-16.2** (`approval.console`), written only for a restore
+/// that a second person approved in the console. It describes every 1.x
+/// document this build writes; PROD-15.1's 1.8.0 file (`target.original_name`)
+/// is frozen beside it.
 ///
 /// The Rust type reads both majors, so what it derives on its own is no longer
 /// format 1's selection block (a start and an end; [`scorecard_schema`] turns
-/// it into 2.0.0's). A MINOR adds optional fields only, so this file is BUILT
-/// AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.7.0 file),
-/// plus the optional `target.original_name` property and its two definitions
-/// exactly as the type derives them today, under the `$id` built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME`]. So a change to
-/// [`crate::scorecard::OriginalNameInfo`] is a diff of this file
-/// (`just schema-check`), and nothing else of format 1 can move.
+/// it into format 2's). A MINOR adds optional fields only, so this file is
+/// BUILT AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.8.0
+/// file), plus the optional `approval.console` property and its two
+/// definitions exactly as the type derives them today, under the `$id` built
+/// from [`crate::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL`]. So a
+/// change to [`crate::scorecard::ConsoleApprovalInfo`] is a diff of this file
+/// (`just schema-check`), and nothing else of format 1 can move: PROD-15.1's
+/// block is the frozen file's, as that row published it
+/// (`the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`).
 ///
 /// # Panics
 ///
-/// When `frozen_predecessor` is not a JSON Schema that defines `TargetInfo`,
+/// When `frozen_predecessor` is not a JSON Schema that defines `ApprovalInfo`,
 /// or already describes the block: the caller handed the wrong file.
 pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
     use schemars::schema::{RootSchema, Schema};
@@ -154,29 +170,29 @@ pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
         serde_json::from_str(frozen_predecessor).expect("the frozen scorecard schema parses");
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME
+        crate::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
     ));
-    let property = match derived.definitions.get_mut("TargetInfo") {
+    let property = match derived.definitions.get_mut("ApprovalInfo") {
         Some(Schema::Object(o)) => o
             .object()
             .properties
-            .remove(ORIGINAL_NAME_PROPERTY)
-            .expect("the scorecard type derives target.original_name"),
-        _ => panic!("the scorecard type derives TargetInfo"),
+            .remove(CONSOLE_APPROVAL_PROPERTY)
+            .expect("the scorecard type derives approval.console"),
+        _ => panic!("the scorecard type derives ApprovalInfo"),
     };
-    match root.definitions.get_mut("TargetInfo") {
+    match root.definitions.get_mut("ApprovalInfo") {
         Some(Schema::Object(o)) => {
             assert!(
                 o.object()
                     .properties
-                    .insert(ORIGINAL_NAME_PROPERTY.into(), property)
+                    .insert(CONSOLE_APPROVAL_PROPERTY.into(), property)
                     .is_none(),
-                "the frozen predecessor must not describe target.original_name"
+                "the frozen predecessor must not describe approval.console"
             );
         }
-        _ => panic!("the frozen scorecard schema defines TargetInfo"),
+        _ => panic!("the frozen scorecard schema defines ApprovalInfo"),
     }
-    for name in ORIGINAL_NAME_DEFINITIONS {
+    for name in CONSOLE_APPROVAL_DEFINITIONS {
         let definition = derived
             .definitions
             .remove(name)

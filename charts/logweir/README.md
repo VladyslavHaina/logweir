@@ -890,10 +890,12 @@ own signing key — moving the signer out of the controller's reach is not this
 setting. Each listed namespace costs one watch per namespaced kind (twelve, plus
 their owned Jobs), which is the price of not holding a cluster-wide list.
 
-## `approvalPolicy` — the three modes: confirm, two-person, strict (PLAT-19.2, PROD-16.1)
+## `approvalPolicy` — the three modes: confirm, two-person, strict (PLAT-19.2, PROD-16.1, PROD-16.2)
 
 **confirm** — one person clicks Create in the console, no key (internal
-`Ordinary`); **two-person** — PROD-16.2, refused by name in this release;
+`Ordinary`); **two-person** — a second person signs in to the shared console
+and clicks Approve, no key (internal `Governed` with `approverSignature:
+Console`; per namespace, and only with `api.console.mode: shared`);
 **strict** — an approver's personal key (internal `Governed`, or
 `legacy-governed-v1`). A **fresh install with a console** (the first `helm
 install`, Helm 3.19+ or 4.x, with `api.console.enabled`, the managed identity
@@ -908,7 +910,7 @@ when the cluster has no trust of its own, and marks the install
 | value | meaning |
 |---|---|
 | `approvalPolicy.default` | what an unbound namespace resolves to: `""` (the fresh-install marker: confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` (needs `allowOrdinaryConfirmation`), `strict`; rendered as `defaultMode`, which an older binary refuses at start |
-| `approvalPolicy.policies` | named policies: `name`, `mode: confirm\|strict` (or `Ordinary\|Governed`; the chart renders the internal names), `maxAgeSeconds` (60..604800; default 900 confirm, 86400 strict), `requireDistinctPrincipal` (strict only, must be true); `default-confirm-v1` and `legacy-governed-v1` are reserved |
+| `approvalPolicy.policies` | named policies: `name`, `mode: confirm\|two-person\|strict` (or `Ordinary\|Governed`; the chart renders the internal names), `maxAgeSeconds` (60..604800; default 900 confirm, 86400 two-person and strict), `requireDistinctPrincipal` (two-person and strict, must be true), `approverSignature: Console` (the internal spelling of two-person, on a `Governed` policy; refused on a confirm policy and beside `mode: strict`); `default-confirm-v1` and `legacy-governed-v1` are reserved |
 | `approvalPolicy.namespaces` | `{<namespace>: <policy>}`; an explicit binding always wins over the default |
 | `approvalPolicy.allowOrdinaryConfirmation` | D0's installation floor, default `false`; a confirm policy and `default: confirm` are refused at render and at start without it (the fresh-install marker does not need it) |
 | `approvalPolicy.confirmationKeySecret` | `""`: with `identity.bootstrapFeatures.consoleKey`, the console key the identity hook generates and retains (`logweir-console-confirmation`, mounted `optional` and marked `confirmationKeyManaged` because the hook fills it after the console starts), and without it no key; another name (or the managed name with the feature off): a Secret you manage, key `confirmation.key`, mounted required, needed when a console-served namespace is bound |
@@ -936,6 +938,38 @@ and an older controller refuses every document the new console signed: both
 directions fail closed. The keys this needs on each namespace's `TrustPolicy`
 are in `docs/keys.md`; the example is `examples/approval-policy.values.yaml`,
 rendered to `rendered/approval-policy.yaml`.
+
+**Two-person approval in the console (PROD-16.2).** A policy written `mode:
+two-person` is rendered as `mode: Governed` with `approverSignature: Console`,
+and a namespace bound to it takes its approval from a second person: someone
+with the `approver` role (`api.console.roles.bindings`; an administrator is not
+an approver unless bound as one) who is not the requester signs in to the
+console and clicks Approve. Nobody copies, signs or pastes anything. The
+console signs the approval with the confirmation key that signed the request,
+so the namespace's `TrustPolicy` needs that key under `ConsoleConfirmation` and
+no approver key. The setting is inside the policy's snapshot digest: a request
+made under it is never approved with a personal key, and a request made under a
+strict policy is never approved in the console.
+
+- **It renders only with the shared console.** With no console, or with
+  `api.console.mode: localAdmin`, the chart refuses a two-person policy by
+  name: the administrator console has one identity, which cannot be two
+  people. `approvalPolicy.default` cannot be `two-person`; bind each namespace.
+- **Roll the controller, the runner and the console together.** An older
+  controller or console refuses a policy document that carries
+  `approverSignature` and does not start; an older runner refuses the frozen
+  policy snapshot and the approval document, exit 3, before it dials anything.
+  The key is rendered only for a two-person policy, so an install that
+  declares none is unaffected.
+- **Rollback.** Rebind the namespaces (to `strict` or `confirm`) or remove the
+  policy BEFORE rolling the binaries back. A request waiting for its second
+  person is then for another policy and is submitted again.
+- **The residual** (`SECURITY.md`): whoever controls the console pod, its
+  confirmation-key Secret or the identity provider can approve alone, here as
+  under confirm. `strict` is for a namespace that cannot accept that.
+
+The example is `examples/console-two-person.values.yaml`, rendered to
+`rendered/console-two-person.yaml`.
 
 ## `controller.failFastSeconds` and `controller.jobTtlSeconds`
 

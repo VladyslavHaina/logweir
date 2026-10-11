@@ -353,7 +353,7 @@ pub struct RetentionEvaluation {
     pub at: Option<Time>,
     /// How many points were considered: every point of this destination in
     /// the catalog view the evaluation read. Each is counted once, in
-    /// `keptCount`, `candidateCount`, `truncatedByCap` or `skipped`.
+    /// `keptCount`, `candidateCount`, `truncatedByCap` or `skippedCount`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub points_evaluated: Option<i64>,
     /// How many points stay: the rules keep them, or something protects them.
@@ -391,19 +391,29 @@ pub struct RetentionEvaluation {
     /// Absent means the catalog did not say, never `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_incomplete: Option<bool>,
-    /// The point ids that stay. `keptCount` is their number.
+    /// How many points something protected: the length of `protected`
+    /// before it was cut at 500. Absent on an evaluation written by a
+    /// controller that did not record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_count: Option<i64>,
+    /// How many points could not be classified: the length of `skipped`
+    /// before it was cut at 500. Absent on an evaluation written by a
+    /// controller that did not record it; `skipped` is then whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_count: Option<i64>,
+    /// The point ids that stay, the first 500. `keptCount` is their number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub kept: Option<Vec<String>>,
-    /// The points this plan would remove.
+    /// The points this plan would remove, the first 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub candidates: Option<Vec<RetentionCandidate>>,
-    /// The points something protected.
+    /// The points something protected, the first 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub protected: Option<Vec<ProtectedPoint>>,
-    /// What could not be classified.
+    /// What could not be classified, the first 500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 500))]
     pub skipped: Option<Vec<SkippedEntry>>,
@@ -430,9 +440,15 @@ pub struct RetentionAccounting {
     pub candidates: i64,
     /// `truncatedByCap`: due, and held back by the per-run ceiling.
     pub held_back: i64,
-    /// The points in `skipped`.
+    /// `skippedCount`, or the length of `skipped` where an older controller
+    /// wrote no count.
     pub skipped: i64,
 }
+
+/// The CRD's `maxItems` on each `status.lastEvaluation` list (FX-39). The
+/// controller writes the first this many entries of each list and the full
+/// number beside it, so the API server never refuses the status write.
+pub const EVALUATION_LIST_BOUND: usize = 500;
 
 impl RetentionEvaluation {
     /// The four counts every surface reads (FX-22), **or `None` when this
@@ -444,8 +460,11 @@ impl RetentionEvaluation {
     /// list may include such points — and `None` when
     ///
     /// ```text
-    /// pointsEvaluated = keptCount + candidateCount + truncatedByCap + |skipped|
+    /// pointsEvaluated = keptCount + candidateCount + truncatedByCap + skippedCount
     /// ```
+    ///
+    /// (`skippedCount` absent: the length of `skipped`, which a controller
+    /// that wrote no count wrote whole, or the API server refused the write).
     ///
     /// does not hold. Every evaluation this controller writes satisfies it, so
     /// one that does not is two writers' numbers in one block: a merge patch
@@ -467,17 +486,22 @@ impl RetentionEvaluation {
     /// from the same vector in one patch, so a list of another length is two
     /// writers', whatever the sum says.
     ///
-    /// FX-39 WILL CUT THE STATUS LISTS AT THE CRD'S BOUND (`maxItems`). The
-    /// comparison below must then be `min(keptCount, bound)`, not `keptCount`;
-    /// until then a list is whole or the write was refused.
+    /// THE LISTS ARE CUT AT [`EVALUATION_LIST_BOUND`] (FX-39), so the sum
+    /// reads the counts, and the `kept` and `skipped` lists are held to
+    /// `min(count, 500)`: an older controller rewrites a list and cannot
+    /// remove the count beside it (review S1).
     #[must_use]
     pub fn accounting(&self) -> Option<RetentionAccounting> {
+        let list_len = |len: usize| i64::try_from(len).ok();
         let accounting = RetentionAccounting {
             points_evaluated: self.points_evaluated?,
             kept: self.kept_count?,
             candidates: self.candidate_count?,
             held_back: self.truncated_by_cap?,
-            skipped: i64::try_from(self.skipped.as_ref().map_or(0, Vec::len)).ok()?,
+            skipped: match self.skipped_count {
+                Some(count) => count,
+                None => list_len(self.skipped.as_ref().map_or(0, Vec::len))?,
+            },
         };
         let parts = [
             accounting.kept,
@@ -488,11 +512,16 @@ impl RetentionEvaluation {
         if parts.iter().any(|n| *n < 0) {
             return None;
         }
-        // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG (review
-        // M2) — see the doc comment for the rollback this refuses, and for
-        // what FX-39 must change here when it cuts the lists.
-        let listed = i64::try_from(self.kept.as_ref().map_or(0, Vec::len)).ok()?;
-        if listed != accounting.kept {
+        // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG, UP TO THE
+        // BOUND (review M2) — see the doc comment for the rollback this
+        // refuses.
+        let bound = list_len(EVALUATION_LIST_BOUND)?;
+        let listed = list_len(self.kept.as_ref().map_or(0, Vec::len))?;
+        if listed != accounting.kept.min(bound) {
+            return None;
+        }
+        let skipped_listed = list_len(self.skipped.as_ref().map_or(0, Vec::len))?;
+        if skipped_listed != accounting.skipped.min(bound) {
             return None;
         }
         let sum = parts.iter().try_fold(0i64, |acc, n| acc.checked_add(*n))?;

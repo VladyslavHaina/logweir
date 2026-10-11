@@ -55,14 +55,41 @@
 //! reaches over the same objects — so the two cannot disagree and an
 //! annotation patched into an older install changes nothing. An absent
 //! object, annotation or policy is unmarked: `legacy-governed-v1`.
+//!
+//! # Two-person approval in the console (PROD-16.2)
+//!
+//! Under a policy whose `approverSignature` is `Console` the second person
+//! signs in and clicks Approve, and THIS key signs the approval too. One key,
+//! two documents, so what stops the console being talked into approving a
+//! request it never confirmed is the order in [`verified_request`] and the
+//! route that calls it:
+//!
+//! 1. the stored request's sidecar must carry a signature by THIS console's
+//!    key that verifies over the stored bytes — and until it does, nothing of
+//!    the object is read for any other purpose (not its annotations, not its
+//!    labels, not `spec.planHash`, not `spec.subjectRef`);
+//! 2. the verified bytes, parsed, must bind the Restore the click names (its
+//!    namespace, name, current UID and the hash of its current plan bytes)
+//!    and the namespace's CURRENT policy, and must not have expired
+//!    (`logweir_core::approval_policy::check_request_binding`) — so a
+//!    signature lifted from another request binds another request;
+//! 3. the approval is that verified document with `approver`, `approvedAt`
+//!    and the 2.2.0 version added ([`approved_document`]) — every other field
+//!    is the verified one, re-serialised by the one writer.
+//!
+//! The console never signs an approval over bytes it did not first verify
+//! under its own key, and it signs a REQUEST only for the principal of the
+//! session that created the Restore. What that leaves is stated in
+//! `SECURITY.md`: whoever holds this key, controls this pod, or controls the
+//! identity provider can produce both documents alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use logweir_core::approval_policy::{
-    ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizedSubject, InstallationMarker,
-    PolicyRef, Requester, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    ApprovalPolicy, ApprovalPolicySet, Approver, AuthorizedSubject, InstallationMarker, PolicyRef,
+    Requester, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
     RESTORE_AUTHORIZATION_KIND, SUBJECT_API_VERSION, SUBJECT_KIND_RESTORE,
 };
 use logweir_evidence::keys::SigningKey;
@@ -151,6 +178,104 @@ impl ConfirmationKey {
     pub fn sign(&self, document: &[u8]) -> Result<Sidecar, String> {
         sign_detached(&self.key, PAYLOAD_TYPE_RESTORE_AUTHORIZATION, document)
             .map_err(|e| format!("signing the authorization document: {e}"))
+    }
+
+    /// **PROD-16.2: whether THIS key signed exactly these bytes** — the
+    /// console verifying its own earlier `ConsoleConfirmation` signature.
+    ///
+    /// The sidecar must be a v2 sidecar and carry a signature under this
+    /// key's id that verifies over `document` (DSSE PAE, so the payload type
+    /// is inside what is verified). A signature by any other key, however
+    /// trusted elsewhere, is not this console's confirmation.
+    ///
+    /// # Errors
+    ///
+    /// The verifier's reason. Never the document.
+    pub fn verifies(&self, document: &[u8], sidecar: &Sidecar) -> Result<(), String> {
+        logweir_evidence::verify::verify_detached(
+            &self.key.verifying_key(),
+            PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+            document,
+            sidecar,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// A stored request this console verified its own signature on, and the
+/// identity of the bytes it verified.
+#[derive(Clone, Debug)]
+pub struct VerifiedRequest {
+    /// The document, parsed from the VERIFIED bytes and from nothing else.
+    pub document: RestoreAuthorization,
+    /// `sha256:<hex>` of those bytes: what the approver's view shows and the
+    /// click must repeat.
+    pub sha256: String,
+}
+
+/// **PROD-16.2, step A3: the console verifies its OWN earlier signature on a
+/// stored request, before anything else is done with it.**
+///
+/// Takes the two byte strings of the stored object and nothing else of it —
+/// by signature, this function CANNOT read an annotation, a label,
+/// `spec.planHash` or `spec.subjectRef`. The document it returns is parsed
+/// from the bytes the signature covers, after the signature verified.
+///
+/// # Errors
+///
+/// A sentence saying the request is not this console's confirmation. It
+/// names the key id (public) and never echoes the stored text.
+pub fn verified_request(
+    key: &ConfirmationKey,
+    approval_bytes: &str,
+    sidecar_bytes: &str,
+) -> Result<VerifiedRequest, String> {
+    let sidecar: Sidecar = serde_json::from_str(sidecar_bytes).map_err(|_| {
+        "the stored request's sidecar is not a DSSE sidecar, so it carries no signature of this \
+         console's"
+            .to_string()
+    })?;
+    key.verifies(approval_bytes.as_bytes(), &sidecar)
+        .map_err(|reason| {
+            format!(
+                "the stored request does not carry a signature by this console's confirmation \
+                 key {} over its bytes ({reason}); the console approves only a request it \
+                 confirmed itself",
+                key.key_id()
+            )
+        })?;
+    let document =
+        RestoreAuthorization::from_bytes(approval_bytes.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(VerifiedRequest {
+        document,
+        sha256: logweir_core::ids::sha256_prefixed(approval_bytes.as_bytes()),
+    })
+}
+
+/// **PROD-16.2, step A8: the approval of a verified request** — that
+/// document with exactly three changes: `approver`, `approvedAt`, and the
+/// version the one writer gives a document that carries them (2.2.0).
+///
+/// Requester, subject, UID, plan hash, policy, `issuedAt`, `expiresAt`, the
+/// ticket and the approval subject are the VERIFIED request's: this function
+/// takes no other source for them.
+#[must_use]
+pub fn approved_document(
+    request: &RestoreAuthorization,
+    approver: Approver,
+    approved_at: DateTime<Utc>,
+) -> RestoreAuthorization {
+    RestoreAuthorization {
+        format_version: logweir_core::approval_policy::restore_authorization_format_version(
+            request.approval_subject.as_deref(),
+            request.original_name_confirmation.as_ref(),
+            true,
+        )
+        .to_string(),
+        approver: Some(approver),
+        approved_at: Some(approved_at),
+        ..request.clone()
     }
 }
 
@@ -435,6 +560,11 @@ pub fn document(
         // restore (`routes::restores::refuse_typed_confirmation` admitted the
         // request only then).
         original_name_confirmation,
+        // PROD-16.2: a REQUEST names nobody who approved. The approval of a
+        // two-person policy is `approved_document`, built from a request this
+        // console verified its own signature on.
+        approver: None,
+        approved_at: None,
     }
 }
 
@@ -478,10 +608,25 @@ pub fn merge_countersignature(
     Ok(merged)
 }
 
-/// Whether `mode` needs an approver after the console's confirmation.
-#[must_use]
-pub const fn awaits_approver(mode: ApprovalMode) -> bool {
-    matches!(mode, ApprovalMode::Governed)
+/// **The row of the approval table a bound policy is**
+/// (`logweir_core::approval_policy::ApprovalRoute`), as a problem when the
+/// pair is not a row. Every route of this service that acts on a policy
+/// decides from this, and from nothing else about the policy.
+///
+/// # Errors
+///
+/// `policy_mismatch` (409). A parsed installation document never carries
+/// such a pair (`ApprovalPolicySet::parse` refuses it at start); this is the
+/// console's own refusal all the same.
+pub fn route_of(
+    policy: &ApprovalPolicy,
+) -> Result<logweir_core::approval_policy::ApprovalRoute, crate::problem::ApiError> {
+    policy.route().map_err(|refusal| {
+        crate::problem::ApiError::new(
+            crate::problem::ProblemCode::PolicyMismatch,
+            format!("{refusal}. Nothing was created or approved."),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -549,7 +694,10 @@ mod tests {
             chrono::Duration::seconds(policy.max_age_seconds)
         );
         assert_eq!(doc.policy.digest, policy.digest());
-        assert_eq!(doc.authorization_mode, ApprovalMode::Ordinary);
+        assert_eq!(
+            doc.authorization_mode,
+            logweir_core::approval_policy::ApprovalMode::Ordinary
+        );
     }
 
     #[test]

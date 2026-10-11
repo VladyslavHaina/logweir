@@ -133,20 +133,31 @@ pub struct ObjectHead {
 /// | cap | bytes | read by | measured |
 /// |---|---|---|---|
 /// | [`SIDECAR`] | 64 KiB | everyone | one DSSE signature is about 312 bytes; equal to the evidence relay's sidecar cap |
-/// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI, check Jobs | a 1.5.0 receipt is about 3.4 KB per topic (two-space pretty JSON, 14 semantic configuration entries and a schema-dependency block each), so a 5,000-topic run (`MAX_RESOLVED_TOPICS`) is about 16.4 MiB, 20 MiB with five overrides per topic |
-/// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper` | equal to the evidence relay's payload cap, so a document is verifiable by the controller exactly when it is verifiable through a relay; about 300 topics of receipt |
+/// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI | a receipt is about 3.1 KB per topic (2.9 to 6.5 KB by shape; `logweir_core::topic_budget`). This build writes none over [`CONTROLLER_RECEIPT`]; an older one admitted 5,000 topics, about 15 to 21 MB, and this cap is what still reads such a receipt for a restore |
+/// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper`: a scorecard, and every signed document that is not a backup receipt | equal to the evidence relay's cap for such a document (`MAX_EVIDENCE_SCORECARD_BYTES`), so it is verifiable by the controller exactly when it is verifiable through a relay. Parsed whole, so the cap also bounds that parse |
+/// | [`CONTROLLER_RECEIPT`] | 5,131,072 | `weirkeeper`: a backup receipt | **FX-33.** `logweir_core::topic_budget::MAX_RECEIPT_BYTES`, the largest receipt Logweir writes: 1,000 topics at 5,000 bytes each plus 128 KiB. Equal to the relay's payload cap. Never parsed into a tree: the controller folds the five facts it needs from the bytes |
+/// | [`CATALOG_RECEIPT`] | 5,131,072 | the catalog walk (a check Job) | **FX-33.** Equal to [`CONTROLLER_RECEIPT`], so a point the catalog lists `Available` is one the controller can verify |
+/// | [`CATALOG_RECORD`] | 6,131,072 | the catalog walk | **FX-33.** `topic_budget::MAX_RECORD_BYTES`: the catalog point record copies the receipt's per-topic blocks two levels deeper |
 /// | [`MANIFEST`] | 256 MiB | runner, CLI, check Jobs | about 540 bytes per segment entry, so about 500,000 segments |
 /// | [`CONTROLLER_MANIFEST`] | 64 MiB | `weirkeeper`'s retention report | about 124,000 segments; parsed as a stream, so memory is the bytes and no more |
 /// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. FX-30 owns the decode cap |
 /// | [`ENGINE_DOCUMENT`] | 64 MiB | runner, CLI | the engine's consumer-groups snapshot and validation report |
 /// | [`PROBE`] | 0 | check Jobs, `backup run` | a readiness probe of a key nobody wrote, and the backup set check's "is the manifest there": the answer is the GET's status, and any body is refused unread |
 ///
+/// **A receipt has ONE cap for every reader that must agree about it**
+/// (FX-33): the controller's own handle, the evidence relay and the catalog
+/// walk. The runner and the CLI keep [`SIGNED_DOCUMENT`], which is why an
+/// archive written over the bound by an older build stays restorable from
+/// the command line while the catalog lists it as oversized.
+///
 /// PROD-03.0's schema-dependency detection reads archived segments through
 /// [`Store::get_bounded`] under its own 64 MiB stored cap (a `HEAD`, then a
 /// ranged GET of exactly the reported size), so it is bounded the same way
 /// and is not a row here.
 pub mod caps {
-    use logweir_core::check_contract::{MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES};
+    use logweir_core::check_contract::{
+        MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SCORECARD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES,
+    };
 
     /// A detached DSSE sidecar, whoever reads it: the evidence relay's own
     /// sidecar cap.
@@ -154,14 +165,28 @@ pub mod caps {
     /// A signed evidence document (receipt, scorecard, catalog point record)
     /// read in a runner, CLI or check-Job process.
     pub const SIGNED_DOCUMENT: u64 = 64 << 20;
-    /// A signed evidence document read by the SHARED controller: the evidence
-    /// relay's payload cap, so the controller's own handle and a relay agree
-    /// on which documents can be verified at all. The controller parses two
-    /// such documents into a `serde_json::Value` before any digest check (the
-    /// receipt's window, the scorecard's outcome), and a document of tiny
-    /// values parses into about 37 times its size, so this cap is also what
-    /// bounds that parse: about 40 MB at worst.
-    pub const CONTROLLER_DOCUMENT: u64 = MAX_EVIDENCE_PAYLOAD_BYTES;
+    /// A signed evidence document that is NOT a backup receipt, read by the
+    /// SHARED controller — a drill scorecard: the evidence relay's cap for
+    /// such a document, so the controller's own handle and a relay agree on
+    /// which can be verified at all. The controller parses a scorecard into a
+    /// `serde_json::Value` (its outcome and a dozen facts), and a document of
+    /// tiny values parses into about 37 times its size, so this cap is also
+    /// what bounds that parse: about 40 MB at worst.
+    pub const CONTROLLER_DOCUMENT: u64 = MAX_EVIDENCE_SCORECARD_BYTES;
+    /// **FX-33.** A backup receipt read by the SHARED controller: the largest
+    /// receipt Logweir writes, and the evidence relay's payload cap. The
+    /// controller holds the bytes (its signature is over them) and folds the
+    /// facts it needs as they are parsed
+    /// (`logweir_core::receipt_facts::ReceiptFacts`); it never builds a tree
+    /// of one, which is what lets this cap be five times
+    /// [`CONTROLLER_DOCUMENT`] at a third of its memory.
+    pub const CONTROLLER_RECEIPT: u64 = MAX_EVIDENCE_PAYLOAD_BYTES;
+    /// **FX-33.** A backup receipt read by the catalog walk. Equal to
+    /// [`CONTROLLER_RECEIPT`]: a point the catalog lists `Available` is one
+    /// the controller can verify, whichever way its evidence is read.
+    pub const CATALOG_RECEIPT: u64 = logweir_core::topic_budget::MAX_RECEIPT_BYTES;
+    /// **FX-33.** A catalog point record read by the catalog walk.
+    pub const CATALOG_RECORD: u64 = logweir_core::topic_budget::MAX_RECORD_BYTES;
     /// An engine manifest read in a runner, CLI or check-Job process.
     pub const MANIFEST: u64 = 256 << 20;
     /// An engine manifest read by the controller's retention report.

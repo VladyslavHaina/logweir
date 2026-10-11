@@ -2199,6 +2199,38 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
+        // FX-27 and FX-42 (2026-10-10, item 62): every engine document turns
+        // the engine's metrics server off; the key it renders.
+        (
+            "the engine's metrics port stays closed",
+            "metrics: {enabled: false}",
+        ),
+        // FX-35 (2026-10-10, item 63): a restore started from a Backup is
+        // bound to its point; the review row that says what the run reads.
+        (
+            "a restore started from a Backup is bound to its point",
+            "recorded by the point",
+        ),
+        // FX-39 and FX-40 (2026-10-10, item 64): the status lists are cut at
+        // the CRD's bound with their counts, and an `Enforce` run refuses a
+        // partial or expired catalog view by name.
+        (
+            "a retention policy over 500 points keeps enforcing",
+            "ViewIncomplete",
+        ),
+        // FX-33 (2026-10-10, item 65): one backup names at most 1,000
+        // topics; the name a selection over it is refused under, at every
+        // entry, before the engine runs.
+        (
+            "one backup names at most 1,000 topics",
+            "BackupSelectionTooLarge",
+        ),
+        // PROD-16.2 (2026-10-10, item 66): two-person approval in the
+        // console; the policy setting the chart renders for it.
+        (
+            "two-person approval in the console",
+            "approverSignature: Console",
+        ),
     ];
     assert_eq!(
         items.len(),

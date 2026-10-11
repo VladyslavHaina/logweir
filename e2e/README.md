@@ -167,8 +167,10 @@ topic with `Partition N not available for topic …` before the broker's
 metadata names the new partitions' leaders: the drill exits 1 and signs
 nothing. Measured on 2026-10-08, without a delay: 1 failed restore in 7
 (FX-21's runs) and 1 in 17 (its review's), on a loaded host. The container route
-starts slowly enough not to meet it. Phase 0 does not wait for the leaders it
-just asked for; until it does, a native run that meets this is rerun.
+starts slowly enough not to meet it. Since FX-18, phase 0 waits until the
+cluster serves each topic it created: 0 failures in 18 native restores, then 0
+in 30 (FX-25, 2026-10-10, `full_drill`'s
+`a_restore_into_an_empty_scratch_target_succeeds` on slot 1).
 
 ## Optional profiles
 

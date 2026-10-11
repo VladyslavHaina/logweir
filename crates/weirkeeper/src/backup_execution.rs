@@ -1157,6 +1157,23 @@ pub fn resolve_inputs(
         ));
     }
 
+    // FX-33: THE MAXIMUM ONE BACKUP MAY NAME, at the boundary every producer
+    // of the list goes through — a named allowlist and a dynamic selection
+    // alike. A backup over it would sign a receipt the recovery catalog could
+    // not list and this controller could not verify, so it is refused BY NAME
+    // before any plan is frozen or any Job exists, and nothing is dropped
+    // from the selection to make it fit. The runner refuses the same count at
+    // phase −1 (`logweir_core::topic_budget::refuse_topic_count`).
+    if let Some(why) = logweir_core::topic_budget::refuse_topic_count(selection.topics.len()) {
+        return Err(ExecutionRefusal::new(
+            crate::conditions::TERMINAL_STATE_SELECTION_TOO_LARGE,
+            format!(
+                "the topic selection for {name} is refused: {why}. No runner Job is created \
+                 and no topic is left out to make the selection fit"
+            ),
+        ));
+    }
+
     // PROD-04.1: a consumer group selection the runner would refuse at phase
     // −1 (exit 3) is refused HERE, before anything is frozen or created.
     if let Some(why) = crate::policy::selected_groups(&backup.spec)

@@ -533,6 +533,39 @@ fn paths() -> Value {
             }],
         ),
         (
+            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+            vec![Op {
+                method: "get",
+                operation_id: "getApprovalRequest",
+                summary: "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The request.", "ApprovalRequestResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
+            vec![Op {
+                method: "post",
+                operation_id: "approveInConsole",
+                summary: "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("ConsoleApprovalRequest"),
+                success: vec![
+                    ("201", "The Approval was created.", "ApprovalResponse"),
+                    ("200", "This approver already approved this request (a replay).", "ApprovalResponse"),
+                ],
+                problems: all_codes(&[
+                    COMMON,
+                    NAMESPACED,
+                    KUBE,
+                    UNSAFE,
+                    &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
+                ]),
+            }],
+        ),
+        (
             "/api/v1/namespaces/{ns}/approval-policy",
             vec![get_one(
                 "getApprovalPolicy",
@@ -1044,6 +1077,8 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();
     let _ = generator.subschema_for::<c::ApprovalPolicyResponse>();
     let _ = generator.subschema_for::<c::SubmitApprovalRequest>();
+    let _ = generator.subschema_for::<c::ConsoleApprovalRequest>();
+    let _ = generator.subschema_for::<c::ApprovalRequestResponse>();
     // BOTH SHAPES STAY PUBLISHED, AND THAT IS NOT AN OVERSIGHT.
     // `OperationViewResponse` is what the route returns and is a strict
     // SUPERSET of `OperationResponse`: D3 §2.5's keys sit beside PLAT-17.1's

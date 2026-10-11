@@ -472,7 +472,7 @@ export function openOperationStream(ns, kind, name, EventSourceClass) {
   return new Source(path("api", "v1", "namespaces", ns, "operations", kind, name, "events"));
 }
 
-/** THE SIX NAMED ACTION ROUTES, AND NOTHING ELSE. The product API spells an
+/** THE NAMED ACTION ROUTES, AND NOTHING ELSE. The product API spells an
  *  action as a verb suffix on an object's own identifier
  *  (`destinations/primary:test`) or as a sub-collection create
  *  (`connections/source/topic-discoveries`). Neither shape is a plural this
@@ -484,11 +484,11 @@ export function openOperationStream(ns, kind, name, EventSourceClass) {
  *  the creates. An action the table does not name is a RangeError before the
  *  network, with the permitted set in the message.
  *
- *  THE IDEMPOTENCY KEY IS THE ROUTE'S, NOT THE CALLER'S. Three of these six
- *  are durable creates and the product API REQUIRES a key on each; the other
- *  three refuse one with a 400 (a rotation's replay guard is
- *  `expectedGeneration`, and a cancel's is that cancelling twice is the same
- *  wish). The table says which, and a caller that hands a key to a route that
+ *  THE IDEMPOTENCY KEY IS THE ROUTE'S, NOT THE CALLER'S. Three of these
+ *  are durable creates and the product API REQUIRES a key on each; the
+ *  others refuse one with a 400 (a rotation's replay guard is
+ *  `expectedGeneration`, a cancel's is that cancelling twice is the same
+ *  wish, and an approval is named by its Restore's own approvalRef). The table says which, and a caller that hands a key to a route that
  *  refuses one -- or omits it on a route that requires one -- is refused here
  *  rather than by the server. */
 export async function consoleAction(ns, action, name, body, options) {
@@ -538,6 +538,17 @@ export async function consoleAction(ns, action, name, body, options) {
 export async function consoleApprovalPolicy(ns, options) {
   const response = await request(
     path("api", "v1", "namespaces", ns, "approval-policy"),
+    readInit(options || {}),
+  );
+  return problemBody(response);
+}
+
+/** PROD-16.2: reads one Restore's two-person request as the approver is shown
+ *  it, `GET /api/v1/namespaces/{ns}/restores/{name}/approval-request`. A read;
+ *  no body, no query. */
+export async function consoleApprovalRequest(ns, name, options) {
+  const response = await request(
+    path("api", "v1", "namespaces", ns, "restores", name, "approval-request"),
     readInit(options || {}),
   );
   return problemBody(response);
@@ -860,12 +871,12 @@ const CONSOLE_OPERATION_KINDS = Object.freeze([
   "preflight",
 ]);
 
-// THE SIX ACTION ROUTES, WRITTEN OUT. `plural` is the collection the route
+// THE ACTION ROUTES, WRITTEN OUT. `plural` is the collection the route
 // hangs off, `named` says whether it addresses one object, `suffix` is the
 // verb or sub-collection, and `key` says whether the product API requires an
 // `Idempotency-Key` (`true`), refuses one (`false`).
 //
-// The three `key: false` routes are not "less safe": a rotation's replay guard
+// The `key: false` routes are not "less safe": a rotation's replay guard
 // is `expectedGeneration` and a cancel's is that cancelling a cancelled check
 // is the same wish, so a key there would be a second answer to a question that
 // already has one -- which is why the product API answers 400 for it.
@@ -893,6 +904,13 @@ const CONSOLE_ACTIONS = Object.freeze({
   // immutable approvalRef, so a replay targets the same object by name.
   "restores:approval": Object.freeze({
     plural: "restores", named: true, suffix: "/approval", key: false,
+  }),
+  // PROD-16.2: a second person approves ONE Restore's request in the console.
+  // No key, for the same reason: the Approval it creates is named by the
+  // Restore's own immutable approvalRef, and the same approver's second click
+  // is answered as a replay of the first.
+  "restores:console-approval": Object.freeze({
+    plural: "restores", named: true, suffix: "/console-approval", key: false,
   }),
 });
 

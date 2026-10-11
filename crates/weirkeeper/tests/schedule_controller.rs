@@ -8193,3 +8193,42 @@ fn a_schedules_consumer_groups_reach_every_run_and_an_absent_selection_digests_a
         "{errs:?}"
     );
 }
+
+/// **FX-33 — a `BackupSchedule` naming more topics than one backup may is
+/// refused AS A POLICY**, not slot by slot: `decide` answers
+/// `InvalidRunPolicy` naming `spec.topics` and the maximum, so the schedule is
+/// `Ready=False` and fires no run whose receipt nothing could read. A schedule
+/// naming exactly the maximum is due as before.
+///
+/// This is what a schedule stored BEFORE the upgrade does at its next pass.
+///
+/// KILLS: the count refusal removed from the run policy (the slot is `Due`).
+#[test]
+fn fx33_a_schedule_naming_more_than_the_maximum_is_an_invalid_run_policy() {
+    use logweir_core::topic_budget::{MAX_BACKUP_TOPICS, SELECTION_TOO_LARGE};
+    let fire = utc(2026, 9, 7, 3, 17);
+    let naming = |topics: usize| {
+        let mut s = schedule("nightly", UID, "17 3 * * 1", false);
+        s.spec.topics = (0..topics).map(|i| format!("topic-{i:05}")).collect();
+        s
+    };
+    assert!(
+        matches!(
+            decide("nightly", &naming(MAX_BACKUP_TOPICS).spec, fire),
+            SlotDecision::Due { .. }
+        ),
+        "CONTROL: the maximum is a policy that runs"
+    );
+    match decide("nightly", &naming(MAX_BACKUP_TOPICS + 1).spec, fire) {
+        SlotDecision::InvalidRunPolicy { errors } => {
+            assert!(
+                errors.iter().any(|e| e.field == "spec.topics"
+                    && e.message.starts_with(SELECTION_TOO_LARGE)
+                    && e.message.contains(&format!("at most {MAX_BACKUP_TOPICS}"))
+                    && e.message.contains("Split the topics across backups")),
+                "{errors:?}"
+            );
+        }
+        other => panic!("one topic over the maximum must refuse the policy: {other:?}"),
+    }
+}
