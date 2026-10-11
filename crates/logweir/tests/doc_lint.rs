@@ -2256,10 +2256,7 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // PROD-14.1 (item 83): a render that cannot ask the cluster is
         // refused; the value that answers it.
-        (
-            "an offline render is refused",
-            "`identity.renderedOffline`",
-        ),
+        ("an offline render is refused", "`identity.renderedOffline`"),
         // PROD-14.1 (item 84): the multi-platform identity hook; its pin.
         (
             "the identity hook runs natively on arm64",

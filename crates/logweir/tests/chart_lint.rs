@@ -5606,7 +5606,12 @@ fn chart_lint_constraints_show_before_install() {
             .expect("the README's first screen"),
     );
     let install = read("docs/install.md");
-    let first_section = flat(install.split("\n---").next().expect("install.md's first section"));
+    let first_section = flat(
+        install
+            .split("\n---")
+            .next()
+            .expect("install.md's first section"),
+    );
     for (page, text, needles) in [
         (
             "Chart.yaml's description",
