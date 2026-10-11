@@ -3,20 +3,12 @@
 //!
 //! # Why `signingKeys[]` and not `signingKeyIds[]`
 //!
-//! Interface **I17**, and spec amendment 3. A `signingKeyIds: Vec<String>`
-//! shape — ids with no key material — is UNBUILDABLE: Task 24's
-//! `verify_evidence` resolves a runner's signing key from this roster and
-//! calls `verify_detached`, and an id alone gives it nothing to verify
-//! against. Every verification would return `NotAttempted`,
-//! `status.evidence.verification.result` could never be `Valid`, and Phase B's
-//! exit criterion would be unreachable. **A `signingKeyIds: [string]` shape is
-//! a CRD schema error, not a degraded mode.**
-//!
+//! Interface **I17**: verification resolves a runner's signing key from this
+//! roster and calls `verify_detached`, and an id alone gives it nothing to
+//! verify against, so every verification would be `NotAttempted`. A
+//! `signingKeyIds: [string]` shape is a schema error, not a degraded mode.
 //! [`KeyEntry`] therefore carries the same four fields for both lists, with
-//! `keyId` and `spkiPem` both REQUIRED. This is discovered at Task 24 and
-//! fixed here, at slot 5, because after Task 21 renders `logweir.yaml`, after
-//! Task 23 pins both images, and with `.spec` sealed by CEL, the retrofit
-//! reopens six landed tasks in a strictly serial chain.
+//! `keyId` and `spkiPem` both required.
 //!
 //! # Two lists, two principals
 //!
