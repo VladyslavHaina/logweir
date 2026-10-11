@@ -79,7 +79,6 @@ pub const ALLOWED_CLUSTERS_PATH: &str = "/plan/allowed-clusters.json";
 /// Where the receipt signing key is projected in the runner pod.
 pub const SIGNING_KEY_PATH: &str = "/signing/key.pem";
 /// Where the runner writes its backup document.
-/// Where the runner writes its backup document.
 ///
 /// Not in the runner argv: `logweir backup run` writes one document,
 /// `--receipt-out` takes precedence over `--out`, and passing both at different

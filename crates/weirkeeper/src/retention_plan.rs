@@ -856,7 +856,6 @@ pub struct PlanIdentity {
     pub name: String,
     /// The policy's `metadata.uid`.
     pub uid: String,
-    /// The `metadata.generation` this plan was computed from.
     /// The `metadata.generation` this plan was computed from. Not in the
     /// digested bytes: approving a plan is a spec patch, which bumps the
     /// generation, and a digest the approval changes can never be approved.

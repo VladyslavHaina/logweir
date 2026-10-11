@@ -865,7 +865,6 @@ pub struct Outcome {
     pub created_job: bool,
     /// How many result chunks this pass wrote or adopted.
     pub chunks_written: usize,
-    /// Whether the status on the server now says what this pass computed.
     /// Whether the status on the server now says what this pass computed;
     /// `false` when the `/status` PATCH answered 409 (seam S7). It gates
     /// [`Outcome::ttl_patched`].

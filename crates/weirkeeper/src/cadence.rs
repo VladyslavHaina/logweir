@@ -656,7 +656,6 @@ pub enum RetryAdmission {
         /// is present with `maxRetries: 0`, which is why the field below
         /// exists.
         max_retries: u32,
-        /// Whether `spec.retry` was set at all.
         /// Whether `spec.retry` was set at all: the decision is the same, but a
         /// schedule that used up configured retries reports `RetryExhausted`
         /// and one that never asked for retries reports `RunFailed` (D1 §4.7

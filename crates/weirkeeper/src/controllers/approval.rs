@@ -1149,7 +1149,6 @@ fn join<'a>(ids: impl Iterator<Item = &'a str>) -> String {
 /// about anybody's approval and requeues.
 #[derive(Debug)]
 pub enum RosterLoad {
-    /// The roster exists.
     /// The roster exists. Boxed (`clippy::large_enum_variant`): a
     /// `TrustRoster` is ~464 bytes and `NotFound` is empty.
     Found(Box<TrustRoster>),
