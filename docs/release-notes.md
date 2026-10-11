@@ -52,8 +52,9 @@ restored under its own name, behind its own approval subject), 57 (FX-14, a cata
 the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
 ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
-the capability rows a readiness check asks of the endpoint itself) and 61 (FX-34, a
-guard-refused Restore or Backup says why in its status) so far. Items continue the next entry's
+the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
+guard-refused Restore or Backup says why in its status) and 62 (FX-44, a failed
+restore removes or names the scratch topic it created) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -214,6 +215,12 @@ and `Backup` Job gains that argument) and the console's text, and the PoC
 upgrade that carries it moves the controller and the runner image in one
 `helm upgrade`, submits a `Restore` the runner refuses and reads the reason
 on its status and in the console after the pod is gone.
+Item 62 is fix-now row FX-44, proven by unit rows, controller rows over a
+recording API double and the compose ACL row; it changes the runner (the
+failure-path teardown, the warning's grant clause, one more stdout line) and
+the controller (`status.teardown.failed`), and the PoC upgrade that carries it
+runs a scratch `Restore` that fails after creating its topic and reads the
+topic gone, and one whose topic cannot be deleted and reads it on the status.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2839,6 +2846,35 @@ controller passes no token and ignores the new line, and writes the message it
 always wrote, over this runner or an older one. The runner image first leaves
 THIS controller over an older runner, which does not start (above). Statuses
 already written keep the text they have.
+
+#### 62. A failed restore removes or names the scratch topic it created (FX-44)
+
+**Changed.** A restore that fails after its creation step created target
+topics (exit 1, 3 or 4) now tears them down by phase 9's rule: deleted in
+`scratch` mode under `teardown: delete`, never in `newTopic` mode, never a
+topic it did not create. It logs `the restore failed after it created its
+target topics; teardown removed 1 scratch topic: <topic>`. Before, it left
+them and said nothing, and a leftover `drill-` topic refused the next run.
+A topic the broker would not delete is named, on a pass and on a failure, by
+the teardown warning, which now also names the grant when the broker's answer
+was an authorization refusal (``…; the restore principal lacks `Delete` on
+topic `<topic>` ``), and by a new stdout line, `teardown-failed=`, which the
+controller copies to `Restore.status.teardown.failed` (until now declared and
+never written). The product API's `teardown` and the console's Teardown
+section show it, and a `RehearsalSchedule` skips its next slot with
+`LeftoverTopics`. The failure path signs nothing and writes no attestation,
+as before; a pass's signed attestation is unchanged.
+**Do:** nothing. Give the restore identity `Delete` on the scratch prefix.
+**Scope:** unit rows (the failure-path teardown over a fixture drill, only
+the topics the run created, nothing in `newTopic` mode or under `keep`, the
+grant only for an authorization refusal, the line's bounds), controller rows
+over a recording API double (exit 1 and exit 0, an unmapped name dropped, no
+line no block), and the compose ACL row (`Write`, `Read`, `Delete`, and
+`Write` with `Delete` removed; an existing target topic is not deleted).
+[UNVERIFIED — no controller has read a `teardown-failed=` line on a cluster yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older controller ignores the line; an older runner prints none, and leaves a
+failed run's topics as before.
 
 ### Required operator actions after `v0.2.0-rc.1`
 

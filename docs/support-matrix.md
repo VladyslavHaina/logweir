@@ -208,19 +208,18 @@ and then removing one grant at a time:
 |---|---|---|
 | Probe (`cluster-probe`, Test connection) | None beyond authenticating. | Nothing to remove: with no ACL at all for the principal, the probe reads the cluster id. |
 | Backup | `Read` on each source topic (it implies `Describe`), and `DescribeConfigs` on each source topic. | Without `Read`: exit 1, the engine fails, no receipt. Without `DescribeConfigs`: exit 0, and the receipt says `captureDenied` with no timestamp type. |
-| Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, the created topic is left behind, **and the run says nothing about it**. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so**: a warning names the topic, the summary line repeats it beside `outcome pass`, and the signed teardown attestation records it. It does not say why: nothing names the missing grant. |
+| Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, nothing signed, and the run removes the topic it created and says so. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so and why**: a warning names the topic and the missing grant, the summary line repeats the topic beside `outcome pass`, the signed teardown attestation records it, and `Restore.status.teardown.failed` names it. Without `Write` and `Delete`: exit 1, the topic is left, and the run names it and the grant the same way. |
 
-**Give the restore identity `Delete`, and read the summary line of a restore
-that passed.** A leftover scratch topic blocks the next rehearsal that would
-use its name. Two things are open (tracker row FX-44): a restore that FAILS
-leaves its topic without a word, and the teardown warning of one that passes
-does not name the grant. The row above requires both as measured, so this
-paragraph is held to the product.
+**Give the restore identity `Delete`.** A leftover scratch topic blocks the
+next rehearsal that would use its name. A restore that fails after creating
+its topic removes it as a passing one does (FX-44). The row above requires
+each line below as measured.
 
-| Restore without | What the run prints about the topic it leaves |
+| Restore without | What the run prints about its topic |
 |---|---|
-| `Delete` (exit 0, `pass`) | `teardown left 1 scratch topic behind on the target cluster: <topic>` (WARN); `… — outcome pass — … — teardown left 1 scratch topic behind (<topic>)` (the summary line); `teardown-key=logweir/drills/<run>.teardown.json` (the signed attestation) |
-| `Write` or `Read` (exit 1) | Nothing |
+| `Delete` (exit 0, `pass`) | ``teardown left 1 scratch topic behind on the target cluster: <topic>; the restore principal lacks `Delete` on topic `<topic>` `` (WARN); `… — outcome pass — … — teardown left 1 scratch topic behind (<topic>)` (the summary line); `teardown-failed=[{"topic":"<topic>",…}]` (copied to `Restore.status.teardown.failed`); `teardown-key=logweir/drills/<run>.teardown.json` (the signed attestation) |
+| `Write` or `Read` (exit 1) | `the restore failed after it created its target topics; teardown removed 1 scratch topic: <topic>` (INFO) |
+| `Write` and `Delete` (exit 1) | the same WARN and `teardown-failed=` line as without `Delete`; nothing is signed |
 
 The restore row is a scratch drill of a topic whose backup recorded no
 configuration overrides, into a broker on `CreateTime`. Three cases need

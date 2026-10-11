@@ -1113,6 +1113,15 @@ reversible direction until the owning task rules.
   - a clause on `drill run`'s summary line naming the count and the topics. A
     clean run's line is unchanged.
 
+  The warning names the missing grant when the broker refused the deletion for
+  authorization (``the restore principal lacks `Delete` on topic `…` ``), and the
+  runner's `teardown-failed=` line puts each leftover topic on
+  `Restore.status.teardown.failed`. **A run that fails after creating its
+  target topics** (exit 1, 3 or 4) tears them down by phase 9's rule (scratch
+  mode, `teardown: delete`, never an original name), logs what it removed, and
+  names what it could not with the same warning and line. It signs nothing and
+  writes no attestation, as before (FX-44).
+
   The signed teardown attestation
   (`logweir/drills/{run_id}.teardown.json`) has always been honest about this —
   a refused topic goes in `topics_failed` and never in `topics_deleted` — and
@@ -1905,6 +1914,19 @@ mandatory evidence keys out of the controller's bounded tail.
 
 **Read it by key name, never by position.** Same rule as `refusal-reason=` and
 `offset-report-key=`, for the same reason (plan erratum E4).
+
+### `teardown-failed=` names what a teardown left (FX-44)
+
+```
+teardown-failed=[{"topic":"drill-orders","error":"the restore principal lacks `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization failed)"}]
+```
+
+Printed once, by phase 9 or by the teardown of a run that failed after its creation step,
+whenever that teardown left a topic; never otherwise. Kafka-legal names only, at most 256 entries,
+each `error` at most 256 characters on one line. It is printed before the summary line, so it
+moves none of the keys below. The controller reads the last one in its tail and copies it,
+held to the Restore's mapped target names, to `Restore.status.teardown.failed`. An older
+controller ignores it.
 
 ### `teardown-key=` is printed exactly when phase 9 attested, and it comes BEFORE interface I8's keys
 
