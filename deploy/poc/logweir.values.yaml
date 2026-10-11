@@ -29,17 +29,18 @@ runnerImagePullPolicy: IfNotPresent
 environment: poc
 
 # ---------------------------------------------------- where backups execute
-# `logweir-poc` is the one execution namespace. It must exist before the
-# install (the chart copies the signing identity and the runner account into
-# it). The controller is scoped to it (D0 stage 5): it cannot create Jobs in
-# logweir-system, where the console's keys live.
+# `logweir-poc` is the main execution namespace; `logweir-pair` is the second,
+# bound to the two-person policy below (PROD-16.2). Both must exist before the
+# install or upgrade that names them (the chart copies the signing identity and
+# the runner account into each). The controller is scoped to them (D0 stage 5):
+# it cannot create Jobs in logweir-system, where the console's keys live.
 kubernetes:
   namespace: logweir-poc
   connectionsNamespace: logweir-poc   # G3: the demo archive credential lands where Backups run
 identity:
-  authorizedRunnerNamespaces: [logweir-poc]
+  authorizedRunnerNamespaces: [logweir-poc, logweir-pair]
 controller:
-  watchNamespaces: [logweir-poc]
+  watchNamespaces: [logweir-poc, logweir-pair]
 retention:
   enabled: true                  # the account an Enforce policy would need; deletes nothing by itself
 
@@ -52,7 +53,7 @@ admissionPolicy:
 # -------------------------------------------------------- the shared console
 api:
   enabled: true
-  namespaces: [logweir-poc]
+  namespaces: [logweir-poc, logweir-pair]
   console:
     enabled: true
     imagePullPolicy: IfNotPresent
@@ -92,7 +93,7 @@ api:
       caBundle: { configMap: logweir-dex-ca, key: ca.crt }
       systemRoots: false
     roles:
-      revision: "poc-2026-09-23.2"
+      revision: "poc-2026-10-11.1"
       # One Dex user per role, bound by subject (`<issuer>#<sub>`; dex.values.yaml
       # says why). The `groups` entries are what a real connector's groups bind
       # to; they match nobody under Dex's static users.
@@ -112,6 +113,21 @@ api:
         - role: administrator
           namespace: logweir-poc
           groups: ["logweir-poc-admins"]
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
+        # logweir-pair (two-person, PROD-16.2): `alice` requests (operator) and
+        # is also an approver, so the console can show that she may never
+        # approve her own request; `bob` approves; `admin` is an administrator
+        # there and, not being an approver, cannot approve either.
+        - role: operator
+          namespace: logweir-pair
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA2LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDYSBWxvY2Fs"]
+        - role: approver
+          namespace: logweir-pair
+          subjects:
+            - "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA2LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDYSBWxvY2Fs"
+            - "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA3LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDcSBWxvY2Fs"
+        - role: administrator
+          namespace: logweir-pair
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
     ingress:
       enabled: true
@@ -142,15 +158,21 @@ api:
 # `logweir-poc` restores are authorised by the console's own confirmation of
 # the signed-in requester (Ordinary). The confirmation key is a Secret created
 # before the install, and its PUBLIC half goes on the TrustPolicy that governs
-# logweir-poc (README.md, step 7).
+# logweir-poc (README.md, step 7). `logweir-pair` restores need a SECOND person
+# signed in to this console (two-person, PROD-16.2): `alice` asks, `bob`
+# approves with one click; the same console key signs both, no personal key.
 approvalPolicy:
   allowOrdinaryConfirmation: true
   policies:
     - name: poc-ordinary
       mode: Ordinary
       maxAgeSeconds: 900
+    - name: poc-pair
+      mode: two-person
+      maxAgeSeconds: 900
   namespaces:
     logweir-poc: poc-ordinary
+    logweir-pair: poc-pair
   confirmationKeySecret: logweir-console-confirmation
 
 # ------------------------------------------- something to back up (demo only)

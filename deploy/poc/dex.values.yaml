@@ -4,7 +4,7 @@
 #   helm upgrade --install dex dex --repo https://charts.dexidp.io --version 0.24.1 \
 #     -n dex --create-namespace -f deploy/poc/dex.values.yaml --wait
 #
-# NO SECRET IS IN THIS FILE. The console's client secret and the four users'
+# NO SECRET IS IN THIS FILE. The console's client secret and the users'
 # bcrypt hashes come from the Secret `dex-poc-secrets` (README.md, step 4)
 # through `envFrom`: `secretEnv` for the client and `hashFromEnv` for each user
 # are Dex's own ways of reading them from the environment.
@@ -82,6 +82,18 @@ config:
       username: norole
       userID: 1f0c9a4e-0005-4a1e-9e1a-000000000005
       hashFromEnv: DEX_HASH_NOROLE
+    # Two users for the two-person namespace `logweir-pair` (PROD-16.2,
+    # logweir.values.yaml): `alice` requests a restore, `bob` approves it. Their
+    # hashes are DEX_HASH_ALICE and DEX_HASH_BOB in `dex-poc-secrets`, added as
+    # README.md step 4 adds the others.
+    - email: alice@logweir.localtest.me
+      username: alice
+      userID: 1f0c9a4e-0006-4a1e-9e1a-000000000006
+      hashFromEnv: DEX_HASH_ALICE
+    - email: bob@logweir.localtest.me
+      username: bob
+      userID: 1f0c9a4e-0007-4a1e-9e1a-000000000007
+      hashFromEnv: DEX_HASH_BOB
 ingress:
   enabled: true
   className: traefik
