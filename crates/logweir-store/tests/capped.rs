@@ -1,12 +1,9 @@
-//! **FX-31 — every object-store read is bounded in size.**
+//! **Every object-store read is bounded in size.**
 //!
-//! `Store::get` used to read a whole object, so the memory one read could take
-//! was whatever a bucket held. These rows hold the two fences of
-//! `Store::get_capped` (the reported size first, then a running cap over the
-//! stream), the `head` an existence test uses instead of a read, the version
-//! read, the cap table, and the streaming manifest parse that replaced a
-//! `serde_json::Value` walk — against the walk itself, kept here as the
-//! oracle.
+//! These rows hold the two fences of `Store::get_capped` (the reported size
+//! first, then a running cap over the stream), the `head` an existence test
+//! uses instead of a read, the version read, the cap table, and the streaming
+//! manifest parse, against a `serde_json::Value` walk kept here as the oracle.
 //!
 //! No socket: the in-memory backend, the misreporting double
 //! (`Store::in_memory_misreporting_size`) and a scratch filesystem tree.
@@ -19,8 +16,6 @@ fn put(s: &Store, key: &str, bytes: &[u8]) {
     s.put_create_only(key, bytes)
         .expect("the fixture is written");
 }
-
-// ---------------------------------------------------------------- fence 1
 
 /// The cap is inclusive, and one byte over it is refused, naming the cap and
 /// the size the store reported.
@@ -107,8 +102,6 @@ fn the_reported_size_fence_holds_on_a_filesystem_store() {
     assert_eq!(bytes.len(), 2 << 20);
 }
 
-// ---------------------------------------------------------------- fence 2
-
 /// **A store that reports a small size and streams more is cut off at the
 /// cap.** The double says ten bytes and streams a mebibyte.
 ///
@@ -152,8 +145,6 @@ fn a_store_that_reports_a_small_size_and_streams_more_is_cut_off_at_the_cap() {
     assert_eq!(bytes.len(), 1 << 20);
 }
 
-// ---------------------------------------------------------------- versions
-
 /// The version read has both fences too: over the cap is `TooLarge` naming
 /// the version it was asked for.
 #[test]
@@ -178,8 +169,6 @@ fn a_version_read_is_capped_like_a_current_read() {
         other => panic!("a pinned version over the cap must be refused, got {other:?}"),
     }
 }
-
-// ---------------------------------------------------------------- head
 
 /// **The existence test reads no body.** `head` answers with the size the
 /// store reports and takes no byte of the body, while a capped GET of the same
@@ -240,8 +229,6 @@ fn head_reports_a_filesystem_objects_size() {
     ));
 }
 
-// ---------------------------------------------------------------- the error
-
 /// `TooLarge` is structural: never token-scanned into a code it does not mean
 /// (its text carries an adopter's key), and a plain operational error for every
 /// `?` caller, whose message still names the cap.
@@ -263,8 +250,6 @@ fn too_large_is_unclassified_and_names_the_cap_through_engine_error() {
         "{engine}"
     );
 }
-
-// ---------------------------------------------------------------- the table
 
 /// The caps the controller reads with are the evidence relay's, so a document
 /// is verifiable by the controller's own handle exactly when it is verifiable
@@ -310,10 +295,8 @@ fn the_cap_table_holds_its_own_relations() {
         .is_ok());
 }
 
-// ---------------------------------------------------- the streaming manifest
-
-/// The `serde_json::Value` walk `manifest_facts` used before FX-31, VERBATIM
-/// in its decisions, as the oracle: `(oldest, newest)` or the error's variant
+/// A `serde_json::Value` walk, VERBATIM in its decisions, as the oracle for
+/// `manifest_facts`' streaming fold: `(oldest, newest)` or the error's variant
 /// and message.
 fn value_walk(key: &str, bytes: &[u8]) -> Result<(i64, i64), (String, String)> {
     fn kind_of(v: &serde_json::Value) -> &'static str {
@@ -504,8 +487,6 @@ fn a_manifest_over_the_cap_is_too_large() {
     assert!(s.manifest_facts("logweir/b/manifest.json", cap + 1).is_ok());
 }
 
-// ---------------------------------------------------------------- scaffolding
-
 /// A scratch filesystem tree, removed when the row ends.
 struct Tree {
     root: std::path::PathBuf,
@@ -539,17 +520,15 @@ impl Drop for Tree {
     }
 }
 
-// ---------------------------------------------------------------- the guard
-
 /// Every read call in production source (`crates/*/src`), with its file and
 /// line and the text of its arguments.
 ///
-/// Matched BY SHAPE, not by receiver name (review F4): every
-/// `.get_capped(`, `.get_version_capped(`, `.get_bounded(`,
-/// `.manifest_facts(`, `.get_with_version(` and `.get_version(` call, and
-/// every `.get(` with two or more top-level arguments. In production source
-/// that last shape is exactly the `ObjectAccess` read: a map's, a slice's or a
-/// JSON value's `get` takes one.
+/// Matched BY SHAPE, not by receiver name: every `.get_capped(`,
+/// `.get_version_capped(`, `.get_bounded(`, `.manifest_facts(`,
+/// `.get_with_version(` and `.get_version(` call, and every `.get(` with two or
+/// more top-level arguments. In production source that last shape is exactly
+/// the `ObjectAccess` read: a map's, a slice's or a JSON value's `get` takes
+/// one.
 fn production_reads() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -642,7 +621,7 @@ fn call_arguments(after_open: &str) -> (&str, usize) {
 }
 
 /// **Every production read names its cap from the table**, and none is
-/// "far too large" (review F4: per crate, and by shape).
+/// "far too large" (per crate, and by shape).
 ///
 /// - In `crates/weirkeeper/src`, the SHARED controller, a read may name only
 ///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_RECEIPT`,
@@ -661,8 +640,8 @@ fn call_arguments(after_open: &str) -> (&str, usize) {
 ///
 /// KILLS: "a cap far too large" at any production read site, a later one
 /// included: `u64::MAX`, a literal, or a runner-side cap such as
-/// `caps::SEGMENT` in the controller (the review's G1); a read through a
-/// receiver of another name (G2).
+/// `caps::SEGMENT` in the controller; a read through a receiver of another
+/// name.
 #[test]
 fn every_production_read_names_a_cap_from_the_table() {
     let reads = production_reads();

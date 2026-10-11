@@ -1,4 +1,4 @@
-//! Explicit store construction (decision D2 W2): credentials, transport,
+//! Explicit store construction: credentials, transport,
 //! addressing, root certificates, the instance-metadata pin and error
 //! classification.
 //!
@@ -94,13 +94,8 @@ fn https_tls() -> StorageUrl {
     }
 }
 
-// --------------------------------------------------- explicit over ambient
-
-/// PLAT-08.1's `store_options::explicit_static_credentials_ignore_ambient_env`.
-///
-/// The poison values below are exactly what a controller's own environment
-/// looks like today (`controllers/backup.rs:192-218` forwards four of them),
-/// and a destination-backed store must be built from NONE of them.
+/// The poison values below are what a controller's own environment looks like,
+/// and a destination-backed store must be built from none of them.
 #[test]
 fn explicit_static_credentials_ignore_ambient_env() {
     let _l = env_lock();
@@ -144,15 +139,14 @@ fn explicit_static_credentials_ignore_ambient_env() {
     assert!(!shown.contains("poison-secret"), "{shown}");
 }
 
-/// Tracker defect **SEC-ENVHTTP**, both halves.
+/// An explicit `allow_http: false` beats `AWS_ALLOW_HTTP=true`, in both halves.
 ///
 /// (a) the decision: with `AWS_ALLOW_HTTP=true` in the process environment, an
 /// explicit `allow_http: false` still renders `false`.
 ///
 /// (b) the behaviour: the store built from that decision REFUSES an `http://`
 /// request. reqwest's `https_only` rejects the scheme before it resolves a
-/// name, so this opens no socket; the endpoint is a dead loopback port so a
-/// regression fails in milliseconds rather than hanging.
+/// name, so this opens no socket.
 ///
 /// MUTANT: dropping `.with_allow_http(eff.allow_http)` from
 /// `build_backend_with` — i.e. letting `from_env`'s value stand — turns (b)
@@ -171,8 +165,8 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
         bucket: "kafka-backups".into(),
         prefix: "team-a".into(),
         region: Some("us-east-1".into()),
-        // A plaintext endpoint with `allow_http: false` is the exact shape of
-        // the defect: the plan forbids HTTP and the environment permits it.
+        // A plaintext endpoint with `allow_http: false`: the plan forbids HTTP
+        // and the environment permits it.
         endpoint: Some("http://127.0.0.1:1".into()),
         path_style: true,
         allow_http: false,
@@ -190,13 +184,11 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
         );
     }
 
-    // (b) the behaviour. The same location, built twice, differing ONLY in
-    // the `allow_http` the plan carries. reqwest is configured `https_only`
-    // when it is false, so the request is refused while the client is still
-    // BUILDING the request — no name resolution and no socket — while the
-    // permissive twin gets as far as the transport and is refused by the dead
-    // loopback port. Asserting the PAIR is what makes this a proof: a single
-    // assertion on an error string is satisfied by any failure at all.
+    // (b) the behaviour: the same location built twice, differing ONLY in
+    // `allow_http`. The `https_only` twin is refused while BUILDING the request
+    // (no name resolution, no socket); the permissive twin reaches the dead
+    // loopback port. Asserting the PAIR is the proof: one assertion on an error
+    // string is satisfied by any failure at all.
     let build = |allow_http: bool| {
         let mut u = plan_says_https_only.clone();
         let StorageUrl::S3 { allow_http: a, .. } = &mut u else {
@@ -255,9 +247,8 @@ fn explicit_allow_http_false_wins_over_aws_allow_http_true() {
     );
 }
 
-/// PLAT-08.1's "without global configuration leakage", as a property rather
-/// than an enumeration: NO credential source — `Ambient` included — reads an
-/// `AWS_*` variable that is not on its own named list.
+/// NO credential source — `Ambient` included — reads an `AWS_*` variable that
+/// is not on its own named list.
 ///
 /// The tripwire is a variable whose value object_store parses at `build()`
 /// time. An unparseable `AWS_CONDITIONAL_PUT` makes a `from_env()`-based build
@@ -317,24 +308,20 @@ fn no_credential_source_reads_an_unnamed_aws_variable() {
     }
 }
 
-/// **F2, the reviewer's reproduction.** The shape every other test in this
-/// file avoided: a destination that names NEITHER an endpoint NOR a region.
+/// A destination that names NEITHER an endpoint NOR a region, the shape every
+/// other test in this file avoids.
 ///
-/// D2 §3.10 builds the controller's `ControllerIdentity` evidence cache with
-/// `credentials: Ambient`. When `Ambient` started from
-/// `AmazonS3Builder::from_env()`, such a destination inherited
-/// `AWS_ENDPOINT_URL` from the controller's own environment while
-/// `s3_effective` reported `endpoint: None` — so a `BackupDestination` on
-/// plain AWS S3 would have had its evidence read from the controller's own
-/// MinIO bucket, and a W7 test written against `s3_effective` would have
-/// passed while the client dialled the wrong host. That is G2's "global
-/// configuration leakage", the defect PLAT-08.1 exists to close.
+/// The controller's evidence cache is built with `credentials: Ambient`. Had
+/// `Ambient` started from `AmazonS3Builder::from_env()`, such a destination
+/// would inherit `AWS_ENDPOINT_URL` from the controller's environment while
+/// `s3_effective` reported `endpoint: None`, and a plain AWS S3 destination
+/// would have its evidence read from the controller's own MinIO bucket.
 ///
 /// It is asserted on `s3_builder_config`, which reads the values back off the
 /// `AmazonS3Builder` the store is actually built from — NOT off
-/// `s3_effective`, because the whole point of the finding is that the two can
-/// disagree. Nothing is dialled: an endpoint-less destination targets AWS S3,
-/// and a unit test does not leave this machine (Global Constraint 17).
+/// `s3_effective`, because the two can disagree. Nothing is dialled: an
+/// endpoint-less destination targets AWS S3, and a unit test does not leave
+/// this machine (Global Constraint 17).
 #[test]
 fn ambient_does_not_inherit_an_endpoint_or_region_from_the_environment() {
     let _l = env_lock();
@@ -446,7 +433,7 @@ fn the_legacy_constructors_still_read_the_environment() {
 }
 
 /// `Ambient` resolves object_store's credential ORDER over the named
-/// variables, and reports which arm it took — so W7 can log the principal
+/// variables, and reports which arm it took, so a caller can log the principal
 /// without dialling to find out.
 #[test]
 fn ambient_reports_the_arm_of_the_chain_it_resolved() {
@@ -503,9 +490,7 @@ fn explicit_addressing_wins_over_the_environment() {
     assert!(eff.virtual_hosted_style);
 }
 
-// --------------------------------------------------------- workload identity
-
-/// D2 §3.5: no injected identity is a REFUSAL, not a fall-through to the
+/// No injected identity is a REFUSAL, not a fall-through to the
 /// node's instance role.
 #[test]
 fn workload_identity_without_injection_is_a_closed_refusal() {
@@ -626,11 +611,10 @@ fn static_from_env_needs_both_halves() {
     assert!(eff.reads_environment);
 }
 
-/// **F3.** `StoreOptions` derives `Debug` and W4/W7/W10 will hold it inside
-/// structs that derive `Debug` or pass it to `tracing`'s `?field`. One `?opts`
-/// would otherwise put an AWS secret access key into a runner or controller
-/// log — the invariant WORKER-RULES names first. `CredentialSource`'s `Debug`
-/// is hand-written so the derive above it is safe.
+/// `StoreOptions` derives `Debug`, and callers hold it inside structs that
+/// derive `Debug` or pass it to `tracing`'s `?field`. One `?opts` would
+/// otherwise put an AWS secret access key into a log. `CredentialSource`'s
+/// `Debug` is hand-written so the derive above it is safe.
 ///
 /// MUTANT: replacing the hand-written impl with `#[derive(Debug)]` turns every
 /// assertion below red.
@@ -675,7 +659,7 @@ fn no_debug_rendering_can_carry_a_secret() {
     }
 }
 
-/// **F8.** Setting `max_retries` must not silently shorten the retry WINDOW;
+/// Setting `max_retries` must not silently shorten the retry WINDOW;
 /// that is `retry_timeout`, and it keeps object_store's own 180 s default.
 #[test]
 fn max_retries_and_retry_timeout_are_independent() {
@@ -703,9 +687,7 @@ fn max_retries_and_retry_timeout_are_independent() {
     );
 }
 
-// ------------------------------------------------------- metadata endpoint
-
-/// D2 G16: an explicit credential source can never fall back to instance
+/// An explicit credential source can never fall back to instance
 /// metadata. `Ambient` is the one case that keeps the default, because there
 /// the instance role may be exactly what the operator configured.
 #[test]
@@ -750,8 +732,6 @@ fn instance_metadata_is_pinned_for_every_explicit_source() {
     unpinned_static.pin_instance_metadata = Some(false);
     assert!(!unpinned_static.pins_instance_metadata());
 }
-
-// ------------------------------------------------------- root certificates
 
 /// A destination's private CA. The PEM below is a throwaway self-signed
 /// certificate generated for this test; its private key was discarded at
@@ -805,8 +785,6 @@ fn a_root_certificate_is_accepted_and_garbage_is_refused() {
     assert!(format!("{err}").contains("root certificate"), "{err}");
 }
 
-// ------------------------------------------------------------ non-S3 urls
-
 /// A `BackupDestination` is `provider: S3`. Silently ignoring an explicit
 /// credential on another backend would build a store with a credential nobody
 /// asked for, so it is refused by name.
@@ -821,19 +799,16 @@ fn a_non_s3_url_with_explicit_options_is_refused() {
     assert!(Store::from_url_with(&fs, &StoreOptions::ambient()).is_err());
 }
 
-// -------------------------------------------- the existing constructors
-
 /// Global Constraint 6 is enforced by ONE function that `from_url` and
 /// `from_url_with` both call, so the new constructor cannot become a second
 /// way to build a writable handle outside `logweir/`.
 ///
-/// The `from_url` half of that claim is already covered, with both directions,
-/// by `tests/storage.rs::a_prefix_deeper_than_the_sanctioned_root_is_refused_at_construction`
-/// and `::the_sanctioned_root_still_builds` — which is why this file does not
-/// name that constructor a second time (`no_network_in_unit_tests` allow-lists
-/// `storage.rs` by path and this file is deliberately not on that list). What
-/// is asserted here is the NEW half: the same refusal, with the same message,
-/// from `from_url_with`, and the read-only flag surviving `read_only_with`.
+/// The `from_url` half is covered, both directions, by `tests/storage.rs`
+/// (`a_prefix_deeper_than_the_sanctioned_root_is_refused_at_construction` and
+/// `the_sanctioned_root_still_builds`); `no_network_in_unit_tests` allow-lists
+/// that file by path, not this one. Asserted here: the same refusal, with the
+/// same message, from `from_url_with`, and the read-only flag surviving
+/// `read_only_with`.
 #[test]
 fn the_new_constructors_do_not_widen_the_write_surface() {
     let _l = env_lock();
@@ -880,8 +855,6 @@ fn the_new_constructors_do_not_widen_the_write_surface() {
     ));
 }
 
-// ------------------------------------------------------- classification
-
 /// The classifier's two tables, pinned by messages in the shape
 /// `object_store` 0.14.1 produces: the request line (`RetryError`), then
 /// either the status line and the store's body (`RequestError::Status`) or
@@ -889,11 +862,10 @@ fn the_new_constructors_do_not_widen_the_write_surface() {
 /// loopback responder and against MinIO; request ids removed.
 ///
 /// A store's ANSWER is classified by its code, or else its status, and its
-/// body is not searched (PROD-01.2 review, M1): each answer below echoes a
-/// bucket and a key that spell a code of ANOTHER class, and the class does
-/// not move. A failure with no answer is matched against the wording table,
-/// and an unmatched one answers `StoreErrorUnclassified` rather than
-/// guessing.
+/// body is not searched: each answer below echoes a bucket and a key that spell
+/// a code of ANOTHER class, and the class does not move. A failure with no
+/// answer is matched against the wording table, and an unmatched one answers
+/// `StoreErrorUnclassified` rather than guessing.
 #[test]
 fn the_classifier_table() {
     use StoreErrorClass as C;
@@ -911,9 +883,9 @@ fn the_classifier_table() {
         )
     };
     let cases: Vec<(String, C)> = vec![
-        // C6: versitygw v1.8.0's answer to an unknown access key id, as
-        // PROD-01.5 recorded it from a LIST (request and host ids removed).
-        // A 404, and a credential problem.
+        // C6: versitygw v1.8.0's answer to an unknown access key id, recorded
+        // from a LIST (request and host ids removed). A 404, and a credential
+        // problem.
         (
             "Generic S3 error: Error performing list request: Error performing GET http://localhost:19130/kafka-backups?list-type=2 in 1.7745ms - Server returned non-2xx status code: 404 Not Found: <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code><Message>No user exists with the provided access key ID.</Message></Error>".into(),
             C::InvalidCredentials,
@@ -1009,11 +981,10 @@ fn the_classifier_table() {
             "error sending request for url (https://minio:9000/timeout-archive): tcp connect error: Connection refused (os error 61)".into(),
             C::EndpointUnreachable,
         ),
-        // A failure the client RETRIED carries its retry clause, whose
-        // `retry_timeout:` the first classifier read as a timeout. The clause
-        // is part of the request line and is not read: a retried transport
-        // failure is unreachable, and a retried 503 is an answer the tables do
-        // not name (release-notes item 60 says both classes moved).
+        // A failure the client RETRIED carries a retry clause, `retry_timeout:`
+        // included. The clause is part of the request line and is not read: a
+        // retried transport failure is unreachable, and a retried 503 is an
+        // answer the tables do not name.
         (
             "k: Generic S3 error: Error performing GET http://minio:9000/b/k in 6.2s, after 2 retries, max_retries: 2, retry_timeout: 5s  - HTTP error: error sending request".into(),
             C::EndpointUnreachable,
@@ -1093,8 +1064,8 @@ fn store_at(port: u16, bucket: &str) -> Store {
     .expect("the client builds")
 }
 
-/// MinIO's body for an absent object, as PROD-01.2's review captured it on
-/// the compose stack, for `key` in `bucket`.
+/// MinIO's body for an absent object, as captured on the compose stack, for
+/// `key` in `bucket`.
 fn minio_no_such_key(bucket: &str, key: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The \
@@ -1104,10 +1075,9 @@ fn minio_no_such_key(bucket: &str, key: &str) -> String {
     )
 }
 
-/// **PROD-01.2 review, M1, through the real client.** A store answers
-/// `404 NoSuchKey` for an object whose bucket, prefix and key each spell a
-/// credential code, and every read of it is `NotFound`: a read, a bounded
-/// read, a read by version id and a `HEAD`.
+/// Through the real client: a store answers `404 NoSuchKey` for an object whose
+/// bucket, prefix and key each spell a credential code, and every read of it is
+/// `NotFound`: a read, a bounded read, a read by version id and a `HEAD`.
 ///
 /// This is the row the in-crate ones cannot be: the error is the one
 /// `object_store` builds (its retry error, its request error, its `Display`),
@@ -1231,8 +1201,7 @@ fn a_real_answers_class_is_its_code_whatever_the_names_spell() {
     }
 }
 
-/// PLAT-08.1's `store_errors::access_denied_is_classified_without_body`: the
-/// CLASS is a code, and a code carries no body. Combined with
+/// The CLASS is a code, and a code carries no body. Combined with
 /// `logweir_core::check_contract::redact`, the S3 XML that produced the class
 /// never reaches a status.
 #[test]
@@ -1257,10 +1226,9 @@ fn access_denied_is_classified_without_body() {
     assert!(redacted.contains("AccessDenied"), "{redacted}");
 }
 
-/// A genuine absence is never a denial. The variant carries that distinction
-/// and the classifier must not lose it — `StoreError::NotFound`'s own doc
-/// comment exists because collapsing the two put an unestablished claim into a
-/// signed scorecard once already.
+/// A genuine absence is never a denial, and the classifier must not lose the
+/// distinction: collapsing the two puts an unestablished claim into a signed
+/// scorecard (see `StoreError::NotFound`).
 #[test]
 fn not_found_stays_not_found() {
     assert_eq!(
