@@ -3061,8 +3061,8 @@ fn stop_tail(lists: &str, state: &str) -> String {
 /// dropped. KILLS: the line not read; an unmapped name copied.
 #[tokio::test]
 async fn what_a_runs_teardown_left_is_named_on_the_restore() {
-    let why = "the restore principal lacks `Delete` on topic `drill-orders` (Broker: Topic \
-               authorization failed)";
+    let why = "the restore principal lacks `Delete` on topic `drill-orders`: \
+               TopicAuthorizationFailed (Broker: Topic authorization failed)";
     let line = format!(
         "teardown-failed=[{{\"topic\":\"drill-orders\",\"error\":\"{why}\"}},\
          {{\"topic\":\"payments-prod\",\"error\":\"x\"}}]\n"

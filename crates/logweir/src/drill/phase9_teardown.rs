@@ -143,6 +143,75 @@ pub fn remove(
     (deleted, failed)
 }
 
+/// **FX-44: the teardown of a run that FAILED after its creation step.**
+///
+/// Only the topics this run created (`created`, phase 0's `topics_created`)
+/// go to [`remove`], by phase 9's own rule: deleted in `scratch` mode under
+/// `teardown: delete`, never in `newTopic` mode, never under an original name.
+/// What it removed is logged; what it could not is a WARN naming each topic
+/// (and the grant, for an authorization refusal) and the `teardown-failed=`
+/// line; what the rule kept is a WARN naming it. Nothing is signed or written
+/// to the store: this path (exit 1, 3 or 4) signs nothing. Returns
+/// `(deleted, failed)`.
+pub fn after_failure(
+    deleter: &dyn TopicDeleter,
+    mapping: &BTreeMap<String, String>,
+    created: &[String],
+    policy: &str,
+    mode: TargetMode,
+    run_id: &str,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let ours: BTreeMap<String, String> = mapping
+        .iter()
+        .filter(|(_, target)| created.contains(target))
+        .map(|(s, t)| (s.clone(), t.clone()))
+        .collect();
+    if ours.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let (deleted, failed) = remove(deleter, &ours, policy, mode);
+    if !deleted.is_empty() {
+        tracing::info!(
+            run_id = %run_id,
+            topics = %deleted.join(","),
+            "the restore failed after it created its target topics; teardown removed {} \
+             scratch {}: {}",
+            deleted.len(),
+            if deleted.len() == 1 { "topic" } else { "topics" },
+            deleted.join(", ")
+        );
+    }
+    if let Some(msg) = left_warning(&failed) {
+        let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+        tracing::warn!(
+            run_id = %run_id,
+            topics = %names.join(","),
+            count = failed.len(),
+            "{msg}"
+        );
+    }
+    print_left(&failed);
+    let kept: Vec<&str> = ours
+        .values()
+        .filter(|t| !deleted.contains(t) && !failed.iter().any(|(n, _)| n == *t))
+        .map(String::as_str)
+        .collect();
+    if !kept.is_empty() {
+        tracing::warn!(
+            run_id = %run_id,
+            topics = %kept.join(","),
+            "the restore failed after it created {}; left in place, because {}",
+            kept.join(", "),
+            if mode == TargetMode::NewTopic {
+                "a newTopic restore never deletes the topics it created"
+            } else {
+                "target.teardown is keep"
+            }
+        );
+    }
+    (deleted, failed)
+}
+
 /// Phase 9: [`remove`], attested.
 pub fn run(
     deleter: &dyn TopicDeleter,
@@ -296,7 +365,7 @@ pub fn left_reasons(failed: &[(String, String)]) -> Vec<(String, String)> {
         .iter()
         .map(|(topic, error)| {
             let why = if lacks_delete(error) {
-                format!("{} ({error})", lacks_delete_on(&[topic]))
+                format!("{}: {error}", lacks_delete_on(&[topic]))
             } else {
                 error.clone()
             };

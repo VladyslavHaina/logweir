@@ -567,3 +567,168 @@ fn dashboard_has_a_teardown_panel() {
         "duplicate panel ids in dashboards/logweir.json: {ids:?}"
     );
 }
+
+// ---------------------------------------------------------------- FX-44
+
+/// The broker's per-topic answer to a delete the principal may not make.
+const AUTHZ: &str = "TopicAuthorizationFailed (Broker: Topic authorization failed)";
+
+/// A deleter that records every name it is handed and deletes it.
+#[derive(Default)]
+struct Recording(std::sync::Mutex<Vec<String>>);
+impl TopicDeleter for Recording {
+    fn delete_topics(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        self.0.lock().unwrap().extend_from_slice(names);
+        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
+    }
+}
+
+/// **FX-44, R1 (unit).** A run that fails after its creation step created
+/// `drill-orders` (the engine's restore fails, exit 1, nothing signed) removes
+/// the topic and says so. Control: a passing drill deletes it in phase 9, once,
+/// exactly as before. KILLS: the failure-path teardown skipped.
+#[test]
+fn a_run_that_fails_after_creating_its_topic_removes_it_and_says_so() {
+    let f = fixtures::orchestrator_fixture(Drill::FailsAfterCreation);
+    let mut result = None;
+    let lines = under_a_capturing_subscriber(|| {
+        result = Some(execute_with(&f.args, &f.run_id, &f.ctx));
+    });
+    let err = result.unwrap().expect_err("the engine's restore failed");
+    assert_eq!(logweir::exit::ExitCode::from(err) as u8, 1);
+    assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
+    assert!(
+        lines.iter().any(|v| v["level"] == "INFO"
+            && v["fields"]["message"]
+                == "the restore failed after it created its target topics; teardown removed 1 \
+                    scratch topic: drill-orders"),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|v| v["level"] == "WARN"
+            && v["fields"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("teardown left"))),
+        "nothing was left: {lines:#?}"
+    );
+
+    let f = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the control passes");
+    assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
+}
+
+/// **FX-44, R2 (unit).** The same failed run, and the broker refuses the
+/// deletion for authorization: the WARN names the topic AND the grant. KILLS:
+/// the leftover not named; the grant not named.
+#[test]
+fn a_failed_run_that_cannot_delete_names_the_topic_and_the_grant() {
+    let f = fixtures::orchestrator_fixture(Drill::FailsAfterCreationAndCannotDelete);
+    let mut result = None;
+    let lines = under_a_capturing_subscriber(|| {
+        result = Some(execute_with(&f.args, &f.run_id, &f.ctx));
+    });
+    assert!(result.unwrap().is_err());
+    assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
+    let warning = lines
+        .iter()
+        .find(|v| v["level"] == "WARN" && v["fields"]["topics"] == SCRATCH_TOPIC)
+        .unwrap_or_else(|| panic!("no WARN naming the topic: {lines:#?}"));
+    assert_eq!(
+        warning["fields"]["message"],
+        "teardown left 1 scratch topic behind on the target cluster: drill-orders; the restore \
+         principal lacks `Delete` on topic `drill-orders`",
+        "{warning}"
+    );
+    assert_eq!(warning["fields"]["run_id"], f.run_id.as_str());
+}
+
+/// **FX-44, R5 (unit).** Only the topics THIS run created are handed to the
+/// deleter: a mapped name it did not create (one that existed before it,
+/// which phase 0 refuses today) is never deleted. With nothing created,
+/// nothing is attempted. KILLS: tearing down a topic the run did not create.
+#[test]
+fn a_failed_run_deletes_only_the_topics_it_created() {
+    let mapping = std::collections::BTreeMap::from([
+        ("orders".to_string(), "drill-orders".to_string()),
+        ("payments".to_string(), "drill-payments".to_string()),
+    ]);
+    let scratch = logweir_core::spec::TargetMode::Scratch;
+    let deleter = Recording::default();
+    let (deleted, failed) = phase9_teardown::after_failure(
+        &deleter,
+        &mapping,
+        &["drill-orders".to_string()],
+        "delete",
+        scratch,
+        "RUN",
+    );
+    assert_eq!(*deleter.0.lock().unwrap(), vec!["drill-orders"]);
+    assert_eq!(deleted, vec!["drill-orders"]);
+    assert!(failed.is_empty());
+
+    let deleter = Recording::default();
+    let (deleted, failed) =
+        phase9_teardown::after_failure(&deleter, &mapping, &[], "delete", scratch, "RUN");
+    assert!(deleter.0.lock().unwrap().is_empty());
+    assert!(deleted.is_empty() && failed.is_empty());
+}
+
+/// **FX-44, R4 (unit).** A failed `newTopic` restore, or a scratch one under
+/// `teardown: keep`, deletes nothing it created, at any policy. Control: the
+/// same call in scratch mode under `delete` deletes.
+#[test]
+fn a_failed_new_topic_restore_deletes_nothing() {
+    let mapping = fixtures::mapping("orders", "restored-orders");
+    let created = ["restored-orders".to_string()];
+    for (mode, policy) in [
+        (logweir_core::spec::TargetMode::NewTopic, "delete"),
+        (logweir_core::spec::TargetMode::Scratch, "keep"),
+    ] {
+        let deleter = Recording::default();
+        let (deleted, failed) =
+            phase9_teardown::after_failure(&deleter, &mapping, &created, policy, mode, "RUN");
+        assert!(deleter.0.lock().unwrap().is_empty(), "{mode:?} {policy}");
+        assert!(deleted.is_empty() && failed.is_empty());
+    }
+    let deleter = Recording::default();
+    phase9_teardown::after_failure(
+        &deleter,
+        &mapping,
+        &created,
+        "delete",
+        logweir_core::spec::TargetMode::Scratch,
+        "RUN",
+    );
+    assert_eq!(*deleter.0.lock().unwrap(), vec!["restored-orders"]);
+}
+
+/// **FX-44, the grant.** An authorization refusal is named as the missing
+/// `Delete` grant, in the warning and in what the `teardown-failed=` line
+/// carries; any other refusal is not. A pass's warning reads the same.
+#[test]
+fn the_teardown_warning_names_the_grant_only_for_an_authorization_refusal() {
+    let refused = vec![("drill-orders".to_string(), AUTHZ.to_string())];
+    assert_eq!(
+        phase9_teardown::left_warning(&refused).unwrap(),
+        "teardown left 1 scratch topic behind on the target cluster: drill-orders; the restore \
+         principal lacks `Delete` on topic `drill-orders`"
+    );
+    assert_eq!(
+        phase9_teardown::left_reasons(&refused),
+        vec![(
+            "drill-orders".to_string(),
+            "the restore principal lacks `Delete` on topic `drill-orders`: \
+             TopicAuthorizationFailed (Broker: Topic authorization failed)"
+                .to_string()
+        )]
+    );
+    let other = vec![("drill-orders".to_string(), REFUSAL.to_string())];
+    assert_eq!(
+        phase9_teardown::left_warning(&other).unwrap(),
+        "teardown left 1 scratch topic behind on the target cluster: drill-orders"
+    );
+    assert_eq!(phase9_teardown::left_reasons(&other), other);
+}

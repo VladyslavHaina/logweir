@@ -2023,7 +2023,7 @@ mod tests {
         use rdkafka::types::RDKafkaErrorCode as Code;
         assert_eq!(
             Code::TopicAuthorizationFailed.to_string(),
-            "Broker: Topic authorization failed"
+            "TopicAuthorizationFailed (Broker: Topic authorization failed)"
         );
         assert!(super::is_topic_authorization_failed(
             &Code::TopicAuthorizationFailed.to_string()

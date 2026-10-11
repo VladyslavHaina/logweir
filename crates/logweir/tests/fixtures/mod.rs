@@ -818,6 +818,12 @@ pub enum Drill {
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill
     /// against a refusing deleter without this shape.
     LeavesATopicBehind,
+    /// FX-44. Phase 0 creates `drill-orders`, then the engine's restore fails
+    /// (exit 1, nothing signed). Teardown removes the topic.
+    FailsAfterCreation,
+    /// FX-44. The same, and the broker refuses the deletion for
+    /// authorization (`TopicAuthorizationFailed`).
+    FailsAfterCreationAndCannotDelete,
     /// Task 10b. The normal point-in-time shape, which no fixture expressed:
     /// the archive's one segment STRADDLES the window's end, so the records it
     /// holds are partly outside the window and the archive can only ever
@@ -1145,6 +1151,8 @@ pub struct FixtureEngine {
     /// FX-23: what `restore` reports the engine's offset report said.
     /// `Absent` (no report) unless a test moves it.
     pub engine_report: logweir_core::engine::EngineReport,
+    /// FX-44: `restore` fails as the engine does when it cannot produce.
+    pub fails_restore: bool,
 }
 
 impl FixtureEngine {
@@ -1167,6 +1175,7 @@ impl FixtureEngine {
             restored: std::sync::Arc::new(std::sync::Mutex::new(false)),
             signing_key_rotation: None,
             engine_report: logweir_core::engine::EngineReport::Absent,
+            fails_restore: false,
         }
     }
 }
@@ -1222,6 +1231,11 @@ impl DataEngine for FixtureEngine {
             std::fs::write(path, pem).expect("the fixture rotates the signing key");
         }
         o.phase_started(6, "restore");
+        if self.fails_restore {
+            return Err(EngineError::Operational(
+                "kafka-backup restore exited 1".to_string(),
+            ));
+        }
         let started_at = Utc::now();
         // The offset-mapping report, written EXACTLY where the real engine
         // writes it (Task 9b): from the `Ok` arm of a completed restore, to
@@ -1260,7 +1274,7 @@ pub struct FixtureClient {
     pub end_offsets: BTreeMap<String, Vec<(i32, i64)>>,
     pub configs: BTreeMap<String, BTreeMap<String, String>>,
     pub records: BTreeMap<String, Vec<ConsumedRecord>>,
-    pub deleted: std::sync::Mutex<Vec<String>>,
+    pub deleted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Every `NewTopicSpec` the drill's creation step handed to `TopicCreator`,
     /// in order (Task 8, guard **G-TS**).
     ///
@@ -1395,6 +1409,8 @@ pub struct OrchestratorFixture {
     /// unreachable behind `Box<dyn TargetClient>` — every `NewTopicSpec` the
     /// drill's creation step asked for, in order (Task 8, guard **G-TS**).
     pub created_topics: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
+    /// Every name the drill handed to the target client's deleter (FX-44).
+    pub deleted_topics: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Present only for `Drill::RotatesSigningKey`.
     pub replacement_signing_key: Option<logweir_evidence::keys::VerifyingKey>,
     _dir: tempfile::TempDir,
@@ -1701,6 +1717,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             engine.digest = String::new();
         }
         Drill::IgnoresTheHeaderLever => engine.header_honoured = false,
+        Drill::FailsAfterCreation | Drill::FailsAfterCreationAndCannotDelete => {
+            engine.fails_restore = true;
+        }
         Drill::EngineReportLacksTheTopic => {
             engine.engine_report = logweir_core::engine::EngineReport::Read(Default::default());
         }
@@ -1814,7 +1833,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         } else {
             BTreeMap::new()
         },
-        deleted: std::sync::Mutex::new(Vec::new()),
+        deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         created: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         // T0-11. The one shape whose broker refuses a deletion; every other
         // shape gets an empty map and the deleter it always had.
@@ -1822,6 +1841,13 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             [(
                 "drill-orders".to_string(),
                 "BROKER: TOPIC_DELETION_DISABLED".to_string(),
+            )]
+            .into_iter()
+            .collect()
+        } else if shape == Drill::FailsAfterCreationAndCannotDelete {
+            [(
+                "drill-orders".to_string(),
+                "TopicAuthorizationFailed (Broker: Topic authorization failed)".to_string(),
             )]
             .into_iter()
             .collect()
@@ -1838,6 +1864,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let metrics = dir.path().join("logweir.prom");
     let fingerprint_calls = engine.fingerprint_calls.clone();
     let created_topics = client.created.clone();
+    let deleted_topics = client.deleted.clone();
     OrchestratorFixture {
         args: logweir::drill::RunArgs {
             // D2 §3.5: a fixture invocation is not under the store contract.
@@ -1905,6 +1932,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         metrics,
         fingerprint_calls,
         created_topics,
+        deleted_topics,
         replacement_signing_key,
         _dir: dir,
     }

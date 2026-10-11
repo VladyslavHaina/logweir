@@ -3351,7 +3351,14 @@ fn execute_with_validated_approval(
     // that is not a signed `NotPass` (whose path runs phase 9) goes through it.
     let created = topic_preflight.topics_created.clone();
     let failed = |e: DrillError| -> DrillError {
-        teardown_after_failure(c, run_id, deleter, &admitted.topic_mapping, &created);
+        phase9_teardown::after_failure(
+            deleter,
+            &admitted.topic_mapping,
+            &created,
+            &c.spec.target.teardown,
+            c.spec.target.mode,
+            run_id,
+        );
         e
     };
 
@@ -3685,66 +3692,6 @@ fn teardown(
                 p.notes = notes;
             }
         }
-    }
-}
-
-/// **FX-44: the teardown of a run that FAILED after its creation step.**
-///
-/// Only the topics this run created (`created`, phase 0's `topics_created`)
-/// are handed to [`phase9_teardown::remove`], by phase 9's own rule: deleted
-/// in `scratch` mode under `teardown: delete`, never in `newTopic` mode, never
-/// under an original name. What it removed is logged; what it could not is a
-/// WARN naming each topic (and the grant, for an authorization refusal) and
-/// the `teardown-failed=` line. Nothing is signed or written to the store:
-/// this path (exit 1, 3 or 4) signs nothing, and still does not.
-fn teardown_after_failure(
-    c: &Ctx,
-    run_id: &str,
-    deleter: &dyn TopicDeleter,
-    mapping: &BTreeMap<String, String>,
-    created: &[String],
-) {
-    let ours: BTreeMap<String, String> = mapping
-        .iter()
-        .filter(|(_, target)| created.contains(target))
-        .map(|(s, t)| (s.clone(), t.clone()))
-        .collect();
-    if ours.is_empty() {
-        return;
-    }
-    let (mode, policy) = (c.spec.target.mode, c.spec.target.teardown.as_str());
-    let (deleted, failed) = phase9_teardown::remove(deleter, &ours, policy, mode);
-    if !deleted.is_empty() {
-        tracing::info!(
-            run_id = %run_id,
-            topics = %deleted.join(","),
-            "the restore failed after it created its target topics; teardown removed {}: {}",
-            deleted.len(),
-            deleted.join(", ")
-        );
-    }
-    if let Some(msg) = phase9_teardown::left_warning(&failed) {
-        tracing::warn!(run_id = %run_id, topics = %failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(","), count = failed.len(), "{msg}");
-    }
-    phase9_teardown::print_left(&failed);
-    // Not attempted: a `newTopic` restore's topics, or `teardown: keep`.
-    let kept: Vec<&str> = ours
-        .values()
-        .filter(|t| !deleted.contains(t) && !failed.iter().any(|(n, _)| n == *t))
-        .map(String::as_str)
-        .collect();
-    if !kept.is_empty() {
-        tracing::warn!(
-            run_id = %run_id,
-            topics = %kept.join(","),
-            "the restore failed after it created {}; they are left in place ({})",
-            kept.join(", "),
-            if mode == logweir_core::spec::TargetMode::NewTopic {
-                "a newTopic restore never deletes the topics it created"
-            } else {
-                "target.teardown is keep"
-            }
-        );
     }
 }
 
