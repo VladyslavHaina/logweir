@@ -3806,8 +3806,8 @@ export function renderPreflightStep(state, prepared) {
 
 /** Why the submit is refused by the readiness check on screen, or `null`.
  *
- *  "No existing target topic is overwritten by the ordinary path", as a
- *  refusal this page makes first: `target.mappedTopics` answers
+ *  NO EXISTING TARGET TOPIC IS OVERWRITTEN on the ordinary route, and this
+ *  page makes that a refusal first: `target.mappedTopics` answers
  *  `MappedTopicExists` and the runner's phase 0 refuses the run anyway, but a
  *  refusal displayed and not enforced is one an incident walks past.
  *

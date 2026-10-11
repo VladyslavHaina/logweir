@@ -20,7 +20,7 @@
 // 2. ADDRESSING IS NOT TRANSPORT. `addressing` says how the bucket appears in
 //    the URL; `transport.security` alone says whether the connection is
 //    encrypted. They are two independent controls in two fieldsets and
-//    neither derives the other: deriving `allowHttp` from a path-style
+//    neither derives the other: deriving `allowHttp` from a pathStyle
 //    checkbox once turned TLS off for anyone who ticked it.
 //
 // 3. ABSENT IS NOT FALSE. `status.valid` is OPTIONAL on the wire and `null`
