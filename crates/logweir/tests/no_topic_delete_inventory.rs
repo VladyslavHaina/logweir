@@ -341,7 +341,8 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
         .match_indices("torn_down")
         .map(|(i, _)| i)
         .collect();
-    assert!(uses.len() >= 2, "{uses:?}");
+    // Its definition and the four error returns of phases 6, 7 and 8.
+    assert_eq!(uses.len(), 5, "{uses:?}");
     assert!(
         uses[1..].iter().all(|i| *i > to),
         "the failure teardown runs only once the restore has started"

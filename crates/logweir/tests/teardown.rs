@@ -620,6 +620,21 @@ fn a_run_that_fails_after_creating_its_topic_removes_it_and_says_so() {
     assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
 }
 
+/// **FX-44, at phase 7.** The restore ran and phase 7 cannot read the
+/// target back: exit 1, nothing signed, and the topic is removed. KILLS: the
+/// phase-7 error return not reaching the failure teardown.
+#[test]
+fn a_run_that_fails_at_verify_removes_its_topic() {
+    let f = fixtures::orchestrator_fixture(Drill::FailsAtVerify);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("phase 7 cannot read");
+    assert!(
+        !matches!(err, logweir::drill::DrillError::NotPass(..)),
+        "a failure, not a signed result: {err}"
+    );
+    assert_eq!(logweir::exit::ExitCode::from(err) as u8, 1);
+    assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
+}
+
 /// **FX-44, R2 (unit).** The same failed run, and the broker refuses the
 /// deletion for authorization: the WARN names the topic AND the grant. KILLS:
 /// the leftover not named; the grant not named.
@@ -657,6 +672,7 @@ fn a_failed_run_deletes_only_the_topics_it_created() {
     ]);
     let scratch = logweir_core::spec::TargetMode::Scratch;
     let deleter = Recording::default();
+    let mut out = Vec::new();
     let (deleted, failed) = phase9_teardown::after_failure(
         &deleter,
         &mapping,
@@ -664,16 +680,66 @@ fn a_failed_run_deletes_only_the_topics_it_created() {
         "delete",
         scratch,
         "RUN",
+        &mut out,
     );
     assert_eq!(*deleter.0.lock().unwrap(), vec!["drill-orders"]);
     assert_eq!(deleted, vec!["drill-orders"]);
     assert!(failed.is_empty());
+    assert!(out.is_empty(), "nothing was left, so no line");
 
     let deleter = Recording::default();
-    let (deleted, failed) =
-        phase9_teardown::after_failure(&deleter, &mapping, &[], "delete", scratch, "RUN");
+    let (deleted, failed) = phase9_teardown::after_failure(
+        &deleter,
+        &mapping,
+        &[],
+        "delete",
+        scratch,
+        "RUN",
+        &mut std::io::sink(),
+    );
     assert!(deleter.0.lock().unwrap().is_empty());
     assert!(deleted.is_empty() && failed.is_empty());
+}
+
+/// A deleter that refuses every name for authorization, as a broker does
+/// for a principal without `Delete`.
+struct RefusesForAuthorization;
+impl TopicDeleter for RefusesForAuthorization {
+    fn delete_topics(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        Ok(names
+            .iter()
+            .map(|n| (n.clone(), Err(AUTHZ.to_string())))
+            .collect())
+    }
+}
+
+/// **FX-44: a failed run's leftover is printed as the `teardown-failed=`
+/// line** the controller copies to `Restore.status.teardown.failed`, with the
+/// grant. Control: the run in the row above, which removed its topic, wrote
+/// no line. KILLS: the line not printed on the failure path.
+#[test]
+fn a_failed_run_prints_what_it_left_for_the_controller() {
+    let mut out = Vec::new();
+    let (deleted, failed) = phase9_teardown::after_failure(
+        &RefusesForAuthorization,
+        &fixtures::mapping("orders", SCRATCH_TOPIC),
+        &[SCRATCH_TOPIC.to_string()],
+        "delete",
+        logweir_core::spec::TargetMode::Scratch,
+        "RUN",
+        &mut out,
+    );
+    assert!(deleted.is_empty());
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "teardown-failed=[{\"topic\":\"drill-orders\",\"error\":\"the restore principal lacks \
+         `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization \
+         failed)\"}]\n"
+    );
 }
 
 /// **FX-44, R4 (unit).** A failed `newTopic` restore, or a scratch one under
@@ -688,8 +754,15 @@ fn a_failed_new_topic_restore_deletes_nothing() {
         (logweir_core::spec::TargetMode::Scratch, "keep"),
     ] {
         let deleter = Recording::default();
-        let (deleted, failed) =
-            phase9_teardown::after_failure(&deleter, &mapping, &created, policy, mode, "RUN");
+        let (deleted, failed) = phase9_teardown::after_failure(
+            &deleter,
+            &mapping,
+            &created,
+            policy,
+            mode,
+            "RUN",
+            &mut std::io::sink(),
+        );
         assert!(deleter.0.lock().unwrap().is_empty(), "{mode:?} {policy}");
         assert!(deleted.is_empty() && failed.is_empty());
     }
@@ -701,6 +774,7 @@ fn a_failed_new_topic_restore_deletes_nothing() {
         "delete",
         logweir_core::spec::TargetMode::Scratch,
         "RUN",
+        &mut std::io::sink(),
     );
     assert_eq!(*deleter.0.lock().unwrap(), vec!["restored-orders"]);
 }

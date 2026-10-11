@@ -211,8 +211,10 @@ and then removing one grant at a time:
 | Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, nothing signed, and the run removes the topic it created and says so. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so and why**: a warning names the topic and the missing grant, the summary line repeats the topic beside `outcome pass`, the signed teardown attestation records it, and `Restore.status.teardown.failed` names it. Without `Write` and `Delete`: exit 1, the topic is left, and the run names it and the grant the same way. |
 
 **Give the restore identity `Delete`.** A leftover scratch topic blocks the
-next rehearsal that would use its name. A restore that fails after creating
-its topic removes it as a passing one does (FX-44). The row above requires
+next rehearsal that would use its name. A restore that fails after its
+creation step completed (from phase 6 onwards) removes its topic as a passing
+one does (FX-44); a creation step that stops partway deletes nothing and names
+what it left on `status.targetTopicsAppeared`. The row above requires
 each line below as measured.
 
 | Restore without | What the run prints about its topic |

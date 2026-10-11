@@ -2849,12 +2849,14 @@ already written keep the text they have.
 
 #### 62. A failed restore removes or names the scratch topic it created (FX-44)
 
-**Changed.** A restore that fails after its creation step created target
-topics (exit 1, 3 or 4) now tears them down by phase 9's rule: deleted in
-`scratch` mode under `teardown: delete`, never in `newTopic` mode, never a
-topic it did not create. It logs `the restore failed after it created its
-target topics; teardown removed 1 scratch topic: <topic>`. Before, it left
-them and said nothing, and a leftover `drill-` topic refused the next run.
+**Changed.** A restore that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), now tears down the topics that step
+created by phase 9's rule: deleted in `scratch` mode under
+`teardown: delete`, never in `newTopic` mode, never a topic it did not
+create. A creation step that stops partway still deletes nothing. It logs
+`the restore failed after it created its target topics; teardown removed 1
+scratch topic: <topic>`. Before, it left them and said nothing, and a
+leftover `drill-` topic refused the next run.
 A topic the broker would not delete is named, on a pass and on a failure, by
 the teardown warning, which now also names the grant when the broker's answer
 was an authorization refusal (``…; the restore principal lacks `Delete` on

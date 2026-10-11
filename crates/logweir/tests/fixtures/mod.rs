@@ -824,6 +824,9 @@ pub enum Drill {
     /// FX-44. The same, and the broker refuses the deletion for
     /// authorization (`TopicAuthorizationFailed`).
     FailsAfterCreationAndCannotDelete,
+    /// FX-44. The restore runs, and phase 7 cannot read the target back
+    /// (`NotAuthorized`): exit 1 at phase 7, nothing signed.
+    FailsAtVerify,
     /// Task 10b. The normal point-in-time shape, which no fixture expressed:
     /// the archive's one segment STRADDLES the window's end, so the records it
     /// holds are partly outside the window and the archive can only ever
@@ -1293,6 +1296,8 @@ pub struct FixtureClient {
     /// What DescribeConfigs answers for the broker. Empty — the Apache
     /// default — for every shape but PROD-15.1's original-name ones.
     pub broker: BTreeMap<String, String>,
+    /// FX-44: every record read is refused for authorization.
+    pub refuses_reads: bool,
 }
 
 impl ClusterReader for FixtureClient {
@@ -1337,6 +1342,9 @@ impl ClusterReader for FixtureClient {
         from: i64,
         max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        if self.refuses_reads {
+            return Err(KafkaError::NotAuthorized(t.to_string()));
+        }
         Ok(self
             .records
             .get(t)
@@ -1764,6 +1772,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::StatesAPartitionSelection
         | Drill::StatesAWindowStart
         | Drill::VerifiesCompletelyPastItsBound
+        | Drill::FailsAtVerify
         | Drill::LeavesATopicBehind => {}
     }
 
@@ -1834,6 +1843,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             BTreeMap::new()
         },
         deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        refuses_reads: shape == Drill::FailsAtVerify,
         created: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         // T0-11. The one shape whose broker refuses a deletion; every other
         // shape gets an empty map and the deleter it always had.

@@ -151,8 +151,8 @@ pub fn remove(
 /// What it removed is logged; what it could not is a WARN naming each topic
 /// (and the grant, for an authorization refusal) and the `teardown-failed=`
 /// line; what the rule kept is a WARN naming it. Nothing is signed or written
-/// to the store: this path (exit 1, 3 or 4) signs nothing. Returns
-/// `(deleted, failed)`.
+/// to the store: this path (exit 1, 3 or 4) signs nothing. The line goes to
+/// `out` (stdout in production). Returns `(deleted, failed)`.
 pub fn after_failure(
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
@@ -160,6 +160,7 @@ pub fn after_failure(
     policy: &str,
     mode: TargetMode,
     run_id: &str,
+    out: &mut dyn std::io::Write,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let ours: BTreeMap<String, String> = mapping
         .iter()
@@ -190,7 +191,7 @@ pub fn after_failure(
             "{msg}"
         );
     }
-    print_left(&failed);
+    let _ = print_left_to(out, &failed);
     let kept: Vec<&str> = ours
         .values()
         .filter(|t| !deleted.contains(t) && !failed.iter().any(|(n, _)| n == *t))
@@ -377,10 +378,20 @@ pub fn left_reasons(failed: &[(String, String)]) -> Vec<(String, String)> {
 /// Print the `teardown-failed=` line for `failed`, or nothing when nothing
 /// was left. The controller copies it to `Restore.status.teardown.failed`.
 pub fn print_left(failed: &[(String, String)]) {
-    if let Some(line) =
-        logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed))
-    {
-        println!("{line}");
+    let _ = print_left_to(&mut std::io::stdout().lock(), failed);
+}
+
+/// [`print_left`] through a writer seam, so the line is testable.
+///
+/// # Errors
+/// The writer's.
+pub fn print_left_to(
+    out: &mut dyn std::io::Write,
+    failed: &[(String, String)],
+) -> std::io::Result<()> {
+    match logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed)) {
+        Some(line) => writeln!(out, "{line}"),
+        None => Ok(()),
     }
 }
 

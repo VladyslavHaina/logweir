@@ -1452,8 +1452,8 @@ and the ACL list as what a compose broker required:
     topic `…` ``), the summary line repeats the topic beside `outcome pass`,
     the signed teardown attestation records it, and
     `Restore.status.teardown.failed` names it. A restore that FAILS after
-    creating its topics removes them the same way, or names what it could
-    not remove (FX-44).
+    its creation step completed (from phase 6 onwards) removes its topics
+    the same way, or names what it could not remove (FX-44).
 * **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
   refusal in the operator, not an oversight — SASL/SCRAM is the path.
 

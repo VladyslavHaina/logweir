@@ -1116,8 +1116,9 @@ reversible direction until the owning task rules.
   The warning names the missing grant when the broker refused the deletion for
   authorization (``the restore principal lacks `Delete` on topic `…` ``), and the
   runner's `teardown-failed=` line puts each leftover topic on
-  `Restore.status.teardown.failed`. **A run that fails after creating its
-  target topics** (exit 1, 3 or 4) tears them down by phase 9's rule (scratch
+  `Restore.status.teardown.failed`. **A run that fails after its creation
+  step completed**, from phase 6 onwards (exit 1, 3 or 4), tears down what that
+  step created by phase 9's rule (scratch
   mode, `teardown: delete`, never an original name), logs what it removed, and
   names what it could not with the same warning and line. It signs nothing and
   writes no attestation, as before (FX-44).

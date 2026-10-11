@@ -4472,7 +4472,7 @@ spec:
                 nullable: true
                 properties:
                   pendingTopics:
-                    description: 'The names still present, read from the signed teardown attestation. While this is non-empty the next slot is SKIPPED: the controller deletes no topic, and a run that adopted them would be operating on data it did not create.'
+                    description: 'The names still present, from the child Restore''s `status.teardown.failed` (the runner''s unsigned `teardown-failed=` line, FX-44). While this is non-empty the next slot is SKIPPED: the controller deletes no topic, and a run that adopted them would be operating on data it did not create.'
                     items:
                       type: string
                     maxItems: 256

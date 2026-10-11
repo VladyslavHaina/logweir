@@ -3349,6 +3349,7 @@ fn execute_with_validated_approval(
             &c.spec.target.teardown,
             c.spec.target.mode,
             run_id,
+            &mut std::io::stdout().lock(),
         );
     };
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
