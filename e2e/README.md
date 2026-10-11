@@ -7,18 +7,18 @@ copy at a time, how to pick the Apache Kafka line, which optional profiles
 exist and who owns them, and how to extend them. The decision record behind it
 is [`docs/to-do/decisions/PROD-01.5-fixture-profiles.md`](../docs/to-do/decisions/PROD-01.5-fixture-profiles.md).
 
-## The default stack is unchanged
+## The default stack
 
-With no stack variable set, the stack is exactly the one CI, the quickstart and
+With no stack variable set, the stack is the one CI, the quickstart and
 every existing doc describe: project `logweir-e2e`, `kafka-broker-1` with its
 five listeners on host ports 9092 (plaintext), 9095 (pods) and 9097 (SCRAM),
 MinIO on 9000 and 9001, and `just e2e-up` / `just e2e` / `just e2e-down`.
-`docker compose config` renders byte for byte what it rendered before these
-parameters existed, except for two broker settings PROD-04.0d added for share
-groups (`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below). The 3.7 broker does
-not use them: it starts and serves as before and never logs them, but its
-DescribeConfigs now reports both as sensitive entries with no value (below).
-The default stack is shared: on the
+`docker compose config` renders what it rendered before these parameters
+existed, except for two broker settings PROD-04.0d added for share groups
+(`KAFKA_SHARE_COORDINATOR_STATE_TOPIC_*`, below) and the broker line: the
+default is **Apache Kafka 4.3.1** since PROD-01.5a (it was 3.7.1, now the
+legacy line; `KAFKA_VERSION=3.7.1` or `--kafka 3.7` still starts it). The
+default stack is shared: on the
 orchestrated run, hold `claude/compose-lock.sh` while you use it.
 
 ## Parallel stacks: slots
@@ -52,7 +52,7 @@ their one list is [`compose/stack-lib.sh`](compose/stack-lib.sh):
 | `LOGWEIR_E2E_S3_PORT` | 9000 | MinIO's S3 API |
 | `LOGWEIR_E2E_S3_CONSOLE_PORT` | 9001 | MinIO's console |
 | `LOGWEIR_E2E_<PROFILE>_PORT` ×9 | 9102-9141 | each optional profile's ports (below) |
-| `KAFKA_VERSION` | `.env`'s pin (3.7.1) | the broker line (`--kafka`) |
+| `KAFKA_VERSION` | `.env`'s pin (4.3.1) | the broker line (`--kafka`) |
 | `KAFKA_IMAGE` | unset | the broker image, pinned by digest (`--kafka LINE`) |
 | `COMPOSE_PROFILES` | none | the optional profiles (`--profiles`) |
 
@@ -110,14 +110,16 @@ a file is missing or stray, or if a service puts `CLUSTER_ID` back in
 (`stack_params.rs` checks the two agree); every broker service uses
 `${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION}}`. An exact version
 (`--kafka 4.2.2`) is accepted too, by tag. `e2e/compose/.env` keeps the default at
-3.7.1, which `scripts/extract-engine.sh` writes.
+4.3.1, by tag, which `scripts/extract-engine.sh` writes (PROD-01.5a: the line
+the compatibility contract's single-line rows were measured on; nothing in the
+product changed with it).
 
 | Line | Image (`--kafka` pins its index digest) | Status |
 |---|---|---|
-| 3.7 | `apache/kafka:3.7.1@sha256:ed74d7d1…` | **legacy**: Apache support ended, MSK support ended 2026-09-01; still the default fixture (by tag, from `.env`) |
+| 3.7 | `apache/kafka:3.7.1@sha256:ed74d7d1…` | **legacy**: Apache support ended, MSK support ended 2026-09-01; the default until PROD-01.5a. The weekly `engine-matrix.yml` rows still run the whole suite on it |
 | 3.9 | `apache/kafka:3.9.2@sha256:05b4616e…` | supported line |
 | 4.1 | `apache/kafka:4.1.2@sha256:5cc2a2fd…` | supported line |
-| 4.3 | `apache/kafka:4.3.1@sha256:77e3df90…` | supported line |
+| 4.3 | `apache/kafka:4.3.1@sha256:77e3df90…` | supported line; **the default** (by tag, from `.env`) |
 
 What each line proved (the demo drill, `just pitr`, the receipt path, the
 engine's fixed protocol versions, and PROD-01.1's record-semantics and
@@ -301,6 +303,15 @@ the ACLs, both groups and the topic.
 Owner: PROD-04.0d; PROD-04.1, 04.2 and 05.3 are the first consumers. Extend it
 as a profile is extended; a new member or group goes in `groups.sh`'s `SET`
 and in `smoke_groups`.
+
+## CI's e2e job: four shards
+
+CI runs the e2e package in four shards by test binary (FX-41), each on its
+own runner with its own default stack (`COMPOSE_PROFILES=auth`, Kafka 4.3.1).
+The lists are `jobs.e2e.strategy.matrix` in `.github/workflows/ci.yml`. **A
+new file under `e2e/tests/` goes into one shard's `tests`:**
+`tests/stack_params.rs` fails in `check` while a test binary is in no shard
+or in two.
 
 ## Extending the fixtures
 

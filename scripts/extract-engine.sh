@@ -151,9 +151,11 @@ mkdir -p e2e/compose
 # Task 7b addendum A6 fixes this file's exact content: the KAFKA_VERSION pin the
 # compose stack reads, and the note beside the upstream image reference so a
 # reader hitting Global Constraint 14 does not re-raise it. `.env` is generated,
-# so the comment has to be emitted here — it is the only writer.
+# so the comment has to be emitted here — it is the only writer. The default
+# broker line is 4.3.1 (PROD-01.5a); 3.7.1 is the legacy line, reached with
+# `KAFKA_VERSION=3.7.1` or `stack-env.sh --kafka 3.7`.
 cat > e2e/compose/.env <<ENV
-KAFKA_VERSION=3.7.1
+KAFKA_VERSION=4.3.1
 # OSO's released image, which seeds the drill archive: GC14 governs what Logweir
 # publishes, not what it pulls (OD-3). Keep in lockstep with
 # third_party/kafka-backup-binary.digest.

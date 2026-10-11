@@ -66,7 +66,9 @@ archive holding transaction markers is refused unless the plan allows them), 68
 empty capture), 69 (FX-44, a failed restore removes or names the scratch
 topic it created), 70 (FX-49, the console's original-name box takes effect
 when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
-points) and 73 (PROD-17.1, the Helm chart is the only install) so far. Items continue the next entry's
+points), 72 (PROD-01.5a
+and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
+changes) and 73 (PROD-17.1, the Helm chart is the only install) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -259,6 +261,9 @@ failure-path teardown, the warning's grant clause, one more stdout line) and
 the controller (`status.teardown.failed`), and the PoC upgrade that carries it
 runs a scratch `Restore` that fails after creating its topic and reads the
 topic gone, and one whose topic cannot be deleted and reads it on the status.
+Item 72 is rows PROD-01.5a and FX-41, proven on the compose stack (4.3.1 and
+3.7.1) and by the shard guard; it changes CI and the test fixtures only, and
+needs no PoC row.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -3302,6 +3307,26 @@ walks' `Synced` messages and `truncated`).
 older runner lists the first points its walk meets; an older controller drops
 the sentence.
 
+#### 72. CI tests on Apache Kafka 4.3.1, in four shards; nothing in the product changes (PROD-01.5a, FX-41)
+
+**Changed.** Only how the repository is tested. The e2e fixture's default
+broker, and the line CI's e2e job runs on every pull request, is Apache Kafka
+4.3.1 instead of 3.7.1, which Apache and Amazon MSK no longer support. 3.7.1
+stays a legacy line: `KAFKA_VERSION=3.7.1` (or `e2e/compose/stack-env.sh
+--kafka 3.7`) starts it, and the weekly `engine-matrix.yml` rows still run the
+whole e2e suite on it. Six consumer-position rows that need a broker that types
+groups now run on every pull request instead of by hand. The e2e job runs in
+four shards by test binary, each with its own stack, and `check` fails when
+a test binary is in no shard or in two.
+**Operator action:** none. No binary, image, chart value or signed document
+changes, and no broker line's status changes
+([support-matrix.md](support-matrix.md#broker-versions-apache-kafka)).
+**Scope:** the e2e package on 4.3.1 on a compose stack with the
+`auth` profile, the un-ignored rows included; `full_drill`'s main row on
+3.7.1; the shard guard with one binary taken out of its shard and one listed
+twice. The shards' durations are measured on the pull request's CI run.
+**Rollback:** revert the change; nothing deployed is affected.
+
 #### 73. The Helm chart is the only install (PROD-17.1)
 
 **Changed.** The static `kubectl apply` bundle `logweir.yaml`, its renderer
@@ -3325,8 +3350,8 @@ ServiceAccount fragments moved to `config/samples/`.
 `-f charts/logweir/examples/author-only.values.yaml`; a script that applied
 `config/rbac/backup-runner-serviceaccount.yaml` or
 `retention-serviceaccount.yaml` applies them from `config/samples/`. An
-install made with `kubectl apply -f logweir.yaml` keeps running, with no newer bundle to apply; move it to the
-chart. Its CRDs, custom resources, namespace and Secrets stay. Remove the
+install made with `kubectl apply -f logweir.yaml` keeps running, with no
+newer bundle to apply; move it to the chart. Its CRDs, custom resources, namespace and Secrets stay. Remove the
 bundle's control plane, then install the chart into the same namespace
 ([install.md](install.md) (c); `identity.enabled=false` keeps the signer you
 provisioned):
@@ -3462,7 +3487,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71 and 73, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72 and 73, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3542,7 +3567,8 @@ console and the chart, and needs nothing until a namespace is bound
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
 transaction markers; items 69 and 71 change the runner and the controller and
-need nothing, in either order; item 70 changes the console only; item 73
+need nothing, in either order; item 70 changes the console only; item 72
+changes only how the repository is tested and needs nothing; item 73
 changes no image, and a bundle install moves to the chart once. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 

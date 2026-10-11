@@ -29,8 +29,9 @@ concurrency:
 # The window is the newest four engine minors plus every version an OSO
 # operator still defaults to: v0.19.1 (strimzi-backup-operator v0.2.22-v0.2.25)
 # and v0.19.2 (kafka-backup-operator 1.3.0 links kafka-backup-core 0.19.2).
-# Since PROD-00.3f the pin is v0.23.3, so it holds the two full rows (default
-# broker and newest broker); v0.21.0 keeps its default-broker row as the
+# Since PROD-00.3f the pin is v0.23.3, so it holds the two full rows (3.7.1,
+# now the legacy line, and the newest, 4.3.1, the default since PROD-01.5a);
+# v0.21.0 keeps its 3.7.1 row as the
 # full-drill floor and the previous pin, and its 4.3.1 row retired: the fixed
 # protocol versions that row watched are byte-identical in v0.23.3, whose own
 # 4.3.1 row now carries the tripwire. v0.22.0 is what strimzi-backup-operator
