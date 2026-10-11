@@ -32,13 +32,10 @@ impl ValidatedSigner {
         )
     }
 
-    /// Private readiness seam: production supplies the one software signer,
-    /// while the unit test can return a real but non-verifying signature to
-    /// exercise the independently implemented verification failure. It does
-    /// not inject a synthetic signing error: no such failure is reachable for
-    /// either parsed software-key variant today. Keeping the seam here avoids
-    /// a public signer-provider abstraction for a backend that does not have
-    /// one yet.
+    /// Private readiness seam: production supplies the one software signer;
+    /// the unit test returns a real but non-verifying signature to exercise the
+    /// verification failure. It injects no synthetic signing error, because
+    /// none is reachable for either parsed software-key variant.
     fn load_with_probe_signer(
         path: &Path,
         probe_payload_type: &str,

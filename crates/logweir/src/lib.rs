@@ -1,28 +1,28 @@
 //! logweir — the drill orchestrator. Every module here is a LIBRARY module so
-//! `crates/logweir/tests/*.rs` can link them (Tasks 15-20 depend on this).
+//! `crates/logweir/tests/*.rs` can link them.
 #![forbid(unsafe_code)]
 pub mod approve;
 /// GC18's phase −1: `logweir backup run`, the source-side capture.
 pub mod backup;
-/// PLAT-15.1 / decision D3 §5: the durable recovery catalog — the signed point
+/// The durable recovery catalog (decision D3 §5): the signed point
 /// record `logweir backup run` writes beside every receipt, and the two
 /// operator subcommands that read and backfill it.
 pub mod catalog;
-/// Decision D2 §4.2 / D-SEAMS S1: `logweir check run`, the ONE check runner.
+/// `logweir check run`, the ONE check runner (decision D2 §4.2).
 /// Discovery, operation readiness, restore preflight, destination access and
 /// evidence fetch are five plan KINDS of one subcommand, over one argv
 /// surface, one frame format and one closed error vocabulary — never five
 /// commands.
 pub mod check;
 pub mod cli;
-/// PROD-01.3 security follow-up: the runner refuses a projected credential
+/// The runner refuses a projected credential
 /// whose binding does not name the connection it was projected for.
 pub mod credential_binding;
 pub mod doctor;
 pub mod drill;
 /// The ONE engine-binary resolution `doctor` and `drill run` both consult.
 pub mod engine_bin;
-/// PROD-00.2: the engine identity every scorecard and receipt signs — the
+/// The engine identity every scorecard and receipt signs — the
 /// runner image's `/etc/logweir/engine-identity` first, the two environment
 /// variables where there is no image.
 pub mod engine_identity;
@@ -39,18 +39,16 @@ pub mod metrics;
 pub mod probe;
 pub mod schema;
 pub mod show;
-/// ONE execution signer, and it is `pub` so the second document type that
-/// signs with it — the catalog point record (D3 §5.2) — can name the handle in
-/// the signature of its own testable seam rather than growing a parallel
-/// signing abstraction beside it. Global Constraint 27 is a claim about
-/// LINKAGE (`scripts/check-one-signer.sh`), which visibility does not widen:
-/// there is still exactly one type in this workspace that holds a parsed
-/// private key, and it is still the only thing that can sign.
+/// ONE execution signer, `pub` so the catalog point record (D3 §5.2) can name
+/// the handle in its own testable seam rather than grow a parallel signing
+/// abstraction. Global Constraint 27 is about LINKAGE
+/// (`scripts/check-one-signer.sh`), which visibility does not widen: one type
+/// in this workspace holds a parsed private key.
 pub mod signer;
-/// PLAT-07.1: the ONE read of a projected private-CA location, shared by
+/// The ONE read of a projected private-CA location, shared by
 /// every command that dials Kafka over TLS.
 pub mod tls_ca;
-/// PLAT-19.1 / decision D3 §7.1 and §7.5: `logweir trust export` and
+/// `logweir trust export` and `logweir trust migrate-roster` (D3 §7.1, §7.5).
 /// `logweir trust migrate-roster`. Two pure text transforms over one
 /// Kubernetes object each — no cluster client, no key, no signature.
 pub mod trust;
