@@ -628,7 +628,7 @@ What it fixed:
 - **Left on the PoC for the owner:** namespace `logweir-pair`, bound `two-person`, with Dex users `alice` and `bob`. Approval there is a sign-in and a click, with no key. The settings are in `deploy/poc/`; the passwords are in the owner's local 0600 files.
 - **Incident:** the worker's session output showed the PoC's Dex passwords. The orchestrator rotated all seven, with the cluster's hashes checked against the new files and Dex restarted. One refused Job's line token was printed too; that Job has ended, and the token is redacted from the artifacts.
 
-**PR #25 — merged (2026-10-11) as `8048e2ed`, release-notes items 70 and 71.** Integrated by worker `integrate-11`. The PR's checks all passed (`check` 25 min, `e2e` 53 min). Main `dff411ad` was not published, because its `check` failed, so this merge's publish signs items 67 to 71 together.
+**PR #25 — merged (2026-10-11) as `8048e2ed`, release-notes items 70 and 71.** Integrated by worker `integrate-11`. The PR's checks all passed (`check` 25 min, `e2e` 53 min). Main `dff411ad` was not published, because its `check` failed, so this merge's publish signs items 67 to 71 together. **Published and signed:** main run 38129452121 built, promoted and signed `sha-8048e2ed` (2026-10-11), carrying items 67 to 71.
 - **Memory meters** (orchestrator, `cad462a3`).
   - Main `dff411ad`'s `check` failed in `topic_budget::a_receipt_read_and_a_receipt_relay_stay_bounded`. Linux keeps `ru_maxrss` across exec, so the child reported its parent's peak (the same defect as `6f45720a` in `check_cli.rs`).
   - Both weirkeeper meters (`topic_budget.rs`, `read_caps.rs`) now read `VmHWM` from `/proc/self/status` on Linux, which exec resets.
