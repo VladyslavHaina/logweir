@@ -8,8 +8,8 @@
 // rows, and a recovery point freezing 2,000 topics rendered through the
 // restore wizard's topic subset and through the whole wizard. `MEASURE_ROWS`
 // and `MEASURE_TOPICS` change the two sizes (PLAT-20.2 measures 5,000 rows). It does not
-// measure parsing, layout or paint; the browser half of the measurement is
-// `scripts/plat18-2-ui-e2e.mjs`, which times the same datasets in Chromium.
+// measure parsing, layout or paint; the browser half of the measurement was a
+// one-off Chromium harness (now in git history) over the same datasets.
 //
 // It exists so the framework and virtualization decision PLAT-18.2 asks for
 // is taken against numbers, and so the SAME numbers can be taken against any

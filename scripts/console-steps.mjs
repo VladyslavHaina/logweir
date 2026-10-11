@@ -1,5 +1,5 @@
 // The steps a person takes on the console pages that console-ux-1 redesigned, shared by the live
-// browser harnesses (scripts/*-ui-*.mjs, scripts/live/poc/*.mjs). Nothing here reads a cluster;
+// browser harnesses (scripts/*-ui-*.mjs and the journeys). Nothing here reads a cluster;
 // every helper drives the page the way a person does and THROWS when the page does not answer
 // the way the helper requires, so a journey never goes on from a step it did not reach.
 //
@@ -13,7 +13,7 @@
 //
 // Which control is on which step is ui/pages/restore-wizard.js's own `FIELD_STEP` and render
 // functions; the offline guard (scripts/live/wizard_steps.py, run by
-// scripts/live/poc/test_poc_harness.py and e2e/journeys/test_catalogue.py) holds every wizard
+// e2e/journeys/test_catalogue.py) holds every wizard
 // control in the harnesses behind a walk to its step, and reads the titles below against the
 // page's `STEPS`.
 

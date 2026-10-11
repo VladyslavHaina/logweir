@@ -1414,8 +1414,8 @@ async function main() {
 }
 
 // Whether a live object is one THIS run created: the owner label AND the UID
-// recorded at creation (`result.created`), as `plat19-2-admission-e2e.mjs`
-// checks. A same-named, same-labelled object with another UID (an earlier
+// recorded at creation (`result.created`), as the one-off PLAT-19.2
+// admission harness checked. A same-named, same-labelled object with another UID (an earlier
 // run's leftover, or somebody else's) is refused (plat20-1.review.md L-3).
 function ownedByThisRun(live, kind, name, created = result.created) {
   const meta = (live && live.metadata) || {};

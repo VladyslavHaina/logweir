@@ -4,7 +4,7 @@
 // returned" and PLAT-03.1's "names each failed prerequisite and its remedy,
 // with check time and scope".
 //
-// The sibling of `scripts/d2w13-ui-e2e.mjs`, and the difference is the whole
+// The sibling of the one-off D2 W13 harness, and the difference is the whole
 // point: that harness ran against a lab whose controller did not know the three
 // kinds, so every state it could assert was "pending, for ever". This one runs
 // against `e2e/k8s/d2/d2_live.py`'s namespace on the refreshed lab, where a

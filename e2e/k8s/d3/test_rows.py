@@ -3816,11 +3816,11 @@ def test_the_trust_row_revokes_only_a_minted_key() -> None:
 
 
 def test_no_harness_row_revokes_a_roster_key_for_compromise() -> None:
-    """A static twin of the rule for the two harnesses that revoke a key:
-    every `KeyCompromise` literal in `d3_live.py` is inside `compromise_row_keys`
-    or the refused-point row's MINTED signer, and `plat15-2-ui-e2e.mjs`'s only one
-    is the minted entry's, applied after `assertDisposable`. A new row that
-    revokes anything else fails here until it is shown to revoke a minted key."""
+    """A static twin of the rule for the harness that revokes a key: every
+    `KeyCompromise` literal in `d3_live.py` is inside `compromise_row_keys` or the
+    refused-point row's MINTED signer. A new row that revokes anything else fails
+    here until it is shown to revoke a minted key. (The one-off plat15-2 browser
+    harness this also read went in PROD-17.1 A1.)"""
     here = pathlib.Path(__file__).resolve().parent
     live = (here / "d3_live.py").read_text()
     sites = [i for i in range(len(live)) if live.startswith('revocationReason="KeyCompromise"', i)]
@@ -3832,15 +3832,6 @@ def test_no_harness_row_revokes_a_roster_key_for_compromise() -> None:
                        or fn.startswith("\ndef refused_point_trust("))
     row("d3_live.py: every KeyCompromise revocation is a minted key's", bool(sites) and all(allowed),
         f"{len(sites)} site(s), allowed={allowed}")
-    js = (here.parent.parent.parent / "scripts" / "plat15-2-ui-e2e.mjs").read_text()
-    js_sites = [i for i in range(len(js)) if js.startswith('revocationReason: "KeyCompromise"', i)]
-    guarded = [js.rfind("assertDisposable(minted.keyId", 0, i) != -1
-               and js.rfind('"Revoked",', 0, i) > js.rfind("assertDisposable(minted.keyId", 0, i)
-               for i in js_sites]
-    row("plat15-2-ui-e2e.mjs: its one KeyCompromise revocation is the minted entry's, after "
-        "assertDisposable", len(js_sites) == 1 and all(guarded), f"sites={len(js_sites)} guarded={guarded}")
-    row("plat15-2-ui-e2e.mjs: the lab signer's entry refuses a revocation",
-        'the lab signer\'s entry never carries a revocation' in js)
 
 
 def test_zz_every_row_in_this_file_passed() -> None:

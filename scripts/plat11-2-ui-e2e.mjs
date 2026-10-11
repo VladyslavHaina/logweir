@@ -1,7 +1,7 @@
 // PLAT-11.2 live UI acceptance harness: the topic subset, the exact mapping
 // preview, the recovery limits, the readiness gate and the fresh-target retry.
 //
-// THE LAUNCHER IS `scripts/d2w13-ui-e2e.mjs`'s, and for its reason: the
+// THE LAUNCHER IS the one-off D2 W13 harness's, and for its reason: the
 // surfaces under test are served by `logweir-api` and by nothing else, so this
 // starts the product API in localAdmin mode on a loopback port, pointed at this
 // worktree's own `ui/` directory and at one namespace it created, and drives a

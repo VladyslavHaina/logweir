@@ -2,7 +2,7 @@
 // on the CURRENT console (logweir-api serving ui/, localAdmin, loopback).
 //
 // 1. REGISTRATION AND DISCOVERY THAT THE CONTROLLER COMPLETES. The console rows
-//    that exist (scripts/d2w13-ui-e2e.mjs) were written for a lab with no
+//    that existed (the one-off D2 W13 harness) were written for a lab with no
 //    controller for BackupDestination/TopicDiscovery/Preflight and assert
 //    "pending, never succeeded" -- on today's lab they fail at :353. Here the
 //    page registers a connection and a destination and starts a discovery, and

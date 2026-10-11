@@ -1,6 +1,6 @@
 // PLAT-10.1 / PLAT-10.2 live UI acceptance harness.
 //
-// The sibling of `scripts/d2w13-ui-e2e.mjs`, whose launcher this reuses
+// The sibling of the one-off D2 W13 harness, whose launcher this reuses
 // verbatim in shape: `logweir-api` in localAdmin mode on a loopback port,
 // pointed at this worktree's own `ui/` and at one namespace this run created,
 // with a real Chromium driven against it. Console mode, because the guided

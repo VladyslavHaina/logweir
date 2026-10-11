@@ -220,8 +220,8 @@ points and manual runs (MCP-26); the wizard's topic
 subset is a list datagrid that hides, never drops, the boxes off its page.
 
 **Why pagination and not virtualisation or a framework.** Measured before
-either was chosen (`scripts/plat18-2-measure.mjs` in node,
-`scripts/plat18-2-ui-e2e.mjs` in Chromium against the live API; figures in the
+either was chosen (`scripts/plat18-2-measure.mjs` in node, and a one-off
+Chromium harness against the live API, now in git history; figures in the
 PLAT-18.2 report): the strings for 1,000 rows render in a few milliseconds, and
 what a large list costs is the browser laying out every row and, in the
 wizard, two quadratic membership scans. Pagination bounds the layout to one
@@ -1918,7 +1918,7 @@ Rows: `ui/tests/storage-choices.spec.js`, and in `ui/tests/mutation.spec.js`
 `restore_wizard_evidence_store_has_its_own_transport_and_addressing`,
 `a_saved_point_inherits_its_destination_and_can_write_evidence_to_another` and
 `a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again`.
-The browser journey is `scripts/plat08-2-ui-e2e.mjs`.
+Its one-off browser journey is in git history (PROD-17.1 A1).
 
 ## Destinations, discovery and readiness
 

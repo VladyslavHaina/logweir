@@ -327,7 +327,8 @@ def test_no_live_ui_harness_drives_a_hidden_control_off_its_step():
     scripts/console-steps.mjs is the walk itself and is not a flow."""
     harnesses = [p for p in sorted((ROOT / "scripts").glob("*.mjs")) if p.name != "console-steps.mjs"]
     harnesses += sorted((ROOT / "scripts" / "live").rglob("*.mjs"))
-    assert len(harnesses) >= 15, [p.name for p in harnesses]
+    # Five since the one-off and legacy harnesses went (PROD-17.1 C4 and A1).
+    assert len(harnesses) >= 5, [p.name for p in harnesses]
     for p in harnesses:
         text = p.read_text()
         assert console_steps.unreached_controls(text) == [], (p.name, console_steps.unreached_controls(text))
@@ -350,10 +351,6 @@ def test_a_link_click_into_the_wizard_is_not_a_walk_to_its_steps():
                       'await page.fill("#catalog-topics", SOURCE_TOPIC);\n'
                       'await wizardStep(page, 4);\nawait page.fill("#topic-prefix", RESTORE_PREFIX);\n')
     assert console_steps.unreached_controls(walked) == []
-    # and the harness the finding was about is one this sweep reads and that drives the wizard
-    text = (ROOT / "scripts" / "plat15-2-ui-e2e.mjs").read_text()
-    assert console_steps.controls_driven(text) > 0
-    assert console_steps.unreached_controls(text) == []
 
 
 def test_the_harness_step_map_is_the_pages_own():
