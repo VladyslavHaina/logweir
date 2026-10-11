@@ -4,16 +4,14 @@
 //! HOW they are reached (an immutable transport security choice), never a
 //! credential VALUE. This module holds the half that needs no I/O: the closed
 //! enums, the validation that duplicates the CRD's CEL rules R3–R6 for API 422
-//! messages and for the controller, the engine-compatibility refusal (D2 G4),
-//! the canonical URL, the location digest and the two `StorageUrl` renderings.
+//! messages and for the controller, the engine-compatibility refusal, the
+//! canonical URL, the location digest and the two `StorageUrl` renderings.
 //!
 //! **Addressing never implies transport**. `PathStyle` versus
 //! `VirtualHosted` is an addressing choice; `TLS` versus `InsecureHTTP` is a
 //! transport choice; neither derives the other, in either direction, and
 //! [`validate_transition`] refuses an edit that would change either the
-//! location or the transport of an existing destination. The defect this
-//! closes is UI-HTTPDOWNGRADE (`ui/pages/restore-wizard.js:1142-1149` sets
-//! `allowHttp` from the path-style checkbox) and its server-side twin.
+//! location or the transport of an existing destination.
 //!
 //! No I/O, no clock, no entropy — Global Constraint 1, checked by
 //! `scripts/check-pure-core.sh`.
@@ -128,7 +126,7 @@ impl DestinationRole {
 }
 
 /// The immutable half of a `BackupDestination.spec`: the location plus the
-/// transport security choice. Field-for-field the struct D2 §3.4 names.
+/// transport security choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DestinationLocation {
@@ -253,7 +251,7 @@ fn endpoint_shape_ok(endpoint: &str) -> bool {
     !digits.is_empty() && digits.len() <= 5 && digits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// The bucket pattern from D2 §3.1: `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`.
+/// The bucket pattern: `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`.
 fn bucket_shape_ok(bucket: &str) -> bool {
     let n = bucket.chars().count();
     if !(3..=63).contains(&n) {
@@ -273,8 +271,7 @@ fn bucket_shape_ok(bucket: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
 }
 
-/// R3–R6, plus the bucket and region patterns of D2 §3.1, evaluated over a
-/// single value.
+/// R3–R6, plus the bucket and region patterns, evaluated over a single value.
 ///
 /// Every rule that CEL enforces on the CRD is duplicated here ON PURPOSE: the
 /// API answers a 422 before the object is ever POSTed, and the controller
@@ -305,10 +302,9 @@ pub fn validate(loc: &DestinationLocation) -> Result<(), Vec<FieldError>> {
             errs.push(FieldError::new(
                 "spec.storage.region",
                 "region",
-                // Never the value (FX-20 fix round, review F1): a region is
-                // part of an endpoint-less request's host, and one spelled as
-                // a userinfo could carry a credential into a condition, an
-                // audit record or a log.
+                // Never the value: a region is part of an endpoint-less
+                // request's host, and one spelled as a userinfo could carry a
+                // credential into a condition, an audit record or a log.
                 format!(
                     "storage.region must match {}; the value is not repeated here",
                     crate::engine::S3_REGION_PATTERN
@@ -461,20 +457,15 @@ pub fn validate_transition(
     }
 }
 
-/// D2 G4: the pinned engine FORCES path-style addressing whenever an endpoint
-/// is set. kafka-backup 0.21.0 ignored `path_style` outright
-/// (`kafka-backup-core/src/storage/s3.rs:64-67`); 0.22.0 and the 0.23.3 pin
-/// honour `path_style: true`, but `use_path_style(endpoint, path_style)` is
-/// still `path_style || endpoint.is_some()` (`storage/s3.rs:55-57` and
-/// `:78-80` at v0.23.3). So `VirtualHosted` with a custom endpoint is a
-/// setting the engine cannot honour, and Logweir refuses it rather than
-/// advertising a behaviour it does not have (tracker defect ENGINE-PATHSTYLE;
-/// PROD-00 decision record, C16).
+/// The pinned engine FORCES path-style addressing whenever an endpoint is set:
+/// `use_path_style(endpoint, path_style)` is `path_style || endpoint.is_some()`
+/// (`storage/s3.rs:55-57` and `:78-80` at v0.23.3). So `VirtualHosted` with a
+/// custom endpoint is a setting the engine cannot honour, and Logweir refuses
+/// it rather than advertising a behaviour it does not have.
 ///
-/// The refusal names NO engine version (PROD-00.3f, A-C16-1): it is true of
-/// every engine since 0.21.0, and a version in the message is a sentence that
-/// goes stale at the next bump. `VirtualHosted` with NO endpoint is AWS S3's
-/// own default and is fine.
+/// The refusal names NO engine version: it is true of every engine since
+/// 0.21.0, and a version in the message would go stale at the next bump.
+/// `VirtualHosted` with NO endpoint is AWS S3's own default and is fine.
 pub fn engine_compatible(loc: &DestinationLocation) -> Result<(), &'static str> {
     if loc.addressing == Addressing::VirtualHosted && loc.endpoint.is_some() {
         return Err(ENGINE_PATHSTYLE_MESSAGE);
@@ -482,7 +473,7 @@ pub fn engine_compatible(loc: &DestinationLocation) -> Result<(), &'static str> 
     Ok(())
 }
 
-/// The ENGINE-PATHSTYLE refusal, shared by the product API
+/// The engine path-style refusal, shared by the product API
 /// (`addressing_unsupported_by_engine`) and the controller
 /// (`AddressingUnsupportedByEngine`). Version-neutral by contract.
 pub const ENGINE_PATHSTYLE_MESSAGE: &str =
@@ -521,7 +512,7 @@ impl DestinationLocation {
     /// describe the route, not the location, and two destinations that differ
     /// only in addressing hold the same objects. This is the value a recovery
     /// point freezes and the one the restore API compares when
-    /// offering destinations for an existing recovery point (§3.12 step 5), so
+    /// offering destinations for an existing recovery point, so
     /// a TLS destination can serve a recovery point written through a
     /// plaintext one at the same bucket, and neither can serve a recovery
     /// point from a different bucket.
@@ -540,7 +531,7 @@ impl DestinationLocation {
     ///
     /// `allow_http` comes from `transport` and from NOTHING else — not from
     /// the addressing style, not from the endpoint scheme, and never from a
-    /// process environment variable (defect SEC-ENVHTTP, D-SEAMS S5).
+    /// process environment variable.
     #[must_use]
     pub fn archive_storage_url(&self) -> StorageUrl {
         StorageUrl::S3 {

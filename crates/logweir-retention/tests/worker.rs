@@ -1,12 +1,6 @@
-//! The retention worker's own rows — review `d3w9` **H6**.
-//!
-//! Before this file, `cargo test -p logweir-retention` ran **zero tests**
-//! against the one executable in this product that deletes archive data: no
-//! `tests/` directory, no `#[cfg(test)]`, and no other crate can link a
-//! `[[bin]]`. The reviewer proved what that costs by flipping
-//! `"--dry-run" => dry_run = true` to `false` — so a preview deletes for real —
-//! and re-running every suite that could observe the file: 41 suites, all
-//! green. `a_dry_run_is_a_dry_run` below is the row that kills it.
+//! The retention worker's own rows: the one executable in this product that
+//! deletes archive data. `a_dry_run_is_a_dry_run` kills a `--dry-run` flipped
+//! to delete for real.
 //!
 //! Everything here drives the shipped [`logweir_retention::admit`] and
 //! [`logweir_retention::execute`]. `admit` is pure: it takes the argv, an
@@ -31,9 +25,7 @@ use logweir_retention::{
 const SCOPE: &str = "kafka-backups/team-a";
 const UID: &str = "16161616-0000-4000-8000-000000000016";
 
-// ===========================================================================
-// Fixtures
-// ===========================================================================
+// Fixtures.
 
 fn line(point: &str, backup: &str, segments: &[&str]) -> PlanLine {
     let manifest = format!("{SCOPE}/{backup}/manifest.json");
@@ -125,9 +117,7 @@ fn dry_argv() -> Vec<&'static str> {
     v
 }
 
-// ===========================================================================
-// Ports
-// ===========================================================================
+// Ports.
 
 #[derive(Default)]
 struct FakeDeleter {
@@ -192,9 +182,7 @@ impl Sleeper for NoSleep {
     fn sleep(&self, _d: Duration) {}
 }
 
-// ===========================================================================
-// The argv
-// ===========================================================================
+// The argv.
 
 /// The subcommand, the contract version and `--plan`, as a table.
 #[test]
@@ -280,9 +268,7 @@ fn every_refusal_is_exit_three() {
     assert_ne!(EXIT_INCOMPLETE, 2);
 }
 
-// ===========================================================================
-// Admission — every exit-3 path, with no port built
-// ===========================================================================
+// Admission: every exit-3 path, with no port built.
 
 fn admit_with(
     argv: &[&str],
@@ -308,9 +294,8 @@ fn a_complete_binding_admits() {
     assert!(admitted.evidence_keys.is_some());
 }
 
-/// Each of the seven required variables, missing in turn, is named. The two
-/// per-run ceilings joined the five on 2026-10-05: an absent ceiling
-/// used to become 50 or 20 000 without a word.
+/// Each of the seven required variables, missing in turn, is named: an absent
+/// ceiling is never replaced by a default.
 #[test]
 fn each_missing_binding_variable_is_named() {
     let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
@@ -368,23 +353,19 @@ fn lines(n: usize) -> Vec<PlanLine> {
         .collect()
 }
 
-/// **FX-10: the per-run ceilings are the Job's own, at values their defaults
-/// cannot imitate.**
-///
-/// The worker's only row used to set exactly `50` and `20000`, which is what
-/// it fell back to, so a worker that never read the environment passed it.
-/// Here the Job says **7** points and **1234** object keys:
+/// **The per-run ceilings are the Job's own, at values their defaults cannot
+/// imitate.** The Job says **7** points and **1234** object keys:
 ///
 /// * the binding and the execution limit carry 7 and 1234;
 /// * a plan of 8 points is refused `OverCap` naming 7, and a plan of 7 is not;
-/// * one point of 1235 object keys is refused `OverCap` naming 1234, and one
-///   of 1234 is not.
+/// * one point of 1235 object keys is refused `OverCap` naming 1234, and one of
+///   1234 is not.
 ///
 /// NEGATIVE CONTROL, in the row: the SAME 8-point and 1235-key plans are
-/// ADMITTED under the old defaults (50 / 20 000). So a worker that ignored the
-/// environment — or read the two names crossed — admits them, and this row
-/// fails. MUTANTS (FX-10 report): `max_deletions_per_run: 50` or
-/// `max_objects_per_run: 20_000` hard-coded in `admit`; the two names swapped.
+/// ADMITTED under the old defaults (50 / 20 000), so a worker that ignored the
+/// environment, or read the two names crossed, fails this row. MUTANTS:
+/// `max_deletions_per_run: 50` or `max_objects_per_run: 20_000` hard-coded in
+/// `admit`; the two names swapped.
 #[test]
 fn the_per_run_ceilings_are_the_jobs_own_at_non_default_values() {
     // The binding, and the limit `execute` stops at.
@@ -466,35 +447,27 @@ fn the_per_run_ceilings_are_the_jobs_own_at_non_default_values() {
     .expect("CONTROL: at the defaults 1235 keys admit, so the refusal above is the 1234's");
 }
 
-/// **FX-10 fix round (review M1): a RAISED ceiling reaches the worker too, at
-/// admission AND at execution.**
-///
-/// [`the_per_run_ceilings_are_the_jobs_own_at_non_default_values`] sets the
-/// ceilings BELOW the old fallbacks (7 < 50, 1234 < 20 000), so a worker that
-/// read the environment and then bounded it by the old default —
-/// `cap(…)?.min(50)`, or a narrower fallback reintroduced later — passed every
-/// row while an administrator's raised `maxDeletionsPerRun` was silently cut to
-/// 50 and the backlog never cleared (a run stopped by its own ceiling is not a
-/// failure, so the status stays healthy). Here the Job says **75** points and
-/// **30 000** object keys, both ABOVE the old 50 / 20 000 and inside the CRD's
-/// 1..500 / 1..200 000:
+/// **A RAISED ceiling reaches the worker too, at admission AND at execution.**
+/// The row above sets the ceilings BELOW the old fallbacks, so a worker that
+/// bounded the environment by the old default (`cap(…)?.min(50)`) would pass it
+/// while an administrator's raised `maxDeletionsPerRun` was silently cut to 50.
+/// Here the Job says **75** points and **30 000** object keys, both above 50 /
+/// 20 000 and inside the CRD's 1..500 / 1..200 000:
 ///
 /// * the binding and the execution limit carry 75 and 30 000;
-/// * a plan of 75 points is admitted and one of 76 is refused `OverCap`
-///   naming 75;
+/// * a plan of 75 points is admitted and one of 76 is refused `OverCap` naming
+///   75;
 /// * one point of 30 000 object keys is admitted and one of 30 001 is refused
 ///   `OverCap` naming 30 000;
 /// * the 30 000-key point RUNS: all 30 000 keys are deleted, manifest first,
-///   and the run exits 0 — so the raised number reaches `execute`'s budget
-///   too, not only admission.
+///   and the run exits 0, so the raised number reaches `execute`'s budget too.
 ///
-/// NEGATIVE CONTROL, in the row: the SAME 75-point and 30 000-key plans are
-/// REFUSED at the old 50 / 20 000, naming those. So the admissions above are
-/// the raised values' doing.
+/// NEGATIVE CONTROL, in the row: the SAME plans are REFUSED at the old 50 / 20
+/// 000, naming those.
 ///
-/// MUTANTS (FX-10 fix round): `cap(…)?.min(50)` / `.min(20_000)` in `admit`
-/// (the review's M3); `max_objects: self.binding.max_objects_per_run.min(20_000)`
-/// in `Admitted::limits` (admission passes, execution stops at 20 000).
+/// MUTANTS: `cap(…)?.min(50)` / `.min(20_000)` in `admit`;
+/// `max_objects: self.binding.max_objects_per_run.min(20_000)` in
+/// `Admitted::limits` (admission passes, execution stops at 20 000).
 #[test]
 fn a_raised_ceiling_reaches_admission_and_execution_above_the_old_defaults() {
     // The binding, and the limit `execute` stops at.
@@ -625,14 +598,11 @@ fn a_raised_ceiling_reaches_admission_and_execution_above_the_old_defaults() {
         .any(|l| l.contains("retention-point=lwp1-wide state=Deleted objects=30000")));
 }
 
-/// **FX-10: a ceiling that is not a whole number of at least 1 is REFUSED —
-/// exit 3, nothing deleted — and never replaced by a default.**
-///
-/// The parse used to be `.and_then(|v| v.parse().ok()).unwrap_or(50)`: it
-/// FAILED OPEN, so `5O` (a letter O), `7.5` or `-1` ran with 50 points and
-/// 20 000 objects. Absent and blank are `BindingIncomplete`
-/// ([`each_missing_binding_variable_is_named`]); everything else is
-/// `CapUnreadable`, naming the variable and the value.
+/// **A ceiling that is not a whole number of at least 1 is REFUSED (exit 3,
+/// nothing deleted) and never replaced by a default**: `5O` (a letter O), `7.5`
+/// or `-1` must not run with 50 points. Absent and blank are
+/// `BindingIncomplete` ([`each_missing_binding_variable_is_named`]); everything
+/// else is `CapUnreadable`, naming the variable and the value.
 ///
 /// MUTANT: restore the `unwrap_or` fallback and every case here admits.
 #[test]
@@ -685,14 +655,13 @@ fn a_ceiling_the_worker_cannot_read_is_refused_never_defaulted() {
 
 /// **The binding variable names are the ones the controller projects.**
 ///
-/// `weirkeeper` writes the enforcement Job's environment from its own
-/// constants (`controllers::retention_policy::env`), this worker reads its own
+/// `weirkeeper` writes the enforcement Job's environment from its own constants
+/// (`controllers::retention_policy::env`), this worker reads its own
 /// (`logweir_retention::env`), and the two crates share no dependency edge on
-/// purpose. Before FX-10 a rename on either side was silent: the ceilings fell
-/// back to their defaults. Now every binding variable is required, so a rename
-/// fails closed at run time — and this row fails before that, reading the
-/// controller's source. `weirkeeper/tests/configured_values.rs` is the same
-/// comparison from the other side.
+/// purpose. Every binding variable is required, so a rename fails closed at run
+/// time, and this row fails before that, reading the controller's source.
+/// `weirkeeper/tests/configured_values.rs` is the same comparison from the
+/// other side.
 ///
 /// MUTANT: rename `MAX_OBJECTS` on either side and this fails naming it.
 #[test]
@@ -869,14 +838,10 @@ fn the_two_credentials_are_read_from_their_own_variables() {
     assert!(printed.contains("access_key_id_len"));
 }
 
-// ===========================================================================
-// Execution
-// ===========================================================================
+// Execution.
 
-/// **The mutant the reviewer planted, killed.** `--dry-run` deletes nothing.
-///
-/// Flip `"--dry-run" => { dry_run = true }` to `false` and this row fails: the
-/// deleter panics on the first call.
+/// **`--dry-run` deletes nothing.** Flip `"--dry-run" => { dry_run = true }`
+/// to `false` and the deleter panics on the first call.
 #[test]
 fn a_dry_run_is_a_dry_run() {
     let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0", "seg-1"])]);
@@ -903,7 +868,7 @@ fn a_dry_run_is_a_dry_run() {
     assert!(result_line(&report, true).contains("dryRun=true"));
 }
 
-/// **M1 through the worker.** A preview over an enumerating plan prints the
+/// **Through the worker.** A preview over an enumerating plan prints the
 /// real object count per point.
 #[test]
 fn a_preview_prints_the_real_object_count() {
@@ -1004,10 +969,10 @@ fn an_incomplete_run_exits_one_and_names_the_code() {
     assert!(result_line(&report, false).contains("failed=1"));
 }
 
-/// Defect OBJECT-LOCK-DELETE-MARKER at the process boundary: on a versioned
+/// A delete marker is not a deletion, at the process boundary: on a versioned
 /// bucket the run issues no delete, exits 1, and the key line the controller
-/// harvests into `status.lastEnforcement.failed[]` names `VersionedBucket` —
-/// the line that used to read `state=Deleted` over a held point's markers.
+/// harvests into `status.lastEnforcement.failed[]` names `VersionedBucket`,
+/// never `state=Deleted`.
 ///
 /// MUTANT: skip the probe in `logweir_reaper::attempt`. `NeverDeletes` panics
 /// on the first delete and this row fails.
@@ -1089,9 +1054,7 @@ fn the_key_lines_are_shaped_as_the_contract_prints_them() {
     );
 }
 
-// ===========================================================================
-// The delete-capable key is used only when it is bound to this policy
-// ===========================================================================
+// The delete-capable key is used only when it is bound to this policy.
 
 /// **An unbound or foreign delete key — or record key — is refused at
 /// admission, before the plan file is even read; its own binding admits.**
@@ -1276,7 +1239,7 @@ fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
     assert!(!stderr.contains("delete-secret") && !stdout.contains("delete-secret"));
 }
 
-/// **FX-15: every refusal is named, by a code from the closed set the
+/// **Every refusal is named, by a code from the closed set the
 /// controller reads, and a refusal about one binding variable names it.**
 /// One case per variant (the reaper's plan refusals each by its own), so the
 /// 22 codes are each reached once and no two variants share a code except the
@@ -1429,7 +1392,7 @@ fn fx15_every_refusal_has_a_closed_code_and_names_its_variable() {
     assert_eq!(all.len(), REFUSAL_CODES.len(), "the codes are distinct");
 }
 
-/// **FX-15: the shipped binary names a ceiling it cannot read, by code and
+/// **The shipped binary names a ceiling it cannot read, by code and
 /// variable, on stdout.** The process half of the row above: the line is
 /// written by `main`, through the one exit-3 helper every refusal takes.
 ///
