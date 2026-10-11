@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::AuthenticationMode;
 use crate::authz::{Capabilities, Role};
 
-// ======================================================================
-// Shared pieces
-// ======================================================================
+// SHARED PIECES.
 
 /// A same-namespace reference by name.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -85,9 +83,7 @@ pub struct HealthStatus {
     pub status: String,
 }
 
-// ======================================================================
-// Session and namespaces
-// ======================================================================
+// SESSION AND NAMESPACES.
 
 /// The authenticated actor.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -152,9 +148,7 @@ pub struct NamespaceListResponse {
     pub items: Vec<NamespaceGrant>,
 }
 
-// ======================================================================
-// Connections (KafkaCluster)
-// ======================================================================
+// CONNECTIONS (KafkaCluster).
 
 /// What a connection is to Logweir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -249,8 +243,8 @@ impl std::fmt::Debug for NewConnectionCredentialRequest {
     }
 }
 
-/// What every write-only credential field serializes as (PROD-01.3 fix round,
-/// review F1). A constant, so a digest over a serialized request says WHICH
+/// What every write-only credential field serializes as. A constant, so a
+/// digest over a serialized request says WHICH
 /// credential fields were entered and nothing about their values: two
 /// requests that differ only in a credential value serialize — and hash —
 /// identically.
@@ -439,9 +433,7 @@ pub struct Connection {
     pub last_test: Option<LastTestView>,
 }
 
-// ======================================================================
-// Schedules (BackupSchedule)
-// ======================================================================
+// SCHEDULES (BackupSchedule).
 
 /// An archive location in a request.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -729,9 +721,7 @@ pub struct Schedule {
     pub status: ScheduleStatusView,
 }
 
-// ======================================================================
-// Operations: the normalized status model (PLAT-14.1 states)
-// ======================================================================
+// OPERATIONS: the normalized status model.
 
 /// The two operation kinds with a status route in this build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
@@ -924,19 +914,13 @@ pub struct Operation {
     /// The status conditions, at most 16.
     pub conditions: Vec<ConditionView>,
     //
-    // THERE IS NO `jobName` HERE, DELIBERATELY. An earlier draft carried the
-    // runner Job's name. PLAT-17.1 exists because "direct CR manipulation
-    // exposes infrastructure details", and D0 gives PLAT-14.1 the final
-    // normalized operation mapping: what "remains visible in bounded form" is
-    // reason, message, exit code, last phase, timestamps and evidence
-    // references. A Job name is on none of those lists.
-    //
-    // Removing it now is the cheap direction. Adding a field later is a MINOR
-    // change to this document; removing one is MAJOR. So the field waits for
-    // the task that owns the ruling instead of being frozen into a versioned
-    // contract by whoever wrote the projection first.
+    // THERE IS NO `jobName` HERE, DELIBERATELY: D0's bounded operation view is
+    // reason, message, exit code, last phase, timestamps and evidence references,
+    // and a Job name is infrastructure detail. Adding a field later is a MINOR
+    // change to this document and removing one is MAJOR, so it stays out until
+    // a ruling puts it in;
     // `no_infrastructure_detail_is_frozen_into_the_operation_contract` in
-    // `tests/status_mapping.rs` is what keeps it out.
+    // `tests/status_mapping.rs` keeps it out.
 }
 
 /// The status summary carried by list items.
@@ -966,9 +950,7 @@ pub struct OperationSummary {
     pub outcome: Option<String>,
 }
 
-// ======================================================================
-// Backups
-// ======================================================================
+// BACKUPS.
 
 /// A backup run.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1168,9 +1150,7 @@ pub struct ObservedAuthView {
     pub username: Option<String>,
 }
 
-// ======================================================================
-// Restores
-// ======================================================================
+// RESTORES.
 
 /// `scratch` (a drill) or `newTopic`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -1586,9 +1566,7 @@ pub struct RestoreTimeBasisView {
     pub not_recorded: Vec<String>,
 }
 
-// ======================================================================
-// Approvals
-// ======================================================================
+// APPROVALS.
 
 /// What an approval is about.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1705,9 +1683,7 @@ pub struct ApprovalPacket {
     pub sidecar_bytes: String,
 }
 
-// ======================================================================
-// Destinations (BackupDestination, PLAT-08)
-// ======================================================================
+// DESTINATIONS (BackupDestination).
 
 /// The object-store provider a destination names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -2272,9 +2248,7 @@ pub struct DestinationResponse {
     pub item: Destination,
 }
 
-// ======================================================================
-// Topic discoveries (TopicDiscovery, PLAT-09.1)
-// ======================================================================
+// TOPIC DISCOVERIES (TopicDiscovery).
 
 /// The lifecycle of a transient check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
@@ -2617,9 +2591,7 @@ pub struct CancelResponse {
     pub already_terminal: bool,
 }
 
-// ======================================================================
-// Preflights (Preflight, PLAT-03)
-// ======================================================================
+// PREFLIGHTS (Preflight).
 
 /// What a preflight is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -3144,9 +3116,7 @@ pub struct DetailPageResponse {
     pub page: Page,
 }
 
-// ======================================================================
-// Check operations (the normalized status of a transient check)
-// ======================================================================
+// CHECK OPERATIONS: the normalized status of a transient check.
 
 /// The two transient check kinds with a status route.
 ///
@@ -3210,9 +3180,7 @@ pub struct CheckOperationResponse {
     pub item: CheckOperation,
 }
 
-// ======================================================================
-// Cadence: presets, previews and the editable schedule policy (D1 §4, §5)
-// ======================================================================
+// CADENCE: presets, previews and the editable schedule policy (D1 §4, §5).
 
 /// The DST marker on one firing (D1 §4.3/§4.4).
 ///
@@ -3592,9 +3560,7 @@ pub struct ActiveRunView {
     pub attempt: i32,
 }
 
-// ======================================================================
-// Manual backups (D1 §8.2)
-// ======================================================================
+// MANUAL BACKUPS (D1 §8.2).
 
 /// The schedule a manual run copies its policy from.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -3710,9 +3676,7 @@ pub struct ManualBackupResponse {
     pub schedule: Option<ScheduleContextView>,
 }
 
-// ======================================================================
-// Envelopes
-// ======================================================================
+// ENVELOPES.
 
 macro_rules! envelopes {
     ($($item:ident => $list:ident, $single:ident;)*) => {$(
@@ -3785,9 +3749,7 @@ pub struct RestoreResponse {
     pub authorization: Option<RestoreRoutingView>,
 }
 
-// ======================================================================
-// PLAT-19.2 — approval policy
-// ======================================================================
+// APPROVAL POLICY.
 
 /// The two approval modes, as the API spells them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]

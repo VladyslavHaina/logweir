@@ -90,7 +90,7 @@ pub enum KeyError {
 
 /// A key file's contents, with its declared version.
 ///
-/// THE BYTES ARE WIPED ON DROP (review finding N-1 of PLAT-17.2 stage 2): a
+/// THE BYTES ARE WIPED ON DROP: a
 /// `Zeroizing` buffer, so a key read at startup and dropped once its subkeys
 /// are derived does not linger in freed memory.
 #[derive(Clone)]

@@ -75,24 +75,24 @@ struct ConfigFile {
     cursor_key_file: Option<PathBuf>,
     #[serde(default)]
     cursor_key: Option<KeyRefFile>,
-    /// PLAT-19.2: the installation's approval-policy document — the SAME
+    /// The installation's approval-policy document -- the SAME
     /// file the controller reads (`LOGWEIR_APPROVAL_POLICY_FILE`).
     #[serde(default)]
     approval_policy_file: Option<PathBuf>,
-    /// PLAT-19.2: the console's `ConsoleConfirmation` private key, PKCS#8
+    /// The console's `ConsoleConfirmation` private key, PKCS#8
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
-    /// PROD-16.1 fix round (review L5): the key file is the one the chart's
-    /// identity hook generates, which may not exist yet when this pod
-    /// starts. Without it, a missing key file is a refusal to start.
+    /// The key file is the one the chart's identity hook generates, which
+    /// may not exist yet when this pod starts. Without it, a missing key file
+    /// is a refusal to start.
     #[serde(default)]
     confirmation_key_managed: bool,
-    /// PROD-16.1: where the installation's fresh-install marker is read — the
+    /// Where the installation's fresh-install marker is read -- the
     /// public identity ConfigMap the chart's identity hook writes.
     #[serde(default)]
     installation_identity: Option<InstallationIdentityFile>,
-    /// P10: the manual-run create ceilings. Absent is the documented
+    /// The manual-run create ceilings. Absent is the documented
     /// defaults; either key may be omitted and takes its own default.
     #[serde(default)]
     rate_limits: Option<RateLimitsFile>,
@@ -339,7 +339,7 @@ pub struct SharedConfig {
     pub roles: RolesConfig,
     /// Proxy ranges whose forwarded headers may be recorded in the transport
     /// log, and whose `X-Forwarded-For` chooses the sign-in rate-limit bucket
-    /// (`crate::http::login_rate_key`, FX-13). Never an identity input.
+    /// (`crate::http::login_rate_key`). Never an identity input.
     pub trusted_proxy_cidrs: Vec<Cidr>,
     /// Whether every request (the two probes excepted) must arrive from a
     /// trusted proxy peer that asserts `X-Forwarded-Proto: https`.
@@ -415,17 +415,17 @@ pub struct Config {
     /// `inCluster` or `kubeconfig-context:<context>`, which name WHERE the
     /// identity comes from without claiming to know it.
     pub kubernetes_principal: String,
-    /// PLAT-19.2: the approval-policy document, when one is configured.
+    /// The approval-policy document, when one is configured.
     /// Absent is every namespace on `legacy-governed-v1`.
     pub approval_policy_file: Option<PathBuf>,
-    /// PLAT-19.2: the console confirmation key file, when one is configured.
+    /// The console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
-    /// PROD-16.1: that file is the identity hook's managed key, which may be
+    /// That file is the identity hook's managed key, which may be
     /// written after this process starts (`confirmationKeyManaged`).
     pub confirmation_key_managed: bool,
-    /// PROD-16.1: where the fresh-install marker is read, when configured.
+    /// Where the fresh-install marker is read, when configured.
     pub installation_identity: Option<crate::approval::InstallationIdentityRef>,
-    /// P10: the manual-run create ceilings, per actor, per namespace, per
+    /// The manual-run create ceilings, per actor, per namespace, per
     /// minute. `rateLimits` in the file; absent is
     /// [`crate::routes::RunRateLimits::default`].
     pub run_rate_limits: crate::routes::RunRateLimits,
@@ -738,12 +738,11 @@ impl Config {
         let public_base_url = parse_public_base_url(&raw_base)?;
         let redirect_uri = format!("{public_base_url}{}", crate::auth::login::CALLBACK_SUFFIX);
 
-        // `allowedHosts` WIDENS THE DNS-REBINDING GUARD, so each entry is
-        // validated as an authority rather than as a line of text: a `Host` a
-        // browser could never send is a typo that silently does nothing, and a
-        // value carrying a scheme, a path or a space is a misunderstanding of
-        // what the field is. `docs/api.md` states the consequence of adding
-        // one. Review finding F-5.
+        // `allowedHosts` WIDENS THE DNS-REBINDING GUARD, so each entry is validated
+        // as an authority rather than as a line of text: a `Host` a browser could
+        // never send is a typo that silently does nothing, and a value carrying a
+        // scheme, a path or a space is a misunderstanding of what the field is.
+        // `docs/api.md` states the consequence of adding one.
         let mut allowed = vec![authority_of(&public_base_url)];
         for extra in file.allowed_hosts.unwrap_or_default() {
             if !is_host_authority(&extra) {
@@ -822,15 +821,14 @@ impl Config {
             trusted_proxy_raw.push(raw);
         }
         // A GATE THAT TRUSTS A WHOLE NETWORK IS A HEADER CHECK. With
-        // `requireTrustedProxy`, a range wider than /16 (IPv4) or /48 (IPv6)
-        // would admit every pod of a typical cluster — which can dial the
-        // console Service directly and send the proxy's header itself — so the
-        // gate would distinguish nothing (review M3). Without the gate a range
-        // keeps its old latitude, but it no longer decides nothing: a peer in it
-        // also chooses the sign-in rate-limit bucket by its `X-Forwarded-For`
-        // (FX-13), so a range wider than the ingress lets a client in it pick
-        // its own bucket or spend another client's. `docs/api.md` and the
-        // chart README say so; the floor stays a property of the gate.
+        // `requireTrustedProxy`, a range wider than /16 (IPv4) or /48 (IPv6) would
+        // admit every pod of a typical cluster -- which can dial the console Service
+        // directly and send the proxy's header itself -- so the gate would
+        // distinguish nothing. Without the gate a range still chooses the sign-in
+        // rate-limit bucket by its `X-Forwarded-For`, so a range wider than the
+        // ingress lets a client in it pick its own bucket or spend another client's;
+        // `docs/api.md` and the chart README say so, and the floor stays a property
+        // of the gate.
         let require_trusted_proxy = file.require_trusted_proxy.unwrap_or(false);
         if require_trusted_proxy {
             if let Some(wide) = trusted_proxy_raw
@@ -923,7 +921,7 @@ impl Config {
     }
 }
 
-/// P10: `rateLimits`, each key defaulting on its own and each bounded to
+/// `rateLimits`, each key defaulting on its own and each bounded to
 /// `1..=`[`crate::routes::MAX_RUN_CREATES_PER_MINUTE`]. Zero is refused rather
 /// than read as "unlimited" or "never": neither is a rate limit, and the one
 /// that would silently switch "Back up now" off is the worse surprise.
@@ -1612,14 +1610,10 @@ mod tests {
     /// **The configuration in `docs/api.md` is a configuration this code
     /// accepts, and its paths mean what the prose says.**
     ///
-    /// REGRESSION REASON (review finding R2). The example used to write
-    /// `kubeconfig: ~/.kube/config`. Nothing here expands `~` — [`resolve`]
-    /// joins any relative path onto the configuration file's own directory — so
-    /// the documented example resolved to `<config-dir>/~/.kube/config`, which
-    /// does not exist, and a first-time reader following the guide verbatim got
-    /// exit 2 and no service. A documented example that cannot start is worse
-    /// than no example, because the reader debugs their cluster instead of the
-    /// line they copied.
+    /// Nothing here expands `~` -- [`resolve`] joins any relative path onto the
+    /// configuration file's own directory -- so a documented `kubeconfig:
+    /// ~/.kube/config` would resolve to `<config-dir>/~/.kube/config` and a
+    /// reader following the guide verbatim would get exit 2 and no service.
     ///
     /// So the block is parsed from the document rather than retyped here: the
     /// two cannot drift.
@@ -1666,7 +1660,7 @@ mod tests {
     /// **The shared-mode configuration in `docs/api.md` is one this code
     /// accepts, and its refusal table is not aspirational.**
     ///
-    /// Same reasoning as the localAdmin example above (review finding R2): a
+    /// Same reasoning as the localAdmin example above: a
     /// documented example that cannot start sends the reader to debug their
     /// cluster instead of the line they copied. The block is parsed out of the
     /// document rather than retyped, so the two cannot drift, and the derived
@@ -1723,15 +1717,15 @@ mod tests {
         // AND THE REFUSALS THE DOCUMENT TABULATES ARE REAL. Each row below
         // changes exactly one line of the accepted example.
         let refusals: [(&str, &str, &str); 15] = [
-            // PLAT-17.2: a trusted-proxy requirement with no range to trust
-            // would refuse every request, so it is refused by name instead.
+            // A trusted-proxy requirement with no range to trust would refuse every
+            // request, so it is refused by name instead.
             (
                 "trustedProxyCidrs: [\"192.0.2.0/24\"]",
                 "trustedProxyCidrs: []",
                 "requireTrustedProxy",
             ),
             // …and one whose range is so wide it trusts every pod on a typical
-            // cluster (or everybody) is not a trusted proxy at all (review M3).
+            // cluster (or everybody) is not a trusted proxy at all.
             (
                 "trustedProxyCidrs: [\"192.0.2.0/24\"]",
                 "trustedProxyCidrs: [\"10.0.0.0/8\"]",
@@ -2214,8 +2208,8 @@ mod tests {
         ));
     }
 
-    /// PROD-16.1 fix round (review L5): `confirmationKeyManaged` marks the
-    /// configured key file as the identity hook's; alone it is refused.
+    /// `confirmationKeyManaged` marks the configured key file as the identity
+    /// hook's; alone it is refused.
     #[test]
     fn the_managed_key_flag_needs_its_key_file() {
         let base = text("127.0.0.1:8484", "http://127.0.0.1:8484");

@@ -1,6 +1,6 @@
-//! `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` — PLAT-16.1 and
-//! PLAT-16.2's read half: what would be removed, what is actually enforcing
-//! it, and whether the plan an administrator approved is still the plan.
+//! `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` -- the read half
+//! of retention: what would be removed, what is actually enforcing it, and
+//! whether the plan an administrator approved is still the plan.
 //!
 //! WHAT IS ENFORCING IS NOT WHAT IS CONFIGURED. `status.enforcement` is
 //! `RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared`, and
@@ -508,7 +508,7 @@ pub fn approved_plan_state(policy: &RetentionPolicy, now: DateTime<Utc>) -> Appr
 }
 
 /// `lastEvaluation.viewIncomplete` as this API publishes it — ONE RULE, the
-/// console's too (FX-22 review L3 and L5): never hide a warning, and never
+/// console's too: never hide a warning, and never
 /// assert a completeness that is not recorded.
 ///
 /// * `true` is published whether or not the accounting is recorded. It says
@@ -544,15 +544,13 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
     let spec = &policy.spec;
     let status = policy.status.as_ref();
     let evaluation = status.and_then(|s| s.last_evaluation.as_ref());
-    // THE ACCOUNTING IS READ ONCE, THROUGH THE CRD'S OWN RULE (FX-22):
-    // `Some` only when the block records the four counts, they add up to
-    // `pointsEvaluated`, and its `kept` list is `keptCount` long (up to
-    // 500, FX-39). Without it this projection publishes no kept count, no
-    // held-back count and NO
-    // `kept` LIST — the list of a controller that did not record the
-    // ceiling's effect holds the held-back points, and a response that passed
-    // it on would be calling them kept. AND IT SAYS SO (review M1):
-    // `lastEvaluation.accounting` is `Recorded` or `NotRecorded` on every
+    // THE ACCOUNTING IS READ ONCE, THROUGH THE CRD'S OWN RULE: `Some` only when
+    // the block records the four counts, they add up to `pointsEvaluated`, and
+    // its `kept` list is `keptCount` long (up to 500). Without it this
+    // projection publishes no kept count, no held-back count and NO `kept` LIST
+    // -- the list of a controller that did not record the ceiling's effect holds
+    // the held-back points, and passing it on would call them kept. AND IT SAYS
+    // SO: `lastEvaluation.accounting` is `Recorded` or `NotRecorded` on every
     // response, so "no `kept` member" is never the only signal.
     let accounting = evaluation.and_then(|e| e.accounting());
     let truncated = evaluation.is_some_and(|e| {

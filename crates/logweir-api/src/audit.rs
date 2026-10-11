@@ -10,8 +10,8 @@
 //!
 //! IT IS AN ATTRIBUTION RECORD, NOT A PROOF. The same sentence is in D0 and it
 //! matters: annotations on a created object and lines on stdout are
-//! correlation. The tamper-evident requester/approver record is the DSSE
-//! document PLAT-19 owns, and the complementary fact that the `logweir-api`
+//! correlation. The tamper-evident requester/approver record is the signed
+//! DSSE authorization document, and the complementary fact that the `logweir-api`
 //! ServiceAccount made the Kubernetes call comes from Kubernetes audit. Nothing
 //! here claims more than "this process believed this".
 //!
@@ -86,7 +86,7 @@ pub struct AuditRecord {
     pub decision: String,
     /// The approval policy identity/digest, when a decision consulted one:
     /// `<policy name>@<snapshot digest>`, or `legacy-governed-v1` for an
-    /// unbound namespace (PLAT-19.2).
+    /// unbound namespace.
     pub policy_digest: String,
     /// The SHA-256 of the idempotency scope. The raw key never appears.
     pub idempotency_key_hash: String,
@@ -121,7 +121,7 @@ pub struct AuditRecord {
     /// The forwarded client address, present ONLY when the immediate peer is
     /// inside a configured trusted-proxy CIDR. Transport logging: no decision
     /// reads this field. The sign-in limiter charges its bucket to the same
-    /// hop, under the same trust check (`crate::http::login_rate_key`, FX-13),
+    /// hop, under the same trust check (`crate::http::login_rate_key`),
     /// and a bucket only ever refuses; no identity, grant or actor comes from
     /// it.
     pub forwarded_for: String,
@@ -230,7 +230,7 @@ impl AuditContext {
         });
     }
 
-    /// Record the approval policy a decision consulted (PLAT-19.2).
+    /// Record the approval policy a decision consulted.
     pub fn set_policy_digest(&self, policy: &str) {
         self.with(|f| f.record.policy_digest = crate::validate::bounded(policy, 160));
     }

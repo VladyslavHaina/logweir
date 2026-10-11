@@ -48,7 +48,6 @@ import { mountProtection, mountProtectionDetail } from "./pages/protection.js";
 import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 
 // The eleven routes, in navigation order. The hash is the whole route.
-//
 const ROUTES = [
   { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail, can: "see its connections", takes: "any role", needs: ["connectionsRead"] },
   { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail, can: "see its saved destinations", takes: "any role", needs: ["destinations"] },

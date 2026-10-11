@@ -1,4 +1,4 @@
-//! PROD-16.2 — **two-person approval in the console**: the request as the
+//! **Two-person approval in the console**: the request as the
 //! second person is shown it, and that person's click.
 //!
 //! A namespace bound to a policy whose `approverSignature` is `Console`
@@ -222,8 +222,8 @@ async fn load_request(
     let binding =
         policy::check_request_binding(doc, &expected_subject(ns, restore), bound, state.now())
             .and_then(|()| {
-                // The subject the request was signed for is the one this Restore
-                // declares (PROD-15.1); the controller holds both to the plan.
+                // The subject the request was signed for is the one this Restore declares;
+                // the controller holds both to the plan.
                 let declared = super::restores::restore_approval_subject(restore);
                 if doc.approval_subject.as_deref() == declared.wire() {
                     Ok(())
@@ -357,7 +357,7 @@ fn capitalised(text: &str) -> String {
 }
 
 /// **WHAT A SECOND PERSON IS SHOWN IS WHAT THEY APPROVE, ALL OF IT, OR
-/// NOTHING IS APPROVABLE** (PROD-16.2, the coordinator's addition 6).
+/// NOTHING IS APPROVABLE**.
 ///
 /// The approval scope of a VERIFIED request: the one function
 /// (`logweir_core::approval_scope::approval_scope`) over the request's signed
@@ -615,8 +615,8 @@ pub async fn request(
     ))
 }
 
-/// **Who, in the audit record, without ambiguity** (PROD-16.2; the
-/// coordinator's addition 5). A principal is text somebody else chose: the
+/// **Who, in the audit record, without ambiguity.** A
+/// principal is text somebody else chose: the
 /// audit record bounds every note (200 bytes) and passes it through
 /// [`crate::audit::redact`], which is right for free text and can shorten or
 /// rewrite a long or URL-shaped identity. So a principal is recorded THREE

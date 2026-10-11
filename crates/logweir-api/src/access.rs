@@ -2,15 +2,13 @@
 //! service answers, who may reach it — and the layer that enforces it before
 //! any handler runs.
 //!
-//! WHY A TABLE AND A LAYER, WHEN EVERY HANDLER ALREADY AUTHORIZES. Until
-//! PLAT-17.2's completion every route body called `routes::authorize` as its
-//! first line, and that was correct for every route that existed. It was a
-//! convention, not a boundary: a route added by another stage that forgot the
-//! line would have answered an authenticated viewer — or, for a route that
-//! took no `Actor` at all, anybody. D0 §"Application role and namespace
-//! matrix" says the namespace is checked BEFORE resource lookup on every
-//! route; this module makes that a property of the router rather than of each
-//! author's memory.
+//! WHY A TABLE AND A LAYER, WHEN EVERY HANDLER ALREADY AUTHORIZES. A first
+//! line calling `routes::authorize` is a convention, not a boundary: a route
+//! added later that forgot it would answer an authenticated viewer -- or, for
+//! a route that took no `Actor` at all, anybody. D0 §"Application role and
+//! namespace matrix" says the namespace is checked BEFORE resource lookup on
+//! every route; this module makes that a property of the router rather than
+//! of each author's memory.
 //!
 //! * [`ROUTES`] declares one [`Access`] per `(method, path)` the router serves,
 //!   public routes included, so "this route is deliberately public" is written
@@ -322,14 +320,14 @@ pub const ROUTES: &[RouteAccess] = &[
         "/api/v1/namespaces/{ns}/restores/{name}",
         ns(&[Action::ReadRestores]),
     ),
-    // PLAT-19.2: a governed approver's countersignature. The handler keeps
-    // its own role check (it decides by the frozen policy's mode as well).
+    // A governed approver's countersignature. The handler keeps its own role
+    // check (it decides by the frozen policy's mode as well).
     route(
         "POST",
         "/api/v1/namespaces/{ns}/restores/{name}/approval",
         ns(&[Action::SubmitApproval]),
     ),
-    // PROD-16.2: two-person approval in the console. The read shows a
+    // Two-person approval in the console. The read shows a
     // request; the POST is the second person's click, and only the Approver
     // role holds `approval.submit` (an Administrator does not).
     route(
@@ -343,8 +341,8 @@ pub const ROUTES: &[RouteAccess] = &[
         ns(&[Action::SubmitApproval]),
     ),
     // -------------------------------------------------------- approvals
-    // PLAT-19.2: the namespace's approval-policy binding, as the console
-    // routes a submission by it. The handler keeps its own role check.
+    // The namespace's approval-policy binding, as the console routes a
+    // submission by it. The handler keeps its own role check.
     route(
         "GET",
         "/api/v1/namespaces/{ns}/approval-policy",

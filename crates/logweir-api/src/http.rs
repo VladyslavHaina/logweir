@@ -51,18 +51,16 @@ use crate::problem::{
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
 
 /// How long [`read_json`] waits for a whole body, from its first read to the
-/// last byte (FX-24b).
+/// last byte.
 ///
 /// THE TRANSPORT'S PROGRESS WINDOW IS NOT ENOUGH ON ITS OWN. `main.rs` fails a
-/// body read that receives less than its floor (32 KiB, FX-24c) in thirty
-/// seconds, but a client that sends just over the floor in every window
-/// never meets it, and a 1 MiB body at that pace would hold its connection
-/// permit for a quarter of an hour. This is the total, and it is twice the
-/// window so each bound keeps its own job: a body that stops, or trickles
-/// below the floor, is ended by the window at thirty seconds, one that keeps
-/// above the floor by this at sixty. Sixty seconds for at most 1 MiB asks for
-/// 17 KiB/s, which any client that means to send the body clears; the
-/// console's own bodies are a few KiB.
+/// body read that receives less than its floor (32 KiB) in thirty seconds,
+/// but a client sending just over the floor in every window never meets it,
+/// and a 1 MiB body at that pace would hold its connection permit for a
+/// quarter of an hour. This total is twice the window, so a body that stops
+/// or trickles below the floor ends at thirty seconds and one above it at
+/// sixty. Sixty seconds for at most 1 MiB asks for 17 KiB/s; the console's
+/// own bodies are a few KiB.
 pub const JSON_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Content-Security-Policy on every response, verbatim from the contract
@@ -121,8 +119,8 @@ fn forwarded_for_hops(headers: &http::HeaderMap) -> Vec<&str> {
 /// address (`203.0.113.5:4711`, `[2001:db8::5]:443`) with its port dropped.
 /// Some proxies append the second form (Azure Application Gateway does); a
 /// hop is written by the proxy that received it, so its form is that proxy's
-/// and choosing it gives the client nothing (FX-13 review L2). Anything else
-/// — `unknown`, a bracketed address with no port, a name — is not an address.
+/// and choosing it gives the client nothing. Anything else -- `unknown`, a
+/// bracketed address with no port, a name -- is not an address.
 fn hop_address(hop: &str) -> Option<IpAddr> {
     hop.parse::<IpAddr>()
         .ok()
@@ -132,8 +130,8 @@ fn hop_address(hop: &str) -> Option<IpAddr> {
 /// THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
 /// address it received from, so everything left of its entry was sent by the
 /// client and may be invented; walking from the right past our own proxies'
-/// addresses finds the first hop none of them vouch for — the client as the
-/// outermost trusted proxy saw it (review L4). A hop that is not an address
+/// addresses finds the first hop none of them vouch for -- the client as the
+/// outermost trusted proxy saw it. A hop that is not an address
 /// ([`hop_address`]) cannot be a trusted proxy, so the walk stops there and
 /// returns it. `None` when there are no hops, or when every hop is a trusted
 /// proxy.
@@ -206,28 +204,29 @@ impl LoginRateKey {
     }
 }
 
-/// The sign-in limiter's key for one request (FX-13).
+/// The sign-in limiter's key for one request.
 ///
 /// THE FORWARDED CLIENT, ONLY FROM A TRUSTED PEER. When `peer` is a trusted
 /// proxy — [`crate::trusted_proxy::TrustedProxies::contains`], the very check
 /// [`entry_point`] makes, so a Service source that is not read yet or is older
 /// than its `MAX_AGE` trusts nobody here either — the key is the rightmost
 /// `X-Forwarded-For` hop that is not itself a trusted proxy. Behind one
-/// ingress that gives every client its own budget, where the peer alone made
-/// one global budget that a single client could spend for everyone.
+/// `X-Forwarded-For` hop that is not itself a trusted proxy, so every client
+/// behind one ingress has its own budget rather than one global budget a
+/// single client could spend for everyone.
 ///
 /// EVERYTHING ELSE IS THE PEER. An untrusted peer's header is never read, so a
 /// forged one cannot move a request out of its own bucket. A trusted peer
 /// whose header is absent, names only trusted proxies (the request began
-/// inside the proxy tier) or ends in a hop that is not an address is
-/// counted against the peer, as every request was before.
+/// inside the proxy tier) or ends in a hop that is not an address is counted
+/// against the peer.
 ///
 /// ONLY `X-Forwarded-For`. Traefik, the supported ingress, deletes a client's
 /// `X-Forwarded-*` and appends the client's socket address, while it copies an
 /// RFC 7239 `Forwarded` header through as the client wrote it; reading
 /// `Forwarded` would let the client choose its bucket.
 ///
-/// A BUCKET, NOT AN IDENTITY (D0, amended 2026-10-07). The address chooses
+/// A BUCKET, NOT AN IDENTITY (D0). The address chooses
 /// which counter is charged, and a counter can only refuse. It is not an
 /// identity, a grant, or an audit actor.
 #[must_use]
@@ -385,12 +384,10 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
 /// that body may be cached. They are dropped with it; every other header a
 /// handler or an inner layer set survives the rendering.
 ///
-/// WHY A DENY LIST AND NOT A KEEP LIST (FX-32). `rerender` once kept `Allow`
-/// and nothing else, so the `Set-Cookie` that `/auth/callback` appends to clear
-/// the login cookie on a refusal never reached the browser, while the module
-/// documentation said it did. A keep list fails the same way for the next
-/// header a handler adds to an error (`WWW-Authenticate` on a 401,
-/// `Connection: close`, a `Location`); a deny list of what genuinely belongs
+/// WHY A DENY LIST AND NOT A KEEP LIST. A keep list drops the next header a
+/// handler adds to an error -- the `Set-Cookie` that `/auth/callback` appends
+/// to clear the login cookie on a refusal, `WWW-Authenticate` on a 401,
+/// `Connection: close`, a `Location`; a deny list of what genuinely belongs
 /// to the old body cannot. The rendered problem sets its own `Content-Type`
 /// (and `Retry-After` when the error carries one), and those win.
 ///
@@ -458,8 +455,7 @@ pub const HOST_EXEMPT_PATHS: [&str; 2] = ["/healthz", "/readyz"];
 /// A kubelet HTTP probe cannot satisfy it. It addresses the Pod directly and
 /// sends `Host: <podIP>:<port>`, an address no administrator configures and no
 /// origin names, so with the guard applied to `/healthz` and `/readyz` a
-/// deployed console would answer both probes 421 and never become ready. That
-/// is a real trap for the stage that packages this service, not a hypothetical.
+/// deployed console would answer both probes 421 and never become ready.
 ///
 /// Exempting them leaks nothing. Neither reads a header, a cookie, a query or a
 /// body; neither consults the authenticator, the authorizer or any actor;
@@ -611,16 +607,13 @@ pub fn entry_point(
 /// Render a transport-boundary refusal AND attribute it.
 ///
 /// THE AUDIT RECORD MUST NAME THE CHECK THAT REFUSED, NOT THE STATUS.
-/// Without this the four refusals below reached `AuditContext::finish` with no
-/// failure code, which substitutes `http_<status>` — so an operator reading the
-/// log saw `http_400` for an impersonation attempt and `http_403` for both a
-/// forged `Origin` and a missing one, and could not tell a cross-origin write
-/// from a bad CSRF token. These are precisely the attack-shaped refusals, and
-/// D0's "Audit attribution" asks the record to keep the real reason. Review
-/// finding F-1.
-///
-/// The response is unchanged; only the record gains the code the body already
-/// carried.
+/// Otherwise `AuditContext::finish` substitutes `http_<status>`, and an
+/// operator would see `http_400` for an impersonation attempt and `http_403`
+/// for both a forged `Origin` and a missing one, unable to tell a
+/// cross-origin write from a bad CSRF token -- precisely the attack-shaped
+/// refusals D0's "Audit attribution" asks the record to keep the real reason
+/// for. The response is unchanged; only the record gains the code the body
+/// already carried.
 fn refuse(req: &Request, error: ApiError) -> Response {
     if let Some(audit) = req.extensions().get::<Arc<AuditContext>>() {
         audit.set_failure(error.code.as_str());
@@ -755,8 +748,8 @@ pub async fn read_json<T: DeserializeOwned>(body: Body, limit: usize) -> Result<
                 ));
             }
             if crate::transport::is_timeout(error.as_ref()) {
-                // The body's progress window (FX-24b; its floor, FX-24c): no
-                // window's worth of bytes arrived in time.
+                // The body's progress window (and its floor): no window's worth of bytes
+                // arrived in time.
                 return Err(ApiError::new(
                     ProblemCode::MalformedRequest,
                     "The request body stopped arriving, or arrived too slowly, before it was \
@@ -873,13 +866,12 @@ mod tests {
         rerender(&original, error, "01TESTREQUESTID")
     }
 
-    /// **FX-32: a problem response keeps the headers its handler set.**
+    /// **A problem response keeps the headers its handler set.**
     ///
-    /// REGRESSION REASON. `rerender` kept `Allow` and nothing else, so the
-    /// callback's login-cookie clear on a refusal was dropped on the way out
-    /// (found by FX-28). Every header below is one a handler or an inner layer
-    /// may put on an error and that means something to the client; the
-    /// assertions fail on the old keep-only-`Allow` body for all but `Allow`.
+    /// Every header below is one a handler or an inner layer may put on an
+    /// error and that means something to the client; a keep-only-`Allow` body
+    /// fails the assertions for all but `Allow` (the callback's login-cookie
+    /// clear on a refusal among them).
     #[test]
     fn a_rerendered_problem_keeps_the_handlers_headers() {
         let mut original = ApiError::new(ProblemCode::Unauthenticated, "x").into_response();
@@ -941,9 +933,9 @@ mod tests {
         );
     }
 
-    /// THE DENY LIST, WRITTEN OUT (FX-32 review, L3): the fifteen headers
-    /// that describe the replaced body or its caching, each with a value an
-    /// old body could have carried. The two rows below read THIS list, never
+    /// THE DENY LIST, WRITTEN OUT: the fifteen headers that describe the
+    /// replaced body or its caching, each with a value an old body could have
+    /// carried. The two rows below read THIS list, never
     /// [`REPLACED_BODY_HEADERS`] alone: a row that loops over the constant it
     /// tests cannot see an entry leave it.
     const OLD_BODY_HEADERS: [(&str, &str); 15] = [
@@ -967,11 +959,10 @@ mod tests {
     /// **The deny list is exactly these fifteen headers: its length and its
     /// membership are both pinned.**
     ///
-    /// REGRESSION REASON (FX-32 review, L3). With `Cache-Control` or
-    /// `Content-Length` deleted from [`REPLACED_BODY_HEADERS`] every row
-    /// stayed green, because the drop row looped over the constant itself. A
-    /// handler's `Cache-Control: public` would then label a problem document
-    /// that can now carry a `Set-Cookie` as cacheable.
+    /// With `Cache-Control` or `Content-Length` deleted from
+    /// [`REPLACED_BODY_HEADERS`], a row that looped over the constant itself
+    /// would stay green, and a handler's `Cache-Control: public` would label a
+    /// problem document that can carry a `Set-Cookie` as cacheable.
     #[test]
     fn the_deny_list_is_exactly_the_fifteen_body_and_cache_headers() {
         let mut listed: Vec<&str> = REPLACED_BODY_HEADERS
@@ -1060,13 +1051,12 @@ mod tests {
     /// **The identity-claiming headers are REMOVED from the map, not merely
     /// left for everyone to ignore.**
     ///
-    /// REGRESSION REASON. A planted mutant that kept reporting the names while
-    /// skipping `headers.remove` SURVIVED the whole suite: every other test
-    /// asserts a consequence (the actor is unchanged, the names are audited),
-    /// and both consequences hold whether or not the header is still on the
-    /// request. The difference only matters for the code that has not been
-    /// written yet — which is exactly the code the stripping exists to protect
-    /// — so it needs a test that looks at the map itself.
+    /// REGRESSION REASON. A mutant that kept reporting the names while skipping
+    /// `headers.remove` passes every test that asserts a consequence (the actor
+    /// is unchanged, the names are audited), because both hold whether or not
+    /// the header is still on the request. The difference matters for code not
+    /// written yet -- exactly what the stripping protects -- so this test looks
+    /// at the map itself.
     #[test]
     fn identity_headers_are_removed_from_the_request_not_just_ignored() {
         let mut headers = http::HeaderMap::new();
@@ -1200,8 +1190,8 @@ mod tests {
             // A malformed hop the CLIENT sent, left of the appended one, is
             // never read.
             &["not-an-address, 203.0.113.50"][..],
-            // A proxy that appends `ip:port` (review L2): the port is dropped,
-            // and a trusted hop with a port is still skipped.
+            // A proxy that appends `ip:port`: the port is dropped, and a trusted hop
+            // with a port is still skipped.
             &["198.51.100.66, 203.0.113.50:4711"][..],
             &["198.51.100.66, 203.0.113.50:4711, 10.42.0.9:80"][..],
         ] {

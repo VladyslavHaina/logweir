@@ -1,4 +1,4 @@
-//! Preflights: operation readiness and restore preflight (PLAT-03).
+//! Preflights: operation readiness and restore preflight.
 //!
 //! # A result is a result ABOUT something
 //!
@@ -6,9 +6,8 @@
 //! objects it resolved — and [`project`] recomputes `applicable` and `stale`
 //! on EVERY read against the caller's current draft. Edit the plan and the
 //! hash changes; choose another target, destination or recovery point and a
-//! referent UID changes; let it sit and it expires. A cached verdict rendered
-//! as current readiness is the defect PLAT-03 exists to remove, so this module
-//! never serves one without saying so.
+//! referent UID changes; let it sit and it expires. A cached verdict is never
+//! served as current readiness without saying so.
 //!
 //! # Ready authorizes nothing
 //!
@@ -96,10 +95,6 @@ pub const DETAILS_KEY: &str = "details.jsonl";
 /// The annotation carrying a result document's own digest.
 pub const SHA256_ANNOTATION: &str = "logweir.dev/result-sha256";
 
-// ======================================================================
-// Projection
-// ======================================================================
-
 fn operation_dto(operation: PreflightOperation) -> PreflightOperationDto {
     match operation {
         PreflightOperation::Backup => PreflightOperationDto::Backup,
@@ -186,21 +181,18 @@ const fn is_terminal(state: PreflightState) -> bool {
 /// The kinds a `Preflight`'s `status.binding.referents[]` can name, and
 /// whether this service can read one.
 ///
-/// ALL NINE ARE READ. The reconciler records `KafkaCluster`,
-/// `BackupDestination`, `Backup`, `Restore`, `Approval`, `BackupSchedule` and
-/// `RecoveryCatalog` (a catalog point's catalog, PLAT-15.2) — namespaced
-/// `ProductResource`s this API already reads — plus two
-/// CLUSTER-SCOPED trust referents: `TrustRoster/default` whenever it exists
-/// (since `4c4d2ed`), and the namespace's governing `TrustPolicy`. Both trust
-/// kinds are compared by uid and generation like every other referent
-/// (PREFLIGHT-TRUSTROSTER-STALE): the roster through
-/// [`crate::kube::KubeAdapter::get_trust_roster`], which reads `default` and
-/// nothing else, and the policy through the existing read-only
-/// `ClusterResource` seal. A kind this build does not know — anything a later
-/// controller adds — is still reported [`StaleReasonKind::Unverifiable`]
-/// rather than quietly skipped, and so is a read that fails: a roster or
-/// policy edit is exactly the kind of change that invalidates a signer check,
-/// and not being able to see one must never read as "unchanged".
+/// ALL NINE ARE READ: the namespaced `KafkaCluster`, `BackupDestination`,
+/// `Backup`, `Restore`, `Approval`, `BackupSchedule` and `RecoveryCatalog`
+/// (a catalog point's catalog), plus two CLUSTER-SCOPED trust referents,
+/// `TrustRoster/default` and the namespace's governing `TrustPolicy`, both
+/// compared by uid and generation like every other referent: the roster
+/// through [`crate::kube::KubeAdapter::get_trust_roster`], which reads
+/// `default` and nothing else, and the policy through the read-only
+/// `ClusterResource` seal. A kind this build does not know -- anything a
+/// later controller adds -- is reported [`StaleReasonKind::Unverifiable`]
+/// rather than skipped, and so is a read that fails: a roster or policy edit
+/// invalidates a signer check, and not being able to see one must never
+/// read as "unchanged".
 pub const REFERENT_KIND_KAFKA_CLUSTER: &str = "KafkaCluster";
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`].
 pub const REFERENT_KIND_DESTINATION: &str = "BackupDestination";
@@ -222,20 +214,16 @@ pub const REFERENT_KIND_RECOVERY_CATALOG: &str = "RecoveryCatalog";
 ///
 /// `logweir_core::check_contract::Referent::generation` is `None` "for a kind
 /// whose generation is not meaningful", and weirkeeper's reconciler records
-/// exactly these three that way: the recovery-point `Backup` and the `Approval`
-/// (both spec-immutable by CEL, so their generation never moves), and a catalog
-/// point's `RecoveryCatalog` (PLAT-15.2). The controller's own
-/// `stale_against_status` compares all three by uid alone too — its current
-/// side records them with no generation either — so the API and the
-/// controller agree, and a catalog recreated under the same name still
-/// differs by uid.
+/// exactly these three that way: the recovery-point `Backup` and the
+/// `Approval` (both spec-immutable by CEL) and a catalog point's
+/// `RecoveryCatalog`. The controller's own `stale_against_status` compares
+/// all three by uid alone too, so the API and the controller agree, and a
+/// catalog recreated under the same name still differs by uid.
 ///
-/// A CLOSED LIST, ON PURPOSE (PLAT-08.2 review L4). Any OTHER kind recorded
-/// without a generation is reported `unverifiable` with
-/// [`BASIS_GENERATION_NOT_RECORDED`], never compared by uid alone: a mutable
-/// kind (`BackupDestination`, `KafkaCluster`, a `TrustPolicy`) whose edits are
-/// silently ignored would read as "unchanged" when nobody compared its
-/// revision.
+/// A CLOSED LIST, ON PURPOSE. Any OTHER kind recorded without a generation is
+/// reported `unverifiable` with [`BASIS_GENERATION_NOT_RECORDED`], never
+/// compared by uid alone: edits to a mutable kind (`BackupDestination`,
+/// `KafkaCluster`, a `TrustPolicy`) must not read as "unchanged".
 pub const UID_BOUND_KINDS: [&str; 3] = [
     REFERENT_KIND_BACKUP,
     REFERENT_KIND_APPROVAL,
@@ -272,24 +260,21 @@ pub const BASIS_NO_BINDING: &str =
 /// `staleBasis` entry for the installation policy: compared, but by the
 /// controller rather than here.
 ///
-/// WHY THIS IS A BASIS LINE AND NOT AN `unverifiable` REASON. The other gaps
-/// are per-request — a read that failed this time, a binding that is missing
-/// from this object — and they mean nobody checked. The policy is different:
-/// the reconciler compares `binding.policyDigest` against
+/// WHY A BASIS LINE AND NOT AN `unverifiable` REASON. The other gaps are
+/// per-request (a read that failed, a missing binding) and mean nobody
+/// checked. The policy IS checked, continuously, by the component that can
+/// see it: the reconciler compares `binding.policyDigest` against
 /// `CheckPolicy::digest()` on every pass and downgrades `result.state` to
-/// `unknown` when it moves, so it IS checked, continuously, by the component
-/// that can see it. Reporting `unverifiable` for it on every response would
-/// make every verdict permanently inapplicable while adding no information a
-/// console could act on — and a field that always says the same thing is a
-/// field that gets ignored, including on the day it means something.
+/// `unknown` when it moves. Reporting `unverifiable` for it on every response
+/// would make every verdict permanently inapplicable and teach consoles to
+/// ignore the field.
 ///
-/// The digest itself is `CheckPolicy::digest()` over the PARSED
-/// `LOGWEIR_POLICY_CONFIGMAP` document (default `weirkeeper-policy`, key
-/// `policy.json`) in the installation namespace. This service reads a
-/// `ConfigMap` only when a check owns it — owner UID, immutability and digest
-/// all verified — and that document is owned by nothing, is mutable, and lives
-/// outside the actor's granted namespaces, so reaching it is a new grant and a
-/// cross-namespace read that D2 W11 owns.
+/// The digest is over the PARSED `LOGWEIR_POLICY_CONFIGMAP` document (default
+/// `weirkeeper-policy`, key `policy.json`) in the installation namespace.
+/// This service reads a `ConfigMap` only when a check owns it (owner UID,
+/// immutability and digest all verified); that document is owned by nothing,
+/// mutable, and outside the actor's granted namespaces, so reading it would
+/// be a new grant and a cross-namespace read.
 pub const COVERED_POLICY_BY_CONTROLLER: &str =
     "policyDigest:byController(the reconciler compares it each pass and downgrades the result)";
 
@@ -331,12 +316,12 @@ pub struct LiveBinding {
 /// Read every referent a check's binding recorded, as it is now.
 ///
 /// THIS IS THE RECOMPUTATION THE CONTROLLER'S CONTRACT ASSIGNS TO THE API.
-/// `status.binding` is written once, before the Job is created; `weirkeeper`'s
-/// preflight reconciler documents that "W12 recomputes that from live objects
-/// on every GET and answers `applicable: false` with named `staleReasons` when
-/// it differs", and `check_contract::inputs_digest` says the same. Every input
-/// is already structured — `referents[]` carries `kind`, `name`, `uid` and
-/// `generation` — so nothing here parses anything.
+/// `status.binding` is written once, before the Job is created, and the API
+/// recomputes it from live objects on every GET, answering `applicable:
+/// false` with named `staleReasons` when it differs (as
+/// `check_contract::inputs_digest` documents). Every input is already
+/// structured -- `referents[]` carries `kind`, `name`, `uid` and `generation`
+/// -- so nothing here parses anything.
 ///
 /// A read that fails is recorded as [`ReferentReading::Unreadable`] and never
 /// as "unchanged": the whole point of this pass is that not knowing must not
@@ -365,16 +350,9 @@ pub async fn read_live_binding(
     }
     LiveBinding {
         readings,
-        // THE POLICY DIGEST IS NOT READABLE HERE, AND THAT IS REPORTED RATHER
-        // THAN ASSUMED. The controller takes it from `CheckPolicy::digest()`
-        // over the parsed `LOGWEIR_POLICY_CONFIGMAP` document (default
-        // `weirkeeper-policy`, key `policy.json`) in the INSTALLATION
-        // namespace. This service reads a `ConfigMap` only when a check owns
-        // it — owner UID, immutability and digest all verified — and the
-        // policy document is owned by nothing, is mutable, and lives outside
-        // the actor's granted namespaces. Reaching it is a new grant and a new
-        // cross-namespace read, which is D2 W11's to make; until then
-        // `policyChanged` is answered `unverifiable`, never "unchanged".
+        // THE POLICY DIGEST IS NOT READABLE HERE, and that is reported rather than
+        // assumed: `policyChanged` is answered `unverifiable`, never "unchanged"
+        // (see [`COVERED_POLICY_BY_CONTROLLER`]).
         policy_digest: None,
     }
 }
@@ -573,14 +551,11 @@ fn staleness(
     // nothing, which is `applicable: true` for a verdict nobody re-checked —
     // so "I did not recompute" is a distinct, explicit input.
     //
-    // EXCEPT THE ONE THING THAT NEEDS NO READ (P14, poc-upgrade-2): whether
-    // the check's own validity has passed. That is the recorded `expiresAt`
-    // against the clock, and a replay that left it out answered an expired
-    // check as merely "not recomputed" -- so a client asking the same question
-    // again after the expiry was handed the old check with nothing in the
-    // answer saying it had lapsed. It is core's rule, not a copy of it: the
-    // same `stale_reasons` over the recorded inputs compared with themselves,
-    // which can only ever report `expired`.
+    // EXCEPT THE ONE THING THAT NEEDS NO READ: whether the check's own validity
+    // has passed. That is the recorded `expiresAt` against the clock, and a
+    // replay must not answer an expired check as merely "not recomputed". It is
+    // core's rule, not a copy of it: the same `stale_reasons` over the recorded
+    // inputs compared with themselves, which can only ever report `expired`.
     let Some(live) = live else {
         let operation = core_operation(object.spec.request.operation);
         let recorded = binding_inputs(
@@ -625,19 +600,12 @@ fn staleness(
                 ));
             }
             ReferentReading::Live { uid, generation } => {
-                // A REFERENT RECORDED WITHOUT A GENERATION IS BOUND BY UID
-                // ALONE — BUT ONLY FOR THE KINDS THE CONTROLLER RECORDS THAT
-                // WAY. `logweir_core::check_contract::Referent::generation`
-                // is `None` "for a kind whose generation is not meaningful" —
-                // the controller records the recovery-point `Backup`, the
-                // `Approval` and a catalog point's `RecoveryCatalog` that way
-                // — so the live side is compared on the same terms. Comparing
-                // a live `Some(n)` against a recorded `None` reported
-                // `referentChanged` for EVERY restore check that names a
-                // recovery point, on every re-read (found by PLAT-08.2's live
-                // journey); a recreated object still differs by uid and is
-                // still reported. Any other kind without a generation is
-                // `unverifiable` (see [`UID_BOUND_KINDS`]).
+                // A REFERENT RECORDED WITHOUT A GENERATION IS BOUND BY UID ALONE -- BUT ONLY
+                // FOR THE KINDS THE CONTROLLER RECORDS THAT WAY (see [`UID_BOUND_KINDS`]), so
+                // the live side is compared on the same terms. Comparing a live `Some(n)`
+                // against a recorded `None` would report `referentChanged` for every restore
+                // check naming a recovery point, on every re-read; a recreated object still
+                // differs by uid. Any other kind without a generation is `unverifiable`.
                 let current_generation = match referent.generation {
                     Some(_) => *generation,
                     None if UID_BOUND_KINDS.contains(&referent.kind.as_str()) => None,
@@ -806,10 +774,6 @@ pub fn project(
     }
 }
 
-// ======================================================================
-// Approver narrowing
-// ======================================================================
-
 /// D0: an approver reads readiness "only when needed for the approval packet".
 ///
 /// An actor whose ONLY binding in this namespace is Approver may read a
@@ -834,10 +798,6 @@ fn narrow_for_approver(
     }
     Ok(())
 }
-
-// ======================================================================
-// Validation
-// ======================================================================
 
 fn check_reference(field: &str, name: &str, errors: &mut Vec<FieldError>) {
     if !validate::is_dns_subdomain(name) {
@@ -1004,9 +964,9 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
                 &mut errors,
             );
         }
-        // PLAT-15.2: a catalog point, named by its catalog and its
-        // content-derived id — and never beside a `Backup` point, because one
-        // check answers `recoveryPoint.state` about ONE point (CRD rule P10).
+        // A catalog point, named by its catalog and its content-derived id -- and
+        // never beside a `Backup` point, because one check answers
+        // `recoveryPoint.state` about ONE point (CRD rule P10).
         if let Some(point) = &restore.catalog_point {
             if restore.recovery_point.is_some() {
                 errors.push(FieldError::new(
@@ -1149,10 +1109,6 @@ async fn validate_legacy_source_for_point(
     }
 }
 
-// ======================================================================
-// Building the stored object
-// ======================================================================
-
 fn local(name: &str) -> LocalRef {
     LocalRef {
         name: name.to_string(),
@@ -1291,10 +1247,6 @@ fn labels_for(request: &CreatePreflightRequest) -> BTreeMap<String, String> {
     }
     labels
 }
-
-// ======================================================================
-// Routes
-// ======================================================================
 
 /// `POST .../preflights`.
 pub async fn create(

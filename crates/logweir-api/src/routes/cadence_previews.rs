@@ -1,4 +1,4 @@
-//! Cadence previews (PLAT-04.2, D1 §4.4): what a cron expression — or a
+//! Cadence previews (D1 §4.4): what a cron expression -- or a
 //! preset — will actually do, in a time zone, before anything is saved.
 //!
 //! COMPUTED IN RUST AND NOWHERE ELSE. The browser never evaluates cron: a
