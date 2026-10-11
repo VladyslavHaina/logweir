@@ -1,88 +1,60 @@
-//! Global Constraint 11's five exit codes as **wire strings**, and the
-//! terminal states that are not an exit code.
+//! The runner's five exit codes as wire strings and condition reasons, and
+//! the terminal states that are not an exit code.
 //!
-//! # Why this module exists at all
+//! The contract: `0` pass · `1` operational, no artifact · `2` a result that is
+//! not a pass, document written and signed · `3` refused by a guard, before
+//! anything ran · `4` signing or lock proof failed, nothing uploaded. It is
+//! implemented once here, so two reconcilers cannot spell one code two ways.
 //!
-//! GC11's contract — `0` pass · `1` operational, no artifact · `2` a result
-//! that is not a pass, document written AND signed · `3` refused by a guard,
-//! before anything ran · `4` signing or lock proof failed, nothing uploaded —
-//! is written out in four places in this corpus (`docs/stability.md`,
-//! `docs/kubernetes.md` §1, `crates/logweir/src/exit.rs`, the `EXIT` printer
-//! column's description) and, until this file, implemented in none of them on
-//! the controller side. A whole exit-code-to-condition table in prose with no
-//! function behind it is how two reconcilers come to spell the same code two
-//! ways.
+//! # Two vocabularies, two functions
 //!
-//! # TWO VOCABULARIES, TWO FUNCTIONS, AND THE FIELD EACH ONE LANDS ON
+//! [`wire_reason_for_exit`] returns the wire strings (`ok`, `operational`,
+//! `drill-not-pass`, `guard-refused`, `signing-or-lock`), which land on
+//! `status.exitReason` and are the spellings `logweir drill`'s own outcome
+//! strings use.
 //!
-//! [`wire_reason_for_exit`] returns GC11's **wire strings** — `ok`,
-//! `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock`. They
-//! land on `Backup.status.exitReason`, they are read by the UI (Task 26) and
-//! by `docs/kubernetes.md`'s exit-code table, and they are the same spellings
-//! `logweir drill`'s own outcome strings use
-//! (`crates/logweir/src/drill/mod.rs:61`'s `drill-not-pass: {0}`) — so a
-//! consumer never has to accept two spellings for one fact.
+//! [`reason_for_exit`] returns the condition `reason`, in CamelCase (`Ok`,
+//! `Operational`, `DrillNotPass`, `GuardRefused`, `SigningOrLock`): a
+//! `metav1.Condition` `reason` must match
+//! `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, which forbids `-`.
+//! `the_condition_reasons_are_valid_metav1_reasons` checks every constant here
+//! against that regex, and `the_two_reason_vocabularies_never_overlap` keeps
+//! the two sets apart: neither vocabulary is used in the other's field.
 //!
-//! [`reason_for_exit`] returns the **condition `reason`**, and it is
-//! CamelCase: `Ok`, `Operational`, `DrillNotPass`, `GuardRefused`,
-//! `SigningOrLock`. A `metav1.Condition`'s `reason` is validated upstream
-//! against `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, **which forbids `-`**,
-//! so a hyphenated reason is a value the API server rejects the day anything
-//! gives this CRD's hand-rolled condition schema the real pattern.
-//! `the_condition_reasons_are_valid_metav1_reasons` iterates every condition
-//! reason constant in this module against that regex.
+//! # The catch-all is the contract
 //!
-//! THE ONE FUNCTION WAS THE DEFECT. Task 17's brief mandated
-//! `reason_for_exit(code)` as the condition `reason`, which put a wire string
-//! in a field whose vocabulary is CamelCase — review finding LOW-2, plan
-//! errata **E5b**. The fix is not to re-spell the wire strings: that would put
-//! `DrillNotPass` on `exitReason` and make it disagree with the drill path and
-//! with the shipped CRD's own field description, which is why the errata says
-//! `exitReason` keeps its own vocabulary. It is to stop using one vocabulary
-//! in the other's field. The two sets never overlap, and
-//! `the_two_reason_vocabularies_never_overlap` asserts it.
-//!
-//! # Why the exit-code functions have a catch-all and why that is not a hole
-//!
-//! A container can terminate with any of 256 codes: `137` for a SIGKILL,
-//! `139` for a segfault, `2` from a shell that could not find the binary. Only
-//! `0..=4` are Logweir's contract, and every other code is, by definition, the
-//! runner failing in a way the contract does not describe — which is
-//! [`REASON_OPERATIONAL`] and never a guess at one of the other four. The
-//! `match` is exhaustive over the contract and the catch-all is reached only
-//! outside it; `every_exit_code_maps_to_its_wire_reason` asserts both halves.
+//! A container can exit with any of 256 codes (`137` for SIGKILL, `139` for a
+//! segfault). Only `0..=4` are Logweir's contract; every other code is the
+//! runner failing in a way the contract does not describe, which is
+//! [`REASON_OPERATIONAL`], never a guess at one of the other four
+//! (`every_exit_code_maps_to_its_wire_reason`).
 
-/// Exit **0** — a pass. The one code the green badge accepts.
+/// Exit **0**: a pass. The one code the green badge accepts.
 pub const REASON_OK: &str = "ok";
 
-/// Exit **1** — an operational error. **No artifact was written.**
+/// Exit **1**: an operational error. No artifact was written.
 ///
-/// Also the reason for a Job that finished with **no exit code at all** (the
-/// crashed-Job case, `controllers::backup::reconcile_backup` step 4): a run
+/// Also the reason for a Job that finished with no exit code at all: a run
 /// whose code is unrecoverable produced no artifact either, and inventing a
-/// code to classify it would be worse than classifying the absence.
+/// code would be worse than classifying the absence.
 pub const REASON_OPERATIONAL: &str = "operational";
 
-/// Exit **2** — a result that is not a pass. **A document WAS written and
-/// signed**, which is what makes this the most valuable result the tool
-/// produces rather than a failure.
+/// Exit **2**: a result that is not a pass. A document was written and
+/// signed, which makes this the most valuable result the tool produces rather
+/// than a failure.
 pub const REASON_DRILL_NOT_PASS: &str = "drill-not-pass";
 
-/// Exit **3** — refused by a guard, before anything ran. The runner prints
-/// `refusal-reason=<TerminalState>` as its final stdout line for this code
-/// (GC11); one of [`TERMINAL_STATES`] is what that line carries.
+/// Exit **3**: refused by a guard, before anything ran. The runner prints
+/// `refusal-reason=<TerminalState>` as its final stdout line, carrying one of
+/// [`TERMINAL_STATES`].
 pub const REASON_GUARD_REFUSED: &str = "guard-refused";
 
-/// Exit **4** — signing or the lock proof failed, and **nothing was
-/// uploaded**.
+/// Exit **4**: signing or the lock proof failed, and nothing was uploaded.
 pub const REASON_SIGNING_OR_LOCK: &str = "signing-or-lock";
 
-/// The `exitReason` wire string for `code` — Global Constraint 11's own
-/// vocabulary.
-///
-/// Exhaustive over `0..=4`; anything else is [`REASON_OPERATIONAL`]. See the
-/// module note for why the catch-all is the contract and not a gap, and for
-/// why this is NOT the condition `reason` — that is [`reason_for_exit`].
+/// The `exitReason` wire string for `code`: exhaustive over `0..=4`, anything
+/// else [`REASON_OPERATIONAL`]. Not the condition `reason`, which is
+/// [`reason_for_exit`].
 #[must_use]
 pub fn wire_reason_for_exit(code: i32) -> &'static str {
     match code {
@@ -97,11 +69,11 @@ pub fn wire_reason_for_exit(code: i32) -> &'static str {
 
 /// Exit **0**'s condition `reason`.
 pub const CONDITION_REASON_OK: &str = "Ok";
-/// **PROD-02.1.** Exit **0**'s `Complete` reason for an EMPTY CAPTURE, set
-/// only beside a passing verification of a receipt whose arms hold and whose
-/// window is empty (`controllers::backup::with_empty_capture`): the source
-/// held no record in any selected partition, so the signed receipt records
-/// none and the run is not a recovery point. Never an operational failure.
+/// Exit **0**'s `Complete` reason for an empty capture, set only beside a
+/// passing verification of a receipt whose arms hold and whose window is empty
+/// (`controllers::backup::with_empty_capture`): the source held no record in
+/// any selected partition, so the run is not a recovery point. Never an
+/// operational failure.
 pub const CONDITION_REASON_EMPTY_CAPTURE: &str = "EmptyCapture";
 /// Exit **1**'s condition `reason`. The crashed-Job case's `exitReason` says
 /// the same thing in the other vocabulary ([`REASON_OPERATIONAL`]).
@@ -110,21 +82,18 @@ pub const CONDITION_REASON_OPERATIONAL: &str = "Operational";
 pub const CONDITION_REASON_DRILL_NOT_PASS: &str = "DrillNotPass";
 /// Exit **3**'s condition `reason`.
 ///
-/// The CONDITION says only "a guard refused"; WHICH guard is
-/// `status.exitReason`, off the runner's own `refusal-reason=` line (or
-/// [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] when that line was absent).
-/// It is also the reason for a refusal this controller makes ITSELF, before any
-/// `POST` — a topic pattern behind Global Constraint 18(c)'s no-wildcard rail.
+/// The condition says only "a guard refused"; which guard is
+/// `status.exitReason`, off the runner's `refusal-reason=` line (or
+/// [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] when it was absent). Also
+/// the reason for a refusal this controller makes itself before any `POST`,
+/// such as a topic pattern on the no-wildcard rail.
 pub const CONDITION_REASON_GUARD_REFUSED: &str = "GuardRefused";
 /// Exit **4**'s condition `reason`.
 pub const CONDITION_REASON_SIGNING_OR_LOCK: &str = "SigningOrLock";
 
-/// The condition `reason` for `code` — **CamelCase**, per errata E5b.
-///
-/// The same partition as [`wire_reason_for_exit`], in the other vocabulary:
-/// exhaustive over `0..=4`, with everything else
-/// [`CONDITION_REASON_OPERATIONAL`], because a container that terminated with
-/// `137` or `139` failed in a way GC11's contract does not describe.
+/// The condition `reason` for `code`, in CamelCase: the same partition as
+/// [`wire_reason_for_exit`] in the other vocabulary, everything outside
+/// `0..=4` [`CONDITION_REASON_OPERATIONAL`].
 #[must_use]
 pub fn reason_for_exit(code: i32) -> &'static str {
     match code {
@@ -139,24 +108,17 @@ pub fn reason_for_exit(code: i32) -> &'static str {
 
 /// The terminal states that are **not** an exit code.
 ///
-/// TWO PRODUCERS, ONE LIST. Five of these are printed by the RUNNER on its
-/// `refusal-reason=` line and are declared in
-/// `logweir_core::guard::TERMINAL_STATES` — `TargetTopicConfigRefused`,
-/// `CredentialNotRenderable`, `PointInTimeByProducerTime` (FX-8),
-/// `PlainWithoutTls` (PROD-01.3), and the
-/// default `GuardRefused` which this list
-/// spells [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] on the controller
-/// side because the controller reaches it for a DIFFERENT observation (the
-/// line was absent or unparseable, not "the message named no state"). The rest
-/// are the controller's own: nothing in a pod log says `PodUnschedulable`,
-/// because a pod that was never scheduled wrote no log at all.
+/// Two producers, one list. Some are printed by the runner on its
+/// `refusal-reason=` line and declared in `logweir_core::guard::TERMINAL_STATES`;
+/// the runner's default `GuardRefused` is spelled
+/// [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] here, because the
+/// controller reaches it for a different observation (the line was absent or
+/// unparseable). The rest are the controller's own: a pod that was never
+/// scheduled wrote no log to say `PodUnschedulable`.
 ///
-/// WHY THE LIST IS HERE AND NOT IN `logweir-core`. `logweir-core` is inside
-/// the pure layer (Global Constraint 1) and knows nothing about pods, Jobs or
-/// scorecards; half of these states are observations only a Kubernetes client
-/// can make. The two lists are not merged and neither is derived from the
-/// other: one names what a refusal MESSAGE can say, this one names what a
-/// `Backup`'s status can say.
+/// Not in `logweir-core`, which is the pure layer and knows nothing of pods or
+/// Jobs. Neither list is derived from the other: one names what a refusal
+/// message can say, this one what a status can say.
 pub const TERMINAL_STATES: &[&str] = &[
     "Expired",
     "WindowNotCovered",
@@ -166,17 +128,17 @@ pub const TERMINAL_STATES: &[&str] = &[
     "PodUnschedulable",
     "TargetTopicConfigRefused",
     "CredentialNotRenderable",
-    // FX-8: the runner's refusal of a time selection by producer time over a
-    // `LogAppendTime` source, read off `refusal-reason=` like the two above.
+    // The runner's refusal of a time selection by producer time over a
+    // `LogAppendTime` source, read off `refusal-reason=`.
     "PointInTimeByProducerTime",
-    // PROD-01.3: SASL/PLAIN without TLS — the resolver's refusal of such a
-    // `KafkaCluster`, and the runner's `refusal-reason=` for such a plan.
+    // SASL/PLAIN without TLS: the resolver's refusal of such a `KafkaCluster`,
+    // and the runner's `refusal-reason=` for such a plan.
     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
-    // PROD-01.3 security follow-up: a projected credential whose binding does
-    // not name the connection the Job was built for, read off `refusal-reason=`.
+    // A projected credential whose binding does not name the connection the
+    // Job was built for, read off `refusal-reason=`.
     TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
-    // PROD-01.1a: an archive holding transaction markers under a plan that
-    // does not allow them, read off `refusal-reason=`.
+    // An archive holding transaction markers under a plan that does not allow
+    // them, read off `refusal-reason=`.
     logweir_core::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
@@ -206,94 +168,63 @@ pub const TERMINAL_STATES: &[&str] = &[
     TERMINAL_STATE_SELECTION_EMPTY,
     TERMINAL_STATE_SELECTION_TOO_LARGE,
     TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
-    // D3 §2.2 — the four states a run can reach WITHOUT AN EXIT CODE because
-    // its runner container never started. They are the `RunnerReady=False`
-    // reasons that cannot get better on their own, and each one is written
-    // only when the matching diagnostic was recorded BEFORE the Job ended;
-    // otherwise `crash_terminal_state`'s existing table is unchanged and the
-    // answer is still `NoExitCode`. `exitCode` stays absent in all four.
+    // The four states a run reaches without an exit code because its runner
+    // container never started: the `RunnerReady=False` reasons that cannot get
+    // better on their own, written only when the matching diagnostic was
+    // recorded before the Job ended (otherwise `NoExitCode`). `exitCode` stays
+    // absent in all four.
     TERMINAL_STATE_VOLUME_MOUNT_FAILED,
     TERMINAL_STATE_CREDENTIAL_REFERENCE_MISSING,
     TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE,
     TERMINAL_STATE_POD_CREATION_FORBIDDEN,
-    // D3 §5.5 step 6, W5's hand-off — DECLARED AND NOT YET PRODUCED. See the
-    // constant's own note for the two runner-side edits that make it
-    // reachable; it is here so the controller does not have to grow a second
-    // reason vocabulary when they land.
+    // Declared and not yet produced (see the constant's note).
     TERMINAL_STATE_POINT_BINDING_MISMATCH,
-    // PLAT-19.2 — the two admission refusals an approval POLICY adds. Both are
-    // properties of two immutable specs and the installation's binding, so a
-    // requeue could never rescue them.
+    // The two admission refusals an approval policy adds. Both are properties
+    // of two immutable specs and the installation's binding, so a requeue
+    // could never rescue them.
     TERMINAL_STATE_APPROVAL_POLICY_MISMATCH,
     TERMINAL_STATE_AUTHORIZATION_EXPIRED,
 ];
 
-/// PLAT-19.2: the Approval a `Restore` names was issued under a different
-/// approval policy, digest or mode than the namespace is bound to NOW — a v1
-/// approval under an explicit binding, a v2 document in an unbound namespace,
-/// or a document whose policy the installation has since replaced (D0: "a
-/// binding/policy mismatch requires re-confirmation/re-approval"). THE
-/// DOWNGRADE REFUSAL: an ordinary confirmation presented for a Restore in a
-/// governed namespace ends here with no Job.
+/// The Approval a `Restore` names was issued under a different approval
+/// policy, digest or mode than the namespace is bound to now: a v1 approval
+/// under an explicit binding, a v2 document in an unbound namespace, or a
+/// document whose policy has since been replaced. The downgrade refusal: an
+/// ordinary confirmation presented in a governed namespace ends here with no
+/// Job.
 pub const TERMINAL_STATE_APPROVAL_POLICY_MISMATCH: &str = "ApprovalPolicyMismatch";
 
-/// PLAT-19.2: the authorization document v2 an Approval carries expired
-/// before this Restore was admitted. Both specs are immutable, so the only way
-/// forward is a new Restore and a new confirmation.
+/// The authorization document v2 an Approval carries expired before this
+/// Restore was admitted. Both specs are immutable, so the only way forward is a
+/// new Restore and a new confirmation.
 pub const TERMINAL_STATE_AUTHORIZATION_EXPIRED: &str = "AuthorizationExpired";
 
-// ===========================================================================
-// D3 §2.2 — the `RunnerReady` condition, and the states a run reaches when
-// its runner container never starts
-// ===========================================================================
-
-/// D3 §5.5 step 6: the archive holds a recovery point whose receipt is not the
-/// one the approver signed a binding to — **W5's hand-off**, review finding F6.
+/// The archive holds a recovery point whose receipt is not the one the
+/// approver signed a binding to.
 ///
-/// # What it means
-///
-/// Execution contract v2 binds a `Restore` to a specific recovery point
+/// Execution contract v2 binds a `Restore` to a recovery point
 /// (`source.point{point_id, receipt_key, receipt_sha256, manifest_sha256}`)
-/// inside the plan bytes the approval's signature covers. The runner
-/// re-verifies that binding against the bytes actually in the bucket before
-/// any data-plane work and refuses with exit 3 when they disagree. So this
-/// state means the archive changed under an approved restore — the one shape
-/// that is a tampering signal and not a configuration mistake, and the one an
-/// operator must never have to tell apart from an ordinary guard refusal by
-/// reading a pod log.
+/// inside the approved plan bytes; the runner re-verifies it against the bucket
+/// before any data-plane work and refuses with exit 3. So this state means the
+/// archive changed under an approved restore: a tampering signal, not a
+/// configuration mistake, which an operator must not have to find in a pod log.
 ///
-/// # It is declared here and NOT YET PRODUCED, and that is the hand-off
-///
-/// `crates/logweir/src/drill/binding.rs` says in so many words that
-/// `logweir_core::guard::TERMINAL_STATES` "is a closed list owned elsewhere …
-/// until that list grows (it is the status worker's to extend) the
-/// refusal classifies as the general `GuardRefused`". `logweir-core` is not in
-/// this worker's D3 §14 ownership row, so the controller half lands here and
-/// the runner half is recorded as an explicit hand-off rather than reached for:
-///
-/// 1. add `PointBindingMismatch` (and D3 §4.3's `RehearsalScopeViolation`) to
-///    `logweir_core::guard::TERMINAL_STATES`;
-/// 2. prefix `binding.rs`'s two refusal messages with `<State>: `, which is
-///    what `guard::terminal_state` matches on.
-///
-/// Until both land, `refusal_state` reads `GuardRefused` off the log and this
-/// constant is never written. Declaring it now is what makes the controller
-/// side ready and keeps the `metav1` reason vocabulary in one place; it is not
-/// a claim that the state is reachable today.
+/// Declared and not yet produced: the runner reports the refusal as
+/// `GuardRefused` until `PointBindingMismatch` joins
+/// `logweir_core::guard::TERMINAL_STATES` and the runner's binding refusals
+/// open with `<State>: ` (what `guard::terminal_state` matches). Declaring it
+/// keeps the `metav1` reason vocabulary in one place.
 pub const TERMINAL_STATE_POINT_BINDING_MISMATCH: &str = "PointBindingMismatch";
 
 /// The condition carrying whether the one runner pod's `runner` container has
-/// started — D3 §2.2, PLAT-14.1.
+/// started.
 ///
-/// `False` WHILE THE CONTAINER CANNOT START, `True` once
-/// `containerStatuses[name=runner].state.running|terminated` has been seen.
-/// It is the answer to "why has nothing happened for four minutes", which
-/// `phase: Running` could never give: a `Backup` whose pod sits in
-/// `ImagePullBackOff` is `Running` by every existing field on the object.
-///
-/// EVERY TERMINAL BUILDER CARRIES IT FORWARD, beside
-/// [`CONDITION_VERIFIED`]: a JSON merge patch REPLACES `status.conditions`, so
-/// a builder that emits one and not the other deletes the one it left out.
+/// `False` while the container cannot start, `True` once
+/// `containerStatuses[name=runner].state.running|terminated` has been seen: the
+/// answer to "why has nothing happened for four minutes" that `phase: Running`
+/// cannot give (a pod in `ImagePullBackOff` is `Running` by every other
+/// field). Every terminal builder carries it forward beside
+/// [`CONDITION_VERIFIED`], because a merge patch replaces `status.conditions`.
 pub const CONDITION_RUNNER_READY: &str = "RunnerReady";
 
 /// [`CONDITION_RUNNER_READY`] `True`: the container has been seen running or
@@ -303,194 +234,149 @@ pub const REASON_RUNNER_STARTED: &str = "RunnerStarted";
 /// [`CONDITION_RUNNER_READY`] `False`: there is no pod yet, or there is one
 /// and nothing has said why its container has not started.
 ///
-/// **NOT A TERMINAL STATE, AND THAT IS THE ASSERTION.** "Nothing has happened
-/// yet" is the one answer that can never be a verdict about a run; a
-/// fail-fast on it would cancel every Job created in a busy cluster.
+/// Not a terminal state: "nothing has happened yet" is never a verdict about a
+/// run, and a fail-fast on it would cancel every Job in a busy cluster.
 pub const REASON_WAITING_FOR_POD: &str = "WaitingForPod";
 
-/// A volume the runner pod declares did not mount — D3 §2.2.
+/// A volume the runner pod declares did not mount.
 ///
-/// Both a [`CONDITION_RUNNER_READY`] reason and, after `failFastSeconds` of
-/// it, a terminal state. The DIAGNOSTIC keeps the more specific code
-/// (`weirkeeper::diagnostics::Code::SigningKeyMissing` for the signing volume,
-/// `VolumeMountFailed` for any other) and names the volume in its message; a
-/// `metav1` condition reason is a closed label other software matches on, so
-/// the parameters travel in the diagnostic and never in the reason.
+/// Both a [`CONDITION_RUNNER_READY`] reason and, after `failFastSeconds`, a
+/// terminal state. The diagnostic keeps the more specific code
+/// (`weirkeeper::diagnostics::Code::SigningKeyMissing` for the signing volume)
+/// and names the volume; a condition reason is a closed label other software
+/// matches on, so parameters travel in the diagnostic, never in the reason.
 pub const TERMINAL_STATE_VOLUME_MOUNT_FAILED: &str = "VolumeMountFailed";
 
-/// A Secret or ConfigMap the pod's configuration names is not there — D3
-/// §2.2. The diagnostic distinguishes "no Secret", "no key in the Secret" and
-/// "no trust bundle"; the condition reason is their class.
+/// A Secret or ConfigMap the pod's configuration names is not there. The
+/// diagnostic distinguishes "no Secret", "no key in the Secret" and "no trust
+/// bundle"; the condition reason is their class.
 ///
-/// **NOT [`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`]**, which is the
-/// controller refusing to RENDER a credential into a Job it has not created
-/// yet. This one is the kubelet refusing to start a container in a Job that
-/// exists.
+/// Not [`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`], which is the controller
+/// refusing to render a credential into a Job it has not created; this is the
+/// kubelet refusing to start a container in a Job that exists.
 pub const TERMINAL_STATE_CREDENTIAL_REFERENCE_MISSING: &str = "CredentialReferenceMissing";
 
 /// The runner image could not be pulled, is not present under a `Never` pull
-/// policy, or is not a valid reference — D3 §2.2.
+/// policy, or is not a valid reference.
 pub const TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE: &str = "RunnerImageUnavailable";
 
 /// The Job controller could not create the pod at all: a missing
 /// ServiceAccount, a `ResourceQuota`, a PodSecurity level or an admission
-/// webhook — D3 §2.2.
+/// webhook.
 pub const TERMINAL_STATE_POD_CREATION_FORBIDDEN: &str = "PodCreationForbidden";
 
 /// The typed `Backup.spec` cannot produce a runner execution: `triggeredBy` is
 /// not `manual` or `schedule`, a `schedule` trigger lacks the complete
-/// `BackupSchedule` controller identity (owner reference, `scheduleRef`,
-/// `slot` and the deterministic object name), a `manual` Backup names a
-/// schedule `slot`, or `deadlineSeconds` is not positive — PLAT-06.1.
+/// `BackupSchedule` identity (`scheduleRef`, `slot` and the deterministic object
+/// name), a `manual` Backup names a schedule `slot`, or `deadlineSeconds` is
+/// not positive. For a `Restore`: `spec.runnerResources` asks for requests or
+/// limits the controller will not apply ([`crate::runner_resources::validate`]).
 ///
-/// TERMINAL, because `spec` is CEL-immutable and the run identity is derived
-/// from it and from server-generated metadata, never from an annotation. The
-/// condition message names the field.
-///
-/// FX-2 gave it a `Restore` meaning, the same one: `spec.runnerResources`
-/// asks for requests or limits the controller will not apply
-/// ([`crate::runner_resources::validate`]), so the spec cannot produce a
-/// runnable Job. Refused before any read or `POST`, naming every field.
+/// Terminal, because `spec` is CEL-immutable and the run identity is derived
+/// from it and server metadata, never an annotation. Refused before any read or
+/// `POST`; the message names every field.
 pub const TERMINAL_STATE_EXECUTION_SPEC_INVALID: &str = "ExecutionSpecInvalid";
 
-/// A `KafkaCluster`'s settings contradict each other or name an unusable
-/// value — PLAT-07.1, [`crate::connection::resolve`].
-///
-/// `plaintext` with `tls: true` (TLS without SASL, which contract v1 does not
-/// dial rather than dial without TLS), `auth.tlsCa` with `tls: false`, a CA
-/// naming both or neither source, or a bootstrap entry no client can dial.
-/// Refused before any Job, ConfigMap or plan exists. Terminal for a `Backup` or
-/// `Restore` (their `spec` and the referent's are immutable); on the
-/// `KafkaCluster` itself it is re-evaluated on every reconcile, so a controller
+/// A `KafkaCluster`'s settings contradict each other or name an unusable value
+/// ([`crate::connection::resolve`]): `plaintext` with `tls: true`,
+/// `auth.tlsCa` with `tls: false`, a CA naming both or neither source, or a
+/// bootstrap entry no client can dial. Refused before any Job, ConfigMap or
+/// plan exists. Terminal for a `Backup` or `Restore` (immutable specs); on the
+/// `KafkaCluster` itself it is re-evaluated every reconcile, so a controller
 /// upgrade that understands the object clears it without an edit.
 pub const TERMINAL_STATE_CONNECTION_CONFIG_INVALID: &str = "ConnectionConfigInvalid";
 
 /// A credential or CA reference is missing a required part or names something
-/// the kubelet could never resolve — an empty or non-DNS-1123 object name, or a
-/// data key outside `[-._a-zA-Z0-9]+`. PLAT-07.1.
+/// the kubelet could never resolve: an empty or non-DNS-1123 object name, or a
+/// data key outside `[-._a-zA-Z0-9]+`.
 ///
-/// WHAT IT CANNOT SAY: that the named Secret or ConfigMap EXISTS, or holds the
-/// key. The controller holds no read on Secrets (spec §9) and checks neither
-/// kind, so a well-formed reference to a missing object is still a pod that
-/// cannot start; PLAT-03.1's readiness check is where that becomes a named
-/// prerequisite.
+/// It cannot say that the named Secret or ConfigMap exists or holds the key:
+/// the controller reads neither kind, so a well-formed reference to a missing
+/// object is still a pod that cannot start; the readiness check names that.
 pub const TERMINAL_STATE_CONNECTION_REFERENCE_INVALID: &str = "ConnectionReferenceInvalid";
 
-/// The object carries a connection field this controller does not implement —
-/// the CRD installed is newer than the controller (a rollback, or a CRD
-/// applied ahead of its controller). PLAT-07.1.
-///
-/// Refused rather than resolved without the field, because a connection built
-/// without a setting its author asked for is exactly the silent downgrade a
-/// rollback must not perform. The message names every such field.
+/// The object carries a connection field this controller does not implement:
+/// the installed CRD is newer than the controller. Refused rather than
+/// resolved without the field, which would be a silent downgrade. The message
+/// names every such field.
 pub const TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED: &str = "ConnectionFieldUnsupported";
 
 /// A `Restore`'s approved plan names a different target than the saved
-/// connection its `spec.target.clusterRef` resolves to — bootstrap servers,
-/// auth mode, username or TLS. PLAT-07.1.
+/// connection its `spec.target.clusterRef` resolves to: bootstrap servers,
+/// auth mode, username or TLS.
 ///
-/// The runner dials the PLAN's address with the CONNECTION's credential and CA,
-/// so a mismatch is a credential sent somewhere the saved connection does not
-/// name, or a TLS connection dialled without TLS. Terminal: both `spec`s are
-/// immutable and the plan is approved bytes, so the fix is a new plan built
-/// from the saved connection, and a new approval.
+/// The runner dials the plan's address with the connection's credential and
+/// CA, so a mismatch is a credential sent somewhere the connection does not
+/// name, or TLS dialled without TLS. Terminal: the fix is a new plan from the
+/// saved connection, and a new approval.
 pub const TERMINAL_STATE_CONNECTION_PLAN_MISMATCH: &str = "ConnectionPlanMismatch";
 
-/// **PROD-01.3.** A `KafkaCluster` (or a plan) whose auth mode is `plain`
-/// (SASL/PLAIN) without `tls: true`. PLAIN sends the password itself, so the
-/// connection is refused before any Job exists rather than dialled in the
-/// clear. SHARED WITH THE RUNNER'S OWN LIST (`logweir_core::guard::
-/// TERMINAL_STATE_PLAIN_WITHOUT_TLS`, the same string), like
-/// [`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`]. The CRD's admission rule
-/// refuses the same shape first; this is what an object admitted by an older
-/// CRD meets.
+/// A `KafkaCluster` (or plan) whose auth mode is `plain` without `tls: true`:
+/// PLAIN sends the password itself, so it is refused before any Job exists.
+/// The same string as the runner's own list
+/// (`logweir_core::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS`). The CRD refuses
+/// the same shape first; this is what an object admitted by an older CRD
+/// meets.
 pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = logweir_core::connection::PLAIN_WITHOUT_TLS;
 
-/// **PROD-01.3 security follow-up.** The runner refused the credential the
-/// Job projected because the Secret's `logweir-binding` is absent or names
-/// another connection or endpoint (`logweir_core::connection::
-/// CredentialBindingRefusal`) — the guard that stops a `KafkaCluster` naming
-/// another connection's Secret from turning Logweir into the deputy that
-/// presents it to a broker of its author's choosing. Nothing was dialled.
-/// SHARED WITH THE RUNNER'S OWN LIST, the same string.
+/// The runner refused the projected credential because the Secret's
+/// `logweir-binding` is absent or names another connection or endpoint
+/// (`logweir_core::connection::CredentialBindingRefusal`): a `KafkaCluster`
+/// naming another connection's Secret cannot make Logweir present it to a
+/// broker of its author's choosing. Nothing was dialled. The same string as
+/// the runner's own list.
 pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
     logweir_core::connection::CREDENTIAL_BINDING_MISMATCH;
 
 /// A `scramSha512` `KafkaCluster` carries no `auth.username`, so the plan
 /// document cannot name the identity the run will present.
 ///
-/// SHARED WITH THE RUNNER'S OWN LIST ON PURPOSE. `logweir_core::guard`'s
-/// `TERMINAL_STATES` declares this state for the runner's
-/// `refusal-reason=` line; the controller reaches the same FACT one step
-/// earlier — spec §4's "the approval binds the identity, not just the
-/// address" is unsatisfiable with no identity to bind, and rendering
-/// `sasl_username: ""` would produce a run that authenticates as nobody and a
-/// receipt that says so.
+/// The same state as the runner's own list, reached one step earlier: the
+/// approval binds the identity, not just the address, and rendering
+/// `sasl_username: ""` would produce a run that authenticates as nobody.
 pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRenderable";
 
-/// `spec.approvalRef` names nothing at all — the `Restore` half, Task 20.
+/// `spec.approvalRef` names nothing at all.
 ///
-/// A DIFFERENT FACT FROM [`REASON_APPROVAL_NOT_VERIFIED`], AND THE SPLIT IS
-/// THE WHOLE POINT. This one is "you did not ask for authorisation": the ref's
-/// name is empty, `spec` is sealed by a CEL rule, and no `Approval` anyone
-/// creates can ever bind to this object — so it is TERMINAL. An `Approval`
-/// that has simply not arrived yet, or has arrived and is not `Verified=True`,
-/// is the other one and is a 30-second HOLD (interface **I19**). Reporting
-/// both under one name is how an operator comes to wait for an approval that
-/// will never be looked for.
+/// Not [`REASON_APPROVAL_NOT_VERIFIED`]: "you did not ask for authorisation".
+/// The ref's name is empty and `spec` is sealed, so no `Approval` can ever bind
+/// and it is terminal; an `Approval` not yet arrived or not yet verified is a
+/// 30-second hold (interface **I19**). One name for both would leave an
+/// operator waiting for an approval that will never be looked for.
 pub const TERMINAL_STATE_APPROVAL_NOT_RECEIVED: &str = "ApprovalNotReceived";
 
 /// `sha256_prefixed(Restore.spec.planBytes)` is not the `plan_hash` inside the
-/// approval's own signed bytes — Task 20, interface **I18**.
+/// approval's own signed bytes (interface **I18**).
 ///
-/// TERMINAL. The approval authorises bytes; these are different bytes; and
-/// both `spec`s are immutable, so re-approving the exact plan is the only way
-/// forward. The hash is recomputed at Job-creation time and read from inside
-/// `Approval.spec.approvalBytes` — never from either object's `status`, which
-/// is a controller-written cache nobody signed.
-///
-/// THE SAME SPELLING AS [`crate::controllers::approval::ApprovalRefusal`]'s
-/// OWN `PlanHashMismatch`, ON PURPOSE. The `Approval` reconciler reaches the
-/// same fact from the other side — it hashes the referent's bytes while
-/// verifying the signature — and two halves of one refusal reported under two
-/// names is how an operator comes to think they are two problems.
+/// Terminal: the approval authorises other bytes and both specs are immutable,
+/// so re-approving the exact plan is the only way forward. The hash is read
+/// from inside `Approval.spec.approvalBytes`, never from a `status`. The same
+/// spelling as [`crate::controllers::approval::ApprovalRefusal`]'s own, because
+/// it is one fact reached from two sides.
 pub const TERMINAL_STATE_PLAN_HASH_MISMATCH: &str = "PlanHashMismatch";
 
-/// `Restore.spec.target.clusterRef` resolves to nothing, or to a
-/// `KafkaCluster` whose `status.reachable` is not `Some(true)` — Task 20.
+/// `Restore.spec.target.clusterRef` resolves to nothing, or to a `KafkaCluster`
+/// whose `status.reachable` is not `Some(true)`.
 ///
-/// TERMINAL BY CONTROLLER RULING, and the reasoning is that an approval binds
-/// a plan to a target: a target that was not visible at admission time is a
-/// run an operator should re-authorise rather than one that starts by itself
-/// hours later. `status.reachable` is written by Task 15c's probe, so the
-/// value this reads is the control plane's own last look and not a dial this
-/// reconciler made.
+/// Terminal by ruling: an approval binds a plan to a target, and a target not
+/// visible at admission should be re-authorised rather than start by itself
+/// hours later. `status.reachable` is the connection probe's last look, not a
+/// dial this reconciler made.
 pub const TERMINAL_STATE_CLUSTER_NOT_REACHABLE: &str = "ClusterNotReachable";
 
-/// Exit **2** whose scorecard `outcome` names an archive-coverage failure —
-/// Task 20.
-///
-/// The run happened, was measured, and a scorecard WAS written and signed
-/// (Global Constraint 11's code 2); what it says is that the archive did not
-/// cover the window the plan asked for.
-/// [`crate::controllers::restore::OUTCOME_FAIL_COVERAGE`] carries the
-/// measurement about which `outcome` values the frozen 1.0.0 schema actually
-/// admits.
+/// Exit **2** whose scorecard `outcome` names an archive-coverage failure: a
+/// signed scorecard says the archive did not cover the requested window. See
+/// [`crate::controllers::restore::OUTCOME_FAIL_COVERAGE`] for which `outcome`
+/// values the frozen 1.0.0 schema admits.
 pub const TERMINAL_STATE_WINDOW_NOT_COVERED: &str = "WindowNotCovered";
 
-/// The target topic's own configuration refused the restore — guard **G-TS**,
-/// printed by the RUNNER on its `refusal-reason=` line.
-///
-/// The controller MAPS it and produces no part of it (interface **I9**): Task
-/// 3 owns `guard.rs`'s refusal printer and Task 8 the target-topic preflight.
-/// Declared here because `Restore.status.exitReason` is where it lands.
+/// The target topic's own configuration refused the restore (guard **G-TS**),
+/// printed by the runner on its `refusal-reason=` line. The controller maps it
+/// and produces no part of it (interface **I9**).
 pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
 
-/// The archive exists without its detached sidecar — spec §3.2.
-///
-/// The controller records it. It does **not** delete, does **not** repair and
-/// does **not** render the orphan as a result
-/// (`design-operator.md:527-535`).
+/// The archive exists without its detached sidecar. The controller records
+/// it; it does not delete, repair, or render the orphan as a result.
 pub const TERMINAL_STATE_ORPHANED_SCORECARD: &str = "OrphanedScorecard";
 
 /// The pod carried a `DisruptionTarget` condition: the node went away
@@ -504,71 +390,51 @@ pub const TERMINAL_STATE_POD_UNSCHEDULABLE: &str = "PodUnschedulable";
 /// The Job finished and no container named `runner` reported a terminated
 /// state, so the exit code is unrecoverable.
 ///
-/// **A finished Job with zero pods is this state**, not a crash: the pod was
+/// A finished Job with zero pods is this state, not a crash: the pod was
 /// garbage-collected (or never created) and the code went with it.
 pub const TERMINAL_STATE_NO_EXIT_CODE: &str = "NoExitCode";
 
 /// More than one pod claimed this run's Job as its controller owner, so none
-/// of them was read — D-SEAMS **S6**, defect `SEC-PODLOG`, review finding R1.
+/// was read (seam **S6**).
 ///
-/// **NOT A SUB-CASE OF [`TERMINAL_STATE_NO_EXIT_CODE`].** "No pod reported"
-/// is an accident — garbage collection, an eviction, a node that went away.
-/// This is a namespace in which two objects claim one identity, which a Job
-/// pinned to `backoffLimit: 0` and `restartPolicy: Never` cannot produce, and
-/// an `ownerReferences` entry is ordinary metadata written by whoever created
-/// the pod. So at least one claimant was minted by a principal that read the
-/// Job's UID, and the controller cannot tell which. It reads none of them and
-/// says so under its own name, because an operator seeing `NoExitCode` would
-/// go looking for a deleted pod and find two.
+/// Not a sub-case of [`TERMINAL_STATE_NO_EXIT_CODE`]: a Job with
+/// `backoffLimit: 0` and `restartPolicy: Never` cannot produce two pods, and an
+/// `ownerReferences` entry is ordinary metadata, so a principal that read the
+/// Job's UID minted at least one claimant. The controller reads none and says
+/// so by name; `NoExitCode` would send an operator looking for a deleted pod.
 ///
-/// Deliberately **not** in [`crate::cadence::RETRYABLE_TERMINAL_STATES`]: a
-/// retry re-runs the same Job into the same namespace and the same principal
-/// plants the same second claimant.
+/// Not in [`crate::cadence::RETRYABLE_TERMINAL_STATES`]: a retry would meet the
+/// same planted claimant.
 pub const TERMINAL_STATE_POD_OWNERSHIP_CONTESTED: &str = "PodOwnershipContested";
 
 /// Exit 3, and the pod log carried no parseable `refusal-reason=` line.
 pub const TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON: &str = "GuardRefusedUnknownReason";
 
-/// The object's own name is longer than [`crate::slot::NAME_LIMIT`], so no
-/// Job it created could ever be found again.
+/// The object's own name is longer than [`crate::slot::NAME_LIMIT`], so no Job
+/// it created could ever be found again.
 ///
-/// REVIEW FINDING **MEDIUM-1**, plan errata **E5d**. Measured: the API server
-/// refuses the Job (`spec.template.labels: Invalid value: … must be no more
-/// than 63 characters`), the reconciler turned that into a requeue, and the
-/// `Backup` sat with `status: null` — no phase, no condition, an empty `PHASE`
-/// column — **forever**. Task 18 guards the SCHEDULED path at name-minting
-/// time with this same spelling ([`crate::slot::SlotError::NameTooLong`]);
-/// Task 26's create page and any hand-written `Backup` reach the reconciler
-/// directly, and the brief's own principle — never leave the CR in `Running`
-/// forever, never invent a code — had no counterpart for "never leave the CR
-/// with no status at all".
-///
-/// THE SAME SPELLING ON PURPOSE. Two halves of one refusal reported under two
-/// names is how an operator comes to think they are two problems.
+/// The API server refuses such a Job (pod labels are at most 63 characters),
+/// and a requeue would leave the object with no status at all, for ever. The
+/// scheduled path refuses at name-minting time with the same spelling
+/// ([`crate::slot::SlotError::NameTooLong`]): one refusal, one name.
 pub const TERMINAL_STATE_NAME_TOO_LONG: &str = "NameTooLong";
 
 /// `spec.sourceRef` names a `KafkaCluster` that does not exist in this
 /// namespace.
 ///
-/// A TERMINAL REFUSAL AND NOT A REQUEUE (errata **E5a**). `spec` is
-/// CEL-immutable, so a `sourceRef` that resolves to nothing today resolves to
-/// nothing forever unless somebody creates that object — and a requeue in the
-/// meantime is an object with an empty status and no explanation, which is the
-/// shape review finding MEDIUM-1 was about. If the referent is created later,
-/// the `Backup` is still terminal and a new one is the answer: the plan
-/// document is rendered ONCE, at Job-creation time, from a spec that cannot
-/// change.
+/// Terminal, not a requeue: `spec` is CEL-immutable, so a `sourceRef` that
+/// resolves to nothing stays that way, and a requeue would be an object with an
+/// empty status and no explanation. Created later, the referent does not revive
+/// the `Backup`: the plan is rendered once, from a spec that cannot change.
 pub const TERMINAL_STATE_REFERENT_NOT_FOUND: &str = "ReferentNotFound";
 
 /// The plan ConfigMap already exists and is **not owned by this `Backup`**.
 ///
-/// A 409 on the ConfigMap `POST` is ordinarily success — the previous pass of
-/// this same reconcile created it, and the object is byte-identical because it
-/// is rendered from an immutable spec. It is NOT success when the existing
-/// object belongs to something else: writing the Job then would mount a plan
-/// document a stranger wrote, over the same mount path, for a run that carries
-/// this `Backup`'s signing key. So the owner reference's UID is checked, and a
-/// mismatch is terminal.
+/// A 409 on the ConfigMap `POST` is ordinarily success (an earlier pass created
+/// the identical object). Not when the existing object belongs to something
+/// else: the Job would mount a plan a stranger wrote for a run carrying this
+/// `Backup`'s signing key. The owner reference's UID is checked, and a mismatch
+/// is terminal.
 pub const TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT: &str = "PlanConfigMapConflict";
 
 /// A per-Restore approval-bundle ConfigMap exists under the desired name but
@@ -581,9 +447,9 @@ pub const TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT: &str = "ApprovalBundleConflic
 pub const TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH: &str = "ApprovalSubjectMismatch";
 
 /// The `Restore` carries `spec.authorization`, a standing rehearsal
-/// authorization, and standing authorizations are withdrawn in v1 (OD-12).
-/// Terminal: `spec` is sealed. The `Approval` controller refuses an `Approval`
-/// naming a `RehearsalSchedule` under the same reason.
+/// authorization, withdrawn in v1. Terminal: `spec` is sealed. The `Approval`
+/// controller refuses an `Approval` naming a `RehearsalSchedule` under the same
+/// reason.
 pub const TERMINAL_STATE_STANDING_AUTHORIZATION_REFUSED: &str = "StandingAuthorizationRefused";
 
 /// A Job already occupies the Restore's name but is not controlled by this
@@ -592,12 +458,10 @@ pub const TERMINAL_STATE_JOB_NAME_CONFLICT: &str = "JobNameConflict";
 
 /// `spec.archive.url` is not readable as an object-store location.
 ///
-/// The rendered `backup.yaml` carries a TYPED `storage` block
-/// (`logweir_core::engine::StorageUrl`, an internally tagged enum whose
-/// variants have incompatible required fields), so a URL with no scheme or an
-/// unsupported one cannot be rendered at all. Terminal for the same reason as
-/// [`TERMINAL_STATE_REFERENT_NOT_FOUND`]: `spec` is immutable, so the next
-/// pass reads the same unusable string.
+/// The rendered `backup.yaml` carries a typed `storage` block whose variants
+/// have incompatible required fields, so a URL with no scheme or an unsupported
+/// one cannot be rendered. Terminal for the same reason as
+/// [`TERMINAL_STATE_REFERENT_NOT_FOUND`].
 pub const TERMINAL_STATE_ARCHIVE_URL_UNREADABLE: &str = "ArchiveUrlUnreadable";
 
 /// The `Complete` condition type, for a run that exited **0**.
@@ -610,58 +474,43 @@ pub const CONDITION_FAILED: &str = "Failed";
 /// finished.
 pub const CONDITION_JOB_CREATED: &str = "JobCreated";
 
-/// Whether a `Restore`'s admission passed — **its own condition type**, Task
-/// 20.
+/// Whether a `Restore`'s admission passed: its own condition type.
 ///
-/// WHY NOT A `Failed` CONDITION. An `Approval` that has not arrived yet is not
-/// a failure: it is a HOLD, and interface **I19** requires the object to be
-/// released the moment the approval is verified. Errata **E5c** is exactly
-/// about the shape a `Failed=False` would take — a condition array is a MAP
-/// KEYED BY `type`, so a `Failed=False` written at admission time and a
-/// `Failed=True` written when the run later fails are one field with two
-/// values, and the day any task gives the array the standard
-/// `x-kubernetes-list-type: map` the API server rejects the patch. So the
-/// admission gets its own type: `True` with reason [`REASON_ADMITTED`] on the
-/// pass that creates the Job, `False` with reason
-/// [`REASON_APPROVAL_NOT_VERIFIED`] while it waits, and a TERMINAL admission
-/// refusal writes a `Failed` condition instead, because that one really does
-/// end the object's life.
+/// Not a `Failed` condition: an `Approval` that has not arrived is a hold, and
+/// a condition array is a map keyed by `type`, so a `Failed=False` at
+/// admission and a `Failed=True` later would be one field with two values,
+/// rejected the day the array gets `x-kubernetes-list-type: map`. So `True`
+/// with [`REASON_ADMITTED`] on the pass that creates the Job, `False` with
+/// [`REASON_APPROVAL_NOT_VERIFIED`] while it waits, and a terminal admission
+/// refusal writes `Failed`, because that one ends the object's life.
 pub const CONDITION_ADMITTED: &str = "Admitted";
 
 /// The `reason` on an [`CONDITION_ADMITTED`] condition that passed.
 pub const REASON_ADMITTED: &str = "Admitted";
 
-/// The `reason` on an `Admitted=False` condition while a MANUAL run waits for
-/// a slot in its namespace's manual-run pool — P10, [`crate::run_pool`].
+/// The `reason` on an `Admitted=False` condition while a manual run waits for a
+/// slot in its namespace's manual-run pool ([`crate::run_pool`]).
 ///
-/// THE SAME SPELLING AS
+/// The same spelling as
 /// [`logweir_core::check_contract::CheckCode::ConcurrencyLimited`], which a
-/// queued `Preflight` and `TopicDiscovery` already carry: from a person's side
-/// "this namespace is busy, this is queued" is one fact, and one word for it is
-/// one remedy a console has to explain. A HOLD, not a verdict — it is not in
-/// [`TERMINAL_STATES`] and it clears itself when a slot frees.
+/// queued `Preflight` and `TopicDiscovery` carry: one fact, one word, one
+/// remedy. A hold, not in [`TERMINAL_STATES`]; it clears when a slot frees.
 pub const REASON_CONCURRENCY_LIMITED: &str = "ConcurrencyLimited";
 
-/// `phase` for a manual run waiting in its namespace's manual-run pool — P10.
+/// `phase` for a manual run waiting in its namespace's manual-run pool.
 ///
-/// NONTERMINAL, and safe to add for the reason `PHASE_RESOLVING` states: every
-/// terminal predicate treats a phase it does not recognise as active, so an
-/// older controller handed a `Queued` object simply runs it (it has no pool).
-/// Nothing exists for a queued run — no plan `ConfigMap`, no Job, no execution
-/// claim — which is what separates it from `Pending` (a hold on a missing
-/// destination or approval) and from `Running`.
+/// Nonterminal, and safe to add: every terminal predicate treats an unknown
+/// phase as active, so an older controller simply runs a `Queued` object. No
+/// plan `ConfigMap`, Job or execution claim exists for a queued run, which
+/// separates it from `Pending` (a hold on a missing destination or approval)
+/// and `Running`.
 pub const PHASE_QUEUED: &str = "Queued";
 
-/// The `reason` while a `Restore` waits for its `Approval` — **interface
-/// I19**, and it is a HOLD and not a verdict.
-///
-/// NOT IN [`TERMINAL_STATES`], AND THAT IS THE ASSERTION. It is the one
-/// admission outcome that can change without anybody touching the object, so
-/// it requeues at
-/// [`crate::controllers::restore::ADMISSION_REQUEUE_SECS`] — thirty seconds —
-/// which is what makes the restore wizard's minted-both-names-first ordering
-/// workable. Its terminal sibling is
-/// [`TERMINAL_STATE_APPROVAL_NOT_RECEIVED`].
+/// The `reason` while a `Restore` waits for its `Approval` (interface
+/// **I19**): a hold, not a verdict, and not in [`TERMINAL_STATES`]. It can
+/// change without anybody touching the object, so it requeues at
+/// [`crate::controllers::restore::ADMISSION_REQUEUE_SECS`]. Its terminal
+/// sibling is [`TERMINAL_STATE_APPROVAL_NOT_RECEIVED`].
 pub const REASON_APPROVAL_NOT_VERIFIED: &str = "ApprovalNotVerified";
 
 /// The verified inputs could not be materialized into the immutable public
@@ -669,93 +518,72 @@ pub const REASON_APPROVAL_NOT_VERIFIED: &str = "ApprovalNotVerified";
 pub const REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED: &str =
     "ApprovalBundleMaterializationFailed";
 
-/// Whether the run's two evidence keys were recorded — **its own condition
-/// type, raised at exit 0 (and, on a `Restore`, at exit 2 when keys were read)**.
+/// Whether the run's evidence keys were recorded: its own condition type,
+/// raised at exit 0 (and, on a `Restore`, at exit 2 when keys were read).
 ///
-/// REVIEW FINDING HIGH-2, plan errata **E5c**. This used to be a second
-/// `Failed` condition with `status: "False"` and reason
-/// [`REASON_EVIDENCE_KEYS_UNREADABLE`], appended whenever the two key lines
-/// were absent — which is ALWAYS for exits 1, 3 and 4, because Global
-/// Constraint 11 says those runs write no artifact. Measured live, every
-/// refused `Backup` came back carrying
-/// `Failed/True/GuardRefused` **and** `Failed/False/EvidenceKeysUnreadable`.
+/// Not a second `Failed` condition: exits 1, 3 and 4 write no artifact by
+/// contract, and a `Failed/False/EvidenceKeysUnreadable` beside
+/// `Failed/True/GuardRefused` is two values in one map key (a
+/// `FindStatusCondition` reader sees whichever comes first, and a
+/// `listMapKey: [type]` schema would reject the patch), with an untrue message
+/// besides.
 ///
-/// THAT IS A MALFORMED STATUS, NOT A COSMETIC ONE. A condition array is a MAP
-/// KEYED BY `type` — the CRD's own item description says "a
-/// `metav1.Condition`" — so a standard `FindStatusCondition`-style reader sees
-/// whichever comes first, `kubectl wait --for=condition=Failed` matched the
-/// `True` one only by array order, and the day any task gives the array the
-/// standard `x-kubernetes-list-type: map` + `listMapKey: [type]` the API
-/// server would REJECT every failed `Backup`'s status patch. The message was
-/// also untrue: a guard-refused run produced no evidence BY CONTRACT, so
-/// nothing was "unreadable".
-///
-/// So the fact gets its own type, and it is raised only where the contract
-/// promised an artifact: `status: "True"` with reason
-/// [`REASON_EVIDENCE_KEYS_RECORDED`] when both keys were read, `status:
-/// "False"` with reason [`REASON_EVIDENCE_KEYS_UNREADABLE`] when they were
-/// not, and **no evidence condition at all** at exits 1, 3 and 4. A `Restore`
-/// at exit 2 raises the `True` arm when its runner named the signed failure's
-/// keys (interface I8 as amended, FAILED-DRILL-EVIDENCE-UNPUBLISHED) and no
-/// condition when an older runner printed none.
+/// So it is raised only where the contract promised an artifact: `True` with
+/// [`REASON_EVIDENCE_KEYS_RECORDED`] when the keys were read, `False` with
+/// [`REASON_EVIDENCE_KEYS_UNREADABLE`] when they were not, nothing at exits 1,
+/// 3 and 4. A `Restore` at exit 2 raises `True` when its runner named the
+/// signed failure's keys, and nothing when an older runner printed none.
 pub const CONDITION_EVIDENCE_RECORDED: &str = "EvidenceRecorded";
 
 /// The condition reason for a log body that did not carry both key lines.
 ///
-/// THE POINT OF A NAMED REASON IS THAT NO KEY IS GUESSED. A receipt key is
-/// derivable from a backup id — `logweir/backups/<id>/<run>.receipt.json` —
-/// and a controller that derived one would write a status field pointing at an
-/// object that may not exist, which a verifier (Task 24) would then report as
-/// `Invalid` rather than as unread. Absent is the truthful value.
+/// No key is guessed: a receipt key is derivable from a backup id, but deriving
+/// one would point a status field at an object that may not exist, which
+/// verification would report `Invalid` rather than unread.
 pub const REASON_EVIDENCE_KEYS_UNREADABLE: &str = "EvidenceKeysUnreadable";
 
 /// The condition reason for an exit-0 run whose two key lines WERE read.
 ///
-/// The positive arm exists rather than being left absent, because "the keys
-/// are recorded" and "nobody has looked" are different answers and a consumer
-/// reading `status.evidence` alone cannot tell them apart on a run whose
-/// status patch is still in flight.
+/// The positive arm exists because "the keys are recorded" and "nobody has
+/// looked" are different answers a reader of `status.evidence` alone cannot
+/// tell apart while the status patch is in flight.
 pub const REASON_EVIDENCE_KEYS_RECORDED: &str = "EvidenceKeysRecorded";
 
-/// The condition that says whether the UI may render a GREEN badge for this
-/// object — Task 24, interface **I21**.
+/// The condition that says whether the UI may render a green badge (interface
+/// **I21**).
 ///
-/// **ONE TYPE, TWO RULES.** The `type` is `Verified` on both kinds, and the
-/// rule behind it is not: a `Backup` is green on `Valid` + `exitCode == 0`,
-/// a `Restore` on `Valid` + `outcome == pass`
-/// (`crate::verification::{backup_badge, restore_badge}`). The condition's
-/// `message` is the badge label, which is "verified by weirkeeper at
-/// `<verifiedAt>` against key `<matchedKeyId>`" when green and the literal
-/// word `unverified` otherwise — **never** `pass`, and never "verified in your
-/// browser".
+/// One type, two rules: a `Backup` is green on `Valid` + `exitCode == 0`, a
+/// `Restore` on `Valid` + `outcome == pass`
+/// (`crate::verification::{backup_badge, restore_badge}`). The message is the
+/// badge label: "verified by weirkeeper at `<verifiedAt>` against key
+/// `<matchedKeyId>`" when green, the literal word `unverified` otherwise, never
+/// `pass` and never "verified in your browser".
 pub const CONDITION_VERIFIED: &str = "Verified";
 
 /// [`CONDITION_VERIFIED`]'s reason when the badge is green.
 pub const REASON_VERIFIED: &str = "Verified";
 
 /// [`CONDITION_VERIFIED`]'s reason when the controller verified the evidence
-/// and the answer was no. A claim about the DOCUMENT.
+/// and the answer was no. A claim about the document.
 pub const REASON_VERIFICATION_INVALID: &str = "VerificationInvalid";
 
-/// [`CONDITION_VERIFIED`]'s reason when no verification happened at all — no
-/// evidence credential, an unreadable object, or a `TrustRoster` with no
-/// signing key material. A claim about the CONTROLLER, and the reason
-/// `NotAttempted` exists as a verdict distinct from `Invalid`.
+/// [`CONDITION_VERIFIED`]'s reason when no verification happened at all (no
+/// evidence credential, an unreadable object, no signing key material). A
+/// claim about the controller.
 pub const REASON_VERIFICATION_NOT_ATTEMPTED: &str = "VerificationNotAttempted";
 
-/// [`CONDITION_VERIFIED`]'s reason when the signature verified and the SIGNER
-/// is one this installation will not accept — PLAT-19.1, decision D3 §7.4.
+/// [`CONDITION_VERIFIED`]'s reason when the signature verified and the signer
+/// is one this installation will not accept.
 ///
-/// A CLAIM ABOUT THE KEY, and the third thing that is not
-/// [`REASON_VERIFICATION_INVALID`]: the document is exactly what it says it is,
-/// and the key that made it is revoked, unknown to the resolved `TrustPolicy`,
-/// declared for another usage, or was used outside the window it was trusted
-/// in. The operator's next step is their trust policy, not their archive.
+/// A claim about the key: the document is exactly what it says, and the key
+/// that made it is revoked, unknown to the resolved `TrustPolicy`, declared for
+/// another usage, or used outside its trusted window. The operator's next step
+/// is their trust policy, not their archive.
 pub const REASON_VERIFICATION_UNTRUSTED: &str = "VerificationUntrusted";
 
 /// [`CONDITION_VERIFIED`]'s reason when a `Backup`'s evidence verified and the
-/// run did not exit 0. The `Backup` half of interface **I21** — there is no
-/// `outcome` on that path to read instead.
+/// run did not exit 0. The `Backup` half of interface **I21**: there is no
+/// `outcome` on that path.
 pub const REASON_EXIT_CODE_NOT_ZERO: &str = "ExitCodeNotZero";
 
 /// [`CONDITION_VERIFIED`]'s reason when a `Restore`'s evidence verified and
@@ -763,23 +591,19 @@ pub const REASON_EXIT_CODE_NOT_ZERO: &str = "ExitCodeNotZero";
 pub const REASON_OUTCOME_NOT_PASS: &str = "OutcomeNotPass";
 
 /// [`CONDITION_VERIFIED`]'s reason when a `Restore`'s evidence verified and
-/// its signed complete verification says `covered: false` — PROD-08.1a.
+/// its signed complete verification says `covered: false`.
 ///
-/// THE REASON OF EVERY REAL ONE. A complete verification that a bound stopped,
-/// or that met an archive it could not compare, signs `fail-integrity` and
-/// exits 2; this reason is judged before `outcome`, so such a run reads
-/// `CompleteNotCovered` and not [`REASON_OUTCOME_NOT_PASS`], and an operator
-/// can alert on it. It is ALSO the reason of a status that says `pass` beside
-/// `covered: false` — a combination arm IV-6 keeps out of every document
-/// either reader accepts, read anyway because a badge rule that trusted one
-/// field to imply another would be one runner defect away from a green badge
-/// over a verification that did not cover the restore.
+/// A real one signs `fail-integrity` and exits 2; this reason is judged before
+/// `outcome`, so an operator can alert on it. It is also the reason of a status
+/// saying `pass` beside `covered: false`, a combination no accepted document
+/// carries, read anyway because a badge rule trusting one field to imply
+/// another would be one runner defect away from green.
 pub const REASON_COMPLETE_NOT_COVERED: &str = "CompleteNotCovered";
 
-/// A `Backup` whose runner Job is NOT known to execute this object's frozen
-/// execution inputs — PLAT-06.1. `True` is the problem being present, as with
-/// [`CONDITION_FAILED`]; a Job created from frozen inputs raises no condition,
-/// because `status.execution` is the positive record.
+/// A `Backup` whose runner Job is not known to execute this object's frozen
+/// execution inputs. `True` is the problem being present; a Job created from
+/// frozen inputs raises no condition, because `status.execution` is the
+/// positive record.
 ///
 /// The Job is observed to completion and never changed, deleted or re-derived:
 /// a Job that already exists is the compatibility boundary.
@@ -798,10 +622,9 @@ pub const REASON_LEGACY_EXECUTION: &str = "LegacyExecution";
 pub const REASON_JOB_INPUTS_MISMATCH: &str = "JobInputsMismatch";
 
 /// A `Backup` carrying the legacy `logweir.dev/runner-argv` annotation, which
-/// this controller never executes — PLAT-06.1. `True` while the annotation is
-/// present on an object whose run this controller derives or refuses; absent
-/// when there is no annotation. The message names the annotation's size and
-/// digest and never its content.
+/// this controller never executes. `True` while the annotation is present on
+/// an object whose run this controller derives or refuses. The message names
+/// the annotation's size and digest, never its content.
 pub const CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED: &str = "RunnerArgvAnnotationIgnored";
 
 /// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]'s reason for an annotation that
@@ -813,14 +636,12 @@ pub const REASON_RUNNER_ARGV_ANNOTATION_IGNORED: &str = "AnnotationIgnored";
 /// is not a JSON array of strings.
 pub const REASON_RUNNER_ARGV_ANNOTATION_MALFORMED: &str = "AnnotationMalformed";
 
-/// Every condition `reason` this crate writes that is NOT one of
-/// [`TERMINAL_STATES`], in one list.
-///
-/// ONE LIST SO THE REGEX TEST CANNOT MISS ONE. A test that named the reasons
-/// itself would be a test that goes stale the first time a reason is added;
-/// `the_condition_reasons_are_valid_metav1_reasons` iterates THIS and
-/// [`TERMINAL_STATES`], and `the_two_reason_vocabularies_never_overlap`
-/// asserts no member of either is a [`wire_reason_for_exit`] value.
+/// Every condition `reason` this crate writes that is not one of
+/// [`TERMINAL_STATES`], in one list, so
+/// `the_condition_reasons_are_valid_metav1_reasons` iterates this and
+/// [`TERMINAL_STATES`] and cannot go stale, and
+/// `the_two_reason_vocabularies_never_overlap` asserts no member is a
+/// [`wire_reason_for_exit`] value.
 pub const CONDITION_REASONS: &[&str] = &[
     CONDITION_REASON_OK,
     CONDITION_REASON_EMPTY_CAPTURE,
@@ -867,78 +688,64 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_INVALID_TOPIC_SELECTION,
     REASON_INVALID_RUN_POLICY,
     REASON_CRD_OUTDATED,
-    // D3 §2.2. The other four `RunnerReady=False` reasons are NOT here: they
-    // are `TERMINAL_STATES` members, the regex test iterates both lists, and a
-    // reason in both would be counted twice and asserted twice about nothing.
+    // The other four `RunnerReady=False` reasons are `TERMINAL_STATES`
+    // members, which the regex test iterates too.
     REASON_RUNNER_STARTED,
     REASON_WAITING_FOR_POD,
 ];
 
-// ===========================================================================
-// D1 §3.4 — the cadence, selection and identity vocabulary
-// ===========================================================================
-
 /// The identity a scheduled `Backup` claims is not the one its own fields
-/// compose (D1 §3.1 rules 1 and 3).
-///
-/// TERMINAL, AND NEVER RE-READ AS A MANUAL RUN. A manual run executes under
-/// its own UID, so quietly accepting a misnamed scheduled object would let it
-/// write a second archive of a window a scheduled run already owns.
+/// compose. Terminal, and never re-read as a manual run: a manual run executes
+/// under its own UID, and would write a second archive of a window a
+/// scheduled run already owns.
 pub const TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH: &str = "ScheduledIdentityMismatch";
 
 /// A scheduled `Backup` whose `spec.scheduleRef` names a schedule this
-/// namespace does not have (D1 §3.1 rule 2).
-///
-/// **Deleting a schedule stops future work.** Checked only BEFORE the freeze:
-/// once a run's inputs exist, nothing is re-checked, so deleting a schedule
-/// never kills a run that is already executing.
+/// namespace does not have. Deleting a schedule stops future work; checked only
+/// before the freeze, so it never kills a run already executing.
 pub const TERMINAL_STATE_SCHEDULE_NOT_FOUND: &str = "ScheduleNotFound";
 
 /// `spec.scheduleRef.runPolicySha256` disagrees with the digest recomputed
-/// from this object's own policy fields (D1 §3.1 rule 5).
+/// from this object's own policy fields.
 pub const TERMINAL_STATE_RUN_POLICY_DIGEST_MISMATCH: &str = "RunPolicyDigestMismatch";
 
 /// `spec.topics` and `spec.allUserTopics` do not form one of the two legal
 /// selection shapes, or a name in either is not Kafka-legal.
 pub const TERMINAL_STATE_INVALID_TOPIC_SELECTION: &str = "InvalidTopicSelection";
 
-/// The discovery Job did not produce a usable result — unreachable broker,
-/// timeout, authentication failure, a non-zero exit.
-///
-/// **RETRYABLE**, and the one member of [`crate::cadence::RETRYABLE_TERMINAL_STATES`]
-/// this task adds: a broker that was down can be up in five minutes, and
-/// nothing was decided.
+/// The discovery Job did not produce a usable result: unreachable broker,
+/// timeout, authentication failure, a non-zero exit. Retryable
+/// ([`crate::cadence::RETRYABLE_TERMINAL_STATES`]): a broker that was down can
+/// be up in five minutes, and nothing was decided.
 pub const TERMINAL_STATE_DISCOVERY_FAILED: &str = "DiscoveryFailed";
 
 /// Discovery could not prove it saw every topic and the policy says `Refuse`.
 ///
-/// NOT RETRYABLE. Re-running would ask the same principal the same question
-/// and get the same partial answer; what changes it is an ACL or an
-/// administrator attestation.
+/// Not retryable: the same principal would get the same partial answer; an
+/// ACL or an administrator attestation changes it.
 pub const TERMINAL_STATE_DISCOVERY_INCOMPLETE: &str = "DiscoveryIncomplete";
 
 /// The discovery output was malformed: a missing or duplicated summary, a
 /// count or digest that does not match the lines, a name no broker could have
-/// produced. NOT retryable — malformed output is a defect, not a blip.
+/// produced. Not retryable: malformed output is a defect, not a blip.
 pub const TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE: &str = "DiscoveryResultUnreadable";
 
 /// Dynamic selection resolved to nothing: every user topic excluded, or an
-/// empty cluster. **The runner is never started**, because a backup of no
-/// topics is not a backup.
+/// empty cluster. The runner is never started: a backup of no topics is not a
+/// backup.
 pub const TERMINAL_STATE_SELECTION_EMPTY: &str = "SelectionEmpty";
 
 /// Dynamic selection resolved to more than the run may carry.
 pub const TERMINAL_STATE_SELECTION_TOO_LARGE: &str = "SelectionTooLarge";
 
 /// The source connection resolved to something different between discovery and
-/// the freeze — a `KafkaCluster` edited or replaced mid-resolution.
+/// the freeze: a `KafkaCluster` edited or replaced mid-resolution.
 pub const TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION: &str = "SourceChangedDuringResolution";
 
 /// `phase` while a dynamic run is resolving its topic list.
 ///
-/// NONTERMINAL, and safe to add: `backup_is_terminal` already treats a phase
-/// it does not recognise as active, so an older controller reading a
-/// `Resolving` Backup does not mistake it for a finished one.
+/// Nonterminal, and safe to add: `backup_is_terminal` treats an unknown phase
+/// as active, so an older controller does not mistake it for finished.
 pub const PHASE_RESOLVING: &str = "Resolving";
 
 /// The condition type carrying a dynamic run's topic resolution.
@@ -951,7 +758,7 @@ pub const REASON_DISCOVERY_RUNNING: &str = "DiscoveryRunning";
 pub const REASON_RESOLVED: &str = "Resolved";
 
 /// The condition type carrying whether a schedule's run history is retained
-/// independently of the schedule object (PLAT-05.2).
+/// independently of the schedule object.
 pub const CONDITION_HISTORY_RETAINED: &str = "HistoryRetained";
 
 /// `HistoryRetained=True`: no run is owned by the schedule any more.
@@ -972,8 +779,7 @@ pub const REASON_ACTIVE_LEGACY_RUNS_OWNED: &str = "ActiveLegacyRunsOwned";
 pub const REASON_MIGRATION_BLOCKED: &str = "MigrationBlocked";
 
 /// The condition a `BackupSchedule` carries while it still sets the withdrawn
-/// `spec.retention` (PROD-17.1 B1). `True` names the field; the schedule backs
-/// up as before.
+/// `spec.retention`. `True` names the field; the schedule backs up as before.
 pub const CONDITION_RETENTION_REPORT_WITHDRAWN: &str = "RetentionReportWithdrawn";
 
 /// [`CONDITION_RETENTION_REPORT_WITHDRAWN`]'s reason.
@@ -1003,22 +809,20 @@ pub const REASON_SLOT_NAME_UNAVAILABLE: &str = "SlotNameUnavailable";
 /// `Ready` reason: the per-schedule active-run ceiling is reached.
 pub const REASON_ACTIVE_RUN_LIMIT: &str = "ActiveRunLimit";
 /// `Ready=False`: `spec.timeZone` names a zone this build's tzdb does not
-/// have. **Fail closed**: a zone nobody can resolve is not silently UTC.
+/// have. Fail closed: never silently UTC.
 pub const REASON_UNKNOWN_TIME_ZONE: &str = "UnknownTimeZone";
 /// `Ready=False`: the topic selection is not one of the two legal shapes.
 pub const REASON_INVALID_TOPIC_SELECTION: &str = "InvalidTopicSelection";
 /// `Ready=False`: the run policy has a field-level problem.
 pub const REASON_INVALID_RUN_POLICY: &str = "InvalidRunPolicy";
 /// `Ready=False`: the object uses a field the installed CRD declares and this
-/// controller does not understand — a CRD applied ahead of its controller.
+/// controller does not understand: a CRD applied ahead of its controller.
 pub const REASON_CRD_OUTDATED: &str = "CrdOutdated";
 
-/// The condition TYPES a `Backup` can carry, in one list.
-///
-/// A condition array is a MAP KEYED BY `type` (the CRD's item description says
-/// "a `metav1.Condition`"), so two conditions sharing a `type` is a malformed
-/// status whatever their statuses say — review finding HIGH-2. This list is
-/// what `no_two_conditions_share_a_type` measures the written status against.
+/// The condition types a `Backup` can carry, in one list. A condition array is
+/// a map keyed by `type`, so two conditions sharing a `type` is a malformed
+/// status; `no_two_conditions_share_a_type` measures written statuses against
+/// this.
 pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_COMPLETE,
     CONDITION_FAILED,
@@ -1034,16 +838,14 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_RUNNER_READY,
 ];
 
-/// `phase` for a `Restore` whose admission has not passed yet — **interface
-/// I19**, Task 20.
+/// `phase` for a `Restore` whose admission has not passed yet (interface
+/// **I19**).
 ///
-/// `Pending` IS NOT `Failed`, AND THE DIFFERENCE IS THE WHOLE OF I19. A
-/// `Restore` created before its `Approval` is verified sits here with one
-/// `Admitted=False` condition and is released the moment the approval
-/// verifies. `Restore.status.phase`'s vocabulary is Task 20's
-/// (`crds/restore.rs` says so), and this is the value that makes a dangling
-/// `approvalRef` workable rather than fatal. `Backup` has no such state: its
-/// Job is created on the first pass.
+/// Not `Failed`: a `Restore` created before its `Approval` is verified sits
+/// here with one `Admitted=False` condition and is released the moment the
+/// approval verifies, which makes a dangling `approvalRef` workable rather
+/// than fatal. A `Backup`'s Job is created on the first pass, so it has no
+/// such state.
 pub const PHASE_PENDING: &str = "Pending";
 
 /// `phase` while the Job exists and has not finished.
@@ -1055,67 +857,39 @@ pub const PHASE_SUCCEEDED: &str = "Succeeded";
 /// `phase` for every other terminal outcome, the crashed-Job case included.
 pub const PHASE_FAILED: &str = "Failed";
 
-// ===========================================================================
-// THE STATUS-WRITE CONTRACT — ONE IMPLEMENTATION, SIX RECONCILERS
-// ===========================================================================
+// The status-write contract: one implementation for every reconciler.
 //
-// Plan erratum **E11(d)**, from Task 15c's review (findings H-1, H-2, M-1).
+// A reconciler's own status patch wakes it: a changed byte bumps
+// `resourceVersion`, the watch fires, and the next reconcile writes another
+// changing byte (12,107 reconciles in 91 s on an untouched object, live). The
+// invariant: a status patch is a pure function of the object and its
+// children, never of the clock. Three rules implement it, here:
 //
-// # The bug these four functions close
+// 1. A condition's `lastTransitionTime` moves only when its `status` or
+//    `reason` moves ([`merge_condition`], the `metav1.Condition` contract).
+//    `message` is not compared: it carries instants that move by design.
+// 2. A "when computed" field (`lastSlot.decidedAt`, `lastEvaluation.at`) is
+//    written only when the thing it timestamps changed
+//    ([`keep_instant_unless_changed`]), compared on the JSON the API server
+//    will store, never a typed struct, which can see a difference the merge
+//    patch cannot carry and stamp a fresh instant for ever. A struct block goes
+//    through [`replacing`] first, so a field that became `None` is cleared.
+// 3. If the patch would not change the object, no patch is sent
+//    ([`status_unchanged`]): the backstop that makes rules 1 and 2 observable
+//    in a test (zero PATCHes) and turns a redundant write into none.
 //
-// A reconciler's OWN status patch is what wakes it: a patch that changes any
-// byte bumps `resourceVersion`, the primary-resource watch fires, and the next
-// reconcile writes another changing byte. `owns` is not required and no child
-// object is needed — two of the three reconcilers caught by this were watching
-// nothing at all. Measured live on docker-desktop at `376a09e`, on objects
-// nobody touched: `trust_roster` **12,107 reconciles in 91.2 s**, `approval`
-// **7,114 in 90.4 s**, and `backup_schedule` writing a fresh
-// `retentionReport.evaluatedAt` on every pass.
-//
-// The invariant, stated once: **a status patch is a pure function of the
-// object and its children, never of the clock.** Three rules implement it, and
-// all three live here rather than in any reconciler:
-//
-// 1. A condition's `lastTransitionTime` moves only when that condition's
-//    `status` or `reason` moves — [`merge_condition`], the `metav1.Condition`
-//    contract. `message` is deliberately NOT compared: it carries instants
-//    (the next firing, the slot) that move by design, and comparing it would
-//    put the bug straight back.
-// 2. A "when computed" field — `retentionReport.evaluatedAt`,
-//    `lastSlot.decidedAt` — is written only when the thing it timestamps
-//    changed, and kept otherwise. That comparison is
-//    [`keep_instant_unless_changed`], and it is made on the JSON the API server
-//    will STORE (the block merged onto the stored one), never on a typed
-//    struct: FX-29 was a typed comparison that saw a difference the merge patch
-//    could not carry, so it stamped a fresh instant on every pass, forever. It
-//    feeds this module's rule 3. A struct block is sent through [`replacing`]
-//    first, so a field that became `None` is cleared rather than left behind.
-// 3. **If the patch would not change the object, no patch is sent at all** —
-//    [`status_unchanged`]. This is the backstop that makes rules 1 and 2
-//    OBSERVABLE in a test (a route table with zero PATCHes) instead of merely
-//    invisible on the wire, and it is what turns a redundant API write into no
-//    API write.
-//
-// # Why the comparison is RFC 7386 and not `==`
-//
-// Every reconciler here patches with `Patch::Merge`, which is RFC 7386. A
-// merge patch that omits a key means "leave it alone", and one that carries
-// `null` means "delete it" — so "the computed status equals the current
-// status" is not a comparison of two objects, it is the question *would
-// applying this patch change anything*. [`apply_merge_patch`] is the API
-// server's half of that question, written out so the answer is exact: a patch
-// that omits five keys and repeats a sixth is correctly read as a no-op, and a
-// patch that sets a key to `null` on an object that never had it is too.
-// Arrays are REPLACED and never merged, which is why every condition array
-// this crate writes is built from `Condition` and serialised by `serde` —
-// a hand-built element that spells one optional field differently from the
-// stored one would compare unequal forever and re-open the loop.
+// The comparison is RFC 7386, not `==`: every reconciler patches with
+// `Patch::Merge`, where an omitted key means "leave it alone" and `null` means
+// "delete it", so the question is whether applying the patch changes anything.
+// [`apply_merge_patch`] is the API server's half, written out. Arrays are
+// replaced, never merged, which is why every condition array is built from
+// `Condition` and serialised by `serde`: a hand-built element spelling an
+// optional field differently would compare unequal for ever.
 
 /// The object's current condition of this `type`, if it carries one.
 ///
-/// The lookup half of [`merge_condition`], separate only because each kind has
-/// its own status struct and therefore its own path to the vector; the
-/// COMPARISON is in one place and this is not it.
+/// The lookup half of [`merge_condition`], separate only because each kind's
+/// status struct has its own path to the vector.
 #[must_use]
 pub fn current_condition<'a>(
     conditions: Option<&'a Vec<crate::crds::Condition>>,
@@ -1128,12 +902,8 @@ pub fn current_condition<'a>(
 /// says it should: the one it ALREADY has when neither `status` nor `reason`
 /// changed, and `next`'s own otherwise.
 ///
-/// THE ONE COMPARISON. Before this function there were four byte-identical
-/// private copies of it (`backup.rs`, `restore.rs`, `kafka_cluster.rs`,
-/// `backup_schedule.rs`) and two reconcilers with none at all
-/// (`trust_roster.rs`, `approval.rs`) — which is exactly how a rule comes to
-/// hold on four kinds and not on the other two. Every reconciler in this crate
-/// calls this; none of them compares timestamps itself.
+/// The one comparison: every reconciler calls this, and none compares
+/// timestamps itself, so the rule cannot hold on some kinds and not others.
 ///
 /// `existing` is `None` for a first write, and then `next` is returned
 /// unchanged: the first time a condition appears IS a transition.
@@ -1151,39 +921,20 @@ pub fn merge_condition(
     }
 }
 
-/// `owned` UPSERTED into the conditions the object already carries.
+/// `owned` upserted into the conditions the object already carries.
 ///
-/// # The rule this writes down
+/// A merge patch replaces arrays, so the builder that writes
+/// `status.conditions` deletes every type it does not name. A builder
+/// therefore owes the conditions it does not own, which is everything the
+/// object carries that this patch is not about, not a list someone must
+/// remember to extend ([`crate::verification::carry_conditions`]' allow-list
+/// is the narrower, older form).
 ///
-/// A JSON merge patch REPLACES arrays, so the builder that writes
-/// `status.conditions` writes ALL of it: every type it does not name is
-/// deleted from the object. A builder therefore owes the conditions it does
-/// not own, and "the ones it owes" is not a list somebody remembers to extend
-/// — it is *everything the object carries that this patch is not about*.
-///
-/// [`crate::verification::carry_conditions`] is the older, narrower form: an
-/// explicit allow-list of types to carry. It works until a type nobody put on
-/// the list appears, which is defect RESTORE-ADMITTED-DROPPED — `Admitted` was
-/// on no list, so the second reconcile of an unchanged running `Restore`
-/// deleted the only statement on the object that said the run had been
-/// approved. `e308ab3` reached the same conclusion for the retention
-/// controller from the other end (`EnforcementDegraded` vanished the same
-/// way) and its `conditions()` upserts for exactly this reason.
-///
-/// # Order, and why a steady object still sends nothing
-///
-/// STORED ORDER IS KEPT and a type the object does not yet carry is appended
-/// in `owned`'s order. That is not tidiness: `status_unchanged` compares
-/// arrays element by element, so a rule that reshuffled a steady object's
-/// conditions would make every pass a write and every write a wake-up. Kept
-/// in place, a pass that recomputes the same conditions computes the same
-/// array and sends no patch at all.
-///
-/// An element of `owned` WINS over the stored one of the same `type`: this
-/// pass's answer about a condition it owns is the point of the write. It is a
-/// `Vec<Value>` and not a `Vec<Condition>` for
-/// [`crate::verification::carry_conditions`]'s reason — a round trip through
-/// the struct would re-serialise elements this crate compares byte for byte.
+/// Stored order is kept and new types are appended in `owned`'s order:
+/// `status_unchanged` compares arrays element by element, so a reshuffle would
+/// make every pass a write and a wake-up. An element of `owned` wins over the
+/// stored one of the same `type`. `Vec<Value>`, not `Vec<Condition>`, for
+/// [`crate::verification::carry_conditions`]' reason.
 #[must_use]
 pub fn upsert_conditions(
     stored: Option<&Vec<crate::crds::Condition>>,
@@ -1202,27 +953,17 @@ pub fn upsert_conditions(
     out
 }
 
-/// `owned` FIRST, then every condition the object carries whose type `owned`
-/// does not name — the terminal builders' form of [`upsert_conditions`].
+/// `owned` first, then every condition the object carries whose type `owned`
+/// does not name: the terminal builders' form of [`upsert_conditions`].
 ///
-/// # Why terminal patches keep the builder's order instead of the object's
+/// A terminal object is reconciled once more and then never, so stored order
+/// buys nothing, and the terminal builders' contract is that `conditions[0]`
+/// is the `Complete`/`Failed` one the scalar `status.reason` quotes.
 ///
-/// [`upsert_conditions`] keeps STORED order because a running object is
-/// reconciled again and again and `status_unchanged` compares arrays element by
-/// element. A terminal object is reconciled once more and then never
-/// (`status_is_terminal` returns before any read), so order stability buys
-/// nothing there — and the terminal builders' own contract is that
-/// `conditions[0]` is the `Complete`/`Failed` one the scalar `status.reason`
-/// quotes. Reordering it would move that statement for no gain.
-///
-/// # The rule is still "carry everything you do not own"
-///
-/// [`crate::verification::carry_conditions`]' allow-list is what defect
-/// RESTORE-ADMITTED-DROPPED was: `Admitted` and `JobCreated` were on no list,
-/// so the terminal patch — the object an auditor actually inspects — replaced
-/// the array with the run's verdict alone and the statement that the run had
-/// been APPROVED went off the object at the moment it finished. A condition a
-/// builder owns may transition; it may not disappear.
+/// The rule is still "carry everything you do not own": a terminal patch that
+/// dropped `Admitted` would take the statement that the run was approved off
+/// the object an auditor inspects. A condition a builder owns may transition;
+/// it may not disappear.
 #[must_use]
 pub fn carry_remaining(
     stored: Option<&Vec<crate::crds::Condition>>,
@@ -1241,10 +982,10 @@ pub fn carry_remaining(
 /// Apply an RFC 7386 JSON merge patch to `target`, exactly as the API server
 /// would.
 ///
-/// `null` deletes the key; an object merges recursively; anything else —
-/// arrays included — replaces. A non-object `target` under an object patch
-/// becomes an empty object first, which is the RFC's own rule and is what
-/// makes a first write onto an absent status come out right.
+/// `null` deletes the key; an object merges recursively; anything else,
+/// arrays included, replaces. A non-object `target` under an object patch
+/// becomes an empty object first (the RFC's own rule), so a first write onto an
+/// absent status comes out right.
 pub fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
     let Some(fields) = patch.as_object() else {
         *target = patch.clone();
@@ -1265,18 +1006,13 @@ pub fn apply_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Val
     }
 }
 
-/// Whether sending `next` would leave `current` byte-for-byte as it is — in
+/// Whether sending `next` would leave `current` byte-for-byte as it is, in
 /// which case the reconciler sends nothing.
 ///
-/// `current` is the object's status as it stands (`None` for an object with no
-/// status yet); `next` is the WHOLE patch body the reconciler is about to
-/// send, `{"status": {…}}`, so a call site passes the value it already built
-/// and does no indexing of its own.
-///
-/// A body with no `status` key changes no status and is therefore unchanged;
-/// that shape is not written anywhere in this crate and is answered rather
-/// than asserted, because a `debug_assert` here would be a panic on a path
-/// whose whole purpose is to avoid a write.
+/// `current` is the object's status (`None` for none yet); `next` is the whole
+/// patch body, `{"status": {…}}`. A body with no `status` key changes no status
+/// and is answered as unchanged rather than asserted, because a panic here
+/// would be on a path whose purpose is to avoid a write.
 #[must_use]
 pub fn status_unchanged(current: Option<&serde_json::Value>, next: &serde_json::Value) -> bool {
     let Some(status) = next.get("status") else {
@@ -1288,25 +1024,17 @@ pub fn status_unchanged(current: Option<&serde_json::Value>, next: &serde_json::
     merged == current
 }
 
-/// `next`, a struct block serialised for a merge patch, made to REPLACE the
+/// `next`, a struct block serialised for a merge patch, made to replace the
 /// block `stored` under the same key instead of merging into it.
 ///
-/// # FX-29: the key a merge patch cannot clear
-///
-/// Every optional field of a status struct carries `skip_serializing_if =
-/// "Option::is_none"`, so a field that has BECOME `None` serialises as an
-/// absent key — and an absent key in an RFC 7386 merge patch means "leave it
-/// alone". `status.lastSlot.backupRef` was the case found live: a slot
-/// `Admitted` with a `Backup`, then the next slot `Missed` with none, left the
-/// older slot's `backupRef` on the newer slot's record, and the reconciler's
-/// typed "same decision?" comparison (stored `Some`, computed `None`) said
-/// "changed" on every pass while the write it sent could never make them equal.
-///
-/// So every key `stored` carries and `next` does not is sent as an explicit
-/// `null`, recursively through nested objects. Arrays are left alone: a merge
-/// patch already replaces an array wholesale. A `next` that is not an object,
-/// or a `stored` that is absent or not an object, is returned unchanged — there
-/// is nothing to clear.
+/// A status field that has become `None` serialises as an absent key, which a
+/// merge patch reads as "leave it alone": a slot record could keep the previous
+/// slot's `backupRef`, and a typed "same decision?" comparison would say
+/// "changed" on every pass while no write could make them equal. So every key
+/// `stored` carries and `next` does not is sent as an explicit `null`,
+/// recursively through nested objects. Arrays are left alone (a merge patch
+/// replaces them). A non-object `next`, or an absent or non-object `stored`,
+/// is returned unchanged.
 #[must_use]
 pub fn replacing(next: serde_json::Value, stored: Option<&serde_json::Value>) -> serde_json::Value {
     let serde_json::Value::Object(mut fields) = next else {
@@ -1330,11 +1058,11 @@ pub fn replacing(next: serde_json::Value, stored: Option<&serde_json::Value>) ->
 }
 
 /// Put `stored[instant]` back into `next` when merging `next` onto `stored`
-/// would change nothing ELSE — so that a "when computed" instant moves when
-/// the thing it timestamps moves, and never on its own. Returns whether it did.
+/// would change nothing else, so a "when computed" instant moves only when the
+/// thing it timestamps moves. Returns whether it did.
 ///
 /// `stored` and `next` are one status block (`status.lastSlot`,
-/// `status.retentionReport`), `next` as it will be sent. The comparison is
+/// `status.lastEvaluation`), `next` as it will be sent. The comparison is
 /// [`status_unchanged`]'s, made on the merged JSON the API server will store,
 /// with `instant` left out of both sides. When the block did change, `next`
 /// keeps the instant it was built with, which is the caller's `now`.
@@ -1371,63 +1099,39 @@ pub fn keep_instant_unless_changed(
     false
 }
 
-// ---------------------------------------------------------------------------
-// THE FOURTH RULE OF THE STATUS-WRITE CONTRACT — D-SEAMS **S7**
-// ---------------------------------------------------------------------------
+// The fourth rule, seam **S7**: every `/status` write carries
+// `metadata.resourceVersion` as a precondition. The API server applies a
+// `resourceVersion` in a merge-patch body as an update precondition and
+// answers `409 Conflict` on a mismatch, which gives a merge PATCH a
+// compare-and-set without the `update` verb. Without it, a pass computing from
+// a stale watch-cache copy overwrites what a concurrent writer stored, and a
+// `Backup` has four writers (its reconciler, `backup_selection`,
+// `backup_schedule`'s reservation and `schedule_history`).
+// [`patch_status_preconditioned`] is the one implementation.
 //
-// Every `/status` write carries `metadata.resourceVersion` as a PRECONDITION.
-// The API server applies a `resourceVersion` carried in a merge-patch BODY as
-// an update precondition and answers `409 Conflict` on a mismatch, which is
-// how a merge PATCH gets a compare-and-set without the `update` verb —
-// `charts/logweir/README.md:59-60` and the D3 W2 record both state the rule for
-// every status write in this crate, and six of the seven kinds that have it
-// spell it out for themselves.
-//
-// Defect STATUS-PATCH-NO-RV is the seventh: `controllers::{backup, restore,
-// kafka_cluster}::patch_status_if_changed` — twenty-three call sites between
-// them — sent an UNCONDITIONAL merge patch, so a pass computing from a stale
-// watch-cache copy overwrote whatever a concurrent writer had stored. The
-// `Backup` kind has four writers (this reconciler, `backup_selection`,
-// `backup_schedule`'s reservation and `schedule_history`), which is exactly
-// the shape the precondition exists for.
-//
-// [`patch_status_preconditioned`] is the one implementation, so the rule
-// cannot hold at twenty-two sites and not at the twenty-third.
-//
-// # A 409 is not swallowed here
-//
-// It is returned as the API error it is and reaches the reconciler, whose
-// `error_policy` requeues; the next pass reads the object the other writer
-// stored and recomputes. A re-read-and-retry INSIDE this helper would be a
-// second write of a status computed from inputs nobody re-observed, which is
-// the defect with an extra round trip. A caller that needs the write to land
-// within the pass opts in BY NAME through [`StatusVersion`]: it passes the
-// version the previous write of the same pass left behind, which is what
-// `Backup`'s freeze → resolve → running sequence and both terminal →
-// verification sequences do.
+// A 409 is not swallowed or retried here: it reaches the reconciler, whose
+// `error_policy` requeues, and the next pass recomputes from what the other
+// writer stored. A retry inside this helper would write a status computed from
+// inputs nobody re-observed. A caller that needs a later write within the
+// pass opts in by name through [`StatusVersion`], passing the version the
+// previous write left (`Backup`'s freeze → resolve → running sequence, and
+// both terminal → verification sequences).
 
-/// The `metadata.resourceVersion` the NEXT `/status` write of this pass must
+/// The `metadata.resourceVersion` the next `/status` write of this pass must
 /// precondition on.
 ///
-/// A pass that writes once takes it from the object the watch delivered and
-/// discards the result. A pass that writes more than once CANNOT: after the
-/// first PATCH returns, the object it was handed is stale by exactly one
-/// version, and a second write preconditioned on the old one is refused
-/// forever. So every write returns where the object now stands, and the
-/// sequences that need it thread it forward.
-///
-/// Deliberately NOT `#[must_use]`: discarding it is correct and common (one
-/// write, then a `return`), and a lint on every such site would train the
-/// reader to ignore it at the two sites where it matters.
+/// After a pass's first PATCH the object it was handed is stale by one
+/// version, and a second write preconditioned on it would be refused, so every
+/// write returns where the object now stands and multi-write sequences thread
+/// it forward. Not `#[must_use]`: discarding it after a single write is correct
+/// and common.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusVersion(Option<String>);
 
 impl StatusVersion {
-    /// Where the object a pass was handed stands — the precondition for that
-    /// pass's FIRST write.
-    ///
-    /// An empty string is treated as absent: that is what a hand-built fixture
-    /// carries, and a precondition of `""` is not one.
+    /// Where the object a pass was handed stands: the precondition for that
+    /// pass's first write. An empty string (a hand-built fixture) is treated
+    /// as absent.
     #[must_use]
     pub fn observed(meta: &kube::core::ObjectMeta) -> Self {
         Self(meta.resource_version.clone().filter(|v| !v.is_empty()))
@@ -1440,25 +1144,22 @@ impl StatusVersion {
     }
 }
 
-/// Write `/status` under seam **S7**'s precondition — unless the patch would
+/// Write `/status` under seam **S7**'s precondition, unless the patch would
 /// change nothing.
 ///
 /// `at` is where the object stands ([`StatusVersion`]); `current` is the
-/// status this pass believes is stored, for [`status_unchanged`]'s decision.
-/// The returned [`StatusVersion`] is where the object stands AFTER this call:
-/// the response's own version when a patch was sent, and `at` unchanged when
-/// none was — a skipped write moves nothing, so the caller's precondition
-/// still holds.
+/// status this pass believes is stored, for [`status_unchanged`]. Returns
+/// where the object stands after the call: the response's version when a patch
+/// was sent, `at` unchanged when none was.
 ///
 /// # Errors
 ///
-/// * [`kube::Error::Discovery`], shaped as the API server's own "no
-///   resourceVersion" answer, for an object that carries none. Unreachable for
-///   anything that came from a watch or a `get`; named rather than written
-///   without its precondition, because writing it unconditionally is the
-///   defect this function exists to close.
-/// * The API error for anything else, `409 Conflict` INCLUDED — see this
-///   section's header for why it is not retried here.
+/// * [`kube::Error::Discovery`], shaped as the API server's "no
+///   resourceVersion" answer, for an object that carries none: unreachable for
+///   anything from a watch or a `get`, and never written without its
+///   precondition.
+/// * The API error for anything else, `409 Conflict` included (see this
+///   section's header).
 pub async fn patch_status_preconditioned<K>(
     api: &kube::Api<K>,
     kind: &str,
