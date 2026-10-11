@@ -31,7 +31,7 @@
 archive:
   # (1) The bucket-and-prefix the controller's evidence handle is built over.
   #     The runner writes receipts and scorecards under `logweir/` in this
-  #     BUCKET; the prefix names the retention report's archive.
+  #     BUCKET.
   url: s3://YOUR-BUCKET/logweir
   s3:
     # (2) An S3-compatible endpoint (MinIO, Ceph, …). Leave EMPTY for Amazon S3

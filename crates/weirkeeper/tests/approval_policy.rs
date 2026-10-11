@@ -21,6 +21,9 @@
 //! asserts that against the live function, so a snapshot change is a red test
 //! here rather than a silently stale fixture.
 
+mod support;
+use support::sidecar;
+
 use chrono::{DateTime, Duration, Utc};
 use kube::api::ObjectMeta;
 use logweir_core::approval_policy::{
@@ -184,15 +187,6 @@ fn trust_policy(keys: Vec<SpecKey>) -> TrustPolicy {
 
 fn trust(keys: Vec<SpecKey>) -> weirkeeper::trust::ResolvedTrust {
     weirkeeper::trust::from_policy(&trust_policy(keys))
-}
-
-fn sidecar(payload_type: &str, signatures: &[(&str, &str)]) -> String {
-    let sigs = signatures
-        .iter()
-        .map(|(keyid, sig)| format!(r#"{{"keyid":"{keyid}","sig":"{sig}"}}"#))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"payloadType":"{payload_type}","signatures":[{sigs}]}}"#)
 }
 
 fn expected() -> ExpectedSubject {

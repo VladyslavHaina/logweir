@@ -1,4 +1,5 @@
 mod fixtures; // crates/logweir/tests/fixtures/mod.rs — Task 14 step 5c
+mod support;
 use logweir::drill::phase6_restore::assert_post_condition;
 use std::collections::BTreeMap;
 
@@ -11,8 +12,9 @@ use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PhaseObserver,
     PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection, StorageUrl,
 };
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::KafkaError;
 use std::sync::atomic::{AtomicBool, Ordering};
+use support::doubles::Reader;
 
 /// The backstop for a `dry_run` that arrives by any route the phase-0 guard did
 /// not see. A no-op restore exits 0 and would otherwise score, producing a
@@ -199,46 +201,18 @@ fn the_measured_span_is_exactly_the_engines_own_facts_and_the_engine_is_actually
 /// file. Review finding F7/N4: a broker read failure during the post-restore
 /// check must surface as `DrillError::Kafka`, never be swallowed into a
 /// false "no-op" finding about the archive.
-struct FailingReader;
-impl ClusterReader for FailingReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("MkU3OEVBNTcwNTJENDM2Qk".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+fn failing_reader() -> Reader {
+    Reader::new("MkU3OEVBNTcwNTJENDM2Qk").on_end_offsets(|_| {
         Err(KafkaError::Client(
             "broker unreachable during post-condition read".into(),
         ))
-    }
-    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
-    /// a broker that surfaces neither `log.message.timestamp.type` nor a
-    /// timestamp bound, which is the harmless case: phase 0's preflight then
-    /// treats the broker as the Apache default (`CreateTime`) and refuses
-    /// nothing. G-TS's own arms live in
-    /// `crates/logweir/tests/topic_preflight.rs`.
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _t: &str,
-        _p: i32,
-        _from: i64,
-        _max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
+    })
 }
 
 #[test]
 fn a_broker_failure_during_the_post_restore_read_surfaces_as_kafka_not_a_no_op() {
     let engine = fixtures::SleepEngine { ms: 1 };
-    let reader = FailingReader;
+    let reader = failing_reader();
     let r = logweir::drill::phase6_restore::run(
         &engine,
         &fixtures::plan(),

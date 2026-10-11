@@ -464,7 +464,9 @@ pub enum ConcurrencyPolicy {
     Allow,
 }
 
-/// Retention reporting settings. Logweir deletes nothing.
+/// Withdrawn (PROD-17.1 B1): stored as `spec.retention` and ignored; the
+/// controller names it with a `RetentionReportWithdrawn` condition. Retention
+/// is a RetentionPolicy's (`.../retention-policies`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetentionRequest {
@@ -562,7 +564,7 @@ pub struct CreateScheduleRequest {
     /// The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_deadline_seconds: Option<i64>,
-    /// Retention reporting.
+    /// Withdrawn; see [`RetentionRequest`].
     #[serde(default)]
     pub retention: Option<RetentionRequest>,
     /// Whether the schedule starts suspended.
@@ -580,7 +582,9 @@ pub struct SetSuspensionRequest {
     pub expected_resource_version: String,
 }
 
-/// Retention settings of a stored schedule.
+/// A stored schedule's `spec.retention`. Withdrawn (PROD-17.1 B1): stored as `spec.retention` and ignored; the
+/// controller names it with a `RetentionReportWithdrawn` condition. Retention
+/// is a RetentionPolicy's (`.../retention-policies`).
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionView {
@@ -590,54 +594,6 @@ pub struct RetentionView {
     /// Keep sets newer than N days.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_days: Option<i64>,
-}
-
-/// One set retention would remove. It is still in the archive.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RemovableSetView {
-    /// The backup set ID.
-    pub backup_id: String,
-    /// The newest record instant in the set.
-    pub newest_record_at: DateTime<Utc>,
-    /// `OlderThanKeepDays` or `BeyondKeepLast`.
-    pub reason: String,
-    /// The configured keepDays, for `OlderThanKeepDays`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub days: Option<i64>,
-    /// The newest-first rank, for `BeyondKeepLast`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rank: Option<i64>,
-}
-
-/// The controller's retention report, bounded to 100 entries per list.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RetentionReportView {
-    /// When retention was last evaluated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub evaluated_at: Option<DateTime<Utc>>,
-    /// keepLast as applied.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_last: Option<i64>,
-    /// keepDays as applied.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_days: Option<i64>,
-    /// Kept set IDs, newest first.
-    pub sets_kept: Vec<String>,
-    /// Sets that would be removed, newest first. Nothing was deleted.
-    pub sets_that_would_be_removed: Vec<RemovableSetView>,
-    /// Removal commands in the archive scheme's own CLI. Reported, never run.
-    pub removal_commands: Vec<String>,
-    /// The same commands in `mc` spelling.
-    pub mc_removal_commands: Vec<String>,
-    /// How many manifests could not be read.
-    pub skipped_manifests: usize,
-    /// Why nothing would be removed, when that is not "nothing to remove".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// Whether any list above was cut at 100 entries.
-    pub truncated: bool,
 }
 
 /// What the schedule controller last recorded.
@@ -694,9 +650,6 @@ pub struct ScheduleStatusView {
     /// The `Ready` condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready: Option<ConditionView>,
-    /// The retention report.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retention_report: Option<RetentionReportView>,
 }
 
 /// A saved schedule.
@@ -767,7 +720,7 @@ pub struct Schedule {
     /// The run's `activeDeadlineSeconds`. ABSENT means 3600.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_deadline_seconds: Option<i64>,
-    /// Retention reporting settings.
+    /// Withdrawn; see [`RetentionView`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention: Option<RetentionView>,
     /// Whether the schedule is suspended.
@@ -3534,7 +3487,7 @@ pub struct UpdateSchedulePolicyRequest {
     /// The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.
     #[serde(default)]
     pub active_deadline_seconds: Option<i64>,
-    /// Retention reporting. Logweir deletes nothing.
+    /// Withdrawn; see [`RetentionRequest`].
     #[serde(default)]
     pub retention: Option<RetentionRequest>,
     /// Whether the schedule is suspended. Suspension is part of the policy
@@ -3856,33 +3809,6 @@ impl From<logweir_core::approval_policy::ApprovalMode> for ApprovalModeView {
     }
 }
 
-/// PROD-16.1: the approval mode in the operator's words — the one mapping is
-/// `logweir_core::approval_policy::OperatorMode`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
-pub enum OperatorModeView {
-    /// One-person confirmation in the console (internal `Ordinary`).
-    #[serde(rename = "confirm")]
-    Confirm,
-    /// Two-person approval in the console (PROD-16.2: internal `Governed`
-    /// with `approverSignature: Console`): a second person signs in to the
-    /// shared console and clicks Approve.
-    #[serde(rename = "two-person")]
-    TwoPerson,
-    /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
-    #[serde(rename = "strict")]
-    Strict,
-}
-
-impl From<logweir_core::approval_policy::OperatorMode> for OperatorModeView {
-    fn from(mode: logweir_core::approval_policy::OperatorMode) -> Self {
-        match mode {
-            logweir_core::approval_policy::OperatorMode::Confirm => Self::Confirm,
-            logweir_core::approval_policy::OperatorMode::TwoPerson => Self::TwoPerson,
-            logweir_core::approval_policy::OperatorMode::Strict => Self::Strict,
-        }
-    }
-}
-
 /// PROD-16.1: why a namespace resolves to its policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3934,7 +3860,7 @@ pub struct RestoreRoutingView {
     /// The mode the namespace's binding requires.
     pub mode: ApprovalModeView,
     /// PROD-16.1: the same mode in the operator's words.
-    pub operator_mode: OperatorModeView,
+    pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
     /// The policy name — `legacy-governed-v1` for an unbound namespace.
     pub policy: String,
     /// The policy snapshot digest the console signed; absent for the legacy
@@ -3974,7 +3900,7 @@ pub struct ApprovalPolicyView {
     pub mode: ApprovalModeView,
     /// PROD-16.1: the same mode in the operator's words: `confirm`,
     /// `two-person` or `strict`.
-    pub operator_mode: OperatorModeView,
+    pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
     /// PROD-16.1: why the namespace resolves to this policy.
     pub basis: PolicyBasisView,
     /// `true` when the namespace resolves to `legacy-governed-v1`.

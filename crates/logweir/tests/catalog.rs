@@ -31,6 +31,9 @@
 //! | CLI exit codes and the URL guard | the `catalog_*_exits` and `evidence_url_*` rows |
 //! | the published schema still describes the type | `the_checked_in_catalog_point_schema_is_the_one_the_type_generates` |
 
+mod support;
+use support::assert_format_at_least;
+
 use logweir::catalog::cli::{ListArgs, Location, PointOutcome, SyncArgs};
 use logweir::catalog::reader::{self, CrossCheck, Duplicate, RecordVerdict};
 use logweir::catalog::record::*;
@@ -2787,24 +2790,6 @@ fn the_frozen_1_6_0_catalog_point_schema_is_still_prod_01_4as() {
         serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
     assert!(current["properties"]["consumer_positions"].is_object());
     assert_ne!(current["$id"], frozen["$id"]);
-}
-
-/// A document's `format_version` is at least `min` (the minor that defines the
-/// field under test), surviving the integration renumber of receipt and
-/// catalog-point versions where an exact pin would break a sibling's CI.
-fn assert_format_at_least(actual: &str, min: &str, what: &str) {
-    let triple = |v: &str| -> (u64, u64, u64) {
-        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-        (
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-        )
-    };
-    assert!(
-        triple(actual) >= triple(min),
-        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
-    );
 }
 
 const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";

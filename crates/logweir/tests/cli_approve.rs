@@ -7,12 +7,10 @@
 //! be satisfied from Logweir's own artifacts. A library-level test would have
 //! passed throughout. Every test here therefore spawns the binary and then
 //! feeds the result to the REAL phase-1 verifier.
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod support;
+use support::bin;
 
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+use std::path::{Path, PathBuf};
 
 fn write_key(dir: &Path) -> PathBuf {
     let p = dir.join("approver.pem");

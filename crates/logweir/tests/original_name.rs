@@ -11,6 +11,8 @@
 //! The bootstrap literals below are data handed to doubles; no client is ever
 //! constructed (`no_network_in_unit_tests.rs`).
 
+mod support;
+
 use logweir::drill::{phase0_admit, phase9_teardown, DrillError};
 use logweir::exit::ExitCode;
 use logweir_core::backup_receipt::TopicOwner;
@@ -21,10 +23,11 @@ use logweir_core::spec::{
 };
 use logweir_core::topic_configuration::DeclaredOwner;
 use logweir_kafka::reader::{
-    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicDeleter, TopicMeta,
+    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicMeta,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use support::doubles::Deleter;
 
 /// The target cluster the doubles report.
 const TARGET: &str = "TARGET0000000000000000";
@@ -315,21 +318,6 @@ fn rdkafka_already_exists() -> String {
         "InvalidReplicationFactor (Broker: Invalid replication factor)"
     ));
     text.to_string()
-}
-
-#[derive(Default)]
-struct Deleter {
-    calls: Mutex<Vec<String>>,
-}
-
-impl TopicDeleter for Deleter {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(names);
-        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
-    }
 }
 
 struct Run {

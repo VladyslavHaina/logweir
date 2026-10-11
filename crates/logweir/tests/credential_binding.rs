@@ -9,46 +9,15 @@
 //! must never be dialled, with a negative control: the same command with the
 //! binding the controller expects, which must NOT be refused on the binding.
 
-use std::io::ErrorKind;
-use std::net::TcpListener;
+mod support;
+use support::{assert_no_connection, base, last_line, sentinel, EXPECTED, FOREIGN, LIMIT};
+
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const LIMIT: Duration = Duration::from_secs(20);
-const EXPECTED: &str = "v1:00000000-0000-0000-0000-000000000001:sha256:abc";
-const FOREIGN: &str = "v1:99999999-9999-9999-9999-999999999999:sha256:def";
 /// A password the refusal paths must never print.
 const SEEDED: &str = "seeded-binding-row-password-7f3a";
-
-fn sentinel() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    (listener, address)
-}
-
-fn assert_no_connection(listener: &TcpListener, label: &str) {
-    match listener.accept() {
-        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-        Ok((_, peer)) => panic!("{label}: the sentinel was dialled from {peer}"),
-        Err(error) => panic!("{label}: inspect the sentinel: {error}"),
-    }
-}
-
-fn base(root: &Path) -> Command {
-    let tmp = root.join("tmp");
-    std::fs::create_dir_all(&tmp).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
-    command
-        .env_clear()
-        .env("TMPDIR", &tmp)
-        .env("RUST_LOG", "info")
-        .env("LOGWEIR_ENGINE_BIN", root.join("no-engine"))
-        .env("LOGWEIR_ENGINE_VERSION", "sentinel-version")
-        .env("LOGWEIR_ENGINE_DIGEST", "sha256:sentinel-digest");
-    command
-}
 
 fn run(mut command: Command, label: &str) -> Output {
     command
@@ -72,14 +41,6 @@ fn run(mut command: Command, label: &str) -> Output {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn last_line(stdout: &str) -> &str {
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
-        .unwrap_or("")
 }
 
 /// `backup run`: the SOURCE side. The binding is checked right after phase

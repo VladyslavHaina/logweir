@@ -21,7 +21,10 @@
 //! Task 21's. Every test here runs against `testing::mock_client` and needs no
 //! RBAC at all.
 
-use chrono::{DateTime, TimeZone, Utc};
+mod support;
+use support::{conditions_of, not_found_body, patched_statuses, path, posted_job, utc};
+
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
@@ -136,21 +139,8 @@ fn scram_cluster() -> KafkaCluster {
         .expect("the fixture is a KafkaCluster")
 }
 
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
-
 fn now() -> DateTime<Utc> {
     utc(2026, 9, 10, 12, 0)
-}
-
-fn not_found_body(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
-  "message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 /// A finished Job, `Complete` or `Failed`.
@@ -296,10 +286,6 @@ fn finished_routes(exit_code: i32, log: String) -> Vec<Route> {
     ]
 }
 
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
-}
-
 fn count(bodies: &[SeenBody], method: &str, suffix: &str) -> usize {
     bodies
         .iter()
@@ -313,40 +299,6 @@ fn mentioning(bodies: &[SeenBody], needle: &str) -> usize {
         .iter()
         .filter(|b| path(&b.uri).contains(needle))
         .count()
-}
-
-fn patched_statuses(bodies: &[SeenBody]) -> Vec<Value> {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
-        .map(|v| v["status"].clone())
-        .collect()
-}
-
-fn conditions_of(status: &Value) -> Vec<(String, String, String)> {
-    status["conditions"]
-        .as_array()
-        .map(|cs| {
-            cs.iter()
-                .map(|c| {
-                    (
-                        c["type"].as_str().unwrap_or_default().to_string(),
-                        c["status"].as_str().unwrap_or_default().to_string(),
-                        c["reason"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn posted_job(bodies: &[SeenBody]) -> Value {
-    let body = bodies
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .expect("the reconciler POSTed a Job");
-    serde_json::from_str(&body.body).expect("a Job POST body is JSON")
 }
 
 // ---------------------------------------------------------------------------
@@ -4023,4 +3975,31 @@ async fn fx19_a_crash_whose_ttl_patch_failed_warns_once() {
     );
     warns.extend(log.messages_at("WARN"));
     assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
+}
+
+/// **PROD-17.1 B4: the probe's log read is a bounded tail.** It asks for the
+/// last `TERMINAL_LOG_TAIL_LINES` lines and nothing else, the read a `Restore`
+/// makes at every exit but 3; before the fold it asked for the whole log. The
+/// two contract lines are last, so the verdict is the one the whole log gave.
+///
+/// KILLS: the unbounded read (an empty query).
+#[tokio::test]
+async fn the_probe_log_read_asks_for_a_bounded_tail() {
+    let (client, rec, _bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reachable, Some(true));
+    let seen = rec.lock().expect("the recorder is readable").clone();
+    let queries: Vec<Vec<&str>> = seen
+        .iter()
+        .filter_map(|r| r.uri.split_once("/log?"))
+        .map(|(_, query)| query.split('&').filter(|p| !p.is_empty()).collect())
+        .collect();
+    let bound = format!(
+        "tailLines={}",
+        weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
+    );
+    assert_eq!(queries, vec![vec![bound.as_str()]], "{seen:?}");
 }

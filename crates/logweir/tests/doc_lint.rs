@@ -30,23 +30,13 @@
 //! spawns cargo, opens a socket or starts a container, so the whole file is
 //! milliseconds against the 15-second per-test budget.
 
+mod support;
+use support::{read, repo_root};
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // --------------------------------------------------------------- the helpers
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
-
-fn read(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
-}
 
 /// The six Markdown files at the repository root. Named rather than globbed:
 /// "the six root markdown files" is a claim about which documents ship, and a
@@ -2219,6 +2209,15 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "the Helm chart is the only install",
             "-l app.kubernetes.io/name=logweir",
+        ),
+        // PROD-17.1 B5 (2026-10-11, item 77): an unparseable plan is refused
+        // before its approval is read.
+        ("an unparseable plan refused early", "PlanUnparseable"),
+        // PROD-17.1 B1 (2026-10-11, item 78): a schedule's `spec.retention`
+        // stops reporting; the condition a schedule that still sets it carries.
+        (
+            "a schedule's spec.retention stops reporting",
+            "RetentionReportWithdrawn",
         ),
     ];
     assert_eq!(

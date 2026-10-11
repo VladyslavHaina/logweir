@@ -56,11 +56,14 @@
 //!
 //! COSTS NOTHING AND REACHES NOTHING: it reads checked-in files only.
 
+mod support;
+use support::{read, repo_root};
+
 use logweir::drill::phase8_score::PutReceipt;
 use logweir_core::execution_contract::StandingAuthorization;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const PAGE: &str = "docs/control-evidence.md";
 
@@ -227,19 +230,6 @@ const FILE_SUFFIXES: [&str; 10] = [
 ];
 
 // --------------------------------------------------------------- the helpers
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
-
-fn read(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
-}
 
 fn read_json(relative: &str) -> Value {
     serde_json::from_str(&read(relative)).unwrap_or_else(|e| panic!("{relative} is JSON: {e}"))

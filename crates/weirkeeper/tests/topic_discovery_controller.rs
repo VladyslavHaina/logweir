@@ -22,6 +22,9 @@
 //!    commit point. A restart anywhere in that sequence has to leave either
 //!    nothing or a complete, readable result.
 
+mod support;
+use support::{broker_failure, pod_list};
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -230,13 +233,6 @@ fn terminated(exit_code: i32) -> Value {
         "state":{"terminated":{"exitCode":exit_code,
                  "startedAt":"2026-09-16T11:58:45Z","finishedAt":"2026-09-16T11:59:00Z"}}
     }]})
-}
-
-fn pod_list(pods: Vec<Pod>) -> String {
-    serde_json::to_string(&json!({
-        "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": pods
-    }))
-    .expect("a serialisable list")
 }
 
 fn job_list(items: Vec<Value>) -> String {
@@ -2754,20 +2750,6 @@ const S12_MESSAGE: &str =
 const S12_REMEDY: &str = "Check the SASL mechanism, the username and the projected password \
                           on the connection's Secret; rotate the credential if it was changed \
                           on the broker.";
-
-/// The `connection.authenticated` row `logweir::check::kinds::from_broker_failure`
-/// builds for a classified broker failure.
-fn broker_failure(code: CheckCode, state: CheckState, message: &str, remedy: &str) -> CheckOutcome {
-    CheckOutcome::new(
-        CheckId::ConnectionAuthenticated,
-        state,
-        Gating::Blocking,
-        Authority::CheckJob,
-        code,
-    )
-    .with_message(message)
-    .with_remedy(remedy)
-}
 
 /// A complete, verifiable relay for a check that produced NO inventory — the
 /// shape `logweir::check::kinds::inventory` emits for a broker it could not

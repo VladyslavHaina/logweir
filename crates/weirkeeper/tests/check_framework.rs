@@ -11,6 +11,9 @@
 //! custom resource's status and then an API response. The label narrows the
 //! list; the controller `ownerReference` UID decides.
 
+mod support;
+use support::pod_list;
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -173,13 +176,6 @@ fn waiting_container(reason: &str, message: &str) -> Value {
         "name":"runner","image":"x","imageID":"","ready":false,"restartCount":0,
         "state":{"waiting":{"reason":reason,"message":message}}
     }]})
-}
-
-fn pod_list(pods: Vec<Pod>) -> String {
-    serde_json::to_string(&json!({
-        "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": pods
-    }))
-    .expect("a serialisable list")
 }
 
 /// A well-formed relay for a two-topic inventory.

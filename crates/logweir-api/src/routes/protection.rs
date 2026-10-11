@@ -9,10 +9,9 @@
 //! readiness beside the objective, and `lastAvailablePoint` — the newest point
 //! that is available, which is not the same object as `lastAttempt`.
 //!
-//! ALERT DELIVERY IS WITHDRAWN (OD-12). `notifications` and each alert's
-//! `notifiedTransition` and `delivery` are always absent. Their types stay
-//! because the published OpenAPI document names them; a withdrawn policy
-//! field is reported by the policy's own `NotificationsDelivered` condition.
+//! ALERT DELIVERY IS WITHDRAWN (OD-12). The view publishes no notification
+//! routes and no delivery state (PROD-17.1 C2); a withdrawn policy field is
+//! reported by the policy's own `NotificationsDelivered` condition.
 
 use axum::extract::State;
 use axum::response::Response;
@@ -88,41 +87,6 @@ pub struct ObjectivesView {
     pub max_rehearsal_age_seconds: Option<i32>,
 }
 
-/// One configured alert destination — its name and which channels it has.
-///
-/// THE CHANNELS ARE BOOLEANS ON PURPOSE. A PagerDuty routing key, a webhook
-/// URL and a Slack webhook URL are each a credential; so is the name of the
-/// Secret that holds one, to a reader deciding what to try to read next.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationRouteView {
-    /// What status and logs call it.
-    pub name: String,
-    /// Whether a PagerDuty channel is configured.
-    pub pager_duty: bool,
-    /// Whether a webhook channel is configured.
-    pub webhook: bool,
-    /// Whether a Slack channel is configured.
-    pub slack: bool,
-}
-
-/// Where alerts go, and which ones.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationsView {
-    /// The routes, at most four.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(default)]
-    pub routes: Vec<NotificationRouteView>,
-    /// Which alert kinds are sent. Absent means all of them.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kinds: Option<Vec<String>>,
-    /// Whether a resolution is delivered too.
-    pub send_resolved: bool,
-    /// How long before an open alert is re-sent; `0` disables re-notify.
-    pub renotify_after_seconds: i32,
-}
-
 /// The newest point this policy can actually recover from.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -193,25 +157,6 @@ pub struct ScheduleHealthView {
     pub last_missed_slot: Option<String>,
 }
 
-/// How a transition was delivered, or why it was not.
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AlertDeliveryView {
-    /// `Pending`, `Delivered`, `Failed` or `Suppressed`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    /// How many attempts.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempts: Option<i64>,
-    /// When the last one was.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_attempt_at: Option<DateTime<Utc>>,
-    /// The last error, redacted by the controller and bounded again here.
-    /// Never a routing key and never a URL.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<String>,
-}
-
 /// One entry of the deduplication ledger.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -232,13 +177,6 @@ pub struct AlertView {
     /// re-notify.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transition: Option<i64>,
-    /// The last transition a delivery was created for. `transition` ahead of
-    /// this one is an alert whose latest state has not been delivered.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notified_transition: Option<i64>,
-    /// How that delivery went.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delivery: Option<AlertDeliveryView>,
 }
 
 /// A `ProtectionPolicy`, projected.
@@ -263,10 +201,6 @@ pub struct ProtectionPolicyView {
     pub protects: ProtectedSubjectView,
     /// What "protected" means.
     pub objectives: ObjectivesView,
-    /// Where alerts go. Absent means the verdict is reported here and
-    /// delivered nowhere — a real choice, not a broken configuration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notifications: Option<NotificationsView>,
     /// How often it is evaluated.
     pub evaluation_interval_seconds: i32,
     /// The generation the verdict was computed from. Different from
@@ -385,8 +319,6 @@ fn alert_view(alert: &AlertEntry) -> AlertView {
         opened_at: alert.opened_at,
         resolved_at: alert.resolved_at,
         transition: alert.transition,
-        notified_transition: None,
-        delivery: None,
     }
 }
 
@@ -433,7 +365,6 @@ pub fn view(policy: &ProtectionPolicy) -> ProtectionPolicyView {
             require_catalog_availability: spec.objectives.require_catalog_availability,
             max_rehearsal_age_seconds: spec.objectives.max_rehearsal_age_seconds,
         },
-        notifications: None,
         evaluation_interval_seconds: spec.evaluation_interval_seconds,
         observed_generation: status.and_then(|s| s.observed_generation),
         evaluated_at: status.and_then(|s| s.evaluated_at),

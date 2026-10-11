@@ -24,6 +24,9 @@
 //! the name is not computed from a clock or a status) or to make the horizon
 //! and `suspend` arms checkable.
 
+mod support;
+use support::{utc, workspace_root};
+
 use chrono::{DateTime, TimeZone, Utc};
 use kube::CustomResourceExt as _;
 use weirkeeper::backup_execution::{
@@ -154,13 +157,6 @@ fn backup_list_body(items: Vec<serde_json::Value>) -> String {
         "items": items
     })
     .to_string()
-}
-
-/// A UTC instant, spelled as five integers so a test reads like a calendar.
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
 }
 
 /// The body a successful `POST …/backups` is answered with — the API server
@@ -460,15 +456,6 @@ fn source_of(relative: &str) -> String {
 fn workspace_source(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The workspace root: two levels above this crate's manifest directory.
-fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the workspace root is two levels above this crate")
-        .to_path_buf()
 }
 
 /// Every `.rs` file under `crates/weirkeeper/src/`, as `(path relative to
@@ -7359,52 +7346,6 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// **A RETENTION REPORT IS NEVER ABOUT ANOTHER DESTINATION'S CATALOGUE** —
-/// defect RET-WRONGBUCKET, grounding G14.
-///
-/// The reconciler LISTS through the controller's one global handle and RENDERS
-/// `aws s3 rm` commands naming the SCHEDULE's own URL. On two buckets that is a
-/// report about bucket A printed as if it described bucket B, with commands
-/// naming keys in B that were listed in A.
-///
-/// KILLS: `retention_scope` returning `GlobalHandleApplies` unconditionally,
-/// and the `destination_backed` arm dropped (a destination-backed schedule then
-/// gets a report computed from a handle that cannot see its bucket).
-#[test]
-fn a_retention_report_is_withheld_when_it_would_describe_another_bucket() {
-    use weirkeeper::destination::{retention_scope, RetentionScope};
-
-    assert!(
-        retention_scope("s3://kb/team-a", Some("s3://kb"), false).reports(),
-        "two prefixes of ONE bucket are both describable by a handle on that bucket — the \
-         listing is prefix-scoped by the report itself"
-    );
-    match retention_scope("s3://team-b-bucket/x", Some("s3://kb"), false) {
-        RetentionScope::WrongBucket {
-            schedule_bucket,
-            handle_bucket,
-        } => {
-            assert_eq!(schedule_bucket, "team-b-bucket");
-            assert_eq!(handle_bucket, "kb");
-        }
-        other => panic!("a different bucket withholds the report; got {other:?}"),
-    }
-    assert!(
-        !retention_scope("s3://kb/team-a", Some("s3://kb"), true).reports(),
-        "a destination-backed schedule gets NO report until PLAT-16.1's per-destination \
-         archive-inventory check: the global handle is for objects without a destinationRef"
-    );
-    assert!(
-        !retention_scope("s3://kb/team-a", None, false).reports(),
-        "and a controller with no handle reports nothing at all"
-    );
-    assert!(
-        !retention_scope("logweir-destination://dest-a", Some("s3://kb"), true).reports(),
-        "the sentinel URL is not a bucket, and an unreadable URL is never the same bucket as \
-         anything — the safe direction"
-    );
 }
 
 /// **THE ENVIRONMENT A DESTINATION-BACKED JOB CARRIES DRIVES THE REAL RUNNER

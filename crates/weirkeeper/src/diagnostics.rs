@@ -1151,12 +1151,7 @@ pub async fn read_progress(
     stored: Option<&RunProgress>,
 ) -> Progress {
     let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
-    let params = kube::api::LogParams {
-        tail_lines: Some(PROGRESS_TAIL_LINES),
-        limit_bytes: Some(PROGRESS_LIMIT_BYTES),
-        ..Default::default()
-    };
-    match pods.logs(pod_name, &params).await {
+    match crate::runner_log::read_text(&pods, pod_name, &crate::runner_log::PROGRESS).await {
         Ok(log) => {
             let mut progress =
                 parse_progress_after(&log, stored.is_some_and(|p| p.runner_phase.is_some()));
@@ -1999,14 +1994,7 @@ pub async fn repair_ttl(
         return Ok(false);
     }
     let jobs: kube::Api<Job> = kube::Api::namespaced(client.clone(), namespace);
-    jobs.patch(
-        &job.name_any(),
-        &kube::api::PatchParams::default(),
-        &kube::api::Patch::Merge(
-            json!({ "spec": { "ttlSecondsAfterFinished": job_ttl_seconds() } }),
-        ),
-    )
-    .await?;
+    crate::runner_log::set_ttl(&jobs, &job.name_any(), job_ttl_seconds(), None).await?;
     warn!(
         namespace,
         job = %job.name_any(),

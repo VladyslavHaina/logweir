@@ -36,21 +36,22 @@
 //! `python3 -c 'import datetime as d; ...'` before it was written, and is
 //! spelled beside its date (plan errata E6/E7).
 mod fixtures;
+mod support;
 
 use logweir::drill::phase7_verify::{compare, decode_original_offset, run};
 use logweir::drill::{phase8_score, DrillError};
 use logweir::exit::ExitCode;
 use logweir_core::engine::{
-    expected_restored_count, BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId,
-    PartitionFacts, PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan,
-    SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    expected_restored_count, BackupSetFacts, BackupSetRef, PartitionFacts, RecordFingerprint,
+    RestorePlan, SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::{IntegrityResult, Outcome};
 use logweir_core::spec::{Anchor, ObjectivesSpec};
 use logweir_engine_oso::storage::Store;
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::ConsumedRecord;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use support::doubles::{zero_digest, Engine, Reader, TopicData};
 
 // ---------------------------------------------------------------------------
 // The window. `2026-09-01T00:00:00Z` .. `2026-09-01T12:00:00Z`, and the two
@@ -71,96 +72,33 @@ const PIT_MS: i64 = 1_788_264_000_000;
 const PAST_PIT_MS: i64 = 1_788_267_600_000;
 
 // ---------------------------------------------------------------------------
-// Doubles. Deliberately local to this file rather than reused from
-// `verify_phase.rs` (whose own doubles are private to that binary): the two
-// files assert different properties over different manifests, and a shared
-// double that has to serve both is a double that stops expressing either.
+// Doubles: the shared ones (`support::doubles`), configured for this file's
+// manifests.
 
-/// A `ClusterReader` answering from three maps. `consume_range` filters by
-/// `offset >= from` and takes `max`, exactly as `fixtures::FixtureClient` does,
-/// so a caller asking for `hi - 1` (which is what `newest_ts` does) gets the
-/// record at the high watermark and a caller asking from 0 gets the canary.
-struct WindowReader {
-    end_offsets: BTreeMap<String, Vec<(i32, i64)>>,
-    configs: BTreeMap<String, BTreeMap<String, String>>,
-    records: BTreeMap<String, Vec<ConsumedRecord>>,
-}
-
-impl ClusterReader for WindowReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("MkU3OEVBNTcwNTJENDM2Qk".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(self
-            .end_offsets
-            .keys()
-            .map(|n| TopicMeta::new(n, 1))
-            .collect())
-    }
-    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(self.end_offsets.get(topic).cloned().unwrap_or_default())
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(self.configs.get(topic).cloned().unwrap_or_default())
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        t: &str,
-        p: i32,
-        from: i64,
-        max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(self
-            .records
-            .get(t)
-            .map(|rs| {
-                rs.iter()
-                    .filter(|r| r.partition == p && r.offset >= from)
-                    .take(max)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
+/// The target: `drill-orders` and nothing else, every other name empty.
+/// `consume_range` filters by `offset >= from` and takes `max`, exactly as
+/// `fixtures::FixtureClient` does, so a caller asking for `hi - 1` (which is
+/// what `newest_ts` does) gets the record at the high watermark and a caller
+/// asking from 0 gets the canary.
+fn window_reader(drill_orders: TopicData) -> Reader {
+    Reader::lenient(
+        "MkU3OEVBNTcwNTJENDM2Qk",
+        [("drill-orders".to_string(), drill_orders)]
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// A `DataEngine` that answers `describe` and `fingerprints` from fields and
 /// refuses everything phase 7 does not call.
-struct WindowEngine {
-    facts: BackupSetFacts,
-    fingerprints: Vec<RecordFingerprint>,
-}
-
-impl DataEngine for WindowEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "oso-cli".into(),
-            version: "v0.21.0-fixture".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        unimplemented!("phase 7 never lists backup sets")
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        unimplemented!("phase 7 never runs preflight")
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        unimplemented!("phase 7 never restores")
-    }
-    fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        Ok(self.fingerprints.clone())
-    }
+fn window_engine(facts: BackupSetFacts, fingerprints: Vec<RecordFingerprint>) -> Engine<'static> {
+    Engine::new()
+        .identified("oso-cli", "v0.21.0-fixture", &zero_digest())
+        .describing(facts)
+        .fingerprinting(fingerprints)
+        .on_list(|_| unimplemented!("phase 7 never lists backup sets"))
+        .on_preflight(|_| unimplemented!("phase 7 never runs preflight"))
+        .on_restore(|_, _| unimplemented!("phase 7 never restores"))
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +178,7 @@ fn facts_with(segments: Vec<SegmentFacts>) -> BackupSetFacts {
 }
 
 /// `target_bootstrap` is the compose stack's own host-side address, as a
-/// STRING handed to `WindowReader`; no client is constructed anywhere in this
+/// STRING handed to `window_reader`; no client is constructed anywhere in this
 /// file (STANDING RULE 18, chain N — this path is on
 /// `no_network_in_unit_tests.rs`'s `ALLOWED` for exactly that reason).
 fn window_plan() -> RestorePlan {
@@ -349,21 +287,12 @@ fn phase7_reconciles_a_windowed_restore_by_original_offset() {
          nothing about the decode"
     );
 
-    let reader = WindowReader {
-        end_offsets: [("drill-orders".to_string(), vec![(0, 50)])]
-            .into_iter()
-            .collect(),
-        configs: [("drill-orders".to_string(), scratch_target_configs())]
-            .into_iter()
-            .collect(),
-        records: [("drill-orders".to_string(), consumed)]
-            .into_iter()
-            .collect(),
-    };
-    let engine = WindowEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-    };
+    let reader = window_reader(TopicData {
+        end_offsets: vec![(0, 50)],
+        configs: scratch_target_configs(),
+        records: consumed,
+    });
+    let engine = window_engine(facts.clone(), archive);
 
     let out = run(
         &engine,
@@ -540,21 +469,12 @@ fn run_with_restored_count(restored: i64) -> logweir::drill::phase7_verify::Veri
     let (_, hwm_record) = archived_and_restored("orders", 0, restored - 1, restored - 1, PIT_MS);
     consumed.push(hwm_record);
 
-    let reader = WindowReader {
-        end_offsets: [("drill-orders".to_string(), vec![(0, restored)])]
-            .into_iter()
-            .collect(),
-        configs: [("drill-orders".to_string(), scratch_target_configs())]
-            .into_iter()
-            .collect(),
-        records: [("drill-orders".to_string(), consumed)]
-            .into_iter()
-            .collect(),
-    };
-    let engine = WindowEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-    };
+    let reader = window_reader(TopicData {
+        end_offsets: vec![(0, restored)],
+        configs: scratch_target_configs(),
+        records: consumed,
+    });
+    let engine = window_engine(facts.clone(), archive);
 
     run(
         &engine,
@@ -812,21 +732,12 @@ fn the_bound_counts_only_the_topics_the_restore_names() {
         archive.push(a);
         consumed.push(c);
     }
-    let reader = WindowReader {
-        end_offsets: [("drill-orders".to_string(), vec![(0, NAMED_TOPIC_RECORDS)])]
-            .into_iter()
-            .collect(),
-        configs: [("drill-orders".to_string(), scratch_target_configs())]
-            .into_iter()
-            .collect(),
-        records: [("drill-orders".to_string(), consumed)]
-            .into_iter()
-            .collect(),
-    };
-    let engine = WindowEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-    };
+    let reader = window_reader(TopicData {
+        end_offsets: vec![(0, NAMED_TOPIC_RECORDS)],
+        configs: scratch_target_configs(),
+        records: consumed,
+    });
+    let engine = window_engine(facts.clone(), archive);
     let out = run(
         &engine,
         &reader,

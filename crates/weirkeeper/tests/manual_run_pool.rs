@@ -22,6 +22,9 @@
 //! hands `reconcile_backup_pooled` the exact snapshot and reservation registry
 //! it is about, and the double panics on any request the row did not route.
 
+mod support;
+use support::{leak, not_found, path};
+
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -193,16 +196,6 @@ fn cluster() -> KafkaCluster {
     .expect("the fixture is a KafkaCluster")
 }
 
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
-}
-
-fn not_found(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
-}
-
 /// Everything a CREATE pass of `b` may ask for, write routes included, so a
 /// zero-`POST` count is a statement about the reconciler and not about the
 /// table.
@@ -263,10 +256,6 @@ fn create_routes(b: &Backup) -> Vec<Route> {
             body: object,
         },
     ]
-}
-
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
 }
 
 fn posts(seen: &[SeenBody], suffix: &str) -> usize {

@@ -37,6 +37,9 @@
 //! somewhere else: **another policy** — a successor applied from an export
 //! taken before the revocation — listing it `Active`.
 
+mod support;
+use support::at;
+
 use chrono::{DateTime, Duration, Utc};
 use kube::api::ObjectMeta;
 use logweir_core::check_contract::{CheckCode, CheckState};
@@ -77,12 +80,6 @@ const NS: &str = "lw-team-a";
 const OTHER_NS: &str = "lw-team-b";
 /// The recording policy.
 const RECORDER: &str = "incident-2026-09";
-
-fn at(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("a fixture instant")
-        .with_timezone(&Utc)
-}
 
 /// When every row is asked.
 fn now() -> DateTime<Utc> {

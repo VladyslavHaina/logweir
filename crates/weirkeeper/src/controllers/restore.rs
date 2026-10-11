@@ -101,7 +101,7 @@ use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
@@ -140,6 +140,7 @@ use crate::job::{
     self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount,
     APPROVAL_MOUNT_PATH, APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
 };
+use crate::runner_log;
 use crate::verification::{
     conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
@@ -150,6 +151,7 @@ use logweir_core::approval_policy::{
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
+use logweir_core::spec::RestoreSpec;
 use logweir_store::{caps, Store};
 
 // ---------------------------------------------------------------------------
@@ -160,7 +162,7 @@ use logweir_store::{caps, Store};
 /// [`runner_argv`] points `--spec` at.
 ///
 /// `restore.yaml` AND THE BYTES ARE VERBATIM. Interface **I20**: this document
-/// has ONE grammar and it is the runner's own — `logweir_core::spec::RestoreSpec`,
+/// has ONE grammar and it is the runner's own — `RestoreSpec`,
 /// which is what `serde_yaml::from_str` deserialises `--spec` with and what
 /// the shipped `examples/restore.yaml` is written in. `planBytes` stays an
 /// OPAQUE STRING on the way through, precisely because the API server
@@ -736,30 +738,6 @@ pub fn typed_confirmation_of(
     ))
 }
 
-/// **OD-10.** The plan's source topics, the names a typed confirmation is
-/// held to; empty for a plan that does not parse (the runner refuses it).
-#[must_use]
-pub fn plan_source_topics(restore: &Restore) -> Vec<String> {
-    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
-        .map(|plan| plan.source.topics)
-        .unwrap_or_default()
-}
-
-/// **PROD-15.1.** The approval subject a `Restore` needs: `originalName` when
-/// its plan carries `target.topic_naming.original_name`, else ordinary.
-///
-/// FROM THE PLAN, the bytes the approver signs and the runner executes —
-/// [`original_name_agrees`] has already held the object's declaration to it
-/// before admission reads this. A plan that does not parse is ordinary here;
-/// the runner refuses it.
-#[must_use]
-pub fn plan_approval_subject(restore: &Restore) -> logweir_core::original_name::ApprovalSubject {
-    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes).map_or(
-        logweir_core::original_name::ApprovalSubject::Ordinary,
-        |plan| logweir_core::original_name::ApprovalSubject::of_plan(&plan),
-    )
-}
-
 /// Whether this Approval carries an authorization document v2 — its sidecar's
 /// `payloadType` is [`PAYLOAD_TYPE_RESTORE_AUTHORIZATION`].
 #[must_use]
@@ -967,7 +945,13 @@ pub fn admit(
     approval: Option<&Approval>,
     cluster: Option<&KafkaCluster>,
 ) -> RestoreAdmission {
-    admit_with_policy(restore, approval, cluster, None)
+    admit_with_policy(
+        restore,
+        parse_plan(restore).ok().as_ref(),
+        approval,
+        cluster,
+        None,
+    )
 }
 
 /// [`admit`], under the namespace's approval-policy binding — PLAT-19.2.
@@ -975,9 +959,12 @@ pub fn admit(
 /// `policy: None` is `legacy-governed-v1` with no clock, which is exactly
 /// [`admit`]: the legacy arm reads neither. With a policy, step 3b below runs
 /// between "the exact Approval is Verified=True" and the plan hash.
+/// `plan`: [`parse_plan`]'s value; `None` (bytes that do not parse, which
+/// the reconcile has refused) is an ordinary subject naming no topics.
 #[must_use]
 pub fn admit_with_policy(
     restore: &Restore,
+    plan: Option<&RestoreSpec>,
     approval: Option<&Approval>,
     cluster: Option<&KafkaCluster>,
     policy: Option<&PolicyAdmission<'_>>,
@@ -1098,16 +1085,22 @@ pub fn admit_with_policy(
     // plan; BEFORE the target, because it is a fact about the two sealed
     // documents and never changes. The runner checks it again (Global
     // Constraint 6's "checked twice").
+    //
+    // FROM THE PLAN, the bytes the approver signs and the runner executes —
+    // `original_name_agrees` has already held the object's declaration to it.
     let subject_refusal = approval_subject_of(approval).and_then(|approved| {
         logweir_core::original_name::check_approval_subject(
-            plan_approval_subject(restore),
+            plan.map_or(
+                logweir_core::original_name::ApprovalSubject::Ordinary,
+                logweir_core::original_name::ApprovalSubject::of_plan,
+            ),
             approved,
         )?;
         // OD-10: a one-person confirmation of an original-name plan carries
         // every original topic name re-typed, exactly, in its signed bytes.
         let (one_person, confirmation) = typed_confirmation_of(approval)?;
         logweir_core::original_name::check_typed_confirmation(
-            &plan_source_topics(restore),
+            plan.map_or(&[][..], |plan| plan.source.topics.as_slice()),
             approved,
             one_person,
             confirmation.as_ref(),
@@ -1324,7 +1317,7 @@ pub enum RestoreDestinationAdmission {
 /// # THE ORDER, AND WHY THE PLAN IS CHECKED AFTER THE DESTINATIONS
 ///
 /// 5. Both refs resolve and are `Valid` — a HOLD while they are not.
-/// 6. `spec.planBytes` parses as a `logweir_core::spec::RestoreSpec`. READ
+/// 6. `spec.planBytes` parses as a `RestoreSpec`. READ
 ///    ONLY, and never re-emitted: those bytes are what an approver signed, and
 ///    the plan `ConfigMap` still carries them verbatim.
 /// 7. `plan.source.storage` is the source destination's archive `StorageUrl`,
@@ -1350,6 +1343,7 @@ pub enum RestoreDestinationAdmission {
 /// the terminal state named by checks 6 through 9.
 pub async fn admit_restore_destinations(
     restore: &Restore,
+    plan: Option<&RestoreSpec>,
     client: &kube::Client,
     namespace: &str,
     now: DateTime<Utc>,
@@ -1439,19 +1433,15 @@ pub async fn admit_restore_destinations(
         }
     }
 
-    // CHECK 6. READ ONLY. These bytes are never re-emitted: `plan_config_map`
-    // still writes `spec.planBytes` verbatim, because they are the bytes an
-    // approver signed and a re-serialisation would change the hash.
-    let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&restore.spec.plan_bytes)
-        .map_err(|e| {
-            RestoreError::Refused(
-                CheckCode::PlanUnparseable.as_str(),
-                format!(
-                    "spec.planBytes is not a readable restore plan ({e}), so the destinations this \
-                     Restore names cannot be compared with the location it was approved to read"
-                ),
-            )
-        })?;
+    // CHECK 6. The reconcile's read of the plan, or one made here.
+    let parsed;
+    let plan = match plan {
+        Some(plan) => plan,
+        None => {
+            parsed = parse_plan(restore)?;
+            &parsed
+        }
+    };
 
     // The withdrawn `notifications` block: a plan that names a sink is refused
     // by name before any Job exists, in the runner's own words. The runner
@@ -1661,7 +1651,14 @@ pub fn approval_bundle_config_map(
     trust: &crate::trust::ResolvedTrust,
     now: DateTime<Utc>,
 ) -> Result<ConfigMap, RestoreError> {
-    approval_bundle_config_map_with_policy(restore, approval, trust, &EffectivePolicy::Legacy, now)
+    approval_bundle_config_map_with_policy(
+        restore,
+        &parse_plan(restore)?,
+        approval,
+        trust,
+        &EffectivePolicy::Legacy,
+        now,
+    )
 }
 
 /// [`approval_bundle_config_map`], under the namespace's approval-policy
@@ -1685,6 +1682,7 @@ pub fn approval_bundle_config_map(
 /// [`RestoreError::Refused`] on a plan-hash mismatch.
 pub fn approval_bundle_config_map_with_policy(
     restore: &Restore,
+    plan: &RestoreSpec,
     approval: &Approval,
     trust: &crate::trust::ResolvedTrust,
     policy: &EffectivePolicy,
@@ -1904,7 +1902,7 @@ pub fn approval_bundle_config_map_with_policy(
     }
 
     // PLAT-15.2: the evidence keyring, exactly when the plan binds a point.
-    data.extend(evidence_member(restore, trust)?);
+    data.extend(evidence_member(plan, trust)?);
 
     Ok(bundle_object(
         name,
@@ -1917,10 +1915,10 @@ pub fn approval_bundle_config_map_with_policy(
 
 /// The [`EVIDENCE_KEYS_FILE`] member, when this plan binds a point.
 fn evidence_member(
-    restore: &Restore,
+    plan: &RestoreSpec,
     trust: &crate::trust::ResolvedTrust,
 ) -> Result<Option<(String, String)>, RestoreError> {
-    if !plan_binds_point(restore) {
+    if !plan_binds_point(plan) {
         return Ok(None);
     }
     Ok(Some((
@@ -1968,12 +1966,10 @@ pub const EVIDENCE_KEYS_FILE: &str = "evidence-keys.json";
 /// Whether this `Restore`'s plan binds a recovery point (`source.point`).
 ///
 /// ONE PREDICATE decides the bundle member, its pinned digest, the runner
-/// flag and the projected file, so the four cannot disagree. A plan that does
-/// not parse binds nothing here; the runner refuses it on its own terms.
+/// flag and the projected file, so the four cannot disagree.
 #[must_use]
-pub fn plan_binds_point(restore: &Restore) -> bool {
-    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
-        .is_ok_and(|plan| plan.source.point.is_some())
+pub fn plan_binds_point(plan: &RestoreSpec) -> bool {
+    plan.source.point.is_some()
 }
 
 /// The [`EVIDENCE_KEYS_FILE`] bytes: every key of the namespace's resolved
@@ -2029,7 +2025,14 @@ pub fn execution_contract_env(
     trust: &crate::trust::ResolvedTrust,
     now: DateTime<Utc>,
 ) -> Result<Vec<(String, String)>, RestoreError> {
-    execution_contract_env_with_policy(restore, approval, trust, &EffectivePolicy::Legacy, now)
+    execution_contract_env_with_policy(
+        restore,
+        &parse_plan(restore)?,
+        approval,
+        trust,
+        &EffectivePolicy::Legacy,
+        now,
+    )
 }
 
 /// [`execution_contract_env`], under the namespace's approval-policy binding —
@@ -2042,6 +2045,7 @@ pub fn execution_contract_env(
 /// As [`execution_contract_env`].
 pub fn execution_contract_env_with_policy(
     restore: &Restore,
+    plan: &RestoreSpec,
     approval: &Approval,
     trust: &crate::trust::ResolvedTrust,
     policy: &EffectivePolicy,
@@ -2049,7 +2053,8 @@ pub fn execution_contract_env_with_policy(
 ) -> Result<Vec<(String, String)>, RestoreError> {
     use logweir_core::execution_contract as contract;
 
-    let bundle = approval_bundle_config_map_with_policy(restore, approval, trust, policy, now)?;
+    let bundle =
+        approval_bundle_config_map_with_policy(restore, plan, approval, trust, policy, now)?;
     let data = bundle.data.as_ref().ok_or_else(|| {
         RestoreError::Materialization("the rendered approval bundle has no data".to_string())
     })?;
@@ -2307,7 +2312,11 @@ pub fn triggered_by(restore: &Restore) -> String {
 /// run`. That ordering is the plan's and is stated in the brief; the measured
 /// consequence for a live Job before Task 22 lands is in this task's report.
 #[must_use]
-pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String> {
+pub fn runner_argv(
+    restore: &Restore,
+    plan: &RestoreSpec,
+    approver_key_ids: &[String],
+) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "restore".to_string(),
         "run".to_string(),
@@ -2328,7 +2337,7 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
     }
     // D3 §5.5 step 6: a point-bound plan's receipt signature is verified
     // against the mounted evidence keyring before any client exists.
-    if plan_binds_point(restore) {
+    if plan_binds_point(plan) {
         argv.extend([
             "--evidence-keys".to_string(),
             format!("{APPROVAL_MOUNT_PATH}/{EVIDENCE_KEYS_FILE}"),
@@ -2353,33 +2362,21 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
 /// to a `Restore` Job — over the approved plan's `source.storage` and
 /// `evidence:` locations as the runner will dial them
 /// ([`crate::destination::inline_archive_binding_env`],
-/// [`crate::destination::effective_inline_storage`]). Plan bytes that do not
-/// parse project the fail-closed expectation.
+/// [`crate::destination::effective_inline_storage`]).
 #[must_use]
 pub fn inline_restore_binding_env(
     secret: &str,
-    plan_bytes: &str,
+    plan: &RestoreSpec,
     addressing: &[(String, String)],
 ) -> crate::destination::DestinationEnv {
-    match serde_yaml::from_str::<logweir_core::spec::RestoreSpec>(plan_bytes) {
-        Ok(plan) => crate::destination::inline_archive_binding_env(
-            secret,
-            &crate::destination::effective_inline_storage(&plan.source.storage, addressing),
-            Some(&crate::destination::effective_inline_storage(
-                &plan.evidence,
-                addressing,
-            )),
-        ),
-        Err(_) => crate::destination::DestinationEnv {
-            literals: vec![(
-                logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV
-                    .to_string(),
-                logweir_core::credential_binding::UNBOUND_NO_UID.to_string(),
-            )],
-            from_secret: Vec::new(),
-            service_account_name: None,
-        },
-    }
+    crate::destination::inline_archive_binding_env(
+        secret,
+        &crate::destination::effective_inline_storage(&plan.source.storage, addressing),
+        Some(&crate::destination::effective_inline_storage(
+            &plan.evidence,
+            addressing,
+        )),
+    )
 }
 
 /// The [`RunnerJobSpec`] one `Restore` produces.
@@ -2467,6 +2464,7 @@ pub fn runner_job_spec_with_destinations(
 ) -> Result<RunnerJobSpec, RestoreError> {
     runner_job_spec_with_policy(
         restore,
+        &parse_plan(restore)?,
         cluster,
         approver_key_ids,
         approval,
@@ -2496,7 +2494,7 @@ pub fn carries_authorization_v2(
 /// binding — PLAT-19.2. A v2-authorised Restore's Job mounts the two extra
 /// bundle members and passes [`APPROVAL_POLICY_ARG`] and
 /// [`CONFIRMATION_KEY_ARG`], and its environment pins both digests; nothing
-/// else about the Job changes.
+/// else about the Job changes. `plan` is [`parse_plan`]'s value.
 ///
 /// # Errors
 ///
@@ -2504,6 +2502,7 @@ pub fn carries_authorization_v2(
 #[allow(clippy::too_many_arguments)]
 pub fn runner_job_spec_with_policy(
     restore: &Restore,
+    plan: &RestoreSpec,
     cluster: &KafkaCluster,
     approver_key_ids: &[String],
     approval: &Approval,
@@ -2527,9 +2526,9 @@ pub fn runner_job_spec_with_policy(
     // carry a value the object would have been refused for.
     let resources = runner_resources_of(restore)?;
     // PROD-08.1a, by the same one function as the early refusal.
-    coverage_agrees(restore)?;
+    coverage_agrees(restore, plan)?;
     // PROD-15.1, likewise.
-    original_name_agrees(restore)?;
+    original_name_agrees(restore, plan)?;
 
     // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
     // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
@@ -2539,7 +2538,7 @@ pub fn runner_job_spec_with_policy(
     let connection =
         crate::connection::resolve(cluster, crate::connection::ConnectionUse::RestoreTarget)?;
     connection.check_job_namespace(&namespace)?;
-    connection.check_restore_plan(&restore.spec.plan_bytes)?;
+    connection.check_restore_target(&plan.target.bootstrap_servers, &plan.target.auth)?;
     let projection = connection.project();
 
     // The private signing key remains the only file-backed Secret. The
@@ -2565,16 +2564,14 @@ pub fn runner_job_spec_with_policy(
     // DIALS WITH IT. On this path the approved plan names them: the source
     // archive (`source.storage`) and the evidence store (`evidence:`), both
     // reached with this one credential (D2 grounding G6), with an endpoint the
-    // block leaves out filled from the forwarded `AWS_ENDPOINT_URL`. A plan
-    // whose bytes do not parse projects the fail-closed expectation — the
-    // runner refuses it anyway, and never with an unbound credential.
+    // block leaves out filled from the forwarded `AWS_ENDPOINT_URL`.
     let inline_binding = match (
         restore.spec.source_archive.secret_ref.as_ref(),
         destinations,
     ) {
         (Some(secret), None) => Some(inline_restore_binding_env(
             &secret.name,
-            &restore.spec.plan_bytes,
+            plan,
             &backup::archive_addressing_env(),
         )),
         _ => None,
@@ -2654,7 +2651,7 @@ pub fn runner_job_spec_with_policy(
             uid,
         },
         args: {
-            let mut argv = runner_argv(restore, approver_key_ids);
+            let mut argv = runner_argv(restore, plan, approver_key_ids);
             // PLAT-19.2: THE TWO v2 MEMBERS, BY FLAG. An old runner image
             // handed these fails to parse them and exits before it dispatches
             // — the version-skew refusal the destination flag below relies on
@@ -2709,7 +2706,7 @@ pub fn runner_job_spec_with_policy(
                     }
                     // PLAT-15.2: the evidence keyring, exactly when the plan
                     // binds a recovery point.
-                    if plan_binds_point(restore) {
+                    if plan_binds_point(plan) {
                         items.push((
                             EVIDENCE_KEYS_FILE.to_string(),
                             EVIDENCE_KEYS_FILE.to_string(),
@@ -2752,7 +2749,7 @@ pub fn runner_job_spec_with_policy(
                 env.extend(binding.literals.iter().cloned());
             }
             env.extend(execution_contract_env_with_policy(
-                restore, approval, trust, policy, now,
+                restore, plan, approval, trust, policy, now,
             )?);
             env.extend(projection.env_literal);
             env
@@ -2803,6 +2800,68 @@ pub fn runner_resources_of(
     })
 }
 
+/// **PROD-17.1 B5: the one read of `spec.planBytes` a reconcile makes**;
+/// every check, the admission, the bundle and the Job are handed its value.
+/// A plan that does not parse is refused here, before an approval is read:
+/// the runner parses the same bytes into the same type and could only refuse
+/// it at phase 0. A declaration over such a plan is refused under the
+/// declaration's name ([`coverage_agrees`], [`original_name_agrees`]).
+///
+/// # Errors
+///
+/// [`RestoreError::Refused`]: `ExecutionSpecInvalid` when the coverage or the
+/// original names are declared, [`CheckCode::PlanUnparseable`] otherwise.
+pub fn parse_plan(restore: &Restore) -> Result<RestoreSpec, RestoreError> {
+    serde_yaml::from_str(&restore.spec.plan_bytes).map_err(|error| {
+        if restore.spec.coverage.is_some() || restore.spec.complete_max_records.is_some() {
+            coverage_refused(format!(
+                "spec.coverage is declared and spec.planBytes does not parse as a restore plan, \
+                 so the two cannot be compared: {error}"
+            ))
+        } else if restore.spec.target.topic_naming.is_original_name() {
+            original_name_refused(format!(
+                "spec.target.topicNaming.originalName is declared and spec.planBytes does not \
+                 parse as a restore plan, so the two cannot be compared: {error}"
+            ))
+        } else {
+            RestoreError::Refused(
+                CheckCode::PlanUnparseable.as_str(),
+                format!(
+                    "spec.planBytes is not a readable restore plan ({error}); the runner would \
+                     refuse it, so no Job was created. spec is immutable and the approval binds \
+                     the plan bytes — create a new Restore with a plan the runner accepts"
+                ),
+            )
+        }
+    })
+}
+
+fn coverage_refused(detail: String) -> RestoreError {
+    RestoreError::Refused(
+        crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+        format!(
+            "{detail}. spec.coverage and spec.completeMaxRecords state what the plan's \
+             sample.coverage and sample.complete_max_records say (absent: sampled, no \
+             bound), so a list and the console show the coverage that will run; no Job was \
+             created. spec is immutable and the approval binds the plan bytes — create a \
+             new Restore whose two fields match its plan"
+        ),
+    )
+}
+
+fn original_name_refused(detail: String) -> RestoreError {
+    RestoreError::Refused(
+        crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+        format!(
+            "{detail}. spec.target.topicNaming.originalName states what the plan's \
+             target.topic_naming.original_name says, so the console and a list show the \
+             approval subject the restore needs; no Job was created. spec is immutable and the \
+             approval binds the plan bytes — create a new Restore whose declaration matches \
+             its plan"
+        ),
+    )
+}
+
 /// **PROD-08.1a.** `spec.coverage` and `spec.completeMaxRecords` against the
 /// plan's own `sample.coverage` and `sample.complete_max_records`.
 ///
@@ -2814,48 +2873,21 @@ pub fn runner_resources_of(
 /// declaration too, and every `Restore` written before the fields existed
 /// (whose plans are all sampled) agrees.
 ///
-/// A plan that does not parse is left to the runner, which refuses it as it
-/// always has, when the spec declares nothing; with a declaration there is
-/// nothing to compare it with, and that is refused here.
-///
 /// # Errors
 ///
 /// [`RestoreError::Refused`] with
 /// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`], naming both
 /// values. TERMINAL: `spec` is immutable and the approval binds the plan.
-pub fn coverage_agrees(restore: &Restore) -> Result<(), RestoreError> {
+pub fn coverage_agrees(restore: &Restore, plan: &RestoreSpec) -> Result<(), RestoreError> {
     let declared = crate::crds::restore::VerificationCoverage::of(restore.spec.coverage);
     let declared_bound = restore.spec.complete_max_records;
-    let refused = |detail: String| {
-        RestoreError::Refused(
-            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
-            format!(
-                "{detail}. spec.coverage and spec.completeMaxRecords state what the plan's \
-                 sample.coverage and sample.complete_max_records say (absent: sampled, no \
-                 bound), so a list and the console show the coverage that will run; no Job was \
-                 created. spec is immutable and the approval binds the plan bytes — create a \
-                 new Restore whose two fields match its plan"
-            ),
-        )
-    };
-    let plan = match serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
-    {
-        Ok(plan) => plan,
-        Err(_) if restore.spec.coverage.is_none() && declared_bound.is_none() => return Ok(()),
-        Err(error) => {
-            return Err(refused(format!(
-                "spec.coverage is declared and spec.planBytes does not parse as a restore plan, \
-                 so the two cannot be compared: {error}"
-            )))
-        }
-    };
     let plan_bound = plan
         .sample
         .complete_max_records
         .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
     if plan.sample.coverage != declared || plan_bound != declared_bound {
         let bound = |b: Option<i64>| b.map_or_else(|| "no bound".to_string(), |n| n.to_string());
-        return Err(refused(format!(
+        return Err(coverage_refused(format!(
             "the plan asks for sample.coverage `{}` ({}) and spec declares coverage `{}` ({})",
             plan.sample.coverage.as_str(),
             bound(plan_bound),
@@ -2877,42 +2909,16 @@ pub fn coverage_agrees(restore: &Restore) -> Result<(), RestoreError> {
 /// one subject and need another: an approver shown "ordinary" could sign the
 /// one approval that authorises a write under the production names.
 ///
-/// A plan that does not parse is left to the runner when nothing is declared,
-/// and refused when something is.
-///
 /// # Errors
 ///
 /// [`RestoreError::Refused`] with
 /// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`], naming both.
-pub fn original_name_agrees(restore: &Restore) -> Result<(), RestoreError> {
+pub fn original_name_agrees(restore: &Restore, plan: &RestoreSpec) -> Result<(), RestoreError> {
     let declared = restore.spec.target.topic_naming.is_original_name();
-    let refused = |detail: String| {
-        RestoreError::Refused(
-            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
-            format!(
-                "{detail}. spec.target.topicNaming.originalName states what the plan's \
-                 target.topic_naming.original_name says, so the console and a list show the \
-                 approval subject the restore needs; no Job was created. spec is immutable and the \
-                 approval binds the plan bytes — create a new Restore whose declaration matches \
-                 its plan"
-            ),
-        )
-    };
-    let plan = match serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
-    {
-        Ok(plan) => plan,
-        Err(_) if !declared => return Ok(()),
-        Err(error) => {
-            return Err(refused(format!(
-                "spec.target.topicNaming.originalName is declared and spec.planBytes does not \
-                 parse as a restore plan, so the two cannot be compared: {error}"
-            )))
-        }
-    };
-    let in_plan = logweir_core::original_name::ApprovalSubject::of_plan(&plan)
+    let in_plan = logweir_core::original_name::ApprovalSubject::of_plan(plan)
         == logweir_core::original_name::ApprovalSubject::OriginalName;
     if in_plan != declared {
-        return Err(refused(format!(
+        return Err(original_name_refused(format!(
             "the plan {} under the original topic names and spec.target.topicNaming.originalName \
              is {}",
             if in_plan {
@@ -2938,7 +2944,7 @@ pub fn original_name_agrees(restore: &Restore) -> Result<(), RestoreError> {
     // no partitions: the plan bytes are the only place a subset is written,
     // so this check IS the Kubernetes boundary for it.
     if in_plan {
-        if let Some(why) = logweir_core::original_name::refuse_shape(&plan) {
+        if let Some(why) = logweir_core::original_name::refuse_shape(plan) {
             return Err(RestoreError::Refused(
                 crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
                 format!(
@@ -2995,7 +3001,7 @@ impl RestoreEvidenceKeys {
 /// Plan erratum **E4**, measured: a pod log is stdout and stderr merged in
 /// nondeterministic order, so "the last three lines" is not a rule in either
 /// direction. This scans the final [`super::backup::KEY_SCAN_TAIL_LINES`]
-/// non-empty lines through [`super::backup::tail_lines`] — the SAME tail the
+/// non-empty lines through [`runner_log::key_values`] — the SAME scan the
 /// `Backup` path uses, shared rather than reimplemented — and matches each
 /// line's own prefix. The second arm of
 /// `the_three_evidence_keys_are_read_from_the_final_three_stdout_lines`
@@ -3014,19 +3020,12 @@ impl RestoreEvidenceKeys {
 /// wrote.
 #[must_use]
 pub fn restore_evidence_keys(log: &str) -> RestoreEvidenceKeys {
-    let mut keys = RestoreEvidenceKeys::default();
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(SCORECARD_KEY_PREFIX) {
-            keys.scorecard = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(SIDECAR_KEY_PREFIX) {
-            keys.sidecar = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(OFFSET_REPORT_KEY_PREFIX) {
-            keys.offset_report = Some(v.to_string());
-        }
+    let last = |key| runner_log::key_values(log, key).pop().map(str::to_string);
+    RestoreEvidenceKeys {
+        scorecard: last(SCORECARD_KEY_PREFIX),
+        sidecar: last(SIDECAR_KEY_PREFIX),
+        offset_report: last(OFFSET_REPORT_KEY_PREFIX),
     }
-    keys
 }
 
 // ---------------------------------------------------------------------------
@@ -3375,10 +3374,7 @@ pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 #[must_use]
 pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
     use logweir_core::execution_contract::{parse_teardown_failed, TEARDOWN_FAILED_PREFIX};
-    let raw = backup::tail_lines(log)
-        .into_iter()
-        .rev()
-        .find_map(|line| line.strip_prefix(TEARDOWN_FAILED_PREFIX))?;
+    let raw = runner_log::key_values(log, TEARDOWN_FAILED_PREFIX).pop()?;
     let kept: Vec<Value> = parse_teardown_failed(raw)?
         .into_iter()
         .filter(|f| mapped.iter().any(|m| m == &f.topic))
@@ -3401,12 +3397,7 @@ pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
 /// `status.topicPreflight` absent rather than writing an empty block.
 #[must_use]
 pub fn topic_preflight(log: &str) -> Option<Value> {
-    let mut raw: Option<&str> = None;
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(TOPIC_PREFLIGHT_KEY_PREFIX) {
-            raw = Some(v);
-        }
-    }
+    let raw = runner_log::key_values(log, TOPIC_PREFLIGHT_KEY_PREFIX).pop();
     let doc: Value = serde_json::from_str(raw?).ok()?;
     let doc = doc.as_object()?;
     let mut out = serde_json::Map::new();
@@ -3656,18 +3647,19 @@ pub fn observe_scorecard_within(
 ///
 /// A destination-backed answer is returned unchanged: its evidence is read
 /// through its own destination and never through this handle. A plan that does
-/// not parse — which admission and the runner both refuse, so no keys exist to
-/// read — keeps the answer it had.
+/// not parse (`None`) — which admission and the runner both refuse, so no keys
+/// exist to read — keeps the answer it had: a run already started is
+/// observed, never refused.
 #[must_use]
 pub fn legacy_evidence_source(
     from: backup::EvidenceSource,
-    plan_bytes: &str,
+    plan: Option<&RestoreSpec>,
     archive_url: Option<&str>,
 ) -> backup::EvidenceSource {
     if !matches!(from, backup::EvidenceSource::GlobalHandle) {
         return from;
     }
-    let Ok(plan) = serde_yaml::from_str::<logweir_core::spec::RestoreSpec>(plan_bytes) else {
+    let Some(plan) = plan else {
         return from;
     };
     match crate::destination::legacy_evidence_scope(&plan.evidence, archive_url)
@@ -3862,19 +3854,18 @@ pub fn unread_scorecard_verdict(
 /// function does can change that. Reading the approved document to answer a
 /// question about it is what the runner does too.
 ///
-/// `None` when `planBytes` is not a `RestoreSpec` — in which case the runner
-/// will refuse the same bytes, and a fabricated topic list would be a status
-/// field naming topics no run touched. **Tag 1 writes these two solely so tag
-/// 2's `Switchover` retirement has a list to validate against**; nothing in
-/// tag 1 reads them, and nothing in any tag writes to `oldTopics`' topics.
+/// The caller has none when `planBytes` is not a `RestoreSpec` — in which case
+/// the runner will refuse the same bytes, and a fabricated topic list would be
+/// a status field naming topics no run touched. **Tag 1 writes these two
+/// solely so tag 2's `Switchover` retirement has a list to validate
+/// against**; nothing in tag 1 reads them, and nothing in any tag writes to
+/// `oldTopics`' topics.
 #[must_use]
-pub fn topic_mapping(restore: &Restore) -> Option<(Vec<String>, Vec<String>)> {
-    let plan: logweir_core::spec::RestoreSpec =
-        serde_yaml::from_str(&restore.spec.plan_bytes).ok()?;
-    let prefix = logweir_core::spec::target_topic_prefix(&plan);
+pub fn topic_mapping(plan: &RestoreSpec) -> (Vec<String>, Vec<String>) {
+    let prefix = logweir_core::spec::target_topic_prefix(plan);
     let old: Vec<String> = plan.source.topics.clone();
     let new: Vec<String> = old.iter().map(|t| format!("{prefix}{t}")).collect();
-    Some((old, new))
+    (old, new)
 }
 
 /// Whether a run's exit code and scorecard `outcome` mean the archive did not
@@ -4559,7 +4550,7 @@ pub fn restore_read_plan(
             )),
             Some(handle) => match legacy_evidence_source(
                 backup::EvidenceSource::GlobalHandle,
-                &restore.spec.plan_bytes,
+                parse_plan(restore).ok().as_ref(),
                 Some(handle),
             ) {
                 backup::EvidenceSource::NotAttempted { detail } => Err(detail),
@@ -4680,7 +4671,8 @@ async fn controller_read_pass(
     )
     .await
     .map_err(RestoreError::Api)?;
-    let source = legacy_evidence_source(routed, &restore.spec.plan_bytes, reads.archive_url);
+    let source =
+        legacy_evidence_source(routed, parse_plan(restore).ok().as_ref(), reads.archive_url);
     let destination = restore
         .spec
         .evidence_destination_ref
@@ -5498,16 +5490,6 @@ pub fn finished_status_patch_with_reason(
     json!({ "status": Value::Object(status) })
 }
 
-/// The terminal read's `pods/log` parameters: the last
-/// [`TERMINAL_LOG_TAIL_LINES`] lines, and nothing else changed.
-#[must_use]
-pub fn terminal_log_params() -> LogParams {
-    LogParams {
-        tail_lines: Some(TERMINAL_LOG_TAIL_LINES),
-        ..LogParams::default()
-    }
-}
-
 /// **PROD-15.1: the closed state of a stopped creation step**, read off a
 /// Restore runner's log: `TargetTopicAppeared` or `CreatedTopicsLeft`, beside
 /// exit 1.
@@ -5534,7 +5516,7 @@ pub fn terminal_log_params() -> LogParams {
 /// image the names are shown as its log gives them (`docs/kubernetes.md`).
 #[must_use]
 pub fn creation_stop_state(exit_code: i32, log: &str) -> Option<&'static str> {
-    let tail = backup::tail_lines(log);
+    let tail = runner_log::tail_lines(log);
     let value = tail
         .last()?
         .strip_prefix(logweir_core::guard::FAILURE_REASON_PREFIX)?;
@@ -5571,7 +5553,7 @@ pub fn creation_stop_lists(
 ) -> Option<logweir_core::creation_stop::CreationStopLists> {
     use logweir_core::creation_stop::CreationStopLists;
     creation_stop_state(exit_code, log)?;
-    let tail = backup::tail_lines(log);
+    let tail = runner_log::tail_lines(log);
     let line = tail.len().checked_sub(2).and_then(|i| tail.get(i))?;
     let lists =
         CreationStopLists::parse_value(line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX)?)?;
@@ -6322,8 +6304,10 @@ async fn write_plan_config_map(
 /// Create the immutable per-Restore approval bundle, accepting a 409 only
 /// when the existing object is byte-for-byte identical and owned by this
 /// Restore UID.
+#[allow(clippy::too_many_arguments)]
 async fn write_approval_bundle_config_map(
     restore: &Restore,
+    plan: &RestoreSpec,
     approval: &Approval,
     trust: &crate::trust::ResolvedTrust,
     policy: &EffectivePolicy,
@@ -6335,7 +6319,8 @@ async fn write_approval_bundle_config_map(
     let uid = restore
         .uid()
         .ok_or_else(|| RestoreError::NoUid(restore_name.clone()))?;
-    let desired = approval_bundle_config_map_with_policy(restore, approval, trust, policy, now)?;
+    let desired =
+        approval_bundle_config_map_with_policy(restore, plan, approval, trust, policy, now)?;
     let bundle_name = approval_bundle_config_map_name(&restore_name);
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
@@ -6896,12 +6881,14 @@ async fn reconcile_restore_inner(
         // run already started by an older controller is observed, never
         // refused mid-flight.
         runner_resources_of(restore)?;
+        // PROD-17.1 B5: the plan, read once for everything below.
+        let plan = parse_plan(restore)?;
         // PROD-08.1a: the declared coverage against the plan's own, for the
         // same reason and at the same point — a fact about the sealed spec.
-        coverage_agrees(restore)?;
+        coverage_agrees(restore, &plan)?;
         // PROD-15.1: the original-name declaration against the plan, for the
         // same reason — before an approver is shown the wrong subject.
-        original_name_agrees(restore)?;
+        original_name_agrees(restore, &plan)?;
 
         // THE ADMISSION, BEFORE THE FIRST `POST`. Two `GET`s and a pure
         // function; Global Constraint 6's operator half is that an unapproved
@@ -6912,6 +6899,7 @@ async fn reconcile_restore_inner(
         let cluster = get_target_cluster(restore, client, &namespace).await?;
         let admission = admit_with_policy(
             restore,
+            Some(&plan),
             approval.as_ref(),
             cluster.as_ref(),
             Some(&PolicyAdmission {
@@ -7046,38 +7034,45 @@ async fn reconcile_restore_inner(
         // reason — an operator who is still creating the destination is in the
         // position of an approver who has not signed yet — and it is not capped:
         // a `Restore` waits for a human either way.
-        let destinations =
-            match admit_restore_destinations(restore, client, &namespace, now).await? {
-                RestoreDestinationAdmission::NotRequested => None,
-                RestoreDestinationAdmission::Resolved(pair) => Some(pair),
-                RestoreDestinationAdmission::Holding { reason, message } => {
-                    info!(
-                        restore = %name,
-                        namespace = %namespace,
-                        reason,
-                        detail = %message,
-                        "no Job exists until both of this Restore's BackupDestinations resolve and \
-                         report Valid=True; holding for {ADMISSION_REQUEUE_SECS}s"
-                    );
-                    patch_status_if_changed(
-                        &restores,
-                        restore,
-                        &name,
-                        destination_hold_patch(restore, reason, &message, now),
-                    )
-                    .await?;
-                    return Ok(RestoreOutcome {
-                        job_name,
-                        created: false,
-                        admission: None,
-                        exit_code: None,
-                        terminal_state: None,
-                        keys: RestoreEvidenceKeys::default(),
-                        ttl_patched: false,
-                        requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
-                    });
-                }
-            };
+        let destinations = match admit_restore_destinations(
+            restore,
+            Some(&plan),
+            client,
+            &namespace,
+            now,
+        )
+        .await?
+        {
+            RestoreDestinationAdmission::NotRequested => None,
+            RestoreDestinationAdmission::Resolved(pair) => Some(pair),
+            RestoreDestinationAdmission::Holding { reason, message } => {
+                info!(
+                    restore = %name,
+                    namespace = %namespace,
+                    reason,
+                    detail = %message,
+                    "no Job exists until both of this Restore's BackupDestinations resolve and \
+                     report Valid=True; holding for {ADMISSION_REQUEUE_SECS}s"
+                );
+                patch_status_if_changed(
+                    &restores,
+                    restore,
+                    &name,
+                    destination_hold_patch(restore, reason, &message, now),
+                )
+                .await?;
+                return Ok(RestoreOutcome {
+                    job_name,
+                    created: false,
+                    admission: None,
+                    exit_code: None,
+                    terminal_state: None,
+                    keys: RestoreEvidenceKeys::default(),
+                    ttl_patched: false,
+                    requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
+                });
+            }
+        };
 
         // === THE MANUAL-RESTORE POOL (P10), THE LAST CHECK BEFORE ANYTHING IS
         // CREATED ===
@@ -7132,6 +7127,7 @@ async fn reconcile_restore_inner(
         let key_ids = vec![matched_key_id];
         let mut spec = runner_job_spec_with_policy(
             restore,
+            &plan,
             &cluster,
             &key_ids,
             &approval,
@@ -7154,6 +7150,7 @@ async fn reconcile_restore_inner(
         write_plan_config_map(restore, client, &namespace, destinations.as_deref()).await?;
         write_approval_bundle_config_map(
             restore,
+            &plan,
             &approval,
             &trust,
             &effective_policy,
@@ -7424,7 +7421,7 @@ async fn reconcile_restore_inner(
     // FX-34: A REFUSED RUN'S LOG IS READ BOUNDED, AND ITS FAILURE IS AN ANSWER
     // — the `Backup` twin carries the reasoning. THIS `if` IS THE ONLY GATE:
     // every other exit code takes the read it always took (PROD-15.1's
-    // `terminal_log_params`, whose failure is still a reconcile error) and
+    // `runner_log::TERMINAL`, whose failure is still a reconcile error) and
     // carries no runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
         // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
@@ -7441,8 +7438,7 @@ async fn reconcile_restore_inner(
         .await;
         (read.body, Some(read.reason))
     } else {
-        let log = pods
-            .logs(&pod_name, &terminal_log_params())
+        let log = runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL)
             .await
             .map_err(RestoreError::Api)?;
         (log, None)
@@ -7485,7 +7481,10 @@ async fn reconcile_restore_inner(
     .await
     .map_err(RestoreError::Api)?;
     let was_global = matches!(routed, backup::EvidenceSource::GlobalHandle);
-    let evidence_from = legacy_evidence_source(routed, &restore.spec.plan_bytes, archive_url);
+    // The plan, read once for this pass; never refused here, a run that has
+    // a Job is observed.
+    let plan = parse_plan(restore).ok();
+    let evidence_from = legacy_evidence_source(routed, plan.as_ref(), archive_url);
     if was_global && !matches!(evidence_from, backup::EvidenceSource::GlobalHandle) {
         // THE HANDLE'S LOCATION IS NAMED HERE AND NOWHERE A TENANT READS: the
         // status detail names it by role (`destination::ARCHIVE_HANDLE_LABEL`).
@@ -7524,7 +7523,7 @@ async fn reconcile_restore_inner(
     // FX-31: a scorecard over the read cap is NOT OBSERVED for every fact
     // below, and its sentence is the verdict (see `verdict`).
     let (observed, refused) = split_refused(observed);
-    let topics = topic_mapping(restore);
+    let topics = plan.as_ref().map(topic_mapping);
     // The stopped creation step's lists, held to THIS Restore's mapped
     // target names (`topics`' new names): a name the plan does not map is
     // not this run's to speak of.
@@ -7612,17 +7611,11 @@ async fn reconcile_restore_inner(
     // than a comment: a status patch that did not return 200 leaves this
     // function before any TTL exists, so pod GC cannot start on a run whose
     // code was never recorded.
-    jobs.patch(
-        &job_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({
-            // D3 §2.7, chart value `controller.jobTtlSeconds`; the default
-            // is `TTL_SECONDS_AFTER_FINISHED`.
-            "spec": { "ttlSecondsAfterFinished": diagnostics::job_ttl_seconds() }
-        })),
-    )
-    .await
-    .map_err(RestoreError::Api)?;
+    // D3 §2.7, chart value `controller.jobTtlSeconds`; the default is
+    // `TTL_SECONDS_AFTER_FINISHED`.
+    runner_log::set_ttl(&jobs, &job_name, diagnostics::job_ttl_seconds(), None)
+        .await
+        .map_err(RestoreError::Api)?;
 
     // ===================================================================
     // THE SECOND PATCH — Task 24, interface I21's `Restore` half.

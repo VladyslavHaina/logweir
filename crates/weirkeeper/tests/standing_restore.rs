@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::controllers::restore::{
-    admit, runner_argv, triggered_by, RestoreAdmission, APPROVAL_DOC_FILE,
+    admit, parse_plan, runner_argv, triggered_by, RestoreAdmission, APPROVAL_DOC_FILE,
 };
 use weirkeeper::crds::restore::Restore;
 
@@ -219,7 +219,11 @@ fn a_standing_restore_is_refused_by_name_whatever_its_approval() {
 #[test]
 fn an_ordinary_restore_keeps_its_approval_argv_and_trigger() {
     let restore = ordinary_restore();
-    let argv = runner_argv(&restore, &[]);
+    let argv = runner_argv(
+        &restore,
+        &parse_plan(&restore).expect("the plan parses"),
+        &[],
+    );
     assert!(
         argv.windows(2)
             .any(|w| w[0] == "--approval" && w[1].ends_with(APPROVAL_DOC_FILE)),

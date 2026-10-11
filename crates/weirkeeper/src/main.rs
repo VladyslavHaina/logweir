@@ -134,7 +134,7 @@ fn run() -> ExitCode {
     // reconcile — is that panic. Here, on a thread driving nothing, it is a
     // plain synchronous call.
     //
-    // AND IT IS BUILT EXACTLY ONCE. `Arc<Store>` is cloned into the schedule
+    // AND IT IS BUILT EXACTLY ONCE. `Arc<Store>` is cloned into each
     // controller's context; every later call on it goes through
     // `tokio::task::spawn_blocking`. A handle rebuilt per reconcile discards
     // the connection pool each time and reintroduces the nested-runtime panic,
@@ -171,8 +171,7 @@ fn run() -> ExitCode {
         None => {
             info!(
                 env = weirkeeper::retention::ARCHIVE_URL_ENV,
-                "no archive configured: this controller holds no archive handle and writes no \
-                 retention report"
+                "no archive configured: this controller holds no archive handle"
             );
             None
         }
@@ -180,13 +179,12 @@ fn run() -> ExitCode {
             Err(e) => {
                 // NOT FATAL, AND NAMED. A malformed archive URL must not stop
                 // the approval and schedule reconcilers, which need no
-                // archive at all; retention is the only thing that degrades,
-                // and it degrades loudly.
+                // archive at all; it degrades loudly.
                 error!(
                     env = weirkeeper::retention::ARCHIVE_URL_ENV,
                     error = %e,
                     "the configured archive URL is not readable as an object-store location; \
-                     this controller holds no archive handle and writes no retention report"
+                     this controller holds no archive handle"
                 );
                 None
             }
@@ -204,8 +202,8 @@ fn run() -> ExitCode {
                     error!(
                         archive_url = %url,
                         error = %e,
-                        "could not build the read-only archive handle; this controller writes no \
-                         retention report"
+                        "could not build the read-only archive handle; this controller holds no \
+                         archive handle"
                     );
                     None
                 }
@@ -487,11 +485,9 @@ fn run() -> ExitCode {
             client.clone(),
             approval_policies.clone(),
         )));
-        // Task 19 threads the ONE read-only archive handle through this call
-        // rather than adding a fourth `controllers.push(…)` line: retention is
-        // a REPORT on a `BackupSchedule`, refreshed by the reconciler that
-        // already owns that object's status, so the registered count stays
-        // three (`tests/linkage.rs` asserts `"controllers":3`).
+        // The schedule reconciler takes the handle on its context and does
+        // not read it: the per-schedule retention report it fed is withdrawn
+        // (PROD-17.1 B1).
         controllers.push(Box::pin(
             weirkeeper::controllers::backup_schedule::controller(client.clone(), archive.clone()),
         ));

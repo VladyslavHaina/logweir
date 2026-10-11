@@ -25,9 +25,10 @@
 //! older than its Job. The last rows of this file run a plan that writes
 //! marker lines of its own and show which line carries the token.
 
+mod support;
+use support::{assert_no_connection, base, sentinel, EXPECTED, FOREIGN, LIMIT};
+
 use std::ffi::OsString;
-use std::io::ErrorKind;
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -40,11 +41,8 @@ use logweir_core::refusal_detail::{
 };
 use RefusingRun::{Backup, Restore};
 
-const LIMIT: Duration = Duration::from_secs(20);
 /// A password no stream may ever carry.
 const SEEDED: &str = "seeded-refusal-detail-password-51c9";
-const EXPECTED: &str = "v1:00000000-0000-0000-0000-000000000001:sha256:abc";
-const FOREIGN: &str = "v1:99999999-9999-9999-9999-999999999999:sha256:def";
 /// What `DrillError::Guard` and `BackupError::Guard` put before the guard's
 /// own sentence on the human line.
 const HUMAN_PREFIX: &str = "guard: plan refused by the admission guard: ";
@@ -62,35 +60,6 @@ fn read_as_the_controller(run: RefusingRun, line: &str) -> Option<RefusalDetail>
         LineRead::Valid(detail) => Some(detail),
         LineRead::Invalid | LineRead::NotThisJobs => None,
     }
-}
-
-fn sentinel() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    (listener, address)
-}
-
-fn assert_no_connection(listener: &TcpListener, label: &str) {
-    match listener.accept() {
-        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-        Ok((_, peer)) => panic!("{label}: the sentinel was dialled from {peer}"),
-        Err(error) => panic!("{label}: inspect the sentinel: {error}"),
-    }
-}
-
-fn base(root: &Path) -> Command {
-    let tmp = root.join("tmp");
-    std::fs::create_dir_all(&tmp).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
-    command
-        .env_clear()
-        .env("TMPDIR", &tmp)
-        .env("RUST_LOG", "info")
-        .env("LOGWEIR_ENGINE_BIN", root.join("no-engine"))
-        .env("LOGWEIR_ENGINE_VERSION", "sentinel-version")
-        .env("LOGWEIR_ENGINE_DIGEST", "sha256:sentinel-digest");
-    command
 }
 
 /// Runs to completion or panics at [`LIMIT`]: a hung child must not block

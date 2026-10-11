@@ -24,6 +24,9 @@
 //! `logweir_core::check_contract::frames` exactly as `logweir check run`
 //! frames one.
 
+mod support;
+use support::{put, repo_root, self_peak_rss};
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -61,14 +64,6 @@ const FIXTURE_KEY_ID: &str = "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9
 const PLAN: &str = "sha256:7777777777777777777777777777777777777777777777777777777777777777";
 const SUBJECT: &str = "3f1c8a5e-0000-4000-8000-0000000000f3";
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf()
-}
-
 fn fixture(rel: &str) -> Vec<u8> {
     std::fs::read(repo_root().join(rel)).unwrap_or_else(|e| panic!("{rel} is readable: {e}"))
 }
@@ -102,11 +97,6 @@ fn reference(label: &str) -> (usize, Vec<u8>, Vec<u8>) {
         "crates/weirkeeper/tests/fixtures/topic-budget/reference-{label}.sig"
     ));
     (*topics, receipt, sidecar)
-}
-
-fn put(s: &Store, key: &str, bytes: &[u8]) {
-    s.put_create_only(key, bytes)
-        .expect("the fixture object is written");
 }
 
 fn stored(receipt: &[u8], sidecar: &[u8]) -> Store {
@@ -954,36 +944,6 @@ const PEAK_LINE: &str = "FX33_PEAK_RSS=";
 /// to its verdict: the log (under 8 MiB), its decoded payload, the
 /// verifier's copy and the signature's, measured at about 27 MB.
 const RELAY_BOUND_BYTES: u64 = 40 << 20;
-
-/// This process's own peak resident set, in bytes.
-fn self_peak_rss() -> u64 {
-    // Linux keeps `ru_maxrss` across `execve`, so a child reports its parent's
-    // peak when that was higher, and a difference between two children is
-    // noise (main `dff411ad`'s CI: the parsed-tree control "added" less than
-    // the document). The child's own address space has its own high-water
-    // mark, `VmHWM`, reset at exec.
-    if cfg!(target_os = "linux") {
-        if let Some(kib) = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status.lines().find_map(|l| {
-                    l.strip_prefix("VmHWM:")
-                        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
-                })
-            })
-        {
-            return kib * 1024;
-        }
-    }
-    let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
-        .expect("getrusage(RUSAGE_SELF)");
-    let max = u64::try_from(usage.max_rss()).unwrap_or(0);
-    if cfg!(target_os = "macos") {
-        max
-    } else {
-        max * 1024
-    }
-}
 
 fn handle(root: &Path) -> Store {
     Store::read_only_from_url(&StorageUrl::Filesystem {

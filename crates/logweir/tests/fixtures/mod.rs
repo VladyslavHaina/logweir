@@ -812,7 +812,7 @@ pub enum Drill {
     ///
     /// This is the T0-11 shape: a drill that verified correctly and could not
     /// clean up. It is the PARTIAL failure (`phase9_teardown::run`'s per-topic
-    /// branch), deliberately not `score.rs`'s `RefusingDeleter`, whose whole
+    /// branch), deliberately not `score.rs`'s `refusing_deleter()`, whose whole
     /// call fails and exercises the other branch. The deleter a drill uses
     /// comes from the target client (`c.client.as_deleter()`), not from a
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill
@@ -2043,8 +2043,6 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             approver_key_ids: Vec::new(),
             // Execution contract v2's optional bundle members; absent is
             // every existing caller's shape (D3 §4.3, D0 bundle v2).
-            standing_authorization: None,
-            authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,

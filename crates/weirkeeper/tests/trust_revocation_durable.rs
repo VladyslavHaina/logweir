@@ -6,6 +6,9 @@
 //! this file pins the mechanism those rows depend on, so each of its mutants
 //! has a named row that kills it (the result file lists them).
 
+mod support;
+use support::at;
+
 use chrono::{DateTime, Duration, Utc};
 use kube::api::ObjectMeta;
 use serde_json::{json, Value};
@@ -32,12 +35,6 @@ const OTHER_PEM: &str =
 const OTHER: &str = "067bf4d360d3c0658620a75a225d4d3e2e038cdb12cdf38ef6611241b9d380d2";
 
 const NS: &str = "lw-team-a";
-
-fn at(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("a fixture instant")
-        .with_timezone(&Utc)
-}
 
 fn now() -> DateTime<Utc> {
     at("2026-09-12T08:00:00Z")

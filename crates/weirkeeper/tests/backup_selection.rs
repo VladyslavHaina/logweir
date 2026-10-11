@@ -27,6 +27,9 @@
 //! (D-SEAMS **S7**), so an object without one is refused by name rather than
 //! written without its precondition.
 
+mod support;
+use support::{broker_failure, path};
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -572,10 +575,6 @@ async fn reconcile_with_runner_image(
     .expect("a refusal is an outcome, not an error");
     let bodies = bodies.lock().expect("readable").clone();
     bodies
-}
-
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
 }
 
 fn calls(bodies: &[SeenBody]) -> Vec<String> {
@@ -2927,21 +2926,6 @@ const S12_MESSAGE: &str = "fetch_cluster_id reported MetadataTimeout, but the cl
 const S12_REMEDY: &str = "Check the SASL mechanism, the username and the projected password on \
                           the connection's Secret; rotate the credential if it was changed on \
                           the broker.";
-
-/// The `connection.authenticated` row
-/// `logweir::check::kinds::from_broker_failure` builds for a classified broker
-/// failure.
-fn broker_failure(code: CheckCode, state: CheckState, message: &str, remedy: &str) -> CheckOutcome {
-    CheckOutcome::new(
-        CheckId::ConnectionAuthenticated,
-        state,
-        Gating::Blocking,
-        Authority::CheckJob,
-        code,
-    )
-    .with_message(message)
-    .with_remedy(remedy)
-}
 
 /// The same row, at a gating other than `Blocking`.
 fn gated_failure(gating: Gating, state: CheckState, code: CheckCode) -> CheckOutcome {

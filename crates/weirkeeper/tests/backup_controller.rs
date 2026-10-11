@@ -14,7 +14,12 @@
 //! file makes that ordering meaningful (there IS an exit code to lose; it is
 //! read from the right container; it reaches the right field).
 
-use chrono::{DateTime, TimeZone, Utc};
+mod support;
+use support::{
+    conditions_of, not_found_body, patched_statuses, path, status_patch_count, utc, workspace_root,
+};
+
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use logweir_store::Store;
 use serde_json::Value;
@@ -230,13 +235,6 @@ fn job_owner_json() -> String {
     )
 }
 
-/// A UTC instant, spelled as five integers so a test reads like a calendar.
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
-
 /// The `KafkaCluster` `spec.sourceRef` names, as the API server would hand it
 /// over — `status.clusterId` INCLUDED, because it is what the rendered
 /// allowlist carries.
@@ -351,14 +349,6 @@ fn existing_plan_config_map(owner_uid: &str) -> String {
     let mut cm = serde_json::to_value(cm).unwrap();
     cm["metadata"]["ownerReferences"][0]["uid"] = serde_json::json!(owner_uid);
     cm.to_string()
-}
-
-/// A 404 `Status`, the shape `Api::get_opt` reads as "absent".
-fn not_found_body(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
-  "message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 /// A finished Job, `Complete` or `Failed`, controlled by exactly this `Backup`
@@ -575,45 +565,6 @@ fn finished_routes(pods: &str, log: String, status_code: u16, job_condition: &st
     ]
 }
 
-/// A recorded URI's PATH, without its query string.
-///
-/// `kube` appends a `?` to every request target it builds, empty query
-/// included (`…/backups/<n>/status?`), so an `ends_with("/status")` over the
-/// raw URI is false for every request the client actually makes. Stripping the
-/// query once, here, is what keeps every assertion below about the route
-/// rather than about the client's URL-building.
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
-}
-
-/// Every `PATCH …/status` body the double saw, as JSON.
-fn patched_statuses(bodies: &[SeenBody]) -> Vec<Value> {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
-        .map(|v| v["status"].clone())
-        .collect()
-}
-
-/// One status's conditions as `(type, status, reason)`, in array order.
-fn conditions_of(status: &Value) -> Vec<(String, String, String)> {
-    status["conditions"]
-        .as_array()
-        .map(|cs| {
-            cs.iter()
-                .map(|c| {
-                    (
-                        c["type"].as_str().unwrap_or_default().to_string(),
-                        c["status"].as_str().unwrap_or_default().to_string(),
-                        c["reason"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// A condition array is a MAP KEYED BY `type`, so two entries sharing one
 /// `type` is a malformed status whatever their statuses say.
 ///
@@ -645,15 +596,6 @@ fn assert_no_duplicate_condition_types(status: &Value, what: &str) {
 fn workspace_file(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The workspace root: two levels above this crate's manifest directory.
-fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the workspace root is two levels above this crate")
-        .to_path_buf()
 }
 
 /// A YAML document from the workspace, parsed.
@@ -5396,14 +5338,6 @@ fn running_routes_with(pods: String, log: String) -> Vec<Route> {
             body: running_job_body(),
         },
     ]
-}
-
-/// How many `/status` `PATCH`es the double was asked for.
-fn status_patch_count(bodies: &[SeenBody]) -> usize {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .count()
 }
 
 /// **Task 16b.** A steady `Backup` — one whose Job is still running — is
@@ -15387,9 +15321,14 @@ const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
 /// unchanged, byte for byte**, and so is an exit 3 from a runner that prints
 /// no detail line — the `Restore` twin carries the reasoning.
 ///
+/// The requests are compared with the log read's QUERY set aside, as the
+/// `Restore` twin's are: the golden predates both bounds on that read, FX-34's
+/// at exit 3 and PROD-17.1 B4's at every other exit (`tailLines=256`, the
+/// `Restore`'s read). The query each exit asks is then asserted by itself.
+///
 /// KILLS: the gate widened to exit 1 (`exit-1` and `exit-1-claimed` gain a
 /// suffix); the bounded read used for every exit code; a suffix for
-/// `NotStated`.
+/// `NotStated`; the unbounded read at every exit but 3 (B4).
 #[tokio::test]
 async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
     let golden: Value =
@@ -15408,27 +15347,53 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
         assert_eq!(got["writes"], want["writes"], "[{name}] the writes");
         assert_eq!(got["exitCode"], want["exitCode"], "[{name}]");
         assert_eq!(got["terminalState"], want["terminalState"], "[{name}]");
-        if exit_code == 3 {
-            let without_log_query = |v: &Value| -> Vec<String> {
-                v["requests"]
-                    .as_array()
-                    .expect("requests")
-                    .iter()
-                    .map(|r| r.as_str().expect("a request line").to_string())
-                    .map(|r| match r.split_once("/log?") {
-                        Some((head, _)) => format!("{head}/log?"),
-                        None => r,
-                    })
-                    .collect()
-            };
-            assert_eq!(
-                without_log_query(&got),
-                without_log_query(want),
-                "[{name}] the same requests, the log read's query aside"
-            );
+        let without_log_query = |v: &Value| -> Vec<String> {
+            v["requests"]
+                .as_array()
+                .expect("requests")
+                .iter()
+                .map(|r| r.as_str().expect("a request line").to_string())
+                .map(|r| match r.split_once("/log?") {
+                    Some((head, _)) => format!("{head}/log?"),
+                    None => r,
+                })
+                .collect()
+        };
+        assert_eq!(
+            without_log_query(&got),
+            without_log_query(want),
+            "[{name}] the same requests, the log read's query aside"
+        );
+        // WHICH READ EACH EXIT MAKES: one, and its query is the one that
+        // exit's reader asks.
+        let queries: Vec<Vec<String>> = got["requests"]
+            .as_array()
+            .expect("requests")
+            .iter()
+            .filter_map(|r| r.as_str().expect("a request line").split_once("/log?"))
+            .map(|(_, query)| {
+                let mut parts: Vec<String> = query
+                    .split('&')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                parts.sort();
+                parts
+            })
+            .collect();
+        let expected = if exit_code == 3 {
+            vec![
+                "container=runner".to_string(),
+                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
+            ]
         } else {
-            assert_eq!(got["requests"], want["requests"], "[{name}] the requests");
-        }
+            vec![format!(
+                "tailLines={}",
+                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
+            )]
+        };
+        assert_eq!(queries, vec![expected], "[{name}] the one log read");
     }
 }
 

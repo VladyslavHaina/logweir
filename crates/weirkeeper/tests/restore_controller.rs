@@ -16,7 +16,13 @@
 //! Global Constraint 6's operator half — an unapproved plan creates NOTHING —
 //! is only assertable that way round.
 
-use chrono::{DateTime, TimeZone, Utc};
+mod support;
+use support::{
+    conditions_of, not_found_body, patched_statuses, path, posted_job, status_patch_count, utc,
+    workspace_root,
+};
+
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
@@ -47,7 +53,7 @@ use weirkeeper::controllers::restore::{
     action_for, admission_hold_patch, admit, approval_bundle_config_map,
     approval_bundle_config_map_name, approval_plan_hash, approver_key_ids,
     compatible_approval_bundle, compatible_legacy_plan_config_map, compatible_restore_job,
-    crashed_status_patch, finished_status_patch, observe_scorecard, plan_config_map,
+    crashed_status_patch, finished_status_patch, observe_scorecard, parse_plan, plan_config_map,
     plan_config_map_name, recomputed_plan_hash, reconcile_restore, refused_status_patch,
     restore_evidence_keys, runner_argv, runner_job_spec, running_status_patch,
     scorecard_observation, topic_mapping, triggered_by, unobserved_scorecard, window_not_covered,
@@ -296,13 +302,6 @@ fn restore_new_topic() -> Restore {
     serde_json::from_value(value).expect("the mutated fixture is a Restore")
 }
 
-/// A UTC instant, spelled as five integers so a test reads like a calendar.
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
-
 fn now() -> DateTime<Utc> {
     utc(2026, 9, 10, 12, 0)
 }
@@ -424,14 +423,6 @@ fn roster() -> weirkeeper::crds::trust_roster::TrustRoster {
 /// legacy path still renders the same bytes.
 fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
     weirkeeper::trust::synthesize_legacy(&roster().spec)
-}
-
-/// A 404 `Status`, the shape `Api::get_opt` reads as "absent".
-fn not_found_body(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
-  "message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 /// A Job that exists and has not finished.
@@ -692,49 +683,12 @@ fn finished_routes(pods: String, log: String, job_condition: &str) -> Vec<Route>
 // Recording helpers
 // ---------------------------------------------------------------------------
 
-/// A recorded URI's PATH, without its query string.
-///
-/// `kube` appends a `?` to every request target it builds, empty query
-/// included, so an `ends_with("/status")` over the raw URI is false for every
-/// request the client actually makes.
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
-}
-
 /// How many `POST`s reached `suffix`.
 fn post_count(bodies: &[SeenBody], suffix: &str) -> usize {
     bodies
         .iter()
         .filter(|b| b.method == "POST" && path(&b.uri).ends_with(suffix))
         .count()
-}
-
-/// Every `PATCH …/status` body the double saw, as its `status` object.
-fn patched_statuses(bodies: &[SeenBody]) -> Vec<Value> {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
-        .map(|v| v["status"].clone())
-        .collect()
-}
-
-/// One status's conditions as `(type, status, reason)`, in array order.
-fn conditions_of(status: &Value) -> Vec<(String, String, String)> {
-    status["conditions"]
-        .as_array()
-        .map(|cs| {
-            cs.iter()
-                .map(|c| {
-                    (
-                        c["type"].as_str().unwrap_or_default().to_string(),
-                        c["status"].as_str().unwrap_or_default().to_string(),
-                        c["reason"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// The body of the one `POST …/configmaps`, as JSON.
@@ -746,15 +700,6 @@ fn posted_config_map(bodies: &[SeenBody]) -> Value {
     serde_json::from_str(&body.body).expect("a ConfigMap POST body is JSON")
 }
 
-/// The body of the one `POST …/jobs`, as JSON.
-fn posted_job(bodies: &[SeenBody]) -> Value {
-    let body = bodies
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .expect("the reconciler POSTed a Job");
-    serde_json::from_str(&body.body).expect("a Job POST body is JSON")
-}
-
 /// This file's own source text, for the two source-reading assertions.
 fn this_module_source() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -762,15 +707,6 @@ fn this_module_source() -> String {
         .join("controllers")
         .join("restore.rs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The workspace root: two levels above this crate's manifest directory.
-fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the workspace root is two levels above this crate")
-        .to_path_buf()
 }
 
 /// A YAML document from the workspace, parsed.
@@ -1771,7 +1707,11 @@ fn a_point_bound_plan_renders_and_pins_the_evidence_keyring() {
         ),
         "the contract pins the keyring's digest: {env:?}"
     );
-    let argv = runner_argv(&bound, &[KEY_ID_LIVE.to_string()]);
+    let argv = runner_argv(
+        &bound,
+        &parse_plan(&bound).expect("the plan parses"),
+        &[KEY_ID_LIVE.to_string()],
+    );
     assert!(
         argv.windows(2).any(|w| w[0] == "--evidence-keys"
             && w[1] == format!("{APPROVAL_MOUNT_PATH}/{EVIDENCE_KEYS_FILE}")),
@@ -2413,7 +2353,11 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
 /// The argv, verbatim, with every path a mount path.
 #[test]
 fn the_runner_argv_is_the_contract() {
-    let argv = runner_argv(&restore(), &[KEY_ID_LIVE.to_string()]);
+    let argv = runner_argv(
+        &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
+        &[KEY_ID_LIVE.to_string()],
+    );
     assert_eq!(
         argv,
         vec![
@@ -2488,7 +2432,11 @@ fn only_unexpired_roster_key_ids_reach_the_argv() {
          nothing matches, which turns a missing roster into a signature refusal"
     );
 
-    let argv = runner_argv(&restore(), &ids);
+    let argv = runner_argv(
+        &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
+        &ids,
+    );
     let flags = argv.iter().filter(|a| *a == "--approver-key-ids").count();
     assert_eq!(flags, 1, "one flag per remaining entry");
     assert!(
@@ -2497,7 +2445,11 @@ fn only_unexpired_roster_key_ids_reach_the_argv() {
     );
 
     // Two live ids produce two flags, each with its own value.
-    let two = runner_argv(&restore(), &["a".to_string(), "b".to_string()]);
+    let two = runner_argv(
+        &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
+        &["a".to_string(), "b".to_string()],
+    );
     assert_eq!(
         two.iter().filter(|a| *a == "--approver-key-ids").count(),
         2,
@@ -5391,12 +5343,20 @@ fn restore_crd_field_description(path: &[&str]) -> String {
 #[tokio::test]
 async fn the_status_carries_the_old_and_new_topic_names() {
     // scratch: the prefix is `target.topic_mapping_prefix`.
-    let (old, new) = topic_mapping(&restore()).expect("the fixture's planBytes parse");
+    let (old, new) = parse_plan(&restore())
+        .ok()
+        .as_ref()
+        .map(topic_mapping)
+        .expect("the fixture's planBytes parse");
     assert_eq!(old, vec!["orders", "payments"]);
     assert_eq!(new, vec!["drill-orders", "drill-payments"]);
 
     // newTopic: the prefix is `target.topic_naming.prefix`.
-    let (old2, new2) = topic_mapping(&restore_new_topic()).expect("the newTopic planBytes parse");
+    let (old2, new2) = parse_plan(&restore_new_topic())
+        .ok()
+        .as_ref()
+        .map(topic_mapping)
+        .expect("the newTopic planBytes parse");
     assert_eq!(old2, vec!["orders", "payments"]);
     assert_eq!(
         new2,
@@ -5412,7 +5372,7 @@ async fn the_status_carries_the_old_and_new_topic_names() {
     value["spec"]["planBytes"] = serde_json::json!("not: a: restore: spec:\n");
     let broken: Restore = serde_json::from_value(value).expect("the mutated fixture is a Restore");
     assert_eq!(
-        topic_mapping(&broken),
+        parse_plan(&broken).ok().as_ref().map(topic_mapping),
         None,
         "the runner will refuse the same bytes; a fabricated topic list would be a status field \
          naming topics no run touched"
@@ -5861,14 +5821,6 @@ fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     ]
 }
 
-/// How many `/status` `PATCH`es the double was asked for.
-fn status_patch_count(bodies: &[SeenBody]) -> usize {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .count()
-}
-
 /// An already-created Job is the migration boundary. The controller observes
 /// it with its original namespace-wide Secret transport and never rewrites or
 /// backfills a new bundle into the in-flight pod template.
@@ -6217,7 +6169,11 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
         "three keys, one expired: exactly the two unexpired ids, in ROSTER order"
     );
 
-    let argv = runner_argv(&restore(), &ids);
+    let argv = runner_argv(
+        &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
+        &ids,
+    );
     let pairs: Vec<(String, String)> = argv
         .windows(2)
         .filter(|w| w[0] == "--approver-key-ids")
@@ -6990,7 +6946,7 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
         source_destination_value(),
         evidence_destination_value(),
     ));
-    match admit_restore_destinations(&restore, &client, NS, now)
+    match admit_restore_destinations(&restore, None, &client, NS, now)
         .await
         .expect("the reads succeed")
     {
@@ -7006,7 +6962,7 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
     moved["spec"]["storage"]["bucket"] = serde_json::json!("somewhere-else");
     let (client, _r, _b) =
         mock_client_recording_bodies(destination_routes(moved, evidence_destination_value()));
-    let error = admit_restore_destinations(&restore, &client, NS, now)
+    let error = admit_restore_destinations(&restore, None, &client, NS, now)
         .await
         .expect_err("a destination that is not the plan's location is refused");
     assert!(
@@ -7028,7 +6984,7 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
     tls["spec"]["storage"]["endpoint"] = serde_json::json!("https://minio.logweir-t20:9000");
     let (client, _r, _b) =
         mock_client_recording_bodies(destination_routes(tls, evidence_destination_value()));
-    let error = admit_restore_destinations(&restore, &client, NS, now)
+    let error = admit_restore_destinations(&restore, None, &client, NS, now)
         .await
         .expect_err("a transport the plan does not name is refused");
     assert!(
@@ -7041,7 +6997,7 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
     elsewhere["spec"]["storage"]["bucket"] = serde_json::json!("another-evidence-bucket");
     let (client, _r, _b) =
         mock_client_recording_bodies(destination_routes(source_destination_value(), elsewhere));
-    let error = admit_restore_destinations(&restore, &client, NS, now)
+    let error = admit_restore_destinations(&restore, None, &client, NS, now)
         .await
         .expect_err("an evidence destination that is not the plan's is refused");
     assert!(
@@ -7072,7 +7028,7 @@ async fn a_plan_that_names_a_notification_sink_is_refused_at_admission() {
         source_destination_value(),
         evidence_destination_value(),
     ));
-    let error = admit_restore_destinations(&restore, &client, NS, now)
+    let error = admit_restore_destinations(&restore, None, &client, NS, now)
         .await
         .expect_err("a plan that names a sink is refused");
     let said = error.to_string();
@@ -7089,7 +7045,7 @@ async fn a_plan_that_names_a_notification_sink_is_refused_at_admission() {
         evidence_destination_value(),
     ));
     assert!(matches!(
-        admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+        admit_restore_destinations(&destination_backed_restore(), None, &client, NS, now)
             .await
             .expect("the reads succeed"),
         RestoreDestinationAdmission::Resolved(_)
@@ -7116,7 +7072,7 @@ async fn half_a_destination_backed_restore_is_refused_and_an_absent_one_holds() 
     half["spec"]["sourceDestinationRef"] = serde_json::json!({"name": "src"});
     let half: Restore = serde_json::from_value(half).expect("the mutated fixture is a Restore");
     let (client, _r, _b) = mock_client_recording_bodies(Vec::new());
-    let error = admit_restore_destinations(&half, &client, NS, now)
+    let error = admit_restore_destinations(&half, None, &client, NS, now)
         .await
         .expect_err("one ref without its partner is refused");
     assert!(
@@ -7136,7 +7092,7 @@ async fn half_a_destination_backed_restore_is_refused_and_an_absent_one_holds() 
         })
         .to_string(),
     }]);
-    match admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+    match admit_restore_destinations(&destination_backed_restore(), None, &client, NS, now)
         .await
         .expect("the read succeeds")
     {
@@ -10798,7 +10754,11 @@ fn fx20_an_inline_source_secret_is_bound_to_the_plans_locations() {
     let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(PLAN_BYTES).unwrap();
 
     // The fixture's evidence bucket is another location: two pairs.
-    let env = inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]);
+    let env = inline_restore_binding_env(
+        "logweir-s3",
+        &serde_yaml::from_str(PLAN_BYTES).unwrap(),
+        &[],
+    );
     let expect = |name: &str| {
         env.literals
             .iter()
@@ -10821,7 +10781,7 @@ fn fx20_an_inline_source_secret_is_bound_to_the_plans_locations() {
 
     // Evidence in the SAME bucket and endpoint: one location, one pair.
     let same = PLAN_BYTES.replace("bucket: logweir-evidence", "bucket: kafka-backups");
-    let env = inline_restore_binding_env("logweir-s3", &same, &[]);
+    let env = inline_restore_binding_env("logweir-s3", &serde_yaml::from_str(&same).unwrap(), &[]);
     assert_eq!(env.from_secret.len(), 1, "{env:?}");
 
     // A plan author moving the SOURCE endpoint moves the expectation.
@@ -10831,8 +10791,14 @@ fn fx20_an_inline_source_secret_is_bound_to_the_plans_locations() {
         1,
     );
     assert_ne!(
-        inline_restore_binding_env("logweir-s3", &moved, &[]).literals,
-        inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]).literals
+        inline_restore_binding_env("logweir-s3", &serde_yaml::from_str(&moved).unwrap(), &[])
+            .literals,
+        inline_restore_binding_env(
+            "logweir-s3",
+            &serde_yaml::from_str(PLAN_BYTES).unwrap(),
+            &[]
+        )
+        .literals
     );
 
     // No endpoint in the plan: the forwarded AWS_ENDPOINT_URL is where the
@@ -10843,20 +10809,22 @@ fn fx20_an_inline_source_secret_is_bound_to_the_plans_locations() {
         "http://minio.logweir-t20:9000".to_string(),
     )];
     assert_eq!(
-        inline_restore_binding_env("logweir-s3", &bare, &forwarded).literals,
-        inline_restore_binding_env("logweir-s3", PLAN_BYTES, &[]).literals,
+        inline_restore_binding_env(
+            "logweir-s3",
+            &serde_yaml::from_str(&bare).unwrap(),
+            &forwarded
+        )
+        .literals,
+        inline_restore_binding_env(
+            "logweir-s3",
+            &serde_yaml::from_str(PLAN_BYTES).unwrap(),
+            &[]
+        )
+        .literals,
         "the env endpoint fills the plan's absent one"
     );
-
-    // Unparseable plan bytes: the fail-closed expectation and nothing else.
-    let env = inline_restore_binding_env("logweir-s3", "}{", &[]);
-    assert_eq!(
-        env.literals,
-        vec![(
-            cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
-            cb::UNBOUND_NO_UID.to_string()
-        )]
-    );
+    // Unparseable plan bytes never reach the binding: the reconcile refuses
+    // them first (`an_unparseable_plan_is_refused_before_anything_is_read`).
 }
 
 /// **The posted Job carries the inline pair**, from the reconcile that builds
@@ -10913,6 +10881,78 @@ fn complete_plan_bytes(bound: Option<u64>) -> String {
         "  anchor: head\n",
         &format!("  anchor: head\n  coverage: complete\n{extra}"),
     )
+}
+
+/// **PROD-17.1 B5: a plan that does not parse is refused before anything is
+/// read** — `PlanUnparseable`, terminal, ZERO `POST`s and the `Approval` never
+/// read, although the approval is VERIFIED over those exact bytes and nothing
+/// is declared on `spec`. Before B5 the first row was admitted: its Job was
+/// created carrying the fail-closed archive binding (`UNBOUND_NO_UID`) and
+/// the runner refused the plan at phase 0; the second was refused only after
+/// the approval was read, as `ConnectionPlanMismatch`. CONTROL: the fixture's
+/// plan, approved the same way, is admitted and its Job created.
+#[tokio::test]
+async fn an_unparseable_plan_is_refused_before_anything_is_read() {
+    let no_objectives = PLAN_BYTES.replace(
+        "objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n",
+        "",
+    );
+    assert_ne!(no_objectives, PLAN_BYTES);
+    for (label, bytes) in [
+        ("a readable target, no objectives", no_objectives.as_str()),
+        ("nothing readable", "not: [a plan\n"),
+    ] {
+        let hash = sha256_prefixed(bytes.as_bytes());
+        let object: Restore = serde_json::from_str(&restore_json(bytes, APPROVAL, NAME))
+            .expect("the fixture is a Restore");
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(true, &hash, &hash),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &object,
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("PlanUnparseable"),
+            "{label}: {outcome:?}"
+        );
+        assert!(!outcome.created, "{label}");
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&bodies, "/jobs"), 0, "{label}: no Job");
+        assert_eq!(post_count(&bodies, "/configmaps"), 0, "{label}");
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "{label}: refused before the approval is read"
+        );
+    }
+    // CONTROL: the plan that parses, approved the same way.
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    assert!(outcome.created, "{outcome:?}");
+    assert_eq!(post_count(&bodies.lock().expect("readable"), "/jobs"), 1);
 }
 
 /// A `Restore` over `plan` declaring `coverage`/`bound` on its spec.
@@ -13140,7 +13180,11 @@ async fn a_refusal_recomputed_later_is_the_same_bytes_and_is_not_written_again()
                 Some("GuardRefused"),
                 Some(reason),
                 None,
-                topic_mapping(&settled).as_ref(),
+                parse_plan(&settled)
+                    .ok()
+                    .as_ref()
+                    .map(topic_mapping)
+                    .as_ref(),
                 None,
                 later,
             ),

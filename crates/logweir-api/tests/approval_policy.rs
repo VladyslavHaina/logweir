@@ -22,7 +22,8 @@ use logweir_evidence::sign::sign_detached;
 use logweir_evidence::Sidecar;
 use serde_json::{json, Value};
 use support::{
-    FakeKube, Options, SharedApp, SharedOptions, TestApp, ISSUER, LOCAL_ADMIN_ACTOR, NS_A, NS_B,
+    approvals_posted, FakeKube, Options, SharedApp, SharedOptions, TestApp, ISSUER,
+    LOCAL_ADMIN_ACTOR, NS_A, NS_B,
 };
 
 const POLICIES: &str = "allowOrdinaryConfirmation: true
@@ -63,14 +64,6 @@ fn app(console: &Console) -> TestApp {
             ..Options::default()
         },
     )
-}
-
-fn approvals_posted(fake: &FakeKube) -> Vec<Value> {
-    fake.requests()
-        .into_iter()
-        .filter(|r| r.method == "POST" && r.path.ends_with("/approvals"))
-        .map(|r| serde_json::from_str(&r.body).expect("json"))
-        .collect()
 }
 
 /// The ticket every governed request here carries (D0: required in Governed).

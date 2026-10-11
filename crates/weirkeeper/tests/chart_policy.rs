@@ -24,17 +24,13 @@
 //! **It reads files and calls a pure function.** No Kubernetes, no network, no
 //! subprocess.
 
+mod support;
+use support::repo;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use weirkeeper::check::policy::{self, Policy, POLICY_KEY};
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root is above crates/weirkeeper")
-}
 
 /// Every `policy.json` in one rendered chart file, by ConfigMap name.
 fn rendered_policies(name: &str) -> BTreeMap<String, String> {

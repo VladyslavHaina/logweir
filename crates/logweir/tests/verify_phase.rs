@@ -1,4 +1,5 @@
 mod fixtures; // crates/logweir/tests/fixtures/mod.rs — Task 14 step 5c
+mod support;
 use logweir::drill::phase7_verify::{classify_parity, compare, ParityClasses};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::spec::Anchor;
@@ -240,12 +241,12 @@ fn a_partition_count_divergence_is_reported_as_intended() {
 use logweir::drill::phase7_verify::run;
 use logweir::drill::DrillError;
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PartitionFacts, PhaseObserver,
-    PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection, SegmentFacts,
-    StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, EngineError, PartitionFacts, RecordFingerprint, RestorePlan,
+    SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
+use support::doubles::{Engine, Reader, TopicData};
 
 /// The instants every hand-built `SegmentFacts` in this file spans, and every
 /// `SampleSelection` here asks for.
@@ -374,115 +375,6 @@ fn with_window_inside_the_segment(mut plan: RestorePlan) -> RestorePlan {
     plan
 }
 
-#[derive(Default, Clone)]
-struct TopicData {
-    end_offsets: Vec<(i32, i64)>,
-    configs: BTreeMap<String, String>,
-    records: Vec<ConsumedRecord>,
-}
-
-/// A `ClusterReader` keyed strictly by topic NAME, refusing (never silently
-/// substituting) any name it was not built with. This is what makes the
-/// mapping-application tests below meaningful: if `phase7_verify` ever read
-/// the archive-side (source) name instead of the mapped target-side name,
-/// this double either errors loudly (`KafkaError::TopicNotFound`, when the
-/// source name was never registered) or, where a test deliberately also
-/// registers the source name as a trap, returns OBSERVABLY WRONG data
-/// instead of merely erroring.
-struct MapReader {
-    topics: BTreeMap<String, TopicData>,
-}
-
-impl ClusterReader for MapReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("TARGET0000000000000000".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(self
-            .topics
-            .iter()
-            .map(|(n, d)| TopicMeta::new(n.clone(), d.end_offsets.len() as i32))
-            .collect())
-    }
-    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        self.topics
-            .get(topic)
-            .map(|d| d.end_offsets.clone())
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        self.topics
-            .get(topic)
-            .map(|d| d.configs.clone())
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))
-    }
-    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
-    /// a broker that surfaces neither `log.message.timestamp.type` nor a
-    /// timestamp bound, which is the harmless case: phase 0's preflight then
-    /// treats the broker as the Apache default (`CreateTime`) and refuses
-    /// nothing. G-TS's own arms live in
-    /// `crates/logweir/tests/topic_preflight.rs`.
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        topic: &str,
-        partition: i32,
-        from: i64,
-        max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        let d = self
-            .topics
-            .get(topic)
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))?;
-        Ok(d.records
-            .iter()
-            .filter(|r| r.partition == partition && r.offset >= from)
-            .take(max)
-            .cloned()
-            .collect())
-    }
-}
-
-struct VerifyEngine {
-    facts: BackupSetFacts,
-    fingerprints: Vec<RecordFingerprint>,
-    unsupported: Option<String>,
-}
-
-impl DataEngine for VerifyEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        if let Some(reason) = &self.unsupported {
-            return Err(EngineError::Unsupported(reason.clone()));
-        }
-        Ok(self.fingerprints.clone())
-    }
-}
-
 /// `logweir-core::ids::sha256_prefixed` over deterministic bytes, plus a
 /// `Store` those bytes are actually put into at the key `facts_with_segment`
 /// names. Every full-`run` test below needs this pair, so it is built once.
@@ -514,12 +406,10 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -608,12 +498,10 @@ fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let out = run(
         &engine,
         &reader,
@@ -660,12 +548,10 @@ fn a_sha256_mismatch_against_the_manifest_fails_integrity_even_when_the_canary_m
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -714,12 +600,10 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -779,12 +663,10 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: vec![],
-        unsupported: Some("kbak level below the gate".into()),
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .unsupported("kbak level below the gate");
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -837,14 +719,10 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
 fn run_rejects_a_verify_request_with_zero_sample_selections() {
     let (store, sha) = store_with_matching_segment();
     let facts = facts_with_segment(&sha);
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: vec![],
-        unsupported: None,
-    };
-    let reader = MapReader {
-        topics: BTreeMap::new(),
-    };
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(vec![]);
+    let reader = Reader::target(BTreeMap::new());
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -864,7 +742,7 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
     assert!(err.to_string().contains("zero sample selections"));
 }
 
-/// THE topic-rename mapping test for `verdict_for_selection`. `MapReader`
+/// THE topic-rename mapping test for `verdict_for_selection`. The reader
 /// registers the ARCHIVE-side name "orders" as present but EMPTY, and the
 /// mapped TARGET-side name "drill-orders" with the real, matching records.
 /// If `verdict_for_selection` ever
@@ -900,12 +778,10 @@ fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() 
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -963,12 +839,10 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
@@ -1001,43 +875,18 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         .any(|s| s.contains("retention.ms")));
 }
 
-/// A `DataEngine` whose `fingerprints` answers PER-TOPIC, unlike `VerifyEngine`
-/// above (which returns one constant list regardless of the selection —
+/// A `DataEngine` whose `fingerprints` answers PER-TOPIC, unlike the
+/// `fingerprinting` engines above (one constant list regardless of the selection —
 /// adequate for every single-topic test above, but unable to distinguish
 /// "two selections, each contributing its own fingerprints" from "one
 /// selection's fingerprints returned twice"). Local to this one test.
-struct MultiTopicEngine {
+fn multi_topic_engine(
     facts: BackupSetFacts,
     by_topic: BTreeMap<String, Vec<RecordFingerprint>>,
-}
-
-impl DataEngine for MultiTopicEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        Ok(self.by_topic.get(&s.topic).cloned().unwrap_or_default())
-    }
+) -> Engine<'static> {
+    Engine::new()
+        .describing(facts)
+        .on_fingerprints(move |s| Ok(by_topic.get(&s.topic).cloned().unwrap_or_default()))
 }
 
 /// Like `fixtures::matching_pair`, but the key/value bytes are distinguished
@@ -1169,10 +1018,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
     let mut by_topic = BTreeMap::new();
     by_topic.insert("orders".to_string(), archive_o);
     by_topic.insert("payments".to_string(), archive_p);
-    let engine = MultiTopicEngine {
-        facts: facts.clone(),
-        by_topic,
-    };
+    let engine = multi_topic_engine(facts.clone(), by_topic);
 
     let mut topics = BTreeMap::new();
     topics.insert(
@@ -1191,7 +1037,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
             records: cons_p,
         },
     );
-    let reader = MapReader { topics };
+    let reader = Reader::target(topics);
 
     let sel = vec![
         SampleSelection {
@@ -1365,10 +1211,7 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     let mut by_topic = BTreeMap::new();
     by_topic.insert("orders".to_string(), archive_o);
     by_topic.insert("payments".to_string(), archive_p);
-    let engine = MultiTopicEngine {
-        facts: facts.clone(),
-        by_topic,
-    };
+    let engine = multi_topic_engine(facts.clone(), by_topic);
 
     let mut topics = BTreeMap::new();
     // `drill-orders` was never restored: present, but empty.
@@ -1388,7 +1231,7 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
             records: cons_p,
         },
     );
-    let reader = MapReader { topics };
+    let reader = Reader::target(topics);
 
     let sel = vec![
         SampleSelection {
@@ -1502,10 +1345,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     // found no key, or no decoded timestamp landed in the window).
     by_topic.insert("orders".to_string(), vec![]);
     by_topic.insert("payments".to_string(), archive_payments);
-    let engine = MultiTopicEngine {
-        facts: facts.clone(),
-        by_topic,
-    };
+    let engine = multi_topic_engine(facts.clone(), by_topic);
 
     let mut topics = BTreeMap::new();
     // orders was genuinely restored to zero — consistent with its archive
@@ -1529,7 +1369,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
             records: cons_payments,
         },
     );
-    let reader = MapReader { topics };
+    let reader = Reader::target(topics);
 
     let sel = vec![
         sel_orders().into_iter().next().unwrap(),
@@ -1613,14 +1453,12 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
         // Ok(vec![]) — support IS present, the archive simply returned
         // nothing to compare.
-        fingerprints: vec![],
-        unsupported: None,
-    };
+        .fingerprinting(vec![]);
     let mapping = fixtures::mapping("orders", "drill-orders");
     // Task 10: the count bound is deliberately non-binding here — see
     // `with_window_inside_the_segment`.
@@ -1680,20 +1518,20 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
     let (_, mut cons) = fixtures::matching_pair(50);
     cons.truncate(5); // 90% of the claimed records never came back
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [(
+    let engine = lane_engine(
+        facts.clone(),
+        [(
             "orders/0".to_string(),
             Err("kbak level 1 (pre-0.21)".to_string()),
         )]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [target("drill-orders", vec![(0, 5)], cons)]
+    );
+    let reader = Reader::target(
+        [target("drill-orders", vec![(0, 5)], cons)]
             .into_iter()
             .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -1749,7 +1587,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
 /// replacing `s.count` with (say) `usize::MAX` at the call site changes what
 /// is observed here, not just how many records happen to exist.
 struct SpyReader {
-    inner: MapReader,
+    inner: Reader,
     seen_max: std::sync::Mutex<Vec<usize>>,
 }
 impl ClusterReader for SpyReader {
@@ -1801,16 +1639,14 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
         },
     );
     let reader = SpyReader {
-        inner: MapReader { topics },
+        inner: Reader::target(topics),
         seen_max: std::sync::Mutex::new(vec![]),
     };
     // ...but only 7 archive fingerprints were sampled.
     let (archive, _) = fixtures::matching_pair(7);
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
     let mut sel = sel_orders();
@@ -1882,12 +1718,10 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
     let mut sel = sel_orders();
@@ -1927,42 +1761,13 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
 /// start at offset 0), and partition 0's archive entries would be checked
 /// against partition 1's — different — content, fabricating mismatches on a
 /// perfectly healthy restore.
-struct PerPartitionEngine {
+fn per_partition_engine(
     facts: BackupSetFacts,
     by_partition: BTreeMap<i32, Vec<RecordFingerprint>>,
-}
-
-impl DataEngine for PerPartitionEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        Ok(self
-            .by_partition
-            .get(&s.partition)
-            .cloned()
-            .unwrap_or_default())
-    }
+) -> Engine<'static> {
+    Engine::new()
+        .describing(facts)
+        .on_fingerprints(move |s| Ok(by_partition.get(&s.partition).cloned().unwrap_or_default()))
 }
 
 /// Distinct content per PARTITION (not per topic) — `partition` is folded
@@ -2066,10 +1871,7 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
     let mut by_partition = BTreeMap::new();
     by_partition.insert(0, archive_p0);
     by_partition.insert(1, archive_p1);
-    let engine = PerPartitionEngine {
-        facts: facts.clone(),
-        by_partition,
-    };
+    let engine = per_partition_engine(facts.clone(), by_partition);
 
     // Both partitions land on the SAME target topic ("drill-orders"),
     // distinguished only by their `partition` field — exactly the layout
@@ -2085,7 +1887,7 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
             records,
         },
     );
-    let reader = MapReader { topics };
+    let reader = Reader::target(topics);
 
     let sel = vec![
         SampleSelection {
@@ -2158,51 +1960,24 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
 
 /// A `DataEngine` answering per SELECTION (`"topic/partition"`), able to hand
 /// back either real fingerprints or `EngineError::Unsupported` — the mixed
-/// case `VerifyEngine` (one answer for the whole run) and `MultiTopicEngine`
+/// case a `fingerprinting` engine (one answer for the whole run) and `multi_topic_engine`
 /// (fingerprints only, never `Unsupported`) between them cannot express, and
 /// the case reproductions 1, 2, 3 and 5 all turn on.
-struct LaneEngine {
+///
+/// `by_selection` holds `Ok(fingerprints)`, or `Err(reason)` rendered as
+/// `EngineError::Unsupported(reason)` — a pre-0.21 archive or a KBAK level-1
+/// segment, which is a NORMAL production condition.
+fn lane_engine(
     facts: BackupSetFacts,
-    /// `Ok(fingerprints)`, or `Err(reason)` rendered as
-    /// `EngineError::Unsupported(reason)` — a pre-0.21 archive or a KBAK
-    /// level-1 segment, which is a NORMAL production condition.
     by_selection: BTreeMap<String, Result<Vec<RecordFingerprint>, String>>,
-}
-
-impl DataEngine for LaneEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("not used by this fixture".into()))
-    }
-    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        match self
-            .by_selection
-            .get(&format!("{}/{}", s.topic, s.partition))
-        {
+) -> Engine<'static> {
+    Engine::new().describing(facts).on_fingerprints(move |s| {
+        match by_selection.get(&format!("{}/{}", s.topic, s.partition)) {
             Some(Ok(fp)) => Ok(fp.clone()),
             Some(Err(reason)) => Err(EngineError::Unsupported(reason.clone())),
             None => Ok(vec![]),
         }
-    }
+    })
 }
 
 /// Two topics ("orders", "payments"), one partition each, one in-window
@@ -2328,9 +2103,9 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
     let (facts, store) = two_topic_facts_and_store(25);
     let (_, cons_payments) = distinct_matching_pair("payments", 25);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [
+    let engine = lane_engine(
+        facts.clone(),
+        [
             (
                 "orders/0".to_string(),
                 Err("kbak level 1 (pre-0.21)".to_string()),
@@ -2342,17 +2117,17 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
-    let reader = MapReader {
-        topics: [
+    let reader = Reader::target(
+        [
             // Never restored: the topic exists, and it is empty.
             target("drill-orders", vec![(0, 0)], vec![]),
             target("drill-payments", vec![(0, 25)], cons_payments),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2435,25 +2210,25 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
         r.value = Some(format!("corrupt-{i}").into_bytes());
     }
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [
+    let engine = lane_engine(
+        facts.clone(),
+        [
             ("orders/0".to_string(), Ok(archive_orders)),
             ("payments/0".to_string(), Ok(archive_payments)),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
-    let reader = MapReader {
-        topics: [
+    let reader = Reader::target(
+        [
             target("drill-orders", vec![(0, 25)], cons_orders),
             // Not restored at all.
             target("drill-payments", vec![(0, 0)], vec![]),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2519,20 +2294,20 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
     // one this drill actually sampled — was not.
     let (_, cons_p1) = distinct_pair_for_partition(1, 5);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [(
+    let engine = lane_engine(
+        facts.clone(),
+        [(
             "orders/0".to_string(),
             Err("kbak level 1 (pre-0.21)".to_string()),
         )]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [target("drill-orders", vec![(0, 0), (1, 5)], cons_p1)]
+    );
+    let reader = Reader::target(
+        [target("drill-orders", vec![(0, 0), (1, 5)], cons_p1)]
             .into_iter()
             .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2598,23 +2373,23 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
     cons_orders.truncate(1);
     let (archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [
+    let engine = lane_engine(
+        facts.clone(),
+        [
             ("orders/0".to_string(), Ok(archive_orders)),
             ("payments/0".to_string(), Ok(archive_payments)),
         ]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [
+    );
+    let reader = Reader::target(
+        [
             target("drill-orders", vec![(0, 1)], cons_orders),
             target("drill-payments", vec![(0, 25)], cons_payments),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2693,9 +2468,9 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
     let (_, cons_orders) = distinct_matching_pair("orders", 25);
     let (archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [
+    let engine = lane_engine(
+        facts.clone(),
+        [
             // A legacy segment in ONE partition.
             (
                 "orders/0".to_string(),
@@ -2705,15 +2480,15 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
         ]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [
+    );
+    let reader = Reader::target(
+        [
             target("drill-orders", vec![(0, 25)], cons_orders),
             target("drill-payments", vec![(0, 25)], cons_payments),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2785,16 +2560,14 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
     let facts = facts_with_segment(&sha);
     let (archive, cons) = fixtures::matching_pair(50);
 
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
-    let reader = MapReader {
-        topics: [target("drill-orders", vec![(0, 50)], cons)]
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
+    let reader = Reader::target(
+        [target("drill-orders", vec![(0, 50)], cons)]
             .into_iter()
             .collect(),
-    };
+    );
     // `facts_with_segment`'s only segment spans WINDOW; this selection asks
     // for a window that overlaps none of it.
     let mut sel = sel_orders();
@@ -2838,16 +2611,14 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
     let facts = facts_with_segment("");
     let (archive, cons) = fixtures::matching_pair(50);
 
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
-    let reader = MapReader {
-        topics: [target("drill-orders", vec![(0, 50)], cons)]
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
+    let reader = Reader::target(
+        [target("drill-orders", vec![(0, 50)], cons)]
             .into_iter()
             .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2900,20 +2671,20 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
     let facts = facts_with_segment(&format!("sha256:{}", "0".repeat(64)));
     let (_, cons) = fixtures::matching_pair(50);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [(
+    let engine = lane_engine(
+        facts.clone(),
+        [(
             "orders/0".to_string(),
             Err("kbak level 1 (pre-0.21)".to_string()),
         )]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [target("drill-orders", vec![(0, 50)], cons)]
+    );
+    let reader = Reader::target(
+        [target("drill-orders", vec![(0, 50)], cons)]
             .into_iter()
             .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -2982,9 +2753,9 @@ fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecar
     let (archive_orders, cons_orders) = distinct_matching_pair("orders", 25);
     let (_archive_payments, cons_payments) = distinct_matching_pair("payments", 25);
 
-    let engine = LaneEngine {
-        facts: facts.clone(),
-        by_selection: [
+    let engine = lane_engine(
+        facts.clone(),
+        [
             ("orders/0".to_string(), Ok(archive_orders)),
             // Support IS present; the archive simply returned nothing to
             // compare for this selection. `Ok(vec![])`, never `Err`, so the
@@ -2993,15 +2764,15 @@ fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecar
         ]
         .into_iter()
         .collect(),
-    };
-    let reader = MapReader {
-        topics: [
+    );
+    let reader = Reader::target(
+        [
             target("drill-orders", vec![(0, 25)], cons_orders),
             target("drill-payments", vec![(0, 25)], cons_payments),
         ]
         .into_iter()
         .collect(),
-    };
+    );
 
     let out = run(
         &engine,
@@ -3104,36 +2875,13 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
 /// The healthy baseline's reader, wrapped so the TARGET's DescribeConfigs is
 /// REFUSED — what `RdKafkaReader::topic_configs` now returns instead of the
 /// empty map rdkafka 0.36.2 used to hand back.
-struct RefusingTargetConfigs(MapReader);
-
-impl ClusterReader for RefusingTargetConfigs {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        self.0.cluster_id()
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        self.0.list_topics()
-    }
-    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        self.0.end_offsets(topic)
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+fn refusing_target_configs(reader: Reader) -> Reader {
+    reader.on_topic_configs(|topic| {
         Err(logweir_kafka::reader::empty_topic_config_answer(
             topic,
             &logweir_kafka::reader::TopicVisibility::Visible,
         ))
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        self.0.broker_configs()
-    }
-    fn consume_range(
-        &self,
-        topic: &str,
-        partition: i32,
-        from: i64,
-        max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        self.0.consume_range(topic, partition, from, max)
-    }
+    })
 }
 
 /// The healthy baseline's target, with a target configuration that DIFFERS
@@ -3142,8 +2890,8 @@ impl ClusterReader for RefusingTargetConfigs {
 fn healthy_parts() -> (
     logweir_engine_oso::storage::Store,
     BackupSetFacts,
-    MapReader,
-    VerifyEngine,
+    Reader,
+    Engine<'static>,
 ) {
     let (store, sha) = store_with_matching_segment();
     let mut facts = facts_with_segment(&sha);
@@ -3164,12 +2912,10 @@ fn healthy_parts() -> (
             records: cons,
         },
     );
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
-    (store, facts, MapReader { topics }, engine)
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
+    (store, facts, Reader::target(topics), engine)
 }
 
 /// A `SourceConfigCoverage` as a verified 1.1.0 receipt naming `orders` reads.
@@ -3298,7 +3044,7 @@ fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
     let (store, facts, reader, engine) = healthy_parts();
     let out = run(
         &engine,
-        &RefusingTargetConfigs(reader),
+        &refusing_target_configs(reader),
         &store,
         &facts,
         &sel_orders(),
@@ -3390,7 +3136,7 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
     let (store, facts, reader, engine) = healthy_parts();
     let out = run(
         &engine,
-        &RefusingTargetConfigs(reader),
+        &refusing_target_configs(reader),
         &store,
         &facts,
         &sel_orders(),
@@ -3579,12 +3325,10 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
             records: cons,
         },
     );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let reader = Reader::target(topics);
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = fixtures::mapping("orders", "restore-orders");
     let moved = vec![
@@ -3645,14 +3389,12 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
             records: cons,
         },
     );
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-    };
+    let engine = Engine::new()
+        .describing(facts.clone())
+        .fingerprinting(archive);
     let out = run(
         &engine,
-        &MapReader { topics },
+        &Reader::target(topics),
         &store,
         &facts,
         &sel_orders(),
@@ -3695,7 +3437,7 @@ fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication
     let (store, facts, reader, engine) = healthy_parts();
     let out = run(
         &engine,
-        &RefusingTargetConfigs(reader),
+        &refusing_target_configs(reader),
         &store,
         &facts,
         &sel_orders(),

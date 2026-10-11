@@ -22,16 +22,11 @@
 //! the real list, and a phrase added to the script without being enforced
 //! fails `the_gate_enforces_every_phrase_on_its_own_list`.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod support;
+use support::{repo_root, text, Overlay};
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
+use std::path::Path;
+use std::process::{Command, Output};
 
 const GATE: &str = "scripts/check-withdrawn-claim.sh";
 /// The wrap-insensitive corpus scan the gate runs — review `d3w9` R2.
@@ -40,10 +35,6 @@ const SCAN: &str = "scripts/withdrawn-claim-scan.py";
 fn gate_source() -> String {
     std::fs::read_to_string(repo_root().join(GATE))
         .unwrap_or_else(|e| panic!("{GATE} is readable: {e}"))
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// The gate's own phrase list, read out of the `PHRASES=( … )` array.
@@ -150,16 +141,6 @@ fn the_exemption_list_is_exactly_two_paths() {
 // never carries one.
 
 /// A throwaway tree, deleted on drop, carrying only the gate and the probes.
-struct Overlay {
-    path: PathBuf,
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 impl Overlay {
     fn new(tag: &str) -> Overlay {
         let stamp = std::time::SystemTime::now()

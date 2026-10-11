@@ -24,6 +24,9 @@
 //! <ns>` shells out to `kubectl`; [`check_secrets_refuses_a_missing_secret`]
 //! parses the recipe instead.
 
+mod support;
+use support::{is_digest_reference, repo};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -32,15 +35,6 @@ use serde_yaml::Value;
 // ---------------------------------------------------------------------------
 // Locating the tree
 // ---------------------------------------------------------------------------
-
-/// `logweir/` — the crate root's grandparent, which is Global Constraint 36's
-/// CWD for every acceptance line in this plan.
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the workspace root is two levels above crates/logweir")
-}
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
@@ -587,7 +581,8 @@ fn every_granted_verb_has_a_caller() {
     let methods_for = |resource: &str, verb: &str| -> Vec<&'static str> {
         let sub = resource.split_once('/').map(|(_, s)| s);
         match (sub, verb) {
-            (Some("log"), "get") => vec!["logs"],
+            // `log_stream` is the same `GET …/pods/<name>/log`: see `needs`.
+            (Some("log"), "get") => vec!["logs", "log_stream"],
             (Some("status"), "patch") => vec!["patch_status"],
             (Some("status"), "update") => vec!["replace_status"],
             (Some(other), v) => panic!("no caller model for subresource `{other}` verb `{v}`"),
@@ -2534,19 +2529,6 @@ fn images_in(m: &Manifest) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// `@sha256:` followed by exactly 64 lowercase hex characters, and nothing
-/// after it.
-fn is_digest_reference(reference: &str) -> bool {
-    let Some((name, digest)) = reference.split_once("@sha256:") else {
-        return false;
-    };
-    !name.is_empty()
-        && digest.len() == 64
-        && digest
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// **Global Constraint 7: pinning is by digest, never by tag** — in every

@@ -402,20 +402,6 @@ pub fn refused_plan_field(log: &str) -> Option<String> {
         .then(|| field.to_string())
 }
 
-/// The merge patch that sets a finished check Job's TTL — D2 §4.3.
-///
-/// # This is only ever sent AFTER the status commit
-///
-/// The TTL controller deletes a Job and its pods together, and the relay lives
-/// only on the pod. The `Backup` path learned this the same way
-/// ([`crate::controllers::backup::TTL_SECONDS_AFTER_FINISHED`]): the ordering
-/// is a guarantee because the status patch is `?`-propagated, so a status write
-/// that did not return 200 leaves the reconcile before any TTL exists.
-#[must_use]
-pub fn ttl_patch() -> Value {
-    json!({ "spec": { "ttlSecondsAfterFinished": job::TTL_SECONDS } })
-}
-
 /// The merge patch that cancels an unfinished check Job — D2 §4.3's
 /// `cancel.rs`.
 ///
@@ -475,7 +461,7 @@ pub fn overall(outcomes: &[CheckOutcome], blocked_by: Option<&Waiting>) -> Overa
 
 /// Create one check Job.
 ///
-/// **No TTL is set here** — [`crate::job::build`]'s note 4 and [`ttl_patch`].
+/// **No TTL is set here** — [`crate::job::build`]'s note 4 and [`set_ttl`].
 ///
 /// # Errors
 /// [`kube::Error`], including the **409** a duplicate reconcile gets. A 409 is
@@ -499,8 +485,8 @@ pub async fn create_job(
 /// That is not a convention this function can enforce, and saying so here is
 /// the next best thing: the relay lives on the pod, the TTL controller deletes
 /// the Job and its pods together, and a TTL patched before the commit lets
-/// garbage collection race the read. The `Backup` and `KafkaCluster` paths
-/// carry the same note above their own TTL patches.
+/// garbage collection race the read. Every runner Job's TTL goes through
+/// [`crate::runner_log::set_ttl`], which carries the same note.
 ///
 /// # Errors
 /// [`kube::Error`].
@@ -510,13 +496,7 @@ pub async fn set_ttl(
     job_name: &str,
 ) -> Result<(), kube::Error> {
     let jobs: kube::Api<Job> = kube::Api::namespaced(client.clone(), namespace);
-    jobs.patch(
-        job_name,
-        &kube::api::PatchParams::default(),
-        &kube::api::Patch::Merge(ttl_patch()),
-    )
-    .await?;
-    Ok(())
+    crate::runner_log::set_ttl(&jobs, job_name, job::TTL_SECONDS, None).await
 }
 
 /// Cancel an owned, unfinished check Job by collapsing its deadline.
@@ -710,7 +690,9 @@ async fn observe_found(
     let log = match (finished, owned) {
         (true, Some(p)) => {
             let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
-            match pods.logs(&p.name_any(), &relay::log_params()).await {
+            match crate::runner_log::read_text(&pods, &p.name_any(), &crate::runner_log::RELAY)
+                .await
+            {
                 Ok(log) => Some(log),
                 // THERE IS NO LOG, AND THAT IS AN ANSWER. A finished Job whose
                 // pod never started its `runner` container has no stdout to

@@ -234,7 +234,7 @@ function isTolerant(shape) {
 }
 
 test("every_member_the_api_publishes_is_declared_or_deliberately_ignored", () => {
-  assert.ok(DECLARED_SHAPES.length >= 230,
+  assert.ok(DECLARED_SHAPES.length >= 229,
     "the registry holds every shape ui/contract.js declares (" +
       String(DECLARED_SHAPES.length) + ")");
   const omitted = [];

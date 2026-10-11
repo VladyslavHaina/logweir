@@ -21,6 +21,9 @@
 //! that is not scoped out is scanned, and there is no exemption inside the
 //! scope.
 
+mod support;
+use support::{text, Overlay};
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -261,21 +264,7 @@ fn run_gate(overlay: Option<&Path>) -> Output {
     cmd.output().expect("the gate script can be spawned")
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// A throwaway UI root, deleted on drop.
-struct Overlay {
-    path: PathBuf,
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 impl Overlay {
     fn new(tag: &str) -> Overlay {
         let stamp = std::time::SystemTime::now()

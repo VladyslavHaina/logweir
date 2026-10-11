@@ -20,6 +20,9 @@
 //! so every sync here is exercised against the check framework's own fakes. The
 //! docker-desktop scenario is D3 §15's and belongs to W14.
 
+mod support;
+use support::{empty_config_map, fixture, no_trust_policies, route, spki, Fixture};
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeZone as _, Utc};
@@ -39,7 +42,7 @@ use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::recovery_catalog as ctrl;
 use weirkeeper::crds::recovery_catalog::{RecoveryCatalog, SignerSummary};
 use weirkeeper::job::RunnerImage;
-use weirkeeper::testing::{mock_client_recording_bodies, Recorder, Route, SeenBody};
+use weirkeeper::testing::Route;
 
 // ===========================================================================
 // Fixtures
@@ -62,13 +65,6 @@ fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0)
         .single()
         .expect("a real instant")
-}
-
-fn spki(marker: u8) -> String {
-    format!(
-        "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE{marker:02x}\n\
-         -----END PUBLIC KEY-----\n"
-    )
 }
 
 fn roster_body() -> String {
@@ -341,12 +337,6 @@ fn framed(plan_sha: &str, subject_uid: &str, body: &str) -> String {
 // The route table
 // ---------------------------------------------------------------------------
 
-struct Fixture {
-    client: kube::Client,
-    recorder: Recorder,
-    bodies: std::sync::Arc<std::sync::Mutex<Vec<SeenBody>>>,
-}
-
 impl Fixture {
     fn seen(&self) -> Vec<(String, String)> {
         self.recorder
@@ -384,30 +374,6 @@ impl Fixture {
             .filter(|b| b.method == "POST" && b.uri.contains(fragment))
             .map(|b| serde_json::from_str(&b.body).expect("JSON"))
             .collect()
-    }
-}
-
-fn fixture(routes: Vec<Route>) -> Fixture {
-    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-    Fixture {
-        client,
-        recorder,
-        bodies,
-    }
-}
-
-/// An empty `TrustPolicy` list: no policy governs the namespace, so the
-/// catalog resolves the synthesised `legacy-roster-v1` from the roster route.
-fn no_trust_policies() -> String {
-    json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
-}
-
-fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
-    Route {
-        method,
-        path_suffix,
-        status: 200,
-        body,
     }
 }
 
@@ -492,13 +458,6 @@ fn plan_route(text: Option<String>) -> Route {
             .to_string(),
         },
     }
-}
-
-/// A minimal but WELL-FORMED answer: `kube` deserialises every response into
-/// the typed object, so a `{}` body fails as a transport error and would hide
-/// whatever the reconciler actually did.
-fn empty_config_map() -> String {
-    json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {}}).to_string()
 }
 
 /// What the API server answers a `POST /jobs` with: the object it created,

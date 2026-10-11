@@ -12,12 +12,14 @@
 //! 3. The teardown attestation is honest: when teardown did not happen, the
 //!    signed document says so instead of asserting a clean state.
 mod fixtures;
+mod support;
 
 use logweir::drill::phase8_score::{compute_measured, decide};
 use logweir::drill::DrillError;
 use logweir::exit::ExitCode;
 use logweir_core::outcome::Outcome;
-use logweir_kafka::reader::{KafkaError, TopicDeleter};
+use logweir_kafka::reader::KafkaError;
+use support::doubles::Deleter;
 
 // ----------------------------------------------------------------- phase 8: measure
 
@@ -777,33 +779,13 @@ fn a_restore_no_op_may_never_be_converted_straight_to_an_exit_code() {
 // ----------------------------------------------------------------- phase 9: teardown
 
 /// A deleter that reports one topic as failed, per name.
-struct PartiallyFailingDeleter;
-impl TopicDeleter for PartiallyFailingDeleter {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        Ok(names
-            .iter()
-            .map(|n| {
-                (
-                    n.clone(),
-                    Err("broker refused: TOPIC_AUTHORIZATION_FAILED".to_string()),
-                )
-            })
-            .collect())
-    }
+fn partially_failing_deleter() -> Deleter {
+    Deleter::default().refusing_all("broker refused: TOPIC_AUTHORIZATION_FAILED")
 }
 
 /// A deleter whose whole call fails — no per-topic answers at all.
-struct RefusingDeleter;
-impl TopicDeleter for RefusingDeleter {
-    fn delete_topics(
-        &self,
-        _names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        Err(KafkaError::Client("admin client unreachable".into()))
-    }
+fn refusing_deleter() -> Deleter {
+    Deleter::default().failing(KafkaError::Client("admin client unreachable".into()))
 }
 
 #[test]
@@ -847,7 +829,7 @@ fn teardown_keep_deletes_nothing_but_still_attests() {
 #[test]
 fn a_topic_that_could_not_be_deleted_is_attested_as_failed_not_as_deleted() {
     let a = logweir::drill::phase9_teardown::run(
-        &PartiallyFailingDeleter,
+        &partially_failing_deleter(),
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
         logweir_core::spec::TargetMode::Scratch,
@@ -870,7 +852,7 @@ fn a_deleter_that_refuses_the_whole_call_fails_every_mapped_topic() {
     let mut mapping = fixtures::mapping("orders", "drill-orders");
     mapping.insert("payments".into(), "drill-payments".into());
     let a = logweir::drill::phase9_teardown::run(
-        &RefusingDeleter,
+        &refusing_deleter(),
         &mapping,
         "delete",
         logweir_core::spec::TargetMode::Scratch,
@@ -920,7 +902,7 @@ fn the_persisted_attestation_is_signed_create_only_and_still_reports_the_failure
     let store = fixtures::recording_store();
     let key = fixtures::good_signing_key();
     let a = logweir::drill::phase9_teardown::run(
-        &PartiallyFailingDeleter,
+        &partially_failing_deleter(),
         &fixtures::mapping("orders", "drill-orders"),
         "delete",
         logweir_core::spec::TargetMode::Scratch,

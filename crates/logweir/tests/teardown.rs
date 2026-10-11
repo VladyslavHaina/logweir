@@ -17,11 +17,13 @@
 //! a clean run's console line stays byte-identical, and the exit code does not
 //! move in either direction (stage-2 ruling R-C).
 mod fixtures;
+mod support;
 
 use fixtures::Drill;
 use logweir::drill::{execute_with, phase9_teardown, summary_line};
 use logweir_core::outcome::Outcome;
 use logweir_kafka::reader::{KafkaError, TopicDeleter};
+use support::doubles::Deleter;
 
 /// The name the fixture spec maps `orders` onto (`topic_mapping_prefix:
 /// "drill-"`), and therefore the one scratch topic a fixture drill creates.
@@ -118,25 +120,10 @@ fn under_a_capturing_subscriber(body: impl FnOnce()) -> Vec<serde_json::Value> {
 /// A deleter that refuses exactly the one scratch topic, so an attestation
 /// identical to the fixture drill's can be built without running a drill.
 /// Deliberately the PARTIAL failure (`Ok(vec![(name, Err(..))])`), which is
-/// `phase9_teardown::run`'s per-topic branch — not `score.rs`'s
-/// `RefusingDeleter`, whose whole call fails and exercises the other branch.
-struct RefusesTheOneTopic;
-impl TopicDeleter for RefusesTheOneTopic {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        Ok(names
-            .iter()
-            .map(|n| {
-                if n == SCRATCH_TOPIC {
-                    (n.clone(), Err(REFUSAL.to_string()))
-                } else {
-                    (n.clone(), Ok(()))
-                }
-            })
-            .collect())
-    }
+/// `phase9_teardown::run`'s per-topic branch — not `score.rs`'s refusing
+/// deleter, whose whole call fails and exercises the other branch.
+fn refuses_the_one_topic() -> Deleter {
+    Deleter::default().refusing(SCRATCH_TOPIC, REFUSAL)
 }
 
 // ---------------------------------------------------------------- the metric
@@ -253,7 +240,7 @@ fn teardown_failure_names_the_topics() {
     // drift: the function is testable without a subscriber, the event is
     // testable with one, and these are asserted to be the same string.
     let att = phase9_teardown::run(
-        &RefusesTheOneTopic,
+        &refuses_the_one_topic(),
         &fixtures::mapping("orders", SCRATCH_TOPIC),
         "delete",
         logweir_core::spec::TargetMode::Scratch,
@@ -701,21 +688,6 @@ fn a_failed_run_deletes_only_the_topics_it_created() {
     assert!(deleted.is_empty() && failed.is_empty());
 }
 
-/// A deleter that refuses every name for authorization, as a broker does
-/// for a principal without `Delete`.
-struct RefusesForAuthorization;
-impl TopicDeleter for RefusesForAuthorization {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        Ok(names
-            .iter()
-            .map(|n| (n.clone(), Err(AUTHZ.to_string())))
-            .collect())
-    }
-}
-
 /// **FX-44: a failed run's leftover is printed as the `teardown-failed=`
 /// line** the controller copies to `Restore.status.teardown.failed`, with the
 /// grant. Control: the run in the row above, which removed its topic, wrote
@@ -723,8 +695,10 @@ impl TopicDeleter for RefusesForAuthorization {
 #[test]
 fn a_failed_run_prints_what_it_left_for_the_controller() {
     let mut out = Vec::new();
+    // Every name refused for authorization, as a broker does for a
+    // principal without `Delete`.
     let (deleted, failed) = phase9_teardown::after_failure(
-        &RefusesForAuthorization,
+        &Deleter::default().refusing_all(AUTHZ),
         &fixtures::mapping("orders", SCRATCH_TOPIC),
         &[SCRATCH_TOPIC.to_string()],
         "delete",

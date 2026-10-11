@@ -114,7 +114,7 @@ async fn console_policy(
                      approval from the console; there is no request to approve in the console \
                      here.",
                     effective.name(),
-                    logweir_core::approval_policy::OperatorMode::of(&effective)
+                    ApprovalRoute::of(&effective)
                 ),
             ))
         }

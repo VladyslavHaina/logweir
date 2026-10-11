@@ -95,7 +95,7 @@ use logweir_core::check_contract::{
 };
 
 use super::approval::ReconcileError;
-use crate::check::{self, chunks, job as cjob, limits, plan, policy, relay, CheckPhase};
+use crate::check::{self, chunks, job as cjob, limits, plan, policy, CheckPhase};
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -105,6 +105,7 @@ use crate::crds::topic_discovery::{
 };
 use crate::crds::{Condition, Time};
 use crate::job::RunnerOwner;
+use crate::runner_log;
 
 // ---------------------------------------------------------------------------
 // The vocabulary a reader of this status is held to
@@ -1739,7 +1740,7 @@ async fn observe(
     let log = match (finished, pod.as_ref()) {
         (true, Some(p)) => {
             let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-            match pods.logs(&p.name_any(), &relay::log_params()).await {
+            match runner_log::read_text(&pods, &p.name_any(), &runner_log::RELAY).await {
                 Ok(log) => Some(log),
                 // THERE IS NO LOG, AND THAT IS AN ANSWER. A finished Job whose
                 // pod never started its `runner` container has no stdout, and

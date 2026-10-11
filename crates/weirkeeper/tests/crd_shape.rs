@@ -23,6 +23,9 @@
 //! is already asserted here, so those tests only have to compare the Rust side
 //! against it.
 
+mod support;
+use support::repo_root;
+
 use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
@@ -30,16 +33,6 @@ use serde_yaml::Value;
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// The workspace root: this crate's manifest directory is
-/// `crates/weirkeeper`.
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf()
-}
 
 /// The directory the checked-in CRDs live in.
 fn crd_dir() -> PathBuf {

@@ -117,15 +117,6 @@
       "runPolicySha256": "sha256:9ef58d8263c0dad64731cdf35d6950829558ea7b8593d4bf4b6c2eabe1847565",
       "timeZone": "Asia/Kathmandu",
       "tzdb": "chrono-tz 0.10.4"
-    },
-    "retentionReport": {
-      "awsCli": [],
-      "evaluatedAt": "2026-09-18T03:19:36.194183971Z",
-      "mcCli": [],
-      "note": "this schedule writes to a saved BackupDestination, and the controller's single archive handle only evaluates schedules that do not name one; retention for this destination is reported by a RetentionPolicy",
-      "setsKept": [],
-      "setsThatWouldBeRemoved": [],
-      "skipped": []
     }
   }
 }

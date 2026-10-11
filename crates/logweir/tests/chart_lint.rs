@@ -30,20 +30,15 @@
 //!   role and never `cluster-admin`, the Service — and no Ingress anywhere.
 //! * `values.schema.json` types the three flags as booleans.
 
+mod support;
+use support::{is_digest_reference, repo};
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_yaml::Value;
 
 // ---------------------------------------------------------------- plumbing
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the workspace root is two levels above crates/logweir")
-}
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
@@ -245,17 +240,6 @@ fn repository_of(reference: &str) -> String {
 /// before it. `weirkeeper::job::RUNNER_IMAGE` is untouched by that ruling and
 /// still pins a digest (Global Constraint 7).
 const LOGWEIR_TAG: &str = "latest";
-
-fn is_digest_reference(reference: &str) -> bool {
-    let Some((name, digest)) = reference.split_once("@sha256:") else {
-        return false;
-    };
-    !name.is_empty()
-        && digest.len() == 64
-        && digest
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-}
 
 /// The twenty-six shipped UI files: everything under `ui/` except `*.md` and
 /// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.
@@ -6112,7 +6096,7 @@ fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_ins
 /// it is the core's: `confirm` renders `Ordinary`, `strict` renders
 /// `Governed` (`templates/approval-policy.yaml`,
 /// `logweir.approvalPolicy.internalMode`), checked against
-/// `logweir_core::approval_policy::OperatorMode` and the binary's parser.
+/// `logweir_core::approval_policy::ApprovalRoute` and the binary's parser.
 #[test]
 fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
     let template = read("charts/logweir/templates/approval-policy.yaml");
@@ -6130,7 +6114,7 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
         let effective = parsed.resolve("team-a");
         assert_eq!(effective.mode().as_str(), internal);
         assert_eq!(
-            logweir_core::approval_policy::OperatorMode::of(&effective).as_str(),
+            logweir_core::approval_policy::ApprovalRoute::of(&effective).as_str(),
             operator
         );
     }
@@ -6162,7 +6146,7 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
 /// rendered as the operator's word.
 #[test]
 fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared_console() {
-    use logweir_core::approval_policy::{ApprovalPolicySet, ApproverSignature, OperatorMode};
+    use logweir_core::approval_policy::{ApprovalPolicySet, ApprovalRoute, ApproverSignature};
     let docs = rendered("console-two-person");
     let map = docs
         .iter()
@@ -6191,13 +6175,16 @@ fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared
     let parsed = ApprovalPolicySet::parse(document)
         .unwrap_or_else(|e| panic!("the rendered two-person document is refused: {e}"));
     let pair = parsed.resolve("team-a");
-    assert_eq!(OperatorMode::of(&pair), OperatorMode::TwoPerson);
+    assert_eq!(
+        ApprovalRoute::of(&pair),
+        ApprovalRoute::SecondPersonInConsole
+    );
     assert_eq!(
         pair.bound().map(|p| p.approver_signature),
         Some(ApproverSignature::Console)
     );
     let strict = parsed.resolve("team-b");
-    assert_eq!(OperatorMode::of(&strict), OperatorMode::Strict);
+    assert_eq!(ApprovalRoute::of(&strict), ApprovalRoute::PersonalKey);
     assert_eq!(
         strict.bound().map(|p| p.approver_signature),
         Some(ApproverSignature::PersonalKey)

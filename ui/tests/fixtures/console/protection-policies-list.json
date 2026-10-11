@@ -3,14 +3,8 @@
     {
       "alerts": [
         {
-          "delivery": {
-            "attempts": 1,
-            "lastAttemptAt": "2026-09-19T01:45:25.387353835Z",
-            "state": "Delivered"
-          },
           "key": "logweir-protection-c8a19161-2797-407f-a9f6-c26cdede6886-Staleness",
           "kind": "Staleness",
-          "notifiedTransition": 1,
           "openedAt": "2026-09-19T01:45:20.787859014Z",
           "state": "Open",
           "transition": 1
@@ -56,23 +50,6 @@
       },
       "name": "protect-a",
       "namespace": "d3w14-lr520260919t0109z",
-      "notifications": {
-        "kinds": [
-          "Staleness",
-          "BackupFailure",
-          "ArchiveUnavailable"
-        ],
-        "renotifyAfterSeconds": 86400,
-        "routes": [
-          {
-            "name": "local-sink",
-            "pagerDuty": false,
-            "slack": false,
-            "webhook": true
-          }
-        ],
-        "sendResolved": true
-      },
       "objectives": {
         "maxConsecutiveFailedRuns": 1,
         "maxRecoveryPointAgeSeconds": 300,
@@ -115,14 +92,8 @@
     {
       "alerts": [
         {
-          "delivery": {
-            "attempts": 1,
-            "lastAttemptAt": "2026-09-19T01:48:26.100000000Z",
-            "state": "Delivered"
-          },
           "key": "logweir-protection-c8a19161-2797-407f-a9f6-c26cdede6886-Staleness",
           "kind": "Staleness",
-          "notifiedTransition": 2,
           "openedAt": "2026-09-19T01:45:20.787859014Z",
           "resolvedAt": "2026-09-19T01:48:25.623545543Z",
           "state": "Resolved",
@@ -184,23 +155,6 @@
       },
       "name": "protect-healthy",
       "namespace": "d3w14-lr520260919t0109z",
-      "notifications": {
-        "kinds": [
-          "Staleness",
-          "BackupFailure",
-          "ArchiveUnavailable"
-        ],
-        "renotifyAfterSeconds": 86400,
-        "routes": [
-          {
-            "name": "local-sink",
-            "pagerDuty": false,
-            "slack": false,
-            "webhook": true
-          }
-        ],
-        "sendResolved": true
-      },
       "objectives": {
         "maxConsecutiveFailedRuns": 1,
         "maxRecoveryPointAgeSeconds": 300,

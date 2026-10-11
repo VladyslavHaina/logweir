@@ -32,18 +32,12 @@
 //! `crates/logweir/tests/one_signer_gate.rs` is the precedent for a test in this
 //! package that shells a repository script against an overlay.
 
+mod support;
+use support::{repo_root, text};
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
-
-/// The repository root, from this package's manifest directory.
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
 
 /// A throwaway workspace overlay, deleted on drop.
 struct Overlay(PathBuf);
@@ -84,10 +78,6 @@ fn run_gate(overlay: &Overlay) -> Output {
         .env("LOGWEIR_ROOT", overlay.path())
         .output()
         .expect("the gate script can be spawned")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn report(out: &Output) -> String {

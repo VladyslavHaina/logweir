@@ -19,7 +19,10 @@
 //! objects alone. That is `L-05.2-2`, `L-05.2-3` and `L-05.2-5` in D1 §13, and
 //! it is W8's.
 
-use chrono::{DateTime, TimeZone, Utc};
+mod support;
+use support::utc;
+
+use chrono::{DateTime, Utc};
 use kube::Api;
 use weirkeeper::conditions::CONDITION_HISTORY_RETAINED;
 use weirkeeper::controllers::backup_schedule::{reconcile_schedule, scheduled_backup};
@@ -54,12 +57,6 @@ const OTHER_UID: &str = "3f1c8a5e-0000-4000-8000-000000000002";
 
 /// Daily at midnight, so a slot instant reads like a date.
 const DAILY: &str = "0 0 * * *";
-
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
 
 fn schedule_json(name: &str, uid: &str, status: serde_json::Value) -> serde_json::Value {
     serde_json::json!({

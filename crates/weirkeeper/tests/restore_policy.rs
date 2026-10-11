@@ -20,7 +20,7 @@ use logweir_core::ids::sha256_prefixed;
 use serde_json::Value;
 use weirkeeper::controllers::restore::{
     admit, admit_with_policy, approval_bundle_config_map, approval_bundle_config_map_with_policy,
-    carries_authorization_v2, reconcile_restore_with_policy, runner_job_spec,
+    carries_authorization_v2, parse_plan, reconcile_restore_with_policy, runner_job_spec,
     runner_job_spec_with_policy, unobserved_scorecard, PolicyAdmission, RestoreAdmission,
     RestoreOutcome, APPROVAL_POLICY_ARG, APPROVAL_POLICY_FILE,
     BUNDLE_APPROVAL_POLICY_DIGEST_ANNOTATION, CONFIRMATION_KEY_ARG, CONFIRMATION_KEY_FILE,
@@ -258,6 +258,7 @@ fn admit_under(approval: &Approval, policy: &str) -> RestoreAdmission {
     };
     admit_with_policy(
         &restore(),
+        parse_plan(&restore()).ok().as_ref(),
         Some(approval),
         Some(&cluster()),
         Some(&PolicyAdmission {
@@ -351,6 +352,7 @@ fn a_policy_changed_since_verification_admits_nothing() {
     .resolve(NS);
     let admission = admit_with_policy(
         &restore(),
+        parse_plan(&restore()).ok().as_ref(),
         Some(&ordinary_approval()),
         Some(&cluster()),
         Some(&PolicyAdmission {
@@ -512,6 +514,7 @@ fn an_ordinary_run_freezes_the_snapshot_and_the_console_key_as_its_authoriser() 
     let bound = effective("team-ordinary");
     let bundle = approval_bundle_config_map_with_policy(
         &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
         &ordinary_approval(),
         &trust(),
         &bound,
@@ -547,6 +550,7 @@ fn a_governed_run_mounts_the_approver_and_the_console_key_and_pins_both() {
     assert!(carries_authorization_v2(&restore, &approval, &bound));
     let spec = runner_job_spec_with_policy(
         &restore,
+        &parse_plan(&restore).expect("the plan parses"),
         &cluster(),
         &[BOB_KEY_ID.to_string()],
         &approval,
@@ -556,9 +560,15 @@ fn a_governed_run_mounts_the_approver_and_the_console_key_and_pins_both() {
         None,
     )
     .expect("a Job spec");
-    let bundle =
-        approval_bundle_config_map_with_policy(&restore, &approval, &trust(), &bound, now())
-            .expect("bundle");
+    let bundle = approval_bundle_config_map_with_policy(
+        &restore,
+        &parse_plan(&restore).expect("the plan parses"),
+        &approval,
+        &trust(),
+        &bound,
+        now(),
+    )
+    .expect("bundle");
     let data = bundle.data.expect("data");
     assert_eq!(
         data["approver.pub.pem"], BOB_PEM,
@@ -612,6 +622,7 @@ fn a_v1_run_is_unchanged_by_the_policy_feature() {
     .expect("old path");
     let new = runner_job_spec_with_policy(
         &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
         &cluster(),
         &[BOB_KEY_ID.to_string()],
         &v1_approval(),
@@ -644,6 +655,7 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
     revoked[0].retired_at = Some(now() - chrono::Duration::hours(1));
     let refused = approval_bundle_config_map_with_policy(
         &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
         &ordinary_approval(),
         &weirkeeper::trust::from_policy(&trust_policy(revoked)),
         &bound,
@@ -661,8 +673,14 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
         "team-ordinary",
         BOB_KEY_ID,
     );
-    let refused =
-        approval_bundle_config_map_with_policy(&restore(), &wrong, &trust(), &bound, now());
+    let refused = approval_bundle_config_map_with_policy(
+        &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
+        &wrong,
+        &trust(),
+        &bound,
+        now(),
+    );
     assert!(
         refused.is_err(),
         "the authorising key must hold the bound mode's usage"
@@ -675,6 +693,7 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
     let governed = effective("prod-governed");
     approval_bundle_config_map_with_policy(
         &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
         &governed_approval(),
         &trust(),
         &governed,
@@ -683,6 +702,7 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
     .expect("the governed control mounts under the unchanged trust");
     let refused = approval_bundle_config_map_with_policy(
         &restore(),
+        &parse_plan(&restore()).expect("the plan parses"),
         &governed_approval(),
         &weirkeeper::trust::from_policy(&trust_policy(revoked_console())),
         &governed,
@@ -1114,6 +1134,7 @@ fn original_approval_at(
 fn admit_original(approval: &Approval, policy: &str) -> RestoreAdmission {
     admit_with_policy(
         &original_restore(),
+        parse_plan(&original_restore()).ok().as_ref(),
         Some(approval),
         Some(&cluster()),
         Some(&PolicyAdmission {

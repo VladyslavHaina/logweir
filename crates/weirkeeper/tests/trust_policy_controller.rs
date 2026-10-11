@@ -20,6 +20,9 @@
 //! on a request it was not given a route for; that panic is what makes "the
 //! reconciler asked for nothing else" an assertion rather than a hope.
 
+mod support;
+use support::{at, seen};
+
 use chrono::{DateTime, Duration, Utc};
 use kube::api::ObjectMeta;
 use logweir_core::trust::{
@@ -38,7 +41,7 @@ use weirkeeper::crds::trust_policy::{
     TrustPolicyStatus, TrustedKey,
 };
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster as TrustRosterObject, TrustRosterSpec};
-use weirkeeper::testing::{mock_client_recording, Recorder, Route, SeenRequest};
+use weirkeeper::testing::{mock_client_recording, Route};
 use weirkeeper::trust::{
     self, Resolution, TrustSource, DEFAULT_SENTINEL, LEGACY_NOT_BEFORE_RFC3339, LEGACY_POLICY_NAME,
     REASON_TRUST_POLICY_CONFLICT,
@@ -69,13 +72,6 @@ const BAD_KEY_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbe
 /// The one instant every test in this file is written against.
 fn now() -> DateTime<Utc> {
     at("2026-09-16T12:00:00Z")
-}
-
-/// An RFC 3339 instant.
-fn at(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("a fixture instant")
-        .with_timezone(&Utc)
 }
 
 // ---------------------------------------------------------------------------
@@ -167,21 +163,6 @@ fn expect_trust(resolution: Resolution) -> weirkeeper::trust::ResolvedTrust {
         Resolution::Trust(t) => *t,
         other => panic!("expected resolved trust; got {other:?}"),
     }
-}
-
-/// Every request the double saw, method and path, query string dropped.
-fn seen(recorder: &Recorder) -> Vec<(String, String)> {
-    recorder
-        .lock()
-        .expect("the recorder mutex")
-        .iter()
-        .map(|SeenRequest { method, uri }| {
-            (
-                method.clone(),
-                uri.split('?').next().unwrap_or(uri).to_string(),
-            )
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
