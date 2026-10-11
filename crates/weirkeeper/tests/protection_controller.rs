@@ -1,12 +1,11 @@
-//! The `ProtectionPolicy` reconciler and its pure half — PLAT-14.2, D3 §3.
+//! The `ProtectionPolicy` reconciler and its pure half.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST, and the
-//! double PANICS on a request it was not given a route for — which is what
-//! turns "it never patched a Backup" and "it created nothing" into assertions
-//! rather than absences of evidence.
+//! Every test here is a pure-function or `mock_client` test, and the double
+//! PANICS on an unrouted request, which turns "it never patched a Backup" and
+//! "it created nothing" into assertions rather than absences of evidence.
 //!
-//! Alert delivery is withdrawn (OD-12): the ledger rows below assert what the
-//! ledger records, and
+//! Alert delivery is withdrawn: the ledger rows below assert what the ledger
+//! records, and
 //! [`a_policy_that_still_names_alert_sinks_says_they_are_withdrawn`] the
 //! named withdrawal.
 
@@ -17,9 +16,7 @@ use weirkeeper::crds::protection_policy::{AlertKind, ProtectionPolicy, Protectio
 use weirkeeper::protection as p;
 use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Recorder, Route};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 const NS: &str = "logweir-d3-w6";
 const POLICY: &str = "orders-prod";
@@ -80,9 +77,7 @@ fn spec() -> ProtectionPolicySpec {
 
 /// The same spec with a `catalogRef`, for the tests whose subject is the
 /// catalog conjunct. `evaluate` consults the catalog only when the POLICY asked
-/// it to (`catalogRef` set AND `requireCatalogAvailability`), which is itself
-/// the rule `a_policy_that_did_not_ask_for_the_catalog_does_not_consult_it`
-/// asserts.
+/// it to (`catalogRef` set AND `requireCatalogAvailability`).
 fn spec_with_catalog() -> ProtectionPolicySpec {
     let mut value = spec_value();
     merge(
@@ -211,13 +206,10 @@ fn schedule_object(status: Value) -> String {
     .to_string()
 }
 
-/// A minimal, VALID `KafkaCluster`.
-///
-/// The reconciler only asks "does the referenced source exist?", but
-/// `Api<KafkaCluster>::get_opt` deserializes into the typed object, so the
-/// answer has to be one — which is itself a property worth having: a policy
-/// that pointed at an object this build cannot decode is not a policy whose
-/// verdict should read `Healthy`.
+/// A minimal, VALID `KafkaCluster`. The reconciler only asks whether the
+/// referenced source exists, but `Api<KafkaCluster>::get_opt` deserializes
+/// into the typed object, so a policy that pointed at an object this build
+/// cannot decode does not read `Healthy`.
 fn source_object() -> String {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
@@ -350,9 +342,7 @@ fn last_status_patch(recorder: &BodyRecorder) -> Value {
     serde_json::from_str(&body).expect("the status patch is JSON")
 }
 
-// ===========================================================================
-// U — the health table across all five states (tracker row: STALE POINT)
-// ===========================================================================
+// The health table across all five states
 
 fn inputs<'a>(
     spec: &'a ProtectionPolicySpec,
@@ -466,14 +456,13 @@ fn the_health_table_covers_all_five_states() {
     assert_eq!(verdict.reason, p::FreshnessReason::SourceMissing);
 }
 
-/// The brief's rule, said as a test: `unknown` is a third answer, not a shade
-/// of either other one.
+/// `unknown` is a third answer, not a shade of either other one.
 ///
 /// MUTANT: make `Freshness::Unknown` fall through to the `Fresh` arm (or to
 /// `Stale`) in `evaluate`. The first assertion fails on the enum, the second
-/// on the condition status, and the third on the alert set — three
-/// independent places, because "unknown rendered as healthy" is the exact
-/// defect this task exists to prevent.
+/// on the condition status, and the third on the alert set: three independent
+/// places, because "unknown rendered as healthy" is the defect this kind
+/// exists to prevent.
 #[test]
 fn unknown_is_neither_fresh_nor_stale_and_is_not_a_failure() {
     let spec = spec_with_catalog();
@@ -516,9 +505,7 @@ fn unknown_is_neither_fresh_nor_stale_and_is_not_a_failure() {
     }
 }
 
-// ===========================================================================
-// U — the availability rule (tracker row: UNAVAILABLE ARCHIVE)
-// ===========================================================================
+// The availability rule
 
 #[test]
 fn the_availability_rule_names_its_four_conjuncts() {
@@ -602,9 +589,9 @@ fn entry(point_id: &str, availability: &str, verification: &str) -> p::CatalogEn
         "availability": availability,
         "verification": verification,
         // BOTH axes, exactly as `catalog_view::view_entry` materialises it
-        // (`availability.selectable() && verification.selectable()`). A helper
-        // that keyed on availability alone would hand the reader a `selectable`
-        // the real catalog never writes.
+        // (`availability.selectable() && verification.selectable()`): a helper
+        // keyed on availability alone would hand the reader a `selectable` the real
+        // catalog never writes.
         "selectable": availability == "Available"
             && matches!(verification, "Verified" | "VerifiedHistorical"),
         "runId": "ignored-unknown-field",
@@ -698,22 +685,13 @@ fn an_unreadable_newest_point_selects_the_older_one_and_opens_archive_unavailabl
     );
 }
 
-// ===========================================================================
-// U — defect PROTECTION-SECRETKEYS-UNPROTECTED (tracker row: PLAT-14.2's
-// health table; measured live on 2026-09-21, `claude/d3-rows.result.md` §5)
-// ===========================================================================
+// A point whose verification the controller could not reach
 
-/// The shape the live run measured, as a candidate.
-///
-/// A destination whose `evidenceRead` grant is `SecretKeys` is read through D2
-/// §3.9's evidence-fetch Job, which the build this was measured on did not yet
-/// create, so the controller reached NO verification verdict — it said so, as
-/// `NotAttempted`
-/// with a sentence — and therefore writes no `status.capture` and no
-/// `status.evidence.receiptSha256`. The run itself succeeded and the archive
-/// is fine. Every field here is a fact the live artifact
-/// (`claude/artifacts/d3-live/20260921t1248z/protect/fresh-point.json`)
-/// records.
+/// A succeeded point on a destination whose `evidenceRead` grant is
+/// `SecretKeys`, where the controller reached NO verification verdict (it
+/// says so, as `NotAttempted` with a sentence) and therefore wrote no
+/// `status.capture` and no `status.evidence.receiptSha256`. The run itself
+/// succeeded and the archive is fine.
 fn unreadable_point(hours_ago: i64) -> p::PointCandidate {
     p::PointCandidate {
         point_id: None,
@@ -725,7 +703,7 @@ fn unreadable_point(hours_ago: i64) -> p::PointCandidate {
 }
 
 /// The catalog-backed spec with the evidence objective OFF, so a test can
-/// exercise the catalog JOIN without clause 1 of the defect deciding first.
+/// exercise the catalog JOIN without the evidence objective deciding first.
 fn spec_with_catalog_only() -> ProtectionPolicySpec {
     let mut value = spec_value();
     merge(
@@ -756,12 +734,11 @@ fn entry_in_set(
 ///
 /// MUTANT: delete the `PointFactsUnread` arm from `evaluate`'s `unresolvable`
 /// chain (or gate it on something that is never true). The candidate falls out
-/// of the available set as before, `newest` is `None`, and the verdict is
+/// of the available set, `newest` is `None`, and the verdict is
 /// `Unprotected`/`NoAvailablePoint` with a `Staleness` alert open and the
-/// sentence "there is no available recovery point for this policy at all" on
-/// its way to an incident title — which is the measured defect, about an
-/// archive that holds the point. Four assertions fail, on the health, the
-/// reason, the alert set and the sentence.
+/// sentence "there is no available recovery point for this policy at all",
+/// about an archive that holds the point. Four assertions fail, on the health,
+/// the reason, the alert set and the sentence.
 #[test]
 fn a_point_whose_facts_are_unreadable_is_unknown_and_never_unprotected() {
     let spec = spec();
@@ -812,10 +789,9 @@ fn a_point_whose_facts_are_unreadable_is_unknown_and_never_unprotected() {
     assert_eq!(verdict.reason, p::FreshnessReason::NoAvailablePoint);
     assert!(verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness));
 
-    // NEGATIVE CONTROL 2 — the set is points the policy COVERS. A failed run,
-    // or one of another source, carries no capture time either, and reading
-    // those as "could not evaluate" would hide a policy that is genuinely
-    // unprotected behind a run that never produced a point.
+    // NEGATIVE CONTROL 2: the set is points the policy COVERS. A failed run, or
+    // one of another source, carries no capture time either; reading those as
+    // "could not evaluate" would hide a policy that is genuinely unprotected.
     let failed = [p::PointCandidate {
         phase: Some("Failed".to_string()),
         exit_code: Some(3),
@@ -879,8 +855,8 @@ fn a_not_attempted_point_with_a_digest_is_still_unread_and_unknown() {
 ///
 /// MUTANT: move the arm above `CatalogStale`/`SourceMissing`, or drop the
 /// `newest.is_none()` gate. The first two assertions fail on the reason; the
-/// third fails on the health, because a policy with a perfectly good fresh
-/// point would report `Unknown` for an older sibling nobody can read.
+/// third fails on the health: a policy with a good fresh point would report
+/// `Unknown` for an older sibling nobody can read.
 #[test]
 fn an_unplaceable_point_never_masks_a_more_specific_reason_or_a_placeable_one() {
     let with_catalog = spec_with_catalog();
@@ -947,11 +923,11 @@ fn no_receipt_point(hours_ago: i64) -> p::PointCandidate {
 /// read the receipt that would have given the point an identity.
 ///
 /// MUTANT: restore `match candidate.point_id { Some(id) => …, None => false }`
-/// in `is_available`'s `Fresh` arm — the first assertion fails and the health
+/// in `is_available`'s `Fresh` arm: the first assertion fails and the health
 /// reads `Unprotected` over a catalog that lists the point as
 /// `Available`/`Verified`. MUTANT 2: drop the `point_id.is_none()` guard in
 /// `entries_for` so the coarser key is tried for a candidate that HAS an
-/// identity the view does not list — the fourth assertion fails.
+/// identity the view does not list: the fourth assertion fails.
 #[test]
 fn the_catalog_join_falls_back_to_the_archive_set_id() {
     let spec = spec_with_catalog_only();
@@ -991,7 +967,7 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
     )]);
     assert!(!p::is_available(&points[0], &spec, &elsewhere));
 
-    // NEGATIVE CONTROL 2 — an EMPTY `backupId` is not a key. `serde(default)`
+    // NEGATIVE CONTROL 2: an EMPTY `backupId` is not a key. `serde(default)`
     // hands `""` to a view that does not write the field, and joining on it
     // would make every such row an answer for every unread point.
     let blank = p::PointCandidate {
@@ -1006,9 +982,9 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
     )]);
     assert!(!p::is_available(&blank, &spec, &blank_row));
 
-    // NEGATIVE CONTROL 3 — `point_id` is the narrower key and DECIDES where
-    // the candidate has one: a point whose identity the view does not list is
-    // a point the view does not know, not one to find under a coarser name.
+    // NEGATIVE CONTROL 3: `point_id` is the narrower key and DECIDES where the
+    // candidate has one: a point whose identity the view does not list is a
+    // point the view does not know.
     let listed_elsewhere = p::PointCandidate {
         point_id: Some(point_id("b-9")),
         receipt_sha256: Some(catalog_digest(&point_id("b-9"))),
@@ -1016,9 +992,9 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
     };
     assert!(!p::is_available(&listed_elsewhere, &spec, &present));
 
-    // NEGATIVE CONTROL 4 — an AMBIGUOUS archive-set join reads no facts at
-    // all. Two rows for one set are two points, and either one's capture time
-    // would be a number about a recovery point that is not this one.
+    // NEGATIVE CONTROL 4: an AMBIGUOUS archive-set join reads no facts at all.
+    // Two rows for one set are two points, and either one's capture time would
+    // describe a recovery point that is not this one.
     let twice = p::CatalogAnswer::Fresh(vec![
         entry_in_set(&point_id("b-1"), "set-1", "Available", "Verified"),
         entry_in_set(&point_id("b-2"), "set-1", "Available", "Verified"),
@@ -1030,8 +1006,8 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
          the join"
     );
 
-    // And the alert reaches it too: `ArchiveUnavailable` used a point-id-only
-    // lookup, so it stayed SHUT over exactly the points the join was added for.
+    // And the alert reaches it too: `ArchiveUnavailable` must not use a
+    // point-id-only lookup, or it stays SHUT over exactly these points.
     let broken = p::CatalogAnswer::Fresh(vec![entry_in_set(
         &point_id("b-1"),
         "set-1",
@@ -1055,18 +1031,17 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
 }
 
 /// `requireVerifiedEvidence` is answered by whichever component read the
-/// signature — and a verdict the controller DID reach still decides.
+/// signature, and a verdict the controller DID reach still decides.
 ///
 /// MUTANT: restore the unconditional `if require_verified_evidence &&
 /// !candidate.evidence.is_verified() { return false }` at the top of
-/// `is_available`. The first assertion fails: the objective refuses the point
-/// a second time for a fact the controller has already said it does not have,
-/// and the policy reads `Unprotected` over a catalog row that says `Verified`.
-/// MUTANT 2: widen `evidence_objective_met` to `!candidate.evidence
-/// .is_verified()` — i.e. let the catalog overrule ANY verdict. The
-/// `Untrusted` assertion fails and `TrustPolicy` becomes decorative.
+/// `is_available`. The first assertion fails: the policy reads `Unprotected`
+/// over a catalog row that says `Verified`, for a fact the controller has
+/// said it does not have. MUTANT 2: widen `evidence_objective_met` to
+/// `!candidate.evidence.is_verified()` (let the catalog overrule ANY verdict):
+/// the `Untrusted` assertion fails and `TrustPolicy` becomes decorative.
 /// MUTANT 3: ask the objective of `entry.is_available()` instead of
-/// `entry.is_verified()`. The `selectable`-disagrees assertion fails.
+/// `entry.is_verified()`: the `selectable`-disagrees assertion fails.
 #[test]
 fn the_catalog_answers_the_evidence_objective_only_where_the_controller_did_not() {
     let spec = spec_with_catalog();
@@ -1134,14 +1109,9 @@ fn the_catalog_answers_the_evidence_objective_only_where_the_controller_did_not(
     );
 }
 
-// ===========================================================================
-// U — the ledger (tracker rows: REPEATED FAILURE DEDUPLICATION, RECOVERY
-// NOTIFICATION)
-// ===========================================================================
+// The ledger
 
 /// A condition that stays true is ONE transition, however many passes see it.
-/// (Re-pointed when alert delivery was withdrawn: the delivery half of this
-/// row, `due` and re-notify, went with the path.)
 #[test]
 fn a_condition_that_stays_true_is_one_transition() {
     let open = [p::PolicyAlertKind::Staleness];
@@ -1268,13 +1238,11 @@ fn slot(name: &str, attempt: u32, outcome: p::SlotOutcome) -> p::SlotRun {
     }
 }
 
-// ===========================================================================
-// U — the summary never claims an exhaustive check
-// ===========================================================================
+// The summary never claims an exhaustive check
 
-/// D3 W4 scans the summary and edits a claim out of it; nothing this
-/// controller generates should ever trip that scan. The word `exhaustive` is
-/// forbidden EVEN INSIDE A DENIAL, because these channels truncate.
+/// Nothing this controller generates may claim an exhaustive check: the word
+/// `exhaustive` is forbidden EVEN INSIDE A DENIAL, because these channels
+/// truncate.
 #[test]
 fn no_summary_claims_an_exhaustive_check() {
     const BANNED: [&str; 6] = [
@@ -1304,9 +1272,9 @@ fn no_summary_claims_an_exhaustive_check() {
         }
     }
 
-    // The condition sentence carries NO clock-derived number (review F4): the
-    // event's does, because it is written once and read by a human, and a
-    // condition `message` is part of an object that is compared on every pass.
+    // The condition sentence carries NO clock-derived number: the event's does,
+    // because it is written once and read by a human, and a condition `message`
+    // is part of an object that is compared on every pass.
     let event = p::summarize(
         &spec,
         p::Health::Stale,
@@ -1349,9 +1317,7 @@ fn facts_point() -> p::AvailablePointFacts {
     }
 }
 
-// ===========================================================================
-// U — the point identity
-// ===========================================================================
+// The point identity
 
 #[test]
 fn the_point_identity_is_the_recorded_receipt_digest() {
@@ -1371,22 +1337,16 @@ fn the_point_identity_is_the_recorded_receipt_digest() {
     );
 }
 
-// ===========================================================================
-// C — the reconcile
-// ===========================================================================
+// The reconcile
 
 fn drive(policy: &ProtectionPolicy, routes: Vec<Route>) -> (pp::Outcome, Recorder, BodyRecorder) {
     drive_at(policy, routes, now())
 }
 
-/// [`drive`] with the reconcile's `now` named.
-///
-/// **The clock is a parameter because freezing it hides the defect** (review
-/// F4). `a_steady_policy_issues_no_patch_at_all` used to call `drive` twice,
-/// which passed the same frozen instant both times, so it proved nothing about
-/// a reconciler whose clock advances — and the reconciler wrote a live
-/// `sinceLastFire` and a humanized age into the object, so every real pass was
-/// a PATCH.
+/// [`drive`] with the reconcile's `now` named. **The clock is a parameter
+/// because freezing it hides a status field that is a live clock reading**:
+/// two passes at one frozen instant prove nothing about a reconciler whose
+/// clock advances.
 fn drive_at(
     policy: &ProtectionPolicy,
     routes: Vec<Route>,
@@ -1523,11 +1483,11 @@ fn a_healthy_policy_creates_nothing_and_publishes_healthy() {
     );
 }
 
-/// A steady object issues ZERO patches per reconcile — erratum **E11(d)**.
+/// A steady object issues ZERO patches per reconcile.
 ///
 /// MUTANT: write `evaluatedAt: now` unconditionally. The route table below has
-/// NO `PATCH` route, so the double panics and this test fails with the request
-/// that should not have been made.
+/// NO `PATCH` route, so the double panics on the request that should not have
+/// been made.
 #[test]
 fn a_steady_policy_issues_no_patch_at_all() {
     let no_catalog = {
@@ -1540,9 +1500,8 @@ fn a_steady_policy_issues_no_patch_at_all() {
     };
     // Pass 1: learn the status this pass computes.
     //
-    // THE SCHEDULE HAS FIRED, which is what puts `missed.sinceLastFire` in the
-    // status at all — and that field is one of the three clock-derived ones, so
-    // a fixture without it cannot see the defect (review F4).
+    // THE SCHEDULE HAS FIRED, which puts `missed.sinceLastFire` in the status:
+    // one of the three clock-derived fields, so the fixture can see it.
     let routes = {
         let mut routes = read_routes(
             vec![backup("b-1", 2, json!({}))],
@@ -1555,14 +1514,11 @@ fn a_steady_policy_issues_no_patch_at_all() {
     let written = last_status_patch(&bodies)["status"].clone();
 
     // Pass 2: the same object, now carrying that status, THE CLOCK ADVANCED,
-    // and NO patch route — the double panics on a PATCH it was not given one
-    // for.
+    // and NO patch route: the double panics on a PATCH.
     //
-    // THE CLOCK MOVES, which is the whole point (review F4). The old form drove
-    // twice at the same frozen instant and so could not see a status field that
-    // is a live clock reading. A hundred seconds is inside `evaluatedAt`'s
-    // half-interval window (150 s at the fixture's 300 s), so the honest
-    // expectation is still ZERO writes: nothing about the cluster changed.
+    // A hundred seconds is inside `evaluatedAt`'s half-interval window (150 s
+    // at the fixture's 300 s), so the honest expectation is still ZERO writes:
+    // nothing about the cluster changed.
     let steady = policy_with(no_catalog, written);
     let routes = read_routes(
         vec![backup("b-1", 2, json!({}))],
@@ -1579,16 +1535,14 @@ fn a_steady_policy_issues_no_patch_at_all() {
     );
 }
 
-/// **FX-29's class sweep: a field that becomes absent is cleared, and the
-/// policy then settles.**
+/// **A field that becomes absent is cleared, and the policy then settles.**
 ///
 /// The newest point loses its `windowCovered`, so `lastAvailablePoint` no
-/// longer carries `newestRecordAt`. Before FX-29 the patch OMITTED the nested
-/// key (`skip_serializing_if`), a merge patch keeps an omitted key, and
-/// `settle_clock_fields` compared the stale stored value with the computed
-/// `None` on every pass — so `evaluatedAt` was `now` on every pass, and every
-/// write woke this reconciler's own watch. (Re-pointed when alert delivery was
-/// withdrawn: this row used `credentialBindings`, which went with the sinks.)
+/// longer carries `newestRecordAt`. A merge patch keeps an omitted key, so
+/// the key must be sent as `null`; otherwise `settle_clock_fields` compares
+/// the stale stored value with the computed `None` on every pass,
+/// `evaluatedAt` is `now` on every pass, and every write wakes this
+/// reconciler's own watch.
 #[test]
 fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
     let no_catalog = {
@@ -1655,13 +1609,13 @@ fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
     );
 }
 
-/// **A point that ages out is seen by the timed requeue** (FX-29 review M-1).
+/// **A point that ages out is seen by the timed requeue.**
 ///
 /// A recovery point ages with no event on any object, so the pass that turns
 /// a policy `Stale` is the one its requeue runs. Driven as kube drives it with
 /// no event: pass 1 sees the newest point 120 s inside the 26-hour objective
 /// (`Healthy`) and returns `Action::requeue(evaluationIntervalSeconds)`; the
-/// pass that requeue runs — no watch event in between — sees it 180 s past the
+/// pass that requeue runs (no watch event in between) sees it 180 s past the
 /// objective and publishes `Stale`. A failed pass is requeued on
 /// `ERROR_REQUEUE_SECONDS`.
 ///
@@ -1733,14 +1687,13 @@ fn a_point_that_ages_out_is_seen_by_the_timed_requeue() {
     );
 }
 
-/// The other side of erratum **E11(d)**: past `evaluatedAt`'s half-interval
-/// window the object IS written, and the only things that move are the three
-/// clock-derived fields.
+/// Past `evaluatedAt`'s half-interval window the object IS written, and the
+/// only things that move are the three clock-derived fields: a steady object
+/// costs one bounded write per interval, not one per reconcile.
 ///
 /// MUTANT: compute `ageSeconds` or `sinceLastFire` from `now` instead of from
 /// the settled `evaluatedAt`. The equality below then fails on a field that is
-/// not in the allowed set — which is what "a steady object costs one bounded
-/// write per interval, not one per reconcile" actually means.
+/// not in the allowed set.
 #[test]
 fn past_the_half_interval_only_the_clock_fields_move() {
     let no_catalog = {
@@ -1816,9 +1769,9 @@ fn condition<'a>(status: &'a Value, r#type: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no `{type}` condition"))
 }
 
-/// A manual run of the schedule is part of its history — D1 W3b's
-/// `is_run_of_schedule`, and the reason `spec.scheduleRef.uid` is the
-/// authority and the label is only an index.
+/// A manual run of the schedule is part of its history
+/// (`is_run_of_schedule`): `spec.scheduleRef.uid` is the authority and the
+/// label is only an index.
 ///
 /// MUTANT: narrow the listing by `logweir.dev/schedule-uid` and decide
 /// membership from the label. The manual run below carries no label at all, so
@@ -1958,12 +1911,10 @@ fn a_fresh_catalog_view_answers_availability_and_an_expired_one_does_not() {
     );
 }
 
-/// **P11 REVIEW L5: A WITHDRAWN DUPLICATE'S VIEW IS STALE, NOT EMPTY.** A
-/// `RecoveryCatalog` refused as `DuplicateCatalog` withdraws its pages AND its
-/// `viewExpiresAt`. A policy over it therefore reads `CatalogStale` —
-/// availability unknown — and never the "no available point" a fresh, empty
-/// view would mean. (Before the fix `viewExpiresAt` was left behind, and the
-/// same policy read a fresh view with no entry at all.)
+/// **A WITHDRAWN DUPLICATE'S VIEW IS STALE, NOT EMPTY.** A `RecoveryCatalog`
+/// refused as `DuplicateCatalog` withdraws its pages AND its `viewExpiresAt`,
+/// so a policy over it reads `CatalogStale` (availability unknown), never the
+/// "no available point" a fresh, empty view would mean.
 #[test]
 fn a_withdrawn_duplicate_catalog_view_is_stale_not_empty() {
     let withdrawn = json!({
@@ -1997,13 +1948,10 @@ fn a_withdrawn_duplicate_catalog_view_is_stale_not_empty() {
     );
 }
 
-/// The `Backup` shape the live run measured on a `SecretKeys` destination: a
-/// succeeded run, an honest `NotAttempted` verdict, and therefore NO capture
-/// block and NO receipt digest.
-///
-/// `backupId` survives, because it is written in the pre-Job patch before any
-/// verification is attempted. Every field here is a fact
-/// `claude/artifacts/d3-live/20260921t1248z/protect/fresh-point.json` records.
+/// A `Backup` on a `SecretKeys` destination: a succeeded run, an honest
+/// `NotAttempted` verdict, and therefore NO capture block and NO receipt
+/// digest. `backupId` survives, because it is written in the pre-Job patch
+/// before any verification is attempted.
 fn evidence_unread_backup(name: &str, hours_ago: i64) -> Value {
     backup(
         name,
@@ -2063,7 +2011,7 @@ fn catalog_entry(name: &str, hours_ago: i64, availability: &str, verification: &
 /// MUTANT: delete the `with_catalog_facts` call at the end of
 /// `candidate_from_backup`. The point keeps `recoveryPointAt: null` and
 /// `pointId: null`, `evaluate` cannot age it, and the policy reports `Unknown`
-/// instead of the `Healthy` this archive has earned — three assertions fail.
+/// instead of the `Healthy` this archive has earned: three assertions fail.
 /// MUTANT 2: fill from `entry.recovery_point_at_ms` without the `> 0` guard
 /// and point the page at a row that omits `recoveryPointAtMs`; the last
 /// assertion fails on a capture date in 1970.
@@ -2119,10 +2067,9 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
          the status says so"
     );
 
-    // NEGATIVE CONTROL 1 — a row whose `recoveryPointAtMs` is `0` is a field
-    // the view did not write, not a capture in 1970. Filling from it would
-    // publish a 56-year-old recovery point and a `Stale` health that measured
-    // nothing.
+    // NEGATIVE CONTROL 1: a row whose `recoveryPointAtMs` is `0` is a field the
+    // view did not write, not a capture in 1970; filling from it would publish
+    // a 56-year-old recovery point and a `Stale` health that measured nothing.
     let mut row = catalog_entry("b-1", 2, "Available", "Verified");
     row["recoveryPointAtMs"] = json!(0);
     let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
@@ -2135,7 +2082,7 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
         Some("PointFactsUnread")
     );
 
-    // NEGATIVE CONTROL 2 — a view that holds no row for this archive set fills
+    // NEGATIVE CONTROL 2: a view that holds no row for this archive set fills
     // nothing, and the policy says it could not place the point rather than
     // inventing a time or claiming the archive is empty.
     let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
@@ -2160,19 +2107,19 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
     );
 }
 
-/// **The defect, end to end, on the shipped objectives.**
+/// **A `SecretKeys` destination is protected and does not page**, on the
+/// shipped objectives.
 ///
-/// `PROTECTION-SECRETKEYS-UNPROTECTED`, measured live on 2026-09-21: a
-/// succeeded run on a destination whose `evidenceRead` grant is `SecretKeys`,
-/// an honest `NotAttempted` verdict, no capture block, no receipt digest — and
-/// a catalog whose row for the same point reads `Available`/`Verified`. The
-/// policy read `health: Unprotected`, D3 §3.2's "no available point at all",
-/// and PAGED with the sentence "there is no available recovery point for this
-/// policy at all" about an archive holding a two-hour-old verified point.
+/// A succeeded run on a destination whose `evidenceRead` grant is
+/// `SecretKeys`, an honest `NotAttempted` verdict, no capture block, no
+/// receipt digest, and a catalog whose row for the same point reads
+/// `Available`/`Verified`: the policy must not read `Unprotected` and page
+/// "there is no available recovery point for this policy at all" about an
+/// archive holding a two-hour-old verified point.
 ///
 /// `requireVerifiedEvidence` and `requireCatalogAvailability` are BOTH on here
-/// — `spec_with_catalog` is the shipped fixture — so all three refusing
-/// clauses are in force and the test fails if any one of them is restored.
+/// (`spec_with_catalog` is the shipped fixture), so all three refusing clauses
+/// are in force and the test fails if any one of them is restored.
 #[test]
 fn a_secret_keys_destination_is_protected_and_does_not_page() {
     let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
@@ -2220,10 +2167,7 @@ fn a_secret_keys_destination_is_protected_and_does_not_page() {
     );
 }
 
-// ===========================================================================
-// U — one row per `evidenceRead` grant kind, and the flip between them
-// (the brief's three grant rows + the alert lifecycle; review MEDIUM-3/4)
-// ===========================================================================
+// One row per `evidenceRead` grant kind, and the flip between them
 
 /// A `SecretKeys`-shaped run whose receipt the controller DID read and found is
 /// not what it claims to be.
@@ -2231,15 +2175,12 @@ fn a_secret_keys_destination_is_protected_and_does_not_page() {
 /// `VerificationVerdict::Invalid` is "the digest did not match, or no roster
 /// signing key verified the sidecar", and `controllers::backup` never produces
 /// it from a storage failure. `status.capture` is absent, because it is written
-/// only on a `Valid` verdict — which is exactly why this shape used to be
-/// indistinguishable from "the controller could not look".
+/// only on a `Valid` verdict.
 ///
-/// `receiptSha256` IS present, and that is the point (review LOW-2): it is
-/// written on the terminal patch whenever the receipt bytes were fetched and
-/// hashed, before any verdict exists, so a refused point arrives with
-/// `point_id: Some` and `recovery_point_at: None`. That is the shape the
-/// catalog join matches on `pointId` and the one `with_catalog_facts` used to
-/// hand a capture time to.
+/// `receiptSha256` IS present: it is written on the terminal patch whenever the
+/// receipt bytes were fetched and hashed, before any verdict exists, so a
+/// refused point arrives with `point_id: Some` and `recovery_point_at: None`:
+/// the shape the catalog join matches on `pointId`.
 fn invalid_verdict_backup(name: &str, hours_ago: i64) -> Value {
     backup(
         name,
@@ -2253,16 +2194,15 @@ fn invalid_verdict_backup(name: &str, hours_ago: i64) -> Value {
     )
 }
 
-/// **Review HIGH-1a.** A verdict the controller REACHED is never answered by
-/// the catalog, however good the row is.
+/// A verdict the controller REACHED is never answered by the catalog, however
+/// good the row is.
 ///
-/// `Evidence` had no `Invalid` member, so a digest mismatch arrived as
-/// `NotAttempted` — the one verdict `evidence_objective_met` is allowed to
-/// defer for — and a tampered archive read `Healthy`/`Protected=True` behind a
-/// catalog view harvested before the tampering (the view is served for
-/// `max(3 × intervalSeconds, 3600)`, so that window is up to an hour by
-/// default). This row drives the shipped objectives with a row that says
-/// `Available`/`Verified` sitting right there.
+/// A digest mismatch folded into `NotAttempted` (the one verdict
+/// `evidence_objective_met` defers for) would let a tampered archive read
+/// `Healthy`/`Protected=True` behind a catalog view harvested before the
+/// tampering; the view is served for `max(3 × intervalSeconds, 3600)`, up to
+/// an hour by default. This row drives the shipped objectives with a row that
+/// says `Available`/`Verified` sitting right there.
 ///
 /// MUTANT: delete `(Some("Invalid"), _) => Self::Invalid` from
 /// `Evidence::from_verification`, or `Invalid` from the `wire_enum!`. The
@@ -2324,11 +2264,11 @@ fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is()
     );
 }
 
-/// **TRUST-VALID-BASIS-CLASS, through the reconciler.** A `Backup` whose
-/// `Valid` sits on a basis the badge refuses is not protecting evidence, and
-/// the reconciler hands `Evidence::from_verification` the whole `trust` block
-/// so it can tell. The unit table is `tests/trust_basis_class.rs`; this row
-/// pins the call site in `controllers::protection_policy`.
+/// A `Backup` whose `Valid` sits on a basis the badge refuses is not
+/// protecting evidence, and the reconciler hands
+/// `Evidence::from_verification` the whole `trust` block so it can tell. The
+/// unit table is `tests/trust_basis_class.rs`; this row pins the call site in
+/// `controllers::protection_policy`.
 ///
 /// MUTANT: pass `None` for the trust block in `candidate_from_backup`
 /// (`controllers/protection_policy.rs`), or revert `from_verification` to the
@@ -2387,11 +2327,11 @@ fn a_valid_backup_protects_only_on_a_basis_the_badge_admits() {
     }
 }
 
-/// **Final review sweep (2026-09-22).** A verification result THIS BUILD does
-/// not know — reachable after a rollback past a build that wrote a fifth
-/// verdict — is still a verdict some verifier reached. It is read as a refusal
-/// (`Untrusted`), never as `NotAttempted`, the one verdict a catalog row may
-/// answer for; the rehearsal join applies the same rule.
+/// A verification result THIS BUILD does not know (reachable after a rollback
+/// past a build that wrote a fifth verdict) is still a verdict some verifier
+/// reached. It is read as a refusal (`Untrusted`), never as `NotAttempted`,
+/// the one verdict a catalog row may answer for; the rehearsal join applies
+/// the same rule.
 ///
 /// MUTANT: map `(Some(_), _)` in `Evidence::from_verification` back to
 /// `NotAttempted`. The row goes `Healthy` behind the `Verified` catalog entry
@@ -2408,9 +2348,9 @@ fn an_unrecognised_verdict_is_a_refusal_the_catalog_cannot_overrule() {
         p::Evidence::from_verification(Some("NotAttempted"), None),
         p::Evidence::NotAttempted
     );
-    // `Pending` (D2 §3.9 step 3) is not a reached verdict: an evidence-fetch
-    // Job is still reading the document. Read as a refusal, every freshly
-    // finished destination-backed run would page `Unprotected`.
+    // `Pending` is not a reached verdict: an evidence-fetch Job is still
+    // reading the document. Read as a refusal, every freshly finished
+    // destination-backed run would page `Unprotected`.
     assert_eq!(
         p::Evidence::from_verification(Some("Pending"), None),
         p::Evidence::NotAttempted
@@ -2448,27 +2388,23 @@ fn an_unrecognised_verdict_is_a_refusal_the_catalog_cannot_overrule() {
     assert_eq!(status["status"]["lastAvailablePoint"].as_object(), None);
 }
 
-/// **Review MEDIUM-1.** `requireVerifiedEvidence` does not decide whether a
-/// REFUSED point may count as protection — only whether an UNVERIFIED one may.
+/// `requireVerifiedEvidence` does not decide whether a REFUSED point may count
+/// as protection, only whether an UNVERIFIED one may.
 ///
-/// `with_catalog_facts` was the fourth site of `Evidence::was_reached`'s rule
-/// and the one that did not ask it. A point the controller fetched and found
-/// `Invalid` has no `status.capture` (written only on `Valid`) but does carry
-/// `receiptSha256`, so it reached the fill, was handed the view's capture time,
-/// and — with the objective turned off, so nothing downstream refused it again
-/// — became the policy's newest available point: `Healthy`, `Protected=True`,
-/// no alert, publishing `evidence: "Invalid"` beside it, where `main` said
-/// `Unprotected`. D3 §3.2 gives a refused point `Unprotected` at every setting
-/// of the objective; an operator who turned off *verified evidence* did not ask
-/// to be told a mismatched digest is healthy.
+/// A point the controller fetched and found `Invalid` has no `status.capture`
+/// (written only on `Valid`) but does carry `receiptSha256`, so it reaches
+/// `with_catalog_facts`; handed the view's capture time with the objective
+/// off, it would become the policy's newest available point: `Healthy`,
+/// `Protected=True`, no alert, beside `evidence: "Invalid"`. A refused point is
+/// `Unprotected` at every setting of the objective; turning off *verified
+/// evidence* does not make a mismatched digest healthy.
 ///
-/// All four postures the review measured, so the row pins the axis rather than
-/// one corner of it.
+/// All four postures, so the row pins the axis rather than one corner of it.
 ///
-/// MUTANT (`MED1-M1`): delete `if candidate.evidence.was_reached() { return
-/// candidate; }` from `with_catalog_facts`. The fourth posture goes `Healthy`
-/// and three assertions fail; the other three are unchanged, which is what
-/// makes this row about the flag and not about HIGH-1.
+/// MUTANT: delete `if candidate.evidence.was_reached() { return candidate; }`
+/// from `with_catalog_facts`. The fourth posture goes `Healthy` and three
+/// assertions fail; the other three are unchanged, which makes this row about
+/// the flag.
 #[test]
 fn a_refused_verdict_is_unprotected_at_every_setting_of_the_evidence_objective() {
     for require_verified in [true, false] {
@@ -2527,16 +2463,14 @@ fn a_refused_verdict_is_unprotected_at_every_setting_of_the_evidence_objective()
     }
 }
 
-/// **Review HIGH-1b.** A reached-and-refused verdict is `Unprotected` whether
-/// or not the point can be placed in time.
+/// A reached-and-refused verdict is `Unprotected` whether or not the point can
+/// be placed in time.
 ///
-/// `Backup.status.capture` is written only inside
-/// `if result.result == VerificationVerdict::Valid`, so an `Untrusted` or
-/// `Invalid` point has no capture time either and satisfied
-/// `is_unplaceable`'s first conjunct. That turned "Logweir checked this archive
-/// and refuses its signature" into `Unknown` — which opens no alert, so an
-/// installation whose archive its own `TrustPolicy` rejects stopped being
-/// paged — under a sentence claiming the controller read no verdict.
+/// `Backup.status.capture` is written only on a `Valid` verdict, so an
+/// `Untrusted` or `Invalid` point has no capture time either. Read as
+/// unplaceable, "Logweir checked this archive and refuses its signature"
+/// would become `Unknown`, which opens no alert, under a sentence claiming
+/// the controller read no verdict.
 ///
 /// MUTANT: drop `&& !candidate.evidence.was_reached()` from `is_unplaceable`.
 /// Both arms go `Unknown`/`PointFactsUnread` with an empty alert set and all
@@ -2604,27 +2538,21 @@ fn a_reached_and_refused_verdict_is_unprotected_even_with_no_capture_time() {
 /// The grant the controller CAN read: a verified receipt, and the policy is
 /// protected on the controller's own verdict.
 ///
-/// The counterpart to `a_secret_keys_destination_is_protected_and_does_not_page`
-/// — the brief asks for one row per grant kind, and this is the one where the
-/// catalog answers nothing. The point identity is derived from the receipt
-/// digest the controller recorded, NOT taken from the catalog row, and the
-/// capture time is the object's own.
+/// The counterpart to `a_secret_keys_destination_is_protected_and_does_not_page`:
+/// the grant kind where the catalog answers nothing. The point identity is
+/// derived from the receipt digest the controller recorded, NOT taken from the
+/// catalog row, and the capture time is the object's own.
 ///
-/// MUTANT (`MED3-M1`): make the catalog row AUTHORITATIVE rather than a
-/// fallback — drop `with_catalog_facts`'s reached-verdict return and both
-/// `is_none()` conjuncts, so the row's values are assigned unconditionally. The
-/// row here carries a capture time 40 h old against a 26 h objective, so the
-/// health assertion and the `recoveryPointAt` assertion both fail.
+/// MUTANT: make the catalog row AUTHORITATIVE rather than a fallback (drop
+/// `with_catalog_facts`'s reached-verdict return and both `is_none()`
+/// conjuncts). The row here carries a capture time 40 h old against a 26 h
+/// objective, so the health and `recoveryPointAt` assertions both fail.
 ///
-/// Dropping the reached-verdict return ALONE is mutant `MED1-M1` and has its
-/// own row. Dropping either `is_none()` conjunct alone is unobservable, and
-/// each for a DIFFERENT reason (review LOW-2): `point_id` against the join
-/// key's own equality — where it is `Some`, `entries_for` matched on it, so the
-/// assignment is a no-op — and the capture time against `capture` being written
-/// only on a `Valid` verdict, which the reached-verdict return has already
-/// excluded. `receiptSha256` is NOT `Valid`-only: it is written on the terminal
-/// patch whenever the receipt bytes were fetched, which is why a refused point
-/// reaches this function with an identity and no capture time at all.
+/// Dropping either `is_none()` conjunct alone is unobservable, each for a
+/// DIFFERENT reason: `point_id` because where it is `Some`, `entries_for`
+/// matched on it, so the assignment is a no-op; the capture time because
+/// `capture` is written only on a `Valid` verdict, which the reached-verdict
+/// return has already excluded.
 #[test]
 fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
     let spec = {
@@ -2637,9 +2565,9 @@ fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
     };
     // The catalog's row for this very point carries a capture time 40 h old
     // against a 26 h objective, so a fill that OVERWROTE the object's own
-    // 2-hour-old one would be visible on both the health and the published
-    // instant. (In the wild the two agree; here they are made to disagree so
-    // the "fill, never overwrite" rule has a witness.)
+    // 2-hour-old one would show on both the health and the published instant.
+    // (In the wild the two agree; here they disagree so the "fill, never
+    // overwrite" rule has a witness.)
     let row = catalog_entry("b-1", 40, "Available", "Verified");
     let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
     routes.extend(catalog_routes(row));
@@ -2672,21 +2600,15 @@ fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
     assert_eq!(status["status"]["alerts"].as_array().map_or(0, Vec::len), 0);
 }
 
-/// **Review MEDIUM-4.** The flip, composed: an open incident, a point the
-/// catalog can vouch for arriving, and exactly one resolve.
-///
-/// The two halves were proven separately (the landing state in
-/// `a_secret_keys_destination_is_protected_and_does_not_page`, the ledger
-/// transition in `protection_getting_worse_never_resolves_the_page`); nothing
-/// ran them together on the `SecretKeys` path, which is the unit form of the
-/// live row `protection-recovery-notification-delivers-exactly-once`.
+/// **The flip, composed**: an open incident, a point the catalog can vouch for
+/// arriving, and exactly one resolve, on the `SecretKeys` path.
 ///
 /// The health values are NOT hand-written: each comes out of `evaluate`, so the
 /// row breaks if the flip stops happening as well as if the ledger misbehaves.
 ///
 /// MUTANT: make `resolves_alerts` include `Health::Unknown`. The last block
-/// fails — Logweir would claim the condition cleared because it stopped being
-/// able to look. MUTANT 2: any of FIX 2/3/4's mutants; the `Healthy` step
+/// fails: Logweir would claim the condition cleared because it stopped being
+/// able to look. MUTANT 2: any mutant of the catalog fill; the `Healthy` step
 /// never arrives and the resolve assertions fail.
 #[test]
 fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_incident() {
@@ -2735,11 +2657,10 @@ fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_inc
     assert_eq!(resolved[0].state, "Resolved");
     assert_eq!(resolved[0].transition, Some(2));
 
-    // 3. THE ARM THE UPGRADE NOTE IS ABOUT, and it does NOT resolve. A policy
-    //    with no catalog to answer for it lands on `Unknown`/`PointFactsUnread`
-    //    and keeps its incident open: D3 §3.3's resolve column is
-    //    `Healthy`/`AtRisk`, and Logweir does not claim a condition cleared
-    //    because it stopped being able to look.
+    // 3. A policy with no catalog to answer for it lands on
+    //    `Unknown`/`PointFactsUnread` and keeps its incident open: only
+    //    `Healthy`/`AtRisk` resolve, and Logweir does not claim a condition
+    //    cleared because it stopped being able to look.
     let unknown = p::evaluate(&inputs(
         &spec,
         &[unreadable_point(1)],
@@ -2761,11 +2682,9 @@ fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_inc
     assert_eq!(still_open[0].transition, Some(1), "no transition");
 }
 
-// ===========================================================================
 // Structural guards
-// ===========================================================================
 
-/// D3 §3.4's structural requirement, read off the source.
+/// The controller writes no `Backup` or `Restore` status, read off the source.
 #[test]
 fn the_controller_names_no_backup_or_restore_status_write() {
     let source = std::fs::read_to_string(
@@ -2819,21 +2738,18 @@ fn the_controller_names_no_backup_or_restore_status_write() {
     );
 }
 
-// ===========================================================================
-// C — RecoveryCompleted (tracker row: RECOVERY NOTIFICATION)
-// ===========================================================================
+// RecoveryCompleted
 
 const RESTORE_UID: &str = "77777777-0000-4000-8000-00000000000a";
 
 /// A terminal `Restore` of a point this policy protects produces exactly ONE
 /// informational ledger entry, keyed on the RESTORE UID.
 ///
-/// MUTANT: key it on the policy UID (or on `(policy, kind)`, which is what
-/// every other alert here does). `the second restore of the day` below then
-/// collides with the first, the ledger holds one entry instead of two, and the
-/// count assertion fails — which is the defect
+/// MUTANT: key it on the policy UID (or on `(policy, kind)`, as every other
+/// alert here is). `the second restore of the day` below then collides with
+/// the first and the ledger holds one entry instead of two.
 /// `recovery_completed_keys_on_the_restore_uid_and_never_on_the_policy`
-/// prevents at the type level and this one prevents at the controller level.
+/// prevents the same at the type level.
 #[test]
 fn a_terminal_restore_of_this_policys_point_is_recorded_once_and_never_pages() {
     let no_catalog = {
@@ -2904,16 +2820,11 @@ fn a_terminal_restore_of_this_policys_point_is_recorded_once_and_never_pages() {
     let _ = requests(&recorder);
 }
 
-// ===========================================================================
-// Fix round 1 — the review's findings, each with the row that would have
-// caught it
-// ===========================================================================
+// Resolve, open, clear and staleness rules
 
-/// **F1.** Protection getting WORSE must never send a `resolve`.
-///
-/// D3 §3.3's resolve column is "`health` back to `Healthy`/`AtRisk`", not
-/// "anything other than `Stale`". Read the wider way, the page that woke
-/// on-call resolved itself at the instant the archive stopped existing.
+/// Protection getting WORSE must never send a `resolve`: only `health` back to
+/// `Healthy`/`AtRisk` resolves. Read wider, the page would resolve itself at
+/// the instant the archive stopped existing.
 ///
 /// MUTANT: drop the `may_resolve` gate in `reconcile_alerts`'s `(Some, false)`
 /// arm, or widen `resolves_alerts` to `!matches!(health, Health::Stale)`.
@@ -2980,11 +2891,10 @@ fn protection_getting_worse_never_resolves_the_page() {
     }
 }
 
-/// **F2.** `Unprotected` — the worst value the enum has — opens an alert.
+/// `Unprotected`, the worst value the enum has, opens an alert.
 ///
 /// MUTANT: narrow the open rule back to `health == Health::Stale`. The first
-/// assertion fails with an empty `open_kinds`, and D3 §15 L5's "exactly 1
-/// POST" becomes 0 on the branch its own criterion 1 admits.
+/// assertion fails with an empty `open_kinds`.
 #[test]
 fn a_policy_with_no_recoverable_point_at_all_opens_an_alert() {
     let spec = spec();
@@ -3038,16 +2948,16 @@ fn a_policy_with_no_recoverable_point_at_all_opens_an_alert() {
     );
 }
 
-/// **F3.** A field this pass computed as `None` must DISAPPEAR from the object.
+/// A field this pass computed as `None` must DISAPPEAR from the object.
 ///
 /// An RFC 7386 merge patch removes a key only for an explicit `null`, and every
 /// status field is `skip_serializing_if = "Option::is_none"`. Without the nulls
-/// the API and the console kept serving a `lastAvailablePoint` naming a point
-/// the controller had just decided was not available — with `health: Unknown`
-/// beside it.
+/// the API and the console would keep serving a `lastAvailablePoint` naming a
+/// point the controller had just decided was not available, with `health:
+/// Unknown` beside it.
 ///
-/// MUTANT: build the body with `json!({"status": status})` again. The merged
-/// result below keeps both fields and the two `is_null` assertions fail.
+/// MUTANT: build the body with `json!({"status": status})`. The merged result
+/// below keeps both fields and the two `is_null` assertions fail.
 #[test]
 fn a_cleared_field_disappears_from_the_merged_status() {
     let stored = json!({
@@ -3071,9 +2981,8 @@ fn a_cleared_field_disappears_from_the_merged_status() {
         stored.clone(),
     );
 
-    // No runs at all, so this pass computes NO point and NO lastAttempt — and
-    // (per F2) opens a Staleness alert, which is why the create routes are
-    // here.
+    // No runs at all, so this pass computes NO point and NO lastAttempt, and
+    // opens a Staleness alert, which is why the create routes are here.
     let mut routes = read_routes(Vec::new(), json!({}));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, body_log) = drive(&policy, routes);
@@ -3101,12 +3010,11 @@ fn a_cleared_field_disappears_from_the_merged_status() {
     assert_eq!(before, merged);
 }
 
-/// **F5.** A missed slot from last January must not pin a policy to `AtRisk`.
+/// A missed slot from last January must not pin a policy to `AtRisk`.
 ///
 /// `BackupSchedule.status.lastMissedSlot` is an audit trail that is never
-/// cleared. Read as a live signal it made `Protected=False` — "Logweir checked
-/// and you are not protected" — permanent on a schedule that has fired
-/// correctly every night since.
+/// cleared. Read as a live signal it would make `Protected=False` permanent
+/// on a schedule that has fired correctly every night since.
 ///
 /// MUTANT: put `missed.last_missed_slot.is_some()` back into `at_risk`. The
 /// first assertion fails with `AtRisk`.
@@ -3146,7 +3054,7 @@ fn a_missed_slot_older_than_the_last_fire_does_not_pin_at_risk() {
     assert_eq!(verdict.health, p::Health::AtRisk);
     assert!(verdict.missed_since_last_fire);
 
-    // D1 W2's explicit zero beats any inference.
+    // An explicit zero beats any inference.
     let declared_none = [p::ScheduleFacts {
         missed_slots: Some(0),
         ..recent[0].clone()
@@ -3176,13 +3084,13 @@ fn a_missed_slot_older_than_the_last_fire_does_not_pin_at_risk() {
     );
 }
 
-/// **F6.** A point the catalog calls `UntrustedSigner` is not protection, and
-/// the archive alert opens.
+/// A point the catalog calls `UntrustedSigner` is not protection, and the
+/// archive alert opens.
 ///
-/// A `TrustPolicy` retires or revokes a signer; W8's catalog re-trust marks the
-/// entries, while the `Backup` CR's own `status.evidence` still says `Valid`
-/// until W10's asynchronous pass rewrites it. Selecting on the availability
-/// axis alone reported `Healthy` with an empty alert set.
+/// A `TrustPolicy` retires or revokes a signer; the catalog's re-trust marks
+/// the entries, while the `Backup` CR's own `status.evidence` still says
+/// `Valid` until an asynchronous pass rewrites it. Selecting on the
+/// availability axis alone would report `Healthy` with an empty alert set.
 ///
 /// MUTANT: make `CatalogEntry::is_available` test `availability == "Available"`
 /// again, or restore the `chosen_is_top` guard. The health assertion fails.
@@ -3265,10 +3173,9 @@ fn a_point_the_catalog_does_not_trust_is_not_protection() {
     assert!(!refused.is_available());
 }
 
-/// **F9.** The boundary of the one comparison PLAT-14.2 is named after.
+/// The boundary of the objective comparison is inclusive.
 ///
-/// MUTANT (the reviewer's, which SURVIVED all 36 rows): `age <= objective`
-/// becomes `age <`. The first assertion then fails.
+/// MUTANT: `age <= objective` becomes `age <`. The first assertion then fails.
 #[test]
 fn the_objective_boundary_is_inclusive() {
     let spec = spec();
@@ -3319,13 +3226,13 @@ fn the_objective_boundary_is_inclusive() {
     assert_eq!(verdict.health, p::Health::Stale);
 }
 
-/// **F12.** A catalog axis this build cannot read is "could not answer", never
-/// "your backups are gone".
+/// A catalog axis this build cannot read is "could not answer", never "your
+/// backups are gone".
 ///
-/// `#[serde(default)]` on the two axes means a rename in W8's `ViewEntry`
-/// yields `""` for every entry. Read as "not available" that puts every
-/// catalog-backed policy in the cluster into `Unprotected` at once, on a schema
-/// change — and (per F2) pages for all of them.
+/// `#[serde(default)]` on the two axes means a rename in the catalog's
+/// `ViewEntry` yields `""` for every entry. Read as "not available" that would
+/// put every catalog-backed policy in the cluster into `Unprotected` at once,
+/// on a schema change, and page for all of them.
 ///
 /// MUTANT: drop the `has_blank_axis` arm from `evaluate`'s `unresolvable`
 /// chain. The health assertion reads `Unprotected` instead of `Unknown`.
@@ -3411,7 +3318,7 @@ fn a_recovery_is_stamped_when_it_finished_and_not_when_it_was_created() {
     assert_eq!(alert["resolvedAt"].as_str(), Some(finished.as_str()));
 }
 
-// ------------------------------------------------- PROD-02.1, review EC-1
+// ------------------------------------------------- the empty capture
 
 /// A verified `Backup` whose `Complete` reason is `EmptyCapture`: Succeeded,
 /// exit 0, `Valid`, a capture time and no `windowCovered`, exactly as the
@@ -3442,11 +3349,11 @@ fn no_catalog_policy() -> ProtectionPolicy {
     policy_with(value, json!({}))
 }
 
-/// **EC-1.** An empty capture holds no record, so a policy without a
-/// `catalogRef` never names it as its newest recovery point: beside an older
-/// real point, the real point is `lastAvailablePoint`; alone, there is no
-/// available point (`NoAvailablePoint`, `Unprotected`), never Protected. Control: the
-/// same object as an ordinary Backup is the newest point, as before.
+/// An empty capture holds no record, so a policy without a `catalogRef` never
+/// names it as its newest recovery point: beside an older real point, the
+/// real point is `lastAvailablePoint`; alone, there is no available point
+/// (`NoAvailablePoint`, `Unprotected`), never Protected. Control: the same
+/// object as an ordinary Backup is the newest point.
 #[test]
 fn an_empty_capture_is_never_a_policys_recovery_point() {
     // Beside a real point 10 hours old (inside the 26-hour objective).
@@ -3487,7 +3394,7 @@ fn an_empty_capture_is_never_a_policys_recovery_point() {
     );
 
     // CONTROL: the same Backup with an ordinary `Complete` reason is the
-    // policy's newest point, exactly as before PROD-02.1.
+    // policy's newest point.
     let mut ordinary = empty_capture_backup("b-empty", 2);
     ordinary["status"]["conditions"][0]["reason"] = json!("Ok");
     let mut routes = read_routes(vec![ordinary, backup("b-real", 10, json!({}))], json!({}));
