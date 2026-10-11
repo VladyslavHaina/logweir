@@ -7,15 +7,15 @@
 //!
 //! READ THESE THREE FIRST, in this order:
 //!
-//! 1. [`refuse_policy_fails_discovery_incomplete_without_runner_job`]: the
+//! 1. [`refuse_policy_fails_discovery_incomplete_without_runner_job`] — the
 //!    honesty claim of the whole mode. Kafka silently omits topics a principal
 //!    cannot describe, so a clean listing is `unknown` and never proof; an
 //!    operator who asked for `Refuse` gets a failed run rather than a backup
 //!    labelled "all user topics" that quietly missed some.
-//! 2. [`an_impostor_pod_is_never_read`]: a discovery pod's stdout becomes
+//! 2. [`an_impostor_pod_is_never_read`] — a discovery pod's stdout becomes
 //!    this run's ALLOWLIST, and `batch.kubernetes.io/job-name` is writable by
 //!    anything that can create a pod.
-//! 3. [`the_discovery_job_ttl_is_patched_only_after_the_status_landed`]: the
+//! 3. [`the_discovery_job_ttl_is_patched_only_after_the_status_landed`] — the
 //!    commit point. The relay lives on the pod and the TTL controller deletes a
 //!    Job and its pods together, so a TTL set before the freeze is recorded
 //!    lets garbage collection race a read a later pass may still have to make.

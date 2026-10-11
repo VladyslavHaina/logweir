@@ -7,11 +7,12 @@
 //! this file's allow-list entry. `tempfile` is not a dependency:
 //! `std::env::temp_dir()` plus a removal guard is the same test.
 //!
-//! The fixtures are REAL signed documents: `e2e/fixtures/signed/scorecard.json`
-//! + `.sig` and `backup-receipt.json` + `.sig` were signed by a throwaway key
-//! whose PUBLIC half is `e2e/fixtures/signed/public.pem`. A test over a
-//! hand-built sidecar would assert the shape of a struct; these assert that
-//! `logweir-verify` said yes about bytes a `logweir` binary actually signed.
+//! The fixtures are REAL signed documents: `scorecard.json` + `.sig` and
+//! `backup-receipt.json` + `.sig` under `e2e/fixtures/signed/` were signed by
+//! a throwaway key whose PUBLIC half is `e2e/fixtures/signed/public.pem`. A
+//! test over a hand-built sidecar would assert the shape of a struct; these
+//! assert that `logweir-verify` said yes about bytes a `logweir` binary
+//! actually signed.
 //!
 //! **No private key is read by anything here.** `signing.pem` sits beside
 //! those files and this test never opens it.

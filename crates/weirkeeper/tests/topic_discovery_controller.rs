@@ -7,14 +7,14 @@
 //!
 //! READ THESE THREE FIRST, in this order:
 //!
-//! 1. [`a_successful_listing_alone_is_unknown_and_never_attested_complete`]:
+//! 1. [`a_successful_listing_alone_is_unknown_and_never_attested_complete`] —
 //!    the honesty claim. Kafka silently omits topics a principal cannot
 //!    describe, so a clean listing proves nothing about completeness.
-//! 2. [`a_label_wearing_pod_that_the_job_does_not_own_is_never_read`]: a
+//! 2. [`a_label_wearing_pod_that_the_job_does_not_own_is_never_read`] — a
 //!    check's stdout becomes a status and then an API response, and
 //!    `batch.kubernetes.io/job-name` is writable by anything that can create
 //!    a pod.
-//! 3. [`the_chunks_are_written_before_the_status_and_the_ttl_after_it`]: the
+//! 3. [`the_chunks_are_written_before_the_status_and_the_ttl_after_it`] — the
 //!    commit point. A restart anywhere in that sequence has to leave either
 //!    nothing or a complete, readable result.
 
