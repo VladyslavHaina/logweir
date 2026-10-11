@@ -2242,10 +2242,11 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
     );
 
-    // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
+    // And the install file's exact shape: 1 Namespace + 13 CRDs + 1
     // ServiceAccount + 6 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
     // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
-    // six, Amendment F's three and Amendment G's five — and a kind that
+    // six, Amendment F's three and Amendment G's four (its
+    // `RehearsalSchedule` is withdrawn in v1) — and a kind that
     // reaches `config/crd/` without reaching
     // `config/crd/kustomization.yaml` shows up here as a count that did not
     // move. SIX ClusterRoles since D3 W13: `weirkeeper`, the three human

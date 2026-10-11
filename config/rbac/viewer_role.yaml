@@ -1,6 +1,6 @@
-# `logweir-viewer` — read the fourteen kinds, and nothing else.
+# `logweir-viewer` — read the thirteen kinds, and nothing else.
 #
-# FOURTEEN, IN TWO RULES. The first is the original six (ADR 0008 Amendment A)
+# THIRTEEN, IN TWO RULES. The first is the original six (ADR 0008 Amendment A)
 # and is shared VERBATIM with the `weirkeeper` ClusterRole's own first rule;
 # the second is the seven kinds Amendments F and G added —
 # `backupdestinations`, `topicdiscoveries`, `preflights` (D2 §7.2),

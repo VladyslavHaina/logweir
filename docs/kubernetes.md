@@ -7392,7 +7392,7 @@ the D3 kinds without an exception: `kubectl apply --server-side
 --force-conflicts -f charts/logweir/crds/` (Helm owns the fields of the CRDs it
 installed, so without the flag an existing CRD keeps its old schema),
 `kubectl wait --for=condition=Established` on all
-fourteen, and only then the controller. [install.md, "Upgrade CRDs before
+thirteen, and only then the controller. [install.md, "Upgrade CRDs before
 upgrading the controller"](install.md#upgrade-crds-before-upgrading-the-controller)
 carries the exact loop. Helm installs `crds/` on first release only and neither
 upgrades nor rolls them back, which is why the procedure is by hand.
