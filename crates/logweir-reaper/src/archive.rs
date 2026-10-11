@@ -15,7 +15,7 @@
 //! [`Credentials::from_env`] reads three NAMED variables the Job projects with
 //! `valueFrom.secretKeyRef` and nothing else — never a sweep of `AWS_*`, which
 //! is what `AmazonS3Builder::from_env()` does and what would let a controller's
-//! ambient environment relocate a deletion (D-SEAMS **S5**). The struct has a
+//! ambient environment relocate a deletion. The struct has a
 //! hand-written [`std::fmt::Debug`] that prints the access key id's length and
 //! nothing of the secret, because a `#[derive(Debug)]` on a credential is one
 //! `tracing` field away from a pod log.
@@ -90,15 +90,14 @@ pub enum BuildError {
     Runtime(String),
     /// A provider this crate has no EXPLICIT-credential path for.
     ///
-    /// Review `d3w9` M7. The S3 arm is written with `AmazonS3Builder::new()`
-    /// precisely so that no ambient variable can relocate a deletion (D-SEAMS
-    /// **S5**); the Azure and GCS builders have no equivalent explicit path in
-    /// this shape, and the first landing reached for `from_env()` on both —
-    /// putting the process environment, rather than the frozen `StorageUrl`, in
+    /// The S3 arm is written with `AmazonS3Builder::new()` precisely so that no
+    /// ambient variable can relocate a deletion; the Azure and GCS builders
+    /// have no equivalent explicit path in this shape, and `from_env()` would
+    /// put the process environment, rather than the frozen `StorageUrl`, in
     /// charge of where a delete lands. Refusing is the only honest answer until
     /// an explicit path exists: neither provider is advertised for enforcement,
     /// and a `RetentionPolicy` over one is usable in `Report` and
-    /// `ExternalLifecycle` exactly as before.
+    /// `ExternalLifecycle`.
     #[error(
         "the retention worker has no explicit-credential path for {0}, and it will not build a          DELETE-capable handle from ambient process environment (D-SEAMS S5). Use `mode: Report`          or `mode: ExternalLifecycle` for this destination."
     )]
@@ -182,7 +181,7 @@ fn build(
                 b.build().map_err(|e| BuildError::Backend(e.to_string()))?,
             ))
         }
-        // NO `from_env()` IN THE DELETER, ON ANY PROVIDER (review `d3w9` M7).
+        // NO `from_env()` IN THE DELETER, ON ANY PROVIDER.
         StorageUrl::Azure { .. } => Err(BuildError::UnsupportedProvider("Azure Blob Storage")),
         StorageUrl::Gcs { .. } => Err(BuildError::UnsupportedProvider("Google Cloud Storage")),
         StorageUrl::Filesystem { path } => Ok(Arc::new(
@@ -195,8 +194,8 @@ fn build(
 impl Deleter for ArchiveReaper {
     /// **The one object-store delete in this workspace.**
     ///
-    /// The key is checked against its own NORMALISED form first — review
-    /// `d3w9` M8. `object_store::path::Path::from` drops empty segments and
+    /// The key is checked against its own NORMALISED form first.
+    /// `object_store::path::Path::from` drops empty segments and
     /// percent-encodes `.`, `..`, `%`, `#`, `<`, `>`, `?`, `*` and the control
     /// set, so the string every rail above validated is not necessarily the
     /// path this would delete. Two consequences, both closed here:
@@ -224,8 +223,8 @@ impl Deleter for ArchiveReaper {
     /// delete by key would write a marker". `None` does NOT mean the opposite:
     /// a null version under Enabled versioning answers no header and a delete
     /// still writes a marker, which the run's intent-tombstone signal catches
-    /// (see [`Versioning`], review H1). The local
-    /// filesystem store never versions. The same normalisation rail as
+    /// (see [`Versioning`]). The local filesystem store never versions. The
+    /// same normalisation rail as
     /// [`Deleter::delete_exact`]: the probe asks about the path the delete
     /// would address, or refuses.
     fn probe_versioning(&self, key: &str) -> Result<Versioning, DeleteError> {
@@ -272,7 +271,7 @@ pub fn normalise(key: &str) -> Result<object_store::path::Path, DeleteError> {
     Ok(path)
 }
 
-/// An `object_store::Error` in the closed vocabulary D3 §6.5 names.
+/// An `object_store::Error` in the reaper's closed vocabulary.
 ///
 /// The variants are matched rather than the message parsed, except for the one
 /// case `object_store` folds into `Generic`: an S3 `AccessDenied` arrives as a

@@ -1,4 +1,4 @@
-//! **PROD-05.1: the topic configuration model and its portability table.**
+//! **The topic configuration model and its portability table.**
 //!
 //! A backup receipt from format 1.3.0 records, per named topic, what a later
 //! restore needs to rebuild the topic rather than guess at it
@@ -10,8 +10,7 @@
 //! topic's declarative owner when one manages it. This module holds the parts
 //! of that model that are pure functions of a key, a source and a flag: the
 //! table, the classification, the capture rule and the detection of Strimzi
-//! owners from `KafkaTopic` resources. `docs/to-do/decisions/
-//! PROD-05.1-configuration-model.md` is the decision record PROD-05.2 consumes.
+//! owners from `KafkaTopic` resources.
 //!
 //! # The table is MEASURED, on both broker lines
 //!
@@ -49,8 +48,8 @@
 //! | `providerOnly` | a key neither line defines | never |
 //! | `secret` | the broker flagged the entry sensitive | never: the value is not captured, only the key |
 //!
-//! "Never applied as a default" is the rule FX-4 and this row share: an entry
-//! that is not applied is still RECORDED, so its absence on the target is a
+//! "Never applied as a default" is the rule the configuration coverage and
+//! this row share: an entry that is not applied is still RECORDED, so its absence on the target is a
 //! named difference, not a silent default.
 
 use crate::backup_receipt::{ConfigEntry, TopicOwner};
@@ -494,8 +493,8 @@ pub fn reference_fits(reference: &str) -> bool {
 /// The YAML documents of a `--kafka-topic-resources` file, as `kubectl get
 /// kafkatopics -A -o yaml` writes it (one `List`) or as separate documents;
 /// empty documents are skipped. ONE parser for every command that takes the
-/// file (`backup run`, PROD-05.1; `restore run`, PROD-15.1), so the two cannot
-/// read one file two ways.
+/// file (`backup run` and `restore run`), so the two cannot read one file two
+/// ways.
 pub fn parse_resource_documents(text: &str) -> Result<Vec<serde_yaml::Value>, String> {
     let mut docs = Vec::new();
     for doc in serde_yaml::Deserializer::from_str(text) {
@@ -551,8 +550,7 @@ pub fn strimzi_owners(
     found
 }
 
-/// **PROD-15.1 review M2 and L2: what a restore under the original topic
-/// names reads from a `--kafka-topic-resources` file, failing CLOSED.**
+/// **What a restore under the original topic names reads from a `--kafka-topic-resources` file, failing CLOSED.**
 ///
 /// [`strimzi_owners`] serves a backup's RECORD, where an owner it cannot
 /// record is said so separately ([`strimzi_unrecordable`]). A restore under
@@ -994,13 +992,12 @@ mod tests {
         );
     }
 
-    /// PROD-15.1 review M2 and L2: the restore's scan drops nothing. An
-    /// unrecordable reference and an unreadable `KafkaTopic` are reported, the
-    /// file's `KafkaTopic` count is kept, and only an explicit empty `List` is
-    /// "no resources". KILLS: dropping an over-long owner (the review's P1
-    /// probe: 63-character namespace, 200-character name); reading a
-    /// `KafkaTopic` with no name as nothing; a file of other kinds read as an
-    /// empty look.
+    /// The restore's scan drops nothing. An unrecordable reference and an
+    /// unreadable `KafkaTopic` are reported, the file's `KafkaTopic` count is
+    /// kept, and only an explicit empty `List` is "no resources". KILLS:
+    /// dropping an over-long owner (63-character namespace, 200-character
+    /// name); reading a `KafkaTopic` with no name as nothing; a file of other
+    /// kinds read as an empty look.
     #[test]
     fn the_restore_scan_reports_what_it_cannot_read_and_drops_nothing() {
         let topics = vec!["orders".to_string()];

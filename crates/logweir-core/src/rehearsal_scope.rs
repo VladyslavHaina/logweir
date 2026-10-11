@@ -1,10 +1,8 @@
 //! The scope a standing rehearsal authorization signs over.
 //!
-//! # Types only — and the predicate LANDED, in `execution_contract`
+//! # Types only; the predicate is in `execution_contract`
 //!
-//! D3 §14 gave this file to W1 with "only the scope types §4.3 names", and the
-//! predicate those types exist for was left for later. It has since landed, as
-//! D3 W5's execution contract v2:
+//! The predicate these types exist for is execution contract v2's:
 //!
 //! ```text
 //! logweir_core::execution_contract::plan_scope_facts(&DrillSpec, &AllowedClusters)
@@ -16,12 +14,11 @@
 //! **Call those. Do not write a second one here.** It is in
 //! `execution_contract` and not in this file because it reads a rendered
 //! restore plan, whose shape IS the v2 contract, and because the
-//! [`PlanScopeFacts`] split is what lets D3 §4.3's "checked twice" use ONE
+//! [`PlanScopeFacts`] split is what lets the "checked twice" rule use ONE
 //! predicate from two producers: the controller builds the facts from the plan
 //! it is about to render and freeze, the runner from the bytes it actually
 //! mounted. Two predicates would be exactly the drift the split exists to
-//! prevent. (D3 §4.3(d) still names `rehearsal_scope::plan_within_scope`; the
-//! orchestrator amends the decision to the landed symbol.)
+//! prevent.
 //!
 //! [`PlanScopeFacts`]: crate::execution_contract::PlanScopeFacts
 //!
@@ -35,12 +32,13 @@
 //!
 //! Per-slot human approval would defeat an unattended rehearsal, and a
 //! controller that could mint its own authorization would be the bypass
-//! PLAT-19.2 exists to prevent. So the human signs a scope ONCE, and the
-//! controller proves each slot's rendered plan falls inside it — twice, once
-//! before creating the `Restore` and once in the runner against the mounted
-//! bundle. [`RehearsalScope::template_digest`] is what binds the scope to one
-//! schedule object: the digest is recomputed from the schedule's own sealed
-//! spec each slot, so a scope cannot outlive the thing it was written for.
+//! governed approval exists to prevent. So the human signs a scope ONCE, and
+//! the controller proves each slot's rendered plan falls inside it — twice,
+//! once before creating the `Restore` and once in the runner against the
+//! mounted bundle. [`RehearsalScope::template_digest`] is what binds the scope
+//! to one schedule object: the digest is recomputed from the schedule's own
+//! sealed spec each slot, so a scope cannot outlive the thing it was written
+//! for.
 //!
 //! # Pure
 //!
@@ -59,7 +57,7 @@ use serde::{Deserialize, Serialize};
 pub const MODE_SCRATCH: &str = "scratch";
 
 /// The `maxPartitions` a scope that authorises complete coverage signs — and
-/// the only one it may sign (PROD-08.1a review M1).
+/// the only one it may sign.
 ///
 /// A complete plan states no `sample.max_partitions`, so this build never reads
 /// the scope's partition bound for one. A reader built before format 1.1.0
@@ -103,7 +101,7 @@ pub struct RehearsalScope {
     /// The most partitions a slot's plan may sample (`sample.max_partitions`).
     ///
     /// **[`COMPLETE_SCOPE_MAX_PARTITIONS`] (0) exactly when the scope
-    /// authorises `coverage: complete`** (PROD-08.1a review M1): a complete
+    /// authorises `coverage: complete`**: a complete
     /// plan samples no partitions, and 0 is what makes every reader built
     /// before format 1.1.0 — which ignores `coverage` and reads a sampled
     /// scope — refuse every plan under the document. Every reader of this
@@ -120,7 +118,7 @@ pub struct RehearsalScope {
     /// build that has learned a second mode, and a scope that carried no mode
     /// at all would silently widen when one arrived.
     pub modes: Vec<String>,
-    /// **PROD-08.1a, document format 1.1.0.** The verification coverage the
+    /// **Document format 1.1.0.** The verification coverage the
     /// signer authorises: every slot's plan must state exactly this
     /// `sample.coverage`.
     ///
@@ -135,7 +133,7 @@ pub struct RehearsalScope {
     /// Not serialised when absent, so a 1.0.0 scope's bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<crate::spec::Coverage>,
-    /// **PROD-08.1a, document format 1.1.0.** The most archived records one
+    /// **Document format 1.1.0.** The most archived records one
     /// complete verification may decode (the plan's
     /// `sample.complete_max_records` may not exceed it, and may not be absent
     /// beside it). Meaningful only with `coverage: complete`, and refused on

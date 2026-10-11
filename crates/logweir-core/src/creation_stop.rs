@@ -1,4 +1,4 @@
-//! **PROD-15.1: the one line a runner prints about a stopped creation step**,
+//! **The one line a runner prints about a stopped creation step**,
 //! `target-topics-appeared=<json>`, written by the runner
 //! (`logweir::drill::phase0_admit::CreationStop`) and read by the controller
 //! (`weirkeeper::controllers::restore`). ONE definition for both sides, pure,
@@ -40,7 +40,7 @@ pub const MAX_COUNT: usize = 1_000_000;
 /// The longest value a genuine line carries: three lists of [`MAX_NAMES`]
 /// names of [`crate::guard::MAX_TOPIC_NAME_CHARS`] bytes, each quoted and
 /// comma-separated, plus the keys, the three counts and the flag. A reader
-/// refuses a longer value before parsing it (review 2, L7): the pod-log read
+/// refuses a longer value before parsing it: the pod-log read
 /// that hands it over is not bounded by line length.
 pub const MAX_VALUE_BYTES: usize = 3 * MAX_NAMES * (crate::guard::MAX_TOPIC_NAME_CHARS + 3) + 512;
 
@@ -285,8 +285,7 @@ mod tests {
         assert!(!unlisted.is_empty());
     }
 
-    /// **The count bound, at the writer and at the reader** (review 2, L3
-    /// and M2 (c)): a list of 150 names is cut to 100 and says 50 more; a
+    /// **The count bound, at the writer and at the reader**: a list of 150 names is cut to 100 and says 50 more; a
     /// line carrying 5,000 names is read as 100. KILLS: an unbounded list (a
     /// status patch over the CRD's `maxItems` would never land); a cut that
     /// says nothing.
@@ -317,16 +316,16 @@ mod tests {
             // No count on the line: the list's own length, never a guess.
             assert_eq!(list.count, MAX_NAMES);
         }
-        // The review's 5,000 names per list are longer than any genuine
-        // line, and are not read at all.
+        // 5,000 names per list are longer than any genuine line, and are not
+        // read at all.
         let huge = json!({"appeared": names(5000), "left": names(5000)}).to_string();
         assert!(huge.len() > MAX_VALUE_BYTES);
         assert_eq!(CreationStopLists::parse_value(&huge), None);
     }
 
     /// What the reader believes of a hostile or older line. KILLS: a name a
-    /// broker would not accept reaching an object (`.` and `..` included,
-    /// review 2 L12); a key other than the three lists; a count smaller than
+    /// broker would not accept reaching an object (`.` and `..` included); a
+    /// key other than the three lists; a count smaller than
     /// its list, absurd, negative or not a number; `unconfirmedSeen` read as
     /// seen from anything but `true`.
     #[test]
@@ -404,7 +403,7 @@ mod tests {
         assert!(odd.is_empty());
     }
 
-    /// **An over-long value is refused BEFORE it is parsed** (review 2, L7):
+    /// **An over-long value is refused BEFORE it is parsed**:
     /// the pod-log read is not bounded by line length, and parsing a
     /// megabyte line into a JSON tree to keep 100 names of it is work a
     /// hostile log should not be able to ask for. The bound admits the
@@ -457,8 +456,8 @@ mod tests {
         );
     }
 
-    /// A controller holds each list to its own Restore's mapped targets
-    /// (review 2, M1): a name outside them is dropped, and the count can
+    /// A controller holds each list to its own Restore's mapped targets: a
+    /// name outside them is dropped, and the count can
     /// never claim more names than the plan maps. KILLS: a count that still
     /// counts the dropped names; a count above the plan's own size.
     #[test]

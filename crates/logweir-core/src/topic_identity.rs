@@ -1,5 +1,4 @@
-//! **PROD-01.4a: the topic ID's canonical text, and the generation rule that
-//! reads it** (`docs/to-do/decisions/PROD-01.4-topic-identity.md` §2–§4).
+//! **The topic ID's canonical text, and the generation rule that reads it.**
 //!
 //! A Kafka topic that is deleted and created again under the same name is a
 //! NEW topic: the broker gives it a new topic ID (KIP-516) and restarts every
@@ -12,7 +11,7 @@
 //! half of that: the text form, its closed sets, and the rule two points'
 //! IDs are read by.
 //!
-//! # The text form (decision §3.1)
+//! # The text form
 //!
 //! 22 characters: URL-safe base64 with no padding over the ID's 16 bytes,
 //! most significant half first, big-endian. That is exactly what
@@ -20,7 +19,7 @@
 //! halves ([`topic_id_text`]) and NEVER from librdkafka's
 //! `rd_kafka_Uuid_base64str`, which uses the standard alphabet: the same ID
 //! reads `Cf6zT/mcTNCoxuPmv1Ztxw` there and `Cf6zT_mcTNCoxuPmv1Ztxw` in Kafka
-//! (PROD-01.4 §1.3 C4, measured). Kafka RESERVES two IDs that no topic is
+//! (measured). Kafka RESERVES two IDs that no topic is
 //! ever given (`org.apache.kafka.common.Uuid.RESERVED`, which `randomUuid`
 //! never returns): the all-zero ID, Kafka's "no ID" (a broker below
 //! inter-broker protocol 2.8 answers with it), and `(0, 1)`,
@@ -31,7 +30,7 @@
 //! recorded one is refused (receipt arm 38) — so two captures can never read
 //! as the same generation through a sentinel.
 //!
-//! # The generation rule (decision §4.2 R1 and §4.4)
+//! # The generation rule
 //!
 //! [`between`] compares a point with the previous point of the same lineage
 //! key (source cluster ID, topic name):
@@ -46,14 +45,14 @@
 //! `NotEstablished` is TODAY'S FALLBACK, stated and never guessed: a point
 //! whose ID is unknown — every receipt before 1.6.0, a broker below 2.8, a
 //! refused or failed read — is never the same generation as another point.
-//! The offset rule of decision §4 is what will decide those
-//! links; until it lands, they are UNKNOWN.
+//! Only an offset rule could decide those links; without one, they are
+//! UNKNOWN.
 //!
 //! What equal IDs do NOT say: that the offsets between the two points are
 //! continuous. A same-ID truncation (an unclean leader election) reuses
-//! offsets without a new ID (decision §2, FP1), so offset-dependent consumers
-//! still need decision §4's offset checks over equal IDs (R2–R6). [`Same`]
-//! is "the same topic incarnation", nothing more.
+//! offsets without a new ID, so offset-dependent consumers still need offset
+//! checks over equal IDs. [`Same`] is "the same topic incarnation", nothing
+//! more.
 //!
 //! [`Same`]: Generation::Same
 //!
@@ -67,12 +66,12 @@ use base64::Engine as _;
 pub const TOPIC_ID_TEXT_LEN: usize = 22;
 
 /// `topic_id_source` for an ID Logweir's own DescribeTopics read returned
-/// (`logweir-rdkafka-ffi`, OD-6 (a2)).
+/// (`logweir-rdkafka-ffi`).
 pub const DESCRIBE_TOPICS: &str = "describeTopics";
 
 /// `topic_id_source` for an ID the engine's manifest carried — the engine
-/// route of decision §6.3. No writer in this build produces it;
-/// the format defines it so that route needs no version of its own.
+/// route. No writer in this build produces it; the format defines it so that
+/// route needs no version of its own.
 pub const ENGINE_MANIFEST: &str = "engineManifest";
 
 /// `topic_id_source`'s closed set (receipt arm 40), in the order the refusal
@@ -170,15 +169,14 @@ pub fn is_canonical(text: &str) -> bool {
     topic_id_halves(text).is_some()
 }
 
-/// **The one check both verifiers make of a catalog point record** (review
-/// M1): every topic ID the record copies from its receipt
-/// (`topics[].identity.topic_id`, `.topic_id_after`) is a real topic ID in
-/// Kafka's text — never one of Kafka's reserved IDs, never another alphabet.
-/// A record's copied facts are otherwise checked against the verified receipt
-/// it names, which no verifier fetches; this check needs
-/// nothing but the record, and keeps a sentinel from ever reading as an
-/// identity in a catalog. `docs/verify_scorecard.py::_catalog_point_problem`
-/// returns the same text.
+/// **The one check both verifiers make of a catalog point record**: every
+/// topic ID the record copies from its receipt (`topics[].identity.topic_id`,
+/// `.topic_id_after`) is a real topic ID in Kafka's text — never one of Kafka's
+/// reserved IDs, never another alphabet. A record's copied facts are otherwise
+/// checked against the verified receipt it names, which no verifier fetches;
+/// this check needs nothing but the record, and keeps a sentinel from ever
+/// reading as an identity in a catalog.
+/// `docs/verify_scorecard.py::_catalog_point_problem` returns the same text.
 ///
 /// # Errors
 ///
@@ -270,7 +268,7 @@ pub fn observed(before: &IdRead, after: &IdRead) -> TopicIdentity {
     }
 }
 
-/// What ONE capture's own two reads say about it (decision §4.4).
+/// What ONE capture's own two reads say about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithinCapture<'a> {
     /// Both reads recorded the same ID: the capture saw one generation.
@@ -316,7 +314,7 @@ pub fn within_capture(entry: &TopicIdentity) -> WithinCapture<'_> {
 }
 
 /// How one point relates to the previous point of the same lineage key, by
-/// topic ID (decision §4.2 R1, §4.4).
+/// topic ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Generation {
     /// Both points recorded the topic's ID before their captures, and the IDs
@@ -341,9 +339,9 @@ pub enum Generation {
     /// capture's own two reads were recorded and are equal (it saw no change):
     /// the same topic incarnation (basis `topicId`). A capture whose read after
     /// the engine recorded no ID is never `Same` — the topic may have been
-    /// recreated while it ran (decision §4.7 FN3). Not, by itself, a claim that
-    /// the offsets between the two points are continuous (a same-ID truncation
-    /// keeps the ID; decision §2, FP1).
+    /// recreated while it ran. Not, by itself, a claim that the offsets
+    /// between the two points are continuous (a same-ID truncation keeps the
+    /// ID).
     Same {
         /// The ID.
         topic_id: String,
@@ -371,8 +369,8 @@ pub enum Unestablished {
     /// This point's read before its capture recorded no ID, for this reason.
     CurrentUnread(String),
     /// This point's read AFTER its capture recorded no ID, for this reason:
-    /// whether the topic was recreated while the engine ran is not known
-    /// (decision §4.7 FN3), so the link is never `Same`.
+    /// whether the topic was recreated while the engine ran is not known, so
+    /// the link is never `Same`.
     CurrentAfterUnread(String),
 }
 
@@ -542,8 +540,8 @@ pub fn between(
 mod tests {
     use super::*;
 
-    /// The four IDs PROD-01.4 measured (`artifacts/prod-01-4/ffi-route-evidence.txt`):
-    /// the broker CLI's text and librdkafka's two halves for the same topic.
+    /// Four measured IDs: the broker CLI's text and librdkafka's two halves for
+    /// the same topic.
     const MEASURED: [(&str, i64, i64); 4] = [
         (
             "gtOq2VXiTCK1QM2UtERijA",
@@ -585,7 +583,7 @@ mod tests {
         assert_eq!(topic_id_text(0, 0), None);
         assert!(!is_canonical("AAAAAAAAAAAAAAAAAAAAAA"));
         assert_eq!(IdRead::of_halves(0, 0), IdRead::Unread(NO_TOPIC_ID));
-        // (0, 1), Kafka's ONE_UUID / METADATA_TOPIC_ID (review M1): never a
+        // (0, 1), Kafka's ONE_UUID / METADATA_TOPIC_ID: never a
         // topic's, so never text, never canonical, and its own reason.
         assert!(is_reserved(0, 1));
         assert_eq!(topic_id_text(0, 1), None);
@@ -733,7 +731,7 @@ mod tests {
     /// Review M2: equal pre-capture IDs are `Same` only when this capture's
     /// read AFTER the engine recorded the same ID. Whatever the after-read's
     /// reason, the link is not established (the topic may have been recreated
-    /// while the engine ran, decision §4.7 FN3) — never `Same`.
+    /// while the engine ran) — never `Same`.
     #[test]
     fn an_after_read_that_recorded_no_id_is_never_the_same_generation() {
         for reason in TOPIC_ID_REASONS {

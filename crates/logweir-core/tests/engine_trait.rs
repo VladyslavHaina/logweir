@@ -1,6 +1,6 @@
 // crates/logweir-core/tests/engine_trait.rs
 // The trait must stay object-safe, and a signature change must become a compile
-// error rather than a surprise at the call site in Task 12.
+// error rather than a surprise at a call site.
 use logweir_core::engine::*;
 
 struct NullEngine;
@@ -35,8 +35,8 @@ fn the_data_engine_trait_is_object_safe() {
     let _: &dyn DataEngine = &NullEngine;
 }
 
-/// Task 4 added `backup` to this trait WITH a default body, so `NullEngine`
-/// above and every other pre-existing implementor keeps compiling unchanged.
+/// `backup` has a default body, so `NullEngine` above and every implementor
+/// that does not back up compiles unchanged.
 ///
 /// That default must fail loudly, never fabricate `Ok(BackupFacts { exit_code:
 /// 0, .. })`: `crates/logweir/src/backup/phase_run.rs` reads the ARCHIVE
@@ -79,12 +79,11 @@ fn default_data_engine_backup_is_operational() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 10 — `expected_restored_count`, guard **G-WIN**'s second half.
+// `expected_restored_count`, guard **G-WIN**'s second half.
 
 /// Epoch milliseconds, each computed with
-/// `python3 -c 'import datetime as d; ...'` before being written here (plan
-/// errata E6/E7) and spelled beside its date:
+/// `python3 -c 'import datetime as d; ...'` before being written here, and
+/// spelled beside its date:
 const FLOOR_MS: i64 = 1_788_220_800_000; // 2026-09-01T00:00:00Z
 const MID_MS: i64 = 1_788_242_400_000; // 2026-09-01T06:00:00Z
 const NEAR_PIT_MS: i64 = 1_788_260_400_000; // 2026-09-01T11:00:00Z
@@ -201,8 +200,7 @@ fn expected_restored_count_treats_the_window_as_closed_and_ignores_segments_outs
     assert_eq!(expected_restored_count(&empty, FLOOR_MS, PIT_MS), (0, 0));
 }
 
-// ---------------------------------------------------------------------------
-// FX-23 — `partition_count_bound`, the per-partition bound phase 7's sampled
+// `partition_count_bound`, the per-partition bound phase 7's sampled
 // lane holds every mapped partition to.
 
 fn partition(segs: Vec<SegmentFacts>) -> PartitionFacts {
@@ -214,7 +212,7 @@ fn partition(segs: Vec<SegmentFacts>) -> PartitionFacts {
     }
 }
 
-/// **FX-23, hole A's arithmetic.** A segment the point in time cuts across
+/// **The straddler's arithmetic.** A segment the point in time cuts across
 /// still PROVES one record in the window when its FIRST record's timestamp
 /// (`start_timestamp`) is inside it, so its partition's `lower` is 1, never 0:
 /// an empty target partition is then outside its own bound. The aggregate
@@ -228,8 +226,8 @@ fn a_straddling_segment_that_starts_inside_the_window_proves_one_record() {
     assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 50));
     // Both ends of the window are INCLUSIVE, as the engine's restore filter is:
     // a segment whose first record sits exactly AT the point in time proves
-    // that record (review L5: `ts < pit_ms` survived without this row), and
-    // one whose first record sits exactly at the floor proves it too.
+    // that record (KILLS `ts < pit_ms`), and one whose first record sits
+    // exactly at the floor proves it too.
     let p = partition(vec![seg(PIT_MS, PAST_PIT_MS, 7)]);
     assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (1, 7));
     let p = partition(vec![seg(FLOOR_MS - 5, FLOOR_MS, 7)]);
@@ -244,7 +242,7 @@ fn a_straddling_segment_that_starts_inside_the_window_proves_one_record() {
         seg(NEAR_PIT_MS, PAST_PIT_MS, 50),
     ]);
     assert_eq!(partition_count_bound(&p, FLOOR_MS, PIT_MS), (101, 150));
-    // The aggregate reading of the same facts is unchanged by FX-23.
+    // The aggregate reading of the same facts is unchanged.
     assert_eq!(
         expected_restored_count(&facts_with_segments(p.segments.clone()), FLOOR_MS, PIT_MS),
         (100, 150)
@@ -279,7 +277,7 @@ fn only_an_end_inside_the_window_proves_a_record() {
     );
 }
 
-/// FX-1 fix round (M1): the default `describe_with_notices` is exactly
+/// The default `describe_with_notices` is exactly
 /// `describe` with no notice, so a double that only implements `describe`
 /// behaves as it always did — and it must propagate `describe`'s error rather
 /// than paper over it with an empty answer.

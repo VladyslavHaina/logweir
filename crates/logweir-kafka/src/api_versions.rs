@@ -418,14 +418,13 @@ pub fn bootstrap_addresses(bootstrap_servers: &str) -> Vec<String> {
     out
 }
 
-/// **A whole view of the cluster, or the reason there is none** (PROD-01.2
-/// review, M3).
+/// **A whole view of the cluster, or the reason there is none.**
 ///
-/// The first version of this module intersected whichever connections the
-/// client happened to have opened. On a three-broker cluster that was one,
-/// two or three of them from run to run, so a row said `ready` for a cluster
-/// one of whose brokers nobody had asked: wrong for a cluster whose brokers
-/// differ (a rolling upgrade), and different on the next run.
+/// Intersecting whichever connections the client happened to open would, on a
+/// three-broker cluster, read one, two or three of them from run to run, so a
+/// row could say `ready` for a cluster one of whose brokers nobody had asked:
+/// wrong for a cluster whose brokers differ (a rolling upgrade), and different
+/// on the next run.
 ///
 /// **Unknown is never ready, and a broker nobody asked is unknown.** So this
 /// answers only when:
@@ -548,8 +547,7 @@ pub type LogRead = (Vec<(String, String)>, bool);
 /// The LAST READ ALWAYS RUNS, so what did arrive is counted, and its own
 /// `quiet` answer is what [`full_view`] is given: a log still being written
 /// when the budget ran out is "an answer may be cut short", which is no
-/// answer (review L4: nothing showed that a read that never went quiet is
-/// refused through this function).
+/// answer.
 ///
 /// # Errors
 ///
@@ -678,7 +676,7 @@ mod tests {
 
     /// Who a connection reached is read off the name its lines are logged
     /// under, in each shape librdkafka 2.12.1 uses (captured on the compose
-    /// stack's three-broker cluster by PROD-01.2's review).
+    /// stack's three-broker cluster).
     #[test]
     fn a_connections_peer_is_read_off_its_log_name() {
         for (message, peer) in [
@@ -765,7 +763,7 @@ mod tests {
         assert_eq!(v.describe(32), "not served");
     }
 
-    /// **PROD-01.2 review, M3: a view of some of the brokers is not an
+    /// **A view of some of the brokers is not an
     /// answer.** Three brokers listed; all three answer, then two, then one
     /// reached over three connections.
     ///
@@ -806,8 +804,8 @@ mod tests {
 
         // ONE broker reached over THREE connections (its own, the bootstrap
         // address it stands behind, and the group coordinator's) is one
-        // broker of three. This is what the review measured on the compose
-        // cluster from one bootstrap address.
+        // broker of three, as measured on the compose cluster from one
+        // bootstrap address.
         let mut one_broker = answer(&node("b1.example", 1), &KAFKA);
         one_broker.extend(answer(
             "[thrd:b1.example:9092/bootstrap]: b1.example:9092/bootstrap: ",
@@ -1019,7 +1017,7 @@ mod tests {
             Err(unread)
         );
 
-        // The review's probe: one connection answered whole and a second one
+        // One connection answered whole and a second one
         // opened an answer with no readable entry. The first is not the
         // cluster's answer.
         let mut one_whole_one_not = answer(NODE, &KAFKA);
@@ -1053,8 +1051,8 @@ mod tests {
     /// holds.
     ///
     /// * A log that NEVER GOES QUIET is not an answer, although every broker's
-    ///   lines are in it: some answer may be cut short (review L4; the mutant
-    ///   is passing `true` where the read's own `quiet` goes).
+    ///   lines are in it: some answer may be cut short (the mutant is
+    ///   passing `true` where the read's own `quiet` goes).
     /// * CONTROL: the same lines from a log that went quiet are the answer.
     /// * Answers that arrive over several reads are waited for.
     /// * With the budget already spent, exactly one read still runs, and a
