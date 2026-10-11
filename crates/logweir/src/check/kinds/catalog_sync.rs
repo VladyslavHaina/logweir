@@ -1626,15 +1626,17 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and an
-    // `Available` point is not kept out of it by points that only failed to be
+    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and a point
+    // with a record is not kept out of it by points that only failed to be
     // read. The window is `viewLimit` entries in walk order, and an archive can
     // hold many points nobody can take — an older build's oversized points,
-    // reads that failed. When the window is full, an `Available` point takes
-    // the place of the last-listed DISPLACEABLE entry ([`displaceable`]), and
-    // never of one that is evidence about the archive's integrity. Either way
-    // the walk counted more than it listed, so the view says it is a window
-    // (`truncated`), and the counts name every point.
+    // reads that failed. When the window is full, a point with a record —
+    // `Available` or not, since either may name a set retention keeps — takes
+    // the place of the last-listed DISPLACEABLE entry ([`displaceable`]), so
+    // the listed points with a record are a walk-order prefix (review HUNT-1:
+    // a newer receipt of a set is never overtaken by its older sibling).
+    // Either way the walk counted more than it listed, so the view says it is
+    // a window (`truncated`), and the counts name every point.
     if observation.point.is_none()
         && observation.cause.is_some_and(|c| {
             c.document == CauseDocument::Record && c.reason == CauseReason::ReadFailed
@@ -1647,7 +1649,7 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     if walk.entries.len() < view_limit {
         walk.entries.push(entry);
         walk.displaceable.push(can_give_way);
-    } else if entry.availability == Availability::Available {
+    } else if observation.point.is_some() {
         if let Some(at) = walk.displaceable.iter().rposition(|d| *d) {
             walk.entries.remove(at);
             walk.displaceable.remove(at);
@@ -1657,8 +1659,8 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     }
 }
 
-/// **FX-33.** Whether a listed entry may give its place in a full window to an
-/// `Available` point: only an entry whose RECORD gave no facts, and of those
+/// **FX-33.** Whether a listed entry may give its place in a full window to a
+/// point with a record: only an entry whose RECORD gave no facts, and of those
 /// only one that carries no evidence about the archive's integrity.
 ///
 /// - **May**: a point whose record is `Missing`, could not be read (a store

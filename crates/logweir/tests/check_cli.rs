@@ -13499,6 +13499,61 @@ fn a_skipped_point_that_names_a_set_keeps_its_place_against_an_unrelated_point()
     assert_eq!(fx33_listed(&objects, 4).len(), 4, "CONTROL");
 }
 
+/// **Review HUNT-1: a newer receipt of a set is never overtaken by its older
+/// sibling.** viewLimit 3 over, newest first: an `Available` point; a point
+/// whose record is over its bound (record-less, displaceable); another
+/// `Available` point; the newer receipt of `set-y`, whose receipt read fails
+/// (it keeps its record and names `set-y`); and the older receipt of `set-y`,
+/// `Available`. The newer `set-y` entry takes the record-less entry's place,
+/// so it is listed, naming `set-y`, and its older sibling is not: the listed
+/// points with a record are a walk-order prefix. CONTROL: viewLimit 5 lists
+/// all five (and the two earlier window rows hold the rest of the rule).
+///
+/// KILLS: only an `Available` point taking a record-less entry's place (the
+/// older `set-y` receipt listed, the newer one not).
+#[test]
+fn a_newer_receipt_of_a_set_is_never_overtaken_by_its_older_sibling() {
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = |set: &str, run: &str, day: usize| {
+        catalog_fixture(
+            &catalog_receipt(set, run, &format!("2026-09-{day:02}T03:00:00Z")),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let n1 = fixture("set-a", "run-a", 16);
+    let r = fixture("set-r", "run-a", 15);
+    let n2 = fixture("set-b", "run-a", 14);
+    let newer = fixture("set-y", "run-b", 13);
+    let older = fixture("set-y", "run-a", 12);
+    let objects = [&n1, &r, &n2, &newer, &older]
+        .into_iter()
+        .fold(FakeObjects::new(), place)
+        .reporting_size(&r.record_key, caps::CATALOG_RECORD + 1)
+        .failing_key(
+            &newer.receipt_key,
+            Fault::Io("connection reset by peer".to_string()),
+        );
+    let listed = fx33_listed(&objects, 3);
+    let ids: Vec<&str> = listed.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            n1.point.point_id.as_str(),
+            n2.point.point_id.as_str(),
+            newer.point.point_id.as_str()
+        ],
+        "{listed:?}"
+    );
+    assert_eq!(
+        (listed[2].1.as_str(), listed[2].2.as_str()),
+        ("Unreadable", "set-y")
+    );
+    assert_eq!(fx33_listed(&objects, 5).len(), 5, "CONTROL");
+}
+
 /// **Review finding M1: a record read that did not answer leaves the walk
 /// incomplete.** Such a point is listed by its id only, with no set, so a
 /// view with it in is not whole until a sync reads the record; the cursor

@@ -1652,8 +1652,9 @@ listed by no entry. Now:
   `backupId`, `runId` and `receiptKey` are empty, the instants are 0, and
   there is no window, location or topic list. It is never `Available`, so
   never selectable, and nothing reads anything else for it;
-- the view is `viewLimit` entries. When it is full, an `Available` point
-  takes the place only of an entry whose RECORD gave no facts and that only
+- the view is `viewLimit` entries. When it is full, a point with a record
+  (`Available` or not) takes the place only of an entry whose RECORD gave no
+  facts and that only
   failed to be read (the record is missing, did not answer, is over its
   bound, or is of a newer format). It never takes the place of an entry with
   a record, whatever its state (such an entry may name a backup set that
