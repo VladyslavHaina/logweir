@@ -1,12 +1,10 @@
 //! `logweir drill approve`, driven through the COMPILED BINARY.
 //!
-//! The defect this file exists for was not "the signing code is wrong" — the
-//! signing code was correct and tested. It was that the only producer of an
-//! approval was a cargo EXAMPLE, which ships in neither the container image
-//! nor the release tarballs, so `drill run`'s mandatory `--approval` could not
-//! be satisfied from Logweir's own artifacts. A library-level test would have
-//! passed throughout. Every test here therefore spawns the binary and then
-//! feeds the result to the REAL phase-1 verifier.
+//! The only producer of an approval must ship in the container image and the
+//! release tarballs, or `drill run`'s mandatory `--approval` cannot be
+//! satisfied from Logweir's own artifacts, and a library-level test cannot
+//! see that. Every test here spawns the binary and feeds the result to the
+//! REAL phase-1 verifier.
 mod support;
 use support::bin;
 
@@ -210,9 +208,7 @@ fn approve_is_listed_in_drill_help() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 22 — `--subject-kind`
-// ---------------------------------------------------------------------------
+// `--subject-kind`.
 
 /// The two values `--subject-kind` accepts are the WIRE spellings, capitalised
 /// — and the help text states both halves of what the field means.
@@ -293,9 +289,7 @@ fn a_lower_cased_subject_kind_is_a_usage_error() {
     );
 }
 
-// ===========================================================================
-// PROD-17.1 C1 (OD-12) — the standing mint is withdrawn
-// ===========================================================================
+// The standing mint is withdrawn (OD-12).
 
 /// **`drill approve --standing` is refused by clap, and so is
 /// `--subject-kind RehearsalSchedule`.** Standing rehearsal authorizations are
@@ -359,8 +353,8 @@ fn the_withdrawn_standing_mint_is_refused_by_clap() {
 
 /// **The blank-approver refusal is `mint`'s own, not clap's.**
 ///
-/// `--approver` is required by clap, so the command line cannot omit it — which means a mutant deleting the check inside `mint`
-/// survives every subprocess row here. This one calls the library directly,
+/// `--approver` is required by clap, so a mutant deleting the check inside
+/// `mint` survives every subprocess row here. This one calls the library directly,
 /// the way any future caller that builds `ApproveArgs` itself would, and a
 /// whitespace-only value is refused for the same reason an absent one is: the
 /// value is signed and copied verbatim into the scorecard's accountability
@@ -406,9 +400,7 @@ fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
     assert!(dir.path().join("blank.json").exists());
 }
 
-// ===========================================================================
-// FX-9: the clock is read at the entry point, and only there
-// ===========================================================================
+// The clock is read at the entry point, and only there.
 
 fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
@@ -487,9 +479,7 @@ fn drill_approve_hands_the_mint_the_wall_clock() {
     );
 }
 
-// ===========================================================================
-// PROD-11.1b (review L4): no approval over a subset plan this release refuses
-// ===========================================================================
+// No approval over a subset plan this release refuses.
 
 /// The example drill spec with a `restore` block naming a partition subset,
 /// its point in time written as `point_in_time`.

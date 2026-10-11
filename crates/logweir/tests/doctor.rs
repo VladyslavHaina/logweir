@@ -1,5 +1,5 @@
-//! Task 14b. Seven checks, one test each — see task-14b-brief.md and its
-//! binding addendum. Each test names the check it exercises and asserts the
+//! `logweir doctor`: seven checks, one test each. Each test names the check it
+//! exercises and asserts the
 //! FAILURE TEXT that check must produce, not just a bare exit code: a check
 //! that regresses to a generic "doctor failed" would still exit 1 and pass a
 //! test that only checked the exit code.
@@ -97,51 +97,20 @@ fn check_6_an_unusable_storage_configuration_is_named_as_storage() {
 }
 
 /// Checks 6 and 7 need a broker, so the no-broker case must still be a NAMED
-/// failure rather than a generic one — otherwise an adopter with a firewall
-/// problem reads "doctor failed" and nothing else.
+/// failure rather than a generic one: an adopter with a firewall problem must
+/// not read "doctor failed" and nothing else.
 ///
-/// **`--features e2e` since Task 5b, and NOT deleted.** MEASURED at 26.60 s,
-/// the single slowest test in the workspace and a third of the whole default
-/// suite on its own: ~6.5 s in check 6, where `AmazonS3Builder::from_env()`
-/// with no credentials in the environment retries the EC2 metadata service at
-/// the link-local `169.254.169.254` ten times, and then 20 s in check 7,
-/// which is `crates/logweir-kafka/src/rdkafka_reader.rs:16`'s
-/// `const T: Duration = Duration::from_secs(20)`.
+/// **Behind `--features e2e`**: this form takes about 26 s (check 6 retries the
+/// EC2 metadata service ten times with no credentials, and check 7 waits out
+/// `rdkafka_reader.rs`'s 20 s `const T`; `127.0.0.1:1` fails no faster). The
+/// default suite proves the property at
+/// `doctor::tests::evaluate_target_fails_and_names_the_target_when_the_cluster_is_unreachable`
+/// against the stub reader; this form proves it through the compiled binary.
 ///
-/// The fixture's `127.0.0.1:1` is NOT a fast-failing mechanism and never was:
-/// librdkafka retries a refused connect with backoff and the metadata REQUEST
-/// sits until `T` expires, so an unroutable address and a black-holed one
-/// cost exactly the same. The only way to make this form fast is to shorten
-/// `T`, and `T` is open decision O18's (folded into G19) — changing it here
-/// would take a scheduled decision about production behaviour on loaded and
-/// cross-AZ clusters in order to win a test-suite second.
-///
-/// So the property moves rather than the constant. The default suite proves
-/// it at `doctor::tests::evaluate_target_fails_and_names_the_target_when_the_cluster_is_unreachable`
-/// against the stub reader, in microseconds; this form — the one that proves
-/// it through the compiled binary, end to end, with a real client and a real
-/// timeout — still runs, under `just e2e`.
-/// The spec is BUILT HERE rather than read from
-/// `e2e/fixtures/drill-unreachable.yaml`, for a reason that only shows up once
-/// this test runs with the stack UP. That fixture's `source.storage` is
-/// `s3://kafka-backups/basic-demo`, and `basic-demo` is not where anything
-/// writes — `scripts/e2e-seed.sh:40` seeds `local/kafka-backups/drill-demo`,
-/// and `examples/drill.yaml:11` documents `basic-demo` as a name borrowed from
-/// a different upstream demo. With no stack that prefix was merely
-/// unreachable, so check 6 SKIPPED and check 7 was still reached; with the
-/// stack up it is reachable and EMPTY, so check 6 FAILS ("zero backup sets"),
-/// `run` short-circuits on the first failure, and check 7 — the actual
-/// subject — never runs at all. The test would have gone green on a check it
-/// never reached.
-///
-/// So the spec here gives check 6 a local archive holding exactly one backup
-/// set: check 6 passes identically with or without a stack, and check 7 is
-/// always the check under test. `127.0.0.1:1` stays — the ruling that an
-/// unroutable address is not a speed mechanism does not make it a wrong
-/// address, it makes it an honest one.
-///
-/// `e2e/fixtures/drill-unreachable.yaml` is deliberately left byte-identical
-/// (Task 5b acceptance check 12 forbids editing it) and is now unreferenced.
+/// The spec gives check 6 a local archive holding exactly one backup set, so
+/// check 6 passes with or without a stack and check 7 is always the check
+/// under test (an empty reachable archive would fail check 6 first, and `run`
+/// stops at the first failure).
 #[cfg(feature = "e2e")]
 #[test]
 fn check_7_an_unreachable_target_is_named_as_a_target_problem() {
@@ -179,7 +148,7 @@ fn check_7_an_unreachable_target_is_named_as_a_target_problem() {
     assert_fails_with(doctor(&a, &ENGINE_OK), "target");
 }
 
-/// Fix round 2, M3: a reachable archive holding zero backup sets must be a
+/// A reachable archive holding zero backup sets must be a
 /// NAMED failure end-to-end through the CLI, not just at the unit-test
 /// level (`doctor::tests::check_storage_fails_on_a_reachable_but_empty_archive`
 /// in `src/doctor.rs`) — mirrors `check_6_...`'s own shape for the
@@ -191,7 +160,7 @@ fn check_6b_a_reachable_but_empty_archive_is_named_as_a_storage_problem() {
     assert_fails_with(doctor(&a, &ENGINE_OK), "zero backup sets");
 }
 
-/// **PROD-01.3 security follow-up: `doctor` reports the credential binding
+/// **`doctor` reports the credential binding
 /// `drill run` will refuse**, by its named reason, and dials nothing — the
 /// target here is a loopback listener that records any connection. CONTROL:
 /// the same run with the binding equal to the expectation gets past the

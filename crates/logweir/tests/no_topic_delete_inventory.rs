@@ -1,13 +1,9 @@
-//! **PROD-15.1 review 2, M3: the no-delete guarantee, pinned ACROSS THE
-//! WORKSPACE.**
+//! **The no-delete guarantee, pinned ACROSS THE WORKSPACE.**
 //!
-//! "No code path deletes a topic under an original name" was pinned by text in
-//! two files of one crate. A delete added behind the creator, in
-//! `logweir-kafka`, survived every CI suite (the review's mutant R2-01: the
-//! real `CreateTopics` implementation deleting what its own request created
-//! when another name failed, bypassing the scratch prefix and the protected
-//! names), because every row drives the creation step through a double and no
-//! row read the real creator.
+//! "No code path deletes a topic under an original name" cannot be pinned by
+//! text in the runner alone: a delete added behind the creator, in
+//! `logweir-kafka`, would pass every row that drives the creation step through
+//! a double.
 //!
 //! This is an INVENTORY, in the style of `logweir-kafka/tests/inventory.rs`'s
 //! source scans, over every `.rs` file under `crates/*/src`:
@@ -135,7 +131,7 @@ const RDKAFKA_READER: &str = "logweir-kafka/src/rdkafka_reader.rs";
 const PHASE0: &str = "logweir/src/drill/phase0_admit.rs";
 const PHASE9: &str = "logweir/src/drill/phase9_teardown.rs";
 const ORCHESTRATOR: &str = "logweir/src/drill/mod.rs";
-/// PROD-01.2's vendored copy of the pinned engine's request-version table.
+/// The vendored copy of the pinned engine's request-version table.
 const ENGINE_VERSION_TABLE: &str = "logweir-engine-oso/src/vendored/request_versions.rs";
 
 fn source(path: &str) -> String {
@@ -147,8 +143,7 @@ fn source(path: &str) -> String {
 }
 
 /// **Every mention of `delete_topics` in the workspace's sources, by file.**
-/// KILLS: a delete added in any crate, in any file, behind any trait (the
-/// review's R2-01 adds one to `rdkafka_reader.rs` and moves its count).
+/// KILLS: a delete added in any crate, in any file, behind any trait.
 #[test]
 fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
     assert_eq!(
@@ -185,15 +180,11 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
     ] {
         assert_eq!(inventory(needle), BTreeMap::new(), "`{needle}` is named");
     }
-    // `DeleteRecords` IS NAMED ONCE, AS DATA, and nowhere as a call. PROD-01.2
-    // vendors the pinned engine's request-version table
-    // (`ENGINE_REQUEST_VERSIONS`, held to the engine's source by
-    // `cargo xtask check-drift`), and the engine declares a version for
-    // DeleteRecords in it. The row is a string in that table: nothing in
-    // Logweir sends the request (`delete_records` above is named nowhere),
-    // and the capability rows read only the Metadata, ListOffsets, Fetch,
-    // DescribeConfigs, Produce and SASL rows of it. Met at the merge of the
-    // two rows; a second mention, or this one becoming a call, still fails.
+    // `DeleteRecords` IS NAMED ONCE, AS DATA, and nowhere as a call: the
+    // vendored request-version table (`ENGINE_REQUEST_VERSIONS`, held to the
+    // engine's source by `cargo xtask check-drift`) declares a version for it.
+    // Nothing in Logweir sends the request, and a second mention, or this one
+    // becoming a call, fails.
     assert_eq!(
         inventory("DeleteRecords"),
         expect(&[(ENGINE_VERSION_TABLE, 1)]),
@@ -207,8 +198,8 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
 
 /// **The broker's delete call is inside `impl TopicDeleter for
 /// RdKafkaReader`, once, behind both refusals; and the real creator names no
-/// delete.** KILLS: R2-01 (the creator deleting what its own request
-/// created); a second broker delete; a delete that skips the scratch prefix
+/// delete.** KILLS: the creator deleting what its own request created; a
+/// second broker delete; a delete that skips the scratch prefix
 /// or the protected names.
 #[test]
 fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
@@ -252,7 +243,7 @@ fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
         !creator.to_lowercase().contains("delete"),
         "impl TopicCreator for RdKafkaReader names a delete"
     );
-    // And the creation call bounds the broker below the client (M2): a
+    // And the creation call bounds the broker below the client: a
     // per-name answer wherever there can be one.
     assert!(creator.contains(".operation_timeout(Some(CREATE_OPERATION_TIMEOUT))"));
     assert!(creator.contains(".request_timeout(Some(T))"));
@@ -265,7 +256,7 @@ fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
 }
 
 /// **The trait method is called from exactly two places: the phase-0 probe,
-/// for its own probe topic, and phase 9.** Phase 9's file also holds FX-44's
+/// for its own probe topic, and phase 9.** Phase 9's file also holds the
 /// teardown of a run that failed after the restore started, through the same
 /// one call; the orchestrator reaches it only from the error returns of
 /// phase 6 onwards. KILLS: a third caller (a cleanup after the creation step,
@@ -332,7 +323,7 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
         !production[from..to].contains("delete"),
         "nothing is deleted between creation and the restore"
     );
-    // FX-44: the failure teardown is defined once, before the creation step,
+    // The failure teardown is defined once, before the creation step,
     // and every use of it but its own definition comes after phase 6 starts.
     assert_eq!(count(&production, "phase9_teardown::after_failure("), 1);
     assert!(production.find("phase9_teardown::after_failure(").unwrap() < from);

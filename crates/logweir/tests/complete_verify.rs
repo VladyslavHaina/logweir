@@ -1,4 +1,4 @@
-//! **PROD-08.1 — complete verification, the fault matrix at the phase-7
+//! **Complete verification, the fault matrix at the phase-7
 //! seam.** Every row builds a REAL archive — KBAK segments encoded here,
 //! independently of the decoder (the layout of `segment/format.rs:18-46`),
 //! put into an in-memory store with the sha256 a manifest would carry — and
@@ -9,7 +9,7 @@
 //! what is asserted.
 //!
 //! Each fault is asserted CAUGHT by the complete lane and, as its negative
-//! control, either MISSED by the sampled lane (where that is the gap PROD-08.1
+//! control, either MISSED by the sampled lane (the gap complete coverage
 //! closes) or absent from an unfaulted twin that passes. The live twins of
 //! these rows are the complete restores and the `complete_coverage_*` rows of
 //! `e2e/tests/record_semantics.rs`.
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use support::doubles::Engine;
 
-/// `2025-10-09T08:53:20Z`, PROD-01.1's fixture epoch; `+n` below is
+/// `2025-10-09T08:53:20Z`, the fixture epoch; `+n` below is
 /// milliseconds after it.
 const T: i64 = 1_760_000_000_000;
 const SOURCE: &str = "orders";
@@ -52,7 +52,7 @@ struct Rec {
 }
 
 /// An archived record as the backup writes it: the record's own headers,
-/// then `x-original-offset` and `x-original-timestamp` (PROD-01.1 S5).
+/// then `x-original-offset` and `x-original-timestamp`.
 fn archived(offset: i64, ts: i64) -> Rec {
     Rec {
         offset,
@@ -186,7 +186,7 @@ impl Archive {
     }
 
     /// The window floor the plan binds (guard G-WIN): the minimum FIRST
-    /// record timestamp (PROD-01.1 S8).
+    /// record timestamp.
     fn floor(&self) -> i64 {
         self.parts
             .values()
@@ -568,7 +568,7 @@ fn a_sampled_verification_says_it_sampled_and_did_not_verify_header_order() {
     assert!(ver.complete.is_none());
 }
 
-/// 08-1 (PROD-01.1 ts-pit): a segment whose FIRST record is after the point
+/// 08-1 (ts-pit): a segment whose FIRST record is after the point
 /// holds a record at or before it; the engine skips the segment. The complete
 /// lane expects the record from its own timestamp and FAILS naming it. The
 /// sampled lane, whose archive side selects by the same first/last bounds,
@@ -614,7 +614,7 @@ fn a_record_skipped_by_first_last_selection_fails_complete_and_passes_sampled() 
     assert_eq!(fixed.complete().integrity.result, IntegrityResult::Pass);
 }
 
-/// 08-2 (PROD-01.1 ts-bound): a wholly-inside segment holds a record past
+/// 08-2 (ts-bound): a wholly-inside segment holds a record past
 /// the point; the engine correctly leaves it out. The complete lane passes;
 /// the sampled lane's first/last count BOUND fails the correct restore.
 #[test]
@@ -654,11 +654,11 @@ fn a_correct_point_in_time_restore_passes_complete_where_the_bound_fails_it() {
     );
 }
 
-/// 08-3 (PROD-01.1 ts-floor): a record older than every segment's first
+/// 08-3 (ts-floor): a record older than every segment's first
 /// record is below the plan's window floor; the engine drops it from every
 /// restore. The complete model has no lower bound under an archive floor, so
 /// it is expected and reported missing — at a point the segment straddles,
-/// where the sampled lane PASSES — until PROD-01.1b moves the floor.
+/// where the sampled lane PASSES.
 #[test]
 fn a_record_below_the_window_floor_is_missing_under_complete_and_passes_sampled_at_a_point() {
     let archive = Archive::new()
@@ -920,7 +920,7 @@ fn a_bound_that_stops_complete_verification_is_incomplete_never_a_pass() {
     assert_eq!(b.max_records, Some(6));
     assert!(!b.partitions[1].compared && b.partitions[0].compared);
     assert_eq!(b.archive.segments_unverified.len(), 2);
-    // Review L-4: each lane says its own thing about the stopped partition,
+    // Each lane says its own thing about the stopped partition,
     // so `partial_reason` names it twice in two different sentences, never the
     // same sentence twice.
     let reason = v.integrity.partial_reason.as_deref().unwrap_or_default();
@@ -1007,7 +1007,7 @@ fn a_manifest_count_that_disagrees_with_the_decoded_segment_fails() {
     assert!(all_findings(&v).contains("decodes to 3 records, the manifest says 4"));
 }
 
-/// The lineage is the LAST `x-original-offset` (PROD-00.3e's prerequisite):
+/// The lineage is the LAST `x-original-offset`:
 /// a record that already carried its own keeps the backup's after it.
 #[test]
 fn a_record_carrying_its_own_lineage_header_is_mapped_by_the_last() {
@@ -1099,7 +1099,7 @@ fn the_complete_block_the_writer_builds_satisfies_the_invariants() {
     }
 }
 
-/// **Review M-2: a short read is refused, never a smaller comparison.** The
+/// **A short read is refused, never a smaller comparison.** The
 /// target's partition 0 holds every expected record and then ONE stray record
 /// past them; the reader answers nothing from the stray's offset on, below the
 /// high watermark. Ending the comparison there would have matched every
@@ -1152,10 +1152,10 @@ fn a_short_target_read_is_refused_and_never_a_smaller_comparison() {
     assert_eq!(block(&v).partitions[0].replay.unexpected, 1);
 }
 
-// ============================================== PROD-11.1: replay selection
+// ============================================== replay selection
 
 impl Case {
-    /// `verify_with`, under a given plan (PROD-11.1: its start and subsets).
+    /// `verify_with`, under a given plan (its start and subsets).
     fn verify_plan(&self, plan: &RestorePlan, coverage: Coverage) -> VerifyOutcome {
         let b = self.archive.build();
         let engine = sampled_engine(self.archive.parts.clone());
@@ -1318,8 +1318,8 @@ fn a_sub_window_passes_complete_and_signs_its_start() {
     assert_eq!(block(&v).replay.unexpected, 1);
 }
 
-/// **The sampled lane judges the selection too** (PROD-11.1). A subset plan
-/// whose unselected partition is empty passes: the count bound and FX-23's
+/// **The sampled lane judges the selection too.** A subset plan
+/// whose unselected partition is empty passes: the count bound and the
 /// per-partition presence check are the SELECTED partitions'. Controls: the
 /// same empty partition under a plan without the subset fails (the manifest
 /// proves it holds records); a record in the unselected partition fails,

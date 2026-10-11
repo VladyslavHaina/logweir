@@ -1,7 +1,5 @@
-//! G2′ — the link-time single-signer gate, and the eight tests that keep it a
-//! gate rather than a comment. Task 7 (Phase 1 line item 1c); the last three
-//! are Task 14's, which extracted `crates/logweir-verify`, re-scoped check 2
-//! and added check 4.
+//! G2′ — the link-time single-signer gate, and the tests that keep it a gate
+//! rather than a comment.
 //!
 //! `scripts/check-one-signer.sh` proves narrow, mechanical LINKAGE properties:
 //! the set of workspace crates from which `logweir-evidence` is reachable over
@@ -9,10 +7,9 @@
 //! `logweir-verify` is reachable is on its own separate allowlist. It bounds
 //! nobody's CAPABILITY to sign — the scorecard signing key is a Kubernetes
 //! Secret, and `create pods` in its namespace is equivalent to holding it
-//! (Global Constraint 27, residual **O1**, accepted). The stronger claim was
-//! withdrawn once already; the script says so in its own header,
-//! `scripts/check-withdrawn-claim.sh` keeps it off every shipped surface, and
-//! these tests do not assert more than the script does.
+//! (Global Constraint 27, residual **O1**, accepted). The stronger claim is
+//! withdrawn (`scripts/check-withdrawn-claim.sh` keeps it off every shipped
+//! surface), and these tests do not assert more than the script does.
 //!
 //! Why a Rust test at all, when the script is the gate: because the script's
 //! RED side is the half that decays. A gate nobody has ever seen fail is
@@ -101,7 +98,7 @@ impl Overlay {
             path.join("scripts/check-one-signer.sh"),
         )
         .expect("copy the gate script into the overlay");
-        // Task 32: check 2's primitive set is DERIVED from the graph minus this
+        // Check 2's primitive set is DERIVED from the graph minus this
         // classification, and an unclassified direct dependency of
         // `logweir-evidence` is fail-closed to `primitive` and exits 1. The
         // overlay must therefore carry the gate's INPUT as well as the gate, or
@@ -189,7 +186,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// Phase-1 demonstrable 5: a throwaway crate that depends on
+/// A throwaway crate that depends on
 /// `logweir-evidence` turns the gate red.
 ///
 /// The probe both LINKS the signer and NAMES it, so this one test covers the
@@ -275,9 +272,7 @@ fn one_signer_script_detects_a_transitive_signer() {
     }
 }
 
-/// The red side of check 2 — the leg that had none until fix round 1, where
-/// the reviewer deleted the whole primitives block and all four tests still
-/// passed.
+/// The red side of check 2.
 ///
 /// This probe depends on `p256` **directly**, from the registry, and on
 /// nothing else. That is a backdoor the other two legs cannot see: it never
@@ -326,9 +321,8 @@ fn one_signer_script_detects_a_direct_primitive_dependency() {
     );
 }
 
-/// `just lint` is the Phase-1 gate (line item 1g): `ci.yml` mirrors the gate
-/// (green since 2026-09-12), and membership in this recipe is what makes
-/// G2′ enforced on a laptop before a push.
+/// `just lint` is the gate `ci.yml` mirrors, and membership in this recipe is
+/// what makes G2′ enforced on a laptop before a push.
 ///
 /// It asserts membership and nothing else — not the recipe's length, not its
 /// line numbers, not the absence of other arms — so a later task adding a
@@ -359,15 +353,13 @@ fn just_lint_runs_the_one_signer_gate() {
     );
 }
 
-// ------------------------------------------------- Task 14: check 2 re-scoped
+// ------------------------------------------------- check 2's scope
 //
-// `logweir-verify` must depend on `p256` AND `ed25519-dalek` — `VerifyingKey`
-// is an enum over them and `verify_detached` matches both arms — so the
-// inverted walk at check 2 gains it and check 2 could not pass unamended.
-// G-SIGN is `[EDIT-DERIVED]`, so STANDING RULE 21 binds: the widening had to be
-// RECORDED rather than performed quietly, because a quiet two-name addition
-// would retire the check for `weirkeeper` for good. These two tests are what
-// make "recorded" mean something.
+// `logweir-verify` must depend on `p256` AND `ed25519-dalek` (`VerifyingKey`
+// is an enum over them), so the inverted walk at check 2 gains it. The
+// widening is RECORDED, not performed quietly, because a quiet two-name
+// addition would retire the check for `weirkeeper`; these two tests make
+// "recorded" mean something.
 
 /// The value of a `NAME="a b c"` shell assignment, split on whitespace.
 fn allowlist(script: &str, name: &str) -> Vec<String> {
@@ -414,7 +406,7 @@ fn primitive_dependencies_have_an_explicit_allowlist() {
 fn signing_and_verification_have_separate_allowed_consumers() {
     let src = one_signer_source();
     for (name, expected) in [
-        // PLAT-19.2: `logweir-api` signs console confirmations (D0) with its
+        // `logweir-api` signs console confirmations (D0) with its
         // own `ConsoleConfirmation` key through the shared signer; the reason
         // is recorded above `ALLOWED_LINK` in scripts/check-one-signer.sh. A
         // FOURTH name on either list is the mutant this row kills.

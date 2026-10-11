@@ -1,4 +1,4 @@
-//! **PROD-03.0 — schema dependency at backup, over real `.kbak` bytes.**
+//! **Schema dependency at backup, over real `.kbak` bytes.**
 //!
 //! `logweir::backup::schema_dependency::detect` reads a bounded sample of each
 //! named topic's archived segments, decodes them with Logweir's own decoder
@@ -344,7 +344,7 @@ use logweir_engine_oso::storage::Store;
 use logweir_evidence::keys::SigningKey;
 use support::doubles::{Engine, Reader};
 
-/// Writes the manifest when it runs (FX-7: a set must be new) and describes
+/// Writes the manifest when it runs (a set must be new) and describes
 /// the segments the test seeded OUTSIDE the set's directory.
 fn engine(archive: &Store, topics: Vec<TopicFacts>) -> Engine<'_> {
     Engine::for_backup()
@@ -372,7 +372,7 @@ fn engine(archive: &Store, topics: Vec<TopicFacts>) -> Engine<'_> {
 fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
     let archive = Store::in_memory("logweir/");
     let evidence = Store::in_memory("logweir/");
-    // The segments, under a prefix the FX-7 new-set check does not list.
+    // The segments, under a prefix the new-set check does not list.
     let put = |key: &str, recs: &[ConsumedRecord]| {
         archive
             .put_create_only(key, &fixtures::kbak_segment(recs))
@@ -393,8 +393,8 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
         ],
     );
     let (outcome, receipt) = sign_backup(&engine, &archive, &evidence);
-    // At least the version that defines `schema_dependency` (an exact pin
-    // breaks when a later block, PROD-01.4a's `generations`, moves the minor).
+    // At least the version that defines `schema_dependency`: an exact pin
+    // breaks when a later block moves the minor.
     let (major, minor) = {
         let mut it = receipt
             .format_version
@@ -500,10 +500,9 @@ fn sign_backup(
     (outcome, serde_json::from_slice(&bytes).unwrap())
 }
 
-/// The review's L1 end to end: an engine whose manifest lists `orders` TWICE
+/// An engine whose manifest lists `orders` TWICE
 /// (4 records each). The backup is SIGNED, its `records` counts 8 and its
-/// schema dependency judged the same 8 (`complete`); the first version judged
-/// 4 and the backup failed at signing.
+/// schema dependency judges the same 8 (`complete`).
 #[test]
 fn a_manifest_listing_a_topic_twice_still_signs() {
     let archive = Store::in_memory("logweir/");
@@ -540,10 +539,8 @@ fn a_manifest_listing_a_topic_twice_still_signs() {
     assert_eq!(orders.value.as_ref().unwrap().framed, 8);
 }
 
-// ===========================================================================
-// THE BOUNDS (the security review of the first version): caps, the time
-// budget, the head's early stop, the tail's ring, and "never fatal".
-// ===========================================================================
+// THE BOUNDS: caps, the time budget, the head's early stop, the tail's ring,
+// and "never fatal".
 
 /// A KBAK v1 segment of `(key, value)` records, zstd-compressed when `zstd`,
 /// with the frame of record `pad` (when given) declaring one byte more than
@@ -808,10 +805,8 @@ fn the_head_scan_stops_after_its_records() {
     );
 }
 
-// ===========================================================================
-// The review's fix round: one budget per backup, a hard stop, a topic listed
-// twice, the real store's cap, and the advisory block never blocking signing.
-// ===========================================================================
+// One budget per backup, a hard stop, a topic listed twice, the real store's
+// cap, and the advisory block never blocking signing.
 
 /// A source on a fake clock: every read costs `per_read`, and the `within`
 /// each read was given is recorded.
@@ -848,8 +843,8 @@ fn three_topics() -> (Segments, BackupSetFacts) {
     (s, set(topics.to_vec()))
 }
 
-/// ONE budget for the whole backup (the review's mutant RR1 restarted it per
-/// topic), and a HARD one: with 100 ms reads and a 150 ms budget, `a` is
+/// ONE budget for the whole backup, never one per topic, and a HARD one:
+/// with 100 ms reads and a 150 ms budget, `a` is
 /// judged; `b`'s read is given the 50 ms left and overruns it, so `b` is not
 /// scanned; `c` is not even read. Each read is given only what is left.
 #[test]
@@ -919,7 +914,7 @@ fn a_read_the_budget_ends_is_not_assessed_for_the_budget() {
     assert_eq!(got["a"].reason.as_deref(), Some(REASON_SEGMENT_UNREADABLE));
 }
 
-/// The REAL store's cap (the review's mutant RS1 doubled it): over
+/// The REAL store's cap: over
 /// `Store::in_memory`, a segment of exactly the cap is judged, and one byte
 /// less refuses it without a fetch.
 #[test]
@@ -953,9 +948,7 @@ fn the_real_stores_cap_is_exact() {
 }
 
 /// A topic the manifest lists TWICE is judged over both entries — the records
-/// `phase_run` counts — so the judgement and `records` agree (the review's
-/// L1: the first version judged the first entry and the backup failed at
-/// signing).
+/// `phase_run` counts — so the judgement and `records` agree.
 #[test]
 fn a_topic_listed_twice_is_judged_over_both_entries() {
     let mut s = Segments::default();

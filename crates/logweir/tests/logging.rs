@@ -1,26 +1,20 @@
-//! T0-10: at the SHIPPED default log level — `RUST_LOG` absent from the
+//! At the SHIPPED default log level — `RUST_LOG` absent from the
 //! environment entirely — every terminal path of `drill run` must put a
 //! non-empty `run_id` on a machine-parseable stdout line, and `RUST_LOG` must
 //! still win when it is set.
 //!
-//! Both halves are load-bearing, and neither alone is the fix.
-//!
-//! `crates/logweir/src/drill/mod.rs` carried the comment "Spec §13: structured
-//! JSON logs on stdout with run_id on every line" nine lines above
-//! `.with_env_filter(EnvFilter::from_default_env())`, whose default level is
-//! ERROR when `RUST_LOG` is unset. The span carrying the id is an INFO span, so
-//! at ERROR it is never entered and renders nothing, and `exiting()`'s INFO
-//! line — which its own doc comment calls "the one place [the exit-code]
-//! distinction survives into a log aggregator" — was not emitted at all. A
-//! CronJob failing operationally at 03:17 on a Monday left an operator a bare
-//! error string with nothing to correlate against the bucket, the metrics
-//! textfile, or a sibling pod.
+//! Both halves are load-bearing. With `RUST_LOG` unset,
+//! `EnvFilter::from_default_env()` defaults to ERROR, and the span carrying
+//! the id is an INFO span, so it would never be entered and `exiting()`'s INFO
+//! line would not be emitted: an operational failure would leave a bare error
+//! string with nothing to correlate against the bucket, the metrics textfile,
+//! or a sibling pod.
 //!
 //! WHERE `run_id` LIVES IN THE JSON. `tracing_subscriber`'s JSON formatter
 //! nests an event's own fields under `"fields"` and renders the current span as
-//! a sibling object `"span":{"run_id":…,"name":"drill"}`. T0-10's fix text says
-//! "add `run_id` as a field on the error event itself", and that is
-//! `fields.run_id` — as opposed to `span.run_id`, which is what it excludes.
+//! a sibling object `"span":{"run_id":…,"name":"drill"}`. The rule is
+//! `run_id` as a field on the error event itself: `fields.run_id`, not
+//! `span.run_id`.
 //! These tests therefore assert `fields.run_id`, NOT a root-level `run_id`:
 //! a root-level key is unreachable without `.flatten_event(true)`, which would
 //! change the shape of every log line the product emits.
@@ -146,9 +140,7 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-// ---------------------------------------------------------------------------
-// The five tests T0-10 names.
-// ---------------------------------------------------------------------------
+// The five tests the property names.
 
 #[test]
 fn error_event_carries_run_id_with_rust_log_unset() {
@@ -263,10 +255,8 @@ fn cronjob_manifest_sets_rust_log() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Additions (addendum A7.3). None needs a broker, an engine binary, a cluster
-// or Docker, and none needs a new dependency.
-// ---------------------------------------------------------------------------
+// Additions. None needs a broker, an engine binary, a cluster or Docker,
+// and none needs a new dependency.
 
 #[test]
 fn a_malformed_rust_log_does_not_panic_and_still_reaches_a_terminal_path() {
@@ -314,8 +304,8 @@ fn every_default_level_line_carries_the_run_id_on_the_event_or_on_its_span() {
     // correlatable. A line qualifies either by carrying `fields.run_id` (the
     // error event, `exiting()`, `PhaseLogger`'s three) or by rendering the
     // entered `drill` span, which `.with_current_span(true)` puts at
-    // `span.run_id` — and which only exists at all because the default level is
-    // now INFO, since the span itself is an INFO span.
+    // `span.run_id`, which exists only because the default level is INFO (the
+    // span itself is an INFO span).
     //
     // `--metrics-file` points inside a directory that does not exist, so the
     // textfile write fails and `publish()` emits its WARN line. That line
@@ -365,8 +355,7 @@ fn the_metrics_record_and_the_log_carry_the_same_run_id() {
     // Cross-stream correlation, which is the whole point: the id an operator
     // greps out of the log aggregator is the id in the Prometheus textfile
     // node_exporter scraped off the same pod. The textfile carries it as a
-    // leading COMMENT, never as a label (cardinality) — that shape is not this
-    // task's and is not changed here, only asserted against the log.
+    // leading COMMENT, never as a label (cardinality).
     let r = FailingRun::with_live_dir();
     let metrics = r.dir().join("logweir.prom");
     let arg = format!("--metrics-file={}", metrics.display());
@@ -400,7 +389,7 @@ fn the_metrics_record_and_the_log_carry_the_same_run_id() {
 //
 // These are the streams a run only produces against a live broker and the real
 // engine binary, so they cannot be exercised by spawning the binary against
-// absent paths. What they need from this task is the DEFAULT LEVEL: the lines
+// absent paths. What they need is the DEFAULT LEVEL: the lines
 // are emitted at INFO by `logweir::metrics::PhaseLogger`, which the
 // orchestrator constructs with the run id and hands to phase 6, and the engine
 // child is never told the run id (GC3: its argv is exactly `restore` /
@@ -408,8 +397,7 @@ fn the_metrics_record_and_the_log_carry_the_same_run_id() {
 // re-emits the child's captured lines under its own identity).
 //
 // So the test drives `PhaseLogger` directly under a subscriber built at the
-// two levels that matter: the one this task now defaults to, and the one it
-// replaced.
+// two levels that matter: the default (INFO) and ERROR.
 // ---------------------------------------------------------------------------
 
 /// A thread-local `tracing` sink, so this never touches the global subscriber.
@@ -501,7 +489,7 @@ fn the_engine_output_and_phase_lines_carry_the_run_id_at_the_default_level() {
 
 #[test]
 fn the_old_default_level_hid_every_one_of_those_lines() {
-    // `EnvFilter::from_default_env()` with RUST_LOG unset was ERROR
+    // `EnvFilter::from_default_env()` with RUST_LOG unset is ERROR
     // (tracing-subscriber-0.3.23 `filter/env/mod.rs:289-293`). This pins WHY
     // the level change is the fix and not a cosmetic default: at ERROR the
     // engine's captured output and both phase lines do not exist at all, so no

@@ -1,4 +1,4 @@
-//! PROD-01.3 security follow-up: the CHECK runner (topic discovery, preflight,
+//! The CHECK runner (topic discovery, preflight,
 //! connection test) refuses a projected credential whose binding does not name
 //! the connection its Job was built for — before the password is read and
 //! before any client exists, as `AuthenticationFailed` with the named reason.
@@ -71,7 +71,7 @@ fn the_check_runner_refuses_an_unbound_credential_and_accepts_a_bound_one() {
         std::env::remove_var(var);
     }
 
-    // THE TARGET SIDE (fix round, review F2): a Restore's Preflight resolves
+    // THE TARGET SIDE: a Restore's Preflight resolves
     // its target `KafkaCluster` as `ConnectionUse::PreflightTarget`, so its
     // check Job carries the TARGET binding pair. A check runner that compared
     // only the source side would let a Preflight on a Restore whose target

@@ -1,4 +1,4 @@
-//! RECEIPT-DUP review F3: the destination readiness write probe proves the
+//! The destination readiness write probe proves the
 //! evidence store ENFORCES conditional create, before the first backup.
 //!
 //! The backup runner's execution claim is a lock only on a store that honours

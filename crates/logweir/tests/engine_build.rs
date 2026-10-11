@@ -1,5 +1,5 @@
 //! **Logweir's build of the engine: the inputs, the patch folder's policy and
-//! the identity** (PROD-00.2, OD-3).
+//! the identity** (OD-3).
 //!
 //! `scripts/engine-source.sh` is the recipe the `Dockerfile`'s
 //! `engine-logweir` stage runs, and its refusals are the build's gate. This
@@ -12,7 +12,7 @@
 //!   A change to any input without a new recorded digest is refused.
 //! - **The version.** `<release>+logweir.<n>`, `n` from 1, the release the one
 //!   vendored tarball's name gives.
-//! - **One version, one engine** (review M1). `third_party/kafka-backup-builds.txt`
+//! - **One version, one engine.** `third_party/kafka-backup-builds.txt`
 //!   is the append-only ledger of builds: the last line is the build env's
 //!   pair, no version and no digest appears twice, and `n` rises within a
 //!   release. A new digest under an old version is refused whichever way it is
@@ -275,8 +275,8 @@ impl Inputs {
 
     /// The version the NEXT build of the shipped inputs would carry:
     /// `<release>+logweir.<n + 1>`. The planted cases bump from whatever the
-    /// build env names, so a real build landing (FX-21's `+logweir.2`) does
-    /// not turn a planted "next build" into a recorded one.
+    /// build env names, so a real build landing does not turn a planted "next
+    /// build" into a recorded one.
     fn next_version() -> String {
         let version = env_value(
             &read("third_party/kafka-backup-build.env"),
@@ -300,7 +300,7 @@ impl Inputs {
         next
     }
 
-    /// Re-records the digest WITHOUT bumping `n` (review M1's mistake), and
+    /// Re-records the digest WITHOUT bumping `n`, and
     /// writes the ledger one of three ways.
     fn with_digest_rerecorded_unbumped(self, ledger: LedgerEdit) -> Self {
         let version = env_value(&self.env, "ENGINE_VERSION").unwrap();
@@ -603,7 +603,7 @@ fn every_rule_is_refused_by_both_implementations() {
             Inputs::real().without_readme(),
             "README.md",
         ),
-        // REVIEW M1: ONE VERSION, ONE ENGINE. A patch lands and its digest is
+        // ONE VERSION, ONE ENGINE. A patch lands and its digest is
         // re-recorded, but `n` is not bumped; whichever way the ledger is then
         // written, the gate refuses (a line rewritten in place is
         // `engine_pin.rs`'s, below).
@@ -687,10 +687,8 @@ fn every_rule_is_refused_by_both_implementations() {
     }
 }
 
-/// REVIEW L8: `prepare` — the only mode the Dockerfile runs — refuses a stale
-/// digest itself, before it extracts anything. (Mutant R4 deleted that check
-/// from the `prepare` arm and survived every case above, which all run
-/// `check`.)
+/// `prepare`, the only mode the Dockerfile runs, refuses a stale digest
+/// itself, before it extracts anything; every case above runs `check`.
 #[test]
 fn prepare_refuses_a_stale_digest_before_it_extracts() {
     let inputs = Inputs::real().with_patch("0901-fix.patch", &good_patch());
@@ -837,14 +835,11 @@ fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// FX-21 review L2: a patch's oracle that lives in the engine's own tests runs
-/// in `scripts/ci-check.sh`, over the tree it prepares for `cargo deny`, and
-/// each named test must report `ok` there. Patch 0002 brings three, patch 0003
-/// (PROD-00.3g) three more; every one is in its patch AND in the gate's list,
-/// so dropping a test from either, or the gate's `cargo test`, fails here. The
-/// gate's live negative control (the hunk removed from a prepared tree: two of
-/// the three FAILED, exit 1) is
-/// `claude/artifacts/fx-21/fixround/gates/ci-oracle-negative-hunk-removed.log`.
+/// A patch's oracle that lives in the engine's own tests runs in
+/// `scripts/ci-check.sh`, over the tree it prepares for `cargo deny`, and each
+/// named test must report `ok` there. Patches 0002 and 0003 bring three each;
+/// every one is in its patch AND in the gate's list, so dropping a test from
+/// either, or the gate's `cargo test`, fails here.
 #[test]
 fn ci_check_runs_every_patchs_engine_oracle() {
     const ORACLES: [(&str, [&str; 3]); 2] = [
@@ -904,12 +899,8 @@ fn ci_check_runs_every_patchs_engine_oracle() {
     }
 }
 
-/// REVIEW M2: both graphs — the engine's own lockfile and Logweir's — admit
-/// crates from crates.io only, and `scripts/ci-check.sh` checks `sources` for
-/// both. The live negative control (a planted `git+file://` source for `spin`
-/// in a prepared engine tree) exits 8 with `source-not-allowed` under this
-/// policy and 0 with `unknown-git = "warn"`
-/// (`claude/artifacts/prod-00-2/deny/engine-git-source-*.log`).
+/// Both graphs, the engine's own lockfile and Logweir's, admit crates from
+/// crates.io only, and `scripts/ci-check.sh` checks `sources` for both.
 #[test]
 fn both_graphs_admit_crates_io_only_and_the_gate_checks_it() {
     let ci = read("scripts/ci-check.sh");
@@ -961,7 +952,7 @@ fn both_graphs_admit_crates_io_only_and_the_gate_checks_it() {
     );
 }
 
-/// The one M1 edit neither the script nor `check_ledger` can see: the last
+/// The one ledger edit neither the script nor `check_ledger` can see: the last
 /// ledger line rewritten in place to describe new inputs under the old
 /// version. Both accept it — a file has no history — which is exactly why
 /// `engine_pin.rs`'s `SHIPPED_BUILDS` pins every build that landed and

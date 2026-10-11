@@ -1,13 +1,12 @@
-//! FX-20c: `destination.credentialBound` — a destination's *Test access* (and
+//! `destination.credentialBound` — a destination's *Test access* (and
 //! every readiness check that names a destination) compares the binding of
 //! EVERY Secret-backed grant it lists, `archiveWrite` included, with no
 //! request, and is never READY for a destination a run would refuse.
 //!
-//! The defect (PoC batch 4, FX-20 F6): `fx20-thief`, whose only grant named
-//! `primary`'s `archiveWrite` Secret beside a sentinel endpoint, tested READY
-//! — `destination.credentialProjected: Projected`, and
-//! `destination.archivePrefixWritable` is execution-only, so nothing compared
-//! the binding — while its Backup was refused `CredentialBindingMismatch`.
+//! A destination whose only grant names another destination's `archiveWrite`
+//! Secret must not test READY (`destination.archivePrefixWritable` is
+//! execution-only, so nothing else compares the binding) while its Backup is
+//! refused `CredentialBindingMismatch`.
 //!
 //! Every row reads the environment through `Wiring::env`, overridden here
 //! with a map, so no test mutates the process environment and they may run
@@ -242,13 +241,13 @@ fn assert_no_binding_value(row: &CheckOutcome) {
     }
 }
 
-/// **The F6 thief.** A destination whose ONLY grant is another
+/// **The thief.** A destination whose ONLY grant is another
 /// destination's `archiveWrite` Secret is `notReady`,
 /// `CredentialBindingMismatch` on `archiveWrite`, by name — and the check
 /// opened no store to find out. CONTROL: the same destination with its own
 /// bound Secret is READY.
 ///
-/// KILLS (mutants M1–M3 in the report): skipping the `archiveWrite` grant;
+/// KILLS: skipping the `archiveWrite` grant;
 /// not emitting the row (the verdict is READY on `Projected` alone — the
 /// runner's half of it: nothing else here is blocking and not ready); a
 /// message or fact that drops the grant's name.
@@ -514,8 +513,8 @@ fn fx20c_a_backup_readiness_check_names_a_foreign_evidence_write_secret() {
     assert!(bound
         .message
         .starts_with("evidenceWrite (Secret `lwd-other-evidence-write`: foreign binding)"));
-    // The marker row is execution-only here: before FX-20c nothing else
-    // would have said so.
+    // The marker row is execution-only here, so only the binding row can say
+    // so.
     assert_eq!(
         row(&result, CheckId::DestinationEvidenceWritable)
             .expect("marker row")
@@ -596,7 +595,7 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
         bound.facts.get("archiveRead").map(String::as_str),
         Some("bound")
     );
-    // THE SCOPE IS THE REFUSED GRANT'S DESTINATION (review LOW-3), not the
+    // THE SCOPE IS THE REFUSED GRANT'S DESTINATION, not the
     // source the row happens to list first.
     assert_eq!(
         bound.scope.as_ref().map(|s| s.name.as_str()),
@@ -618,7 +617,7 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
     );
     let ready_row = bound_row(&run(restore(), &wiring));
     assert_eq!(ready_row.state, CheckState::Ready);
-    // A READY row about TWO destinations names neither (review LOW-3): the
+    // A READY row about TWO destinations names neither: the
     // controller gives it the check Job's scope.
     assert!(ready_row.scope.is_none(), "{:?}", ready_row.scope);
 }
@@ -637,7 +636,7 @@ fn fx20c_the_binding_row_is_blocking_and_expires() {
 }
 
 /// **The console fixture is this row.** `ui/tests/fixtures/console/
-/// preflight-binding-mismatch.json` is what the product API sends for the F6
+/// preflight-binding-mismatch.json` is what the product API sends for the
 /// thief and what the console renders; its `destination.credentialBound`
 /// entry is THIS runner's row for that destination, as the controller folds
 /// its facts into the message (`entry_of`: `<message> [<k>=<v>; …]`), with
@@ -699,17 +698,14 @@ fn folded(row: &CheckOutcome) -> String {
     ))
 }
 
-/// **Review LOW-1: the per-grant answer survives the 512-character cap.**
-/// F6b's `fx20-thief-read` (all three of `primary`'s Secrets): the first
-/// landing's message was 598 characters before the facts and lost every
-/// `<grant>=…` fact and the end of its sentence. The compact form keeps every
-/// refused grant AND every fact. A four-grant destination with long Secret
+/// **The per-grant answer survives the 512-character cap.** A destination
+/// naming all three of another's Secrets keeps every refused grant AND every
+/// fact in the compact form, and a four-grant destination with long Secret
 /// names (a 40-character name is redacted by the long-run rule) still names
 /// each refused grant at the head of the message.
 ///
-/// KILLS: a message that repeats the destination per grant and carries the
-/// long explanatory tail (the first landing's; the three-grant fold exceeds
-/// 512 and the facts are cut).
+/// KILLS: a message that repeats the destination per grant and carries a long
+/// explanatory tail (the three-grant fold exceeds 512 and the facts are cut).
 #[test]
 fn fx20c_the_per_grant_answer_survives_the_message_cap() {
     let thief_read = destination(
@@ -806,7 +802,7 @@ fn fx20c_the_per_grant_answer_survives_the_message_cap() {
     }
 }
 
-/// **Review LOW-2: the remedy never tells an operator to bind a refused
+/// **The remedy never tells an operator to bind a refused
 /// Secret to this destination.** On the thief's row the Secret is the
 /// VICTIM's; "set the Secret's `logweir-binding` to this destination's
 /// status.credentialBinding" hands the thief that credential. The remedy says:
@@ -815,8 +811,7 @@ fn fx20c_the_per_grant_answer_survives_the_message_cap() {
 /// name is an incident. Every refusal text the runner and the controller
 /// write shares it (`BINDING_REMEDY`; core and controller rows).
 ///
-/// KILLS: the first landing's remedy (the `status.credentialBinding`
-/// instruction).
+/// KILLS: a remedy carrying the `status.credentialBinding` instruction.
 #[test]
 fn fx20c_the_remedy_never_binds_a_refused_secret_to_this_destination() {
     let thief = destination(

@@ -1,24 +1,12 @@
-//! The unit suite dials nothing. Task 5b.
+//! The unit suite dials nothing.
 //!
-//! `cargo test --workspace` with the compose stack down took ~20 minutes and
-//! was twice mistaken for a hang. Most of that was cargo fingerprinting an
-//! artifact directory five tasks of mutation rounds had grown to 873,349 files
-//! (`scripts/check-deps-count.sh` is the gate for that half). What was left,
-//! once the tree was clean, was **33 seconds in two tests**, neither of which
-//! is about brokers or buckets:
-//!
-//! | test | measured | what it was waiting on |
-//! |---|---|---|
-//! | `tests/doctor.rs::check_7_…` | 26.60 s | 20 s of `rdkafka_reader.rs:16`'s `const T`, plus ~6.5 s below |
-//! | `src/doctor.rs::tests::check_storage_reports_skipped_…` | 6.70 s | ten `object_store` retries against **`http://169.254.169.254`** |
-//!
-//! That second row is worth reading twice. Everyone, this brief included,
-//! assumed the storage wait was a connect to `localhost:9000`. It was not:
-//! with no AWS credentials in the environment, `AmazonS3Builder::from_env()`
-//! falls through to the EC2 instance-metadata credential provider, and the
-//! retries are against the link-local metadata address — traffic off the
-//! loopback interface, from a unit test, on a workstation that is not an EC2
-//! instance (Global Constraint 17). The configured endpoint was never reached.
+//! `AmazonS3Builder::from_env()` with no AWS credentials in the environment
+//! falls through to the EC2 instance-metadata credential provider and retries
+//! against the link-local metadata address (`http://169.254.169.254`): traffic
+//! off the loopback interface, from a unit test, on a workstation that is not
+//! an EC2 instance (Global Constraint 17), whatever endpoint was configured.
+//! And an rdkafka metadata call with nothing listening waits out
+//! `rdkafka_reader.rs`'s 20 s `const T`.
 //!
 //! ## What this file is, and what it is not
 //!
@@ -42,8 +30,8 @@ use std::path::{Path, PathBuf};
 
 /// Tokens that mean "this file opens a connection".
 ///
-/// **`bootstrap_servers` is deliberately NOT here**, though it was in the
-/// brief's list. It is a `DrillSpec` FIELD NAME: it occurs in
+/// **`bootstrap_servers` is deliberately NOT here.** It is a `DrillSpec`
+/// FIELD NAME: it occurs in
 /// `logweir-core/src/spec.rs`, which compiles with `--no-default-features`
 /// and carries no Kafka client at all and therefore cannot dial anything, and
 /// in the two OSO render modules and their snapshots. Including it would have
@@ -56,20 +44,14 @@ use std::path::{Path, PathBuf};
 /// `crates/logweir/tests/notify.rs`).
 const DIAL_TOKENS: [&str; 17] = [
     "RdKafkaReader::connect(",
-    // D2 W3's check client (`crates/logweir-kafka/src/inventory.rs`). It is a
-    // dialling constructor in exactly the sense the one above is: it returns a
-    // handle whose first method call opens a socket. The kafka-check report
-    // asked for it here because that crate could not edit this file, and it is
-    // the constructor D2 W4's runner uses — so leaving it out would point this
-    // gate at the shrinking half of the surface.
+    // The check client (`crates/logweir-kafka/src/inventory.rs`): a dialling
+    // constructor in exactly the sense the one above is, whose handle's first
+    // method call opens a socket.
     "KafkaInventory::connect(",
     "Store::from_url(",
     "Store::read_only_from_url(",
-    // D2 W2's EXPLICIT constructors (`crates/logweir-store/src/lib.rs`).
-    // Dialling in exactly the sense the two above are: each returns a handle
-    // whose first method call opens a socket. They are the ones
-    // destination-backed code uses from W4 onwards, so leaving them out would
-    // point this gate at the shrinking half of the surface.
+    // The EXPLICIT store constructors (`crates/logweir-store/src/lib.rs`),
+    // dialling in exactly the sense the two above are.
     "Store::from_url_with(",
     "Store::read_only_with(",
     "localhost:9092",
@@ -82,26 +64,15 @@ const DIAL_TOKENS: [&str; 17] = [
     // names it is a file that expects a connection to fail — which is still a
     // file that opens one, and is still worth seeing on the way in.
     //
-    // The `http://` form ONLY, and that is deliberate rather than sloppy.
-    // `crates/weirkeeper/tests/linkage.rs:690-699` uses `https://127.0.0.1:1`
-    // as an apiserver address it never contacts, and says in a comment that it
-    // relies on not being a dial token; a bare `127.0.0.1:1` would flag it and
-    // the cheapest fix would be to delete this token again. The plaintext twin
-    // is the one this repository actually dials.
+    // The `http://` form ONLY: `crates/weirkeeper/tests/linkage.rs` uses
+    // `https://127.0.0.1:1` as an apiserver address it never contacts and
+    // relies on not being a dial token. The plaintext twin is the one this
+    // repository actually dials.
     "http://127.0.0.1:1",
     // ureq entry points that carry the crate's DEFAULT configuration, i.e. no
-    // overall or read timeout.
-    //
-    // These six are EXACTLY the `FORBIDDEN` list in
+    // overall or read timeout. These six are EXACTLY the `FORBIDDEN` list in
     // `crates/logweir/tests/notify.rs`, and `the_two_ureq_token_lists_agree`
-    // in that file now asserts it rather than a comment claiming it. Fix
-    // round 1 said "the two lists now match" and they did not: bare
-    // `Agent::new(` — `use ureq::Agent;` and then `Agent::new()` — was in the
-    // crate-local list and missing here, and the re-reviewer walked a probe
-    // straight through this gap into `crates/logweir/tests/`, which the
-    // crate-local test does not walk. An audit whose comment asserts a
-    // property it does not have is the defect F6 was raised about, arriving
-    // in the fix for F6.
+    // in that file asserts it.
     "ureq::post(",
     "ureq::get(",
     "ureq::request(",
@@ -301,8 +272,6 @@ const ALLOWED: [(&str, &str); 35] = [
          endpoint, no network",
     ),
     (
-        // D2 W7 (PLAT-08.1). THIS FILE IS W4'S BY D2 §13.2 AND THIS ONE ENTRY IS
-        // W7'S — kept to a single narrow row for that reason.
         "crates/weirkeeper/src/evidence_store.rs",
         "production: `StoreCache::get_or_build` is the ONE place in the control plane \
          that builds a per-destination read-only evidence handle (D2 §3.10's \
@@ -359,13 +328,13 @@ const ALLOWED: [(&str, &str); 35] = [
 ///
 /// An [`ALLOWED`] entry exempts a whole path, which is right for "this file
 /// dials by design" and wrong for "this file may dial, but only in one way".
-/// A reviewer's mutant (MR-A) showed the gap: swapping the EXPLICIT
+/// Swapping the EXPLICIT
 /// `Store::from_url_with(` for the environment-reading `Store::from_url(` in
 /// `crates/logweir/src/check/store.rs` is a D-SEAMS **S5** downgrade — the
 /// destination's approved endpoint, addressing and `allow_http` stop being
 /// what the handle is built with, and every unnamed `AWS_*` variable in the
-/// controller's environment reaches it instead — and the allow-list waved it
-/// through by path.
+/// controller's environment reaches it instead — and an allow-list by path
+/// waves it through.
 ///
 /// So an allow-listed path may also carry a NARROWER rule. The reason column
 /// says what the file is allowed to do, and the token column says what it is
@@ -502,11 +471,9 @@ fn no_default_set_source_file_opens_a_connection() {
     );
 }
 
-/// M3's self-check: an audit that walked nothing would report a clean tree
-/// forever. 94 `.rs` files existed under `crates/*/{src,tests}` at Task 5b's
-/// base commit (53 src + 36 tests + 5 nested); 60 is a floor loose enough
-/// that deleting a module is not a false alarm and tight enough that a broken
-/// walk cannot hide behind it.
+/// An audit that walked nothing would report a clean tree forever. 60 is a
+/// floor loose enough that deleting a module is not a false alarm and tight
+/// enough that a broken walk cannot hide behind it.
 #[test]
 fn the_audit_actually_walks_the_tree() {
     let files = walk();
@@ -526,7 +493,7 @@ fn the_audit_actually_walks_the_tree() {
     );
 }
 
-/// M2's self-check: the classifier must FLAG something, not merely fail to
+/// The classifier must FLAG something, not merely fail to
 /// flag the tree as it stands today. The mutant this kills is an allow-list
 /// widened to a prefix (`contains("src/")`, or `contains("tests/")`), under
 /// which a new dialling test lands unnoticed and the audit stays green.
@@ -569,8 +536,7 @@ fn a_synthetic_dialling_test_is_flagged() {
 ///
 /// Driven through the pure classifier with a fabricated body, for the reason
 /// `a_synthetic_dialling_test_is_flagged` records: a guard whose red side is
-/// never exercised is a guard that can stop working silently. This is the
-/// reviewer's mutant MR-A, as a test.
+/// never exercised is a guard that can stop working silently.
 #[test]
 fn an_allow_listed_path_is_still_flagged_for_a_forbidden_token() {
     for (path, tokens, why) in ALLOWED_BUT_FORBIDDEN {
@@ -621,50 +587,31 @@ fn every_allow_list_entry_is_still_earned() {
 }
 
 // ===========================================================================
-// THE ONE-CONSTRUCTION-SITE RULE, DERIVED — Task 16b, plan erratum E11(e)
+// THE ONE-CONSTRUCTION-SITE RULE, DERIVED (plan erratum E11(e))
 // ===========================================================================
 //
 // Interface **I1**: a client's auth is built in ONE place,
-// `AuthConfig::from_spec`, and no call site pins an arm itself. Task 6 landed
-// that rule with a guard that iterated a **fixed three-file list**
-// (`auth_binding.rs`'s `no_construction_site_hardcodes_plaintext`, over
-// `drill/mod.rs`, `doctor.rs`, `backup/mod.rs`). Task 15c then added a FOURTH
-// sanctioned site, `probe.rs`, and the Task 6 row did not notice — it could
-// not: a list is not a rule. Task 15c disclosed this and wrote its own,
-// stronger guard inside `cluster_probe.rs`, so nothing was ever unprotected;
-// but the next site would have been unguarded again, and the tree would then
-// have carried TWO guards and no derivation. Task 15c's review raised it as
-// **M-2**.
+// `AuthConfig::from_spec`, and no call site pins an arm itself. This guard
+// DERIVES its file list by walking `crates/logweir/src/**` and
+// `crates/weirkeeper/src/**`, so a new site is caught by existing, and the
+// allowlist below is the only place a sanctioned site is named; "exactly one
+// function may name the constructor" is asserted for every sanctioned site.
 //
-// This is the one guard. It DERIVES its file list by walking
-// `crates/logweir/src/**` and `crates/weirkeeper/src/**`, so a fifth site is
-// caught by existing, and the allowlist below is the only place a sanctioned
-// site is named. Task 15c's row is folded in whole — its `fn_bodies`-counted
-// "exactly one function may name the constructor, and it is THAT one" is
-// asserted here for every sanctioned site rather than for `probe.rs` alone,
-// which is stronger than either of the two guards it replaces.
-//
-// WHY IT LIVES IN THIS FILE. This file already owns the walk, and it is the
-// one path on `ALLOWED` whose reason is "it is the one that has to spell the
-// tokens out" — a guard about constructor names has to name them, and any
-// other home would need a standing permission for a file that constructs
-// nothing.
+// It lives in this file because this file owns the walk and is the one path
+// on `ALLOWED` whose reason is that it has to spell the tokens out.
 
 /// The tokens that mean "a Kafka client's auth is built here".
 ///
 /// The first is the dial itself; the second is interface I1's ONE
-/// constructor; the last two are the arms a call site must never pin — the
-/// defect Task 6 found in two of three sites, under which a spec asking for
-/// `scramSha512` was recorded in the receipt and then dialled unauthenticated.
+/// constructor; the last two are the arms a call site must never pin: a spec
+/// asking for `scramSha512` would be recorded in the receipt and then dialled
+/// unauthenticated.
 const CONSTRUCTION_TOKENS: [&str; 5] = [
     "RdKafkaReader::connect(",
-    // D2 W3's check client, added with W4's runner. It is a SECOND dialling
-    // constructor over the same `AuthConfig`, so leaving it out would have let
-    // a file build a client's auth and dial with it while satisfying the
-    // "exactly one function names the constructor" clause vacuously — the
-    // clause counts functions naming a constructor, and a file naming NONE of
-    // the listed ones fails it rather than passing it, which is how this was
-    // noticed.
+    // The check client: a SECOND dialling constructor over the same
+    // `AuthConfig`, without which a file could build a client's auth and dial
+    // while satisfying the "exactly one function names the constructor"
+    // clause vacuously.
     "KafkaInventory::connect(",
     "AuthConfig::from_spec",
     "AuthConfig::Plaintext",
@@ -729,8 +676,7 @@ const CONSTRUCTION_SITES: [(&str, &str, &str); 5] = [
 ///
 /// Brace-counted rather than regexed: "exactly one function names the
 /// constructor" is a claim about a BODY, and a line-based scan cannot tell
-/// which function a line is inside. Lifted verbatim from the guard Task 15c
-/// wrote in `cluster_probe.rs`, which this row replaces.
+/// which function a line is inside.
 fn fn_bodies(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     // The running BYTE offset of each line. Every index below lands on a `{`
@@ -874,9 +820,8 @@ fn construction_walk() -> Vec<(String, String)> {
 /// arm, each confining the dialling constructor to the one function named
 /// beside it.
 ///
-/// Derived, not listed: this is Task 6's row and Task 15c's row, merged, with
-/// the file list computed from the tree instead of typed out. Plan erratum
-/// **E11(e)**, review finding **M-2**.
+/// Derived, not listed: the file list is computed from the tree (plan erratum
+/// **E11(e)**).
 #[test]
 fn the_one_construction_site_rule_is_derived_from_the_tree() {
     let files = construction_walk();
@@ -933,9 +878,8 @@ fn the_construction_walk_covers_both_crates() {
 /// The guard has TEETH: a construction site planted in a file that is not on
 /// the list is flagged, and so is each way a sanctioned one can go wrong.
 ///
-/// THE MUTANT M-2 IS ABOUT. Task 6's guard iterated a fixed three-file list,
-/// so this plant — a fourth file that dials — was invisible to it. Here it is
-/// one offence, by name.
+/// A fixed file list would not see this plant, a further file that dials.
+/// Here it is one offence, by name.
 #[test]
 fn a_construction_site_planted_in_an_unlisted_file_is_flagged() {
     // 1. A fifth site, in a file nobody listed.
@@ -963,7 +907,7 @@ fn a_construction_site_planted_in_an_unlisted_file_is_flagged() {
     );
     assert_eq!(in_controller.len(), 1, "{in_controller:?}");
 
-    // 3. A sanctioned site that PINS AN ARM — Task 6's original defect.
+    // 3. A sanctioned site that PINS AN ARM.
     let pinned = construction_offences(
         "crates/logweir/src/doctor.rs",
         "fn check_target() {\n    let auth = AuthConfig::Plaintext;\n    \
@@ -981,8 +925,7 @@ fn a_construction_site_planted_in_an_unlisted_file_is_flagged() {
         "and it pinned an arm: {pinned:?}"
     );
 
-    // 4. A sanctioned site whose dial MOVED OUT of its one function — Task
-    //    15c's own claim, now asserted for all four sites.
+    // 4. A sanctioned site whose dial MOVED OUT of its one function.
     let moved = construction_offences(
         "crates/logweir/src/probe.rs",
         "fn dial() {\n    let a = AuthConfig::from_spec(&s, None);\n}\n\

@@ -1,7 +1,6 @@
-//! FX-1 fix round, M1: an unreadable consumer-groups snapshot is TOLD, not
-//! dropped.
+//! An unreadable consumer-groups snapshot is TOLD, not dropped.
 //!
-//! Since FX-1, `OsoCliEngine::describe` no longer refuses an archive over the
+//! `OsoCliEngine::describe` does not refuse an archive over the
 //! content of its consumer-groups snapshot — Logweir restores no consumer
 //! offsets and signs nothing about the snapshot — and a snapshot that is not
 //! in the engine's shape is an `ArchiveNotice` beside the facts
@@ -17,8 +16,8 @@
 //! `kafka-source:9092`, handed to a double, never to a client.
 //!
 //! Signed evidence is deliberately NOT asserted to carry the notice: no
-//! scorecard, receipt or catalog field records it, and carrying it into
-//! signed evidence is PROD-04.1's. The rows assert the opposite, so that
+//! scorecard, receipt or catalog field records it. The rows assert the
+//! opposite, so that
 //! adding it there becomes a visible, versioned decision.
 
 mod fixtures;
@@ -30,9 +29,7 @@ use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-// ---------------------------------------------------------------------------
 // The notice, and a capture of the structured log.
-// ---------------------------------------------------------------------------
 
 const KIND: &str = "consumer-groups-snapshot-unreadable";
 
@@ -93,9 +90,7 @@ fn notice_events(events: &[serde_json::Value]) -> Vec<&serde_json::Value> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // An engine that tells a notice, around any other.
-// ---------------------------------------------------------------------------
 
 /// Delegates everything to `inner` and adds `notices` to `describe`'s answer,
 /// the way `OsoCliEngine` does for an unreadable snapshot.
@@ -170,9 +165,7 @@ impl DataEngine for Placeholder {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The rows.
-// ---------------------------------------------------------------------------
 
 /// The surfacing function itself: one `warning:` line per notice on the writer
 /// it is given, naming the backup set, the object, its digest, the reason and
@@ -235,7 +228,7 @@ fn a_drill_tells_an_unreadable_snapshot_and_still_passes() {
     assert_eq!(told.len(), 1, "no WARN event told the notice: {events:?}");
     assert_eq!(told[0]["fields"]["key"], key);
     assert_eq!(told[0]["fields"]["backup_id"], sc.source.backup_id);
-    // Nothing signed records it: carrying it into evidence is PROD-04.1's.
+    // Nothing signed records it.
     let signed = serde_json::to_string(&sc).unwrap();
     assert!(!signed.contains("consumer-groups"), "{signed}");
 }
@@ -278,7 +271,7 @@ impl ClusterReader for StubReader {
 /// A `DataEngine` whose backup "ran" and whose archive holds one topic with
 /// one segment. It spawns nothing, and — when given an archive — writes its
 /// manifest there DURING the run, as the real engine does: a backup run
-/// refuses a set whose manifest exists before its engine starts (FX-7).
+/// refuses a set whose manifest exists before its engine starts.
 struct OneTopic {
     archive: Option<Arc<Store>>,
 }
@@ -417,8 +410,8 @@ fn a_backup_tells_an_unreadable_snapshot_and_still_writes_its_receipt() {
         strimzi_cluster: None,
         consumer_groups: Vec::new(),
     };
-    // EMPTY: the engine double writes the manifest when it runs (FX-7: a set
-    // whose manifest exists before the engine starts is refused).
+    // EMPTY: the engine double writes the manifest when it runs (a set whose
+    // manifest exists before the engine starts is refused).
     let archive = Arc::new(Store::in_memory(ARCHIVE_PREFIX));
     let evidence = Store::in_memory("logweir/");
     let snapshot_key = format!("{ARCHIVE_PREFIX}{BACKUP_ID}/consumer-groups-snapshot.json");
@@ -452,6 +445,6 @@ fn a_backup_tells_an_unreadable_snapshot_and_still_writes_its_receipt() {
         .expect("the receipt was written");
     let receipt = String::from_utf8(receipt).unwrap();
     assert!(receipt.contains(BACKUP_ID), "{receipt}");
-    // Nothing signed records it: carrying it into evidence is PROD-04.1's.
+    // Nothing signed records it.
     assert!(!receipt.contains("consumer-groups"), "{receipt}");
 }

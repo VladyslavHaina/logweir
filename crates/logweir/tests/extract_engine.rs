@@ -1,7 +1,4 @@
-//! Task 13's own coverage: the extraction and the pin, nothing else.
-//! `logweir doctor` (which would otherwise seem the natural home for a
-//! "does the engine run" check) is Task 14 — its inputs (`DrillSpec`,
-//! `AllowedClusters`) don't exist yet.
+//! The engine extraction and its pin, nothing else.
 use std::process::Command;
 
 fn repo_root() -> std::path::PathBuf {
@@ -88,10 +85,9 @@ fn the_extracted_engine_reports_the_pinned_version() {
             .unwrap_or_else(|e| panic!("docker run failed ({e}); is Docker running?"));
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
     };
-    // The extracted bytes are OSO's RELEASE — the one-release rollback and the
-    // release Logweir's build is made from (PROD-00.2) — and report exactly
-    // that version (PROD-00.3f moved it to 0.23.3; the full-drill floor stays
-    // 0.21.0). A whole-token comparison, as `doctor` makes it: `contains` would
+    // The extracted bytes are OSO's RELEASE (the one-release rollback, and the
+    // release Logweir's build is made from) and report exactly that version.
+    // A whole-token comparison, as `doctor` makes it: `contains` would
     // accept `0.23.31`. They never report Logweir's build identity, which only
     // `scripts/engine-source.sh` stamps.
     let release = logweir::doctor::ENGINE_UPSTREAM_RELEASE;
@@ -127,14 +123,10 @@ fn third_party_license_mit_is_present_and_matches_upstream() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 30: the script's TWO MODES, read from its source, and the one execution
-// of it that reaches no daemon.
-//
-// These are source-reading tests on purpose. Running the default mode for real
-// pulls an image, and STANDING RULE 7 is explicit that a lint or unit gate
-// never reaches the network. The refusal path below is the exception that
-// proves it: it runs the script, and exits before the first `docker` word.
+// The script's TWO MODES, read from its source, and the one execution of it
+// that reaches no daemon. Running the default mode for real pulls an image,
+// and STANDING RULE 7 keeps a lint or unit gate off the network; the refusal
+// path below runs the script and exits before the first `docker` word.
 
 fn extract_engine_sh() -> String {
     let p = repo_root().join("scripts/extract-engine.sh");
@@ -334,13 +326,7 @@ fn extract_engine_refuses_without_a_pinned_digest() {
 /// `scripts/check-verifier-parity.sh` must resolve the Python interpreter in
 /// the same order — `$LOGWEIR_PYTHON`, `$LOGWEIR_E2E_PYTHON`,
 /// `.e2e/venv/bin/python3`, `python3` — so nobody has to discover a fourth name
-/// for the same thing. `verify-py` used to be a hardcoded system `python3`,
-/// which is precisely the interpreter that does not have `cryptography`.
-///
-/// FILE NOTE: Task 30's Files block permits two test files, and this is the
-/// script-side one — `workflow_lint.rs` is about `.github/workflows/`, this
-/// test is about `scripts/` and the `justfile`. No third test file is added
-/// (Global Constraint 38).
+/// for the same thing (a bare system `python3` usually lacks `cryptography`).
 #[test]
 fn verify_py_resolves_the_interpreter_like_the_parity_gate() {
     let root = repo_root();

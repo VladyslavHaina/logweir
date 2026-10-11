@@ -1,4 +1,4 @@
-//! One configurable double per runner trait (PROD-17.1 B6): [`Reader`]
+//! One configurable double per runner trait: [`Reader`]
 //! (`ClusterReader`), [`Engine`] (`DataEngine`), [`Creator`] (`TopicCreator`)
 //! and [`Deleter`] (`TopicDeleter`). A test sets only what it reads; every
 //! other method answers the variant's default. A method the trait gives a
