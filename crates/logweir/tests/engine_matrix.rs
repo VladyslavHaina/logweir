@@ -711,8 +711,8 @@ fn no_workflow_uploads_an_artifact_from_a_hidden_path() {
 
 /// Rows at or above the documented full-drill floor run the full drill; rows
 /// below it are declared `unsupported(lever-absent)`. The pinned tag has a
-/// full row on the compose stack's default broker, and at least one row runs a
-/// newer broker line than that default.
+/// full row on the compose stack's default broker, and one on the newest line
+/// the stack pins (since PROD-01.5a that line is the default).
 #[test]
 fn the_declared_rows_follow_the_documented_floor() {
     let matrix_doc = read("docs/support-matrix.md");
@@ -757,14 +757,26 @@ fn the_declared_rows_follow_the_documented_floor() {
         "the matrix sets KAFKA_IMAGE, which would override every row's KAFKA_VERSION"
     );
 
+    // The newest line `e2e/compose/stack-env.sh` pins (`LINE PINNED-VERSION
+    // IMAGE-DIGEST STATUS`).
+    let newest_broker = read("e2e/compose/stack-env.sh")
+        .split_once("LINES=\"\n")
+        .and_then(|(_, rest)| rest.split_once("\"\n"))
+        .map(|(table, _)| table)
+        .expect("stack-env.sh declares its LINES table")
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .max_by_key(|v| version(v))
+        .expect("stack-env.sh pins a broker line")
+        .to_string();
+
     let rows = matrix_rows();
     let mut pin_on_default = false;
-    let mut newer_broker = false;
     // PROD-00.3f: the C8 tripwire (the engine's fixed protocol versions on the
     // newest broker line) is a row for THE PIN, not for whichever engine
     // happened to carry it. Moving the pin without moving that row would leave
     // the newest broker exercised only by an engine Logweir no longer ships.
-    let mut pin_on_newer_broker = false;
+    let mut pin_on_newest_broker = false;
     for row in &rows {
         let tag = row["tag"].as_str().expect("tag");
         let kafka = row["kafka"].as_str().expect("kafka, as a string");
@@ -781,20 +793,15 @@ fn the_declared_rows_follow_the_documented_floor() {
             assert_eq!(expect, "unsupported(lever-absent)", "{tag}");
         }
         pin_on_default |= tag == pin_tag && kafka == default_broker;
-        newer_broker |= version(kafka) > version(&default_broker);
-        pin_on_newer_broker |= tag == pin_tag && version(kafka) > version(&default_broker);
+        pin_on_newest_broker |= tag == pin_tag && kafka == newest_broker;
     }
     assert!(
         pin_on_default,
         "no row runs the pin {pin_tag} on Kafka {default_broker}"
     );
     assert!(
-        newer_broker,
-        "no row runs a broker newer than {default_broker}"
-    );
-    assert!(
-        pin_on_newer_broker,
-        "no row runs the pin {pin_tag} on a broker newer than {default_broker} (the C8 tripwire)"
+        pin_on_newest_broker,
+        "no row runs the pin {pin_tag} on {newest_broker}, the newest line the stack pins (the C8 tripwire)"
     );
 }
 
