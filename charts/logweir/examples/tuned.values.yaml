@@ -17,7 +17,10 @@
 #     hundred topics, a collector keeping two);
 #   * weirkeeper/tests/configured_values.rs also runs with the rendered
 #     controller Deployment's own environment, so `controller.*` and
-#     `archive.s3.*` are followed through the env to the code that reads it.
+#     `archive.s3.*` are followed through the env to the code that reads it;
+#   * logweir-api/tests/chart_config.rs parses the rendered console
+#     configuration and reads `api.console.*` field by field (FX-15; the
+#     shared-mode values are in console-tuned.values.yaml).
 #
 # Every number differs from its default AND from every other number here, so
 # two values the template swapped are visible (two with equal defaults are not,
@@ -67,3 +70,12 @@ archive:
     region: eu-west-1
     allowHttp: true
     virtualHostedStyle: true
+api:
+  enabled: true
+  console:
+    enabled: true
+    mode: localAdmin
+    port: 8485
+    localAdminSubject: tuned-admin
+    keySecret: logweir-console-keys
+    rateLimits: { manualBackupsPerMinute: 11, manualRestoresPerMinute: 9 }

@@ -21,8 +21,9 @@
 //! cargo test --locked -p logweir --features e2e --test catalog_minio
 //! ```
 //!
-//! `LOGWEIR_TEST_S3_ENDPOINT` overrides the endpoint (default
-//! `http://localhost:9000`, the compose stack's published MinIO port) and
+//! `LOGWEIR_TEST_S3_ENDPOINT` overrides the endpoint (default: the MinIO of
+//! the compose stack the environment names, `http://localhost:9000` on the
+//! default one) and
 //! `LOGWEIR_TEST_S3_BUCKET` the bucket (default `kafka-backups`, created by the
 //! `minio-setup` one-shot) — the same two names
 //! `crates/logweir-store/tests/minio_options.rs` uses, so nobody has to
@@ -53,8 +54,15 @@ use std::time::Duration;
 const ROOT_USER: &str = "minioadmin";
 const ROOT_PASSWORD: &str = "minioadmin";
 
+/// The stack this process addresses, read as the e2e package reads it (the
+/// same module, compiled in), so these rows run on any compose slot
+/// (PROD-01.5b).
+#[path = "../../../e2e/tests/harness/stack.rs"]
+#[allow(dead_code)]
+mod stack;
+
 fn endpoint() -> String {
-    std::env::var("LOGWEIR_TEST_S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into())
+    std::env::var("LOGWEIR_TEST_S3_ENDPOINT").unwrap_or_else(|_| stack::s3_endpoint())
 }
 
 fn bucket() -> String {

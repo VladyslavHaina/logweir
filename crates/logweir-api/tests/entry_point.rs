@@ -411,6 +411,7 @@ fn seed_ingress(fake: &FakeKube, ready: &str) {
 /// slice and a neighbouring Service's pod are not proxies.
 #[tokio::test]
 async fn the_proxy_service_read_is_one_labelled_list_of_serving_addresses() {
+    let (_log, _guard) = capture();
     let fake = FakeKube::new();
     seed_ingress(&fake, "10.1.0.7");
     let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
@@ -530,6 +531,7 @@ fn proxy_service() -> Option<logweir_api::config::ServiceRef> {
 /// same loop over a healthy API keeps the set fresh for the same span.
 #[tokio::test]
 async fn a_loop_whose_reads_fail_ages_the_set_out() {
+    let (_log, _guard) = capture();
     let every = std::time::Duration::from_millis(20);
     let max_age = std::time::Duration::from_millis(300);
     for failing in [false, true] {
@@ -581,6 +583,7 @@ async fn a_loop_whose_reads_fail_ages_the_set_out() {
 /// (the review's mutant m1c).
 #[tokio::test]
 async fn a_proxy_service_with_more_slices_than_one_page_is_refused() {
+    let (_log, _guard) = capture();
     let fake = FakeKube::new();
     let pages = logweir_api::kube::MAX_PROXY_SLICES as usize + 1;
     for i in 0..pages {
@@ -913,6 +916,7 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
 /// spray on the peer (one key) fails the equality.
 #[tokio::test]
 async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() {
+    let (log, _guard) = capture();
     const TABLE: usize = 64;
     let app = app_with_limiter(
         ingress_range(),
@@ -929,7 +933,6 @@ async fn the_bound_on_tracked_keys_holds_under_a_spray_of_forwarded_addresses() 
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
     }
     assert_eq!(limiter().tracked(), TABLE);
-    let (log, _guard) = capture();
     for i in TABLE..(TABLE + 64) {
         let served = sign_in(&app, INGRESS, Some(&sprayed(i))).await;
         assert_eq!(served.status, 303, "client {i}: {}", served.text());
@@ -959,6 +962,7 @@ fn sprayed(i: usize) -> String {
 /// own key.
 #[tokio::test]
 async fn no_global_bucket_exists_behind_the_trusted_ingress() {
+    let (_log, _guard) = capture();
     use logweir_api::auth::ratelimit::{RateLimiter, LOGIN_PER_WINDOW};
     let app = app_with_limiter(ingress_range(), RateLimiter::for_login());
     let clients: Vec<String> = (0..40).map(|i| format!("203.0.113.{}", 100 + i)).collect();

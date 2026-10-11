@@ -499,7 +499,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["logweir-signing-trust"]
+    resourceNames: ["company-logweir-trust"]
     verbs: ["get", "patch"]
 ---
 # Source: logweir/templates/identity.yaml
@@ -648,7 +648,7 @@ data: {}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-signing-trust
+  name: company-logweir-trust
   namespace: logweir-system
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -729,7 +729,7 @@ spec:
             - --namespace
             - logweir-system
             - --public-configmap-name
-            - logweir-signing-trust
+            - company-logweir-trust
             - --external-secret-name
             - company-logweir-signer
             - --external-secret-key

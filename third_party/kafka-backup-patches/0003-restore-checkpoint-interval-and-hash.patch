@@ -1,0 +1,186 @@
+Reason: PROD-00.3g (C4), the restore checkpoint is saved only after each topic although restore.checkpoint_interval_secs is set, and its hash covers the checkpoint and offset-report paths and the HashMap order, so the same restore from another directory or process is not recognised; save it when the interval is due and hash without the paths over sorted keys; oracle: the hash and save_checkpoint_if_due unit tests in this patch and resume_semantics' c4 and g2 rows
+
+diff --git a/crates/kafka-backup-core/src/restore/engine.rs b/crates/kafka-backup-core/src/restore/engine.rs
+index 5ae1fa8..6a82a14 100644
+--- a/crates/kafka-backup-core/src/restore/engine.rs
++++ b/crates/kafka-backup-core/src/restore/engine.rs
+@@ -1993,6 +1993,22 @@ impl RestorePartitionContext {
+ 
+     async fn mark_segment_completed(&self, key: &str) {
+         super::helpers::mark_segment_completed(&self.checkpoint, key).await;
++        // Honour `checkpoint_interval_secs` inside a topic, not only after it.
++        // A segment is marked only once its last produce request was
++        // acknowledged, so the saved file never lists a segment the target may
++        // lack. A failed save is logged; the save after the topic still fails
++        // the run as before.
++        if let Some(path) = &self.options.checkpoint_state {
++            if let Err(e) = super::helpers::save_checkpoint_if_due(
++                &self.checkpoint,
++                path,
++                self.options.checkpoint_interval_secs,
++            )
++            .await
++            {
++                warn!("Failed to save restore checkpoint to {:?}: {}", path, e);
++            }
++        }
+     }
+ 
+     fn filter_segments_by_time(&self) -> Vec<&SegmentMetadata> {
+@@ -2131,10 +2147,21 @@ fn glob_match_impl(pattern: &[char], text: &[char]) -> bool {
+ /// Hash the restore options (and any record-filter fingerprint) for the
+ /// resume checkpoint. The serde representation skips the programmatic filter
+ /// handle itself, so the fingerprint is folded in explicitly.
++///
++/// The options are hashed as a `serde_json::Value`, whose objects are sorted by
++/// key, so the `HashMap` fields (`topic_mapping` and the others) hash the same
++/// in every process. `checkpoint_state` and `offset_report` are left out: they
++/// say where this run writes, not what it restores, so the same restore run
++/// from another directory still recognises its checkpoint.
+ fn restore_config_hash(options: &RestoreOptions) -> String {
+     use sha2::{Digest, Sha256};
++    let mut value = serde_json::to_value(options).unwrap_or_default();
++    if let Some(fields) = value.as_object_mut() {
++        fields.remove("checkpoint_state");
++        fields.remove("offset_report");
++    }
+     let mut hasher = Sha256::new();
+-    hasher.update(serde_json::to_vec(options).unwrap_or_default());
++    hasher.update(serde_json::to_vec(&value).unwrap_or_default());
+     if let Some(fingerprint) = &options.record_filter_fingerprint {
+         hasher.update(fingerprint.as_bytes());
+     }
+@@ -2161,6 +2188,48 @@ mod tests {
+     use crate::restore::offset_reset::{OffsetResetExecutor, OffsetResetStrategy};
+     use std::collections::HashMap;
+ 
++    #[test]
++    fn restore_config_hash_ignores_the_checkpoint_and_report_paths() {
++        let mut here = RestoreOptions::default();
++        here.topic_mapping
++            .insert("orders".to_string(), "orders-restored".to_string());
++        here.checkpoint_state = Some("/run/a/checkpoint.json".into());
++        here.offset_report = Some("/run/a/offsets.json".into());
++        let mut there = here.clone();
++        there.checkpoint_state = Some("/elsewhere/b/checkpoint.json".into());
++        there.offset_report = Some("/elsewhere/b/offsets.json".into());
++        assert_eq!(restore_config_hash(&here), restore_config_hash(&there));
++
++        // What is restored still changes the hash.
++        there
++            .topic_mapping
++            .insert("orders".to_string(), "orders-other".to_string());
++        assert_ne!(restore_config_hash(&here), restore_config_hash(&there));
++    }
++
++    #[test]
++    fn restore_config_hash_does_not_depend_on_map_iteration_order() {
++        // Two maps with the same entries, each with its own random hasher
++        // state, iterate in different orders; the hash must not see that.
++        let names: Vec<String> = (0..16).map(|i| format!("topic-{i:02}")).collect();
++        let mut forward = RestoreOptions::default();
++        for n in &names {
++            forward
++                .topic_mapping
++                .insert(n.clone(), format!("{n}-restored"));
++        }
++        let mut backward = RestoreOptions::default();
++        for n in names.iter().rev() {
++            backward
++                .topic_mapping
++                .insert(n.clone(), format!("{n}-restored"));
++        }
++        assert_eq!(
++            restore_config_hash(&forward),
++            restore_config_hash(&backward)
++        );
++    }
++
+     #[test]
+     fn decode_i64_header_handles_binary_string_and_null() {
+         assert_eq!(
+diff --git a/crates/kafka-backup-core/src/restore/helpers.rs b/crates/kafka-backup-core/src/restore/helpers.rs
+index 6ea1785..334280a 100644
+--- a/crates/kafka-backup-core/src/restore/helpers.rs
++++ b/crates/kafka-backup-core/src/restore/helpers.rs
+@@ -153,6 +153,30 @@ pub async fn mark_segment_completed(checkpoint: &Mutex<Option<RestoreCheckpoint>
+     }
+ }
+ 
++/// Write the restore checkpoint to `path` when at least `interval_secs` have
++/// passed since it was last saved (`0` saves on every call). Returns whether it
++/// wrote. This is what makes `restore.checkpoint_interval_secs` take effect
++/// inside a topic; without it the checkpoint is saved only after each topic.
++pub async fn save_checkpoint_if_due(
++    checkpoint: &Mutex<Option<RestoreCheckpoint>>,
++    path: &std::path::Path,
++    interval_secs: u64,
++) -> Result<bool> {
++    let mut cp = checkpoint.lock().await;
++    let Some(c) = cp.as_mut() else {
++        return Ok(false);
++    };
++    let interval_ms = i64::try_from(interval_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
++    let now = chrono::Utc::now().timestamp_millis();
++    if now.saturating_sub(c.last_checkpoint_time) < interval_ms {
++        return Ok(false);
++    }
++    c.touch();
++    let json = serde_json::to_string_pretty(c)?;
++    tokio::fs::write(path, json).await?;
++    Ok(true)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -491,4 +515,49 @@ mod tests {
+         let out = inject_offset_headers(vec![record], 0, &RestoreOptions::default());
+         assert_eq!(out[0].headers, vec![header("trace-id", None)]);
+     }
++
++    #[tokio::test]
++    async fn save_checkpoint_if_due_honours_the_interval() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("checkpoint.json");
++        let checkpoint = Mutex::new(Some(RestoreCheckpoint::new(
++            "backup".to_string(),
++            "hash".to_string(),
++        )));
++        mark_segment_completed(&checkpoint, "backup/topics/t/partition=0/segment-0.bin").await;
++
++        // Not due: the checkpoint was created (and so last saved) just now.
++        assert!(!save_checkpoint_if_due(&checkpoint, &path, 3600)
++            .await
++            .unwrap());
++        assert!(!path.exists());
++
++        // Due: the last save is older than the interval.
++        checkpoint
++            .lock()
++            .await
++            .as_mut()
++            .unwrap()
++            .last_checkpoint_time -= 3_600_000;
++        assert!(save_checkpoint_if_due(&checkpoint, &path, 3600)
++            .await
++            .unwrap());
++        let saved: RestoreCheckpoint =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++        assert_eq!(
++            saved.segments_completed,
++            vec!["backup/topics/t/partition=0/segment-0.bin".to_string()]
++        );
++
++        // The save resets the clock, so the next call within the interval does
++        // not write; an interval of 0 writes on every call.
++        mark_segment_completed(&checkpoint, "backup/topics/t/partition=0/segment-1.bin").await;
++        assert!(!save_checkpoint_if_due(&checkpoint, &path, 3600)
++            .await
++            .unwrap());
++        assert!(save_checkpoint_if_due(&checkpoint, &path, 0).await.unwrap());
++        let saved: RestoreCheckpoint =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++        assert_eq!(saved.segments_completed.len(), 2);
++    }
+ }

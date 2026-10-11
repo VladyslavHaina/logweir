@@ -1566,32 +1566,17 @@ async fn observe(
     let exclusions = Exclusions::from_policy(policy);
     let classification = classify(&relay.topics, &exclusions);
 
-    // R6. THE VERDICT IS `check_contract::visibility`'s AND NOBODY ELSE'S
-    // (D-SEAMS S3), and the attestation that could raise it to
-    // `attestedComplete` comes from the installation policy `ConfigMap` through
-    // the SAME fail-closed predicate an interactive discovery uses.
-    let load = policy::load(
+    // R6.
+    let verdict = run_time_visibility(
         client,
-        super::topic_discovery::configured_policy_ref().as_ref(),
-        &policy::PolicyCache::new(),
-        now,
-    )
-    .await
-    .map_err(BackupError::Api)?;
-    let signals = super::topic_discovery::visibility_signals(
         &inventory,
         namespace,
         &resolved.cluster_name,
         &resolved.principal,
-    );
-    let attestation = super::topic_discovery::attestation_candidate(
-        &load.policy().discovery.visibility_attestations,
-        namespace,
-        &resolved.cluster_name,
-        &resolved.principal,
-        &signals.cluster_id,
-    );
-    let verdict = visibility(&signals, attestation, now);
+        now,
+    )
+    .await
+    .map_err(BackupError::Api)?;
 
     let observed = Observed {
         observed_at: recorded_finish(job, pod.as_ref()).ok_or_else(|| {
@@ -1625,6 +1610,42 @@ async fn observe(
         "the per-run topic discovery resolved a selection; the names are about to be frozen"
     );
     Ok(Inner::Resolved(Box::new(selection)))
+}
+
+/// R6: a run-time discovery's visibility verdict. It is
+/// `check_contract::visibility`'s AND NOBODY ELSE'S (D-SEAMS S3), and the
+/// attestation that could raise it to `attestedComplete` comes from the
+/// installation policy `ConfigMap` this process is configured with, through
+/// the SAME fail-closed predicate an interactive discovery uses.
+///
+/// # Errors
+///
+/// [`kube::Error`] from the policy read.
+pub async fn run_time_visibility(
+    client: &kube::Client,
+    inventory: &InventoryResult,
+    namespace: &str,
+    cluster_name: &str,
+    principal: &str,
+    now: DateTime<Utc>,
+) -> Result<logweir_core::check_contract::Visibility, kube::Error> {
+    let load = policy::load(
+        client,
+        super::topic_discovery::configured_policy_ref().as_ref(),
+        &policy::PolicyCache::new(),
+        now,
+    )
+    .await?;
+    let signals =
+        super::topic_discovery::visibility_signals(inventory, namespace, cluster_name, principal);
+    let attestation = super::topic_discovery::attestation_candidate(
+        &load.policy().discovery.visibility_attestations,
+        namespace,
+        cluster_name,
+        principal,
+        &signals.cluster_id,
+    );
+    Ok(visibility(&signals, attestation, now))
 }
 
 /// The refusal a discovery Job that did not produce a usable result ends its

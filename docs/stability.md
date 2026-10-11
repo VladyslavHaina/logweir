@@ -376,8 +376,10 @@ fields are additive, so a rollback is unaffected
 - **MSRV is 1.89**, raised from 1.82 by `object_store` 0.14's feature set
   (edition 2024 needs rustc 1.85; `crc-fast`, the `icu_*` crates and
   `idna_adapter` raise the floor to 1.89).
-- **Create-only evidence puts.** MinIO and SeaweedFS 4.48 are the
-  S3-compatible backends with a row in this repository
+- **Create-only evidence puts.** MinIO, SeaweedFS 4.48, RustFS 1.0.0 and
+  versitygw v1.8.0 are the S3-compatible backends with a row in this
+  repository; RustFS and versitygw are opt-in compose profiles that
+  `compat-weekly.yml` runs weekly (PROD-01.2a)
   ([archive backends](support-matrix.md#archive-backends)). **Real AWS S3 is
   NOT exercised**: the AWS leg is
   `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` and is
@@ -452,7 +454,9 @@ fails when that changes.
 ### A crashed restore is not resumable in v0.1
 
 The rendered `restore.checkpoint_state` path is **pod-local and is never
-uploaded**, so a restore that dies mid-run re-runs from phase 0.
+uploaded**, so a restore that dies mid-run re-runs from phase 0. Since engine
+build 3 the engine also saves it inside a topic every
+`checkpoint_interval_secs`; it is still per run and never read.
 
 ### An archive holding transaction markers is refused unless the plan allows it
 
@@ -551,8 +555,10 @@ document cannot carry is refused, exit 3, `CredentialNotRenderable`
 ([saved connections](kubernetes.md#saved-connections)). Local SCRAM is covered
 end to end by `e2e/tests/scram.rs` (`just e2e`).
 **MSK-specific behavior remains [UNVERIFIED — needs an MSK cluster].**
-MSK IAM / OAUTHBEARER is unimplemented, and SCRAM-SHA-512 over TLS has no
-repeatable local row ([the compatibility contract](support-matrix.md#the-compatibility-contract)).
+MSK IAM / OAUTHBEARER is unimplemented. SCRAM-SHA-512 over TLS has a
+repeatable local row since PROD-01.2a (the `auth` profile's `SCRAM512TLS`
+listener, run by CI on every pull request); MSK itself is still unrun
+([the compatibility contract](support-matrix.md#the-compatibility-contract)).
 
 ### The unit suite dials nothing; the e2e suite dials
 
@@ -767,8 +773,10 @@ and G-PITR's fixture keeps its producers' timestamps. MSK stays
   a CA bundle: `debian:bookworm-slim` with `ca-certificates` and `libssl3`,
   never a musl or distroless base.
 - **Supported engine pin.** The images ship **Logweir's build of OSO 0.23.3**,
-  `kafka-backup 0.23.3+logweir.2` (PROD-00.2, OD-3; build 2 adds FX-21's patch
-  0002): OSO's 2026-10-07 release source (tag commit `afb160e7`) plus
+  `kafka-backup 0.23.3+logweir.3` (PROD-00.2, OD-3; build 2 adds FX-21's patch
+  0002, build 3 PROD-00.3g's patch 0003: the restore checkpoint is saved
+  inside a topic when its interval is due, and hashed without the run's
+  paths): OSO's 2026-10-07 release source (tag commit `afb160e7`) plus
   Logweir's patch folder, for linux/amd64 and linux/arm64
   (`third_party/kafka-backup-build.env`). `doctor` accepts exactly that
   version, as a whole token, and names OSO's own 0.23.3 binary (image digest

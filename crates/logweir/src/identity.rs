@@ -148,6 +148,71 @@ pub struct InstallationTrustArgs {
     pub allowed_target_cluster_ids: Vec<String>,
 }
 
+/// What `logweir identity …` runs: the parsed subcommand's arguments, mapped
+/// ONCE, here — `main` runs it, and FX-15's row parses the chart's own
+/// rendered hook argv through it.
+#[derive(Debug)]
+pub enum Invocation {
+    /// `identity bootstrap`.
+    Bootstrap(BootstrapArgs),
+    /// `identity distribute`.
+    Distribute(DistributeArgs),
+}
+
+impl From<crate::cli::IdentityCmd> for Invocation {
+    fn from(cmd: crate::cli::IdentityCmd) -> Self {
+        match cmd {
+            crate::cli::IdentityCmd::Bootstrap {
+                namespace,
+                secret_name,
+                secret_key,
+                public_configmap_name,
+                external_secret_name,
+                external_secret_key,
+                mark_fresh_install_confirm,
+                console_secret_name,
+                console_secret_key,
+                console_public_configmap_name,
+                installation_trust_policy,
+                allowed_target_cluster_ids,
+                revoke_trust_binding,
+            } => Self::Bootstrap(BootstrapArgs {
+                namespace,
+                secret_name,
+                secret_key,
+                public_configmap_name,
+                external_secret: external_secret_name.zip(external_secret_key),
+                mark_fresh_install_confirm,
+                console: console_secret_name.zip(console_public_configmap_name).map(
+                    |(secret_name, public_configmap_name)| ConsoleKeyArgs {
+                        secret_name,
+                        secret_key: console_secret_key,
+                        public_configmap_name,
+                    },
+                ),
+                installation_trust: installation_trust_policy.map(|policy_name| {
+                    InstallationTrustArgs {
+                        policy_name,
+                        allowed_target_cluster_ids,
+                    }
+                }),
+                revoke_trust_binding,
+            }),
+            crate::cli::IdentityCmd::Distribute {
+                source_namespace,
+                target_namespace,
+                secret_name,
+                secret_key,
+            } => Self::Distribute(DistributeArgs {
+                source_namespace,
+                target_namespace,
+                secret_name,
+                secret_key,
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DistributeArgs {
     pub source_namespace: String,
@@ -1453,7 +1518,12 @@ impl KubernetesStore {
             validate_data_key("external Secret data key", key)?;
         }
         let (agent, base_url, token) = Self::connect()?;
-        Ok(Self {
+        Ok(Self::over(args, agent, base_url, token))
+    }
+
+    /// The store `args` names, over an established connection.
+    fn over(args: &BootstrapArgs, agent: ureq::Agent, base_url: String, token: String) -> Self {
+        Self {
             agent,
             base_url,
             token,
@@ -1462,7 +1532,7 @@ impl KubernetesStore {
             secret_name: args.secret_name.clone(),
             secret_key: args.secret_key.clone(),
             public_configmap_name: args.public_configmap_name.clone(),
-        })
+        }
     }
 
     /// The in-cluster API connection alone — the ServiceAccount token and the
@@ -2136,6 +2206,9 @@ mod tests {
         private: PrivateRecord,
         public: PublicRecord,
         external: Result<String, String>,
+        /// FX-15: when set, `external` is served only under this Secret name
+        /// and data key, as the API server would.
+        external_at: Option<(String, String)>,
         private_patch_error: Option<String>,
         concurrent_private: Option<String>,
         empty_private_contention: bool,
@@ -2221,6 +2294,7 @@ mod tests {
                 private: empty_private("2026-10-07T10:00:00Z"),
                 public: empty_public(),
                 external: Err("HTTP 404".into()),
+                external_at: None,
                 private_patch_error: None,
                 concurrent_private: None,
                 empty_private_contention: false,
@@ -2254,8 +2328,13 @@ mod tests {
             Ok(self.public.clone())
         }
 
-        fn external_private(&mut self, _name: &str, _key: &str) -> Result<String, String> {
-            self.external.clone()
+        fn external_private(&mut self, name: &str, key: &str) -> Result<String, String> {
+            match &self.external_at {
+                Some((at_name, at_key)) if (at_name.as_str(), at_key.as_str()) != (name, key) => {
+                    Err(format!("HTTP 404: no Secret {name} with key {key}"))
+                }
+                _ => self.external.clone(),
+            }
         }
 
         fn initialize_private(
@@ -3867,5 +3946,103 @@ mod tests {
             trust_notice(created.trust.as_deref().unwrap(), &created),
             None
         );
+    }
+
+    /// The chart's rendered bootstrap-hook argv in `render`, behind `logweir`.
+    fn hook_argv(render: &str) -> Vec<String> {
+        use serde::Deserialize as _;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../charts/logweir/rendered")
+            .join(format!("{render}.yaml"));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for doc in serde_yaml::Deserializer::from_str(&text) {
+            let value = serde_yaml::Value::deserialize(doc).expect("a YAML document");
+            if value["kind"].as_str() == Some("Job")
+                && value["metadata"]["name"].as_str() == Some("logweir-identity-bootstrap")
+            {
+                let args = value["spec"]["template"]["spec"]["containers"][0]["args"]
+                    .as_sequence()
+                    .expect("the hook's args");
+                return std::iter::once("logweir".to_string())
+                    .chain(
+                        args.iter()
+                            .map(|a| a.as_str().expect("a string").to_string()),
+                    )
+                    .collect();
+            }
+        }
+        panic!("{render}.yaml renders no bootstrap hook");
+    }
+
+    /// The hook's arguments as `main` builds them from `render`'s argv.
+    fn rendered_args(render: &str) -> BootstrapArgs {
+        use clap::Parser as _;
+        let cli = crate::cli::Cli::try_parse_from(hook_argv(render)).expect("the argv parses");
+        let crate::cli::Command::Identity(cmd) = cli.command else {
+            panic!("the hook runs `identity`");
+        };
+        match Invocation::from(cmd) {
+            Invocation::Bootstrap(args) => args,
+            Invocation::Distribute(_) => panic!("the hook runs `identity bootstrap`"),
+        }
+    }
+
+    /// **FX-15: `identity.externalSecret.*` and `identity.publicConfigMapName`
+    /// reach the hook's reads at NON-default values** — from the chart's own
+    /// render (`examples/identity-external.values.yaml`), through clap and the
+    /// one argument mapping `main` uses, to what the hook does: it ADOPTS the
+    /// key the named Secret holds under the named key, and reads and writes the
+    /// public record at the named ConfigMap.
+    ///
+    /// CONTROL: the default render's arguments name no external Secret, so the
+    /// same store generates a new identity, and they name
+    /// `logweir-signing-trust`.
+    ///
+    /// MUTANTS: `external_secret_key.zip(external_secret_name)` in
+    /// `Invocation::from`; `public_configmap_name` taken from a literal in
+    /// `KubernetesStore::over`.
+    #[test]
+    fn the_charts_identity_values_reach_the_hooks_reads_at_non_default_values() {
+        let args = rendered_args("identity-external");
+        let named = (
+            "company-logweir-signer".to_string(),
+            "identity.pem".to_string(),
+        );
+        assert_eq!(args.external_secret.as_ref(), Some(&named));
+        assert_eq!(args.public_configmap_name, "company-logweir-trust");
+
+        // Adopted: the key under exactly that Secret and data key.
+        let company = SigningKey::generate_ed25519();
+        let mut store = MemoryStore::fresh();
+        store.external = Ok(pem(&company));
+        store.external_at = Some(named);
+        let outcome = bootstrap(&mut store, &args).expect("adopted");
+        assert_eq!(
+            (outcome.origin, outcome.key_id),
+            (Origin::Adopted, company.key_id())
+        );
+
+        // The public record is read at the named ConfigMap.
+        let (base, request) = one_response(404, "Not Found");
+        let mut kube = KubernetesStore::over(&args, kubernetes_agent(None), base, "t".into());
+        let _ = kube.public_record();
+        let request = String::from_utf8(request.join().unwrap()).unwrap();
+        assert!(
+            request.starts_with(
+                "GET /api/v1/namespaces/logweir-system/configmaps/company-logweir-trust "
+            ),
+            "{request}"
+        );
+
+        // CONTROL: the defaults.
+        let defaults = rendered_args("default");
+        assert_eq!(defaults.external_secret, None);
+        assert_eq!(defaults.public_configmap_name, "logweir-signing-trust");
+        let mut store = MemoryStore::fresh();
+        store.external = Ok(pem(&company));
+        let outcome = bootstrap(&mut store, &defaults).expect("generated");
+        assert_eq!(outcome.origin, Origin::Generated);
+        assert_ne!(outcome.key_id, company.key_id());
     }
 }

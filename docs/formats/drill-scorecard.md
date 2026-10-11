@@ -787,7 +787,7 @@ with the fail-safe twin below. The twin's `<key>`, the text after the last
 `": "`, is `replication_factor not assessed (notRecorded)`, never one of the
 four settings the restore decides, so arm NR-5 does not read it as a deviation
 `not_reconstructed` must name. Logweir's engine build `0.23.3+logweir.2`
-(patch 0002) records every topic's factor.
+(patch 0002) and later record every topic's factor.
 
 **Telling a writer before FX-21 from one after it.** No marker was added; old
 evidence is not re-read. A reader decides from fields every scorecard carries,

@@ -913,6 +913,7 @@ fn target_topic_preflight(
              its broker reports {LOG_APPEND_TIME}"
         );
     }
+    // Unreported is "", which no check reads and `status_line_value` omits (FX-47).
     let retention_ms = broker.get(BROKER_RETENTION_MS).cloned().unwrap_or_default();
     // `before.max.ms` first: on Kafka >= 3.6 BOTH keys are reported and
     // `difference.max.ms` is the deprecated one.

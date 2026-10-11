@@ -14,7 +14,7 @@ commented out.
 
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
 shipped. The engine the images carry is **Logweir's build of OSO 0.23.3**,
-`kafka-backup 0.23.3+logweir.2` (PROD-00.2; build 2 is FX-21's patch 0002): the vendored OSO source plus
+`kafka-backup 0.23.3+logweir.3` (PROD-00.2; build 2 is FX-21's patch 0002, build 3 PROD-00.3g's patch 0003): the vendored OSO source plus
 Logweir's patch folder, built for linux/amd64 and linux/arm64
 ([../third_party/kafka-backup-build.env](../third_party/kafka-backup-build.env)).
 A standalone CLI install needs that binary, because `logweir doctor` accepts
@@ -1151,6 +1151,36 @@ exact `https://` public base URL, and a TLS certificate for the Ingress.
 time — a non-HTTPS base URL, an Ingress with no TLS Secret, an Ingress in front
 of `localAdmin` mode, a role binding for an unbound namespace, a wildcard in a
 binding. Each is refused with the field named, before anything installs.
+
+**Roles come from the `groups` claim of the ID token, and from nothing else.**
+The console asks for the scopes `openid profile groups` and reads `groups` (a
+list of strings, or one string) from the ID token; it calls no userinfo or
+directory API. `roles.bindings[].groups` must equal those strings exactly. A
+user whose token carries no `groups` claim, or no bound group, holds no role:
+the session lists no namespace, a request into one is answered as if it did not
+exist (`404`), and the audit line says why. Making each provider put the claim
+there:
+
+- **Dex:** the connector supplies the groups (LDAP `groupSearch`, GitHub
+  `orgs`/`teams`, an OIDC upstream with `insecureEnableGroups: true`), and Dex
+  adds them when the `groups` scope is asked for; `staticPasswords` users have
+  none.
+- **Keycloak:** a client scope named `groups` with a *Group Membership* mapper
+  (claim name `groups`, *Full group path* off, *Add to ID token* on), assigned
+  to the client as a default scope.
+- **Microsoft Entra ID:** *Token configuration* → *Add groups claim* for the ID
+  token. The values are group object IDs, so bind those; a user in more than 200
+  groups gets no claim at all, so emit only *Groups assigned to the
+  application*.
+- **Okta:** a `groups` claim on the authorization server that issues the
+  console's tokens, included in the ID token, value type *Groups*, with a
+  filter such as *Matches regex* `^logweir-`.
+
+`[UNVERIFIED — none of the four lines was run against this console; each follows its provider's own documentation]`
+
+**The audit log is stdout only.** Every API request writes one audit line to
+the console's container log, which Kubernetes rotates away;
+[audit-log.md](audit-log.md) ships it to a bucket with a retention period.
 
 **No credential reaches the ConfigMap.** The rendered configuration carries
 paths into read-only Secret mounts under `/var/run/logweir/` and never a value;

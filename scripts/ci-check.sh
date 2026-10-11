@@ -64,19 +64,25 @@ cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advi
 
 # FX-21 (review L2): an engine patch's own oracle runs here, over the same
 # prepared tree, so a later patch or pin move that regresses it fails before an
-# image is built (the e2e row that shows it live needs `cluster3` and is
-# ignored in CI). Patch 0002's: the manifest merge, and the backup loop's save
-# order, keep every topic's replication factor. It builds in the debug profile
-# of target/engine-build, beside `scripts/engine-source.sh build`'s release one
-# (this script never builds a release profile).
+# image is built (the e2e rows that show them live need a slot and are ignored
+# in CI). Patch 0002's: the manifest merge, and the backup loop's save order,
+# keep every topic's replication factor. Patch 0003's (PROD-00.3g): the restore
+# checkpoint's hash leaves out the run's paths and map order, and a due
+# checkpoint is saved. It builds in the debug profile of target/engine-build,
+# beside `scripts/engine-source.sh build`'s release one (this script never
+# builds a release profile).
 engine_tests="target/engine-patch-oracle.log"
 CARGO_TARGET_DIR="$PWD/target/engine-build" cargo test --locked \
   --manifest-path "$engine_src/Cargo.toml" -p kafka-backup-core --lib \
-  -- merge_manifests manifest_persistence > "$engine_tests" 2>&1 \
+  -- merge_manifests manifest_persistence restore_config_hash save_checkpoint_if_due \
+  > "$engine_tests" 2>&1 \
   || { cat "$engine_tests" >&2; echo "ci-check: an engine patch's oracle failed" >&2; exit 1; }
-for oracle in test_merge_manifests_updates_replication_factor \
-              test_merge_manifests_preserves_replication_factor_when_none \
-              test_manifest_persistence_keeps_every_topics_replication_factor; do
-  grep -q "^test backup::engine::tests::$oracle \.\.\. ok$" "$engine_tests" \
-    || { cat "$engine_tests" >&2; echo "ci-check: patch 0002's oracle $oracle did not run and pass" >&2; exit 1; }
+for oracle in backup::engine::tests::test_merge_manifests_updates_replication_factor \
+              backup::engine::tests::test_merge_manifests_preserves_replication_factor_when_none \
+              backup::engine::tests::test_manifest_persistence_keeps_every_topics_replication_factor \
+              restore::engine::tests::restore_config_hash_ignores_the_checkpoint_and_report_paths \
+              restore::engine::tests::restore_config_hash_does_not_depend_on_map_iteration_order \
+              restore::helpers::tests::save_checkpoint_if_due_honours_the_interval; do
+  grep -q "^test $oracle \.\.\. ok$" "$engine_tests" \
+    || { cat "$engine_tests" >&2; echo "ci-check: the engine patch oracle $oracle did not run and pass" >&2; exit 1; }
 done

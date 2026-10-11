@@ -503,12 +503,14 @@ fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
 /// `summarise` that leaves the field absent fails every `Some(..)`.
 #[test]
 fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() {
+    // `retention.ms` is reported EQUAL, so only `cleanup.policy` differs: an
+    // unreported key would differ too (FX-47, the row after this one).
     let target = fixtures::target_with(
         TARGET_CLUSTER_ID,
         "drill-orders",
         3,
         1_200,
-        &[("cleanup.policy", "delete")],
+        &[("cleanup.policy", "delete"), ("retention.ms", "604800000")],
     );
     let facts = fixtures::backup_facts_orders(3);
     let mapping = fixtures::mapping("orders", "drill-orders");
@@ -577,6 +579,43 @@ fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() 
     let s = d.summarise();
     assert!(s.collisions.is_empty(), "{:?}", s.collisions);
     assert_eq!(s.not_assessed, Some(vec![]));
+}
+
+/// **FX-47.** A source setting the existing target topic does not report is a
+/// difference, never agreement: `differing config: […]` names every difference
+/// the archive's own record shows (the scorecard schema), and phase 7 pins the
+/// same rule (`verify_phase.rs::a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed`).
+///
+/// Negative control: `unwrap_or(false)` at `phase3_diff.rs`'s filter drops
+/// `retention.ms`, and the row fails (`left: []`).
+#[test]
+fn a_source_config_key_the_existing_target_topic_does_not_report_is_differing() {
+    // `cleanup.policy` reported EQUAL; `retention.ms` not reported at all.
+    let target = fixtures::target_with(
+        TARGET_CLUSTER_ID,
+        "drill-orders",
+        3,
+        1_200,
+        &[("cleanup.policy", "compact")],
+    );
+    let d = phase3_diff::run(
+        &target,
+        &fixtures::backup_facts_orders(3),
+        &fixtures::mapping("orders", "drill-orders"),
+        &coverage_for("orders", "captured"),
+    );
+    assert_eq!(
+        d.collisions[0].existing_configs_differing,
+        vec!["retention.ms".to_string()]
+    );
+    assert_eq!(
+        d.summarise().collisions,
+        vec![
+            "drill-orders: 3 partition(s), 1200 record(s) already present, \
+             differing config: [retention.ms]"
+                .to_string()
+        ]
+    );
 }
 
 /// A `SourceConfigCoverage` as a VERIFIED receipt carrying one entry reads.

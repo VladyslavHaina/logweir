@@ -1768,6 +1768,11 @@ removed too; `planMaxAgeSeconds` bounds that.
   `spec.scope.prefix`). Otherwise the worker refuses before building a handle:
   `retention-refusal=CredentialBindingMismatch`,
   `Enforced=False/CredentialBindingMismatch`.
+- Any other refusal (exit 3, nothing deleted) is `Enforced=False/RunFailed`,
+  and the message names it, for example `(exit 3, CapUnreadable
+  (LOGWEIR_RETENTION_MAX_OBJECTS))`; `EnforcementDegraded`'s message says
+  `refused <code>` too. The codes are in
+  [reference.md](reference.md#logweir-retention).
 - A record grant that a Job cannot use (malformed, no static keys — a
   `WorkloadIdentity` grant has no path here — or the same Secret as
   `credentialSecretRef`) gives `Enforced=False/EvidenceGrantUnusable` naming
@@ -2495,7 +2500,7 @@ document means the defaults, and `configuration.policy` reads ready.
 | `engine.allowUnverifiedCustomCa` | Whether a destination with a private CA may run backups and restores |
 | `evidence.controllerIdentityLocations` | `[{endpoint, region, bucket}]` where the controller's own identity may read evidence; anything else is `ControllerIdentityNotAllowlisted` |
 | `runs` | Manual-run ceilings per namespace (defaults 4 and 2). The chart renders the block only when a value differs |
-| `legacyArchiveAddressing` | The inline-archive addressing, published read-only for the legacy restore check |
+| `legacyArchiveAddressing` | The inline-archive addressing, published read-only for the legacy restore check. Its `allowHttp` and `virtualHostedStyle` are read by nothing, by decision (FX-15): the check takes transport and addressing from the plan, as the restore runner does, and dropping them would change every install's policy digest |
 
 An attestation has nine required, non-blank fields and applies only on an exact
 match of namespace, `KafkaCluster`, the broker's cluster id and the principal,

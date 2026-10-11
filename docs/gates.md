@@ -51,16 +51,14 @@ and `just deps-count` remain optional diagnostics.
 `just test-shifted-clock` is a third: it runs the workspace suite with every
 test binary's wall clock a year and a day ahead (`+<days>d` sets another
 offset). A test that compares the wall clock with a fixed instant then fails
-before that instant passes, instead of on the day it does. On macOS it builds
-a small clock shim with `cc`. On Linux it preloads libfaketime; with Debian's
-libfaketime 0.9.10 it refuses at its self-check (C11 timed waits hang and
-`rustc` deadlocks under it), so the suite has not run on Linux yet. The Rust
-toolchain keeps the real clock, because cargo judges its shared cache in
-`~/.cargo` by it: the shim stands down in cargo and rustc, and the run refuses
-unless a cargo started under the shim sees the real clock. It also refuses,
-rather than running at the real clock or hanging, when no shim is available,
-the shift does not reach a test binary, a timed wait does not return under the
-shift, or `--target` is passed.
+before that instant passes, instead of on the day it does. It builds a small
+clock shim with `cc`, on macOS and on Linux (glibc; it needs `gcc` and the libc
+headers). No CI job runs it. The Rust toolchain keeps the real clock, because
+cargo judges its shared cache in `~/.cargo` by it: the shim stands down in
+cargo and rustc, and the run refuses unless a cargo started under the shim
+sees the real clock. It also refuses, rather than running at the real clock
+or hanging, when no shim is available, the shift does not reach a test binary,
+a timed wait does not return under the shift, or `--target` is passed.
 
 ## Image publication
 
@@ -123,6 +121,7 @@ historical runs passed.
 | `just smoke`, `just smoke-weirkeeper`, `just smoke-console` | Check locally built runner, controller and console images |
 | [helm-demo.yml](../.github/workflows/helm-demo.yml) | Manual Kubernetes/Helm deployment exercise on an isolated CI kind cluster, including scheduling, restore, verification and UI access |
 | [engine-matrix.yml](../.github/workflows/engine-matrix.yml) | Weekly or manual compatibility checks across engine versions, and the record-semantics and topic-identity suites on each supported Apache Kafka line with the shipped engine |
+| [compat-weekly.yml](../.github/workflows/compat-weekly.yml) | Weekly or manual: the compatibility contract's rows that need a compose profile CI's e2e job does not start (Confluent Platform, Redpanda, SeaweedFS, RustFS, versitygw, a directory archive, Karapace), and archives written by the engines published versions pinned, drilled with the shipped engine |
 | [test-k8s-scram.py](../scripts/test-k8s-scram.py) | Authenticated backup/restore regression exercise restricted to `docker-desktop`; it also installs the shared lab, whose seed topics never expire (`retention.ms=-1`, checked offline by `python3 scripts/test_k8s_scram_seed.py`) |
 
 The standalone no-OSO workflow and duplicate kind demo workflow have been

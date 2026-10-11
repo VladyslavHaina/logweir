@@ -90,7 +90,7 @@ jobs:
           - shard: 3
             tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
                     credential_binding_store, compat_contract, stack_params, created_topics,
-                    schema_dependency, smoke, stopped_restore, topic_configuration]
+                    schema_dependency, smoke, stopped_restore, topic_configuration, fault_proxy]
           # 22; 13, with the `--features e2e` rows under crates/.
           - shard: 4
             crates: true

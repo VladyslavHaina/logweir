@@ -1,0 +1,35 @@
+# Every `api.console` value logweir-api reads in SHARED mode, at a NON-default
+# value — FX-15. A test fixture, NOT a recommendation: `keyVersion: 2` needs key
+# files that declare `version: 2`.
+#
+# crates/logweir-api/tests/chart_config.rs parses rendered/console-tuned.yaml's
+# console configuration and reads each value back from the parsed `Config`, so a
+# template or a parser that ignored one fails there. The localAdmin-only value
+# (`localAdminSubject`) is in tuned.values.yaml.
+controller:
+  watchNamespaces: [team-a]
+kubernetes:
+  namespace: team-a
+api:
+  enabled: true
+  namespaces: [team-a]
+  console:
+    enabled: true
+    mode: shared
+    port: 8486
+    keySecret: logweir-console-keys
+    keyVersion: 2
+    publicBaseUrl: https://console.example.com
+    sessionMaxAgeSeconds: 600
+    trustedProxy: none
+    rateLimits: { manualBackupsPerMinute: 12, manualRestoresPerMinute: 7 }
+    oidc:
+      issuer: https://idp.example.com/realms/logweir
+      clientId: logweir-console
+      clientSecret: logweir-console-oidc
+    roles:
+      revision: "fx-15"
+      bindings:
+        - role: operator
+          namespace: team-a
+          groups: ["logweir-team-a-operators"]

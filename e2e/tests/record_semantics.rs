@@ -25,8 +25,9 @@
 //! The expected divergence sets below are PROD-01.1's capability contract for
 //! the pinned engine, `CONTRACT_ENGINE` (`docs/to-do/decisions/PROD-01.1-record-semantics.md`;
 //! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f and on
-//! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2, and on build
-//! `0.23.3+logweir.2`, FX-21's patch 0002, by FX-21): the
+//! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2, on build
+//! `0.23.3+logweir.2`, FX-21's patch 0002, by FX-21, and on build
+//! `0.23.3+logweir.3`, PROD-00.3g's patch 0003, by PROD-00.3g): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
 //! When the engine changes — READ_COMMITTED capture through PROD-00.3, say —
 //! the row goes red and the contract and this file change together.
@@ -456,7 +457,9 @@ fn kill_own_restores() {
 /// `0.21.0` to `0.23.3` with that run, and PROD-00.2 to Logweir's build of the
 /// same source, `0.23.3+logweir.1`, and FX-21 to its build 2,
 /// `0.23.3+logweir.2` (patch 0002 changes only the manifest's replication
-/// factors; these rows re-ran on it), which is the engine the images ship and
+/// factors; these rows re-ran on it), and PROD-00.3g to its build 3,
+/// `0.23.3+logweir.3` (patch 0003 changes only the restore checkpoint; these
+/// rows re-ran on it), which is the engine the images ship and
 /// CI's e2e job runs (OSO's 0.23.3 release now records outcomes like any other
 /// engine-matrix row). `crates/logweir/tests/engine_pin.rs`
 /// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
@@ -464,7 +467,7 @@ fn kill_own_restores() {
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3+logweir.2";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.3";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();

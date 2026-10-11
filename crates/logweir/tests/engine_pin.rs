@@ -3,7 +3,8 @@
 //! PROD-00.3f moved OSO's release from `kafka-backup` 0.21.0 to 0.23.3
 //! (`docs/to-do/decisions/PROD-00-engine-route.md` section 12). PROD-00.2
 //! (OD-3) made what ships LOGWEIR'S BUILD of that release's vendored source,
-//! `0.23.3+logweir.1` (FX-21's patch 0002 made it `0.23.3+logweir.2`), and kept
+//! `0.23.3+logweir.1` (FX-21's patch 0002 made it `0.23.3+logweir.2`, and
+//! PROD-00.3g's patch 0003 `0.23.3+logweir.3`), and kept
 //! OSO's own binary as the one-release rollback.
 //! So there are two values, and each place names the one it should:
 //!
@@ -298,6 +299,12 @@ const SHIPPED_BUILDS: &[(&str, &str)] = &[
         "0.23.3+logweir.2",
         "sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8",
     ),
+    // PROD-00.3g: patch 0003, the restore checkpoint honours its interval and
+    // its hash leaves out the run's own paths.
+    (
+        "0.23.3+logweir.3",
+        "sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4",
+    ),
 ];
 
 fn check_ledger_keeps_shipped(ledger: &str, shipped: &[(&str, &str)]) -> Result<(), String> {
@@ -348,7 +355,7 @@ fn third_party_names() -> Vec<String> {
 fn the_pin_is_logweirs_build_of_the_release_prod_00_3f_evaluated() {
     // Moving either value is a decision with a record (sections 12 and 13 of
     // the engine route); these lines make the next move touch this file too.
-    assert_eq!(ENGINE_PIN, "0.23.3+logweir.2");
+    assert_eq!(ENGINE_PIN, "0.23.3+logweir.3");
     assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
     assert_eq!(
         digest_file(),
@@ -474,8 +481,8 @@ fn every_check_refuses_a_copy_that_lags() {
         (
             env.replace(
                 &format!("ENGINE_VERSION={ENGINE_PIN}"),
-                // The build before the pin (FX-21 moved it to `+logweir.2`).
-                "ENGINE_VERSION=0.23.3+logweir.1",
+                // The build before the pin (PROD-00.3g moved it to `+logweir.3`).
+                "ENGINE_VERSION=0.23.3+logweir.2",
             ),
             "another build",
         ),

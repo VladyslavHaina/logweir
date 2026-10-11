@@ -13,6 +13,8 @@
 //! | `redpanda_backs_up_and_refuses_a_restore_before_it_starts` | profile `redpanda` | Redpanda v26.2.4: probe and backup work; its groups cannot be typed and the receipt says so; its broker resource reports no timestamp bound; `target.engineProtocol` is `notReady` naming Produce v8, and the restore it predicts cannot run does fail, signing nothing |
 //! | `redpanda_authenticates_both_scram_mechanisms` | profile `redpanda` | SCRAM-SHA-256 and SCRAM-SHA-512 against Redpanda's own SCRAM, on both clients; a wrong password is refused |
 //! | `seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `objectstore` | the maintained object store, through Logweir: conditional create, the pinned manifest version on a versioned bucket, backup, restore, verify |
+//! | `rustfs_takes_a_backup_a_restore_and_refuses_a_second_claim`, `versitygw_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `rustfs`, `versitygw` | the same round trip on the other two S3 servers (PROD-01.2a) |
+//! | `a_directory_archive_backs_up_restores_and_verifies` | the stack as CI runs it | a directory as the archive (`backend: filesystem`): backup, restore, both readers, with the real engine (PROD-01.2a) |
 //! | `the_minimum_acls_for_probe_backup_and_restore` | profile `acl` | the minimum-permission profile: exactly the listed ACLs work, and each one removed fails or degrades the way the record says |
 //! | `an_unreachable_advertised_address_is_not_a_reachable_cluster` | profile `confluent` | a listener that advertises a dead address: the probe still answers `reachable=true`, the readiness check says the bootstrap answered and the advertised brokers did not, the capability rows are blocked behind it, and a backup fails with no receipt |
 //! | `a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` | profile `cluster3` | the engine-protocol row answers for a cluster only when every broker of it answered: `3 of 3` from three addresses and from one, every round; with one broker frozen it is `unknown`, naming `2 of 3` and the broker, never `ready`; and it recovers |
@@ -23,7 +25,7 @@
 //! a topic of its own. Run them on a slot:
 //!
 //! ```text
-//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 4.3 --profiles redpanda,confluent,acl,objectstore)"
+//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 4.3 --profiles redpanda,confluent,acl,objectstore,rustfs,versitygw)"
 //! just e2e-up
 //! cargo build -p logweir
 //! AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --test compat_contract -- \
@@ -1773,63 +1775,50 @@ fn redpanda_authenticates_both_scram_mechanisms() {
     );
 }
 
-/// **The maintained object store, through Logweir** (PROD-01.5's C4): the
-/// `objectstore` profile's SeaweedFS as the archive AND evidence store.
-///
-/// * Conditional create: the backup's execution claim is taken, and a second
-///   run under the same `backup_id` stops with
-///   `failure-reason=ExecutionAlreadyClaimed` (exit 1) before the engine.
-/// * Versioned reads: on the Object Lock bucket (versioning on) the receipt
-///   pins the manifest's version id; on the plain bucket it carries none.
-/// * The receipt verifies in both readers, and a drill restores the archive
-///   into the stack's broker and verifies it, signed `pass`.
-///
-/// CONTROL: the same backup into MinIO (the default store) carries no version
-/// id either, so the pin is the versioned bucket's and not the row's.
-#[test]
-#[ignore = "needs the stack's `objectstore` profile; see the module doc"]
-fn seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
+/// A backup of `topic` into `storage`, whose receipt both readers verify.
+/// Returns the backup id, its spec and the receipt.
+fn take_backup(topic: &str, storage: &Storage, tag: &str) -> (String, PathBuf, Value) {
     let auth = Auth::plaintext();
-    let topic = format!("compat-store-{}", nonce());
-    create_topic(&topic, 3);
-    let window = produce(&bootstrap(), &auth, &topic, 30);
-    let cluster_id = cluster_id();
-    let seaweed = |bucket: &str| Storage {
-        endpoint: objectstore_endpoint(),
-        bucket: bucket.to_string(),
-    };
-    let take = |storage: &Storage, tag: &str| {
-        let backup_id = format!("compat-{tag}-{}", nonce());
-        let spec = backup_spec(&bootstrap(), &auth, &topic, &backup_id, storage);
-        let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
-        let out = backup(&spec, &receipt, &auth, &[]);
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "{tag}: backup into {} did not exit 0:\n{}",
-            storage.endpoint,
-            tail(&text(&out), 4000)
-        );
-        assert_eq!(verify_receipt(&receipt), (Some(0), Some(0)), "{tag}");
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
-        (backup_id, spec, doc)
-    };
-
-    // --- the plain bucket: claim, refusal of a second claim, restore ---------
-    let plain = seaweed("kafka-backups");
-    let (backup_id, spec, doc) = take(&plain, "seaweedfs");
-    assert!(
-        doc["archive"]["manifest_version_id"].is_null(),
-        "an unversioned bucket answers no version id: {}",
-        doc["archive"]
+    let backup_id = format!("compat-{tag}-{}", nonce());
+    let spec = backup_spec(&bootstrap(), &auth, topic, &backup_id, storage);
+    let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
+    let out = backup(&spec, &receipt, &auth, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{tag}: backup into {} did not exit 0:\n{}",
+        storage.endpoint,
+        tail(&text(&out), 4000)
     );
+    assert_eq!(verify_receipt(&receipt), (Some(0), Some(0)), "{tag}");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
+    (backup_id, spec, doc)
+}
+
+/// **One S3 store through Logweir, end to end** (PROD-01.5's C4; PROD-01.2a
+/// for RustFS and versitygw): a backup of `topic` into `storage`'s
+/// `kafka-backups` whose receipt both readers verify; a second run under the
+/// same `backup_id` stopped by the store's conditional create, by name
+/// (`failure-reason=ExecutionAlreadyClaimed`, exit 1, no receipt); and a
+/// drill that restores the archive into the stack's broker, signed `pass` and
+/// verified by both readers, with its evidence on the same store. Returns
+/// the receipt, the second run's exit code and the scorecard.
+fn a_store_round_trip(
+    tag: &str,
+    storage: &Storage,
+    topic: &str,
+    window: (i64, i64),
+    cluster_id: &str,
+) -> (Value, Option<i32>, Value) {
+    let auth = Auth::plaintext();
+    let (backup_id, spec, doc) = take_backup(topic, storage, tag);
     let second_receipt = demo_dir().join(format!("{backup_id}.second.receipt.json"));
     let second = backup(&spec, &second_receipt, &auth, &[]);
     let second_text = text(&second);
     assert_eq!(
         second.status.code(),
         Some(1),
-        "a second run under one backup_id must not back up again:\n{}",
+        "{tag}: a second run under one backup_id must not back up again:\n{}",
         tail(&second_text, 3000)
     );
     assert_eq!(
@@ -1837,31 +1826,92 @@ fn seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
             .lines()
             .rfind(|l| !l.trim().is_empty()),
         Some("failure-reason=ExecutionAlreadyClaimed"),
-        "the refusal is the conditional create's, by name:\n{}",
+        "{tag}: the refusal is the conditional create's, by name:\n{}",
         tail(&second_text, 3000)
     );
-    assert!(!second_receipt.exists(), "a refused run wrote a receipt");
+    assert!(
+        !second_receipt.exists(),
+        "{tag}: a refused run wrote a receipt"
+    );
 
-    let dspec = drill_spec(&bootstrap(), &auth, &topic, &backup_id, window, &plain);
-    let allow = allowlist_for(&cluster_id);
+    let dspec = drill_spec(&bootstrap(), &auth, topic, &backup_id, window, storage);
+    let allow = allowlist_for(cluster_id);
     let mut o = RunOpts::new(&dspec);
     o.allowlist = Some(&allow);
     let r = run_with(o);
     assert_eq!(
         r.out.status.code(),
         Some(0),
-        "the drill over a SeaweedFS archive:\n{}",
+        "{tag}: the drill over the archive in {}:\n{}",
+        storage.endpoint,
         tail(
             &format!("{}\n{}", r.out.stdout_utf8(), r.out.stderr_utf8()),
             4000
         )
     );
     let sc = read_scorecard(&r);
-    assert_eq!(sc["outcome"], "pass");
-    assert!(logweir_verify(&r).success() && python_verify(&r).success());
+    assert_eq!(sc["outcome"], "pass", "{tag}");
+    assert!(
+        logweir_verify(&r).success() && python_verify(&r).success(),
+        "{tag}: both readers verify the scorecard"
+    );
+    (doc, second.status.code(), sc)
+}
+
+/// A topic of its own with 30 records in it, for a store row: its name, the
+/// records' window and the stack broker's cluster id.
+fn a_store_topic() -> (String, (i64, i64), String) {
+    let topic = format!("compat-store-{}", nonce());
+    create_topic(&topic, 3);
+    let window = produce(&bootstrap(), &Auth::plaintext(), &topic, 30);
+    (topic, window, cluster_id())
+}
+
+fn delete_topic(topic: &str) {
+    let _ = kafka_topics(&[
+        "--bootstrap-server",
+        "kafka-broker-1:9094",
+        "--delete",
+        "--topic",
+        topic,
+    ]);
+}
+
+/// **The maintained object store, through Logweir** (PROD-01.5's C4): the
+/// `objectstore` profile's SeaweedFS as the archive AND evidence store.
+///
+/// * [`a_store_round_trip`] on its plain bucket: conditional create, backup,
+///   restore, both readers.
+/// * Versioned reads: on the Object Lock bucket (versioning on) the receipt
+///   pins the manifest's version id; on the plain bucket it carries none.
+///
+/// CONTROL: the same backup into MinIO (the default store) carries no version
+/// id either, so the pin is the versioned bucket's and not the row's.
+#[test]
+#[ignore = "needs the stack's `objectstore` profile; see the module doc"]
+fn seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
+    let (topic, window, cluster_id) = a_store_topic();
+    let seaweed = |bucket: &str| Storage {
+        endpoint: objectstore_endpoint(),
+        bucket: bucket.to_string(),
+    };
+
+    // --- the plain bucket: claim, refusal of a second claim, restore ---------
+    let (doc, second, sc) = a_store_round_trip(
+        "seaweedfs",
+        &seaweed("kafka-backups"),
+        &topic,
+        window,
+        &cluster_id,
+    );
+    assert!(
+        doc["archive"]["manifest_version_id"].is_null(),
+        "an unversioned bucket answers no version id: {}",
+        doc["archive"]
+    );
 
     // --- the versioned (Object Lock) bucket: the manifest's version is pinned
-    let (_, _, locked) = take(&seaweed("kafka-backups-locked"), "seaweedfs-locked");
+    let (_, _, locked) = take_backup(&topic, &seaweed("kafka-backups-locked"), "seaweedfs-locked");
     let pinned = locked["archive"]["manifest_version_id"]
         .as_str()
         .unwrap_or("")
@@ -1873,16 +1923,10 @@ fn seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
     );
 
     // --- CONTROL: MinIO's unversioned bucket carries no pin ------------------
-    let (_, _, minio) = take(&Storage::minio(), "minio-control");
+    let (_, _, minio) = take_backup(&topic, &Storage::minio(), "minio-control");
     assert!(minio["archive"]["manifest_version_id"].is_null());
 
-    let _ = kafka_topics(&[
-        "--bootstrap-server",
-        "kafka-broker-1:9094",
-        "--delete",
-        "--topic",
-        &topic,
-    ]);
+    delete_topic(&topic);
     evidence(
         "seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim",
         &json!({
@@ -1891,11 +1935,145 @@ fn seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
             "backup_exit": 0,
             "receipt_format": doc["format_version"],
             "receipt_verified_by_both_readers": true,
-            "second_claim": {"exit": second.status.code(), "refusal": "ExecutionAlreadyClaimed"},
+            "second_claim": {"exit": second, "refusal": "ExecutionAlreadyClaimed"},
             "restore": {"exit": 0, "outcome": sc["outcome"], "verified_by_both_readers": true},
             "unversioned_bucket_manifest_version_id": doc["archive"]["manifest_version_id"],
             "versioned_bucket_manifest_version_id_recorded": true,
             "minio_control_manifest_version_id": minio["archive"]["manifest_version_id"],
+        }),
+    );
+}
+
+/// **PROD-01.2a: RustFS 1.0.0 (the `rustfs` profile) as the archive and
+/// evidence store**, through [`a_store_round_trip`]: conditional create
+/// (the second claim refused by name), a backup, a restore, both readers.
+#[test]
+#[ignore = "needs the stack's `rustfs` profile; see the module doc"]
+fn rustfs_takes_a_backup_a_restore_and_refuses_a_second_claim() {
+    other_store_row("rustfs", rustfs_endpoint());
+}
+
+/// **PROD-01.2a: versitygw v1.8.0 (the `versitygw` profile), POSIX backend,
+/// as the archive and evidence store**, the same way.
+#[test]
+#[ignore = "needs the stack's `versitygw` profile; see the module doc"]
+fn versitygw_takes_a_backup_a_restore_and_refuses_a_second_claim() {
+    other_store_row("versitygw", versitygw_endpoint());
+}
+
+fn other_store_row(store: &str, endpoint: String) {
+    let (topic, window, cluster_id) = a_store_topic();
+    let storage = Storage {
+        endpoint: endpoint.clone(),
+        bucket: ARCHIVE_BUCKET.to_string(),
+    };
+    let (doc, second, sc) = a_store_round_trip(store, &storage, &topic, window, &cluster_id);
+    delete_topic(&topic);
+    evidence(
+        &format!("{store}_takes_a_backup_a_restore_and_refuses_a_second_claim"),
+        &json!({
+            "store": store,
+            "endpoint": endpoint,
+            "backup_exit": 0,
+            "receipt_format": doc["format_version"],
+            "receipt_verified_by_both_readers": true,
+            "second_claim": {"exit": second, "refusal": "ExecutionAlreadyClaimed"},
+            "restore": {"exit": 0, "outcome": sc["outcome"], "verified_by_both_readers": true},
+        }),
+    );
+}
+
+/// **PROD-01.2a: a directory as the archive (`backend: filesystem`), the
+/// standalone CLI's own case.** `logweir backup run` with the real engine
+/// writes the archive into a local directory, and its receipt verifies in
+/// both readers; `logweir drill run` restores from that directory into the
+/// stack's broker, with its evidence in a second directory, signed `pass` and
+/// verified by both readers. The directories are under `engine_mount()`, so
+/// one path names the same directory to Logweir and, through
+/// `e2e/fixtures/engine-docker.sh`, to an engine in a container.
+#[test]
+#[ignore = "a whole backup and drill on its own topic; run it by name (module doc)"]
+fn a_directory_archive_backs_up_restores_and_verifies() {
+    let auth = Auth::plaintext();
+    let (topic, window, cluster_id) = a_store_topic();
+    let root_dir = engine_mount().join(format!("compat-dir-{}", nonce()));
+    let archive = root_dir.join("archive");
+    let evidence_dir = root_dir.join("evidence");
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::create_dir_all(&evidence_dir).unwrap();
+    let dir_storage = |p: &Path| -> serde_yaml::Value {
+        serde_yaml::from_str(&format!(
+            "{{backend: filesystem, path: \"{}\"}}",
+            p.display()
+        ))
+        .unwrap()
+    };
+
+    let backup_id = format!("compat-dir-{}", nonce());
+    let mut spec: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "backup_id: {backup_id}\nsource:\n  bootstrap_servers: [\"{}\"]\n  topics: [{topic}]\n",
+        bootstrap()
+    ))
+    .unwrap();
+    spec["storage"] = dir_storage(&archive);
+    let spec_path = demo_dir().join(format!("compat-{backup_id}.yaml"));
+    std::fs::write(&spec_path, serde_yaml::to_string(&spec).unwrap()).unwrap();
+    let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
+    let out = backup(&spec_path, &receipt, &auth, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a backup into {} did not exit 0:\n{}",
+        archive.display(),
+        tail(&text(&out), 4000)
+    );
+    assert!(
+        archive.join(&backup_id).join("manifest.json").is_file(),
+        "the engine wrote no manifest under {}",
+        archive.display()
+    );
+    assert_eq!(
+        verify_receipt(&receipt),
+        (Some(0), Some(0)),
+        "both readers verify the receipt"
+    );
+
+    let mut dspec = drill_spec(
+        &bootstrap(),
+        &auth,
+        &topic,
+        &backup_id,
+        window,
+        &Storage::minio(),
+    );
+    dspec["source"]["storage"] = dir_storage(&archive);
+    dspec["evidence"] = dir_storage(&evidence_dir);
+    let allow = allowlist_for(&cluster_id);
+    let mut o = RunOpts::new(&dspec);
+    o.allowlist = Some(&allow);
+    let r = run_with(o);
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "the drill over the directory archive:\n{}",
+        tail(
+            &format!("{}\n{}", r.out.stdout_utf8(), r.out.stderr_utf8()),
+            4000
+        )
+    );
+    let sc = read_scorecard(&r);
+    assert_eq!(sc["outcome"], "pass");
+    assert!(logweir_verify(&r).success() && python_verify(&r).success());
+    delete_topic(&topic);
+    let _ = std::fs::remove_dir_all(&root_dir);
+    evidence(
+        "a_directory_archive_backs_up_restores_and_verifies",
+        &json!({
+            "archive": "backend: filesystem",
+            "backup_exit": 0,
+            "receipt_verified_by_both_readers": true,
+            "restore": {"exit": 0, "outcome": sc["outcome"], "verified_by_both_readers": true},
+            "engine": sc["engine"]["version"],
         }),
     );
 }

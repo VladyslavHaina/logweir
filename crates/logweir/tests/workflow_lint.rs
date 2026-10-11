@@ -150,8 +150,11 @@ fn the_chart_is_published_beside_the_images_it_names() {
     names.sort();
     assert_eq!(
         names,
+        // compat-weekly.yml (PROD-01.2a) runs e2e rows weekly and publishes
+        // nothing: contents read, no secret, no registry login.
         [
             "ci.yml",
+            "compat-weekly.yml",
             "engine-matrix.yml",
             "helm-demo.yml",
             "images.yml",

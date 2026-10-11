@@ -31,13 +31,10 @@
 # the shift once ran that GC as if it were 2100 on the shared `~/.cargo` (FX-9
 # review, MEDIUM-1). Three fences stop that:
 #   1. The shim stands down in cargo, rustc, rustdoc, rustup, rustfmt,
-#      clippy-driver and every `cargo-*` and `rust-*` program. On macOS it also
-#      drops itself from their environment, so nothing they start (rustc, a
-#      build script, the linker) loads it, and it logs each stand-down to
-#      `target/shifted-clock/stood-down.log`. On Linux, libfaketime's
-#      FAKETIME_SKIP_CMDS names the same programs plus `build-script-build`,
-#      which keeps their clock real but leaves libfaketime loaded in them
-#      (see "Linux" below); anything else they start keeps the preload.
+#      clippy-driver and every `cargo-*` and `rust-*` program. It also drops
+#      itself from their environment, so nothing they start (rustc, a build
+#      script, the linker) loads it, and it logs each stand-down to
+#      `target/shifted-clock/stood-down.log`.
 #   2. The runner sets CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never, so no cargo
 #      below a test binary runs the GC at all.
 #   3. The self-check below refuses unless a cargo started under the shim
@@ -54,13 +51,15 @@
 #     measured it (2026-10-05, libfaketime 0.9.13): Rust's
 #     `Condvar::wait_timeout` and librdkafka's `cnd_timedwait_ms` both hang,
 #     and the suite stalled in the first test that dials a broker.
-#   * Linux: libfaketime through `LD_PRELOAD`. In a Debian bookworm container
-#     (libfaketime 0.9.10, 2026-10-05) it moved `pthread_cond_timedwait`
-#     deadlines back but not C11 `cnd_timedwait` ones (librdkafka's wait on
-#     Linux), and `rustc` deadlocked with it preloaded even when
-#     FAKETIME_SKIP_CMDS named rustc. So there the self-check refuses, in
-#     about twelve seconds, and the suite has never run on Linux: that needs a
-#     Linux port of the macOS shim, which does not exist yet.
+#   * Linux (glibc): the same shim, built here with `cc` and loaded with
+#     `LD_PRELOAD` (FX-9a). It also moves `timespec_get` forward, and moves
+#     back the deadlines of C11 `cnd_timedwait` (librdkafka's wait on Linux),
+#     of `pthread_cond_clockwait` on CLOCK_REALTIME and of
+#     `pthread_cond_timedwait` on a realtime condition variable; one created
+#     on CLOCK_MONOTONIC keeps its deadline. Not libfaketime: in a Debian
+#     bookworm container (libfaketime 0.9.10, 2026-10-05) it moved
+#     `pthread_cond_timedwait` deadlines back but not `cnd_timedwait` ones,
+#     and `rustc` deadlocked with it preloaded.
 #
 # IT REFUSES RATHER THAN SKIPS (exit 2). A "shifted-clock" run that quietly
 # runs at the real clock, hangs, or shifts cargo is the failure this guard
@@ -75,8 +74,9 @@
 #     seconds: `pthread_cond_timedwait` with deadlines from `clock_gettime`
 #     and from `gettimeofday` (librdkafka's macOS path) and, where <threads.h>
 #     exists, C11 `cnd_timedwait` with a `timespec_get` deadline (librdkafka's
-#     Linux path). This is the hang check that holds on every platform and
-#     toolchain;
+#     Linux path); on Linux a 200 ms wait on a CLOCK_MONOTONIC condition
+#     variable must also last 200 ms, not end at once. This is the hang check
+#     that holds on every platform and toolchain;
 #   * cargo builds a throwaway crate in a throwaway CARGO_HOME and target
 #     directory. Its `--timings` report is stamped with cargo's own clock and
 #     the crate's build script prints its clock: both must be real.
@@ -93,7 +93,8 @@
 # LIMITS. Doctests run without the runner (cargo applies it to test binaries
 # only). A child spawned through a SIP-protected macOS binary (`/bin/sh`,
 # `/usr/bin/env`, `/usr/bin/perl`, and so `/tmp/lwtimeout`) or with a cleared
-# environment loses the preload and runs at the real clock. Feature-gated
+# environment loses the preload and runs at the real clock, as does a statically
+# linked program on Linux (a Go binary). Feature-gated
 # suites (`--features e2e`) are not in the default run; pass the flags after
 # the offset to include them.
 #
@@ -296,25 +297,141 @@ exec "\$@"
 EOF
     ;;
   Linux)
-    shim=""
-    for candidate in ${LIBFAKETIME:-} /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1 \
-      /usr/lib/aarch64-linux-gnu/faketime/libfaketime.so.1 /usr/lib/faketime/libfaketime.so.1 \
-      /usr/local/lib/faketime/libfaketime.so.1; do
-      if [ -f "$candidate" ]; then
-        shim="$candidate"
-        break
-      fi
-    done
-    if [ -z "$shim" ]; then
-      refuse "libfaketime is not installed (apt-get install faketime), or set LIBFAKETIME to its path."
+    cat > "$dir/shiftclock.c" <<'EOF'
+/* FX-9a's Linux clock shim, the macOS shim's twin, loaded with LD_PRELOAD.
+   See scripts/test-shifted-clock.sh. */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+#include <threads.h>
+#include <time.h>
+#include <unistd.h>
+
+static long long shift; /* seconds, set once before main */
+
+/* The next definition of the function this one replaces, found once. */
+#define REAL(name)                                                     \
+    static __typeof__(name) *real_##name;                              \
+    if (!real_##name) real_##name = (__typeof__(name) *)dlsym(RTLD_NEXT, #name)
+
+/* The Rust toolchain keeps the real clock: cargo judges its shared cache
+   against it (the script's header, "THE TOOLCHAIN KEEPS THE REAL CLOCK"). */
+static int toolchain(const char *name) {
+    static const char *const names[] = {"cargo",   "rustc",         "rustdoc", "rustup",
+                                        "rustfmt", "clippy-driver", 0};
+    for (int i = 0; names[i]; i++)
+        if (strcmp(name, names[i]) == 0) return 1;
+    return strncmp(name, "cargo-", 6) == 0 || strncmp(name, "rust-", 5) == 0;
+}
+
+/* One line per stand-down, the command line, appended to SHIFTED_CLOCK_LOG. */
+static void log_stand_down(void) {
+    const char *path = getenv("SHIFTED_CLOCK_LOG");
+    if (!path || !*path) return;
+    char line[512];
+    ssize_t n = 0;
+    int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        n = read(fd, line, sizeof line - 1); /* a byte is kept for the newline */
+        close(fd);
+    }
+    if (n < 0) n = 0;
+    while (n > 0 && line[n - 1] == '\0') n--;
+    for (ssize_t i = 0; i < n; i++)
+        if (line[i] == '\0') line[i] = ' ';
+    line[n++] = '\n';
+    fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        ssize_t written = write(fd, line, (size_t)n);
+        (void)written;
+        close(fd);
+    }
+}
+
+__attribute__((constructor)) static void read_shift(void) {
+    const char *v = getenv("SHIFTED_CLOCK_SECONDS");
+    long long s = v ? atoll(v) : 0;
+    if (s > 0 && toolchain(program_invocation_short_name)) {
+        /* Stand down here, and for everything this process starts. */
+        unsetenv("LD_PRELOAD");
+        unsetenv("SHIFTED_CLOCK_SECONDS");
+        log_stand_down();
+        s = 0;
+    }
+    shift = s > 0 ? s : 0;
+}
+
+int clock_gettime(clockid_t clock, struct timespec *tp) {
+    REAL(clock_gettime);
+    int rc = real_clock_gettime(clock, tp);
+    if (rc == 0 && tp && (clock == CLOCK_REALTIME || clock == CLOCK_REALTIME_COARSE))
+        tp->tv_sec += shift;
+    return rc;
+}
+int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
+    REAL(gettimeofday);
+    int rc = real_gettimeofday(tv, tz);
+    if (rc == 0 && tv) tv->tv_sec += shift;
+    return rc;
+}
+time_t time(time_t *out) {
+    REAL(time);
+    time_t t = real_time(NULL);
+    if (t != (time_t)-1) t += (time_t)shift;
+    if (out) *out = t;
+    return t;
+}
+int timespec_get(struct timespec *ts, int base) {
+    REAL(timespec_get);
+    int rc = real_timespec_get(ts, base);
+    if (rc == TIME_UTC && ts) ts->tv_sec += shift;
+    return rc;
+}
+/* A deadline computed from the shifted clock, handed back to the kernel's.
+   Only a REALTIME one: glibc marks a condition variable created on
+   CLOCK_MONOTONIC with bit 1 of __wrefs, and its deadline is not shifted. */
+int pthread_cond_timedwait(pthread_cond_t *restrict c, pthread_mutex_t *restrict m,
+                           const struct timespec *restrict abstime) {
+    REAL(pthread_cond_timedwait);
+    if (!abstime || (c->__data.__wrefs & 2)) return real_pthread_cond_timedwait(c, m, abstime);
+    struct timespec real = *abstime;
+    real.tv_sec -= shift;
+    return real_pthread_cond_timedwait(c, m, &real);
+}
+int pthread_cond_clockwait(pthread_cond_t *restrict c, pthread_mutex_t *restrict m,
+                           clockid_t clock, const struct timespec *restrict abstime) {
+    REAL(pthread_cond_clockwait);
+    if (!abstime || clock != CLOCK_REALTIME) return real_pthread_cond_clockwait(c, m, clock, abstime);
+    struct timespec real = *abstime;
+    real.tv_sec -= shift;
+    return real_pthread_cond_clockwait(c, m, clock, &real);
+}
+/* C11's timed wait (librdkafka's on Linux) is always on the realtime clock. */
+int cnd_timedwait(cnd_t *restrict c, mtx_t *restrict m, const struct timespec *restrict abstime) {
+    REAL(cnd_timedwait);
+    if (!abstime) return real_cnd_timedwait(c, m, abstime);
+    struct timespec real = *abstime;
+    real.tv_sec -= shift;
+    return real_cnd_timedwait(c, m, &real);
+}
+EOF
+    bounded 300 "$dir/build.out" cc -shared -fPIC -O2 -o "$dir/libshiftclock.so" "$dir/shiftclock.c" -ldl
+    built=$?
+    if [ "$built" -ne 0 ]; then
+      refuse "the Linux clock shim did not build (cc exit $built); it needs a C compiler and glibc's headers (apt-get install gcc libc6-dev). $(cat "$dir/build.out")"
     fi
+    shim="$PWD/$dir/libshiftclock.so"
     cat > "$runner" <<EOF
 #!/bin/sh
 printf '%s\n' "\$1" >> '$ran'
 export LD_PRELOAD='$shim'
-export FAKETIME='+${days}d'
-export FAKETIME_DONT_FAKE_MONOTONIC=1
-export FAKETIME_SKIP_CMDS='cargo,rustc,rustdoc,rustup,rustfmt,cargo-fmt,cargo-clippy,clippy-driver,build-script-build'
+export SHIFTED_CLOCK_SECONDS='$seconds'
+export SHIFTED_CLOCK_LOG='$stood'
 export CARGO_CACHE_AUTO_CLEAN_FREQUENCY=never
 exec "\$@"
 EOF
@@ -391,6 +508,24 @@ int main(void) {
     plus_200ms(&ts);
     do rc = pthread_cond_timedwait(&c, &m, &ts); while (rc == 0);
     if (rc != ETIMEDOUT) return 1;
+#ifdef __linux__
+    /* A condition variable on CLOCK_MONOTONIC keeps its deadline: a shim that
+       moved it back would end this wait at once. */
+    pthread_condattr_t attr;
+    pthread_cond_t mc;
+    struct timespec start, end;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&mc, &attr);
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    ts = start;
+    plus_200ms(&ts);
+    do rc = pthread_cond_timedwait(&mc, &m, &ts); while (rc == 0);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    if (rc != ETIMEDOUT) return 1;
+    if ((end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec) < 150000000LL)
+        return 1;
+#endif
     pthread_mutex_unlock(&m);
 #ifdef C11_THREADS
     /* librdkafka's wait on Linux, where it uses C11 threads */

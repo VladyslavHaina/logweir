@@ -1,0 +1,157 @@
+name: compat-weekly
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: compat-weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+# PROD-01.2a. The compatibility contract's rows that need a compose profile
+# CI's e2e job does not start (docs/support-matrix.md, "The compatibility
+# contract"), which PROD-01.2 ran by hand: Confluent Platform, Redpanda, the
+# S3 servers beside MinIO (SeaweedFS, RustFS, versitygw), a directory archive,
+# and Karapace. Each entry is its own runner with its own default stack and
+# only the profiles its rows need, and runs its rows BY NAME
+# (scripts/run-named-tests.sh fails on a name that matches nothing; the rows
+# are #[ignore]d in CI's e2e job, hence --include-ignored). The engine is the
+# one the images ship, built from the vendored source exactly as ci.yml's e2e
+# job builds it. No secret: every image is public and pinned, every credential
+# is a fixture of the compose file. The `operator-archives` job below is
+# PROD-00.3o's.
+jobs:
+  rows:
+    name: compat ${{ matrix.name }}
+    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+      COMPOSE_PROFILES: ${{ matrix.profiles }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: confluent
+            profiles: confluent
+            test: compat_contract
+            rows: >-
+              confluent_platform_backs_up_restores_and_verifies
+              an_unreachable_advertised_address_is_not_a_reachable_cluster
+          - name: redpanda
+            profiles: redpanda
+            test: compat_contract
+            rows: >-
+              redpanda_backs_up_and_refuses_a_restore_before_it_starts
+              redpanda_authenticates_both_scram_mechanisms
+          - name: stores
+            profiles: objectstore,rustfs,versitygw
+            test: compat_contract
+            rows: >-
+              seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim
+              rustfs_takes_a_backup_a_restore_and_refuses_a_second_claim
+              versitygw_takes_a_backup_a_restore_and_refuses_a_second_claim
+              a_directory_archive_backs_up_restores_and_verifies
+          - name: registry
+            profiles: registry
+            test: schema_dependency
+            rows: a_backup_flags_the_schema_dependent_topics_from_their_bytes
+    steps:
+      - uses: actions/checkout@v4
+      # As in ci.yml: anonymous Docker Hub pulls are rate-limited per IP.
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
+      - name: free disk space (MinIO refuses writes below its free-space floor)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
+      - run: pip install cryptography
+      - run: cargo fetch --locked
+      - name: Extract the pinned engine
+        run: ./scripts/extract-engine.sh
+      - name: Build Logweir's engine from the vendored source
+        run: bash scripts/engine-source.sh build
+      - run: just e2e-up
+      - run: cargo build --locked -p logweir
+      - name: The rows, by name
+        env:
+          CARGO_TEST_ARGS: --locked -p e2e --features e2e --test ${{ matrix.test }}
+          LIBTEST_ARGS: --test-threads=1 --include-ignored
+          ROWS: ${{ matrix.rows }}
+        run: |
+          # ROWS is a space-separated list of test names: split on purpose.
+          # shellcheck disable=SC2086
+          ./scripts/run-named-tests.sh $ROWS
+      - if: failure()
+        run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > compose.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: "compose-logs-compat-${{ matrix.name }}", path: compose.log }
+      - if: always()
+        run: just e2e-down
+
+  # PROD-00.3o. Archives operator-shaped setups wrote must still restore and
+  # verify (decisions/PROD-00-engine-route.md §7, A-OSO-1 and A-OSO-4):
+  # every published version's archive fixtures are still in the tree, where
+  # the default suite decodes them, and an archive written by each engine a
+  # published version pinned (today OSO's 0.21.0, the pin of v0.1.1 to
+  # v0.2.0-rc.1) drills `pass` with the engine the images ship, beside the
+  # corrupted-segment control. scripts/archive-compat.sh says how; the full
+  # history is fetched because the published versions are the `v*` tags.
+  operator-archives:
+    timeout-minutes: 75
+    runs-on: ubuntu-24.04
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .RegistryConfig.Mirrors}}'
+      - name: free disk space (MinIO refuses writes below its free-space floor)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
+      - run: pip install cryptography
+      - run: cargo fetch --locked
+      - name: Every published version's archive fixtures are in the tree
+        run: scripts/archive-compat.sh fixtures
+      - name: The default suite's decoders over them
+        run: cargo test --locked -p logweir-engine-oso --test kbak --test kbak_scan --test vendored_parse
+      - name: Extract the pinned engine
+        run: ./scripts/extract-engine.sh
+      - name: Build Logweir's engine from the vendored source
+        run: bash scripts/engine-source.sh build
+      - name: An archive each published version's engine writes, drilled with the shipped engine
+        run: scripts/archive-compat.sh engines
+      - if: failure()
+        run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > compose.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: { name: compose-logs-operator-archives, path: compose.log }
+      - if: always()
+        run: just e2e-down
