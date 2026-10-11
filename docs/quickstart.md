@@ -54,7 +54,7 @@ them can approve their own restore, or enforce a deletion plan they wrote.
 ### 1. Install
 
 1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
-   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.2`) the engine the
+   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.3`) the engine the
    images ship
    ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
 2. Choose images: the published digests of the exact CI run you deploy, not
@@ -413,7 +413,7 @@ integrity, not organizational provenance; see [keys.md](keys.md).
   architecture (`docker create` the image, then `docker cp
   <container>:/usr/local/bin/kafka-backup .`), or build it from a checkout
   with `scripts/engine-source.sh build`. `kafka-backup --version` prints
-  `kafka-backup 0.23.3+logweir.2`.
+  `kafka-backup 0.23.3+logweir.3`.
 
 ### 1. Write the drill spec
 
@@ -467,7 +467,7 @@ logweir doctor \
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key — before a drill is
 attempted. It compares the engine's own `--version` output against the pinned
-`0.23.3+logweir.2`, Logweir's build, as a whole token (`0.23.3+logweir.1` or
+`0.23.3+logweir.3`, Logweir's build, as a whole token (`0.23.3+logweir.2` or
 `0.23.3` is a mismatch; OSO's own `0.23.3` passes only as the declared
 rollback, named as OSO's release). It also refuses an engine whose version is
 not the one the run would sign (`LOGWEIR_ENGINE_VERSION`, or the image's
@@ -529,8 +529,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2
-export LOGWEIR_ENGINE_DIGEST=sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8
+export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3
+export LOGWEIR_ENGINE_DIGEST=sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4
 
 logweir drill run \
   --spec drill.yaml \

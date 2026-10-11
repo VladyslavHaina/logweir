@@ -433,6 +433,7 @@ fn the_shipped_patch_folder_follows_its_policy() {
         [
             "0001-lockfile-rustls-h2-spin.patch",
             "0002-manifest-replication-factor.patch",
+            "0003-restore-checkpoint-interval-and-hash.patch",
         ],
         "{names:?}"
     );
@@ -838,19 +839,33 @@ fn check_sources_policy(policy: &str, gate_line: &str) -> Result<(), String> {
 
 /// FX-21 review L2: a patch's oracle that lives in the engine's own tests runs
 /// in `scripts/ci-check.sh`, over the tree it prepares for `cargo deny`, and
-/// each named test must report `ok` there. Patch 0002 brings three; every one
-/// is in the patch AND in the gate's list, so dropping a test from either, or
-/// the gate's `cargo test`, fails here. The gate's live negative control (the
-/// hunk removed from a prepared tree: two of the three FAILED, exit 1) is
+/// each named test must report `ok` there. Patch 0002 brings three, patch 0003
+/// (PROD-00.3g) three more; every one is in its patch AND in the gate's list,
+/// so dropping a test from either, or the gate's `cargo test`, fails here. The
+/// gate's live negative control (the hunk removed from a prepared tree: two of
+/// the three FAILED, exit 1) is
 /// `claude/artifacts/fx-21/fixround/gates/ci-oracle-negative-hunk-removed.log`.
 #[test]
-fn ci_check_runs_patch_0002s_engine_oracle() {
-    const ORACLE: [&str; 3] = [
-        "test_merge_manifests_updates_replication_factor",
-        "test_merge_manifests_preserves_replication_factor_when_none",
-        "test_manifest_persistence_keeps_every_topics_replication_factor",
+fn ci_check_runs_every_patchs_engine_oracle() {
+    const ORACLES: [(&str, [&str; 3]); 2] = [
+        (
+            "0002-manifest-replication-factor.patch",
+            [
+                "test_merge_manifests_updates_replication_factor",
+                "test_merge_manifests_preserves_replication_factor_when_none",
+                "test_manifest_persistence_keeps_every_topics_replication_factor",
+            ],
+        ),
+        (
+            "0003-restore-checkpoint-interval-and-hash.patch",
+            [
+                "restore_config_hash_ignores_the_checkpoint_and_report_paths",
+                "restore_config_hash_does_not_depend_on_map_iteration_order",
+                "save_checkpoint_if_due_honours_the_interval",
+            ],
+        ),
     ];
-    let check = |ci: &str, patch: &str| -> Result<(), String> {
+    let check = |ci: &str, patch: &str, oracle: &[&str]| -> Result<(), String> {
         let runs = ci.lines().any(|l| {
             l.contains("CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked")
                 && !l.trim_start().starts_with('#')
@@ -859,9 +874,9 @@ fn ci_check_runs_patch_0002s_engine_oracle() {
         if !runs {
             return Err("ci-check.sh does not run the engine's library tests".into());
         }
-        for t in ORACLE {
+        for t in oracle {
             if !patch.contains(&format!("fn {t}()")) {
-                return Err(format!("patch 0002 no longer carries {t}"));
+                return Err(format!("the patch no longer carries {t}"));
             }
             if !ci.contains(t) {
                 return Err(format!("ci-check.sh does not require {t} to pass"));
@@ -870,20 +885,22 @@ fn ci_check_runs_patch_0002s_engine_oracle() {
         Ok(())
     };
     let ci = read("scripts/ci-check.sh");
-    let patch = read("third_party/kafka-backup-patches/0002-manifest-replication-factor.patch");
-    check(&ci, &patch).unwrap();
-    // Negative controls: the gate's run dropped, a test dropped from the
-    // gate's list, a test dropped from the patch.
-    let no_run = ci.replace(
-        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked",
-        "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo build --locked",
-    );
-    assert!(check(&no_run, &patch).is_err());
-    for t in ORACLE {
-        let unlisted = ci.replace(t, "test_something_else");
-        assert!(check(&unlisted, &patch).unwrap_err().contains(t));
-        let untested = patch.replace(&format!("fn {t}()"), "fn renamed()");
-        assert!(check(&ci, &untested).unwrap_err().contains(t));
+    for (file, oracle) in ORACLES {
+        let patch = read(&format!("third_party/kafka-backup-patches/{file}"));
+        check(&ci, &patch, &oracle).unwrap();
+        // Negative controls: the gate's run dropped, a test dropped from the
+        // gate's list, a test dropped from the patch.
+        let no_run = ci.replace(
+            "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo test --locked",
+            "CARGO_TARGET_DIR=\"$PWD/target/engine-build\" cargo build --locked",
+        );
+        assert!(check(&no_run, &patch, &oracle).is_err());
+        for t in oracle {
+            let unlisted = ci.replace(t, "test_something_else");
+            assert!(check(&unlisted, &patch, &oracle).unwrap_err().contains(t));
+            let untested = patch.replace(&format!("fn {t}()"), "fn renamed()");
+            assert!(check(&ci, &untested, &oracle).unwrap_err().contains(t));
+        }
     }
 }
 

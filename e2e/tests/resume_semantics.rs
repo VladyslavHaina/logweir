@@ -395,16 +395,19 @@ fn write_doc_in(
         ctx, mapping, checkpoint, offsets, window,
     ))
     .expect("the restore document renders");
-    // The pacing keys go into the `restore:` block, which must be the
-    // document's last top-level block for an append to land in it.
-    let last_top = rendered
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with(' ') && !l.starts_with('#'))
-        .next_back()
-        .expect("a rendered document");
-    assert_eq!(last_top, "restore:", "the restore block is the last block");
-    let text = format!(
-        "{rendered}  produce_batch_size: {PRODUCE_BATCH}\n  rate_limit_records_per_sec: {RATE_PER_PARTITION}\n"
+    // The pacing keys go into the `restore:` block, right under its header:
+    // it is no longer the document's last block (FX-27 appends `metrics:`).
+    assert_eq!(
+        rendered.matches("\nrestore:\n").count(),
+        1,
+        "the document has one restore block"
+    );
+    let text = rendered.replacen(
+        "\nrestore:\n",
+        &format!(
+            "\nrestore:\n  produce_batch_size: {PRODUCE_BATCH}\n  rate_limit_records_per_sec: {RATE_PER_PARTITION}\n"
+        ),
+        1,
     );
     if let Some(d) = doc.parent() {
         std::fs::create_dir_all(d).expect("the attempt directory is creatable");
@@ -1844,6 +1847,238 @@ fn d1(lab: &mut Lab, ctx: &Ctx) -> Outcome {
         d1.len() == 1,
     );
     o
+}
+
+// ============================================== PROD-00.3g, the patched engine
+
+/// The engine run as a native child of this test, Logweir's build at
+/// `.engine/kafka-backup` (`scripts/engine-source.sh build`), so the rows below
+/// run the engine this checkout builds, patches included. Killed and reaped on
+/// every exit path.
+struct Native {
+    child: std::process::Child,
+    log: PathBuf,
+}
+
+impl Native {
+    fn start(lab: &Lab, label: &str, doc: &Path) -> Native {
+        let log = lab.dir.join(format!("{label}.log"));
+        let out = std::fs::File::create(&log).expect("the engine log is creatable");
+        let err = out.try_clone().expect("the engine log");
+        let (user, secret) = kafka::s3_credentials();
+        let child = Command::new(engine_bin())
+            .args(["restore", "--config", doc.to_str().expect("a UTF-8 path")])
+            .env("AWS_ACCESS_KEY_ID", user)
+            .env("AWS_SECRET_ACCESS_KEY", secret)
+            .env("AWS_REGION", "us-east-1")
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "info,kafka_backup_core::kafka::produce=trace")
+            .stdout(out)
+            .stderr(err)
+            .spawn()
+            .expect("the native engine starts");
+        Native { child, log }
+    }
+
+    fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
+    /// The exit code within `secs`; `None` when a signal ended it or the
+    /// deadline passed (the engine is then killed).
+    fn wait(&mut self, secs: u64) -> Option<i32> {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status.code(),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100))
+                }
+                _ => {
+                    self.kill();
+                    let _ = self.child.wait();
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn log(&self) -> String {
+        strip_ansi(&std::fs::read_to_string(&self.log).unwrap_or_default())
+    }
+}
+
+impl Drop for Native {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Logweir renders `checkpoint_interval_secs: 30`; a row that must see a save
+/// inside a four-second topic sets its own interval.
+fn set_interval(doc: &Path, secs: u64) {
+    let text = std::fs::read_to_string(doc).expect("the restore document");
+    assert_eq!(
+        text.matches("  checkpoint_interval_secs: 30\n").count(),
+        1,
+        "the rendered document carries Logweir's interval once"
+    );
+    let text = text.replace(
+        "  checkpoint_interval_secs: 30\n",
+        &format!("  checkpoint_interval_secs: {secs}\n"),
+    );
+    std::fs::write(doc, text).expect("the restore document is writable");
+}
+
+/// A-C4-4 (PROD-00.3g): `restore.checkpoint_interval_secs` is honoured inside
+/// a topic. The document Logweir renders, with a 1 s interval; SIGKILL once
+/// half of the first topic has landed. The checkpoint was saved inside the
+/// topic, lists only the first topic's segments, and never more of a
+/// partition than its target holds. The control is the unpatched engine,
+/// which saves only after a topic: K1's "no checkpoint file".
+fn c4_interval(lab: &mut Lab, ctx: &Ctx) -> Outcome {
+    let mut o = Outcome::new("c4-interval-honoured");
+    let m = targets(lab, ctx, "c4");
+    let (ta, tb) = (a_of(&m, ctx), b_of(&m, ctx));
+    let f = files(lab, "c4", "stable");
+    write_doc(ctx, &m, &f.checkpoint, &f.offsets, &f.doc);
+    set_interval(&f.doc, 1);
+    let mut e1 = Native::start(lab, "c4-e1", &f.doc);
+    let reached = wait_until(180, 50, || landed(&ta) >= PER_TOPIC / 2 || !e1.running());
+    e1.kill();
+    let exit1 = e1.wait(60);
+    let after = settled(&[&ta, &tb]);
+    let landed_a: i64 = after[&ta].values().sum();
+    let cp = checkpoint_json(&f.checkpoint);
+    let segs = completed_segments(&cp);
+    let a_name = ctx.sources[0].clone();
+    let listed_per_partition: BTreeMap<i32, i64> = (0..PARTS)
+        .map(|p| {
+            let part = format!("/topics/{a_name}/partition={p}/");
+            (p, segs.iter().filter(|k| k.contains(&part)).count() as i64)
+        })
+        .collect();
+    o.put("kill_reached_mid_topic", json!(reached));
+    o.put("attempt1_exit", json!(exit1));
+    o.put("landed_after_kill", json!(after));
+    o.put("checkpoint_after_kill", cp.clone().unwrap_or(Value::Null));
+    o.put("attempt1_log", json!(interesting(&e1.log())));
+    o.expect(
+        "the kill landed while the first topic was partly restored",
+        reached && landed_a > 0 && landed_a < PER_TOPIC,
+    );
+    o.expect(
+        "a checkpoint file exists after a kill inside the first topic",
+        cp.is_some(),
+    );
+    o.expect(
+        "it lists at least one segment, all of the first topic",
+        !segs.is_empty()
+            && segs
+                .iter()
+                .all(|k| k.contains(&format!("/topics/{a_name}/"))),
+    );
+    o.expect(
+        "per partition it lists no more than the target holds",
+        listed_per_partition
+            .iter()
+            .all(|(p, n)| n * SEGMENT_RECORDS as i64 <= after[&ta].get(p).copied().unwrap_or(0)),
+    );
+    o
+}
+
+/// 07.1-G2, its path half (PROD-00.3g): one two-topic restore run from two
+/// directories. Attempt 1 restores both topics with run-1's paths; its
+/// checkpoint is carried to run-2's path, and attempt 2 runs the same restore
+/// with run-2's paths, in a new process. The hash leaves the paths out and
+/// does not depend on map order, so attempt 2 recognises the checkpoint, skips
+/// every segment and leaves both targets exact. The control is the unpatched
+/// engine: "config hash mismatch" and both topics re-produced (H1).
+fn g2_paths(lab: &mut Lab, ctx: &Ctx) -> Outcome {
+    let mut o = Outcome::new("g2-hash-without-paths");
+    let m = targets(lab, ctx, "g2");
+    let f1 = files(lab, "g2", "run-1");
+    let f2 = files(lab, "g2", "run-2");
+    write_doc(ctx, &m, &f1.checkpoint, &f1.offsets, &f1.doc);
+    write_doc(ctx, &m, &f2.checkpoint, &f2.offsets, &f2.doc);
+    let mut e1 = Native::start(lab, "g2-e1", &f1.doc);
+    let exit1 = e1.wait(ENGINE_DEADLINE_SECS);
+    let segs = completed_segments(&checkpoint_json(&f1.checkpoint));
+    let carried = std::fs::copy(&f1.checkpoint, &f2.checkpoint).is_ok();
+    let mut e2 = Native::start(lab, "g2-e2", &f2.doc);
+    let exit2 = e2.wait(ENGINE_DEADLINE_SECS);
+    let log2 = e2.log();
+    let all: usize = ctx.segments.iter().sum();
+    let v = verify(ctx, &m);
+    o.put("attempt1_exit", json!(exit1));
+    o.put("carried_checkpoint_segments", json!(segs.len()));
+    o.put("attempt2_exit", json!(exit2));
+    o.put("attempt2_log", json!(interesting(&log2)));
+    o.put("verification", v.clone());
+    o.expect(
+        "attempt 1 exits 0 with every segment of both topics checkpointed",
+        exit1 == Some(0) && segs.len() == all,
+    );
+    o.expect(
+        "attempt 2, from another directory, loads the carried checkpoint",
+        carried && log2.contains(&format!("Loaded checkpoint: {all} segments completed")),
+    );
+    o.expect(
+        "attempt 2 keeps it: no config hash mismatch",
+        !log2.contains("config hash mismatch"),
+    );
+    o.expect("attempt 2 exits 0", exit2 == Some(0));
+    o.expect(
+        "both topics exact: attempt 2 produced nothing again",
+        exact(&v, "first") && exact(&v, "second"),
+    );
+    o
+}
+
+/// PROD-00.3g's live rows, on the engine this checkout builds. Run on a slot,
+/// after `scripts/engine-source.sh build` (the native route is required: a
+/// signal must reach the engine itself):
+///
+/// ```text
+/// eval "$(e2e/compose/stack-env.sh --slot 3)"
+/// cargo build -p logweir
+/// cargo test -p e2e --features e2e --test resume_semantics -- --ignored \
+///     --test-threads=1 --nocapture the_engines_restore_checkpoint_honours
+/// ```
+///
+/// Every prediction is asserted on any engine, so the same run on a build
+/// without patch 0003 fails: that is the rows' negative control.
+#[test]
+#[ignore = "PROD-00.3g rows: run on a compose slot with a native engine build"]
+fn the_engines_restore_checkpoint_honours_its_interval_and_ignores_its_paths() {
+    assert!(
+        engine_bin().ends_with(".engine/kafka-backup"),
+        "these rows signal the engine itself: build it natively with \
+         `scripts/engine-source.sh build`"
+    );
+    let engine = engine_version();
+    eprintln!("[resume71] engine {engine} (PROD-00.3g rows)");
+    let mut lab = Lab::new();
+    let ctx = setup(&mut lab);
+    let mut failures = Vec::new();
+    for row in [c4_interval as fn(&mut Lab, &Ctx) -> Outcome, g2_paths] {
+        let t0 = Instant::now();
+        let mut out = row(&mut lab, &ctx);
+        out.put("seconds", json!(t0.elapsed().as_secs()));
+        out.put("engine", json!(engine));
+        out.save();
+        failures.extend(out.failures.clone());
+    }
+    assert!(
+        failures.is_empty(),
+        "predictions that did not hold: {failures:#?}"
+    );
 }
 
 #[test]
