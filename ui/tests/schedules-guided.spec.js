@@ -22,11 +22,15 @@ import { decoded, wireItem } from "./console-fixture.js";
 import { CONSOLE, resetMode, selectMode } from "../client.js";
 import { dropDraft, formKey, keepDraft, mutationFor, readDraft } from "../lifecycle.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
+import { esc } from "../render.js";
 import {
   ADVANCED_CRON,
   CREATE_PANEL,
   CREATE_TAKES_A_DESTINATION,
+  POLICY_DRAFT_FIELDS,
   PREVIEW_BEFORE_SAVE,
+  RETENTION_POINTER_SENTENCE,
+  RETENTION_REMOVED_ON_SAVE_SENTENCE,
   SCHEDULE_DRAFT_FIELDS,
   SCHEDULE_FIELD_PATHS,
   SCHEDULE_FORM,
@@ -36,13 +40,18 @@ import {
   guidedValues,
   mintScheduleIntent,
   mountSchedules,
+  policyBody,
+  policyFormView,
+  policyValuesOf,
   readinessKey,
   readinessRequestFor,
+  renderPolicyForm,
   renderReadinessVerdict,
   renderScheduleForm,
   scheduleBody,
   scheduleDetailRoute,
   scheduleFormView,
+  submitPolicy,
   submitSchedule,
   validateSchedule,
 } from "../pages/schedules.js";
@@ -95,8 +104,6 @@ function draft(extra) {
     maxRetries: "",
     retryDelaySeconds: "",
     activeDeadlineSeconds: "",
-    keepLast: "",
-    keepDays: "",
     suspended: "false",
   }, extra || {});
 }
@@ -176,7 +183,7 @@ test("every_field_the_body_sends_has_an_input_and_every_input_is_in_the_draft", 
   for (const field of ["mode", "timeZone", "selection", "incompleteDiscovery",
     "excludeTopics", "excludePrefixes", "destination", "concurrencyPolicy",
     "startingDeadlineSeconds", "catchUpPolicy", "maxRetries", "retryDelaySeconds",
-    "activeDeadlineSeconds", "keepLast", "keepDays", "suspended"]) {
+    "activeDeadlineSeconds", "suspended"]) {
     assert.ok(html.indexOf("name=\"" + field + "\"") !== -1, field + " has an input");
     assert.ok(SCHEDULE_DRAFT_FIELDS.indexOf(field) !== -1, field + " is kept in the draft");
   }
@@ -519,7 +526,7 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
     const body = scheduleBody(draft({
       selection: "dynamic", incompleteDiscovery: "Refuse", excludePrefixes: "dev-",
       startingDeadlineSeconds: "900", catchUpPolicy: "Latest", maxRetries: "2",
-      retryDelaySeconds: "600", activeDeadlineSeconds: "7200", keepLast: "7",
+      retryDelaySeconds: "600", activeDeadlineSeconds: "7200",
       concurrencyPolicy: "Allow", suspended: "true",
     }), "30 2 * * *");
     const { MODES } = await import("../client.js");
@@ -542,7 +549,6 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
   assert.equal(sent.catchUpPolicy, "Latest");
   assert.deepEqual(sent.retry, { maxRetries: 2, delaySeconds: 600 });
   assert.equal(sent.activeDeadlineSeconds, 7200);
-  assert.deepEqual(sent.retention, { keepLast: 7 });
   assert.equal(sent.concurrencyPolicy, "Allow");
   assert.equal(sent.suspended, true);
 
@@ -550,6 +556,94 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
   // `archive` and no `destinationRef`, so the row above is about what the
   // object says and not about a translator that always writes both halves.
   assert.equal(sent.sourceRef.name, "orders-prod");
+});
+
+// ===========================================================================
+// PROD-17.1 B1 leftover (w2-retention review I1): `spec.retention` is withdrawn,
+// so neither schedule form offers it and neither sends it
+// ===========================================================================
+
+/** Whether `html` carries an input for either withdrawn retention field. */
+const offersRetention = (html) => /name="keep(Last|Days)"/.test(html);
+
+test("the_schedule_forms_offer_no_retention_and_send_none", async () => {
+  // CONTROL FOR THE PREDICATE: the inputs this row forbids are found when present.
+  assert.ok(offersRetention("<input id=\"policy-x-keepLast\" name=\"keepLast\">"));
+
+  // A stored schedule that still carries the withdrawn field.
+  const stored = () => ({
+    metadata: { name: "nightly", generation: 3 },
+    spec: {
+      schedule: "0 2 * * *", sourceRef: { name: "orders-prod" }, topics: ["orders"],
+      archive: { url: "s3://kafka-backups/team-a", secretRef: { name: "logweir-s3" } },
+      retention: { keepLast: 7, keepDays: 30 },
+    },
+  });
+
+  // 1. Neither form has an input; both show the RetentionPolicy pointer.
+  const create = renderScheduleForm({
+    draft: draft(), clusters: CLUSTERS, destinations: DESTINATIONS, mayOperate: true,
+  });
+  const edit = renderPolicyForm(policyFormView("team-a", stored(), {}, DESTINATIONS, true));
+  for (const [form, html] of [["create", create], ["edit", edit]]) {
+    assert.ok(!offersRetention(html), "the " + form + " form offers no keepLast or keepDays");
+    assert.match(html, /data-retention-pointer="true"/, "the " + form + " form points at a RetentionPolicy");
+    assert.ok(html.includes(esc(RETENTION_POINTER_SENTENCE)), "in the panel's own words (" + form + ")");
+  }
+  // The edit of a schedule that still carries it says saving removes it; a
+  // create, and an edit of a schedule without one, do not.
+  assert.ok(edit.includes(esc(RETENTION_REMOVED_ON_SAVE_SENTENCE)));
+  assert.ok(!create.includes(esc(RETENTION_REMOVED_ON_SAVE_SENTENCE)));
+  const plain = stored();
+  delete plain.spec.retention;
+  assert.ok(!renderPolicyForm(policyFormView("team-a", plain, {}, DESTINATIONS, true))
+    .includes(esc(RETENTION_REMOVED_ON_SAVE_SENTENCE)));
+
+  // 2. No draft keeps it, and no body carries it, even from a draft that holds a value.
+  for (const field of ["keepLast", "keepDays"]) {
+    assert.equal(SCHEDULE_DRAFT_FIELDS.indexOf(field), -1, field + " is not in the create draft");
+    assert.equal(POLICY_DRAFT_FIELDS.indexOf(field), -1, field + " is not in the policy draft");
+    assert.equal(policyValuesOf(stored())[field], undefined, "the stored " + field + " is not read back");
+  }
+  const stale = { keepLast: "7", keepDays: "30" };
+  assert.equal(scheduleBody(draft(stale), "30 2 * * *").spec.retention, undefined);
+  assert.ok(!("retention" in policyBody(Object.assign(policyValuesOf(stored()), stale), 3, "0 2 * * *")));
+
+  // 3. On the wire: the console create sends no `retention` member...
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (u, init) => {
+    seen.push({ url: String(u), init: init || {} });
+    return Promise.resolve({
+      ok: true, status: 201,
+      text: () => Promise.resolve(JSON.stringify({ requestId: "r", replayed: false,
+        item: wireItem("schedule.json") })),
+    });
+  };
+  try {
+    const { MODES } = await import("../client.js");
+    const body = scheduleBody(draft(stale), "30 2 * * *");
+    body.spec.retention = { keepLast: 7 };
+    await MODES.console.create("team-a", "backupschedules", body);
+  } finally {
+    globalThis.fetch = original;
+    resetMode();
+  }
+  const posts = seen.filter((r) => (r.init.method || "GET") === "POST");
+  assert.equal(posts.length, 1, "one create was sent");
+  assert.ok(!("retention" in JSON.parse(posts[0].init.body)),
+    "the create request carries no retention, even from an object that names one");
+
+  // ...and the edit sends none either, so saving removes a stored one.
+  const edits = [];
+  const api = { editSchedulePolicy: async (_ns, _name, sent) => { edits.push(sent); return sent; } };
+  await submitPolicy("team-a", stored(), Object.assign(policyValuesOf(stored()), stale), null, api, null);
+  assert.equal(edits.length, 1, "one edit was sent");
+  assert.ok(!("retention" in edits[0]), "the policy edit carries no retention");
 });
 
 // ===========================================================================

@@ -155,7 +155,7 @@ export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
   "destination", "destinationUid", "archive", "archiveSecret",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
-  "keepLast", "keepDays", "suspended", "intent",
+  "suspended", "intent",
 ]);
 
 /** The field paths a refused create names, mapped to this form's inputs.
@@ -178,8 +178,6 @@ export const SCHEDULE_FIELD_PATHS = Object.freeze([
   ["spec.archive.secretRef", "archiveSecret"],
   ["spec.archive", "archive"],
   ["spec.destinationRef", "destination"],
-  ["spec.retention.keepLast", "keepLast"],
-  ["spec.retention.keepDays", "keepDays"],
   ["schedule", "cron"],
   ["timeZone", "timeZone"],
   ["sourceRef", "source"],
@@ -200,8 +198,6 @@ export const SCHEDULE_FIELD_PATHS = Object.freeze([
   ["retry.maxRetries", "maxRetries"],
   ["retry.delaySeconds", "retryDelaySeconds"],
   ["activeDeadlineSeconds", "activeDeadlineSeconds"],
-  ["retention.keepLast", "keepLast"],
-  ["retention.keepDays", "keepDays"],
 ]);
 
 /** The defaults the CRD applies to an omitted field, and the ONE field that
@@ -418,6 +414,12 @@ export function renderRetentionPanel(object, policy, policies) {
 export const RETENTION_POINTER_SENTENCE =
   "Retention for this schedule's destination is reported by a RetentionPolicy. A schedule's " +
   "own spec.retention no longer reports.";
+
+/** Said beside that pointer in the policy form of a schedule that still carries
+ *  `spec.retention`: the form never sends it, and the route removes what a
+ *  request omits. */
+export const RETENTION_REMOVED_ON_SAVE_SENTENCE =
+  "This schedule still carries the withdrawn spec.retention; saving this policy removes it.";
 
 /** The RetentionPolicies in `policies` whose recorded enforcement is not
  *  recommendation-only: the ones that delete, or declare that a bucket rule
@@ -1223,7 +1225,7 @@ const SCHEDULE_DEFAULTS = Object.freeze({
   destination: "", archive: "", archiveSecret: "logweir-s3",
   concurrencyPolicy: "", startingDeadlineSeconds: "", catchUpPolicy: "",
   maxRetries: "", retryDelaySeconds: "", activeDeadlineSeconds: "",
-  keepLast: "", keepDays: "", suspended: "false",
+  suspended: "false",
 });
 
 /** The five glob metacharacters `logweir_core::guard::GLOB_METACHARACTERS`
@@ -1629,16 +1631,8 @@ export function scheduleBody(values, canonicalSchedule) {
   if (whole("activeDeadlineSeconds") !== null) {
     spec.activeDeadlineSeconds = whole("activeDeadlineSeconds");
   }
-  const retention = {};
-  if (whole("keepLast") !== null) {
-    retention.keepLast = whole("keepLast");
-  }
-  if (whole("keepDays") !== null) {
-    retention.keepDays = whole("keepDays");
-  }
-  if (Object.keys(retention).length > 0) {
-    spec.retention = retention;
-  }
+  // `spec.retention` IS WITHDRAWN (PROD-17.1 B1) and this form never writes it:
+  // a schedule created with it is born carrying `RetentionReportWithdrawn`.
   return {
     apiVersion: "logweir.dev/v1alpha1",
     kind: "BackupSchedule",
@@ -1963,6 +1957,8 @@ export function policyFormView(ns, object, own, destinations, may) {
     current: {
       destination: String((((object || {}).spec || {}).destinationRef || {}).name || ""),
       archive: String((((object || {}).spec || {}).archive || {}).url || ""),
+      // A stored `spec.retention` is withdrawn; saving the policy removes it.
+      retention: (((object || {}).spec || {}).retention || null) !== null,
     },
   };
 }
@@ -1987,8 +1983,6 @@ export const POLICY_FIELD_PATHS = Object.freeze([
   ["retry.maxRetries", "maxRetries"],
   ["retry.delaySeconds", "retryDelaySeconds"],
   ["activeDeadlineSeconds", "activeDeadlineSeconds"],
-  ["retention.keepLast", "keepLast"],
-  ["retention.keepDays", "keepDays"],
   ["expectedGeneration", "cron"],
 ]);
 
@@ -2898,7 +2892,7 @@ export const POLICY_DRAFT_FIELDS = Object.freeze([
   "destinationUid", "moveLocation",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
-  "keepLast", "keepDays", "suspended",
+  "suspended",
 ]);
 
 /** THE PRESET CATALOGUE, AS DISPLAY DATA AND NOTHING ELSE.
@@ -3022,7 +3016,6 @@ export function policyValuesOf(object) {
   const spec = o.spec || {};
   const preset = o.__preset || {};
   const retry = spec.retry || {};
-  const retention = spec.retention || {};
   const archive = spec.archive || {};
   const dynamic = spec.allUserTopics || null;
   const exclude = (dynamic || {}).exclude || {};
@@ -3054,8 +3047,6 @@ export function policyValuesOf(object) {
     maxRetries: number(retry.maxRetries),
     retryDelaySeconds: number(retry.delaySeconds),
     activeDeadlineSeconds: number(spec.activeDeadlineSeconds),
-    keepLast: number(retention.keepLast),
-    keepDays: number(retention.keepDays),
     suspended: spec.suspend === true ? "true" : "false",
   };
 }
@@ -3190,8 +3181,6 @@ export function validatePolicy(values) {
     ["activeDeadlineSeconds", 60, 86400],
     ["maxRetries", 0, 3],
     ["retryDelaySeconds", 60, 21600],
-    ["keepLast", 0, 1000000],
-    ["keepDays", 0, 1000000],
   ]) {
     const raw = String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
     if (raw.length === 0) {
@@ -3277,16 +3266,8 @@ export function policyBody(values, generation, canonicalSchedule) {
   if (whole("activeDeadlineSeconds") !== null) {
     body.activeDeadlineSeconds = whole("activeDeadlineSeconds");
   }
-  const retention = {};
-  if (whole("keepLast") !== null) {
-    retention.keepLast = whole("keepLast");
-  }
-  if (whole("keepDays") !== null) {
-    retention.keepDays = whole("keepDays");
-  }
-  if (Object.keys(retention).length > 0) {
-    body.retention = retention;
-  }
+  // No `retention`: it is withdrawn, and the route removes a field the request
+  // omits, so saving clears one a schedule still carries.
   return body;
 }
 
@@ -3528,10 +3509,11 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
         "<summary>Advanced: write to an archive URL instead of a saved destination</summary>" +
         inline + "</details>"
       : inline) +
-    policyNumber(name, values, errors, "keepLast", "retention keepLast",
-      "Withdrawn: spec.retention no longer reports; use a RetentionPolicy.") +
-    policyNumber(name, values, errors, "keepDays", "retention keepDays",
-      "Withdrawn, as keepLast.") +
+    "<p class=\"note\" id=\"" + esc(policyId(name, "retention")) +
+    "\" data-retention-pointer=\"true\">" + esc(RETENTION_POINTER_SENTENCE) +
+    ((current || {}).retention === true
+      ? " " + esc(RETENTION_REMOVED_ON_SAVE_SENTENCE)
+      : "") + "</p>" +
     "</fieldset>"
   );
 }
