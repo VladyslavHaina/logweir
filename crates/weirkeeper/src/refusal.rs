@@ -1,13 +1,10 @@
-//! **FX-34.** Why a guard refused a run, read off its pod log and carried
-//! into the terminal condition.
+//! Why a guard refused a run, read off its pod log and carried into the
+//! terminal condition.
 //!
-//! # What was missing
-//!
-//! A `Restore` or a `Backup` whose runner exited 3 said "the runner exited 3
-//! (guard-refused)" and nothing else. The runner's own sentence was only in
-//! the pod log, and the pod goes with its Job's TTL (PoC batch 5, F-1). The
-//! runner now prints that sentence as one `refusal-detail=` line
-//! ([`logweir_core::refusal_detail`]); this module reads it.
+//! Without it, a run whose runner exited 3 said only "the runner exited 3
+//! (guard-refused)": the runner's sentence was in the pod log, which goes with
+//! its Job's TTL. The runner prints that sentence as one `refusal-detail=` line
+//! ([`logweir_core::refusal_detail`]), and this module reads it.
 //!
 //! # A pod log is untrusted text
 //!
@@ -18,18 +15,16 @@
 //!
 //! * **One line, and only when it carries this Job's token**
 //!   ([`runner_reason`]). Text the runner did not choose can start a line of
-//!   its own in this log. The runner escapes every line break in the error
-//!   text it prints itself (`logweir::exit::one_line`, PROD-15.1); the Kafka
-//!   client inside it logs to the same stderr by itself, unescaped, and what
-//!   it logs can repeat a plan value that holds a line break (FX-43).
-//!   Both streams reach this controller as one log, so nothing about where a
-//!   line stands, or how well-formed it is, tells the runner's line from text
-//!   a plan's author got into the log. What tells them apart is a value the
-//!   plan's author could not have had: the line token this controller made
-//!   when it built the Job ([`crate::job::new_line_token`]), gave the runner
-//!   as an argument, and reads back off the Job's own pod template
-//!   ([`crate::job::line_token`]). A `refusal-detail=` line that does not
-//!   carry it is not read at all.
+//!   its own in this log: the runner escapes the line breaks in its own error
+//!   text (`logweir::exit::one_line`), but the Kafka client inside it logs to
+//!   the same stderr unescaped and can repeat a plan value holding a line
+//!   break. Nothing about where a line stands, or how well-formed it is, tells
+//!   the runner's line from text a plan's author got into the log. A value the
+//!   author could not have had does: the line token this controller made when
+//!   it built the Job ([`crate::job::new_line_token`]), gave the runner as an
+//!   argument, and reads back off the Job's pod template
+//!   ([`crate::job::line_token`]). A `refusal-detail=` line without it is not
+//!   read at all.
 //! * **Validated and cleaned before it is stored.**
 //!   [`RefusalDetail`](logweir_core::refusal_detail::RefusalDetail) cannot be
 //!   built any other way: a reason code that is a member of the CLOSED set of
@@ -110,10 +105,9 @@ pub enum RunnerReason {
     /// The runner's own reason code and sentence, validated and cleaned.
     Stated(RefusalDetail),
     /// Nothing in the log is this Job's runner's reason: the Job has no line
-    /// token (a controller from before FX-34 built it, or the random source
-    /// gave none), or no line in the tail carries the Job's token (the
-    /// `refusal-detail=` lines there are not the runner's, or there are
-    /// none). The condition is exactly what it was before the line existed.
+    /// token (an older controller built it, or the random source gave none), or
+    /// no line in the tail carries the Job's token. The condition is exactly
+    /// what it was before the line existed.
     NotStated,
     /// A line carries the Job's token, so the runner wrote it, and it did not
     /// validate: a code outside the run's closed set, nothing printable in
@@ -308,11 +302,10 @@ pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec
 /// # What is logged
 ///
 /// The pod's name and the HTTP status, never a byte of the log and never the
-/// token. A pod that is
-/// gone is `debug`: Kubernetes collecting a finished pod is not news (FX-19).
-/// A refused or failed read is ONE `warn`, because an operator has something
-/// to fix; the pass that logs it writes the terminal status, so it is not
-/// logged again.
+/// token. A pod that is gone is `debug` (Kubernetes collecting a finished pod
+/// is not news); a refused or failed read is one `warn`, because an operator
+/// has something to fix, and the pass that logs it writes the terminal status,
+/// so it is not logged again.
 pub async fn read(
     pods: &Api<Pod>,
     namespace: &str,
