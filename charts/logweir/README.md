@@ -1254,8 +1254,8 @@ provenance of each, so nobody has to trust a bare hash.
   repositories are public, and
   `docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z`
   (and the same for `mc-mirror:RELEASE.2025-08-13T08-35-41Z`) resolves them.
-* **`demoKafka.image`** — `apache/kafka:3.7.1`, the compose stack's broker,
-  pinned by its **manifest-list** digest so the same reference resolves on an
+* **`demoKafka.image`** — `apache/kafka:3.7.1`, the compose stack's broker
+  until PROD-01.5a moved its default line to 4.3.1, pinned by its **manifest-list** digest so the same reference resolves on an
   amd64 CI runner and on an arm64 development host. Resolved once, on
   **2026-09-12**, with the `kindest/node` provenance idiom:
 

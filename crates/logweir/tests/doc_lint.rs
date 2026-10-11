@@ -2193,6 +2193,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a catalog's window holds the newest points",
             "It is a partial view",
         ),
+        // PROD-01.5a and FX-41 (2026-10-11, item 72): CI's default broker
+        // line is 4.3.1 and its e2e job runs in shards; the variable that
+        // still starts the legacy line.
+        (
+            "CI tests on Kafka 4.3.1, in four shards",
+            "KAFKA_VERSION=3.7.1",
+        ),
         // PROD-17.1 (2026-10-11, item 73): the v1 cut's withdrawals; the
         // route an API client may still call.
         (
