@@ -1816,17 +1816,19 @@ rollback steps:
    and no `Backup` (item 61), and an older runner refuses a request for a
    receipt over 1 MiB (item 65). The older runner signs scorecard 1.3.0 and
    receipts 1.1.0 or 1.2.0 again; every document already written stays
-   valid. A connection using a mode item 33 added stops working
-   (an older build cannot parse it), so delete or re-create those first. The
-   bound Secrets keep working (items 33 and 38). After the roll, write each
-   `ProtectionPolicy` route again if you need the older alert sinks: the API
-   server dropped their contents (item 74).
+   valid under this release's readers. A connection using a mode item 33 added
+   stops working (an older build cannot parse it), so delete or re-create those
+   first. The bound Secrets keep working (items 33 and 38). After the roll,
+   write each `ProtectionPolicy` route again if you need the older alert sinks:
+   the API server dropped their contents (item 74).
 8. **To roll back only the engine** (item 35), use the one-release rollback
    image (`ENGINE_SOURCE=oso`, linux/amd64;
    [install.md](install.md#rolling-the-engine-back)) rather than an older
    runner; its documents say which engine ran.
-9. **Roll the verifiers back last** (item 51): an older reader refuses the
-   2.0.0 scorecards a subset restore signed.
+9. **Roll the verifiers back last** (items 33, 51 and 68): an older reader
+   refuses a 1.4.0/1.5.0 document that names a new auth mode (item 33), the
+   2.0.0 scorecards a subset restore signed (item 51) and an empty capture's
+   receipt (item 68).
 
 ---
 
