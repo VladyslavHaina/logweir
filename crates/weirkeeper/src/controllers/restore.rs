@@ -24,7 +24,7 @@
 //! `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` asserts the
 //! two Jobs differ **only** in the plan ConfigMap's contents.
 //!
-//! # The runner validates the credential; this reconciler does not
+//! # The credential is VALIDATED BY THE RUNNER, not by this reconciler
 //!
 //! Interface **I11**. `weirkeeper` holds **no `get` on Secrets anywhere**, so
 //! it never sees the projected value. The runner checks it when it reads
