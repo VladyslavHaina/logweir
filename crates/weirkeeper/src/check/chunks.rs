@@ -1,28 +1,26 @@
-//! Result storage — D2 §4.3's `chunks.rs` row and §5.5's size math.
+//! Result storage (D2 §4.3's `chunks.rs` row and §5.5's size math).
 //!
 //! # The commit point
 //!
 //! **Every chunk is written first; the status patch that indexes them is the
-//! commit.** That ordering is what makes a controller restart safe: chunks
-//! that exist but are not indexed are invisible and are collected with their
-//! owner, while an index that named a chunk which was never written would be a
-//! status pointing at nothing. A restart between the two re-decodes the relay
-//! (the Job still exists, because no TTL is set until after the commit) and
-//! re-writes byte-identical chunks, which the 409 rule accepts.
+//! commit.** Chunks that exist but are not indexed are invisible and collected
+//! with their owner, while an index naming an unwritten chunk would point at
+//! nothing. A restart between the two re-decodes the relay (the Job still
+//! exists: no TTL until after the commit) and re-writes byte-identical chunks,
+//! which the 409 rule accepts.
 //!
 //! # The bounds
 //!
 //! D2 §5.5: at most [`MAX_CHUNK_LINES`] entries **and** [`MAX_CHUNK_BYTES`]
-//! per chunk. Both, because either alone is insufficient: 2,500 worst-case
-//! 283-byte lines is ~690 KiB, comfortably under the 1 MiB `ConfigMap` limit,
-//! but 2,500 lines says nothing about a run of pathological names, and a byte
-//! bound alone would let a chunk carry 10,000 short lines that the API's page
-//! size then has to split anyway.
+//! per chunk. 2,500 worst-case 283-byte lines is ~690 KiB, under the 1 MiB
+//! `ConfigMap` limit, but a line count says nothing about pathological names,
+//! and a byte bound alone would let a chunk carry 10,000 short lines the API's
+//! page size then splits anyway.
 //!
-//! # Immutable and owned, exactly as the plan is
+//! # Immutable and owned, as the plan is
 //!
-//! Same reasoning as [`super::plan`], and the same 409 rule with a different
-//! code: [`CheckCode::ResultStorageConflict`].
+//! Same reasoning and 409 rule as [`super::plan`], with
+//! [`CheckCode::ResultStorageConflict`].
 
 use std::collections::BTreeMap;
 
@@ -50,28 +48,27 @@ pub const CHUNK_KEY: &str = "topics.tsv";
 /// The one key inside a details `ConfigMap`.
 pub const DETAILS_KEY: &str = "details.jsonl";
 
-/// The format the chunk carries — `logweir.dev/topic-inventory/v1` for topics.
+/// The format the chunk carries (`logweir.dev/topic-inventory/v1` for topics).
 pub const FORMAT_ANNOTATION: &str = "logweir.dev/result-format";
 /// `sha256:<hex>` over this chunk's own data.
 pub const SHA256_ANNOTATION: &str = "logweir.dev/result-sha256";
-/// `"<i>/<n>"`, one-based — D2 §4.3.
+/// `"<i>/<n>"`, one-based (D2 §4.3).
 pub const CHUNK_ANNOTATION: &str = "logweir.dev/chunk";
 
 /// The details format: one JSON object per line.
 pub const DETAILS_FORMAT: &str = "logweir.dev/check-details/v1";
 
-/// `<job>-r<3-digit index>`, zero-based — D2 §4.3.
+/// `<job>-r<3-digit index>`, zero-based (D2 §4.3).
 ///
-/// THREE DIGITS, which is the shape D2 names and which orders lexically for
-/// the 20 chunks the 50,000-topic hard maximum produces. An index past 999
-/// cannot arise: `MAX_CHUNK_LINES` × 1,000 is 2.5 M entries, fifty times the
-/// contract's `MAX_TOPICS_CEILING`.
+/// Three digits order lexically for the 20 chunks the 50,000-topic hard
+/// maximum produces; an index past 999 would need 2.5 M entries, fifty times
+/// the contract's `MAX_TOPICS_CEILING`.
 #[must_use]
 pub fn chunk_name(job_name: &str, index: usize) -> String {
     format!("{job_name}-r{index:03}")
 }
 
-/// `<job>-details` — D2 §4.3.
+/// `<job>-details` (D2 §4.3).
 #[must_use]
 pub fn details_name(job_name: &str) -> String {
     format!("{job_name}-details")
@@ -82,21 +79,17 @@ pub fn details_name(job_name: &str) -> String {
 pub struct Chunk {
     /// Zero-based, and the number in [`chunk_name`].
     pub index: usize,
-    /// The TSV lines, concatenated.
     pub data: String,
-    /// How many entries it holds.
     pub lines: usize,
     /// `sha256:<hex>` over [`Chunk::data`].
     pub sha256: String,
 }
 
-/// Split an inventory into chunks — **pure**, and the whole of D2 §5.5's
-/// bound.
+/// Split an inventory into chunks (**pure**; the whole of D2 §5.5's bound).
 ///
 /// A single entry longer than [`MAX_CHUNK_BYTES`] cannot exist (a Kafka name is
-/// at most 249 characters, so a line is at most ~308 bytes), but the loop is
-/// written so that one would land alone in its own chunk rather than loop
-/// forever or be dropped.
+/// at most 249 characters, a line at most ~308 bytes), but one would land alone
+/// in its own chunk rather than loop forever or be dropped.
 #[must_use]
 pub fn split(entries: &[TopicEntry]) -> Vec<Chunk> {
     let mut out: Vec<Chunk> = Vec::new();
@@ -209,9 +202,9 @@ fn object(
     }
 }
 
-/// Whether an object already at this name IS this chunk — the same three-part
-/// rule as [`super::plan::accepts_existing`], with
-/// [`CheckCode::ResultStorageConflict`] instead.
+/// Whether an object already at this name is this chunk: the three-part rule
+/// of [`super::plan::accepts_existing`], with
+/// [`CheckCode::ResultStorageConflict`].
 ///
 /// # Errors
 ///
@@ -279,9 +272,9 @@ impl std::error::Error for ChunkConflict {}
 
 /// Write every chunk, accepting identical ones that are already there.
 ///
-/// **Returns the names in index order, and the caller's NEXT act is the status
-/// patch that indexes them** — that patch is the commit point, and nothing
-/// before it is visible to a reader of the custom resource.
+/// **Returns the names in index order; the caller's next act is the status
+/// patch that indexes them**, the commit point before which nothing is visible
+/// to a reader of the custom resource.
 ///
 /// # Errors
 ///
