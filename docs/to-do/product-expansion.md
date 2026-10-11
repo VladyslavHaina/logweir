@@ -627,6 +627,26 @@ What it fixed:
 - **Left on the PoC for the owner:** namespace `logweir-pair`, bound `two-person`, with Dex users `alice` and `bob`. Approval there is a sign-in and a click, with no key. The settings are in `deploy/poc/`; the passwords are in the owner's local 0600 files.
 - **Incident:** the worker's session output showed the PoC's Dex passwords. The orchestrator rotated all seven, with the cluster's hashes checked against the new files and Dex restarted. One refused Job's line token was printed too; that Job has ended, and the token is redacted from the artifacts.
 
+**PR #25 — merged (2026-10-11) as `8048e2ed`, release-notes items 70 and 71.** Integrated by worker `integrate-11`. The PR's checks all passed (`check` 25 min, `e2e` 53 min). Main `dff411ad` was not published, because its `check` failed, so this merge's publish signs items 67 to 71 together.
+- **Memory meters** (orchestrator, `cad462a3`).
+  - Main `dff411ad`'s `check` failed in `topic_budget::a_receipt_read_and_a_receipt_relay_stay_bounded`. Linux keeps `ru_maxrss` across exec, so the child reported its parent's peak (the same defect as `6f45720a` in `check_cli.rs`).
+  - Both weirkeeper meters (`topic_budget.rs`, `read_caps.rs`) now read `VmHWM` from `/proc/self/status` on Linux, which exec resets.
+  - PR #25's Linux `check` is the proof.
+- **PoC batch 7's `deploy/poc/` changes.**
+  - The pinned versions.
+  - The `logweir-pair` two-person namespace and Dex users `alice` and `bob`, whose hashes come from the Secret by environment variable. No secret is in the tree.
+  - The README's conflict dry run uses `--dry-run=server` (F-3).
+- **FX-49** (item 70; OD-11 checklist review ACCEPT).
+  - Both original-name boxes now call `refresh` on `change` (`ui/pages/restore-wizard.js:8168-8169`).
+  - A row drives the page with DOM `change` events only. A static guard checks that every field `refresh` reads has a listener.
+  - The two-person panel says a `newTopic` restore never deletes the topics it creates.
+  - F-6 needs no change: an Operator may create destinations, and the form sits behind a closed disclosure.
+  - Done after its PoC row in PROD-14.1's clean install: one visible click on the box shows the owner box and the coverage lock.
+- **FX-50** (item 71; OD-11 checklist review ACCEPT, one LOW, no change asked).
+  - A catalog's `viewLimit` window holds the newest points with a record, by recovery-point time, in either walk, under FX-33's rules. Memory stays bounded by `viewLimit`.
+  - A resumed rescan or an unfinished walk says "It is a partial view" in its `Synced` message. `truncated` is unchanged, so FX-40 still refuses any window.
+  - Done after its PoC row in PROD-14.1's clean install: a catalog with `viewLimit: 100` over more than 100 points lists the newest 100.
+
 ## Foundation dependency map
 
 PLAT prerequisites that must be Done before a task ships. Research and contract work may proceed sooner when the task allows. Within a task, its own dependency line defines its start condition.
