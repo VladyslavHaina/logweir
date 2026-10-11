@@ -3416,7 +3416,7 @@ fn execute_with_validated_approval(
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
             let signed =
-                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(&failed)?;
+                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(failed)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -3473,7 +3473,7 @@ fn execute_with_validated_approval(
             &restored.engine_report,
         )
     })
-    .map_err(&failed)?;
+    .map_err(failed)?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
@@ -3526,7 +3526,7 @@ fn execute_with_validated_approval(
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
     let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
-        .map_err(&failed)?;
+        .map_err(failed)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.

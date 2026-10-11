@@ -2112,15 +2112,25 @@ fn teardown_said(out: &Output) -> Value {
         .lines()
         .find_map(|l| l.strip_prefix("teardown-key="))
         .map(str::to_string);
+    // FX-44: what the teardown of a run that FAILED removed (its INFO line),
+    // and the `teardown-failed=` line the controller copies to the status.
+    let removed = all
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["fields"]["message"].as_str().map(str::to_string))
+        .find(|m| m.contains("teardown removed "));
+    let line = all
+        .lines()
+        .find_map(|l| l.strip_prefix("teardown-failed="))
+        .and_then(|v| serde_json::from_str::<Value>(v).ok());
     json!({
         "warning": warning,
         "summary_clause": summary,
         "attestation_key": attestation,
-        // FX-44: whether anything the run printed names the grant it lacked.
+        "removed": removed,
+        "line": line,
         "names_authorization": all.to_ascii_lowercase().contains("authoriz"),
-        "names_the_delete_grant": all.contains("Delete")
-            || all.to_ascii_lowercase().contains("delete on")
-            || all.to_ascii_lowercase().contains("delete acl"),
+        "names_the_delete_grant": all.contains("lacks `Delete` on topic"),
     })
 }
 
@@ -2355,9 +2365,31 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         grants.add(g);
     }
     let allow = allowlist_for(&cluster_id);
-    let restore = |grants: &Grants| {
+    let mapped = format!("{prefix}src");
+    // `existing`: the mapped target topic is created first, by someone else
+    // (FX-44 R4), and is listed again before the sweep.
+    let restore_into = |grants: &Grants, existing: bool| {
         let _ = grants;
         sweep_drill_topics(&plain, &super_user);
+        if existing {
+            let made = exec_in(
+                "kafka-acl",
+                &[
+                    "/opt/kafka/bin/kafka-topics.sh",
+                    "--bootstrap-server",
+                    "kafka-acl:9094",
+                    "--create",
+                    "--topic",
+                    &mapped,
+                    "--partitions",
+                    "3",
+                    "--replication-factor",
+                    "1",
+                ],
+            );
+            assert!(made.status.success(), "{}", tail(&text(&made), 800));
+            await_created_on(&plain, &mapped, 3);
+        }
         let dspec = drill_spec(&sasl, &restricted, &topic, &full_id, window, &storage);
         let mut o = RunOpts::new(&dspec);
         o.allowlist = Some(&allow);
@@ -2370,7 +2402,8 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         let left = sweep_drill_topics(&plain, &super_user);
         (r, scorecard, left)
     };
-    let (r, scorecard, _) = restore(&grants);
+    let restore = |grants: &Grants| restore_into(grants, false);
+    let (r, scorecard, full_left) = restore(&grants);
     assert_eq!(
         r.out.status.code(),
         Some(0),
@@ -2381,6 +2414,16 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         )
     );
     assert_eq!(scorecard.expect("a scorecard")["outcome"], "pass");
+    // FX-44's CONTROL: the full-grant run is unchanged. It tears down, leaves
+    // nothing, and prints no teardown warning, removal or `teardown-failed=`.
+    let full_said = teardown_said(&r.out);
+    assert_eq!(full_left, Vec::<String>::new());
+    assert!(
+        full_said["warning"].is_null()
+            && full_said["removed"].is_null()
+            && full_said["line"].is_null(),
+        "{full_said}"
+    );
 
     let mut restore_rows = Vec::new();
     for g in &target {
@@ -2397,6 +2440,29 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         }));
         grants.add(g);
     }
+    // FX-44 R2: `Write` AND `Delete` removed: the run fails after creating
+    // its topic, and its teardown cannot remove it.
+    grants.remove(&target[1]);
+    grants.remove(&target[3]);
+    let (r, _, left) = restore(&grants);
+    let write_and_delete = json!({
+        "removed": [target[1].spelled(), target[3].spelled()],
+        "exit": r.out.status.code(),
+        "scratch_topics_left": left,
+        "reads": how_it_reads(&r.out),
+        "teardown": teardown_said(&r.out),
+    });
+    grants.add(&target[1]);
+    grants.add(&target[3]);
+    // FX-44 R4: every grant, and the mapped target topic EXISTS before the
+    // run: the run fails, and the topic it did not create is not deleted.
+    let (r, _, left) = restore_into(&grants, true);
+    let existing_target = json!({
+        "exit": r.out.status.code(),
+        "scratch_topics_left": left,
+        "reads": how_it_reads(&r.out),
+        "teardown": teardown_said(&r.out),
+    });
     evidence(
         "the_minimum_acls_for_probe_backup_and_restore",
         &json!({
@@ -2411,6 +2477,8 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
                 "bindings": target.iter().map(Grant::spelled).collect::<Vec<_>>(),
                 "exit": 0, "outcome": "pass",
                 "each_removed": restore_rows,
+                "write_and_delete_removed": write_and_delete,
+                "target_topic_exists": existing_target,
             },
         }),
     );
@@ -2423,7 +2491,6 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         );
     }
     // ...and each denial READS the way the record says (measured 2026-10-10).
-    let mapped = format!("{prefix}src");
     let reads = |i: usize| restore_rows[i]["reads"].as_str().unwrap_or("").to_string();
     // Create: refused by name, before anything exists.
     assert_eq!(restore_rows[0]["exit"], 1, "{}", restore_rows[0]);
@@ -2433,39 +2500,82 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         restore_rows[0]
     );
     assert_eq!(restore_rows[0]["scratch_topics_left"], json!([]));
-    // Write: the engine cannot produce; nothing is signed, and the empty
-    // target topic Logweir created is left behind.
+    // Write: the engine cannot produce; nothing is signed, and (FX-44) the
+    // target topic Logweir created is torn down.
     assert_eq!(restore_rows[1]["exit"], 1, "{}", restore_rows[1]);
     assert!(restore_rows[1]["outcome"].is_null(), "{}", restore_rows[1]);
-    assert_eq!(restore_rows[1]["scratch_topics_left"], json!([mapped]));
+    assert_eq!(restore_rows[1]["scratch_topics_left"], json!([]));
     assert!(
         reads(1).contains("kafka-backup restore exited 1"),
         "{}",
         restore_rows[1]
     );
-    // Read: restored and unverifiable; nothing is signed.
+    // Read: restored and unverifiable; nothing is signed; torn down (FX-44).
     assert_eq!(restore_rows[2]["exit"], 1, "{}", restore_rows[2]);
     assert!(restore_rows[2]["outcome"].is_null(), "{}", restore_rows[2]);
-    assert_eq!(restore_rows[2]["scratch_topics_left"], json!([mapped]));
+    assert_eq!(restore_rows[2]["scratch_topics_left"], json!([]));
     assert!(
         reads(2).contains("TopicAuthorizationFailed"),
         "{}",
         restore_rows[2]
     );
-    // A FAILED restore says NOTHING about the topic it leaves (tracker row
-    // FX-44; measured 2026-10-10, 0 teardown lines in the whole output). When
-    // this stops holding, the run has started to say so: update the matrix.
+    // FX-44 R1: a FAILED restore removes the topic it created and says so;
+    // it leaves nothing to warn about and signs nothing.
     for i in [1, 2] {
         let said = &restore_rows[i]["teardown"];
+        assert_eq!(
+            said["removed"],
+            json!(format!(
+                "the restore failed after it created its target topics; teardown removed 1 \
+                 scratch topic: {mapped}"
+            )),
+            "{}",
+            restore_rows[i]
+        );
         assert!(
             said["warning"].is_null()
-                && said["summary_clause"].is_null()
+                && said["line"].is_null()
                 && said["attestation_key"].is_null(),
-            "a failed restore now says something about its teardown; the matrix's sentence \
-             about it (and FX-44) is stale: {}",
+            "{}",
             restore_rows[i]
         );
     }
+    // FX-44 R2: `Write` and `Delete` removed: exit 1, the topic is left, and
+    // the run names it AND the missing grant, on the WARN and on the
+    // `teardown-failed=` line the controller copies to the Restore's status.
+    let grant = format!("the restore principal lacks `Delete` on topic `{mapped}`");
+    assert_eq!(write_and_delete["exit"], 1, "{write_and_delete}");
+    assert_eq!(write_and_delete["scratch_topics_left"], json!([mapped]));
+    let said = &write_and_delete["teardown"];
+    assert_eq!(
+        said["warning"],
+        json!(format!(
+            "teardown left 1 scratch topic behind on the target cluster: {mapped}; {grant}"
+        )),
+        "{write_and_delete}"
+    );
+    assert_eq!(
+        said["line"][0]["topic"],
+        json!(mapped),
+        "{write_and_delete}"
+    );
+    assert!(
+        said["line"][0]["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with(&format!("{grant}: TopicAuthorizationFailed"))),
+        "{write_and_delete}"
+    );
+    assert!(said["removed"].is_null(), "{write_and_delete}");
+    // FX-44 R4: a target topic that existed before the run is refused at
+    // phase 0 and NOT deleted: it is still there when the run has exited,
+    // and the run removed nothing.
+    assert_ne!(existing_target["exit"], 0, "{existing_target}");
+    assert_eq!(existing_target["scratch_topics_left"], json!([mapped]));
+    assert!(
+        existing_target["teardown"]["removed"].is_null()
+            && existing_target["teardown"]["line"].is_null(),
+        "{existing_target}"
+    );
     // Delete: the restore is verified and signed `pass`, exit 0, and the
     // target topic OUTLIVES the run although the plan says `teardown: delete`.
     assert_eq!(
@@ -2482,9 +2592,15 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
     assert_eq!(
         said["warning"],
         json!(format!(
-            "teardown left 1 scratch topic behind on the target cluster: {mapped}"
+            "teardown left 1 scratch topic behind on the target cluster: {mapped}; {grant}"
         )),
-        "the run warns that its teardown left the topic, and names it: {}",
+        "the run warns that its teardown left the topic, names it and (FX-44 R3) the grant: {}",
+        restore_rows[3]
+    );
+    assert_eq!(
+        said["line"][0]["topic"],
+        json!(mapped),
+        "{}",
         restore_rows[3]
     );
     assert_eq!(
@@ -2505,16 +2621,10 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
         "what the run says is in the evidence, never an empty `reads`: {}",
         restore_rows[3]
     );
-    // What it does NOT say is WHY (FX-44): nothing names the missing `Delete`
-    // grant or an authorization refusal. When this stops holding, the open
-    // finding is closed: update the matrix and the chart README.
     assert_eq!(
-        (
-            &said["names_authorization"],
-            &said["names_the_delete_grant"]
-        ),
-        (&json!(false), &json!(false)),
-        "the teardown warning now names the grant; FX-44's sentence in the matrix is stale: {}",
+        said["names_the_delete_grant"],
+        json!(true),
+        "{}",
         restore_rows[3]
     );
     // No removal reads as nothing at all.
