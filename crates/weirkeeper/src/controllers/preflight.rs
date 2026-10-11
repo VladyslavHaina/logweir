@@ -1,67 +1,56 @@
 //! The `Preflight` reconciler: run one isolated check Job and say, in codes an
 //! operator can act on, what would stop this operation from succeeding.
 //!
-//! # A `ready` verdict authorizes nothing (D2 §6.8)
+//! # A `ready` verdict authorizes nothing
 //!
-//! Everything this controller publishes is ADVISORY. The backup controller's
-//! glob rail and destination admission, the runner's phase −1 source rails, the
-//! restore admission checks 0–9, phase 0's collision check and LogAppendTime
-//! probe, G-WIN in phase 5 and PLAT-02.2's signer validation all still run, and
-//! none of them consults a `Preflight`. That is not a convention: it is
-//! `no_execution_path_reads_preflight_or_discovery` in
-//! `tests/preflight_controller.rs`, a source scan over the four execution
-//! reconcilers and both runner paths, whose planted mutant is an `import` of
-//! this kind into `controllers/restore.rs`.
+//! Everything this controller publishes is advisory. Every execution-time
+//! check (the backup controller's glob rail and destination admission, the
+//! runner's source rails, the restore admission, phase 0's collision check,
+//! the signer validation) still runs, and none of them consults a
+//! `Preflight`; `no_execution_path_reads_preflight_or_discovery` in
+//! `tests/preflight_controller.rs` is a source scan that holds it. A preview is
+//! a statement about a moment: a colliding topic created afterwards is caught
+//! at execution and nowhere else.
 //!
-//! The reason is the defect UI-FAKEPREFLIGHT names. A preview is a statement
-//! about a moment; a run happens later. A colliding topic created in between is
-//! caught at execution and nowhere else, and a reconciler that trusted a green
-//! badge would have removed the only check that could see it.
+//! # It proves what only a pod can prove
 //!
-//! # It proves what only a pod can prove (D2 §6.1)
+//! The controller holds no verb on `secrets`
+//! (`linkage::the_controller_never_reads_a_secret`), and "the bytes exist" is
+//! not "the credential works". So a preflight is one short-lived Job in the
+//! same shape an execution pod has (image, ServiceAccount, Secret projections,
+//! CA and signing mounts, `automountServiceAccountToken: false`), and it
+//! reports what that pod observed: an image pull, a projected key, a broker
+//! that accepted the SASL exchange, a bucket that answered a LIST, a signer
+//! that loaded.
 //!
-//! The controller holds no verb on `secrets` — `linkage::the_controller_never_reads_a_secret`
-//! — and would not want one if it did: "the bytes exist" is not "the credential
-//! works". So a preflight is one short-lived Job in the SAME shape an execution
-//! pod has (same image, same ServiceAccount, same Secret projections, same CA
-//! and signing mounts, `automountServiceAccountToken: false`), and what it
-//! reports is what that pod observed: an image pull on a schedulable node, a
-//! kubelet that could project the key, a broker that accepted the SASL
-//! exchange, a bucket that answered a LIST, a signer that loaded.
-//!
-//! The costs are accepted and named in D2 §6.1: one pod per preflight, the
-//! namespace's quota, and a missing Secret blocking the whole pod — in which
-//! case every Job-sourced row is reported `unknown` with
-//! [`CheckCode::BlockedByPrerequisite`] and the named cause beside it, rather
-//! than silently passing.
+//! The cost is one pod per preflight, within the namespace's quota. A missing
+//! Secret blocks the whole pod, and every Job-sourced row is then reported
+//! `unknown` with [`CheckCode::BlockedByPrerequisite`] and the named cause,
+//! rather than silently passing.
 //!
 //! # What this controller writes, and what it never writes
 //!
 //! It patches `preflights/status`, creates its own plan and result
 //! `ConfigMap`s and its own Job, and patches that Job's
-//! `ttlSecondsAfterFinished` after the status commit. It patches **no target**:
-//! a restore preflight performs no write of any kind, and the validate-only
-//! `CreateTopics` D2 §6.7 calls for belongs to the runner, inside the pod,
-//! with `AdminOptions::validate_only(true)`. `a_restore_preflight_writes_to_no_target`
+//! `ttlSecondsAfterFinished` after the status commit. It patches no target: a
+//! restore preflight performs no write of any kind, and the validate-only
+//! `CreateTopics` belongs to the runner, inside the pod, with
+//! `AdminOptions::validate_only(true)`. `a_restore_preflight_writes_to_no_target`
 //! is the structural test.
 //!
 //! # A verdict that cannot say what it was about is worthless
 //!
-//! `status.binding` is recorded BEFORE the Job is created, from the objects
-//! this pass actually resolved: the recomputed `planHash`, every referent with
-//! its UID and generation, the CA digests, the roster, the approval's resource
-//! version and the policy digest, reduced to one
-//! [`inputs_digest`](logweir_core::check_contract::inputs_digest). W12 recomputes
-//! that from live objects on every GET and answers `applicable: false` with
-//! named `staleReasons` when it differs — editing the target, the recovery
-//! point, the point in time, the topic subset or the mapping prefix all change
-//! the plan bytes, and choosing a recreated destination changes a UID.
+//! `status.binding` is recorded before the Job is created, from the objects
+//! this pass resolved: the recomputed `planHash`, every referent with its UID
+//! and generation, the CA digests, the roster, the approval's resource version
+//! and the policy digest, reduced to one
+//! [`inputs_digest`](logweir_core::check_contract::inputs_digest). The API
+//! recomputes it from live objects on every GET and answers
+//! `applicable: false` with named `staleReasons` when it differs.
 //!
-//! This controller keeps the same promise from its own side: a terminal
-//! `Preflight` whose `result.expiresAt` has passed, or whose referents have
-//! moved under it, is DOWNGRADED to `unknown` on the next pass. A stale green
-//! badge that nobody is looking at the API through is still a stale green
-//! badge.
+//! This controller keeps the same promise: a terminal `Preflight` whose
+//! `result.expiresAt` has passed, or whose referents have moved, is downgraded
+//! to `unknown` on the next pass.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -104,20 +93,16 @@ use crate::crds::restore::Restore;
 use crate::crds::Condition;
 use crate::destination::{self, ResolvedDestination};
 
-// ---------------------------------------------------------------------------
-// Phases, conditions and requeues
-// ---------------------------------------------------------------------------
-
 /// Nothing has been created yet.
 pub const PHASE_PENDING: &str = "Pending";
-/// A concurrency ceiling is holding this check back — D2 §4.4.
+/// A concurrency ceiling is holding this check back.
 pub const PHASE_QUEUED: &str = "Queued";
 /// The Job exists and has not finished.
 pub const PHASE_RUNNING: &str = "Running";
 /// A result was produced. **`Completed` is not `ready`**: the verdict is in
 /// `status.result.state`.
 pub const PHASE_COMPLETED: &str = "Completed";
-/// No result could be produced at all — D2 §6.2's failure vocabulary.
+/// No result could be produced at all.
 pub const PHASE_FAILED: &str = "Failed";
 /// The requester asked for it to stop and it did.
 pub const PHASE_CANCELLED: &str = "Cancelled";
@@ -139,7 +124,7 @@ pub const CONDITION_READY: &str = "Ready";
 
 /// How long before a running check is looked at again.
 pub const REQUEUE_RUNNING_SECS: u64 = 10;
-/// How long before a queued check is looked at again — D2 §4.3's `limits.rs`.
+/// How long before a queued check is looked at again.
 pub const REQUEUE_QUEUED_SECS: u64 = limits::QUEUED_REQUEUE_SECS;
 /// How long before a reconcile that ERRORED is retried.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
@@ -149,28 +134,20 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 /// sub-second interval and spin the loop; a check whose expiry has already
 /// passed is downgraded on this very pass and never requeued at all.
 pub const MIN_REVALIDATE_SECS: u64 = 30;
-/// How long a terminal check waits before the collector looks at it again —
-/// D2 §4.3's `gc.rs`.
+/// How long a terminal check waits before the collector looks at it again.
 ///
-/// ONE HOUR, the same pace `controllers::topic_discovery` uses, and it is the
-/// backstop rather than the mechanism: a check whose verdict can still go
-/// stale is requeued much sooner by [`revalidation_action`], and this is what
-/// wakes the one whose verdict cannot — a `notReady` or `unknown` result that
-/// would otherwise sit forever with `Action::await_change()`.
+/// The backstop, not the mechanism: a check whose verdict can still go stale
+/// is requeued sooner by [`revalidation_action`], and this wakes the one whose
+/// verdict cannot (a `notReady` or `unknown` result that would otherwise wait
+/// for ever on `Action::await_change()`).
 pub const REQUEUE_TERMINAL_SECS: u64 = 3600;
-/// The most objects ONE garbage-collection pass may delete — D2 §4.3.
-///
-/// See `controllers::topic_discovery::GC_MAX_DELETES_PER_PASS`: a bound on the
+/// The most objects one garbage-collection pass may delete: a bound on the
 /// blast radius and on the API server, not on the total.
 pub const GC_MAX_DELETES_PER_PASS: usize = 20;
 /// The page size one garbage-collection pass lists.
 pub const GC_LIST_LIMIT: u32 = 500;
 
-// ---------------------------------------------------------------------------
-// The controller's half of D2 §6.3's catalogue
-// ---------------------------------------------------------------------------
-
-/// Fifteen minutes — D2 §6.3's default expiry.
+/// Fifteen minutes, the default expiry.
 pub const EXPIRY_DEFAULT: Duration = Duration::from_secs(15 * 60);
 /// Ten minutes — the two `approval.*` rows, capped again by the approver key's
 /// own `notAfter`.
@@ -190,9 +167,8 @@ pub struct Row {
     pub gating: Gating,
     /// Who answered.
     pub authority: Authority,
-    /// How long its answer is good for. `None` is D2 §6.3's "until bytes
-    /// change" — such a row contributes no `expiresAt` and cannot pull the
-    /// aggregate's expiry forward.
+    /// How long its answer is good for. `None` is "until bytes change": such a
+    /// row contributes no `expiresAt`.
     pub expiry: Option<Duration>,
 }
 
@@ -260,7 +236,7 @@ pub const DESTINATION_ACCESS_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
-    // "J or C" (D2 §6.3): the controller answers it only when no check pod can
+    // "J or C": the controller answers it only when no check pod can
     // (`EvidenceReadPlan::ControllerAnswers`); the Job answers it otherwise.
     row(
         CheckId::DestinationEvidenceReadable,
@@ -290,10 +266,10 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
-    // "J or C" (D2 §6.3), and on a Restore only ever C: reported for an
-    // INLINE-ARCHIVE point whose scorecard the controller would not be able
-    // to read (`legacy_evidence_row`), never for a destination-backed one,
-    // and advisory because the restore itself is unaffected.
+    // "J or C", and on a Restore only ever C: reported for an inline-archive
+    // point whose scorecard the controller could not read
+    // (`legacy_evidence_row`), and advisory because the restore itself is
+    // unaffected.
     row(
         CheckId::DestinationEvidenceReadable,
         Gating::Advisory,
@@ -339,16 +315,12 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
-    // EXECUTION-ONLY FOR A RESTORE, AND BLOCKING FOR A BACKUP — not a
-    // weakening, a statement about what is answerable. The verdict needs the
-    // runner's PUBLIC `signerKeyId` fact, which rides on
-    // `signer.privateKeyUsable`; the landed `RestorePreflightRequest` (D2 §4.2,
-    // W1's contract) carries no `signer_path`, so a `restorePreflight` pod is
-    // never given a key to report. A BLOCKING row nobody can answer pins every
-    // restore preflight at `unknown` for ever, which is reviewer finding F1's
-    // own shape. The row is still reported, with `SignerKeyIdNotObserved` and a
-    // message naming the reason. Closing it is a W1 amendment: add
-    // `signer_path` to `RestorePreflightRequest`.
+    // Execution-only for a restore, blocking for a backup: the verdict needs
+    // the runner's public `signerKeyId` fact, and a `RestorePreflightRequest`
+    // carries no `signer_path`, so a restore preflight pod is never given a
+    // key. A blocking row nobody can answer would pin every restore preflight
+    // at `unknown` for ever. The row is still reported, with
+    // `SignerKeyIdNotObserved` and a message naming why.
     row(
         CheckId::SignerRostered,
         Gating::ExecutionOnly,
@@ -381,16 +353,13 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
     ),
 ];
 
-/// The **C** and **E** rows of a `SourceConnection` check (D2-SOURCECHECK).
+/// The **C** and **E** rows of a `SourceConnection` check.
 ///
-/// D2 §6.3's Backup catalogue MINUS everything that is about something the
-/// connection is used FOR. No `destination.*`, because the request names none;
-/// no `signer.*`, because nothing would be signed and projecting a signing key
-/// into a connectivity test would widen the pod's blast radius past the
-/// question; no `connection.topicsReadable`, because no topic was selected for
-/// anything to be readable from. What is left is the connection itself, and
-/// `configuration.*`, which is about the installation and not about the
-/// operation.
+/// The Backup catalogue minus everything about what the connection is used
+/// for: no `destination.*` (the request names none), no `signer.*` (projecting
+/// a signing key into a connectivity test would widen the pod's blast radius),
+/// no `connection.topicsReadable` (no topic was selected). What is left is the
+/// connection itself and `configuration.*`.
 pub const SOURCE_CONNECTION_CONTROLLER_ROWS: &[Row] = &[
     row(
         CheckId::ConnectionResolved,
@@ -436,12 +405,9 @@ pub fn pod_rows(operation: PreflightOperation) -> Vec<Row> {
             Some(EXPIRY_DEFAULT),
         ),
     ];
-    // A DESTINATION CREDENTIAL ROW NEEDS A DESTINATION. It used to be
-    // unconditional, which was harmless while every operation named one; a
-    // `SourceConnection` check names none, and an unconditional row would have
-    // reported `destination.credentialProjected unknown/PodNotStarted` —
-    // BLOCKING — about a destination nobody asked for, pinning every
-    // connection test at `unknown`.
+    // A destination credential row needs a destination: a `SourceConnection`
+    // check names none, and a blocking `unknown/PodNotStarted` row about it
+    // would pin every connection test at `unknown`.
     if operation != PreflightOperation::SourceConnection {
         out.push(row(
             CheckId::DestinationCredentialProjected,
@@ -484,31 +450,21 @@ pub fn controller_rows(operation: PreflightOperation) -> Vec<Row> {
     out
 }
 
-/// The rows the check JOB will answer for THIS RENDERED PLAN — **pure**, and
-/// the mirror of the runner's own emission rules.
+/// The rows the check Job will answer for this rendered plan: pure, and the
+/// mirror of the runner's own emission rules.
 ///
-/// # Why this is a function of the plan and not of the operation
-///
-/// It used to be a static list per operation, and that was reviewer finding
-/// **F1**: a `Preflight` could never report `ready`. The rows the runner emits
-/// are decided by the REQUEST it is handed — which `roles` a destination check
-/// exercises, whether a `signer_path` was projected, whether an evidence
-/// destination was named, whether the restore plan's target mode is `scratch` —
-/// and every static list differed from the real one. `assemble` renders a row
-/// nobody answered as a BLOCKING `unknown`, so each difference pinned the
-/// verdict at `unknown` for ever, with a row reading "the check Job did not
-/// report this row" and no remedy.
-///
-/// So the rule lives here, once, and
-/// `the_expected_rows_are_the_rows_the_runner_emits` holds it against the
-/// runner's own pinned fixtures in `crates/logweir/tests/check_cli.rs` — the
-/// two crates share no dependency edge, so that test reads the runner's
-/// `want` literals out of its source rather than copying them.
+/// A function of the request, not the operation: which `roles` a destination
+/// check exercises, whether a `signer_path` was projected, whether an evidence
+/// destination was named, whether the restore target is `scratch`. `assemble`
+/// renders a row nobody answered as a blocking `unknown`, so any difference
+/// from what the runner emits would pin the verdict at `unknown` for ever.
+/// `the_expected_rows_are_the_rows_the_runner_emits` holds this against the
+/// runner's own fixtures in `crates/logweir/tests/check_cli.rs`, read out of
+/// its source because the two crates share no dependency edge.
 ///
 /// `restore_target_is_scratch` comes from the plan bytes a `restorePreflight`
-/// mounts: `target.scratchMarker` is the one row whose presence depends on the
-/// document rather than on the request, and the controller parses the same
-/// bytes ([`PlanFacts::scratch`]).
+/// mounts: `target.scratchMarker` is the one row that depends on the document
+/// rather than the request ([`PlanFacts::scratch`]).
 #[must_use]
 pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTreeSet<CheckId> {
     let mut out = BTreeSet::new();
@@ -540,17 +496,16 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
                     push(destination_row_for(*role));
                 }
             }
-            // FX-20c: `readiness.rs` pushes the binding row through the same
-            // skip filter, when the plan lists a grant.
+            // `readiness.rs` pushes the binding row through the same skip
+            // filter, when the plan lists a grant.
             if request.compares_grant_bindings() {
                 push(CheckId::DestinationCredentialBound);
             }
             if r.signer_path.is_some() {
                 push(CheckId::SignerPrivateKeyUsable);
             }
-            // PROD-01.2: the capability rows the plan LISTS, and no other:
-            // `readiness.rs` emits exactly `capabilityChecks`, through the
-            // same skip filter.
+            // The capability rows the plan lists, and no other: `readiness.rs`
+            // emits exactly `capabilityChecks`, through the same skip filter.
             for id in request.capability_checks() {
                 push(*id);
             }
@@ -564,11 +519,9 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
                 out.insert(CheckId::DestinationCredentialBound);
             }
         }
-        // TWO ROWS, AND `connection.topicsDescribable` IS NOT ONE OF THEM.
-        // `kinds::source_connection::run` emits exactly these; the row it
-        // deliberately omits is argued there, and this mirror is what
-        // `the_expected_rows_are_the_rows_the_runner_emits` holds against the
-        // runner's own fixtures.
+        // Two rows, without `connection.topicsDescribable`:
+        // `kinds::source_connection::run` emits exactly these, and argues the
+        // omission there.
         CheckRequest::SourceConnection(_) => {
             out.insert(CheckId::RunnerContract);
             out.insert(CheckId::ConnectionAuthenticated);
@@ -578,9 +531,8 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             let skipped: BTreeSet<CheckId> = r.skip_checks.iter().copied().collect();
             let want =
                 |id: CheckId| (wanted.is_empty() || wanted.contains(&id)) && !skipped.contains(&id);
-            // `restore.rs` pushes `runner.contract` UNCONDITIONALLY — unlike
-            // `readiness.rs`, which filters it. The asymmetry is the runner's;
-            // mirroring it is the whole point of this function.
+            // `restore.rs` pushes `runner.contract` unconditionally, unlike
+            // `readiness.rs`, which filters it; this mirrors the runner.
             out.insert(CheckId::RunnerContract);
             for id in [
                 CheckId::PlanParse,
@@ -603,23 +555,20 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             if r.evidence_destination.is_some() && want(CheckId::DestinationEvidenceWritable) {
                 out.insert(CheckId::DestinationEvidenceWritable);
             }
-            // FX-20c: `restore.rs` reports it first, through `want`.
+            // `restore.rs` reports it first, through `want`.
             if request.compares_grant_bindings() && want(CheckId::DestinationCredentialBound) {
                 out.insert(CheckId::DestinationCredentialBound);
             }
-            // PROD-01.2: `restore.rs` emits every capability row the plan
-            // lists, whatever `checks` says: an empty `checks` ("every row
-            // this kind owns") never includes one, and the plan validation
-            // refuses one that is also skipped.
+            // `restore.rs` emits every capability row the plan lists, whatever
+            // `checks` says: an empty `checks` never includes one, and the plan
+            // validation refuses one that is also skipped.
             for id in request.capability_checks() {
                 out.insert(*id);
             }
         }
-        // None of these three is ever rendered by this controller: a topic
-        // inventory belongs to `TopicDiscovery`, an evidence fetch to the
-        // verification path, and a `catalogSync` to `RecoveryCatalog` — whose
-        // result is a relayed BODY and not a row set, so it has no expected
-        // rows for a `Preflight` to be missing.
+        // This controller never renders these: a topic inventory belongs to
+        // `TopicDiscovery`, an evidence fetch to verification, and a
+        // `catalogSync` (a relayed body, not a row set) to `RecoveryCatalog`.
         CheckRequest::TopicInventory(_)
         | CheckRequest::EvidenceFetch(_)
         | CheckRequest::CatalogSync(_) => {}
@@ -627,17 +576,15 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
     out
 }
 
-/// **PROD-01.2: the capability rows a plan for `operation` asks its runner
-/// for** — every one the pure layer defines for the operation
-/// (`logweir_core::check_contract::capability_checks_for`), minus the ones
-/// the request skips.
+/// The capability rows a plan for `operation` asks its runner for: every one
+/// the pure layer defines for it
+/// (`logweir_core::check_contract::capability_checks_for`), minus the ones the
+/// request skips.
 ///
 /// A capability row is emitted only when the plan lists it, so this list is
-/// what makes a `Preflight` name a missing capability at all. A SKIPPED one
-/// is left out here and reported `skipped` by [`assemble`], like any other
-/// skipped row: the plan validation refuses an id that is both listed and
-/// skipped, because "answer it" and "do not answer it" in one plan has no
-/// reading.
+/// what makes a `Preflight` name a missing capability at all. A skipped one is
+/// reported `skipped` by [`assemble`]; the plan validation refuses an id that
+/// is both listed and skipped.
 #[must_use]
 pub fn capability_checks(operation: CheckOperation, skip: &[CheckId]) -> Vec<CheckId> {
     logweir_core::check_contract::capability_checks_for(operation)
@@ -660,11 +607,9 @@ pub fn destination_row_for(role: DestinationRole) -> CheckId {
 
 /// The rows to report `unknown` for when NO plan could be rendered at all.
 ///
-/// Used only on the path where a blocking controller row refused before a
-/// `CheckRequest` existed (an unresolvable connection or destination, an
-/// unparseable plan). Every row here is `unknown` in that case whatever the set
-/// is; what it buys is that the verdict LISTS the questions that went
-/// unanswered instead of publishing a short green-looking record.
+/// Used only when a blocking controller row refused before a `CheckRequest`
+/// existed. Every row is `unknown` either way; listing them makes the verdict
+/// name the unanswered questions instead of looking short and green.
 #[must_use]
 pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
     match operation {
@@ -692,9 +637,8 @@ pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
         }
         PreflightOperation::Restore => [
             CheckId::RunnerContract,
-            // `plan.parse` is deliberately absent: the CONTROLLER answers it
-            // (it holds the claimed hash and the bytes), so listing it here
-            // would claim one id for two authorities.
+            // `plan.parse` is absent: the controller answers it (it holds the
+            // claimed hash and the bytes).
             CheckId::TargetAuthenticated,
             CheckId::TargetMappedTopics,
             CheckId::TargetTopicCreate,
@@ -708,7 +652,7 @@ pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
     }
 }
 
-/// The plan kind an operation runs — D2 §4.2.
+/// The plan kind an operation runs.
 #[must_use]
 pub fn plan_kind(operation: PreflightOperation) -> CheckPlanKind {
     match operation {
@@ -730,12 +674,9 @@ pub fn check_operation(operation: PreflightOperation) -> CheckOperation {
     }
 }
 
-/// The ONE construction site for a controller-owned outcome.
-///
-/// Going through it is what makes gating and expiry properties of the ROW
-/// rather than of the call site — the same rule the runner's catalogue keeps on
-/// its side, and the reason `every_controller_row_has_a_catalogue_entry` can be
-/// a real guard.
+/// The one construction site for a controller-owned outcome, so gating and
+/// expiry are properties of the row rather than the call site, and
+/// `every_controller_row_has_a_catalogue_entry` is a real guard.
 ///
 /// # Panics
 /// Never in practice: only for a [`CheckId`] absent from every table above,
@@ -768,8 +709,8 @@ fn add(now: DateTime<Utc>, d: Duration) -> Option<DateTime<Utc>> {
 
 /// Pull an outcome's expiry forward to `limit` when `limit` is sooner.
 ///
-/// D2 §6.3 spells two rows' expiry as `min(15 m, key notAfter)` and
-/// `min(10 m, notAfter)`: a verdict about a key must not outlive the key.
+/// A verdict about a key must not outlive the key: two rows' expiry is
+/// `min(15 m, key notAfter)` and `min(10 m, notAfter)`.
 #[must_use]
 pub fn cap_expiry(mut out: CheckOutcome, limit: Option<DateTime<Utc>>) -> CheckOutcome {
     if let Some(limit) = limit {
@@ -781,16 +722,11 @@ pub fn cap_expiry(mut out: CheckOutcome, limit: Option<DateTime<Utc>>) -> CheckO
     out
 }
 
-// ---------------------------------------------------------------------------
-// The controller-authority rows, each a pure function of one reduced fact
-// ---------------------------------------------------------------------------
-
-/// `connection.resolved` / `target.resolved` — D2 §6.3.
+/// `connection.resolved` / `target.resolved`.
 ///
-/// The three `notReady` codes are the catalogue's, and the mapping from the
-/// saved-connection contract's own terminal states is here rather than in
-/// `connection::resolve` because a `CheckCode` is a preflight vocabulary and a
-/// terminal state is an execution one.
+/// The mapping from the connection contract's terminal states to `CheckCode`s
+/// lives here, not in `connection::resolve`: a `CheckCode` is preflight
+/// vocabulary and a terminal state is execution vocabulary.
 #[must_use]
 pub fn connection_row(
     operation: PreflightOperation,
@@ -852,11 +788,10 @@ pub fn connection_row(
     }
 }
 
-/// `destination.resolved` — D2 §6.3.
+/// `destination.resolved`.
 ///
-/// `DestinationRefusal` already carries a [`CheckCode`], because D2 §3.3's
-/// validation vocabulary and §6.3's catalogue are the same closed set; a second
-/// mapping here would be a second spelling.
+/// `DestinationRefusal` already carries a [`CheckCode`] (validation and the
+/// catalogue share one closed set), so there is no second mapping here.
 #[must_use]
 pub fn destination_row(
     operation: PreflightOperation,
@@ -903,7 +838,7 @@ pub fn destination_row(
     }
 }
 
-/// `configuration.policy` — D2 §6.3, advisory.
+/// `configuration.policy`, advisory.
 #[must_use]
 pub fn policy_row(
     operation: PreflightOperation,
@@ -934,13 +869,13 @@ pub fn policy_row(
     }
 }
 
-/// `configuration.egress` — D2 §6.3's execution-only row.
+/// `configuration.egress`, an execution-only row.
 ///
-/// It is `unknown` FOREVER and by construction: Docker Desktop does not enforce
-/// NetworkPolicy, a cluster that does enforces it at the CNI, and neither the
-/// controller nor a pod that got through can tell an operator whether the deny
-/// path is actually closed. `CheckOutcome::new` forces an execution-only row to
-/// `unknown` whatever a caller passes, so the remedy is the whole content.
+/// `unknown` for ever, by construction: Docker Desktop does not enforce
+/// NetworkPolicy, an enforcing cluster does it at the CNI, and neither the
+/// controller nor a pod that got through can tell whether the deny path is
+/// closed. `CheckOutcome::new` forces an execution-only row to `unknown`, so
+/// the remedy is the whole content.
 #[must_use]
 pub fn egress_row(
     operation: PreflightOperation,
@@ -974,13 +909,12 @@ pub fn egress_row(
     ))
 }
 
-/// What the controller knows about the namespace's trust — the reduced fact
-/// `signer.rostered` and the restore allowlist read.
+/// What the controller knows about the namespace's trust: the reduced fact
+/// behind `signer.rostered` and the restore allowlist.
 ///
-/// The fields below are `TrustRoster/default`'s, and they ARE the trust when
-/// [`Self::governing`] is `None`: no `TrustPolicy` governs the namespace, so it
-/// resolves to the synthesised `legacy-roster-v1` and every answer is the one
-/// this row gave before policies existed.
+/// The fields below are `TrustRoster/default`'s, and they are the trust when
+/// [`Self::governing`] is `None` (the namespace resolves to the synthesised
+/// `legacy-roster-v1`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RosterFacts {
     /// Whether a `TrustRoster` object was found at all.
@@ -996,16 +930,15 @@ pub struct RosterFacts {
     /// The cluster ids a restore may target.
     pub allowed_cluster_ids: Vec<String>,
     /// The namespace's trust when a `TrustPolicy` governs it, or when two
-    /// contest it — [`crate::trust::resolve`]'s answer, the one the `Approval`
-    /// controller, the catalog and the runner's bundles are built from.
-    /// `None` is the roster fallback above.
+    /// contest it: [`crate::trust::resolve`]'s answer, which the `Approval`
+    /// controller, the catalog and the runner's bundles use. `None` is the
+    /// roster fallback above.
     pub governing: Option<GoverningTrust>,
     /// On the roster fallback, every roster key a `TrustPolicy` revoked for
-    /// `KeyCompromise`, with the policies recording it
-    /// (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). The roster fields above carry
-    /// no lifecycle, so without this a namespace re-bound (or dropped) to the
-    /// roster answered `ready/SignerRostered` for a compromised signer that
-    /// every verification in the same namespace refuses.
+    /// `KeyCompromise`, with the policies recording it. The roster fields carry
+    /// no lifecycle, so without this a namespace on the roster would answer
+    /// `ready/SignerRostered` for a compromised signer that every verification
+    /// in the same namespace refuses.
     pub compromised_keys: Vec<(String, Vec<String>)>,
 }
 
@@ -1066,15 +999,12 @@ impl RosterFacts {
         self
     }
 
-    /// The cluster ids a SCRATCH restore may target — the list the runner's
-    /// `allowed-clusters.json` is rendered from (`restore.rs`, from the
-    /// resolved trust): the governing policy's `allowedTargetClusterIds`, the
-    /// roster's `allowedClusterIds` when none governs, and nothing at all in
-    /// a contested namespace. `None` when the policy list could not be READ:
-    /// there is no allowlist to compare against, and the roster's is not it
-    /// (review LOW-1 — falling back to it read `ready` for a target the
-    /// governing policy may not list). [`cluster_identity_under_trust`] turns
-    /// that into `unknown`, `TrustUnknown`.
+    /// The cluster ids a scratch restore may target, the list the runner's
+    /// `allowed-clusters.json` is rendered from: the governing policy's
+    /// `allowedTargetClusterIds`, the roster's `allowedClusterIds` when none
+    /// governs, nothing in a contested namespace. `None` when the policy list
+    /// could not be read: the roster's list is not the answer then, and
+    /// [`cluster_identity_under_trust`] turns it into `unknown`, `TrustUnknown`.
     #[must_use]
     pub fn restore_allowlist(&self) -> Option<&[String]> {
         match &self.governing {
@@ -1129,10 +1059,9 @@ impl RosterFacts {
 
 /// Whether a relayed string is a signing key id at all.
 ///
-/// The sha256 of a SubjectPublicKeyInfo DER, lowercase hex —
-/// `logweir_core::trust::TrustedKey::key_id`'s form, and what
-/// `TrustRoster.spec.signingKeys[*].keyId` is written in. Nothing else is
-/// comparable against the roster.
+/// The sha256 of a SubjectPublicKeyInfo DER, lowercase hex: the form of
+/// `logweir_core::trust::TrustedKey::key_id` and of the roster's key ids.
+/// Nothing else is comparable against the roster.
 #[must_use]
 pub fn is_signer_key_id(value: &str) -> bool {
     value.len() == 64
@@ -1141,29 +1070,21 @@ pub fn is_signer_key_id(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// `signer.rostered` — D2 §6.3.
+/// `signer.rostered`.
 ///
-/// # Why the key id is `unknown` and not `notReady` before the pod runs
+/// The public key id is a fact the check Job reports (`signerKeyId` on
+/// `signer.privateKeyUsable`), derived from a private key the controller may
+/// not read. Before the pod relays, the row can only say
+/// `SignerKeyIdNotObserved`; `SignerNotRostered` would be a claim about a key
+/// nobody has seen.
 ///
-/// The PUBLIC key id is a fact the check Job reports (`signer.privateKeyUsable`
-/// carries it as the `signerKeyId` fact), because it is derived from the
-/// private key the kubelet projected and the controller may not read that
-/// Secret. So the first pass — and every pass where the pod has not relayed —
-/// can only say `SignerKeyIdNotObserved`, and saying `SignerNotRostered`
-/// instead would be a claim about a key nobody has seen.
-///
-/// # The scope is the trust the namespace resolved to
-///
-/// Every answer this row can give — not found, empty, not listed, expired,
-/// rostered — is a statement about ONE trust object, and the remedy for four
-/// of the five is "edit that object". With no `TrustPolicy` governing the
-/// namespace that object is the cluster-scoped `TrustRoster`, and the row is
-/// what it always was. When a policy governs (CATALOG-TRUST-ROSTER-ONLY's
-/// class sweep), the row judges the key against THAT policy — the trust the
-/// `Approval` controller, the catalog and the runner's bundles use — and names
-/// it; see [`signer_policy_row`]. It carries the object's UID once one was
-/// read, so a verdict taken against a replaced object is visibly about a
-/// different one.
+/// The scope is the trust the namespace resolved to: every answer is about
+/// one trust object, and most remedies are "edit that object". With no
+/// `TrustPolicy` governing, that is the cluster-scoped `TrustRoster`; when a
+/// policy governs, the key is judged against that policy (the trust the
+/// `Approval` controller, the catalog and the runner's bundles use) by
+/// [`signer_policy_row`]. The row carries the object's UID once read, so a
+/// verdict against a replaced object is visibly about a different one.
 #[must_use]
 pub fn signer_rostered_row(
     operation: PreflightOperation,
@@ -1174,10 +1095,8 @@ pub fn signer_rostered_row(
     let id = CheckId::SignerRostered;
     let roster_scope = roster.scope();
     if operation == PreflightOperation::Restore {
-        // See `RESTORE_CONTROLLER_ROWS`: the restore check plan carries no
-        // signer path, so no pod reports a key id and there is nothing to match
-        // against the roster. `CheckOutcome::new` forces an execution-only row
-        // to `unknown` whatever is passed here.
+        // See `RESTORE_CONTROLLER_ROWS`: no restore pod reports a key id.
+        // `CheckOutcome::new` forces an execution-only row to `unknown`.
         return outcome(
             operation,
             id,
@@ -1226,22 +1145,13 @@ pub fn signer_rostered_row(
         .with_remedy("Add the runner's public signing key to `spec.signingKeys`.")
         .with_scope(roster_scope);
     }
-    // A RELAYED VALUE THAT IS NOT A KEY ID IS NOT A KEY ID. D2-SIGNERID-
-    // REDACTED: the runner's `signerKeyId` fact went through the redactor's
-    // long-run rule, which replaced it with the literal `[redacted]`, and this
-    // comparison then asked the roster whether it listed a key called
-    // `[redacted]`. It never does, so `signer.rostered` answered
-    // `notReady/SignerNotRostered` for a key whose SPKI sha256 IS on the roster
-    // — a permanent, blocking false negative on every Backup preflight, while
-    // `signer.privateKeyUsable` on the same Job said `ready`.
-    //
-    // The redactor now keeps a key id ([`logweir_core::check_contract::
-    // redact`]'s public-identifier exemption), and this is the belt: the roster
-    // is written in sha256 of a SubjectPublicKeyInfo DER, so anything that is
-    // not 64 lowercase hex characters did not come out of `ValidatedSigner`,
-    // whatever it came out of. The honest answer for it is `unknown` — the same
-    // one a pod that has not reported gets — and NOT a blocking refusal about a
-    // key nobody has actually seen.
+    // A relayed value that is not a key id is not a key id. The roster is
+    // written in sha256 of a SubjectPublicKeyInfo DER, so anything that is not
+    // 64 lowercase hex characters (for example a value the redactor replaced
+    // with `[redacted]`) did not come from `ValidatedSigner`. The honest answer
+    // is `unknown`, as for a pod that has not reported, not a blocking refusal
+    // about a key nobody has seen. The redactor also keeps key ids
+    // ([`logweir_core::check_contract::redact`]'s public-identifier exemption).
     let observed_key_id = observed_key_id.filter(|k| is_signer_key_id(k));
     let Some(key_id) = observed_key_id else {
         return outcome(
@@ -1274,10 +1184,9 @@ pub fn signer_rostered_row(
         )
         .with_scope(roster_scope);
     };
-    // A KeyCompromise REVOCATION ON ANY TrustPolicy REACHES THE ROSTER
-    // (TRUSTPOLICY-DELETE-DROPS-REVOCATION): the key may not sign anything new,
-    // exactly as `signer_policy_row` answers `KeyRevoked` for a governing
-    // policy, and the row says where the revocation is recorded.
+    // A `KeyCompromise` revocation on any `TrustPolicy` reaches the roster: the
+    // key may not sign anything new, as `signer_policy_row` answers
+    // `KeyRevoked`, and the row says where the revocation is recorded.
     if let Some((_, recorded_by)) = roster.compromised_keys.iter().find(|(k, _)| k == key_id) {
         return outcome(
             operation,
@@ -1333,24 +1242,21 @@ pub fn signer_rostered_row(
 
 /// `signer.rostered` in a namespace a `TrustPolicy` governs (or two contest).
 ///
-/// # Judged by the NEW-signature rule
+/// Judged by the new-signature rule: the key is the one the run is about to
+/// sign evidence with, so the question is
+/// [`logweir_core::trust::may_sign_new`]'s (`Active`,
+/// `notBefore ≤ now < notAfter`, `EvidenceSigning`), resolved by key id through
+/// [`crate::trust::ResolvedTrust::may_sign_new_for`]. A retired key still
+/// verifies what it signed, but evidence it wrote today would be
+/// `SignedOutsideValidity` when read. The key must also be usable (its PEM
+/// parses and hashes to its id), because only usable keys reach a verifier.
 ///
-/// The key this row asks about is the one the run is ABOUT TO SIGN evidence
-/// with, so the question is [`logweir_core::trust::may_sign_new`]'s — `Active`,
-/// `notBefore ≤ now < notAfter`, `EvidenceSigning` — resolved by key id
-/// through [`crate::trust::ResolvedTrust::may_sign_new_for`], the rule
-/// [`logweir_core::trust::decide`] defers to for any new use. A retired key
-/// still verifies what it signed (`decide`'s `Historical`), and signs nothing
-/// new: evidence it wrote today would be `SignedOutsideValidity` the moment it
-/// was read. The key must also be USABLE (its PEM parses and hashes to its
-/// id), because only usable keys reach a verifier's keyring.
-///
-/// The codes are the roster row's, so a console reading them needs no second
-/// vocabulary: a conflict or a policy with no usable signing key is
-/// `TrustRosterNotLoaded` (trust resolved, and verifies nothing), a key the
-/// policy does not carry for `EvidenceSigning` is `SignerNotRostered`, and a
-/// listed key that may not sign now is `SignerKeyExpired` naming the refusal.
-/// A policy list that could not be read is `unknown`, `TrustUnknown`.
+/// The codes are the roster row's, so a console needs no second vocabulary: a
+/// conflict or a policy with no usable signing key is `TrustRosterNotLoaded`,
+/// a key the policy does not carry for `EvidenceSigning` is
+/// `SignerNotRostered`, a listed key that may not sign now is
+/// `SignerKeyExpired` naming the refusal, and an unreadable policy list is
+/// `unknown`, `TrustUnknown`.
 fn signer_policy_row(
     operation: PreflightOperation,
     governing: &GoverningTrust,
@@ -1490,12 +1396,11 @@ fn signer_policy_row(
 ///
 /// The allowlist decides a scratch restore's `TargetNotAllowlisted` and a
 /// backup's `SourceIsAllowlistedTarget`. With the `TrustPolicy` list
-/// unreadable neither can be answered, so a verdict that is `ready` (or that
-/// refused only for the allowlist) becomes `unknown`, `TrustUnknown` — a
-/// blocking row, so the preflight can never read `ready` on a guess. A row
-/// decided BEFORE the allowlist (identity not observed, identity changed, the
-/// target is the source) keeps its own answer: those are facts about the
-/// broker, not about trust.
+/// unreadable neither can be answered, so a `ready` (or an allowlist-only
+/// refusal) becomes a blocking `unknown`, `TrustUnknown`: never `ready` on a
+/// guess. A row decided before the allowlist (identity not observed or
+/// changed, target is the source) keeps its answer: those are facts about the
+/// broker.
 #[must_use]
 pub fn cluster_identity_under_trust(
     operation: PreflightOperation,
@@ -1561,13 +1466,10 @@ pub fn cluster_identity_under_trust(
     unknown
 }
 
-/// `connection.clusterIdentity` / `target.clusterIdentity` — the **J+C** row.
-///
-/// The check Job reports the OBSERVED cluster id as a fact; the verdict needs
-/// `KafkaCluster.status.clusterId` and `TrustRoster.spec.allowedClusterIds`,
-/// neither of which a credential-holding Job is given Kubernetes read for. So
-/// the two halves meet here, and this is the one row whose authority is
-/// genuinely both.
+/// `connection.clusterIdentity` / `target.clusterIdentity`, the **J+C** row:
+/// the check Job reports the observed cluster id, and the verdict needs
+/// `KafkaCluster.status.clusterId` and the allowlist, which a
+/// credential-holding Job has no Kubernetes read for.
 #[must_use]
 pub fn cluster_identity_row(
     operation: PreflightOperation,
@@ -1628,9 +1530,8 @@ pub fn cluster_identity_row(
                 )
                 .with_fact("clusterId", observed);
             }
-            // The allowlist is a SCRATCH-mode rule (D2 §6.3's
-            // `TargetNotAllowlisted` is spelled "(scratch)"): a `newTopic`
-            // restore writes into a named cluster on purpose.
+            // The allowlist is a scratch-mode rule: a `newTopic` restore writes
+            // into a named cluster on purpose.
             if scratch && !allowed_cluster_ids.iter().any(|a| a == observed) {
                 return outcome(
                     operation,
@@ -1663,22 +1564,14 @@ pub fn cluster_identity_row(
             .with_fact("clusterId", observed)
         }
         _ => {
-            // D2 §6.3: a SOURCE whose id is on the restore allowlist is a
-            // scratch cluster, and the runner's phase −1 rail refuses to back
-            // one up. Reporting it here is how an operator learns before the
-            // run rather than from an exit code.
-            //
-            // IT IS A `Backup` VERDICT AND ONLY A `Backup` VERDICT (review
-            // F4). A `SourceConnection` check asks whether the connection
-            // answers; whether the cluster may be backed up is a different
-            // question, asked by a different operation, and the phase −1 rail
-            // it cites guards a run this operation does not describe. Reported
-            // here it made a successful dial to a legitimate restore target
-            // read `not ready`, under a remedy — "Back up the production
-            // cluster, not the scratch target" — advising about a backup
-            // nobody had asked for. `ClusterIdentityChanged` above stays
-            // blocking for both: dialling a DIFFERENT cluster than the object
-            // records is a fact about the connection itself.
+            // A source whose id is on the restore allowlist is a scratch
+            // cluster, which the runner refuses to back up; this reports it
+            // before the run. A `Backup` verdict only: a `SourceConnection`
+            // check asks whether the connection answers, not whether the
+            // cluster may be backed up, so a dial to a legitimate restore
+            // target must not read `not ready`. `ClusterIdentityChanged` above
+            // stays blocking for both: dialling a different cluster than the
+            // object records is a fact about the connection itself.
             if operation == PreflightOperation::Backup
                 && allowed_cluster_ids.iter().any(|a| a == observed)
             {
@@ -1712,19 +1605,14 @@ pub fn cluster_identity_row(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The restore-only controller rows
-// ---------------------------------------------------------------------------
-
 /// The restore plan, reduced to the facts the three `plan.*` rows read.
 ///
-/// NO `PartialEq`: `logweir_core::spec::DrillSpec` has none, and deriving one
-/// here would mean comparing plans by a structural equality the pure crate
-/// deliberately does not define. What identifies a plan is
-/// [`PlanFacts::recomputed_hash`], which is what `binding.planHash` carries.
+/// No `PartialEq`: `logweir_core::spec::DrillSpec` deliberately defines none.
+/// What identifies a plan is [`PlanFacts::recomputed_hash`], which
+/// `binding.planHash` carries.
 #[derive(Clone, Debug)]
 pub struct PlanFacts {
-    /// The verbatim bytes. Never re-serialised: `planHash` binds THESE.
+    /// The verbatim bytes. Never re-serialised: `planHash` binds these.
     pub bytes: Vec<u8>,
     /// `sha256:<hex>` recomputed by the controller from `bytes`.
     pub recomputed_hash: String,
@@ -1748,7 +1636,7 @@ impl PlanFacts {
         }
     }
 
-    /// Whether the target mode is `scratch` — the mode the allowlist and the
+    /// Whether the target mode is `scratch`, the mode the allowlist and the
     /// marker row apply to.
     #[must_use]
     pub fn scratch(&self) -> bool {
@@ -1760,13 +1648,11 @@ impl PlanFacts {
 
 /// A digest, shortened so the redaction chokepoint does not eat it.
 ///
-/// `check_contract::redact`'s `long-base64-or-hex-run` rule replaces any hex
-/// run of 40 characters or more — which a `sha256:<64 hex>` is — so a message
-/// quoting a whole digest reaches a status as `[redacted]`. That rule is right
-/// and is not weakened here; the message carries the first twelve hex
-/// characters, which is enough for a human to tell two plans apart, and the
-/// WHOLE digest is in `status.binding.planHash`, where nothing redacts it
-/// because it is a field and not prose.
+/// `check_contract::redact` replaces any hex run of 40 characters or more, so
+/// a whole `sha256:<64 hex>` in a message reaches the status as `[redacted]`.
+/// The message carries the first twelve hex characters, enough to tell two
+/// plans apart; the whole digest is in `status.binding.planHash`, a field
+/// nothing redacts.
 #[must_use]
 pub fn short_digest(digest: &str) -> String {
     match digest.split_once(':') {
@@ -1775,13 +1661,12 @@ pub fn short_digest(digest: &str) -> String {
     }
 }
 
-/// `plan.parse` — D2 §6.3, and the controller's half of it.
+/// `plan.parse`, the controller's half.
 ///
-/// THE HASH IS RECOMPUTED HERE AND THE CLAIM IS NEVER TRUSTED. `spec.request
-/// .restore.planHash` is the requester's assertion about bytes it also
-/// supplied; a preflight that took it on faith would bind its verdict to a
-/// hash that names some other document, and W12's applicability test compares
-/// exactly that field.
+/// The hash is recomputed here and the claim is never trusted:
+/// `spec.request.restore.planHash` is the requester's assertion about bytes it
+/// also supplied, and the API's applicability test compares exactly that
+/// field.
 #[must_use]
 pub fn plan_parse_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
     let op = PreflightOperation::Restore;
@@ -1844,13 +1729,11 @@ fn topic_name_is_legal(name: &str) -> bool {
 
 /// A scope naming the TOPIC a row is about.
 ///
-/// Reviewer finding **F7**: `redact`'s `long-base64-or-hex-run` rule replaces
-/// any run of 40+ characters from `[A-Za-z0-9+/=_-]`, and a Kafka topic name's
-/// only run-breaking character is `.`. So the exact case a
-/// `MappedTopicNameIllegal` row is about — a name that is too long — is the
-/// case whose name `with_message` eats. `entry_of` copies `scope` VERBATIM, and
-/// a topic name is not credential-shaped, so the name goes there and the prose
-/// keeps its (possibly redacted) copy.
+/// `redact` replaces any run of 40+ characters from `[A-Za-z0-9+/=_-]`, and a
+/// topic name's only run-breaking character is `.`, so the too-long name a
+/// `MappedTopicNameIllegal` row is about is the one `with_message` eats.
+/// `entry_of` copies `scope` verbatim, and a topic name is not
+/// credential-shaped, so the name goes there.
 #[must_use]
 pub fn topic_scope(name: &str) -> CheckScope {
     CheckScope {
@@ -1860,12 +1743,8 @@ pub fn topic_scope(name: &str) -> CheckScope {
     }
 }
 
-/// `plan.names` — D2 §6.3's four `notReady` codes, over the MAPPED names.
-///
-/// The rules are phase 0's, applied to the plan a restore would submit rather
-/// than to the document a running pod already holds. Phase 0 still runs; this
-/// is the same arithmetic reported before the pod exists, which is the whole
-/// point of a preflight.
+/// `plan.names`: the four `notReady` codes, over the mapped names. Phase 0's
+/// rules, applied before the pod exists; phase 0 still runs.
 #[must_use]
 pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
     let op = PreflightOperation::Restore;
@@ -1885,9 +1764,9 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
             .with_remedy("Name each topic explicitly (guard G-GLOB).");
     }
     let prefix = logweir_core::spec::target_topic_prefix(spec);
-    // `$` is refused in BOTH halves: the engine's config loader expands
+    // `$` is refused in both halves: the engine's config loader expands
     // `${NAME}` in pre-parse text, so a name that can name an environment
-    // variable is a name that can read one.
+    // variable can read one.
     if let Some(entry) = topics
         .iter()
         .find(|t| t.contains('$'))
@@ -1901,10 +1780,9 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
             ))
             .with_remedy("Remove the `$` from the topic name or the mapping prefix.");
     }
-    // PROD-15.1 (review L6, and its class sweep): a plan that restores under
-    // the ORIGINAL topic names maps every topic onto itself ON PURPOSE — into
-    // absent topics, behind its own approval subject — so the identity map is
-    // refused here only when the plan did not opt in, or opted in in a shape
+    // A plan that restores under the original topic names maps every topic
+    // onto itself on purpose, behind its own approval subject, so the identity
+    // map is refused only when the plan did not opt in, or opted in in a shape
     // phase 0 refuses (`refuse_shape`, the runner's own words).
     if let Some(why) = logweir_core::original_name::refuse_shape(spec) {
         return mk(CheckState::NotReady, CheckCode::TopicMappingIdentity)
@@ -1957,13 +1835,11 @@ pub struct BindingFacts {
     pub legacy_source: Option<LegacyBinding>,
 }
 
-/// `plan.bindings` — D2 §6.3.
+/// `plan.bindings`.
 ///
-/// EVERY MISMATCH IS A DIFFERENT REMEDY, which is why the four codes are four
-/// codes: a plan pointed at the wrong bucket is an edit to the plan, a plan
-/// pointed at the wrong broker is an edit to the target, and a plan naming a
-/// topic the recovery point never captured is a choice of a different recovery
-/// point.
+/// Four codes, because every mismatch is a different remedy: the wrong bucket
+/// is a plan edit, the wrong broker is a target edit, and a topic the recovery
+/// point never captured means choosing a different recovery point.
 #[must_use]
 pub fn plan_bindings_row(
     facts: &PlanFacts,
@@ -2056,9 +1932,9 @@ pub fn plan_bindings_row(
 /// `plan.bindings`'s legacy half: the plan reads the inline archive the
 /// request names, and that is the archive the recovery point was written to.
 ///
-/// Both are compared on scheme, bucket and prefix — everything a legacy
-/// `archive.url` carries. The other four storage fields exist only in the plan,
-/// and [`legacy_source_destination`] reads them from there.
+/// Both are compared on scheme, bucket and prefix, everything a legacy
+/// `archive.url` carries; [`legacy_source_destination`] reads the other four
+/// storage fields from the plan.
 fn legacy_binding_mismatch(
     spec: &logweir_core::spec::DrillSpec,
     legacy: &LegacyBinding,
@@ -2127,7 +2003,7 @@ fn describe_plan_source(storage: &logweir_core::engine::StorageUrl) -> String {
     }
 }
 
-/// The recovery point, reduced — PLAT-11.1's identity is a `Backup` UID.
+/// The recovery point, reduced; its identity is a `Backup` UID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveryPointFacts {
     /// No `recoveryPointRef` was given. The row is not reported.
@@ -2138,7 +2014,7 @@ pub enum RecoveryPointFacts {
     Found {
         /// Its name.
         name: String,
-        /// Its UID — PLAT-11.1's identity.
+        /// Its UID, the recovery point's identity.
         uid: String,
         /// The UID the requester pinned, when it pinned one.
         expected_uid: Option<String>,
@@ -2151,32 +2027,25 @@ pub enum RecoveryPointFacts {
     },
 }
 
-/// `recoveryPoint.state` — D2 §6.3, bound to a `Backup` UID (PLAT-11.1).
+/// `recoveryPoint.state`, bound to a `Backup` UID.
 ///
-/// # A same-named replacement is not the same recovery point
+/// A `Backup` deleted and recreated under the same name is a different run
+/// over a different window, so `RecoveryPointUidChanged` exists, and the UID in
+/// the binding digest makes every earlier preflight stale.
 ///
-/// `RecoveryPointUidChanged` exists because a `Backup` deleted and recreated
-/// under the same name is a different run over a different window. The UID is
-/// what PLAT-11.1 fixes as the identity, and it is in the binding digest, so a
-/// recreated recovery point also makes every earlier preflight stale.
-///
-/// # The location comparison, and its three answers
-///
-/// A recovery point is only restorable from the destination it was WRITTEN to
-/// (D2 §3.12). The point's frozen `locationDigest` — `Backup.status.destination`
-/// — is compared with the digest this check resolved for the source
-/// destination:
+/// A recovery point is only restorable from the destination it was written
+/// to. Its frozen `locationDigest` (`Backup.status.destination`) is compared
+/// with the digest this check resolved for the source destination:
 ///
 /// * both present and equal → `RecoveryPointSucceeded`;
 /// * both present and different → `RecoveryPointLocationMismatch`, with both
 ///   digests in the message;
 /// * the point has none and the check resolved one → `unknown` with
-///   `RecoveryPointLocationUnknown`. A point archived before saved destinations
-///   existed publishes no location, and a blocking row that answered `ready`
-///   there would be reporting a comparison nobody made.
+///   `RecoveryPointLocationUnknown`: a point archived before saved destinations
+///   publishes no location, and `ready` would report a comparison nobody made.
 ///
 /// Neither digest is recomputed from a live object: a destination edited after
-/// a run froze must not be able to make a moved recovery point look settled.
+/// a run froze must not make a moved recovery point look settled.
 #[must_use]
 pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Option<CheckOutcome> {
     let op = PreflightOperation::Restore;
@@ -2241,11 +2110,9 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
                 location_digest.as_deref(),
                 expected_location_digest.as_deref(),
             ) {
-                // TWO LOCATIONS, AND THEY ARE NOT THE SAME ONE. Both digests
-                // are in the message: an operator holding two destinations
-                // needs to know WHICH of them this point is in, and a sentence
-                // that only says "different" sends them to compare two objects
-                // by hand.
+                // Two different locations. Both digests are in the message, so
+                // an operator with two destinations learns which one holds the
+                // point.
                 (Some(frozen), Some(expected)) if frozen != expected => {
                     return Some(
                         mk(
@@ -2263,18 +2130,14 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
                         ),
                     );
                 }
-                // A LEGACY POINT UNDER A DESTINATION-BACKED CHECK. The Backup
-                // publishes no frozen destination, so this row cannot say the
-                // location agrees — and saying `ready` would be the check
-                // claiming a comparison it never made. `unknown` is the honest
-                // answer and, as a blocking row, it holds the verdict at
-                // `unknown` until somebody confirms the location by hand.
-                //
-                // The mirror case — a point WITH a digest under a check that
-                // resolved no source destination — stays `ready` here: that
-                // preflight makes no location claim to compare against, and
-                // `plan.bindings` is the row that holds the legacy plan's
-                // location to account (D2 §3.12).
+                // A legacy point under a destination-backed check: the Backup
+                // publishes no frozen destination, so the row cannot say the
+                // location agrees, and as a blocking `unknown` it holds the
+                // verdict until someone confirms the location by hand. The
+                // mirror case (a point with a digest under a check that
+                // resolved no source destination) stays `ready`: that check
+                // makes no location claim, and `plan.bindings` holds the
+                // legacy plan's location to account.
                 (None, Some(expected)) => {
                     return Some(
                         mk(CheckState::Unknown, CheckCode::RecoveryPointLocationUnknown)
@@ -2303,33 +2166,26 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
     }
 }
 
-// ---------------------------------------------------------------------------
-// A catalog point (PLAT-15.2, D3 §5.5 step 5)
-// ---------------------------------------------------------------------------
-
 /// How many `Backup`s one list page reads for the catalog point's verdict join.
 pub const CATALOG_POINT_BACKUP_PAGE: u32 = 500;
 /// How many such pages one check reads. A namespace holding more `Backup`s than
 /// `4 × 500` cannot be shown to hold no refusal of this receipt, and the row
 /// says so (`unknown`) rather than guessing.
 pub const CATALOG_POINT_BACKUP_PAGES: usize = 4;
-/// How many view pages one check reads — the view's own ceiling (D3 §5.3).
+/// How many view pages one check reads: the view's own ceiling.
 pub const CATALOG_POINT_VIEW_PAGES: usize = 8;
 
 /// The catalog point a restore check is about, reduced.
 ///
-/// # Why the controller re-reads the row
-///
-/// The console read the row when the operator chose the point; this is the
-/// check D3 §5.5 step 5 asks for — "re-evaluates trust, so a green preview
-/// cannot survive a point that became `Missing`". The row is the controller's
-/// own materialised judgement (availability × verification, trust already
-/// applied), read from the immutable page `ConfigMap`s the catalog's status
-/// names and checked against their recorded digests, and joined with the
-/// namespace's `Backup` verdicts on the receipt digest: **the catalog decides
-/// only where the controller could not look**, so a `Backup` of the same
-/// receipt whose own verdict is a reached refusal refuses the point whatever
-/// the row says.
+/// The console read the row when the operator chose the point; this re-reads
+/// it so a green preview cannot survive a point that became `Missing`. The row
+/// is the controller's own materialised judgement (availability ×
+/// verification, trust applied), read from the immutable page `ConfigMap`s the
+/// catalog's status names and checked against their recorded digests, and
+/// joined with the namespace's `Backup` verdicts on the receipt digest: the
+/// catalog decides only where the controller could not look, so a `Backup` of
+/// the same receipt whose own verdict is a reached refusal refuses the point
+/// whatever the row says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogPointFacts {
     /// No `catalogPointRef` was given. The row is not reported by this path.
@@ -2366,7 +2222,7 @@ pub struct CatalogPointFound {
     pub catalog_uid: String,
     /// The row, as the controller materialised it.
     pub entry: crate::catalog_view::ViewEntry,
-    /// A reached verdict on a `Backup` of this receipt, when one exists —
+    /// A reached verdict on a `Backup` of this receipt, when one exists:
     /// `catalog_view::ControllerRefusals`' answer, the join the product API's
     /// `/points` route and retention make.
     pub refused_by: Option<String>,
@@ -2380,19 +2236,17 @@ pub struct CatalogPointFound {
     pub plan_backup: Option<String>,
     /// Whether the check has a parsed plan at all.
     pub plan_parsed: bool,
-    /// The row's signer, judged again against the namespace's CURRENT trust.
+    /// The row's signer, judged again against the namespace's current trust.
     pub signer: SignerRecheck,
 }
 
-/// The row's signer against the namespace's CURRENT trust — the PLAT-15.2
-/// review's M-2 (D3 §5.5 step 5, "re-evaluates trust").
+/// The row's signer against the namespace's current trust.
 ///
-/// The row's `verification` is the verdict the catalog reached at SYNC time,
-/// under the trust it held then. A key revoked or retired after that sync
-/// would otherwise keep a `Verified` row green until the next sync; this is
-/// the same `logweir_core::trust::decide` the runner applies before it
-/// restores (D3 §5.5 step 6), over the same trust the controller resolves for
-/// the namespace's `Approval`s (`crate::trust::resolve`).
+/// The row's `verification` is the catalog's sync-time verdict; a key revoked
+/// or retired since would otherwise keep a `Verified` row green until the next
+/// sync. This is the `logweir_core::trust::decide` the runner applies before
+/// it restores, over the trust the controller resolves for the namespace's
+/// `Approval`s (`crate::trust::resolve`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignerRecheck {
     /// Current trust accepts the row's signer for `EvidenceSigning`.
@@ -2417,9 +2271,9 @@ pub enum SignerRecheck {
 ///
 /// The claimed signing time is the row's recovery point: the view carries no
 /// receipt `finished_at`, and the recovery point is the earliest instant the
-/// receipt can have been signed. A key retired between the two instants is
-/// therefore accepted here and refused by the runner, which reads the real
-/// `finished_at` — the runner's refusal is the one that moves no data.
+/// receipt can have been signed. A key retired between the two is accepted
+/// here and refused by the runner, which reads the real `finished_at` before
+/// moving any data.
 #[must_use]
 pub fn signer_recheck(
     entry: &crate::catalog_view::ViewEntry,
@@ -2463,10 +2317,9 @@ pub fn signer_recheck(
         &IndependentObservation::none(),
         now,
     );
-    // A PASS IS `Valid` ON A BASIS THE BADGE ADMITS, not `Valid` alone
-    // (TRUST-VALID-BASIS-CLASS). `decide` pairs `Valid` with
-    // `Current`/`Historical` only, so this reads the same today; the
-    // allow-list is what keeps it so.
+    // A pass is `Valid` on a basis the badge admits, not `Valid` alone.
+    // `decide` pairs `Valid` with `Current`/`Historical` only today; the
+    // allow-list keeps it so.
     let pass = verdict.result == TrustResult::Valid
         && crate::verification::ValidBasis::of_core(verdict.basis).is_pass();
     if !pass {
@@ -2522,11 +2375,10 @@ pub struct CatalogPointRead<'a> {
 
 /// Reduce what the reconciler read to [`CatalogPointFacts`]. Pure.
 ///
-/// A page is trusted only when it is `immutable: true` and its entry lines hash
-/// to the digest the catalog's status recorded for it — the API's `/points`
-/// rule, and the only integrity a Job-owned page has (D3 §5.3). A page that is
-/// gone, mutable, or disagrees with its digest makes the view unreadable: an
-/// entry read from it would be a row nobody recorded.
+/// A page is trusted only when it is `immutable: true` and its entry lines
+/// hash to the digest the catalog's status recorded for it (the API's
+/// `/points` rule, and the only integrity a Job-owned page has). A page that
+/// is gone, mutable, or disagrees with its digest makes the view unreadable.
 #[must_use]
 pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
     let catalog = read.catalog_name.to_string();
@@ -2626,7 +2478,7 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
 
 /// `recoveryPoint.state` for a catalog point.
 ///
-/// # The order is the order an operator repairs in
+/// In the order an operator repairs in:
 ///
 /// 1. the catalog or its view is not there → `notReady`/`unknown`;
 /// 2. the view does not list the point → `notReady RecoveryPointNotFound`;
@@ -2634,12 +2486,12 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
 ///    `notReady CatalogPointRefusedByController`, whatever the row says;
 /// 4. the row is not selectable → `notReady CatalogPointNotSelectable`, with
 ///    both axes in the message;
-/// 5. the row's signer is refused by the namespace's CURRENT trust →
+/// 5. the row's signer is refused by the namespace's current trust →
 ///    `notReady CatalogPointSignerUntrusted`; that trust could not be resolved
 ///    or the row names no signer → `unknown CatalogPointSignerUnknown`;
-/// 6. not every `Backup` could be read → `unknown CatalogPointViewUnavailable`
-///    — asked AFTER the refusal it could not rule out, because a refusal that
-///    WAS found is an answer;
+/// 6. not every `Backup` could be read → `unknown CatalogPointViewUnavailable`,
+///    asked after the refusal it could not rule out, because a refusal that
+///    was found is an answer;
 /// 7. the plan is not bound to this row (no `source.point`, a different
 ///    binding, or a `source.backup` that is not the row's set) →
 ///    `notReady CatalogPointBindingMismatch`;
@@ -2821,9 +2673,9 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
 /// The `Approval`, reduced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalFacts {
-    /// A DRAFT. D2 §6.3: `approval.state` is `skipped` with
-    /// [`CheckCode::SubjectNotCreated`] — there is no subject to approve yet,
-    /// and that is a real answer rather than a failure to decide.
+    /// A draft: `approval.state` is `skipped` with
+    /// [`CheckCode::SubjectNotCreated`], because there is no subject to
+    /// approve yet.
     Draft,
     /// The `Restore` names no approval at all.
     NotNamed,
@@ -2835,40 +2687,26 @@ pub enum ApprovalFacts {
         name: String,
         /// Its UID, for the binding.
         uid: String,
-        /// Its `metadata.resourceVersion`, for the binding — it MOVES when
-        /// verification status moves, which is what makes a preflight taken
-        /// while an approval was pending go stale the moment it is verified.
+        /// Its `metadata.resourceVersion`, for the binding. It moves when
+        /// verification status moves, so a preflight taken while an approval
+        /// was pending goes stale the moment it is verified.
         resource_version: String,
         /// `status.verified`.
         verified: Option<bool>,
-        /// The `Verified` condition's REASON — a `ApprovalRefusal::reason()`
-        /// token such as `KeyIdExpired`, and the thing this row ROUTES on.
-        ///
-        /// IT USED TO BE THE MESSAGE OR THE REASON, WHICHEVER EXISTED, and
-        /// that conflation is half of PREFLIGHT-APPROVAL-ROSTER: a router
-        /// cannot branch on a sentence, so this row had nothing to branch on
-        /// and re-derived the verdict from the roster instead.
+        /// The `Verified` condition's reason, an `ApprovalRefusal::reason()`
+        /// token such as `KeyIdExpired`: what this row routes on.
         reason: Option<String>,
         /// The `Verified` condition's MESSAGE, which is what an operator
         /// reads. Never routed on.
         message: Option<String>,
         /// The roster key id that verified it.
         matched_key_id: Option<String>,
-        /// `status.approverKeyWindow` — the matched approver key's declared
-        /// validity window, as the **Approval controller** published it.
-        ///
-        /// THE ONLY WINDOW THIS FILE MAY READ. It is not resolved here and it
-        /// is not the roster's: `controllers::approval` resolved the key
-        /// through the `TrustPolicy` that governs the namespace and wrote what
-        /// it found, which is the same authority the verdict beside it came
-        /// from. `None` is the honest answer of an `Approval` that matched no
-        /// key, or of a controller that predates the field — and `None` is
-        /// UNKNOWN, never valid.
-        ///
-        /// BOXED because `Found` is already the large variant of this enum and
-        /// a fourth inline field tipped `clippy::large_enum_variant`: every
-        /// `ApprovalFacts` in a reduced-inputs struct would otherwise carry the
-        /// window's bytes whether or not there is one.
+        /// `status.approverKeyWindow`: the matched approver key's validity
+        /// window, as the Approval controller published it from the trust that
+        /// governs the namespace, the authority its verdict came from. The only
+        /// window this file may read. `None` (no key matched, or an older
+        /// controller) is unknown, never valid. Boxed to keep `Found` small
+        /// (`clippy::large_enum_variant`).
         approver_key_window: Option<Box<ApproverKeyWindow>>,
         /// The `plan_hash` inside the approval's own signed bytes.
         approved_plan_hash: Option<String>,
@@ -2876,16 +2714,15 @@ pub enum ApprovalFacts {
         subject_name: Option<String>,
         /// The Restore UID the verdict was recorded for
         /// (`status.verifiedSubjectRef.uid`) beside the UID of the Restore this
-        /// check is about — review L2. A consumed `Approval` is never re-read
-        /// by its controller (P9), so it no longer flips to
-        /// `ReferentUidChanged` when its Restore is deleted and re-created
-        /// under the same name; this row must see the UID itself. BOXED for
-        /// `approver_key_window`'s reason. `None` when either is unknown.
+        /// check is about. A consumed `Approval` is never re-read by its
+        /// controller, so it does not flip to `ReferentUidChanged` when its
+        /// Restore is re-created under the same name; this row must see the
+        /// UID itself. Boxed, likewise. `None` when either is unknown.
         uid_binding: Option<Box<UidBinding>>,
     },
 }
 
-/// The two UIDs [`ApprovalFacts::Found`] compares — review L2.
+/// The two UIDs [`ApprovalFacts::Found`] compares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UidBinding {
     /// `Approval.status.verifiedSubjectRef.uid`.
@@ -2897,53 +2734,31 @@ pub struct UidBinding {
 /// The `Verified` condition reason that means the approver key had passed its
 /// `notAfter` when the Approval controller last looked.
 ///
-/// ONE SPELLING, AND IT IS THE CONTROLLER'S.
+/// One spelling, the controller's:
 /// `the_expiry_reason_is_the_one_the_approval_controller_writes` pins it
-/// against `ApprovalRefusal::KeyIdExpired`'s own `reason()`, so a rename there
-/// is a red test here rather than a preflight that silently stops recognising
-/// an expiry.
+/// against `ApprovalRefusal::KeyIdExpired`'s own `reason()`.
 pub const APPROVAL_REASON_KEY_ID_EXPIRED: &str = "KeyIdExpired";
 
-/// `approval.state` and `approval.keyValidity` — D2 §6.3's two rows.
+/// `approval.state` and `approval.keyValidity`.
 ///
-/// # This row reads the Approval's verdict and never re-derives it
+/// This row reads the Approval's verdict and never re-derives it. The
+/// Approval controller resolves the approver key through the trust policy that
+/// governs the namespace; a second derivation from `TrustRoster/default`
+/// disagreed with it (a policy can expire a key the roster still shows open),
+/// and a preflight must never authorise what the controller has refused. So
+/// the verdict comes from the Approval: its `Verified` condition, that
+/// condition's reason, and `status.matchedKeyId`. `approval_rows` is not given
+/// a [`RosterFacts`] at all (`the_approval_rows_are_not_given_the_roster`).
 ///
-/// Defect **PREFLIGHT-APPROVAL-ROSTER**. It used to resolve the approver key
-/// and its `notAfter` out of `TrustRoster/default` and decide expiry here,
-/// while `controllers::approval` resolves the same key through the **trust
-/// policy** that governs the namespace (D3 W10). Those are two different
-/// authorities and they disagree: on `lab-refresh-4` an isolated `TrustPolicy`
-/// carrying an expiring approver key moved the Approval to
-/// `Verified=False, KeyIdExpired` while this row, reading the roster, still
-/// said `ready`. A preflight that authorises what the controller has already
-/// refused is the one direction this kind may never fail in — and the roster
-/// being immutable is also why PLAT-03.2's `expired approval` test could not
-/// be built without recreating a shared trust anchor.
-///
-/// So the verdict comes from the Approval: its `Verified` condition, that
-/// condition's REASON, and `status.matchedKeyId`. **`approval_rows` is not
-/// given a [`RosterFacts`] at all**, which is what makes "does not read the
-/// roster" a property of the signature rather than of a comment;
-/// `the_approval_rows_are_not_given_the_roster` holds the shape.
-///
-/// # The key's WINDOW comes from the Approval too — and only from there
-///
-/// Defect **APPROVAL-KEY-WINDOW-UNPUBLISHED**, the deliberate regression the
-/// fix above created and recorded. Two D2 §6.3 behaviours are about the KEY and
-/// not about the verdict — `ApproverKeyExpiresBeforeDeadline` and the
-/// `min(10 m, notAfter)` re-check cap on both rows — and both need a window
-/// this file may no longer resolve. `controllers::approval` now publishes it
-/// (`status.approverKeyWindow`: the matched key's `keyId`, `notBefore` and
-/// `notAfter`, as the RESOLVED TRUST POLICY declares them), so the two return
-/// reading the same authority the verdict does.
+/// The key's window comes from the Approval too
+/// (`status.approverKeyWindow`, as the resolved trust policy declares it), for
+/// `ApproverKeyExpiresBeforeDeadline` and the `min(10 m, notAfter)` cap.
 ///
 /// `deadline` is the instant the restore would still need the approver key to
-/// be valid at. `ApproverKeyExpiresBeforeDeadline` is ADVISORY, which is D2
-/// §6.3's own `Gate` column for `approval.keyValidity` (`A`) and what §6.4
-/// spells out — *"Advisory `notReady` appears as warnings"* — so this is a
-/// warning ahead of time and not a refusal: a key that expires mid-run does not
-/// invalidate an approval that verified while it was valid, and the blocking
-/// `approval.state` row is where a withdrawn verdict refuses.
+/// be valid at. `ApproverKeyExpiresBeforeDeadline` is advisory, a warning
+/// ahead of time: a key that expires mid-run does not invalidate an approval
+/// that verified while it was valid, and the blocking `approval.state` row is
+/// where a withdrawn verdict refuses.
 #[must_use]
 pub fn approval_rows(
     facts: &ApprovalFacts,
@@ -3000,18 +2815,11 @@ pub fn approval_rows(
                 name: name.clone(),
                 uid: Some(uid.clone()),
             };
-            // NO KEY WINDOW IS DERIVED HERE. It is READ BACK from the
-            // `Approval`, which resolved it through the trust policy that
-            // governs the namespace — the roster this file used to walk is not
-            // that authority (see the type-level note).
-            //
-            // AND THE WINDOW MUST NAME THE KEY THE VERDICT NAMES. A window
-            // beside a key id is two fields, and two fields can disagree: a
-            // merge patch that lands half an update, or a controller that
-            // published one key's window beside another key's verdict, would
-            // otherwise have this row compare a deadline against a window that
-            // is about nothing it read. Disagreement is `None`, which is
-            // unknown — never valid.
+            // No key window is derived here: it is read back from the
+            // `Approval` (see the function's note). The window must name the
+            // key the verdict names; two fields can disagree (a half-landed
+            // merge patch, one key's window beside another's verdict), and
+            // disagreement is `None`, which is unknown, never valid.
             let window = matched_window(matched_key_id.as_deref(), approver_key_window.as_deref());
             let not_after = window.map(|w| w.not_after);
             let mut out = Vec::new();
@@ -3019,10 +2827,9 @@ pub fn approval_rows(
                 .as_deref()
                 .filter(|b| b.verified_uid != b.restore_uid);
             let state = if let Some(binding) = foreign {
-                // A VERDICT ABOUT ANOTHER OBJECT OF THIS NAME (review L2). The
-                // Restore controller refuses it terminally
-                // (`ApprovalSubjectMismatch`), so `ready` here would be the
-                // only green on the way to that refusal.
+                // A verdict about another object of this name. The Restore
+                // controller refuses it terminally (`ApprovalSubjectMismatch`),
+                // so `ready` here would be the only green on the way there.
                 state_row(CheckState::NotReady, CheckCode::ApprovalSubjectMismatch)
                     .with_scope(scope.clone())
                     .with_message(&format!(
@@ -3063,12 +2870,9 @@ pub fn approval_rows(
                     now,
                 )
             };
-            // `min(10 m, notAfter)` ON BOTH ROWS — D2 §6.3's `Expiry` column
-            // for `approval.state` and for `approval.keyValidity` alike. A
-            // verdict about a key must not outlive the key: a preflight that
-            // stayed fresh for ten minutes past a `notAfter` four minutes away
-            // would let a restore be admitted on a window that closed while the
-            // record still said `ready`.
+            // `min(10 m, notAfter)` on both rows: a verdict about a key must
+            // not outlive the key, or a restore could be admitted on a window
+            // that closed while the record still said `ready`.
             out.push(cap_expiry(state, not_after));
             out.push(cap_expiry(
                 key_validity_row(matched_key_id.as_deref(), window, deadline, now),
@@ -3080,10 +2884,7 @@ pub fn approval_rows(
 }
 
 /// One `approval.state` verdict, from the Approval's own status and nothing
-/// else.
-///
-/// THE ORDER IS PLAN HASH, THEN EXPIRY, THEN VERIFIED, and it is unchanged by
-/// PREFLIGHT-APPROVAL-ROSTER — only the SOURCE of the expiry answer moved.
+/// else, in the order plan hash, expiry, verified.
 fn approval_verdict(
     scope: &CheckScope,
     verified: Option<bool>,
@@ -3096,10 +2897,9 @@ fn approval_verdict(
     let op = PreflightOperation::Restore;
     let mk =
         |state: CheckState, code: CheckCode| outcome(op, CheckId::ApprovalState, state, code, now);
-    // THE HASH FIRST. An approval that verified against a DIFFERENT plan is a
-    // stronger and more actionable finding than "not verified yet", and
-    // reporting the plan mismatch as a pending approval sends an operator to
-    // wait for something that has already happened.
+    // The hash first: an approval verified against a different plan is a
+    // stronger, more actionable finding than "not verified yet", which would
+    // send an operator to wait for something that has already happened.
     if let Some(approved) = approved_plan_hash {
         if approved != recomputed {
             return mk(CheckState::NotReady, CheckCode::ApprovalPlanMismatch)
@@ -3115,18 +2915,14 @@ fn approval_verdict(
                 );
         }
     }
-    // THE EXPIRY IS THE CONTROLLER'S, VERBATIM. `KeyIdExpired` is the reason
-    // `controllers::approval` writes when the key that verified an approval is
-    // past the `notAfter` of the entry the RESOLVED TRUST POLICY carries for
-    // it. Deciding it here from `TrustRoster/default` was the defect: a policy
-    // can expire a key the roster still shows as open, and this row then
-    // authorised what the controller had already refused.
+    // The expiry is the controller's, verbatim: `KeyIdExpired` is the reason
+    // `controllers::approval` writes when the verifying key is past the
+    // `notAfter` the resolved trust policy carries for it.
     if reason.is_some_and(|r| r == APPROVAL_REASON_KEY_ID_EXPIRED) {
         return mk(CheckState::NotReady, CheckCode::ApprovalExpired)
             .with_scope(scope.clone())
-            // THE CONTROLLER'S OWN SENTENCE when it wrote one: it names the key
-            // id and the `notAfter` that passed, which this row no longer
-            // resolves and must not invent.
+            // The controller's own sentence when it wrote one: it names the key
+            // and the `notAfter`, which this row must not invent.
             .with_message(
                 message.unwrap_or("the approver key that verified this approval has expired"),
             )
@@ -3136,21 +2932,18 @@ fn approval_verdict(
         Some(true) => mk(CheckState::Ready, CheckCode::ApprovalVerified)
             .with_scope(scope.clone())
             .with_message("the Approval's Verified condition is True"),
-        // EVERY OTHER REFUSAL IS `ApprovalNotVerified` CARRYING THE
-        // CONTROLLER'S OWN WORDS — including `KeyRetired`, `KeyRevoked` and
-        // `KeyNotYetValid`, which are deliberately NOT folded into
-        // `ApprovalExpired`. `controllers::approval` is explicit that a
+        // Every other refusal is `ApprovalNotVerified` carrying the
+        // controller's own words, including `KeyRetired`, `KeyRevoked` and
+        // `KeyNotYetValid`, which are not folded into `ApprovalExpired`: a
         // revocation reported as an expiry sends an operator to extend a
-        // window when the remedy is an investigation, and a retirement has no
-        // `notAfter` to extend at all. The closed check vocabulary has one
-        // code for "did not verify"; the reason and the message carry which.
+        // window when the remedy is an investigation. The reason and message
+        // say which.
         Some(false) => mk(CheckState::NotReady, CheckCode::ApprovalNotVerified)
             .with_scope(scope.clone())
             .with_message(message.or(reason).unwrap_or("the Approval did not verify"))
             .with_remedy("Read the Approval's own Verified condition for the exact refusal."),
-        // NO STATUS YET IS NOT A REFUSAL. The approval controller has not
-        // reconciled it, which is a wait and not a verdict — D2 §6.3's
-        // `ApprovalPending`.
+        // No status yet is not a refusal: the Approval controller has not
+        // reconciled it, which is a wait, `ApprovalPending`.
         None => mk(CheckState::Unknown, CheckCode::ApprovalPending)
             .with_scope(scope.clone())
             .with_message("the Approval has no verification status yet"),
@@ -3159,11 +2952,9 @@ fn approval_verdict(
 
 /// The published window, but only when it is about the key the verdict names.
 ///
-/// `controllers::approval` writes the `keyId` INSIDE the window for this
-/// comparison. A window that names another key is not a window about this
-/// approval, and comparing a deadline against it would be worse than having
-/// none: it would be a green advisory row grounded in someone else's rotation
-/// schedule.
+/// `controllers::approval` writes the `keyId` inside the window for this
+/// comparison. A window about another key would ground a green advisory row
+/// in someone else's rotation schedule, which is worse than none.
 fn matched_window<'a>(
     matched_key_id: Option<&str>,
     window: Option<&'a ApproverKeyWindow>,
@@ -3175,36 +2966,23 @@ fn matched_window<'a>(
     }
 }
 
-/// `approval.keyValidity` — D2 §6.3's advisory row, reading the window the
-/// `Approval` publishes.
+/// `approval.keyValidity`, the advisory row, reading the window the `Approval`
+/// publishes:
 ///
-/// # Three answers, and the third is the one that matters
+/// * the window's `notAfter` falls before the restore's deadline →
+///   `notReady`/`ApproverKeyExpiresBeforeDeadline`. Advisory, so it warns
+///   ahead of time and never refuses; if the key does expire, the blocking
+///   `approval.state` row relays `KeyIdExpired`, which is a fact and not a
+///   forecast.
+/// * the deadline falls inside the window → `ready`/`ApproverKeyValid`.
+/// * no window is published, or it is about another key →
+///   `unknown`/`ApproverKeyWindowUnknown`, never `ready`: unevaluated or stale
+///   expiry information is unknown, not valid. `unknown` on an advisory row
+///   does not make the aggregate `unknown`.
 ///
-/// * the window is published and its `notAfter` falls **before** the restore's
-///   deadline — `notReady`/`ApproverKeyExpiresBeforeDeadline`, D2 §6.3's own
-///   condition (`notAfter` < now + `deadlineSeconds`). ADVISORY: §6.3 gates
-///   this row `A` and §6.4 says *"Advisory `notReady` appears as warnings"*, so
-///   it warns ahead of time and never refuses. The refusal, if the key does
-///   expire, is the blocking `approval.state` row relaying `KeyIdExpired` —
-///   which is a fact and not a forecast.
-/// * the window is published and the deadline falls inside it —
-///   `ready`/`ApproverKeyValid`.
-/// * **no window is published, or the one published is about another key —
-///   `unknown`/`ApproverKeyWindowUnknown`, NEVER `ready`.** PLAT-19.1's
-///   acceptance: unevaluated or stale expiry information is unknown, not valid.
-///   An `Approval` that matched no key has no window to publish and its verdict
-///   is already `notReady` on the blocking row; a controller image that
-///   predates `status.approverKeyWindow` publishes none either, and during that
-///   upgrade window this row says so rather than inventing a pass. `unknown` on
-///   an ADVISORY row does not make the aggregate `unknown` (D2 §6.4 aggregates
-///   over blocking checks), so honesty here costs a reader nothing but a green
-///   badge it was not entitled to.
-///
-/// # Why this is not derived from `Verified=True` alone
-///
-/// A verified approval says the key was usable when the controller last looked.
-/// This row asks a different question — will it still be usable at the end of a
-/// restore that has not started — and "it verified" is not an answer to it.
+/// Not derived from `Verified=True` alone: that says the key was usable when
+/// the controller last looked, not that it will be at the end of a restore
+/// that has not started.
 fn key_validity_row(
     key_id: Option<&str>,
     window: Option<&ApproverKeyWindow>,
@@ -3226,10 +3004,9 @@ fn key_validity_row(
         );
     };
     match deadline {
-        // THE COMPARISON IS `<`, AND THE DIRECTION IS D2 §6.3's: the key
-        // expires BEFORE the deadline. A key whose `notAfter` is exactly the
-        // deadline is not early, and a `>` here would warn about every key that
-        // outlasts the restore — the one row an operator would learn to ignore.
+        // `<`: the key expires before the deadline. A key whose `notAfter` is
+        // exactly the deadline is not early, and `>` would warn about every
+        // key that outlasts the restore.
         Some(deadline) if window.not_after < deadline => mk(
             CheckState::NotReady,
             CheckCode::ApproverKeyExpiresBeforeDeadline,
@@ -3247,15 +3024,11 @@ fn key_validity_row(
             window.key_id,
             window.not_after.to_rfc3339()
         )),
-        // NO DEADLINE, SO NO COMPARISON — AND THE SENTENCE SAYS SO. This arm
-        // used to share the one above and claim "this restore's deadline falls
-        // inside it" about a comparison that never happened. It is reachable:
-        // `deadline` is `now + spec.deadlineSeconds` and `deadlineSeconds` is
-        // an unbounded `int64` in the CRD, so an absurd value overflows the
-        // addition to `None` and silences the warning for a key that expires in
-        // a minute. The verdict is unchanged — an advisory row cannot refuse,
-        // and the blocking `approval.state` row already reports a WITHDRAWN
-        // verdict — but a green row must not describe work it did not do.
+        // No deadline, so no comparison, and the sentence says so. Reachable:
+        // `deadline` is `now + spec.deadlineSeconds`, an unbounded `int64` in
+        // the CRD, so an absurd value overflows to `None`. The verdict is
+        // unchanged (an advisory row cannot refuse), but a green row must not
+        // describe work it did not do.
         None => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
             "the Approval controller verified this approval under approver key `{}`, whose \
              published validity window runs to {}; this restore names no deadline to compare \
@@ -3266,16 +3039,9 @@ fn key_validity_row(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The pod-status rows, and what an unattributable waiting code does
-// ---------------------------------------------------------------------------
-
-/// Which check a waiting code belongs to, ADJUSTED for the operation.
-///
-/// [`check::attribute`] answers in the `connection.*` vocabulary because that
-/// is the framework's neutral spelling. D2 §6.3 gives a restore the TARGET
-/// equivalents, and a restore that reported `connection.credentialProjected`
-/// would name a row its own catalogue does not contain.
+/// Which check a waiting code belongs to, adjusted for the operation.
+/// [`check::attribute`] answers in the neutral `connection.*` vocabulary; a
+/// restore's catalogue has the `target.*` equivalents instead.
 #[must_use]
 pub fn attribute_for(
     operation: PreflightOperation,
@@ -3293,13 +3059,11 @@ pub fn attribute_for(
 
 /// The **P** rows, plus whether every Job-sourced row is blocked.
 ///
-/// # Why "blocked" is a second return value and not a state on a row
-///
-/// D2 §4.3: "An unmatched code blocks the whole pod: every Job-sourced check
-/// becomes `unknown` with `BlockedByPrerequisite`, and the named cause is
-/// reported." That is a statement about the OTHER rows, so it cannot live on
-/// any one of them — and a caller that aggregated the pod rows alone would
-/// report `ready` for a pod that never started.
+/// "An unmatched code blocks the whole pod: every Job-sourced check becomes
+/// `unknown` with `BlockedByPrerequisite`, and the named cause is reported."
+/// That is a statement about the other rows, so it cannot live on any one of
+/// them, and a caller that aggregated the pod rows alone would report `ready`
+/// for a pod that never started.
 #[must_use]
 pub fn pod_outcomes(
     operation: PreflightOperation,
@@ -3335,10 +3099,10 @@ pub fn pod_outcomes(
                 true,
             );
         }
-        // A VERIFIED RELAY IS THE PROOF. The runner wrote framed output from
+        // A verified relay is the proof: the runner wrote framed output from
         // inside the pod, so the image pulled, the pod started and every
-        // projection the kubelet was asked for succeeded — those are not
-        // inferences, they are preconditions of the bytes being there.
+        // projection succeeded. Those are preconditions of the bytes, not
+        // inferences.
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let mut row = outcome(operation, r.id, CheckState::Ready, ready_code(r.id), now)
@@ -3355,13 +3119,11 @@ pub fn pod_outcomes(
 
     let attributed = attribute_for(operation, w, projections);
     let carrier = attributed.filter(|id| rows.iter().any(|r| r.id == *id));
-    // REVIEWER QUESTION Q1. The waiting state is still REPORTED below — a pod
-    // that was disrupted after it wrote its frames is a fact an operator wants
-    // — but a VERIFIED RELAY IS NEVER DISCARDED. `check::observe` is not
-    // believed to produce both in one pass; this is the safe direction anyway,
-    // because throwing away a result that exists and replacing it with
+    // The waiting state is still reported below (a pod disrupted after it
+    // wrote its frames is a fact an operator wants), but a verified relay is
+    // never discarded: replacing a result that exists with
     // `BlockedByPrerequisite` placeholders is strictly worse than reporting
-    // both, and `blocked` is exactly "drop every relayed row".
+    // both, and `blocked` means "drop every relayed row".
     let blocks_the_job_rows = !relayed;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
@@ -3385,11 +3147,10 @@ pub fn pod_outcomes(
         }
     }
     if carrier.is_none() {
-        // THE CAUSE IS NAMED ON `runner.pod` RATHER THAN ATTRIBUTED TO A GUESS.
-        // A code that names a Secret this plan did not project is deliberately
+        // The cause is named on `runner.pod` rather than attributed to a
+        // guess: a code naming a Secret this plan did not project is
         // attributed to nothing (`check::attribute`), because sending an
-        // operator to rotate the wrong credential is worse than telling them
-        // the pod did not start and why.
+        // operator to rotate the wrong credential is worse.
         if let Some(slot) = out.iter_mut().find(|o| o.id == CheckId::RunnerPod) {
             *slot = outcome(
                 operation,
@@ -3460,8 +3221,8 @@ pub fn remedy_for(code: CheckCode) -> String {
             "This runner image does not implement `logweir check run`. Upgrade the runner image \
              to one that ships the check contract."
         }
-        // Review L3: the runner parsed the plan and refused a field or a bound
-        // this controller wrote — an older runner image than the controller.
+        // The runner parsed the plan and refused a field or a bound this
+        // controller wrote: an older runner image than the controller.
         CheckCode::CheckContractMismatch => {
             "The runner image is older than this controller and refused the check plan it \
              rendered (the message names the field when the runner said which). Upgrade the \
@@ -3488,27 +3249,21 @@ pub fn remedy_for(code: CheckCode) -> String {
     .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Assembly and the verdict
-// ---------------------------------------------------------------------------
-
-/// Put one pass's findings together — **pure**, and the ONE place the verdict's
-/// row set is decided.
+/// Put one pass's findings together: pure, and the one place the verdict's row
+/// set is decided.
 ///
-/// 1. The controller's own rows, first, because a **C** row is the controller's
-///    answer by D2 §6.3's legend and a relayed duplicate would be a second
-///    answer with one id.
+/// 1. The controller's own rows first: a **C** row is the controller's answer,
+///    and a relayed duplicate would be a second answer with one id.
 /// 2. The relayed rows, for every id the controller did not answer.
 /// 3. Every row `expected` names that nobody answered, as `unknown` with
-///    [`CheckCode::BlockedByPrerequisite`] — never absent, because an absent
-///    blocking row is a row that cannot hold the verdict back.
-/// 4. The rows the REQUEST asked to skip, as `skipped`, which D2 §6.2 keeps the
-///    overall verdict `unknown` for: skipping a question is not answering it.
+///    [`CheckCode::BlockedByPrerequisite`]: never absent, because an absent
+///    blocking row cannot hold the verdict back.
+/// 4. The rows the request asked to skip, as `skipped`, which keeps the
+///    overall verdict `unknown`: skipping a question is not answering it.
 ///
-/// `expected` is [`job_rows`] over the RENDERED plan, or
-/// [`unrendered_job_rows`] when no plan could be rendered. It is a parameter
-/// and not a lookup here so that the one rule that has to match the runner's
-/// emission lives in one function with one guard (reviewer finding **F1**).
+/// `expected` is [`job_rows`] over the rendered plan, or
+/// [`unrendered_job_rows`] when no plan could be rendered; a parameter, so the
+/// rule that must match the runner's emission lives in one guarded function.
 #[must_use]
 pub fn assemble(
     controller: Vec<CheckOutcome>,
@@ -3541,10 +3296,8 @@ pub fn assemble(
             CheckOutcome::new(
                 id,
                 CheckState::Unknown,
-                // A row nobody answered is BLOCKING, whatever the runner's own
-                // catalogue would have made it: this is the case where the
-                // verdict must not be `ready`, and an advisory placeholder
-                // would let it be.
+                // A row nobody answered is blocking, whatever the runner's
+                // catalogue says: the verdict must not be `ready` here.
                 Gating::Blocking,
                 Authority::CheckJob,
                 CheckCode::BlockedByPrerequisite,
@@ -3561,12 +3314,9 @@ pub fn assemble(
                     CheckState::Skipped,
                     Gating::Blocking,
                     Authority::Controller,
-                    // THE CLOSED VOCABULARY HAS NO "THE REQUESTER ASKED ME NOT
-                    // TO" SPELLING, and `logweir-core` is not this task's file
-                    // to add one to. `BlockedByPrerequisite` is the vocabulary's
-                    // "this row has no answer, and here is what blocked it";
-                    // the prerequisite here is the request's own `skipChecks`,
-                    // and the `skipped` STATE is what tells the two apart.
+                    // The closed vocabulary has no "the requester asked me not
+                    // to" code; `BlockedByPrerequisite` with the `skipped` state
+                    // means the request's own `skipChecks` blocked it.
                     CheckCode::BlockedByPrerequisite,
                 )
                 .with_message("this check was skipped at the request's own asking")
@@ -3584,13 +3334,12 @@ pub fn assemble(
 
 /// The objects a row's `scope` names when the row itself did not name one.
 ///
-/// One per AUTHORITY, because the authority IS the statement about who
-/// observed the thing: `podStatus` is the kubelet reporting on a Pod,
-/// `checkJob` is the runner reporting from inside a Job, and `controller` is
-/// this process reporting about the `Preflight` it is reconciling. A row that
-/// knows a better referent — the `KafkaCluster` a connection dialled, the
-/// `BackupDestination` a grant belongs to, the `TrustRoster` a key is or is not
-/// on — sets its own and keeps it.
+/// One per authority, because the authority says who observed the thing:
+/// `podStatus` is the kubelet reporting on a Pod, `checkJob` the runner inside
+/// a Job, `controller` this process about the `Preflight`. A row that knows a
+/// better referent (the `KafkaCluster` a connection dialled, the
+/// `BackupDestination` a grant belongs to, the `TrustRoster` a key is on) sets
+/// its own and keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScopeReferents {
     /// The `Preflight` being reconciled. Always known.
@@ -3618,17 +3367,13 @@ impl ScopeReferents {
 
 /// Give every row that carries no `scope` the referent its authority implies.
 ///
-/// D2 §6.3's acceptance sentence is "the UI names each failed prerequisite and
-/// its remedy, with check time **and scope**", and the live run found six
-/// `notReady` rows with `scope: null` — the `podStatus` credential rows, the
-/// `checkJob` connection rows and the `controller` `signer.rostered` rows
-/// (`objects/s14/notready-rows.json`). Those are exactly the rows an operator
-/// reads, and "which object is this about" was blank on all of them.
+/// The UI names each failed prerequisite and its remedy, with check time and
+/// scope; a row with `scope: null` leaves "which object is this about" blank on
+/// exactly the rows an operator reads.
 ///
-/// It runs AFTER [`assemble`] rather than inside it because `assemble` decides
-/// which rows exist and this decides what a row that exists is about; and
-/// because [`assemble`]'s own placeholders — the rows nobody answered and the
-/// rows the request skipped — need a referent too, and they are built there.
+/// It runs after [`assemble`], which decides which rows exist and builds the
+/// placeholders (rows nobody answered, rows the request skipped) that need a
+/// referent too.
 pub fn fill_scopes(checks: &mut [CheckOutcome], referents: &ScopeReferents) {
     for c in checks.iter_mut() {
         if c.scope.is_some() {
@@ -3660,18 +3405,13 @@ pub fn state_str(state: OverallState) -> &'static str {
 
 /// One outcome, as the shipped CRD's `status.result.checks[]` entry.
 ///
-/// # Facts and bounded detail are folded into `message`
-///
 /// [`CheckOutcome`] carries `facts` (`clusterId`, `brokerCount`, `imageID`,
 /// `signerKeyId`) and a bounded `detail`; the shipped `Preflight` CRD carries
-/// NEITHER, deliberately — `detail` is free-form JSON, which in a structural
-/// schema needs `x-kubernetes-preserve-unknown-fields` and turns a status into
-/// a place arbitrary bytes can be parked (`crds/preflight.rs` records the
-/// reason). Dropping them silently would lose the one non-secret fact an
-/// operator most often needs — WHICH cluster, WHICH key — so they are rendered
-/// into the message, deterministically ordered, and the whole thing is redacted
-/// and capped again on the way out. The long form lives in the details
-/// `ConfigMap` that `result.detailsRef` names.
+/// neither, because free-form JSON in a structural schema needs
+/// `x-kubernetes-preserve-unknown-fields` (see `crds/preflight.rs`). So the
+/// facts are rendered into the message, deterministically ordered, then
+/// redacted and capped again; the long form lives in the details `ConfigMap`
+/// that `result.detailsRef` names.
 #[must_use]
 pub fn entry_of(outcome: &CheckOutcome) -> CheckEntry {
     let mut message = outcome.message.clone();
@@ -3726,29 +3466,22 @@ pub fn entry_of(outcome: &CheckOutcome) -> CheckEntry {
     }
 }
 
-/// How many rows `status.result.checks` may hold — the shipped CRD's own
-/// `maxItems`, restated here because the API server enforces it with a 422.
+/// How many rows `status.result.checks` may hold: the shipped CRD's own
+/// `maxItems`, which the API server enforces with a 422.
 pub const MAX_PUBLISHED_CHECKS: usize = logweir_core::check_contract::MAX_CHECK_ENTRIES;
 
-/// The aggregated verdict — D2 §6.4, and nothing this module decides itself.
+/// The aggregated verdict, decided by the pure layer.
 ///
-/// Returns the result and **how many rows did not fit**, which the caller puts
-/// in `status.message`.
+/// Returns the result and how many rows did not fit, which the caller puts in
+/// `status.message`.
 ///
-/// # The verdict is computed over EVERY row, and only the list is capped
-///
-/// Reviewer finding **F8**: `CheckResult::validate` caps the RELAY at 64 rows,
-/// and `assemble` then adds up to sixteen controller and pod rows on top. The
-/// shipped CRD declares `maxItems: 64` on `status.result.checks`, so the merge
-/// patch was a 422 the reconciler could only requeue on — the verdict was never
-/// published at all.
-///
-/// Capping is therefore done here, and `aggregate` / `aggregate_expires_at` run
-/// over the WHOLE set first: a truncation that could change the verdict would
-/// be a way to publish `ready` by producing more rows. What the cap decides is
-/// which rows an operator gets to READ, so the order is the order of
-/// usefulness — blocking rows that are not `ready` first, because those are the
-/// ones that explain the verdict.
+/// The relay is capped at 64 rows and `assemble` adds controller and pod rows
+/// on top, but the CRD declares `maxItems: 64`; an oversized merge patch is a
+/// 422 and the verdict would never be published. So the list is capped here,
+/// after `aggregate` / `aggregate_expires_at` ran over every row: truncation
+/// must never change the verdict (or more rows could publish `ready`). The cap
+/// decides only which rows an operator reads, most useful first: blocking rows
+/// that are not `ready`, because they explain the verdict.
 #[must_use]
 pub fn result_for(
     checks: &[CheckOutcome],
@@ -3765,7 +3498,7 @@ pub fn result_for(
         _ => 4,
     };
     let mut ordered: Vec<&CheckOutcome> = checks.iter().collect();
-    // STABLE, so the id order `assemble` established survives inside a rank.
+    // Stable, so the id order `assemble` established survives inside a rank.
     ordered.sort_by_key(|c| rank(c));
     let dropped = ordered.len().saturating_sub(MAX_PUBLISHED_CHECKS);
     ordered.truncate(MAX_PUBLISHED_CHECKS);
@@ -3783,10 +3516,6 @@ pub fn result_for(
         dropped,
     )
 }
-
-// ---------------------------------------------------------------------------
-// The binding, and what makes a stored verdict stop applying
-// ---------------------------------------------------------------------------
 
 /// One recorded binding, as `status.binding`.
 #[must_use]
@@ -3819,19 +3548,15 @@ pub fn binding_status(inputs: &BindingInputs) -> PreflightBinding {
     }
 }
 
-/// Why a RECORDED verdict no longer applies, in D2 §6.6's own spellings.
-///
-/// # This is the controller's half of an API-side test, and it is not a copy
+/// Why a recorded verdict no longer applies.
 ///
 /// `logweir_core::check_contract::stale_reasons` compares two whole
-/// [`BindingInputs`], which is what W12 has: it recomputes one from live
-/// objects and holds the other from the status. A CONTROLLER holds the recorded
-/// side only as `status.binding`, which is deliberately narrower — the CRD
-/// stores the digest, the plan hash, the referents and the policy digest, and
-/// not the CA bundle list or the approval's resource version. So this compares
-/// what the status actually carries and leans on the DIGEST for everything
-/// else: `inputsDigest` is computed over all of it, so a change the four named
-/// comparisons cannot see still surfaces as
+/// [`BindingInputs`], as the API does with live objects. The controller holds
+/// the recorded side only as `status.binding`, which is narrower (the digest,
+/// the plan hash, the referents and the policy digest, not the CA bundle list
+/// or the approval's resource version). So this compares what the status
+/// carries and leans on the digest for the rest: `inputsDigest` covers all of
+/// it, so a change the named comparisons cannot see still surfaces as
 /// [`logweir_core::check_contract::StaleReason::InputsDigestChanged`].
 ///
 /// The empty vector means the verdict still applies.
@@ -3871,9 +3596,8 @@ pub fn stale_against_status(
     if recorded.policy_digest.as_deref() != Some(current.policy_digest.as_str()) {
         out.push(StaleReason::PolicyChanged);
     }
-    // THE DIGEST IS THE AUTHORITY ON "did anything change", and it is checked
-    // last so that a difference the named comparisons cannot see is still
-    // reported rather than swallowed.
+    // The digest is the authority on "did anything change", checked last so a
+    // difference the named comparisons cannot see is still reported.
     let digests_differ = recorded.inputs_digest.as_deref() != Some(inputs_digest(current).as_str());
     let only_expiry = out.iter().all(|r| *r == StaleReason::Expired);
     if digests_differ && only_expiry {
@@ -3882,11 +3606,10 @@ pub fn stale_against_status(
     out
 }
 
-/// Downgrade a stored verdict that no longer applies — **pure**.
+/// Downgrade a stored verdict that no longer applies. Pure.
 ///
-/// `ready` becomes `unknown`. Not `notReady`: nothing was found wrong, the
-/// answer simply stopped being about the current objects, and "this operation
-/// will fail" is a different and stronger claim than "I no longer know".
+/// `ready` becomes `unknown`, not `notReady`: nothing was found wrong; the
+/// answer stopped being about the current objects.
 ///
 /// Returns `None` when the verdict still applies and nothing needs writing.
 #[must_use]
@@ -3913,10 +3636,6 @@ pub fn stale_text(stale: &[logweir_core::check_contract::StaleReason]) -> String
         .join(", ")
 }
 
-// ---------------------------------------------------------------------------
-// The status body
-// ---------------------------------------------------------------------------
-
 /// Everything one status write carries.
 #[derive(Clone, Debug, Default)]
 pub struct StatusInput {
@@ -3926,7 +3645,7 @@ pub struct StatusInput {
     pub reason: Option<CheckCode>,
     /// A redacted, bounded explanation.
     pub message: String,
-    /// What this verdict is about. Recorded BEFORE the Job is created.
+    /// What this verdict is about. Recorded before the Job is created.
     pub binding: Option<PreflightBinding>,
     /// The check Job's name.
     pub job_ref: Option<String>,
@@ -3938,10 +3657,9 @@ pub struct StatusInput {
 
 /// The `/status` body one pass produces.
 ///
-/// The two conditions are D2 §6.2's: `Complete` says whether a result exists at
-/// all, and `Ready` restates the verdict. **`Ready` is `Unknown` and never
-/// `False` for an `unknown` verdict** — a UI that rendered "not ready" for "I
-/// could not tell" would turn every skipped or blocked check into a refusal.
+/// `Complete` says whether a result exists at all, and `Ready` restates the
+/// verdict. `Ready` is `Unknown`, never `False`, for an `unknown` verdict: "I
+/// could not tell" is not a refusal.
 #[must_use]
 pub fn status_for(pf: &Preflight, input: &StatusInput, now: DateTime<Utc>) -> PreflightStatus {
     let previous = pf.status.as_ref();
@@ -3974,10 +3692,9 @@ pub fn status_for(pf: &Preflight, input: &StatusInput, now: DateTime<Utc>) -> Pr
         phase: Some(input.phase.clone()),
         reason: Some(reason.clone()),
         message: Some(message.clone()).filter(|m| !m.is_empty()),
-        // A BINDING IS NEVER UNWRITTEN. A later pass that could not resolve the
-        // referents keeps the one the Job was created against: the alternative
-        // is a verdict whose binding vanished, which is the one state W12
-        // cannot tell apart from "never bound".
+        // A binding is never unwritten: a later pass that could not resolve
+        // the referents keeps the one the Job was created against, because a
+        // vanished binding cannot be told apart from "never bound".
         binding: input
             .binding
             .clone()
@@ -4006,14 +3723,10 @@ pub fn status_for(pf: &Preflight, input: &StatusInput, now: DateTime<Utc>) -> Pr
     }
 }
 
-// ---------------------------------------------------------------------------
-// The legacy inline archive — a v0.1.5 point (legacy-point-restore, PoC P3)
-// ---------------------------------------------------------------------------
-
 /// The name a legacy inline archive carries in the check plan, where a saved
-/// destination's name would be. It is never an object name — no
-/// `BackupDestination` exists — and [`rescope_legacy`] replaces it on every
-/// relayed row before a verdict is published.
+/// destination's name would be. It is never an object name, and
+/// [`rescope_legacy`] replaces it on every relayed row before a verdict is
+/// published.
 pub const LEGACY_ARCHIVE_PLAN_NAME: &str = "inline-archive";
 
 /// The scope kind of a row about a legacy inline archive: the
@@ -4021,14 +3734,14 @@ pub const LEGACY_ARCHIVE_PLAN_NAME: &str = "inline-archive";
 /// URL.
 pub const LEGACY_ARCHIVE_SCOPE_KIND: &str = "InlineArchive";
 
-/// A restore readiness check over a recovery point with NO saved destination
-/// — `spec.request.restore.legacySourceArchive`.
+/// A restore readiness check over a recovery point with no saved destination
+/// (`spec.request.restore.legacySourceArchive`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegacySource {
     /// The inline archive URL the request names.
     pub url: String,
-    /// The Secret it names, when it names one — the Secret the restore Job
-    /// projects as its archive credential.
+    /// The Secret it names, when it names one: the restore Job's archive
+    /// credential.
     pub secret: Option<String>,
 }
 
@@ -4050,7 +3763,7 @@ pub struct LegacyBinding {
     /// The inline archive URL the request names.
     pub url: String,
     /// The named recovery point's `Backup.spec.archive.url`, when a point is
-    /// named and was found — what the point was WRITTEN to.
+    /// named and was found: what the point was written to.
     pub point_url: Option<String>,
     /// That point's name, for the message.
     pub point: Option<String>,
@@ -4065,39 +3778,32 @@ fn url_location(url: &str) -> (String, String, String) {
     (scheme, bucket, prefix.trim_matches('/').to_string())
 }
 
-/// The legacy inline archive, resolved into the shape a check plan carries —
-/// **the principal and the location the restore Job itself will use** — PURE.
-///
-/// # Why this is the read the restore will make, and not an approximation
+/// The legacy inline archive, resolved into the shape a check plan carries:
+/// the principal and the location the restore Job itself will use. Pure.
 ///
 /// An inline-archive `Restore`'s runner (`restore::runner_job_spec_with_policy`)
 /// projects `spec.sourceArchive.secretRef`'s `access-key-id` and
 /// `secret-access-key` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and
-/// reads the archive at the location the APPROVED PLAN names
-/// (`source.storage`), filling a region or endpoint the plan leaves out from
-/// the controller's forwarded addressing — the same values the installation
-/// policy publishes as `legacyArchiveAddressing` (D2 §4.4). This builds exactly
-/// that: a `SecretKeys` grant on the same Secret and keys, and the plan's
-/// location with the same two fallbacks. `path_style` and `allow_http` always
-/// come from the plan, because the runner's store applies them after the
-/// environment. The check pod therefore reads the manifest and the segments
-/// as the restore Job will — with the restore's credential, at the restore's
-/// location — and a green `archive.*` row is a real read, never a guess.
+/// reads the location the approved plan names (`source.storage`), filling an
+/// omitted region or endpoint from the controller's forwarded addressing (the
+/// values the installation policy publishes as `legacyArchiveAddressing`).
+/// This builds exactly that: a `SecretKeys` grant on the same Secret and keys,
+/// and the plan's location with the same two fallbacks. `path_style` and
+/// `allow_http` always come from the plan, because the runner's store applies
+/// them after the environment. So a green `archive.*` row is a real read, as
+/// the restore will make it.
 ///
-/// Addressing follows D2 §3.12's mapping: a custom endpoint is path-style
-/// whatever the plan says, because engine 0.21.0 forces it (G4). Transport is
-/// `InsecureHTTP` only for `allow_http: true` with an explicit `http://`
-/// endpoint, and is never derived from anything else (D-SEAMS S5).
+/// A custom endpoint is path-style whatever the plan says, because the engine
+/// forces it. Transport is `InsecureHTTP` only for `allow_http: true` with an
+/// explicit `http://` endpoint, and is never derived from anything else.
 ///
-/// # Fail closed
-///
-/// Everything this cannot establish is a `destination.resolved` refusal, which
-/// holds the Job back and the verdict at `notReady`: a URL that is not
-/// `s3://`, a request that names no Secret (the restore Job would then read
-/// with whatever credential chain its pod finds, which no check pod can
+/// Fail closed: everything this cannot establish is a `destination.resolved`
+/// refusal, which holds the Job back and the verdict at `notReady`: a URL that
+/// is not `s3://`, a request that names no Secret (the restore Job would use
+/// whatever credential chain its pod finds, which no check pod can
 /// reproduce), a plan that does not parse or does not read S3, and a location
-/// the destination rules refuse — an `http://` endpoint with `allow_http:
-/// false`, for one, which the runner cannot reach either.
+/// the destination rules refuse (an `http://` endpoint with
+/// `allow_http: false`, which the runner cannot reach either).
 ///
 /// # Errors
 ///
@@ -4229,7 +3935,7 @@ pub fn legacy_source_destination(
             secret_access_key_key: super::backup::ARCHIVE_SECRET_KEY.to_string(),
             session_token_key: None,
         },
-        // FX-20: an inline archive — its Secret is bound to the location.
+        // An inline archive: its Secret is bound to the location.
         inline_archive: true,
     })
 }
@@ -4249,16 +3955,14 @@ pub fn restore_legacy_source(restore: &Restore) -> LegacySource {
     }
 }
 
-/// A `restoreRef` check whose `legacySourceArchive` is not the `Restore`'s own
-/// — review M1(b). `None` when they agree.
+/// A `restoreRef` check whose `legacySourceArchive` is not the `Restore`'s
+/// own. `None` when they agree.
 ///
-/// The request's CEL rule P8 requires `legacySourceArchive` beside a
-/// `restoreRef` for a point with no destination, and nothing tied the two
-/// together: a check could read with Secret A while the `Restore` projects
-/// Secret B (or none), and `destination.resolved` would say "the credential
-/// the restore Job projects". A readiness check reads as the restore will, so
-/// a request naming another archive or another Secret is `notReady`, with both
-/// named, and no Job is created.
+/// The request's CEL rule requires `legacySourceArchive` beside a `restoreRef`
+/// for a point with no destination, but nothing ties the two together, so a
+/// check could read with Secret A while the `Restore` projects Secret B. A
+/// readiness check reads as the restore will, so another archive or Secret is
+/// `notReady`, both named, and no Job is created.
 #[must_use]
 pub fn legacy_request_conflict(
     requested: &LegacySource,
@@ -4288,7 +3992,7 @@ pub fn legacy_request_conflict(
     })
 }
 
-/// `destination.resolved` for a legacy inline archive — what the check reads,
+/// `destination.resolved` for a legacy inline archive: what the check reads,
 /// as whom, and that there is no `BackupDestination` behind it.
 #[must_use]
 pub fn legacy_source_row(
@@ -4329,8 +4033,8 @@ pub fn legacy_source_row(
              and restore from it by destinationRef.",
             refusal.field
         )),
-        // UNREACHABLE by construction — `resolve` always resolves a legacy
-        // source — and answered as the refusal it would be, never as ready.
+        // Unreachable by construction (`resolve` always resolves a legacy
+        // source), and answered as the refusal it would be, never as ready.
         None => outcome(
             op,
             CheckId::DestinationResolved,
@@ -4343,20 +4047,19 @@ pub fn legacy_source_row(
     }
 }
 
-/// `destination.evidenceReadable` for a legacy restore — ADVISORY, answered by
-/// the controller, and present only when the run's evidence would NOT be
+/// `destination.evidenceReadable` for a legacy restore: advisory, answered by
+/// the controller, and present only when the run's evidence would not be
 /// verified.
 ///
 /// An inline-archive run's scorecard is read only through the controller's
 /// archive handle, and only in that handle's bucket
 /// (`destination::legacy_evidence_scope`, `restore::legacy_evidence_source`).
-/// A plan writing its evidence anywhere else restores the data and then
-/// publishes `NotAttempted` with no completion (PoC defect P5). The restore
-/// itself is unaffected, so this never blocks; it says so before the approver
-/// signs, which is the only time the plan can still change.
+/// A plan writing its evidence elsewhere restores the data and then publishes
+/// `NotAttempted` with no completion. This says so before the approver signs,
+/// while the plan can still change, and never blocks.
 ///
-/// Never `ready`: a comparison of two bucket names is not a read, so the
-/// matching case publishes no row rather than a green one.
+/// Never `ready`: comparing two bucket names is not a read, so the matching
+/// case publishes no row.
 #[must_use]
 pub fn legacy_evidence_row(
     legacy: &LegacySource,
@@ -4374,8 +4077,8 @@ pub fn legacy_evidence_row(
              verification NotAttempted and no completion"
                 .to_string()
         }
-        // THE HANDLE BY ROLE, NEVER BY VALUE (review L4): this message is in
-        // a status every operator of the namespace reads.
+        // The handle by role, never by value: this message is in a status
+        // every operator of the namespace reads.
         LegacyEvidenceScope::Elsewhere { evidence, .. } => format!(
             "the plan writes its scorecard to {evidence}, which is not the bucket of {}; an \
              inline-archive restore's evidence is read only through that handle, so this run \
@@ -4404,13 +4107,10 @@ pub fn legacy_evidence_row(
 }
 
 /// Every relayed row the runner scoped to the legacy archive's placeholder
-/// name, rescoped to the archive itself. The runner scopes its `archive.*`
-/// rows to `BackupDestination/<plan name>`, and for a legacy source there is
-/// no such object — a scope naming one would send an operator looking for it.
-///
-/// The runner's MESSAGES name the placeholder too ("… on destination
-/// `inline-archive` …", review L7); the same phrase is rewritten to name the
-/// inline archive. Nothing else in a relayed row is touched.
+/// name, rescoped to the archive itself: there is no
+/// `BackupDestination/<plan name>` for a legacy source, and a scope naming one
+/// would send an operator looking for it. The same placeholder phrase in a
+/// message is rewritten to name the inline archive; nothing else is touched.
 #[must_use]
 pub fn rescope_legacy(mut checks: Vec<CheckOutcome>, legacy: &LegacySource) -> Vec<CheckOutcome> {
     let placeholder = format!("destination `{LEGACY_ARCHIVE_PLAN_NAME}`");
@@ -4423,7 +4123,7 @@ pub fn rescope_legacy(mut checks: Vec<CheckOutcome>, legacy: &LegacySource) -> V
             c.scope = Some(legacy.scope());
         }
         if c.message.contains(&placeholder) {
-            // THROUGH THE CHOKEPOINT AGAIN: the URL came from a request, and a
+            // Through the chokepoint again: the URL came from a request, and a
             // relayed message is only ever published redacted and capped.
             c.message = redact(&c.message.replace(&placeholder, &named));
         }
@@ -4431,16 +4131,11 @@ pub fn rescope_legacy(mut checks: Vec<CheckOutcome>, legacy: &LegacySource) -> V
     checks
 }
 
-// ---------------------------------------------------------------------------
-// Resolution: everything one pass reads from the API server, reduced
-// ---------------------------------------------------------------------------
-
 /// The subject's own facts plus every referent, reduced to what the rows and
 /// the binding read.
 ///
-/// ONE STRUCT AND ONE RESOLUTION PASS, because the binding must be computed
-/// from exactly the objects the checks were computed from. Two walks would be
-/// two readings of a cluster that moves.
+/// One struct and one resolution pass, because the binding must be computed
+/// from exactly the objects the checks were computed from.
 #[derive(Debug)]
 pub struct Inputs {
     /// Which operation.
@@ -4478,31 +4173,25 @@ pub struct Inputs {
     /// The grants this check exercises.
     pub roles: Vec<DestinationRole>,
     /// Whether the archive-side destination opted in to the create-only
-    /// readiness marker (`spec.readiness.writeProbe: CreateOnlyMarker`).
-    ///
-    /// READ FROM THE OBJECT, never assumed. It used to be hard-`false`, which
-    /// gave an operator who had opted in a `WriteNotProbed` row whose message
-    /// was false about their own spec (reviewer finding **F3**) — and for a
-    /// `DestinationAccess` check it stayed hard-`false` until defect
-    /// DESTINATIONACCESS-IGNORES-WRITEPROBE ([`destination_spec_facts`]).
+    /// readiness marker (`spec.readiness.writeProbe: CreateOnlyMarker`). Read
+    /// from the object, never assumed ([`destination_spec_facts`]).
     pub write_probe: bool,
-    /// The archive-side destination's OWN `evidenceWrite` grant, resolved from
-    /// the same object: the principal `destination.evidenceWritable` is about
-    /// (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Resolved for a
-    /// Backup or `DestinationAccess` check that requests `EvidenceWrite`;
-    /// `None` otherwise. See [`Inputs::evidence_write_principal`].
+    /// The archive-side destination's own `evidenceWrite` grant, resolved from
+    /// the same object: the principal `destination.evidenceWritable` is about.
+    /// Resolved for a Backup or `DestinationAccess` check that requests
+    /// `EvidenceWrite`; `None` otherwise. See
+    /// [`Inputs::evidence_write_principal`].
     pub evidence_write_grant:
         Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
-    /// The same object's OWN `evidenceRead` grant: the principal
-    /// `destination.evidenceReadable` is about (the class sweep of the same
-    /// defect). Resolved for a Backup or `DestinationAccess` check that
-    /// requests `EvidenceRead`; `None` otherwise. See
-    /// [`Inputs::evidence_read_plan`].
+    /// The same object's own `evidenceRead` grant: the principal
+    /// `destination.evidenceReadable` is about. Resolved for a Backup or
+    /// `DestinationAccess` check that requests `EvidenceRead`; `None`
+    /// otherwise. See [`Inputs::evidence_read_plan`].
     pub evidence_read_grant:
         Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
-    /// FX-20c: the archive destination's `SecretKeys` grants whose binding
-    /// the check compares ([`grant_bindings_of`]); empty when it has none, or
-    /// when no destination object was read.
+    /// The archive destination's `SecretKeys` grants whose binding the check
+    /// compares ([`grant_bindings_of`]); empty when it has none, or when no
+    /// destination object was read.
     pub grant_bindings: Vec<GrantBindingRef>,
     /// A backup check's topic set.
     pub topics: Vec<String>,
@@ -4512,8 +4201,8 @@ pub struct Inputs {
     pub bindings: BindingFacts,
     /// The recovery point.
     pub recovery_point: RecoveryPointFacts,
-    /// Or a catalog point (PLAT-15.2). When requested, it is what
-    /// `recoveryPoint.state` reports.
+    /// Or a catalog point. When requested, it is what `recoveryPoint.state`
+    /// reports.
     pub catalog_point: CatalogPointFacts,
     /// The approval.
     pub approval: ApprovalFacts,
@@ -4531,26 +4220,24 @@ pub struct Inputs {
     pub referents: Vec<Referent>,
     /// Every CA bundle digest, for the binding.
     pub ca_bundles: Vec<CaBundleRef>,
-    /// A BACKUP check's inline archive, which this build cannot render into
-    /// a check plan (`Failed`/`ArchiveUrlUnreadable`).
+    /// A backup check's inline archive, which this build cannot render into a
+    /// check plan (`Failed`/`ArchiveUrlUnreadable`).
     pub legacy_archive: Option<String>,
-    /// A RESTORE check's inline archive — a recovery point with no saved
+    /// A restore check's inline archive: a recovery point with no saved
     /// destination, read through [`legacy_source_destination`] with the
-    /// restore Job's own principal (legacy-point-restore P3).
+    /// restore Job's own principal.
     pub legacy_source: Option<LegacySource>,
-    /// The controller's archive handle location, `LOGWEIR_ARCHIVE_URL` —
-    /// what [`legacy_evidence_row`] compares a legacy plan's evidence with.
+    /// The controller's archive handle location, `LOGWEIR_ARCHIVE_URL`, which
+    /// [`legacy_evidence_row`] compares a legacy plan's evidence with.
     pub legacy_evidence_handle: Option<String>,
 }
 
 impl Default for Inputs {
     fn default() -> Self {
         Self {
-            // A DEFAULT HAS TO NAME ONE, AND NAMING `Backup` IS NOT A CLAIM.
-            // `PreflightOperation` has no `Default` on purpose — the operation
-            // is required on the wire — so this exists for tests and for
-            // `..Inputs::default()`, and every real construction sets it from
-            // `spec.request.operation` on the line above.
+            // `PreflightOperation` has no `Default` (the operation is required
+            // on the wire); this one exists for tests and `..Inputs::default()`,
+            // and every real construction sets it from the request.
             operation: PreflightOperation::Backup,
             namespace: String::new(),
             skip: BTreeSet::new(),
@@ -4597,7 +4284,7 @@ impl Default for Inputs {
 pub struct RelayFacts {
     /// The broker's cluster id, from the `clusterId` fact.
     pub cluster_id: Option<String>,
-    /// The runner's PUBLIC signing key id, from the `signerKeyId` fact.
+    /// The runner's public signing key id, from the `signerKeyId` fact.
     pub signer_key_id: Option<String>,
 }
 
@@ -4621,7 +4308,7 @@ impl RelayFacts {
 }
 
 impl Inputs {
-    /// The binding this verdict is about — D2 §6.6.
+    /// The binding this verdict is about.
     #[must_use]
     pub fn binding(&self) -> BindingInputs {
         BindingInputs {
@@ -4677,14 +4364,10 @@ impl Inputs {
         }
     }
 
-    /// Whether this operation's pod needs the signing key.
-    ///
-    /// A DESTINATION-ACCESS CHECK DOES NOT, and neither does a
-    /// SOURCE-CONNECTION CHECK. That is the point of the distinction: one
-    /// exercises grants and the other dials a broker, so projecting a signing
-    /// key into either would widen the pod's blast radius past the question
-    /// being asked. Only the two operations that would really sign something —
-    /// a backup's receipt, a restore's evidence — get the key.
+    /// Whether this operation's pod needs the signing key: only a backup
+    /// (its receipt) and a restore (its evidence) sign anything. A
+    /// destination-access or source-connection check does not, and projecting
+    /// a key into either would widen the pod's blast radius past the question.
     #[must_use]
     pub fn signs(&self) -> bool {
         matches!(
@@ -4700,23 +4383,20 @@ impl Inputs {
         self.write_probe && self.roles.contains(&DestinationRole::EvidenceWrite)
     }
 
-    /// The SEPARATE principal the create-only marker must be written as, and
-    /// the environment that projects it — defect
-    /// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    /// The separate principal the create-only marker must be written as, and
+    /// the environment that projects it.
     ///
-    /// * `Ok(None)` — no marker is written (no probe, no `EvidenceWrite` role,
-    ///   a Restore or a source-connection check, or a destination that did not
-    ///   resolve and is reported as such), or the destination's `evidenceWrite`
-    ///   grant IS the grant the plan's destination credential came from. The
-    ///   plan then carries no separate grant and renders exactly as before.
-    /// * `Ok(Some(..))` — the grants differ: the plan names the evidence-write
+    /// * `Ok(None)`: no marker is written (no probe, no `EvidenceWrite` role, a
+    ///   Restore or source-connection check, or an unresolved destination
+    ///   reported as such), or the `evidenceWrite` grant is the grant the plan's
+    ///   destination credential came from. The plan carries no separate grant.
+    /// * `Ok(Some(..))`: the grants differ; the plan names the evidence-write
     ///   grant by reference and the pod is projected its credential beside the
     ///   destination's.
-    /// * `Err` — a marker would be written and the evidence-write grant cannot
-    ///   be exercised by this pod (two workload identities, or a grant that was
-    ///   not resolved at all). `destination.resolved` reports it and no Job is
-    ///   rendered: a probe that cannot run as the right principal must not run
-    ///   as another one.
+    /// * `Err`: a marker would be written and this pod cannot exercise the
+    ///   evidence-write grant (two workload identities, or a grant never
+    ///   resolved). `destination.resolved` reports it and no Job is rendered: a
+    ///   probe that cannot run as the right principal must not run as another.
     ///
     /// # Errors
     ///
@@ -4738,8 +4418,8 @@ impl Inputs {
         let grant = match self.evidence_write_grant.as_ref() {
             Some(Ok(g)) => g,
             Some(Err(refusal)) => return Err(refusal.clone()),
-            // FAIL CLOSED. A marker is about to be written and nobody resolved
-            // whose it is; guessing "the destination grant" is the defect.
+            // Fail closed: a marker is about to be written and nobody resolved
+            // whose it is.
             None => {
                 return Err(destination::DestinationRefusal {
                     code: CheckCode::DestinationRoleNotConfigured,
@@ -4770,32 +4450,28 @@ impl Inputs {
     }
 
     /// Which principal `destination.evidenceReadable` is answered as, and what
-    /// the pod needs for it — the class sweep of
-    /// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    /// the pod needs for it.
     ///
-    /// See [`EvidenceReadPlan`] for the answers. The one that is not "the
-    /// principal D2 names" is [`EvidenceReadPlan::ControllerAnswers`]: the
-    /// ADVISORY row is answered `unknown` by the controller, with the reason,
-    /// and every other row still runs (review L1/L2). It covers:
+    /// See [`EvidenceReadPlan`]. [`EvidenceReadPlan::ControllerAnswers`] has the
+    /// controller answer the advisory row `unknown` with the reason while every
+    /// other row still runs. It covers:
     ///
-    /// * a grant the resolver REFUSED (e.g. `ControllerIdentityNotAllowlisted`
-    ///   while the installation policy does not list the location yet) — an
-    ///   advisory row's refusal must not stop the archive and marker rows of
-    ///   the same check;
+    /// * a grant the resolver refused (e.g. `ControllerIdentityNotAllowlisted`
+    ///   before the policy lists the location): an advisory row's refusal must
+    ///   not stop the archive and marker rows of the same check;
     /// * a Backup check's workload identity that cannot share the check pod's
-    ///   ServiceAccount — a Backup run never reads evidence in its own pod, so
-    ///   it must not block the readiness of a run it takes no part in.
+    ///   ServiceAccount: a Backup run never reads evidence in its own pod.
     ///
-    /// A `DestinationAccess` check whose evidence-read workload identity
-    /// cannot share the pod is still REFUSED: it asked for that principal, and
-    /// no pod can be it.
+    /// A `DestinationAccess` check whose evidence-read workload identity cannot
+    /// share the pod is still refused: it asked for that principal, and no pod
+    /// can be it.
     ///
     /// # Errors
     ///
-    /// [`destination::DestinationRefusal`] — `ExecutionContextConflict` (a
+    /// [`destination::DestinationRefusal`]: `ExecutionContextConflict` (a
     /// `DestinationAccess` check whose evidence-read workload identity cannot
     /// share the pod) or `DestinationRoleNotConfigured` (the role is requested
-    /// and its grant was never resolved — fail closed).
+    /// and its grant was never resolved; fail closed).
     pub fn evidence_read_plan(&self) -> Result<EvidenceReadPlan, destination::DestinationRefusal> {
         if !matches!(
             self.operation,
@@ -4809,7 +4485,7 @@ impl Inputs {
         };
         let grant = match self.evidence_read_grant.as_ref() {
             Some(Ok(g)) => g,
-            // L1: the ADVISORY row says why, and nothing else is held back.
+            // The advisory row says why, and nothing else is held back.
             Some(Err(refusal)) => {
                 return Ok(EvidenceReadPlan::ControllerAnswers(format!(
                     "the evidence-read grant of BackupDestination {} was refused ({}: {}), so \
@@ -4819,7 +4495,7 @@ impl Inputs {
                     refusal.message
                 )))
             }
-            // FAIL CLOSED, as for the marker.
+            // Fail closed, as for the marker.
             None => {
                 return Err(destination::DestinationRefusal {
                     code: CheckCode::DestinationRoleNotConfigured,
@@ -4833,11 +4509,10 @@ impl Inputs {
             }
         };
         let service_account = match grant {
-            // No pod holds these, whatever the destination grant is — even
-            // when it IS the destination grant (a DestinationAccess check whose
-            // only role is EvidenceRead), because then the plan's credential is
-            // the ambient chain and reading with it is reading as nobody D2
-            // names.
+            // No pod holds these, even when it is the destination grant (a
+            // `DestinationAccess` check whose only role is `EvidenceRead`):
+            // the plan's credential is then the ambient chain, which is
+            // reading as nobody the destination names.
             destination::ResolvedGrant::ControllerIdentity => {
                 return Ok(EvidenceReadPlan::NotInPod(
                     GrantRef::without_pod_credential(GrantCredentials::ControllerIdentity),
@@ -4878,8 +4553,8 @@ impl Inputs {
                         key: token.clone(),
                     });
                 }
-                // FX-20: the evidenceRead Secret's binding, optional, beside
-                // it, against THIS destination's binding.
+                // The evidenceRead Secret's optional binding, beside it, against
+                // this destination's binding.
                 from_secret.push(crate::job::EnvFromSecret {
                     name: logweir_core::credential_binding::EVIDENCE_READ_CREDENTIAL_BINDING_ENV
                         .to_string(),
@@ -4904,7 +4579,7 @@ impl Inputs {
                 service_account_name,
             } => service_account_name,
         };
-        // ONE POD, ONE ServiceAccount: every other principal this pod must
+        // One pod, one ServiceAccount: every other principal this pod must
         // run as.
         let others: Vec<String> = [
             match self.connection.as_ref() {
@@ -4969,7 +4644,7 @@ impl Inputs {
             .collect()
     }
 
-    /// `destination.resolved`, over BOTH destinations — see the call site.
+    /// `destination.resolved`, over both destinations (see the call site).
     ///
     /// `None` when this operation names no destination at all.
     #[must_use]
@@ -4992,10 +4667,10 @@ impl Inputs {
             }
             first_ok.get_or_insert(row);
         }
-        // THE THIRD PRINCIPAL ON THE SAME ROW. A destination that resolves for
-        // the checked grant but whose evidence-write grant cannot be exercised
-        // by this pod is not ready to be checked, and saying `DestinationValid`
-        // would hide why the marker row never ran.
+        // The third principal on the same row: a destination whose
+        // evidence-write grant this pod cannot exercise is not ready to be
+        // checked, and `DestinationValid` would hide why the marker row never
+        // ran.
         if let (Some(name), Err(refusal)) =
             (self.archive_name.as_ref(), self.evidence_write_principal())
         {
@@ -5029,12 +4704,10 @@ impl Inputs {
             &self.store_ports(),
             now,
         ));
-        // THE CONNECTION ROWS BELONG TO THE OPERATIONS THAT DIAL, and the
-        // SIGNER ROW to the ones that sign. They used to be one `if`, because
-        // `DestinationAccess` was the only operation that did neither;
-        // `SourceConnection` dials and does not sign, which is what splits
-        // them. Pushing `signer.rostered` for it would have published a
-        // BLOCKING controller row about a key the pod was never given.
+        // The connection rows belong to the operations that dial, the signer
+        // row to the ones that sign: `SourceConnection` dials and does not
+        // sign, and a blocking `signer.rostered` row about a key its pod was
+        // never given would be false.
         if op != PreflightOperation::DestinationAccess {
             out.push(connection_row(
                 op,
@@ -5060,18 +4733,16 @@ impl Inputs {
                 now,
             ));
         }
-        // F9: ONE `destination.resolved` ID, TWO OBJECTS. A restore names a
-        // source destination and an evidence destination, and the catalogue
-        // has a single row id for both. Reporting only the archive's verdict
-        // gave an operator a GREEN row about the destination that was fine and
-        // no cause at all for the one that was not. The row therefore carries
-        // the first REFUSAL, scoped to the object that produced it, and falls
-        // back to the archive when both resolve.
+        // One `destination.resolved` id, two objects: a restore names a source
+        // and an evidence destination. The row carries the first refusal,
+        // scoped to the object that produced it, and falls back to the archive
+        // when both resolve, so the broken one is never hidden behind a green
+        // row about the other.
         if let Some(row) = self.destination_verdict_row(now) {
             out.push(row);
         }
-        // Review L1/L2: an advisory evidence-read row the pod cannot answer is
-        // the controller's, with its reason — never absent, never blocking.
+        // An advisory evidence-read row the pod cannot answer is the
+        // controller's, with its reason: never absent, never blocking.
         if let (Ok(EvidenceReadPlan::ControllerAnswers(reason)), Some(Ok(d))) =
             (self.evidence_read_plan(), self.archive.as_ref())
         {
@@ -5093,9 +4764,8 @@ impl Inputs {
                     ));
                 }
             }
-            // ONE `recoveryPoint.state` ROW: the catalog point's when the
-            // request names one (P10 forbids naming both), the Backup's
-            // otherwise.
+            // One `recoveryPoint.state` row: the catalog point's when the
+            // request names one (it cannot name both), the Backup's otherwise.
             if let Some(row) = catalog_point_row(&self.catalog_point, now)
                 .or_else(|| recovery_point_row(&self.recovery_point, now))
             {
@@ -5150,11 +4820,9 @@ impl Inputs {
 
     /// The rows whose refusal makes a check plan unrenderable.
     ///
-    /// EVERY OTHER REFUSAL STILL RUNS THE JOB. A preflight exists to report
-    /// every problem at once: a restore whose approval has not been signed yet
-    /// is exactly the case D2 §6.2 names (`restoreRef` pointing at a `Restore`
-    /// awaiting an approver), and refusing to check the archive because of it
-    /// would make the preflight useless precisely when it is most wanted.
+    /// Every other refusal still runs the Job: a preflight reports every
+    /// problem at once, and a restore awaiting its approver is exactly when a
+    /// check of the archive is most wanted.
     #[must_use]
     pub fn plan_blockers<'a>(&self, outcomes: &'a [CheckOutcome]) -> Vec<&'a CheckOutcome> {
         outcomes
@@ -5172,10 +4840,6 @@ impl Inputs {
             .collect()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Rendering the check plan and the Job
-// ---------------------------------------------------------------------------
 
 /// Where the archive destination's CA bundle is mounted inside the check pod.
 pub const ARCHIVE_CA_PATH: &str = "/check/archive-ca.pem";
@@ -5195,9 +4859,8 @@ pub struct JobShape {
     pub documents: check_plan::PlanDocuments,
     /// The Job.
     pub spec: check_job::CheckJobSpec,
-    /// The plan document, as a value — so the caller can derive the rows the
-    /// runner will emit ([`job_rows`]) from the REQUEST it actually rendered
-    /// rather than from the operation (reviewer finding **F1**).
+    /// The plan document, as a value, so the caller derives the rows the runner
+    /// will emit ([`job_rows`]) from the request it actually rendered.
     pub plan: CheckPlan,
 }
 
@@ -5207,19 +4870,17 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
         bootstrap_servers: c.bootstrap_servers.clone(),
         auth_mode: c.auth.mode_str().to_string(),
         username: c.auth.username().map(str::to_string),
-        // THE NAME, NEVER THE VALUE. The password reaches the pod as a
-        // `secretKeyRef` the kubelet projects; the plan says which variable to
-        // read and the controller never holds the bytes.
+        // The name, never the value: the password reaches the pod as a
+        // `secretKeyRef`, and the controller never holds the bytes.
         password_env: c.password.as_ref().map(|_| side.password_env().to_string()),
         tls: Some(c.tls()),
-        // AN OPAQUE IN-POD PATH, and deliberately not rendered bytes: a
-        // `KafkaCluster` may name its CA in a Secret, and this controller holds
-        // no verb on `secrets`. The check pod gets the SAME mount an execution
-        // pod gets, and the runner passes the path to librdkafka without
-        // opening it.
+        // An opaque in-pod path, never rendered bytes: a `KafkaCluster` may
+        // name its CA in a Secret, which this controller cannot read. The
+        // check pod gets the mount an execution pod gets, and the runner passes
+        // the path to librdkafka without opening it.
         ca_file: c.tls_ca.as_ref().map(|_| side.ca_file_path()),
-        // PROD-01.3: the `mtls` pair's IN-POD PATHS, exactly where the
-        // resolver's own projection mounts them — never key material.
+        // The `mtls` pair's in-pod paths, where the resolver's own projection
+        // mounts them; never key material.
         client_cert_file: c
             .client_certificate
             .as_ref()
@@ -5242,7 +4903,7 @@ fn destination_plan(
         uid: d.uid.clone(),
         location: d.location.clone(),
         location_digest: d.location_digest.clone(),
-        // The DESTINATION side is the one place a CA is rendered as BYTES:
+        // The destination side is the one place a CA is rendered as bytes:
         // `StoreOptions::with_root_certificate` takes PEM, not a path.
         ca_file: d.ca_pem.as_ref().and(ca_file).map(str::to_string),
         credentials: match &d.grant {
@@ -5255,20 +4916,20 @@ fn destination_plan(
     }
 }
 
-/// FX-20c: a Restore's evidence destination lists its `evidenceWrite` grant —
-/// resolved for that role, fall-back included — when it is a Secret.
+/// A Restore's evidence destination lists its `evidenceWrite` grant (resolved
+/// for that role, fall-back included) when it is a Secret.
 fn evidence_grant_bindings(e: &ResolvedDestination) -> Vec<GrantBindingRef> {
     grant_binding_ref(DestinationRole::EvidenceWrite, &e.grant)
         .into_iter()
         .collect()
 }
 
-/// FX-20c: the binding-only pair each listed grant contributes to the check
-/// pod — the grant's Secret's `logweir-binding` as an OPTIONAL `secretKeyRef`
-/// (an unbound or missing Secret still lets the pod start, and the runner
-/// names it) and `expected`, the destination's binding, as a literal. NO
-/// credential variable rides with it: a grant this check does not exercise is
-/// compared and never used.
+/// The binding-only pair each listed grant contributes to the check pod: the
+/// grant's Secret's `logweir-binding` as an optional `secretKeyRef` (an
+/// unbound or missing Secret still lets the pod start, and the runner names
+/// it) and `expected`, the destination's binding, as a literal. No credential
+/// variable rides with it: a grant this check does not exercise is compared
+/// and never used.
 fn push_grant_binding_env(
     bindings: &[GrantBindingRef],
     expected: &str,
@@ -5288,15 +4949,13 @@ fn push_grant_binding_env(
     }
 }
 
-/// Render one check's plan documents and Job — **pure**.
+/// Render one check's plan documents and Job. Pure.
 ///
 /// # Errors
 ///
-/// A sentence naming what could not be rendered. Every one of them is a
-/// programming error or a refusal the caller already reported as a row; it is a
-/// `String` rather than a code because the caller turns it into
-/// `phase: Failed`, which D2 §6.2 defines as "the check could not produce a
-/// result".
+/// A sentence naming what could not be rendered: a programming error or a
+/// refusal the caller already reported as a row. The caller turns it into
+/// `phase: Failed`, "the check could not produce a result".
 pub fn build_job_shape(
     inputs: &Inputs,
     owner: &crate::job::RunnerOwner,
@@ -5318,15 +4977,15 @@ pub fn build_job_shape(
         Some(Ok(d)) => Some(d),
         _ => None,
     };
-    // THE MARKER'S PRINCIPAL (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A
-    // refusal here was already published as `destination.resolved`, which
-    // `plan_blockers` holds the Job back on; reaching it is a caller that
-    // skipped that, and it must not render a plan that writes as someone else.
+    // The marker's principal. A refusal here was already published as
+    // `destination.resolved`, which `plan_blockers` holds the Job back on; a
+    // caller that skipped that must not render a plan that writes as someone
+    // else.
     let evidence_write = inputs
         .evidence_write_principal()
         .map_err(|refusal| refusal.message)?;
     let evidence_write_grant = evidence_write.as_ref().map(|(g, _)| g.clone());
-    // THE EVIDENCE READ'S PRINCIPAL — the class sweep, same rule.
+    // The evidence read's principal, by the same rule.
     let evidence_read = inputs
         .evidence_read_plan()
         .map_err(|refusal| refusal.message)?;
@@ -5353,10 +5012,9 @@ pub fn build_job_shape(
                 roles: plan_roles.clone(),
                 topics: inputs.topics.clone(),
                 signer_path: Some(crate::backup_execution::SIGNING_KEY_PATH.to_string()),
-                // The create-only marker is the ONLY key a check may ever
-                // write, and it is opt-in ON THE DESTINATION — read from
-                // `spec.readiness.writeProbe`, never assumed (reviewer finding
-                // F3).
+                // The create-only marker is the only key a check may ever
+                // write, and it is opt-in on the destination
+                // (`spec.readiness.writeProbe`), never assumed.
                 write_probe: inputs.write_probe,
                 evidence_write: evidence_write_grant.clone(),
                 evidence_read: evidence_read_grant.clone(),
@@ -5406,9 +5064,8 @@ pub fn build_job_shape(
                 // The manifest key is the archive's own convention; the runner
                 // joins it to the destination's prefix.
                 manifest_key: format!("{}/manifest.json", inputs.backup_id),
-                // EMPTY MEANS "every row this kind owns". Naming them here
-                // would be a second catalogue for the runner's own table to
-                // drift from.
+                // Empty means "every row this kind owns"; naming them would be a
+                // second catalogue to drift from the runner's.
                 checks: Vec::new(),
                 skip_checks: skip.clone(),
                 capability_checks: capability_checks(CheckOperation::Restore, &skip),
@@ -5437,7 +5094,7 @@ pub fn build_job_shape(
         restore_plan: inputs.plan.as_ref().map(|p| p.bytes.clone()),
     };
 
-    // --- the pod's shape: the execution pod's, with the check's plan ---
+    // The pod's shape: the execution pod's, with the check's plan.
     let projection = connection.map(ResolvedConnection::project);
     let mut secret_mounts = Vec::new();
     if inputs.signs() {
@@ -5463,9 +5120,9 @@ pub fn build_job_shape(
     let mut service_account: Option<String> = connection
         .map(|c| c.execution.service_account_name.clone())
         .filter(|s| !s.is_empty());
-    // FX-20c: one binding-only pair per grant the plan lists, for EXACTLY the
-    // grants the plan lists — the runner compares the plan's list, and a pair
-    // the plan does not name would be a Secret key projected for nothing.
+    // One binding-only pair per grant the plan lists, and only those: the
+    // runner compares the plan's list, and an unlisted pair would project a
+    // Secret key for nothing.
     for (_, d) in plan.request.bound_destinations() {
         let expected = [archive, evidence]
             .into_iter()
@@ -5485,11 +5142,10 @@ pub fn build_job_shape(
         env_literal.extend(env.literals);
         env_from_secret.extend(env.from_secret);
         if let Some(sa) = env.service_account_name {
-            // A DESTINATION THAT DEMANDS ITS OWN ServiceAccount AND A
-            // CONNECTION THAT DEMANDS ANOTHER IS A CONFLICT, NOT A CHOICE.
-            // Picking one would run the check as a principal neither half was
-            // validated against; the row reports it as
-            // `ExecutionContextConflict`.
+            // A destination demanding its own ServiceAccount and a connection
+            // demanding another is a conflict, not a choice: either would run
+            // the check as a principal the other half was not validated
+            // against. The row reports `ExecutionContextConflict`.
             if service_account.as_deref().is_some_and(|s| s != sa) {
                 return Err(format!(
                     "the connection runs as ServiceAccount `{}` and the destination's grant \
@@ -5573,10 +5229,6 @@ pub fn build_job_shape(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Resolution against the API server
-// ---------------------------------------------------------------------------
-
 fn roster_facts(load: &super::approval::RosterLoad) -> RosterFacts {
     match load {
         super::approval::RosterLoad::NotFound => RosterFacts::default(),
@@ -5638,9 +5290,9 @@ async fn read_catalog_point(
             pages.push((page.config_map_name.clone(), map));
         }
     }
-    // THE BACKUP VERDICTS, READ LENIENTLY — the join `/points` and retention
-    // make (`catalog_view::BackupVerdictFacts`): one `Backup` this build cannot
-    // type refuses at most its own point, and a list that FAILS makes the row
+    // The Backup verdicts, read leniently, as `/points` and retention join
+    // them (`catalog_view::BackupVerdictFacts`): a `Backup` this build cannot
+    // type refuses at most its own point, and a failed list makes the row
     // `unknown` rather than failing the check.
     let resource = kube::api::ApiResource::erase::<Backup>(&());
     let api: Api<kube::api::DynamicObject> =
@@ -5673,9 +5325,9 @@ async fn read_catalog_point(
         }
     }
     let refusals = crate::catalog_view::ControllerRefusals::from_facts(facts);
-    // THE CURRENT TRUST (M-2): the resolution the Approval controller makes for
-    // this namespace. A failed read, a contested namespace and an unconfigured
-    // one are each an unknown row, never a pass.
+    // The current trust, as the Approval controller resolves it for this
+    // namespace. A failed read, a contested namespace and an unconfigured one
+    // are each an unknown row, never a pass.
     let resolved = crate::trust::resolve(client, namespace).await;
     let unresolved: String;
     let trust = match &resolved {
@@ -5729,22 +5381,16 @@ fn referent(
     }
 }
 
-/// The grant a `DestinationAccess` check's destination credential is
-/// resolved for — the ONE credential its plan's `DestinationPlan` names.
+/// The grant a `DestinationAccess` check's destination credential is resolved
+/// for: the one credential its plan's `DestinationPlan` names.
 ///
-/// **`ArchiveRead` first, whenever it is requested.** `archiveWrite` is never
-/// probed by a check (`destination.archivePrefixWritable` is execution-only),
-/// so resolving the plan's credential for it while `ArchiveRead` was also
-/// requested answered `destination.archiveListable` as the archive-WRITE
-/// principal — the same wrong-principal defect as
-/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL, on the listing row. After it
-/// the declaration order stands (`ArchiveWrite`, `EvidenceWrite`,
-/// `EvidenceRead`), which is what every earlier build chose; `evidenceWrite`
-/// never needs to be the primary, because the marker is written as its own
-/// principal ([`Inputs::evidence_write_principal`]).
-///
-/// Empty roles cannot reach here (CEL `minItems: 1`); `ArchiveRead` is the
-/// answer anyway, as before.
+/// `ArchiveRead` first whenever it is requested: `archiveWrite` is never
+/// probed by a check, and resolving the credential for it would answer
+/// `destination.archiveListable` as the archive-write principal. Then the
+/// declaration order (`ArchiveWrite`, `EvidenceWrite`, `EvidenceRead`);
+/// `evidenceWrite` never needs to be primary, because the marker is written as
+/// its own principal ([`Inputs::evidence_write_principal`]). Empty roles cannot
+/// reach here (CEL `minItems: 1`).
 #[must_use]
 pub fn access_primary_role(roles: &[DestinationRole]) -> DestinationRole {
     const ORDER: [DestinationRole; 4] = [
@@ -5764,9 +5410,8 @@ pub fn access_primary_role(roles: &[DestinationRole]) -> DestinationRole {
 pub enum EvidenceReadPlan {
     /// The check does not carry the `EvidenceRead` role.
     NotRequested,
-    /// The `evidenceRead` grant IS the plan's destination grant: nothing
-    /// second is projected and the plan names nothing — byte-identical to the
-    /// plans every earlier controller rendered.
+    /// The `evidenceRead` grant is the plan's destination grant: nothing second
+    /// is projected and the plan names nothing.
     SameGrant,
     /// A different Secret or ServiceAccount: named in the plan, projected into
     /// the pod.
@@ -5776,15 +5421,14 @@ pub enum EvidenceReadPlan {
     NotInPod(GrantRef),
     /// The grant was refused by the resolver, or (Backup only) cannot share
     /// the pod's ServiceAccount: the role is left out of the rendered plan and
-    /// the CONTROLLER answers the advisory row `unknown` /
+    /// the controller answers the advisory row `unknown` /
     /// `EvidenceReadNotConfigured` with this reason ([`evidence_read_row`]).
-    /// The verdict is unchanged: the row is advisory.
     ControllerAnswers(String),
 }
 
 /// `destination.evidenceReadable`, answered by the controller for
-/// [`EvidenceReadPlan::ControllerAnswers`] — D2 §6.3 gives the row authority
-/// "J or C". Advisory `unknown`, so the aggregate is untouched.
+/// [`EvidenceReadPlan::ControllerAnswers`]. Advisory `unknown`, so the
+/// aggregate is untouched.
 #[must_use]
 pub fn evidence_read_row(
     operation: PreflightOperation,
@@ -5814,13 +5458,13 @@ pub fn evidence_read_row(
     .with_fact("grant", "evidenceRead")
 }
 
-/// What a `BackupDestination`'s SPEC says that its resolved form does not
+/// What a `BackupDestination`'s spec says that its resolved form does not
 /// carry, for one check.
 #[derive(Clone, Debug, Default)]
 pub struct DestinationSpecFacts {
     /// `spec.readiness.writeProbe: CreateOnlyMarker`.
     pub write_probe: bool,
-    /// Whether a Backup readiness check should ADD the `EvidenceRead` role.
+    /// Whether a Backup readiness check should add the `EvidenceRead` role.
     pub request_evidence_read: bool,
     /// The object's own `evidenceWrite` grant, when the check requests the
     /// `EvidenceWrite` role — see [`Inputs::evidence_write_grant`].
@@ -5831,32 +5475,29 @@ pub struct DestinationSpecFacts {
     /// [`Inputs::evidence_read_grant`].
     pub evidence_read_grant:
         Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
-    /// FX-20c: the destination's `SecretKeys` grants whose binding the check
-    /// compares — [`grant_bindings_of`].
+    /// The destination's `SecretKeys` grants whose binding the check compares
+    /// ([`grant_bindings_of`]).
     pub grant_bindings: Vec<GrantBindingRef>,
 }
 
-/// FX-20c: the `SecretKeys` grants of `object` whose `logweir-binding` a
-/// check for `operation` compares (`destination.credentialBound`) — **pure**.
+/// The `SecretKeys` grants of `object` whose `logweir-binding` a check for
+/// `operation` compares (`destination.credentialBound`). Pure.
 ///
-/// * **`DestinationAccess`: every grant the destination DECLARES**, whichever
-///   roles the check exercises. *Test access* is a question about the
-///   destination, and a READY answer about a destination whose `archiveWrite`
-///   Secret was written for another one is the PoC batch 4 F6 defect: the
-///   backup would be refused. A role the object does not declare falls back to
-///   `archiveWrite`, which is listed already.
-/// * **`Backup`: `archiveWrite` and `evidenceWrite`** (its fall-back
-///   included) — the two grants a backup Job presents, each compared the way
-///   that Job's runner compares it (`STORE_BINDING_PAIRS`).
-/// * **`Restore`: `archiveRead`** of the source destination. The evidence
-///   destination's `evidenceWrite` is a second object, listed by
-///   [`build_job_shape`] from its own resolution.
-/// * **`SourceConnection`: none** — it names no destination.
+/// * **`DestinationAccess`: every grant the destination declares**, whichever
+///   roles the check exercises: "test access" is a question about the
+///   destination, and `ready` for a destination whose `archiveWrite` Secret
+///   was written for another one would precede a refused backup. An
+///   undeclared role falls back to `archiveWrite`, which is listed already.
+/// * **`Backup`: `archiveWrite` and `evidenceWrite`** (fall-back included),
+///   each compared the way the backup Job's runner compares it
+///   (`STORE_BINDING_PAIRS`).
+/// * **`Restore`: `archiveRead`** of the source destination; the evidence
+///   destination's `evidenceWrite` is listed by [`build_job_shape`] from its
+///   own resolution.
+/// * **`SourceConnection`: none**; it names no destination.
 ///
-/// A grant that is not `SecretKeys` (a workload identity, the controller's
-/// own identity, none) carries no binding and is not listed; a grant the
-/// resolver refuses is reported by `destination.resolved` and is not listed
-/// either.
+/// A grant that is not `SecretKeys` carries no binding and is not listed, nor
+/// is a grant the resolver refuses (`destination.resolved` reports it).
 #[must_use]
 pub fn grant_bindings_of(
     operation: PreflightOperation,
@@ -5903,28 +5544,24 @@ pub fn grant_binding_ref(
     }
 }
 
-/// [`DestinationSpecFacts`] for one check — **pure**.
+/// [`DestinationSpecFacts`] for one check. Pure.
 ///
-/// * **`write_probe` is read for EVERY operation**, `DestinationAccess`
-///   included (defect DESTINATIONACCESS-IGNORES-WRITEPROBE). It used to be
-///   derived for Backup and Restore only, so a `DestinationAccess` check
-///   requesting `EvidenceWrite` answered `WriteNotProbed` on a destination
-///   that had opted in to the marker — a readiness question that was asked and
-///   could never fail. The opt-in stays the destination owner's: `Disabled`
-///   (the default) still writes nothing, and the row is then execution-only as
-///   D2 §6.3 says.
+/// * **`write_probe` is read for every operation**, `DestinationAccess`
+///   included, so a check requesting `EvidenceWrite` on a destination that
+///   opted in to the marker actually probes it. The opt-in stays the
+///   destination owner's: `Disabled` (the default) writes nothing, and the row
+///   is then execution-only.
 /// * **`EvidenceRead` is added only to a Backup check, and only when the
 ///   destination configures that grant.** A `DestinationAccess` request names
 ///   its own roles.
 /// * **The `evidenceWrite` grant is resolved for a Backup or
 ///   `DestinationAccess` check that requests `EvidenceWrite`**, so the marker
-///   can be written as that principal (defect
-///   PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A Restore preflight's
-///   evidence destination is a second object, resolved for `EvidenceWrite`
-///   already, and its row is execution-only.
+///   is written as that principal. A Restore preflight's evidence destination
+///   is a second object, resolved for `EvidenceWrite` already, and its row is
+///   execution-only.
 /// * **The `evidenceRead` grant is resolved whenever the check will carry the
 ///   `EvidenceRead` role**, so `destination.evidenceReadable` is answered as
-///   that principal or not at all (the class sweep of the same defect).
+///   that principal or not at all.
 #[must_use]
 pub fn destination_spec_facts(
     operation: PreflightOperation,
@@ -5932,18 +5569,17 @@ pub fn destination_spec_facts(
     roles: &[DestinationRole],
     policy: &check_policy::Policy,
 ) -> DestinationSpecFacts {
-    // `EvidenceRead` is requested ONLY when the destination configures that
-    // grant: probing a role the object leaves unconfigured would report a
-    // refusal about a grant nobody asked for. Absent means verification is
-    // `NotAttempted` (D2 §3.6), and the advisory row is then simply not
-    // requested rather than answered wrongly. WHICH principal answers it when
-    // it is requested is `Inputs::evidence_read_plan`'s business.
+    // `EvidenceRead` is requested only when the destination configures that
+    // grant: probing an unconfigured role would report a refusal about a grant
+    // nobody asked for. Absent, verification is `NotAttempted` and the
+    // advisory row is not requested. Which principal answers it is
+    // `Inputs::evidence_read_plan`'s business.
     let evidence_read =
         destination::resolve(object, DestinationRole::EvidenceRead, policy).map(|d| d.grant);
-    // A grant that is CONFIGURED and refused (not allowlisted, an
+    // A grant that is configured and refused (not allowlisted, an
     // `ArchiveReadGrant` with no `archiveRead`) is still requested: the
-    // controller answers the advisory row with the refusal (review L1) rather
-    // than leave it absent, which would read as "no grant configured".
+    // controller answers the advisory row with the refusal rather than leave
+    // it absent, which would read as "no grant configured".
     let evidence_read_configured =
         !matches!(evidence_read, Ok(destination::ResolvedGrant::NotConfigured));
     let request_evidence_read = evidence_read_configured && operation == PreflightOperation::Backup;
@@ -5981,13 +5617,13 @@ async fn resolve_destination(
     }
 }
 
-/// Everything one pass reads, in ONE walk — see [`Inputs`].
+/// Everything one pass reads, in one walk; see [`Inputs`].
 ///
 /// # Errors
 ///
 /// [`ReconcileError`] for anything that is not a finding: a missing namespace,
 /// or an API server that would not answer. A referent that does not exist is a
-/// FINDING and comes back inside [`Inputs`].
+/// finding and comes back inside [`Inputs`].
 #[allow(clippy::too_many_lines)]
 pub async fn resolve(
     client: &kube::Client,
@@ -6012,10 +5648,9 @@ pub async fn resolve(
     let roster_load = super::approval::load_roster(client)
         .await
         .map_err(ReconcileError::Api)?;
-    // THE NAMESPACE'S RESOLVED TRUST (class sweep of CATALOG-TRUST-ROSTER-ONLY):
-    // the resolution the `Approval` controller verifies against and the
-    // runner's bundles are rendered from. The roster is still read above — it
-    // is the fallback, and its UID is in the binding.
+    // The namespace's resolved trust: what the `Approval` controller verifies
+    // against and the runner's bundles are rendered from. The roster is still
+    // read above: it is the fallback, and its UID is in the binding.
     let resolution = crate::trust::resolve(client, namespace).await;
     if let Err(e) = &resolution {
         warn!(namespace = %namespace, error = %e,
@@ -6046,7 +5681,7 @@ pub async fn resolve(
             generation,
         } = &trust.source
         {
-            // A POLICY EDIT MAKES THE VERDICT STALE, as a roster edit does.
+            // A policy edit makes the verdict stale, as a roster edit does.
             inputs.referents.push(referent(
                 "TrustPolicy",
                 "",
@@ -6066,13 +5701,13 @@ pub async fn resolve(
         ));
     }
 
-    // --- the KafkaCluster, when this operation dials one --------------------
+    // The KafkaCluster, when this operation dials one.
     let cluster_name = match request.operation {
         PreflightOperation::Backup => request.backup.as_ref().map(|b| b.source_ref.name.clone()),
         PreflightOperation::Restore => {
             let r = request.restore.as_ref();
-            // `None` here is not "no target": it is DERIVED from the
-            // `Restore` below, which a `restoreRef` request names instead.
+            // `None` here is not "no target": a `restoreRef` request derives
+            // it from the `Restore` below.
             r.and_then(|r| r.target_ref.as_ref())
                 .map(|t| t.name.clone())
         }
@@ -6083,7 +5718,7 @@ pub async fn resolve(
         PreflightOperation::DestinationAccess => None,
     };
 
-    // --- the Restore, for a restore bound to an existing subject ------------
+    // The Restore, for a restore bound to an existing subject.
     let mut restore_object: Option<Restore> = None;
     if let Some(r) = request.restore.as_ref() {
         if let Some(ref_) = r.restore_ref.as_ref() {
@@ -6124,20 +5759,16 @@ pub async fn resolve(
         }
     }
 
-    // --- the destinations ---------------------------------------------------
+    // The destinations.
     let (archive_ref, evidence_ref, roles, legacy) = match request.operation {
         PreflightOperation::Backup => {
             let b = request.backup.as_ref();
-            // THE ROLES DECIDE THE ROWS (reviewer finding **F1**). The runner
-            // emits one destination row PER REQUESTED ROLE: `ArchiveRead` is
-            // `destination.archiveListable`, `EvidenceWrite` is
-            // `destination.evidenceWritable`, `EvidenceRead` is
-            // `destination.evidenceReadable`. `ArchiveWrite` was requested here
-            // and `ArchiveRead` was not, so D2 §6.3's BLOCKING
-            // `destination.archiveListable` row was never emitted and never
-            // could be — and `assemble` then held the verdict at `unknown` for
-            // ever. `EvidenceRead` is added below, but only when the
-            // destination configures that grant.
+            // The roles decide the rows: the runner emits one destination row
+            // per requested role (`ArchiveRead` → `archiveListable`,
+            // `EvidenceWrite` → `evidenceWritable`, `EvidenceRead` →
+            // `evidenceReadable`), and a blocking row never emitted would hold
+            // the verdict at `unknown` for ever. `EvidenceRead` is added below,
+            // only when the destination configures that grant.
             (
                 b.and_then(|b| b.destination_ref.as_ref().map(|d| d.name.clone())),
                 None,
@@ -6151,9 +5782,9 @@ pub async fn resolve(
                 r.and_then(|r| r.source_destination_ref.as_ref().map(|d| d.name.clone())),
                 r.and_then(|r| r.evidence_destination_ref.as_ref().map(|d| d.name.clone())),
                 vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
-                // A RESTORE'S INLINE ARCHIVE IS CHECKED, NOT REFUSED — see the
-                // `legacy_source` resolution in the Restore arm below. Only a
-                // BACKUP's inline archive still ends `ArchiveUrlUnreadable`.
+                // A restore's inline archive is checked, not refused (see the
+                // `legacy_source` resolution below); only a backup's inline
+                // archive still ends `ArchiveUrlUnreadable`.
                 None,
             )
         }
@@ -6166,9 +5797,8 @@ pub async fn resolve(
                 None,
             )
         }
-        // NO DESTINATION AND NO ROLE. Every `None` here is a question this
-        // operation does not ask, so nothing is resolved, nothing is projected
-        // and no `destination.*` row is expected of the Job.
+        // No destination and no role: nothing is resolved, nothing is
+        // projected and no `destination.*` row is expected of the Job.
         PreflightOperation::SourceConnection => (None, None, Vec::new(), None),
     };
     inputs.roles = roles;
@@ -6177,10 +5807,9 @@ pub async fn resolve(
         PreflightOperation::Restore => DestinationRole::ArchiveRead,
         PreflightOperation::DestinationAccess => access_primary_role(&inputs.roles),
         PreflightOperation::Backup => DestinationRole::ArchiveWrite,
-        // Unreachable in practice: the arm above left `archive_ref` `None`, so
-        // nothing is resolved with this role. It is spelled rather than
-        // wildcarded so that an operation added later cannot inherit a grant
-        // by falling through.
+        // Unreachable (`archive_ref` is `None` here); spelled rather than
+        // wildcarded so an operation added later cannot inherit a grant by
+        // falling through.
         PreflightOperation::SourceConnection => DestinationRole::ArchiveRead,
     };
     if let Some(name) = archive_ref {
@@ -6203,9 +5832,9 @@ pub async fn resolve(
             }
             inputs.bindings.source_storage = Some(d.plan_storage());
         }
-        // THE SPEC FACTS THE RESOLVED FORM DOES NOT CARRY, read once from the
-        // object itself — see `destination_spec_facts`, which is pure so that
-        // the derivation is a unit row and not an API-server fixture.
+        // The spec facts the resolved form does not carry, read once from the
+        // object (see `destination_spec_facts`, pure so the derivation is a
+        // unit row).
         if resolved.is_ok() {
             let api: Api<crate::crds::backup_destination::BackupDestination> =
                 Api::namespaced(client.clone(), namespace);
@@ -6262,8 +5891,8 @@ pub async fn resolve(
         }
         PreflightOperation::Restore => {
             let r = request.restore.as_ref();
-            // THE BYTES, VERBATIM, FROM WHICHEVER SIDE SUPPLIED THEM. A draft
-            // carries its own; a `restoreRef` takes the `Restore`'s. Neither is
+            // The bytes, verbatim, from whichever side supplied them: a draft
+            // carries its own, a `restoreRef` takes the `Restore`'s. Never
             // re-serialised: `planHash` binds these exact bytes.
             let (bytes, claimed) = match (
                 r.and_then(|r| r.plan_bytes.as_deref()),
@@ -6280,23 +5909,22 @@ pub async fn resolve(
                 inputs.plan = Some(PlanFacts::of(&bytes, claimed.as_deref()));
             }
 
-            // --- a recovery point with no saved destination (PoC P3) -------
-            //
-            // Read through the principal and at the location the restore Job
-            // will use — `legacy_source_destination`. No referent is added:
-            // the URL and the Secret name are in the immutable request, the
-            // location is in the plan bytes `planHash` binds, and the
-            // installation's legacy addressing is in the policy digest.
+            // A recovery point with no saved destination, read through the
+            // principal and location the restore Job will use
+            // (`legacy_source_destination`). No referent is added: the URL and
+            // Secret name are in the immutable request, the location in the
+            // plan bytes `planHash` binds, and the legacy addressing in the
+            // policy digest.
             if let Some(archive) = r.and_then(|r| r.legacy_source_archive.as_ref()) {
                 let requested = LegacySource {
                     url: archive.url.clone(),
                     secret: archive.secret_ref.as_ref().map(|s| s.name.clone()),
                 };
-                // A CHECK OF AN EXISTING RESTORE READS AS THAT RESTORE WILL
-                // (review M1(b)). Its Job projects `spec.sourceArchive` — the
-                // URL and the Secret — so the check takes both from there, and
-                // a request naming anything else is refused rather than
-                // answered about a credential the restore will not use.
+                // A check of an existing Restore reads as that Restore will:
+                // its Job projects `spec.sourceArchive` (URL and Secret), so
+                // both come from there, and a request naming anything else is
+                // refused rather than answered about a credential the restore
+                // will not use.
                 let (legacy, conflict) = match restore_object.as_ref() {
                     None => (requested, None),
                     Some(obj) => {
@@ -6351,7 +5979,7 @@ pub async fn resolve(
                 ));
             }
 
-            // --- the recovery point (PLAT-11.1: a Backup UID) ---------------
+            // The recovery point (a Backup UID).
             let mut recovery_point_source: Option<String> = None;
             inputs.recovery_point = match r.and_then(|r| r.recovery_point_ref.as_ref()) {
                 None => RecoveryPointFacts::NotRequested,
@@ -6372,9 +6000,9 @@ pub async fn resolve(
                             ));
                             inputs.bindings.recovery_point_topics =
                                 Some(backup.spec.topics.clone()).filter(|t| !t.is_empty());
-                            // WHAT A LEGACY POINT WAS WRITTEN TO: its own
-                            // immutable `spec.archive.url`, which the legacy
-                            // plan's location is held to in `plan.bindings`.
+                            // What a legacy point was written to: its own
+                            // immutable `spec.archive.url`, which `plan.bindings`
+                            // holds the legacy plan's location to.
                             if let Some(legacy) = inputs.bindings.legacy_source.as_mut() {
                                 legacy.point_url = Some(backup.spec.archive.url.clone());
                                 legacy.point = Some(backup.name_any());
@@ -6385,27 +6013,22 @@ pub async fn resolve(
                                 uid,
                                 expected_uid: rp.uid.clone(),
                                 phase: backup.status.as_ref().and_then(|s| s.phase.clone()),
-                                // THE TWO DIGESTS THE LOCATION COMPARISON
-                                // NEEDS, AND NEITHER IS RECOMPUTED HERE. The
-                                // left one is what the run FROZE (D2 §3.7,
-                                // `Backup.status.destination`, absent on a
-                                // legacy inline-archive point); the right one
-                                // is what THIS check resolved for the source
-                                // destination a moment ago. Deriving either
-                                // from the live `BackupDestination` would let
-                                // an edit after the freeze make a moved
-                                // recovery point look like it never moved.
+                                // The two digests the location comparison
+                                // needs, neither recomputed: what the run froze
+                                // (`Backup.status.destination`, absent on a
+                                // legacy point), and what this check resolved
+                                // for the source destination. Deriving either
+                                // from the live `BackupDestination` would let a
+                                // later edit hide a moved recovery point.
                                 location_digest: backup
                                     .status
                                     .as_ref()
                                     .and_then(|s| s.destination.as_ref())
                                     .map(|d| d.location_digest.clone()),
-                                // A SAVED DESTINATION'S DIGEST ONLY. A
-                                // legacy source's location is derived from
-                                // the plan, so comparing it with the point
-                                // would compare the plan with itself; its
-                                // location is held to account by
-                                // `plan.bindings` instead (above).
+                                // A saved destination's digest only: a legacy
+                                // source's location comes from the plan, so the
+                                // comparison would be the plan with itself;
+                                // `plan.bindings` holds it instead.
                                 expected_location_digest: inputs
                                     .archive
                                     .as_ref()
@@ -6418,7 +6041,7 @@ pub async fn resolve(
                 }
             };
 
-            // --- a catalog point (PLAT-15.2, D3 §5.5 step 5) ----------------
+            // A catalog point.
             if let Some(cp) = r.and_then(|r| r.catalog_point_ref.as_ref()) {
                 inputs.catalog_point =
                     read_catalog_point(client, namespace, cp, inputs.plan.as_ref(), now).await?;
@@ -6433,7 +6056,7 @@ pub async fn resolve(
                 }
             }
 
-            // --- the approval ----------------------------------------------
+            // The approval.
             inputs.approval = match restore_object.as_ref() {
                 None => ApprovalFacts::Draft,
                 Some(obj) => {
@@ -6504,11 +6127,10 @@ pub async fn resolve(
                     }
                 }
             };
-            // THE SOURCE CLUSTER'S RECORDED ID, for `TargetEqualsSource`.
-            // It is read from the recovery point's OWN source `KafkaCluster`
-            // and never from the plan: a plan that named its own source could
-            // name anything, and the whole question is whether the target is
-            // the cluster the archive was taken from.
+            // The source cluster's recorded id, for `TargetEqualsSource`, read
+            // from the recovery point's own source `KafkaCluster`, never the
+            // plan: a plan could name anything, and the question is whether the
+            // target is the cluster the archive was taken from.
             if let Some(source_name) = recovery_point_source.as_deref() {
                 let clusters: Api<KafkaCluster> = Api::namespaced(client.clone(), namespace);
                 if let Some(source) = clusters
@@ -6528,10 +6150,6 @@ pub async fn resolve(
     Ok(inputs)
 }
 
-// ---------------------------------------------------------------------------
-// The reconcile
-// ---------------------------------------------------------------------------
-
 /// The owner reference every object this check creates carries.
 fn owner_of(pf: &Preflight) -> Result<crate::job::RunnerOwner, ReconcileError> {
     Ok(crate::job::RunnerOwner {
@@ -6546,10 +6164,8 @@ fn owner_of(pf: &Preflight) -> Result<crate::job::RunnerOwner, ReconcileError> {
 
 /// The events for one Job and its pod, by `involvedObject.uid`.
 ///
-/// **By UID and never by name.** `FailedCreate` is a common event in a
-/// namespace with a `ResourceQuota`, and a classifier handed somebody else's
-/// event would cancel a healthy check Job because of an unrelated workload
-/// (`waiting::from_failed_create`'s own note).
+/// By UID, never by name: `FailedCreate` is common in a namespace with a
+/// `ResourceQuota`, and someone else's event would cancel a healthy check Job.
 async fn events_for(
     client: &kube::Client,
     namespace: &str,
@@ -6577,15 +6193,13 @@ fn image_id_of(pod: Option<&k8s_openapi::api::core::v1::Pod>) -> Option<String> 
         .filter(|i| !i.is_empty())
 }
 
-/// Write `/status`, with D-SEAMS **S7** in both halves.
+/// Write `/status`, with seam **S7** in both halves.
 ///
 /// Answers the object as the API server stored it when a patch was sent and
 /// accepted, and `None` when nothing was sent or the precondition failed. A
-/// pass that writes AGAIN must precondition on that answer
-/// ([`written_or`]): the first write moved the object's `resourceVersion`,
-/// and a second write carrying the version this pass was handed is refused
-/// 409 and lost — REHEARSAL-FIRE-PASS-STATUS-LOST's class, found here by its
-/// sweep (the Pending write, then a `CheckPlanConflict` refusal).
+/// pass that writes again must precondition on that answer ([`written_or`]):
+/// the first write moved the `resourceVersion`, and a second write with the
+/// version this pass was handed would be refused 409 and lost.
 async fn patch_status(
     client: &kube::Client,
     pf: &Preflight,
@@ -6629,9 +6243,9 @@ async fn patch_status(
             json!({ "name": name, "resourceVersion": resource_version }),
         );
     let api: Api<Preflight> = Api::namespaced(client.clone(), namespace);
-    // A MERGE PATCH AND NEVER `replace_status`: the role grants `patch` on
+    // A merge patch, never `replace_status`: the role grants `patch` on
     // `preflights/status` and `update` on nothing, and the resourceVersion in
-    // the BODY is what gives a merge patch its compare-and-set.
+    // the body gives a merge patch its compare-and-set.
     match api
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
         .await
@@ -6649,8 +6263,8 @@ async fn patch_status(
     }
 }
 
-/// The object a LATER write of this pass preconditions on: what the earlier
-/// write stored, or — when it sent nothing or was refused — the object in hand.
+/// The object a later write of this pass preconditions on: what the earlier
+/// write stored, or, when it sent nothing or was refused, the object in hand.
 fn written_or<'a>(written: Option<&'a Preflight>, pf: &'a Preflight) -> &'a Preflight {
     written.unwrap_or(pf)
 }
@@ -6686,13 +6300,12 @@ pub async fn reconcile_preflight(
 
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
 
-    // --- 1. Cancellation ----------------------------------------------------
+    // 1. Cancellation.
     if pf.spec.cancel_requested && !terminal {
         if let Some(job) = jobs.get_opt(&job_name).await.map_err(ReconcileError::Api)? {
-            // OWNERSHIP IS VERIFIED INSIDE `check::cancel`. A Job's name is a
-            // pure function of this subject's UID, and a name is not an
-            // identity: a foreign Job that happens to carry it is never
-            // patched.
+            // Ownership is verified inside `check::cancel`: a Job's name is a
+            // pure function of this subject's UID, and a foreign Job that
+            // happens to carry it is never patched.
             check::cancel(client, &namespace, &job, &owner.uid)
                 .await
                 .map_err(ReconcileError::Api)?;
@@ -6711,18 +6324,15 @@ pub async fn reconcile_preflight(
         return Ok(Action::await_change());
     }
 
-    // --- 2. A terminal check is REVALIDATED, never re-run, and COLLECTED -----
-    //
-    // D2 §4.3's `gc.rs` runs FIRST and on the same pass, because it is the only
-    // other work a terminal check has. An absent policy is the documented
-    // default (one hour) and not an error. The collector's answer never
-    // changes the revalidation verdict: a check this pass deleted is simply
-    // gone, and a `revalidate` that then writes its status gets a 404 the
-    // reconciler already handles as any other API answer.
+    // 2. A terminal check is revalidated, never re-run, and collected. The
+    // collector runs first, on the same pass, as the only other work a
+    // terminal check has; an absent policy means the one-hour default. Its
+    // answer never changes the revalidation verdict: a check it deleted gets
+    // a 404 on the status write, handled like any other API answer.
     if terminal {
-        // THE SAME REFERENCE `resolve` READS, and from the same pure decision
-        // (`check_policy::configured_ref`), so a terminal pass and a running
-        // one cannot disagree about which document is in force.
+        // The same reference `resolve` reads, from the same pure decision, so a
+        // terminal pass and a running one cannot disagree about which document
+        // is in force.
         let policy_ref = check_policy::configured_ref(
             std::env::var(check_policy::POLICY_CONFIGMAP_ENV)
                 .ok()
@@ -6740,19 +6350,18 @@ pub async fn reconcile_preflight(
         return revalidate(pf, ctx, cache, &namespace, now).await;
     }
 
-    // --- 3. Everything this pass reads --------------------------------------
+    // 3. Everything this pass reads.
     let inputs = resolve(client, pf, &namespace, cache, now).await?;
     let binding = inputs.binding();
     let recorded_binding = binding_status(&binding);
 
     if let Some(url) = inputs.legacy_archive.as_deref() {
-        // NAMED, NOT GUESSED — AND A BACKUP'S ONLY. A backup readiness check
-        // over an inline archive would need the ARCHIVE-WRITE principal a
-        // legacy Backup Job holds, and no check exercises that grant; `Failed`
-        // is D2 §6.2's "the check could not produce a result", which is
-        // exactly true and is NOT a verdict about the operation. A RESTORE's
-        // inline archive is read with the restore Job's own principal
-        // (`legacy_source_destination`) and never reaches this arm.
+        // Named, not guessed, and a backup's only: a backup check over an
+        // inline archive would need the archive-write principal a legacy
+        // Backup Job holds, which no check exercises. `Failed` means "the
+        // check could not produce a result", which is exactly true and is not
+        // a verdict about the operation. A restore's inline archive is read
+        // with the restore Job's own principal and never reaches this arm.
         let status = status_for(
             pf,
             &StatusInput {
@@ -6783,7 +6392,7 @@ pub async fn reconcile_preflight(
             .map(|b| format!("{}: {}", b.id, b.message))
             .collect::<Vec<_>>()
             .join("; ");
-        // NO PLAN WAS RENDERED, so there is no request to derive the expected
+        // No plan was rendered, so there is no request to derive the expected
         // rows from.
         let mut checks = assemble(
             probe,
@@ -6793,7 +6402,7 @@ pub async fn reconcile_preflight(
             &inputs.skip,
             now,
         );
-        // NO JOB AND NO POD EXIST on this path, so every row that named no
+        // No Job and no pod exist on this path, so every row that named no
         // object of its own is about the `Preflight` itself.
         fill_scopes(
             &mut checks,
@@ -6839,12 +6448,12 @@ pub async fn reconcile_preflight(
         }
     };
 
-    // --- 4. The Job -----------------------------------------------------------
+    // 4. The Job.
     let existing = jobs.get_opt(&job_name).await.map_err(ReconcileError::Api)?;
     let Some(job) = existing else {
-        // THE BINDING IS RECORDED BEFORE THE JOB EXISTS (D2 §6.6). A verdict
-        // whose binding was written afterwards could not be told apart from a
-        // verdict about whatever the objects became in between.
+        // The binding is recorded before the Job exists: a binding written
+        // afterwards could not be told apart from one about whatever the
+        // objects became in between.
         let counts = limits::count(
             &limits::check_jobs(client)
                 .await
@@ -6891,8 +6500,8 @@ pub async fn reconcile_preflight(
             },
             now,
         );
-        // THE FIRST OF TWO WRITES THIS PASS MAY MAKE: a plan refusal below
-        // writes again, preconditioned on where THIS write left the object.
+        // The first of two writes this pass may make: a plan refusal below
+        // writes again, preconditioned on where this write left the object.
         let pending_written = patch_status(client, pf, &namespace, &status).await?;
         let pf_now = written_or(pending_written.as_ref(), pf);
 
@@ -6919,9 +6528,9 @@ pub async fn reconcile_preflight(
         }
         match check::create_job(client, &shape.spec).await {
             Ok(_) => {}
-            // A 409 IS THE DUPLICATE RECONCILE WORKING. The name is a pure
-            // function of the subject's UID, so the Job this pass wanted
-            // already exists and the next pass observes it.
+            // A 409 is the duplicate reconcile working: the name is a pure
+            // function of the subject's UID, so the Job already exists and the
+            // next pass observes it.
             Err(kube::Error::Api(e)) if e.code == 409 => {}
             Err(e) => return Err(ReconcileError::Api(e)),
         }
@@ -6935,7 +6544,7 @@ pub async fn reconcile_preflight(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_RUNNING_SECS)));
     };
 
-    // --- 5. Observe it ------------------------------------------------------
+    // 5. Observe it.
     let job_uid = job.uid().unwrap_or_default();
     let pod = check::pod::find_owned_pod(client, &namespace, &job)
         .await
@@ -6952,11 +6561,10 @@ pub async fn reconcile_preflight(
     )
     .await
     .map_err(ReconcileError::Api)?;
-    // THE DIGEST THE JOB WAS ACTUALLY CREATED WITH, read off the plan
-    // `ConfigMap`'s annotation rather than recomputed here: a destination whose
-    // generation moved after the Job started would otherwise make this pass
-    // verify the relay against a plan the pod never mounted, and report
-    // `ResultUnreadable` for a check that ran correctly.
+    // The digest the Job was actually created with, read off the plan
+    // `ConfigMap`'s annotation rather than recomputed: a destination whose
+    // generation moved after the Job started would otherwise verify the relay
+    // against a plan the pod never mounted, and report `ResultUnreadable`.
     let expect = FrameExpectations {
         plan_sha256: mounted_plan_digest(client, &namespace, &job_name)
             .await
@@ -7012,19 +6620,16 @@ pub async fn reconcile_preflight(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_RUNNING_SECS)));
     }
 
-    // --- 6. Terminal: the details ConfigMap, then the commit ----------------
+    // 6. Terminal: the details ConfigMap, then the commit.
     let details = match observation
         .relay
         .as_ref()
         .and_then(|r| r.stream(Stream::Details))
     {
         Some(bytes) if !bytes.is_empty() => {
-            // REDACTED BY RULE AND NOT BY `redact`. `redact` ends with the
-            // 512-CHARACTER cap, which is right for a message and destroys a
-            // stream: the details document is JSON lines and a cut line is an
-            // unparseable line (the same distinction `check_contract`'s own
-            // `redact_path` had to learn). The rules are the chokepoint; the
-            // cap is a message bound.
+            // Redacted by rule, not by `redact`, whose 512-character cap is
+            // right for a message and destroys a stream: the details document
+            // is JSON lines, and a cut line is unparseable.
             let text = logweir_core::check_contract::apply_rules(
                 &String::from_utf8_lossy(bytes),
                 logweir_core::check_contract::redaction_rules(),
@@ -7059,27 +6664,25 @@ pub async fn reconcile_preflight(
         _ => None,
     };
 
-    // D2 §6.2's failure vocabulary, exactly: `Failed` means NO RESULT COULD BE
-    // PRODUCED. A pod that never started because a Secret is missing DID
-    // produce a result — `connection.credentialProjected notReady
-    // CredentialSecretNotFound`, with a remedy — and reporting that as `Failed`
-    // would hide the one finding an operator can act on behind a phase that
-    // says "ask again later". A waiting code that belongs to NO row (the Job's
-    // own deadline, a disrupted node, an unreadable relay) is the other case,
-    // and that one really is `Failed`.
+    // `Failed` means no result could be produced. A pod that never started
+    // because a Secret is missing did produce one
+    // (`connection.credentialProjected notReady CredentialSecretNotFound`,
+    // with a remedy), and `Failed` would hide that finding. A waiting code
+    // that belongs to no row (the Job's deadline, a disrupted node, an
+    // unreadable relay) really is `Failed`.
     let attributed = observation
         .waiting
         .as_ref()
         .and_then(|w| attribute_for(operation, w, &inputs.projections()))
         .is_some();
     let failed = observation.phase == check::CheckPhase::Failed && !relayed && !attributed;
-    // THE ROWS THIS PLAN'S RUNNER WILL HAVE EMITTED, derived from the request
-    // that was rendered and not from the operation (reviewer finding F1).
+    // The rows this plan's runner will have emitted, derived from the request
+    // that was rendered, not the operation.
     let expected = job_rows(
         &shape.plan.request,
         inputs.plan.as_ref().is_some_and(PlanFacts::scratch),
     );
-    // A LEGACY SOURCE HAS NO `BackupDestination`: the runner's placeholder
+    // A legacy source has no `BackupDestination`: the runner's placeholder
     // scope is replaced by the inline archive itself.
     let relayed_checks = match inputs.legacy_source.as_ref() {
         Some(legacy) => rescope_legacy(relayed_checks, legacy),
@@ -7123,11 +6726,9 @@ pub async fn reconcile_preflight(
     let status = status_for(
         pf,
         &StatusInput {
-            // A CHECK THAT PRODUCED ROWS IS `Completed`, WHATEVER THEY SAY.
-            // `Failed` is reserved for "no result could be produced" — D2 §6.2
-            // — and the row set here always carries the controller's own
-            // findings, so it is `Failed` only when the pod's own failure left
-            // nothing to relay.
+            // A check that produced rows is `Completed`, whatever they say: the
+            // row set always carries the controller's own findings, so it is
+            // `Failed` only when the pod's failure left nothing to relay.
             phase: if failed {
                 PHASE_FAILED.to_string()
             } else {
@@ -7148,9 +6749,8 @@ pub async fn reconcile_preflight(
     );
     patch_status(client, pf, &namespace, &status).await?;
 
-    // THE TTL IS PATCHED ONLY AFTER THE COMMIT. The relay lives on the pod and
-    // the TTL controller deletes a Job and its pods together; a TTL set before
-    // the status write lets garbage collection race the read.
+    // The TTL is patched only after the commit: the relay lives on the pod,
+    // and the TTL controller deletes a Job and its pods together.
     if crate::controllers::backup::job_finished(&job) {
         check::set_ttl(client, &namespace, &job_name)
             .await
@@ -7212,37 +6812,25 @@ async fn mounted_plan_digest(
         }))
 }
 
-/// A terminal check is never re-run — it is REVALIDATED.
-///
-/// D2 §6.6's applicability test is W12's, over the API. This is the same test
-/// from the controller's side, and it exists because a stale green badge is
-/// stale whether or not anybody is reading the API through a client that
-/// recomputes: `status.result.state` is a printer column
-/// (`kubectl get preflights`) and a UI field, and leaving it `ready` after the
-/// referents moved is defect UI-FAKEPREFLIGHT with a new spelling.
 /// One terminal preflight, as [`expired_terminal`] reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalPreflight {
     /// `metadata.name`.
     pub name: String,
-    /// `metadata.uid` — the DELETE precondition, not the name.
+    /// `metadata.uid`: the DELETE precondition, not the name.
     pub uid: String,
     /// The instant retention counts from: `status.result.expiresAt` when the
     /// check produced a verdict with an expiry, else when it was observed.
     pub basis: DateTime<Utc>,
 }
 
-/// Which terminal preflights are collectable — **pure**, D2 §4.3's `gc.rs`.
+/// Which terminal preflights are collectable. Pure.
 ///
-/// ONE RULE, AND IT IS NOT THE DISCOVERY'S. `now > basis + retentionSeconds`,
-/// where the basis is `result.expiresAt` for a check that produced a verdict
-/// and the observation time for one that never did (D2 §4.3: "or
-/// `observedAt + …` if never ready"). There is no keep-last-N cohort here,
-/// deliberately: a `Preflight` is about ONE plan of ONE operation, so there is
-/// no "the newest five for this connection" to be outside of, and inventing a
-/// cohort would delete the only readiness verdict a restore has.
-///
-/// The order is newest-first by basis with the UID as the tie-break, so two
+/// `now > basis + retentionSeconds`, where the basis is `result.expiresAt` for
+/// a check that produced a verdict and the observation time for one that never
+/// did. No keep-last-N cohort, deliberately: a `Preflight` is about one plan of
+/// one operation, and a cohort would delete the only readiness verdict a
+/// restore has. Ordered newest-first by basis with the UID as tie-break, so two
 /// passes over the same input agree.
 #[must_use]
 pub fn expired_terminal(
@@ -7264,7 +6852,7 @@ pub fn expired_terminal(
 /// a collectable terminal preflight.
 fn gc_row(pf: &Preflight) -> Option<TerminalPreflight> {
     let phase = pf.status.as_ref().and_then(|s| s.phase.as_deref())?;
-    // THE GUARD THAT MATTERS. A non-terminal check is still running, and its
+    // The guard that matters: a non-terminal check is still running, and its
     // pod holds the only copy of a relay nobody has read.
     if !matches!(phase, PHASE_COMPLETED | PHASE_FAILED | PHASE_CANCELLED) {
         return None;
@@ -7293,8 +6881,7 @@ fn gc_row(pf: &Preflight) -> Option<TerminalPreflight> {
     })
 }
 
-/// D2 §4.3's `gc.rs` for this kind: collect the namespace's expired terminal
-/// checks.
+/// Collect the namespace's expired terminal checks.
 ///
 /// The same four bounds as `controllers::topic_discovery::collect_expired`:
 /// one kind, terminal only, UID preconditions, and at most
@@ -7351,12 +6938,11 @@ async fn collect_expired(
     Ok(collected)
 }
 
-/// EVERY EXIT REQUEUES AT [`REQUEUE_TERMINAL_SECS`] RATHER THAN
-/// `await_change()`, and that is what keeps the collector alive. A `notReady`
-/// or `unknown` verdict cannot go stale, so this function has nothing more to
-/// say about it — but `reconcile_preflight`'s terminal branch runs the GC on
-/// the same pass, and an object parked on `await_change()` never has another
-/// pass. The cost is one list per terminal check per hour per namespace.
+/// Every exit requeues at [`REQUEUE_TERMINAL_SECS`] rather than
+/// `await_change()`, which keeps the collector alive: `reconcile_preflight`'s
+/// terminal branch runs the GC on the same pass, and an object parked on
+/// `await_change()` never has another pass. The cost is one list per terminal
+/// check per hour per namespace.
 async fn revalidate(
     pf: &Preflight,
     ctx: &Context,
@@ -7375,9 +6961,8 @@ async fn revalidate(
         // going stale.
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_TERMINAL_SECS)));
     }
-    // THE CLOCK FIRST, AND IT COSTS NO API CALL. An expired verdict is stale
-    // whatever the referents say, so a check that has simply run out of time is
-    // downgraded without re-reading a cluster.
+    // The clock first, at no API cost: an expired verdict is stale whatever
+    // the referents say.
     let expired = result.expires_at.is_none_or(|e| now >= e);
     let stale = if expired {
         vec![logweir_core::check_contract::StaleReason::Expired]
@@ -7418,9 +7003,8 @@ async fn reconcile(
     pf: Arc<Preflight>,
     ctx: Arc<ReconcilerContext>,
 ) -> Result<Action, ReconcileError> {
-    // ONE CLOCK READ PER PASS, for the reason every other reconciler in this
-    // directory takes one: two reads could put a verdict and the expiry that
-    // bounds it on either side of the same instant.
+    // One clock read per pass: two reads could put a verdict and the expiry
+    // that bounds it on either side of the same instant.
     reconcile_preflight(&pf, &ctx.context, &ctx.policy, Utc::now()).await
 }
 
@@ -7435,16 +7019,13 @@ fn error_policy(pf: Arc<Preflight>, err: &ReconcileError, _ctx: Arc<ReconcilerCo
 
 /// The context this reconciler holds: the shared one, plus the policy cache.
 ///
-/// A SECOND TYPE RATHER THAN A FIELD ON [`Context`]. `controllers::Context` is
-/// shared by every reconciler in this directory and all but this one read no
-/// installation policy; a
-/// field there would be carried and never read, which is the shape
-/// `Context::runner_image`'s own note warns about.
+/// A second type rather than a field on [`Context`], which every reconciler
+/// shares and none of the others would read.
 pub struct ReconcilerContext {
     /// What every reconciler in this directory needs.
     pub context: Context,
-    /// D2 §4.4's 30-second policy cache, so a reconcile does not `get` the
-    /// policy `ConfigMap` on every pass.
+    /// The 30-second policy cache, so a reconcile does not `get` the policy
+    /// `ConfigMap` on every pass.
     pub policy: check_policy::PolicyCache,
 }
 
@@ -7453,18 +7034,17 @@ pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
+    // One watch per watched namespace: `crate::scope` is the whole cluster
+    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
+    // then this reconciler runs once per namespace with an `Api::namespaced`
+    // watch, the only shape the scoped chart's RoleBindings permit.
     crate::scope::run_everywhere(move |namespace| {
         controller_in(client.clone(), runner_image.clone(), namespace)
     })
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
@@ -7475,9 +7055,8 @@ fn controller_in(
     let ctx = Arc::new(ReconcilerContext {
         context: Context {
             client,
-            // NO ARCHIVE HANDLE. A preflight reads no archive from the
-            // controller: the archive checks are the check JOB's, with the
-            // destination's own credential, inside a pod that ends.
+            // No archive handle: the archive checks are the check Job's, with
+            // the destination's own credential, inside a pod that ends.
             archive: None,
             runner_image,
         },
