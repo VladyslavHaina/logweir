@@ -99,7 +99,7 @@ pub const DEADLINE_MARGIN_SECONDS: i64 = 90;
 /// TEN MINUTES, and **patched on only after the status commit**. The relay
 /// lives on the pod, and the TTL controller deletes a Job and its pods
 /// together: a TTL set at creation time would let garbage collection race the
-/// log read. [`super::ttl_patch`] is the one place it is written.
+/// log read. [`crate::runner_log::set_ttl`] is the one place it is written.
 pub const TTL_SECONDS: i32 = 600;
 
 /// The Job name for one check: `lwc-<k>-<first 20 hex of sha256(owner uid)>`.

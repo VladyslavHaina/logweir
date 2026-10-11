@@ -12,10 +12,10 @@
 //!   exactly the input nobody should paste into a status field.
 //! * **The refusal key.** D2 §4.2's exit 3 prints `refusal-reason=<Code>` and
 //!   NO frames. That is read the way every other key in this crate is —
-//!   [`crate::controllers::backup::tail_lines`], the ONE bounded-tail
-//!   implementation, matched BY KEY NAME (plan erratum **E4**: a pod log is
-//!   stdout and stderr merged in nondeterministic order, so no reader here may
-//!   take "the last line").
+//!   [`crate::runner_log::key_values`], the ONE key scan over the bounded
+//!   tail, matched BY KEY NAME (plan erratum **E4**: a pod log is stdout and
+//!   stderr merged in nondeterministic order, so no reader here may take "the
+//!   last line").
 //!
 //! # The log read is bounded twice
 //!
@@ -31,7 +31,7 @@ use logweir_core::check_contract::{
     frames::Decoder, redact, CheckCode, CheckRelay, FrameExpectations, DEFAULT_RELAY_BUDGET_BYTES,
 };
 
-use crate::controllers::backup::{tail_lines, REFUSAL_REASON_PREFIX};
+use crate::controllers::backup::REFUSAL_REASON_PREFIX;
 
 /// `limitBytes` on the `pods/log` read — D2 §4.3.
 ///
@@ -45,18 +45,14 @@ pub const RELAY_LIMIT_BYTES: i64 = 8 * 1024 * 1024;
 /// non-topic streams, which is [`Decoder::default`]'s.
 pub const DECODER_BUDGET_BYTES: usize = DEFAULT_RELAY_BUDGET_BYTES + (2 * 1024 * 1024);
 
-/// The `pods/log` parameters for a check.
+/// The `pods/log` parameters for a check: [`crate::runner_log::RELAY`].
 ///
 /// `container: Some("runner")` and not `None`: `None` means "the only
 /// container if there is one", which is true today and would silently start
 /// reading a sidecar's stdout the day something adds one.
 #[must_use]
 pub fn log_params() -> LogParams {
-    LogParams {
-        container: Some(crate::job::CONTAINER_NAME.to_string()),
-        limit_bytes: Some(RELAY_LIMIT_BYTES),
-        ..LogParams::default()
-    }
+    crate::runner_log::RELAY.params()
 }
 
 /// Decode a pod log into a verified relay — **pure**.
@@ -127,13 +123,10 @@ impl std::fmt::Display for RelayRefusal {
 /// [`crate::controllers::backup::evidence_keys`].
 #[must_use]
 pub fn refusal_reason(log: &str) -> Option<CheckCode> {
-    let mut found = None;
-    for line in tail_lines(log) {
-        if let Some(v) = line.strip_prefix(REFUSAL_REASON_PREFIX) {
-            found = CheckCode::parse(v.trim()).or(found);
-        }
-    }
-    found
+    crate::runner_log::key_values(log, REFUSAL_REASON_PREFIX)
+        .into_iter()
+        .rev()
+        .find_map(|v| CheckCode::parse(v.trim()))
 }
 
 // `pub async fn read(client, namespace, pod_name, expect)` USED TO LIVE HERE,

@@ -4024,3 +4024,30 @@ async fn fx19_a_crash_whose_ttl_patch_failed_warns_once() {
     warns.extend(log.messages_at("WARN"));
     assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
 }
+
+/// **PROD-17.1 B4: the probe's log read is a bounded tail.** It asks for the
+/// last `TERMINAL_LOG_TAIL_LINES` lines and nothing else, the read a `Restore`
+/// makes at every exit but 3; before the fold it asked for the whole log. The
+/// two contract lines are last, so the verdict is the one the whole log gave.
+///
+/// KILLS: the unbounded read (an empty query).
+#[tokio::test]
+async fn the_probe_log_read_asks_for_a_bounded_tail() {
+    let (client, rec, _bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(outcome.reachable, Some(true));
+    let seen = rec.lock().expect("the recorder is readable").clone();
+    let queries: Vec<Vec<&str>> = seen
+        .iter()
+        .filter_map(|r| r.uri.split_once("/log?"))
+        .map(|(_, query)| query.split('&').filter(|p| !p.is_empty()).collect())
+        .collect();
+    let bound = format!(
+        "tailLines={}",
+        weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
+    );
+    assert_eq!(queries, vec![vec![bound.as_str()]], "{seen:?}");
+}

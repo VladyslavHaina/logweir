@@ -587,7 +587,8 @@ fn every_granted_verb_has_a_caller() {
     let methods_for = |resource: &str, verb: &str| -> Vec<&'static str> {
         let sub = resource.split_once('/').map(|(_, s)| s);
         match (sub, verb) {
-            (Some("log"), "get") => vec!["logs"],
+            // `log_stream` is the same `GET …/pods/<name>/log`: see `needs`.
+            (Some("log"), "get") => vec!["logs", "log_stream"],
             (Some("status"), "patch") => vec!["patch_status"],
             (Some("status"), "update") => vec!["replace_status"],
             (Some(other), v) => panic!("no caller model for subresource `{other}` verb `{v}`"),
