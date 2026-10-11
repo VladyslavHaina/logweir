@@ -13,7 +13,9 @@ upgrading the chart. Every reason, exit code and runner output line is in
 Logweir backs up Kafka topics to object storage, restores them into new topics,
 and verifies both with signed evidence. The `weirkeeper` controller turns
 custom resources into runner Jobs; the runner (`logweir`) does the work and
-signs the result. The controller and the console link no signing code (see
+signs the result. The controller links no signing code; the console links it
+only to sign its own approval documents with its `ConsoleConfirmation` key,
+never evidence (see
 [the signing-oracle residual](#the-signing-oracle-residual)).
 
 **Minimum Kubernetes: 1.29.** The CRDs seal what may not change with CEL
@@ -1625,9 +1627,11 @@ signers and usage mismatches are decided at once, without the read.
 
 `weirkeeper` is a **signing oracle**: Job CRUD in a namespace that holds
 `logweir-signing-key` is equivalent to holding that key, because a Job the
-controller creates can mount it. That is residual **O1**, accepted. No
-control-plane crate links the signer (`scripts/check-one-signer.sh`), but the
-capability to sign stands while the controller can create Jobs there. The
+controller creates can mount it. That is residual **O1**, accepted. The
+controller links no signing code (`weirkeeper` depends on `logweir-verify`,
+never on `logweir-evidence`; `scripts/check-one-signer.sh`), and the console
+links it only for its `ConsoleConfirmation` documents, but the capability to
+sign evidence stands while the controller can create Jobs there. The
 chart's `controller.watchNamespaces` replaces the cluster-wide binding with one
 RoleBinding per execution namespace, so O1 then covers those namespaces only; the
 release namespace is outside it. None of this stops a cluster-admin
