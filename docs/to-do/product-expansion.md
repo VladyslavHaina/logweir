@@ -658,6 +658,7 @@ What it fixed:
   - A guard in `stack_params.rs` fails on a binary that is in no shard or in two, with both controls.
   - **Measured on the PR:** shards took 23.7, 21.9, 23.4 and 20.2 minutes, all under the 30-minute target. The whole run took 25 minutes against 53 before.
   - `publish` needs every shard.
+- **Published and signed:** main run 38134054797 passed all four shards on main and signed `sha-5da3a395`.
 
 **PROD-17.1 — decided (OD-12, 2026-10-11); wave 1 started.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
 - **Wave 1, cuts:**
