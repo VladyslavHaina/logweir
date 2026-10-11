@@ -21,7 +21,7 @@ use logweir_reaper::{
     ThreadSleeper, TombstoneSink,
 };
 use logweir_retention::{
-    admit, execute, record_line, result_line, Admitted, Keys, ProcessEnv, Refusal, EXIT_REFUSED,
+    admit, execute, record_line, result_line, Admitted, Keys, ProcessEnv, Refusal,
 };
 use logweir_store::{Store, StoreError, StoreOptions};
 
@@ -51,18 +51,19 @@ fn code(exit: i32) -> ExitCode {
     ExitCode::from(u8::try_from(exit).unwrap_or(1))
 }
 
+/// Every exit-3 path: the reason on stderr, and the closed code (FX-20, FX-15)
+/// on stdout for the controller to put on the policy's status.
+fn refuse(refusal: &Refusal) -> i32 {
+    eprintln!("logweir-retention: {refusal}");
+    println!("{}", refusal.refusal_line());
+    refusal.exit_code()
+}
+
 fn run(flags: &[&str]) -> i32 {
     let started_at = Utc::now();
     let admitted = match admit(flags, &ProcessEnv, |path| std::fs::read(path)) {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("logweir-retention: {e}");
-            // FX-20: the closed code the controller publishes, on stdout.
-            if let Some(code) = e.code() {
-                println!("{}{code}", logweir_retention::REFUSAL_LINE);
-            }
-            return e.exit_code();
-        }
+        Err(e) => return refuse(&e),
     };
 
     // THE DELETER. Built from the destination's own frozen addressing and the
@@ -74,10 +75,7 @@ fn run(flags: &[&str]) -> i32 {
         admitted.allow_http(),
     ) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("logweir-retention: {}", Refusal::Port(e.to_string()));
-            return EXIT_REFUSED;
-        }
+        Err(e) => return refuse(&Refusal::Port(e.to_string())),
     };
 
     // A DRY RUN OPENS NO SINK AND DELETES NOTHING. It does hold the archive
@@ -111,10 +109,7 @@ fn run(flags: &[&str]) -> i32 {
     // neither is any later one — `a_point_whose_intent_cannot_be_written_is_not_deleted`.
     let sink = match EvidenceSink::open(&admitted) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("logweir-retention: {}", Refusal::Port(e.to_string()));
-            return EXIT_REFUSED;
-        }
+        Err(e) => return refuse(&Refusal::Port(e.to_string())),
     };
 
     let report = execute(&admitted, &reaper, &ThreadSleeper, &sink, &reaper);

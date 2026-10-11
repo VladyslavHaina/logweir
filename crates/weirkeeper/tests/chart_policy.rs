@@ -786,11 +786,10 @@ const FOLLOWED: &[Followed] = &[
             Site {
                 file: "evidence_fetch.rs",
                 needle: "inputs.checks.max_evidence_fetch_active_per_namespace, inputs.attempt",
-                proof: Err(
-                    "the queue message names the ceiling the admission above applied; it \
-                     decides nothing (FX-10 report, class-sweep row 4). The caller's wiring \
-                     at a non-default value is FX-10 report, Class sweep owed, item 1.",
-                ),
+                proof: Ok((
+                    "configured_values.rs",
+                    "the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its_caller",
+                )),
             },
         ]),
     },
@@ -901,11 +900,10 @@ const FOLLOWED: &[Followed] = &[
                 file: "controllers/backup_selection.rs",
                 needle: "super::topic_discovery::attestation_candidate( \
                          &load.policy().discovery.visibility_attestations,",
-                proof: Err(
-                    "a Backup's run-time discovery reads its policy reference from the process \
-                     environment, and no row serves it a document carrying an attestation: \
-                     FX-10 report, Class sweep owed, item 6",
-                ),
+                proof: Ok((
+                    "configured_values.rs",
+                    "the_installation_policys_attestation_reaches_a_backups_run_time_discovery",
+                )),
             },
         ]),
     },
@@ -944,7 +942,7 @@ const FOLLOWED: &[Followed] = &[
             needle: "PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace",
             proof: Ok((
                 "configured_values.rs",
-                "the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies",
+                "the_installation_policys_manual_restore_ceiling_admits_the_third_restore",
             )),
         }]),
     },
@@ -1002,12 +1000,12 @@ const FOLLOWED: &[Followed] = &[
             )),
         }]),
     },
-    // PUBLISHED, READ BY NOTHING YET — listed, not hidden. Both values DO reach
-    // a reader through the Deployment's env (`AWS_ALLOW_HTTP`,
-    // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` → `retention::storage_url_for`,
-    // `configured_values.rs`); it is their copy in this document that nothing
-    // reads. The access count holds them at zero readers, so the day one
-    // appears this table must name it.
+    // PUBLISHED AND READ BY NOTHING, BY DECISION (FX-15) — listed, not hidden.
+    // Both values DO reach a reader through the Deployment's env
+    // (`AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` →
+    // `retention::storage_url_for`, `configured_values.rs`); it is their copy
+    // in this document that nothing reads, and nothing may: the access count
+    // holds them at zero readers, so a reader added later fails here by name.
     Followed {
         value: "archive.s3.allowHttp",
         field: "legacyArchiveAddressing.allowHttp",
@@ -1016,9 +1014,11 @@ const FOLLOWED: &[Followed] = &[
             ".legacy_archive_addressing.allow_http",
         ],
         sites: Err(
-            "Its one planned reader, the legacy adoption route, was withdrawn (release-notes \
-             item 75); the restore readiness check takes transport from the PLAN \
-             (D-SEAMS S5). FX-10 report, Class sweep owed.",
+            "Read by nothing, by decision (FX-15; was FX-10 report, Class sweep owed item 3). \
+             Its one planned reader, the legacy adoption route, was withdrawn (release-notes \
+             item 75); the restore readiness check takes transport from the PLAN, as the \
+             restore runner does (D-SEAMS S5), so a reader here would make the two disagree. \
+             It stays published: dropping it would change every install's policy digest.",
         ),
     },
     Followed {
@@ -1029,8 +1029,9 @@ const FOLLOWED: &[Followed] = &[
             ".legacy_archive_addressing.virtual_hosted_style",
         ],
         sites: Err(
-            "D2 §3.12 (b), as allowHttp; the readiness check derives addressing from the \
-             plan and the endpoint (engine G4). FX-10 report, Class sweep owed.",
+            "Read by nothing, by decision (FX-15; was FX-10 report, Class sweep owed item 3), \
+             as allowHttp: the readiness check derives addressing from the plan and the \
+             endpoint (engine G4), as the restore runner does.",
         ),
     },
 ];

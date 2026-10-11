@@ -291,6 +291,15 @@ pub struct EvidencePolicy {
 
 /// The legacy inline-archive addressing an upgrade keeps working with — D2
 /// §4.4's `legacyArchiveAddressing` block.
+///
+/// **`allow_http` and `virtual_hosted_style` are parsed and read by nothing,
+/// by decision (FX-15).** A restore readiness check takes transport and
+/// addressing from the PLAN, as the restore runner does (D-SEAMS S5), so a
+/// reader of these copies would make the check and the run disagree. The
+/// chart keeps publishing them, because dropping them would change every
+/// install's policy digest, and this parser keeps accepting them (the v0.1.x
+/// shims stay, OD-12). `weirkeeper/tests/chart_policy.rs` fails, naming the
+/// field, on any reader added later.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LegacyArchiveAddressing {

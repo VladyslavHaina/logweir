@@ -104,3 +104,72 @@ fn rate_limits_are_rendered_only_away_from_the_binarys_defaults() {
         assert_eq!(config.run_rate_limits, defaults, "{render}");
     }
 }
+
+/// **FX-15: every `api.console` value this binary reads reaches the parsed
+/// `Config` at a NON-default value.** `examples/tuned.values.yaml` (localAdmin)
+/// and `examples/console-tuned.values.yaml` (shared) set each one away from
+/// its default; their renders' configurations are parsed by the real
+/// `Config::parse` and read back field by field. CONTROL: the same reads over
+/// the default renders (`console`, `console-shared`) give the defaults, so a
+/// template or a parser that dropped a value would read as the control does.
+///
+/// MUTANTS: render `listen` from a literal 8484; drop `expectedVersion` or
+/// `sessionMaxAgeSeconds` from the shared template; read `rateLimits` and keep
+/// the defaults.
+#[test]
+fn every_console_value_reaches_the_parsed_configuration_at_a_non_default_value() {
+    let parse = |render: &str| {
+        logweir_api::config::Config::parse(&console_config(render), Path::new("/"))
+            .unwrap_or_else(|e| panic!("rendered/{render}.yaml: {e}"))
+    };
+    let limits = |backups, restores| logweir_api::routes::RunRateLimits {
+        manual_backups_per_minute: backups,
+        manual_restores_per_minute: restores,
+    };
+    let key_versions = |config: &logweir_api::config::Config| {
+        let shared = config.shared().expect("shared mode");
+        let cursor = match &config.cursor_key {
+            logweir_api::config::CursorKeySource::Versioned(key) => key.expected_version,
+            other => panic!("shared mode's cursor key is versioned: {other:?}"),
+        };
+        (shared.session_key.expected_version, cursor)
+    };
+
+    // localAdmin: port, localAdminSubject, rateLimits.
+    for (render, port, subject, rate) in [
+        ("tuned", 8485, "tuned-admin", limits(11, 9)),
+        ("console", 8484, "admin", limits(10, 5)),
+    ] {
+        let config = parse(render);
+        assert_eq!(config.listen.port(), port, "{render}: port");
+        assert_eq!(
+            config.local_admin().expect("localAdmin mode").subject,
+            subject,
+            "{render}: localAdminSubject"
+        );
+        assert_eq!(config.run_rate_limits, rate, "{render}: rateLimits");
+    }
+
+    // shared: port, keyVersion (both keys), sessionMaxAgeSeconds, rateLimits.
+    for (render, port, version, max_age, rate) in [
+        ("console-tuned", 8486, 2, 600, limits(12, 7)),
+        ("console-shared", 8484, 1, 900, limits(10, 5)),
+    ] {
+        let config = parse(render);
+        assert_eq!(config.listen.port(), port, "{render}: port");
+        assert_eq!(
+            key_versions(&config),
+            (version, version),
+            "{render}: keyVersion"
+        );
+        assert_eq!(
+            config
+                .shared()
+                .expect("shared mode")
+                .session_max_age_seconds,
+            max_age,
+            "{render}: sessionMaxAgeSeconds"
+        );
+        assert_eq!(config.run_rate_limits, rate, "{render}: rateLimits");
+    }
+}

@@ -38,22 +38,31 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Once};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use logweir_core::approval_policy::ApprovalPolicySet;
+use logweir_core::check_contract::{
+    topic_tsv_sha256, ExpectedSummary, InventoryCounts, InventoryResult, TopicEntry,
+    VisibilityState, TOPIC_INVENTORY_FORMAT,
+};
 use serde::Deserialize as _;
 use serde_json::{json, Value};
 use weirkeeper::backup_execution::inputs_config_map;
 use weirkeeper::check::policy::{self, Policy, PolicyCache};
 use weirkeeper::controllers::backup::{
-    admit_destination, desired_execution_inputs, reconcile_backup_pooled, runner_job,
-    unobserved_archive, with_status_patch, DestinationAdmission,
+    admit_destination, desired_execution_inputs, evidence_source_for, reconcile_backup_pooled,
+    runner_job, unobserved_archive, with_status_patch, DestinationAdmission, EvidenceSource,
 };
 use weirkeeper::controllers::preflight as pf;
 use weirkeeper::controllers::restore::admit_restore_destinations;
 use weirkeeper::controllers::Context;
+use weirkeeper::crds::approval::Approval;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Preflight;
 use weirkeeper::crds::restore::Restore;
-use weirkeeper::job::RunnerImage;
+use weirkeeper::crds::trust_roster::TrustRoster;
+use weirkeeper::crds::LocalRef;
+use weirkeeper::evidence_fetch::{self, Step};
+use weirkeeper::job::{RunnerImage, RunnerOwner};
 use weirkeeper::run_pool::{Pool, PoolKind, Reservations};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
@@ -567,12 +576,12 @@ async fn the_installation_policys_manual_backup_ceiling_admits_the_sixth_run() {
 /// **FX-10: `runs.maxManualRestoresActivePerNamespace` is the ceiling the
 /// restore gate applies.**
 ///
-/// The restore gate's end-to-end pass needs `restore_controller.rs`'s approval
-/// and signing fixtures, so its half is held at the mapping both gates now
-/// share (`run_pool::ceiling`): the tuned document's restores (8) and backups
-/// (6) differ from each other and from their defaults (2 and 4), so a crossed
-/// or constant mapping fails. The restore gate is pinned to call it with
-/// `PoolKind::Restore` over the document it loaded.
+/// The mapping both gates share (`run_pool::ceiling`): the tuned document's
+/// restores (8) and backups (6) differ from each other and from their defaults
+/// (2 and 4), so a crossed or constant mapping fails, and each gate is pinned
+/// to call it over the document it loaded. The restore gate's end-to-end pass
+/// is `the_installation_policys_manual_restore_ceiling_admits_the_third_restore`
+/// (FX-15).
 ///
 /// MUTANTS: swap the two arms of `ceiling`; pass `PoolKind::Backup` at the
 /// restore gate; pass `&Policy::defaults()` there.
@@ -610,6 +619,571 @@ fn the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies()
              over the policy it LOADED"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// runs.maxManualRestoresActivePerNamespace, end to end — FX-15
+// ---------------------------------------------------------------------------
+
+const RESTORE_PLAN: &str = "\
+source:
+  storage:
+    backend: s3
+    bucket: kafka-backups
+    prefix: drill-demo
+    region: us-east-1
+  backup: latestCompleted
+  topics: [orders]
+target:
+  bootstrap_servers: [scratch-0.team-a:9092]
+  mode: scratch
+  topic_mapping_prefix: \"drill-\"
+  marker_topic: logweir.scratch
+  default_replication_factor: 1
+  teardown: delete
+restore:
+  point_in_time: \"2026-09-07T14:05:00Z\"
+sample:
+  window_start: \"2026-09-07T12:00:00Z\"
+  window_end: \"2026-09-07T15:00:00Z\"
+  records_per_partition: 25
+  anchor: head
+objectives:
+  rto_seconds: 900
+  rpo_seconds: 300
+  pass_rate: 1.0
+evidence:
+  backend: s3
+  bucket: logweir-evidence
+  prefix: logweir/
+  region: us-east-1
+";
+const APPROVER_KEY_ID: &str =
+    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+/// A MANUAL inline-archive `Restore` in [`NS`], approved by `a1`.
+fn manual_restore(name: &str, uid: &str, minute: u32, status: Value) -> Restore {
+    let mut value = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": name, "namespace": NS, "uid": uid, "generation": 1,
+                     "resourceVersion": "7", "creationTimestamp": utc(11, minute, 0).to_rfc3339()},
+        "spec": {
+            "planBytes": RESTORE_PLAN,
+            "approvalRef": {"name": "a1"},
+            "sourceArchive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+            "backupSetRef": "drill-demo",
+            "pointInTime": "2026-09-07T14:05:00Z",
+            "target": {"clusterRef": {"name": "scratch"}, "mode": "scratch",
+                       "topicNaming": {"prefix": "drill-"}},
+            "deadlineSeconds": 1800
+        }
+    });
+    if !status.is_null() {
+        value["status"] = status;
+    }
+    serde_json::from_value(value).expect("a Restore")
+}
+
+/// Today's (v1) approval of `restore`, verified, under no approval policy.
+fn restore_approval(restore: &Restore) -> Approval {
+    let name = restore.metadata.name.clone().expect("named");
+    let uid = restore.metadata.uid.clone().expect("uid");
+    let hash = logweir_core::ids::sha256_prefixed(RESTORE_PLAN.as_bytes());
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+        "metadata": {"name": "a1", "namespace": NS, "uid": "aaaaaaaa-0000-4000-8000-0000000000f1"},
+        "spec": {
+            "subjectRef": {"kind": "Restore", "name": name},
+            "planHash": hash,
+            "approvalBytes": format!(
+                r#"{{"approver":"sre-oncall@example.com","ticket":"CHG-1","plan_hash":"{hash}","subject_kind":"Restore"}}"#
+            ),
+            "sidecarBytes": "{}"
+        },
+        "status": {
+            "verified": true,
+            "matchedKeyId": APPROVER_KEY_ID,
+            "verifiedSubjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                                   "name": name, "namespace": NS, "uid": uid},
+            "conditions": [{"type": "Verified", "status": "True", "reason": "Verified"}]
+        }
+    }))
+    .expect("an Approval")
+}
+
+fn roster() -> TrustRoster {
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+        "metadata": {"name": "default", "uid": "dddddddd-0000-4000-8000-0000000000f1"},
+        "spec": {
+            "approverKeys": [{"keyId": APPROVER_KEY_ID,
+                              "spkiPem": "-----BEGIN PUBLIC KEY-----\nA\n-----END PUBLIC KEY-----\n"}],
+            "signingKeys": [],
+            "allowedClusterIds": ["MkU3OEVBNTcwNTJENDM2Qk"]
+        },
+        "status": {"loaded": true}
+    }))
+    .expect("a TrustRoster")
+}
+
+/// Everything one pass of `restore` may ask for, the policy included: the
+/// admission reads, the trust (a roster, no `TrustPolicy`), and the plan,
+/// bundle and Job it creates.
+fn restore_routes(restore: &Restore, document: String, now: DateTime<Utc>) -> Vec<Route> {
+    let name = restore.metadata.name.clone().expect("named");
+    let uid = restore.metadata.uid.clone().expect("uid");
+    let approval = restore_approval(restore);
+    let plan = weirkeeper::controllers::restore::plan_config_map(restore).expect("a plan");
+    let bundle = weirkeeper::controllers::restore::approval_bundle_config_map(
+        restore,
+        &approval,
+        &weirkeeper::trust::synthesize_legacy(&roster().spec),
+        now,
+    )
+    .expect("a bundle");
+    let job = json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": name, "namespace": NS, "uid": "bbbbbbbb-0000-4000-8000-0000000000f1",
+                     "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                                          "name": name, "uid": uid, "controller": true,
+                                          "blockOwnerDeletion": true}]},
+        "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+        "status": {"active": 1}
+    });
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/jobs/{name}")),
+            status: 404,
+            body: not_found("jobs.batch", &name),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/approvals/a1",
+            status: 200,
+            body: serde_json::to_string(&approval).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/kafkaclusters/scratch",
+            status: 200,
+            body: json!({
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
+                "metadata": {"name": "scratch", "namespace": NS,
+                             "uid": "cccccccc-0000-4000-8000-0000000000f1"},
+                "spec": {"bootstrapServers": ["scratch-0.team-a:9092"],
+                         "auth": {"mode": "plaintext", "tls": false},
+                         "role": "scratch", "markerTopic": "logweir.scratch"},
+                "status": {"reachable": true, "clusterId": "MkU3OEVBNTcwNTJENDM2Qk"}
+            })
+            .to_string(),
+        },
+        policy_route(document),
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList",
+                         "metadata": {"resourceVersion": "1"}, "items": []})
+            .to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: serde_json::to_string(&roster()).expect("JSON"),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: serde_json::to_string(&plan).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/configmaps/{name}-plan")),
+            status: 200,
+            body: serde_json::to_string(&plan).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/configmaps/{name}-approval-bundle")),
+            status: 200,
+            body: serde_json::to_string(&bundle).expect("JSON"),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: job.to_string(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/restores/{name}/status")),
+            status: 200,
+            body: serde_json::to_string(restore).expect("JSON"),
+        },
+    ]
+}
+
+/// One pooled pass of `candidate` beside `peers`, its ceiling read from the
+/// installation policy (`limit: None`, as production passes it).
+async fn pooled_restore_pass(
+    candidate: &Restore,
+    peers: Vec<Restore>,
+    document: String,
+    now: DateTime<Utc>,
+) -> Vec<SeenBody> {
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(restore_routes(candidate, document, now));
+    let snapshot: Vec<Arc<Restore>> = peers.into_iter().map(Arc::new).collect();
+    let source = move || Some(snapshot.clone());
+    let reservations = Reservations::new();
+    let pool = Pool {
+        peers: &source,
+        limit: None,
+        reservations: &reservations,
+    };
+    weirkeeper::controllers::restore::reconcile_restore_pooled(
+        candidate,
+        &client,
+        &weirkeeper::controllers::restore::unobserved_scorecard,
+        &unverified_evidence,
+        now,
+        &RunnerImage::default(),
+        &ApprovalPolicySet::default(),
+        None,
+        &pool,
+    )
+    .await
+    .expect("the pass reconciles");
+    let seen = bodies.lock().expect("readable").clone();
+    seen
+}
+
+/// **FX-15: `runs.maxManualRestoresActivePerNamespace` reaches the restore
+/// gate — environment, `ConfigMap`, ceiling, admission.**
+///
+/// Two manual `Restore`s are running and an approved third arrives. The
+/// chart's tuned document raises the ceiling to eight, so the third is
+/// admitted (`Admitted=True` naming `= 8`) and its Job is created. CONTROL:
+/// served the default document (two), the same pass queues it —
+/// `queue.limit: 2`, nothing created. FX-10 held only the ceiling's mapping and
+/// a source pin; this drives the gate's USE of it (FX-10 review M7).
+///
+/// MUTANTS: `&Policy::defaults()` for the loaded policy at the restore gate;
+/// `limit` replaced by `2` in its `decide` call.
+#[tokio::test]
+async fn the_installation_policys_manual_restore_ceiling_admits_the_third_restore() {
+    tuned_environment();
+    let running = |name: &str, uid: &str, minute: u32| {
+        manual_restore(
+            name,
+            uid,
+            minute,
+            json!({"phase": "Running", "jobRef": {"name": name}}),
+        )
+    };
+    let third = manual_restore(
+        "rst-third",
+        "5c2e7b91-0000-4000-8000-0000000000f3",
+        9,
+        Value::Null,
+    );
+    let peers = vec![
+        running("rst-a", "5c2e7b91-0000-4000-8000-0000000000f1", 1),
+        running("rst-b", "5c2e7b91-0000-4000-8000-0000000000f2", 2),
+        third.clone(),
+    ];
+
+    let seen =
+        pooled_restore_pass(&third, peers.clone(), policy_json("tuned"), utc(12, 0, 0)).await;
+    assert_eq!(
+        posts(&seen, "/jobs"),
+        1,
+        "the tuned ceiling is eight: the third starts"
+    );
+    let first = &patched_statuses(&seen)[0];
+    let admitted = first["conditions"]
+        .as_array()
+        .and_then(|cs| cs.iter().find(|c| c["type"] == "Admitted"))
+        .expect("the admission record comes first");
+    assert_eq!(admitted["status"], "True");
+    assert!(
+        admitted["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("maxManualRestoresActivePerNamespace` = 8"),
+        "{admitted}"
+    );
+
+    // CONTROL, an hour later so the process-wide cache holds nothing current.
+    let seen = pooled_restore_pass(&third, peers, policy_json("default"), utc(13, 0, 0)).await;
+    assert_eq!(posts(&seen, "/jobs"), 0, "CONTROL: two may run, two do");
+    assert_eq!(posts(&seen, "/configmaps"), 0, "and no plan");
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1, "{statuses:?}");
+    assert_eq!(statuses[0]["phase"], "Queued");
+    assert_eq!(statuses[0]["queue"]["limit"], 2);
+}
+
+// ---------------------------------------------------------------------------
+// checks.maxEvidenceFetchActivePerNamespace, from the caller — FX-15
+// ---------------------------------------------------------------------------
+
+const BACKUP_UID: &str = "00000000-0000-4000-8000-0000000000e1";
+
+/// A destination whose `evidenceRead` only a pod may hold: its evidence is
+/// fetched by an evidence-fetch Job.
+fn fetch_destination() -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {"name": "dest-f", "namespace": NS,
+                     "uid": "cafe0003-0000-4000-8000-0000000000f3",
+                     "generation": 1, "resourceVersion": "11"},
+        "spec": {
+            "storage": {"provider": "S3", "bucket": "lw-f", "prefix": "team-a",
+                        "region": "us-east-1", "endpoint": "https://minio-f.storage.svc:9000",
+                        "addressing": "PathStyle"},
+            "transport": {"security": "TLS"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {"name": "lw-f-writer",
+                    "accessKeyIdKey": "id", "secretAccessKeyKey": "key"}},
+                "evidenceRead": {"mode": "SecretKeys", "secret": {"name": "lw-f-reader",
+                    "accessKeyIdKey": "id", "secretAccessKeyKey": "key"}}
+            }
+        },
+        "status": {"observedGeneration": 1,
+                   "conditions": [{"type": "Valid", "status": "True", "reason": "Valid",
+                                   "observedGeneration": 1}]}
+    })
+}
+
+/// `n` evidence-fetch Jobs running in [`NS`] for other runs.
+fn active_fetches(n: u32) -> String {
+    let items: Vec<Value> = (0..n)
+        .map(|i| {
+            json!({
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {
+                    "name": format!("lwc-ev-other{i}"), "namespace": NS,
+                    "uid": format!("eeeeeeee-0000-4000-8000-00000000000{i}"),
+                    "labels": {"app.kubernetes.io/component": "check",
+                               "logweir.dev/check-kind": "evidenceFetch"}
+                },
+                "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+                "status": {"active": 1}
+            })
+        })
+        .collect();
+    json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {}, "items": items}).to_string()
+}
+
+/// One pass from the caller: [`evidence_source_for`] loads the policy and
+/// resolves the destination, and its `checks` drive [`evidence_fetch::advance`]
+/// beside `active` running fetches.
+async fn fetch_step(document: String, now: DateTime<Utc>, active: u32) -> (Step, Vec<SeenBody>) {
+    let job_name = weirkeeper::check::job::evidence_fetch_job_name(BACKUP_UID, 1);
+    let (client, _seen, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/backupdestinations/dest-f",
+            status: 200,
+            body: fetch_destination().to_string(),
+        },
+        policy_route(document),
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/jobs/{job_name}")),
+            status: 404,
+            body: not_found("jobs.batch", &job_name),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/jobs",
+            status: 200,
+            body: active_fetches(active),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: json!({"apiVersion": "v1", "kind": "ConfigMap",
+                         "metadata": {"name": format!("{job_name}-plan"), "namespace": NS}})
+            .to_string(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: json!({"apiVersion": "batch/v1", "kind": "Job",
+                         "metadata": {"name": job_name, "namespace": NS,
+                                      "uid": "eeeeeeee-0000-4000-8000-0000000000ff"},
+                         "spec": {"template": {"spec": {"containers": [],
+                                                        "restartPolicy": "Never"}}}})
+            .to_string(),
+        },
+    ]);
+    let reference = LocalRef {
+        name: "dest-f".to_string(),
+    };
+    let source = evidence_source_for(Some(&reference), &client, NS, now)
+        .await
+        .expect("the reads succeed");
+    assert!(
+        matches!(source, EvidenceSource::FetchJob { .. }),
+        "a SecretKeys evidenceRead is fetched by a Job: {source:?}"
+    );
+    // As `controllers/backup.rs` hands them to `advance`.
+    let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
+    let owner = RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "Backup".to_string(),
+        name: "logweir-manual-ev".to_string(),
+        uid: BACKUP_UID.to_string(),
+    };
+    let request = evidence_fetch::Request {
+        payload_key: "logweir/receipts/ev.json".to_string(),
+        sidecar_key: "logweir/receipts/ev.json.sig".to_string(),
+        payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+    };
+    let step = evidence_fetch::advance(&evidence_fetch::Inputs {
+        client: &client,
+        namespace: NS,
+        owner: &owner,
+        attempt: 1,
+        request: &request,
+        destination,
+        unresolved: unresolved.as_deref(),
+        checks: &checks,
+        policy_digest,
+        image: &RunnerImage::default(),
+        now,
+    })
+    .await
+    .expect("the pass completes");
+    let seen = bodies.lock().expect("readable").clone();
+    (step, seen)
+}
+
+/// **FX-15: `checks.maxEvidenceFetchActivePerNamespace` reaches the
+/// evidence-fetch pool FROM ITS CALLER** — the policy `evidence_source_for`
+/// loads is the one `advance` admits by.
+///
+/// Four evidence-fetch Jobs run in the namespace. The tuned document's pool is
+/// five, so a fifth is created; beside five it waits, naming `= 5`. CONTROL:
+/// served the default document (four), the pass beside four waits, naming
+/// `= 4`, and creates nothing. FX-10 drove the consumer (`limits::admit`) at a
+/// non-default value but not this caller (`controllers/backup.rs`,
+/// `checks: load.policy().checks`).
+///
+/// MUTANT: `checks: Policy::defaults().checks` in `evidence_source_for`.
+#[tokio::test]
+async fn the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its_caller() {
+    tuned_environment();
+    let (step, seen) = fetch_step(policy_json("tuned"), utc(18, 0, 0), 4).await;
+    assert!(matches!(step, Step::Running { .. }), "{step:?}");
+    assert_eq!(
+        posts(&seen, "/jobs"),
+        1,
+        "the tuned pool is five: the fifth starts"
+    );
+    let queued = |step: Step| match step {
+        Step::Queued { detail } => detail,
+        other => panic!("a full pool waits: {other:?}"),
+    };
+    let (step, seen) = fetch_step(policy_json("tuned"), utc(18, 30, 0), 5).await;
+    let detail = queued(step);
+    assert!(
+        detail.contains("maxEvidenceFetchActivePerNamespace = 5"),
+        "{detail}"
+    );
+    assert_eq!(posts(&seen, "/jobs") + posts(&seen, "/configmaps"), 0);
+
+    // CONTROL, an hour later so the process-wide cache holds nothing current.
+    let (step, seen) = fetch_step(policy_json("default"), utc(19, 0, 0), 4).await;
+    let detail = queued(step);
+    assert!(
+        detail.contains("maxEvidenceFetchActivePerNamespace = 4"),
+        "{detail}"
+    );
+    assert_eq!(posts(&seen, "/jobs") + posts(&seen, "/configmaps"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// checks.discovery.visibilityAttestations, at a Backup's run-time discovery —
+// FX-15
+// ---------------------------------------------------------------------------
+
+/// A clean listing of the tuned attestation's cluster: no authorization error,
+/// not truncated.
+fn clean_listing(cluster_id: &str) -> InventoryResult {
+    InventoryResult {
+        format: TOPIC_INVENTORY_FORMAT.to_string(),
+        cluster_id: Some(cluster_id.to_string()),
+        broker_count: Some(3),
+        counts: InventoryCounts {
+            listed: 2,
+            returned: 2,
+            internal_excluded: 0,
+            errored: 0,
+        },
+        truncated: false,
+        truncation_reason: None,
+        topic_authorization_error_in_listing: false,
+        expected: ExpectedSummary::default(),
+        expected_results: Vec::new(),
+        topics_sha256: topic_tsv_sha256(&[
+            TopicEntry::new("orders", 3),
+            TopicEntry::new("payments", 3),
+        ]),
+    }
+}
+
+/// **FX-15: `checks.discovery.visibilityAttestations` reaches a `Backup`'s
+/// run-time discovery** (`backup_selection::run_time_visibility`, the R6 read
+/// `resolve` makes), from the policy reference in this process's environment.
+///
+/// The tuned document attests `team-a`'s `source` cluster
+/// (`M29I2S7FQPyHBEX12Vx7XA`) for `User:backup` until 2027, so a clean listing
+/// of it is `attestedComplete` — the one state a `Backup` with
+/// `incompleteDiscovery: Refuse` resolves under. CONTROL: served the default
+/// document (no attestation), the same listing is `unknown`, and a listing of
+/// another cluster id under the tuned document is `unknown` too.
+///
+/// MUTANT: `&Policy::defaults().discovery.visibility_attestations` at the read.
+#[tokio::test]
+async fn the_installation_policys_attestation_reaches_a_backups_run_time_discovery() {
+    tuned_environment();
+    let verdict = |document: String, cluster_id: &'static str| async move {
+        let (client, _r, _b) = mock_client_recording_bodies(vec![policy_route(document)]);
+        weirkeeper::controllers::backup_selection::run_time_visibility(
+            &client,
+            &clean_listing(cluster_id),
+            NS,
+            "source",
+            "User:backup",
+            utc(12, 0, 0),
+        )
+        .await
+        .expect("the policy read succeeds")
+        .state
+    };
+    let attested = "M29I2S7FQPyHBEX12Vx7XA";
+    assert_eq!(
+        verdict(policy_json("tuned"), attested).await,
+        VisibilityState::AttestedComplete
+    );
+    assert_eq!(
+        verdict(policy_json("default"), attested).await,
+        VisibilityState::Unknown,
+        "CONTROL: no attestation in the default document"
+    );
+    assert_eq!(
+        verdict(policy_json("tuned"), "aaaaaaaaaaaaaaaaaaaaaa").await,
+        VisibilityState::Unknown,
+        "CONTROL: the attestation is for the cluster it names"
+    );
 }
 
 // ---------------------------------------------------------------------------

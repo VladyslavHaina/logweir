@@ -1,7 +1,10 @@
 # Explicitly adopt a pre-existing PKCS#8 PEM signing identity. Create this
 # Secret in the release namespace before the first install. Bootstrap copies
 # it once into the retained managed Secret; later upgrades validate equality.
+# The public half is published under a name of the company's choosing (FX-15:
+# crates/logweir/src/identity.rs follows all three names to the hook's reads).
 identity:
+  publicConfigMapName: company-logweir-trust
   externalSecret:
     name: company-logweir-signer
     key: identity.pem

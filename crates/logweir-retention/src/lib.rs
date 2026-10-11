@@ -230,21 +230,99 @@ pub enum Refusal {
     Port(String),
 }
 
-/// FX-20: the key line a refused run prints for a refusal the controller names
-/// on the policy's status — `retention-refusal=<code>`, read by key name from a
-/// closed table (`weirkeeper::controllers::retention_policy::RETENTION_REFUSALS`).
+/// FX-20: the key line a refused run prints — `retention-refusal=<code>`, and
+/// for a refusal about one binding variable ` variable=<name>` after it — read
+/// by key name from a closed table
+/// (`weirkeeper::controllers::retention_policy::RETENTION_REFUSALS`) and put on
+/// the policy's status.
 pub const REFUSAL_LINE: &str = "retention-refusal=";
 
+/// FX-15: every code [`Refusal::code`] can return. The controller's
+/// `RETENTION_REFUSALS` must be this set, and
+/// `weirkeeper/tests/retention_policy_controller.rs` reads this array to hold
+/// it so.
+pub const REFUSAL_CODES: [&str; 22] = [
+    "NotRun",
+    "UnknownArgument",
+    "ContractVersion",
+    "NoPlanPath",
+    "PlanUnreadable",
+    "BindingIncomplete",
+    "GenerationNotANumber",
+    "CapUnreadable",
+    "LocationUnreadable",
+    "NoRecordCredential",
+    "CredentialBindingMismatch",
+    "PortUnavailable",
+    "PlanUnparseable",
+    "PlanWrongFormat",
+    "PlanDigestMismatch",
+    "PlanPolicyMismatch",
+    "RetentionScopeViolation",
+    "PlanManifestNotFirst",
+    "PlanOverCap",
+    "PlanEmptyLine",
+    "PlanDuplicatePoint",
+    "PlanDuplicateKey",
+];
+
 impl Refusal {
-    /// The closed code a controller may publish for this refusal, or `None`
-    /// for one it reports by exit code alone.
+    /// FX-15: the closed code the controller publishes for this refusal. Every
+    /// refusal has one, so a refused run's status says why without the pod log.
     #[must_use]
-    pub fn code(&self) -> Option<&'static str> {
+    pub fn code(&self) -> &'static str {
+        use logweir_reaper::Refusal as Plan;
         match self {
+            Self::NotRun(_) => "NotRun",
+            Self::UnknownArgument(_) => "UnknownArgument",
+            Self::ContractVersion(_) => "ContractVersion",
+            Self::NoPlanPath => "NoPlanPath",
+            Self::PlanUnreadable { .. } => "PlanUnreadable",
+            Self::BindingIncomplete(_) => "BindingIncomplete",
+            Self::GenerationNotANumber(_) => "GenerationNotANumber",
+            Self::CapUnreadable { .. } => "CapUnreadable",
+            Self::LocationUnreadable(_) => "LocationUnreadable",
+            Self::NoRecordCredential => "NoRecordCredential",
             Self::CredentialBinding(_) => {
-                Some(logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH)
+                logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH
             }
+            Self::Port(_) => "PortUnavailable",
+            Self::Plan(plan) => match plan {
+                Plan::Unreadable(_) => "PlanUnparseable",
+                Plan::WrongFormat(_) => "PlanWrongFormat",
+                Plan::DigestMismatch { .. } => "PlanDigestMismatch",
+                Plan::PolicyMismatch { .. } => "PlanPolicyMismatch",
+                Plan::ScopeViolation { .. } | Plan::EvidenceRoot { .. } => {
+                    "RetentionScopeViolation"
+                }
+                Plan::ManifestNotFirst { .. } => "PlanManifestNotFirst",
+                Plan::OverCap { .. } => "PlanOverCap",
+                Plan::EmptyLine(_) => "PlanEmptyLine",
+                Plan::DuplicatePoint(_) => "PlanDuplicatePoint",
+                Plan::DuplicateKey { .. } => "PlanDuplicateKey",
+            },
+        }
+    }
+
+    /// The binding variable a refusal is about, when it is about one. A NAME
+    /// from [`env::BINDING`], never a value.
+    #[must_use]
+    pub fn variable(&self) -> Option<&'static str> {
+        match self {
+            Self::BindingIncomplete(name) | Self::CapUnreadable { name, .. } => Some(name),
+            Self::GenerationNotANumber(_) => Some(env::POLICY_GENERATION),
+            Self::LocationUnreadable(_) => Some(env::LOCATION),
             _ => None,
+        }
+    }
+
+    /// The stdout key line for this refusal: [`REFUSAL_LINE`], the code, and
+    /// the variable when there is one.
+    #[must_use]
+    pub fn refusal_line(&self) -> String {
+        match self.variable() {
+            Some(name) => format!("{REFUSAL_LINE}{} variable={name}", self.code()),
+            None => format!("{REFUSAL_LINE}{}", self.code()),
         }
     }
 }
