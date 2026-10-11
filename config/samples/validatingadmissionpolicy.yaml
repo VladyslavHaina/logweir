@@ -17,7 +17,7 @@
 # seal an OPTIONAL field: an absent field can still be ADDED on update, because
 # `oldSelf` has nothing to compare against. Immutability over an object with
 # optional fields is therefore an object-level rule (critique B M3) — which is
-# exactly the shape `config/crd/backupschedules.yaml` already uses for
+# exactly the shape `charts/logweir/crds/backupschedules.yaml` already uses for
 # `BackupSchedule.spec`, inside the CRD, where it works on 1.29.
 #
 # WHY IT IS COMMENTED OUT RATHER THAN OMITTED. A `ValidatingAdmissionPolicy`
