@@ -3123,7 +3123,7 @@ fn complete_coverage_hashes_every_segment_outside_the_window() {
 }
 
 /// A stub engine for phase 7's complete lane, which never asks the engine for
-/// sampled fingerprints: its `validation_run` is evidence only and is logged.
+/// sampled fingerprints.
 struct NoEngine;
 
 impl logweir_core::engine::DataEngine for NoEngine {

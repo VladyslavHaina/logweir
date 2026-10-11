@@ -45,10 +45,6 @@ jobs:
         run: cargo build -p logweir
       - name: just image (the runner image; amd64, Global Constraint 10)
         run: just image
-      - name: just image-ui (the page's image — the chart no longer carries the files)
-        env:
-          LOGWEIR_IMAGE_PLATFORM: linux/amd64
-        run: just image-ui
       - name: just image-weirkeeper (the controller image, built NATIVELY for this runner)
         env:
           LOGWEIR_IMAGE_PLATFORM: linux/amd64
@@ -56,9 +52,9 @@ jobs:
       - name: kind create cluster
         run: kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
       - name: kind load the three author-only tags
-        run: kind load docker-image logweir:check weirkeeper:check logweir-ui:check --name logweir
+        run: kind load docker-image logweir:check weirkeeper:check --name logweir
       - name: helm install (author-only images; NOT evidence for §16 clause 1)
-        run: helm install logweir charts/logweir -n logweir-system --create-namespace --kube-context kind-logweir -f charts/logweir/examples/author-only.values.yaml --set demoKafka.enabled=true --set minio.enabled=true --set ui.enabled=true --wait --timeout 10m
+        run: helm install logweir charts/logweir -n logweir-system --create-namespace --kube-context kind-logweir -f charts/logweir/examples/author-only.values.yaml --set demoKafka.enabled=true --set minio.enabled=true --wait --timeout 10m
       - name: "The walk — scripts/helm-demo.sh, every step, on the kind cluster the job created"
         env:
           LOGWEIR_KUBE_CONTEXT: kind-logweir

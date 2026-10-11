@@ -1,6 +1,5 @@
 //! `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` — PLAT-14.2's
-//! read half: is this data protected, by when, and who was told when it was
-//! not.
+//! read half: is this data protected, and by when.
 //!
 //! THE THREE THINGS THIS PAGE EXISTS TO KEEP APART. "A schedule is enabled",
 //! "a run succeeded" and "there is a recovery point I could actually restore
@@ -10,13 +9,10 @@
 //! readiness beside the objective, and `lastAvailablePoint` — the newest point
 //! that is available, which is not the same object as `lastAttempt`.
 //!
-//! NO SINK, NO ROUTING KEY, NO URL. `spec.notifications.routes[]` carries
-//! `secretKeyRef`s and nothing else; this projection carries each route's NAME
-//! and which CHANNELS it has configured, as booleans. A webhook URL is a
-//! bearer token with a hostname on the front (the CRD says so), and a Secret
-//! NAME beside it would tell a reader which Secret to go and read. The alert
-//! ledger's `delivery.lastError` is already redacted and bounded by the
-//! controller and is bounded again here.
+//! ALERT DELIVERY IS WITHDRAWN (OD-12). `notifications` and each alert's
+//! `notifiedTransition` and `delivery` are always absent. Their types stay
+//! because the published OpenAPI document names them; a withdrawn policy
+//! field is reported by the policy's own `NotificationsDelivered` condition.
 
 use axum::extract::State;
 use axum::response::Response;
@@ -389,13 +385,8 @@ fn alert_view(alert: &AlertEntry) -> AlertView {
         opened_at: alert.opened_at,
         resolved_at: alert.resolved_at,
         transition: alert.transition,
-        notified_transition: alert.notified_transition,
-        delivery: alert.delivery.as_ref().map(|d| AlertDeliveryView {
-            state: d.state.clone(),
-            attempts: d.attempts,
-            last_attempt_at: d.last_attempt_at,
-            last_error: d.last_error.as_deref().map(|e| bounded(e, 512)),
-        }),
+        notified_transition: None,
+        delivery: None,
     }
 }
 
@@ -442,26 +433,7 @@ pub fn view(policy: &ProtectionPolicy) -> ProtectionPolicyView {
             require_catalog_availability: spec.objectives.require_catalog_availability,
             max_rehearsal_age_seconds: spec.objectives.max_rehearsal_age_seconds,
         },
-        notifications: spec.notifications.as_ref().map(|n| NotificationsView {
-            routes: n
-                .routes
-                .iter()
-                .flatten()
-                .take(4)
-                .map(|r| NotificationRouteView {
-                    name: bounded(&r.name, 63),
-                    pager_duty: r.pager_duty.is_some(),
-                    webhook: r.webhook.is_some(),
-                    slack: r.slack.is_some(),
-                })
-                .collect(),
-            kinds: n
-                .kinds
-                .as_ref()
-                .map(|k| k.iter().map(crate::status::wire_name).collect()),
-            send_resolved: n.send_resolved,
-            renotify_after_seconds: n.renotify_after_seconds,
-        }),
+        notifications: None,
         evaluation_interval_seconds: spec.evaluation_interval_seconds,
         observed_generation: status.and_then(|s| s.observed_generation),
         evaluated_at: status.and_then(|s| s.evaluated_at),

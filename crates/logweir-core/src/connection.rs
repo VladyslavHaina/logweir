@@ -335,12 +335,10 @@ pub struct CredentialBindingRefusal {
 
 impl std::fmt::Display for CredentialBindingRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // FX-20: the same refusal guards object-store and notification
-        // credentials; their wording names what they are bound to. A Kafka
-        // connection's text is PROD-01.3's, byte for byte.
-        let other = if self.binding_env.starts_with("NOTIFY_") {
-            Some(("notification route", "sink"))
-        } else if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
+        // FX-20: the same refusal guards object-store credentials; their
+        // wording names what they are bound to. A Kafka connection's text is
+        // PROD-01.3's, byte for byte.
+        let other = if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
             || self.binding_env.starts_with("LOGWEIR_EVIDENCE_")
         {
             Some(("destination or archive location", "object store"))

@@ -1,5 +1,5 @@
-//! Protection freshness, the alert vocabulary and the deduplication ledger —
-//! PLAT-14.2, decision D3 §§3.2–3.4.
+//! Protection freshness, the alert vocabulary and the alert ledger —
+//! PLAT-14.2, decision D3 §§3.2–3.3.
 //!
 //! # PURE. There is no `kube::Client` in this module and there must not be one
 //!
@@ -7,11 +7,9 @@
 //! one `now`. That is not tidiness: "an enabled schedule can have no recent
 //! recoverable backup" is a sentence about a five-valued health, a
 //! three-valued freshness, an availability rule with four conjuncts and a
-//! ledger whose whole property is *how few* messages it sends. A verdict
+//! ledger whose whole property is *how few* transitions it records. A verdict
 //! reachable only through a client can only be tested through a route table,
-//! and a route table answers whatever it is asked — which is exactly how a
-//! dedup ledger comes to send one page per reconcile and nobody notices until
-//! an on-call rotation is muted.
+//! and a route table answers whatever it is asked.
 //!
 //! [`crate::controllers::protection_policy`] is the thin half: it reads, calls
 //! [`evaluate`] and [`reconcile_alerts`], and patches `/status`.
@@ -36,24 +34,12 @@
 //!    objective measured from the newest record makes an idle topic look
 //!    stale forever; one measured from `finishedAt` under-reports the gap by
 //!    the length of the run.
-//!
-//! # No credential value reaches anything this module builds
-//!
-//! The event document ([`event_document`]) carries a policy name, an alert
-//! key, a health, a summary and a point identity. The sink credentials reach
-//! the delivery Job by `secretKeyRef` and are never read by this process
-//! (`config/rbac/role.yaml` grants no verb on `secrets`), so there is nothing
-//! here to redact — which is a stronger statement than "it is redacted", and
-//! `a_sink_credential_value_never_reaches_status_or_a_plan` is the test that
-//! keeps it true against an API server that echoes one back.
 
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
-
 use crate::crds::protection_policy::{
-    AlertDelivery, AlertEntry, AlertKind, AvailablePoint, LastAttempt, MissedSummary,
-    Notifications, ProtectionPolicySpec, RehearsalSummary, ScheduleSummary,
+    AlertEntry, AlertKind, AvailablePoint, LastAttempt, MissedSummary, ProtectionPolicySpec,
+    RehearsalSummary, ScheduleSummary,
 };
 use crate::crds::{LocalRef, Time, TrustBasis as TrustBlock};
 use crate::verification::ValidBasis;
@@ -79,64 +65,13 @@ pub const MAX_TOPICS: usize = 64;
 /// namespace with ten thousand runs costs one bounded list per schedule.
 pub const MAX_BACKUPS_SCANNED: usize = 50;
 
-/// D3 §3.4 point 4's bound: **three attempts in total** for one transition.
-///
-/// # Three attempts, two waits, and why the third wait is not here
-///
-/// Review **F8**. D3 §3.4 reads "retries at most 3 times with 60 s/300 s/900 s
-/// backoff", which is four attempts if "retries" excludes the first. Three was
-/// implemented, so `DELIVERY_BACKOFF_SECONDS[2] = 900` was dead code that two
-/// prose sites nonetheless advertised. The count is the one kept — three
-/// attempts bound a transition's delivery at roughly six minutes, inside the
-/// interval a policy is re-evaluated on, so a failure is visible in status
-/// before the next pass rather than a quarter of an hour later — and the waits
-/// are now exactly the two a three-attempt schedule uses. `docs/kubernetes.md`
-/// §7e and the report say the same number.
-pub const MAX_DELIVERY_ATTEMPTS: i64 = 3;
-
-/// The wait before each retry, in seconds, indexed by the attempt that just
-/// failed. Two entries for three attempts; see [`MAX_DELIVERY_ATTEMPTS`].
-pub const DELIVERY_BACKOFF_SECONDS: [i64; 2] = [60, 300];
-
-/// The most delivery Jobs one reconcile pass may create for one policy.
-///
-/// # The arithmetic bound this makes exact
-///
-/// Exactly one Job exists per `(alertKey, transition)` — the name is a pure
-/// function of both ([`delivery_job_name`]), so a duplicate reconcile is a 409
-/// and not a second page (guard **G-SLOT**'s shape). `transition` moves only
-/// on open, on resolve and on a re-notify no sooner than
-/// `renotifyAfterSeconds`. So over a window `W` one policy creates at most
-///
-/// ```text
-/// kinds(5) × (2 + W / renotifyAfterSeconds) × MAX_DELIVERY_ATTEMPTS
-/// ```
-///
-/// Jobs, and this constant bounds the BURST inside one pass on top of that: a
-/// policy that opened four alerts at once creates four Jobs and not five, and
-/// the deferred one is picked up by the next pass. The deferral is visible —
-/// `delivery.state` stays `Pending` — rather than silent.
-pub const MAX_DELIVERY_JOBS_PER_PASS: usize = 4;
-
 /// The most `RecoveryCompleted` entries the ledger carries.
 ///
 /// EIGHT, leaving room inside [`MAX_ALERTS`] for the four policy-keyed kinds
 /// twice over. A recovery entry keys on a RESTORE UID, so there is no natural
-/// ceiling on how many a busy namespace produces; the oldest DELIVERED ones
-/// are dropped first, because an entry nobody has heard about yet is the one
-/// that still has work to do.
+/// ceiling on how many a busy namespace produces; the oldest are dropped
+/// first.
 pub const MAX_RECOVERY_ALERTS: usize = 8;
-
-/// `alerts[].delivery.lastError`'s cap, matching the CRD's `maxLength`.
-pub const MAX_ERROR_CHARS: usize = 512;
-
-/// How many hex characters of a sha256 go into a derived object name.
-///
-/// EIGHT, as D3 §3.4 spells it (`sha8`). It is a NAME and not an identity: the
-/// full `(policyUID, alertKey, transition)` triple is inside the event
-/// document, and the API server's own 409 on the name is what makes a
-/// duplicate reconcile idempotent.
-pub const NAME_DIGEST_CHARS: usize = 8;
 
 // ===========================================================================
 // Vocabulary
@@ -153,8 +88,7 @@ macro_rules! wire_enum {
         }
 
         impl $name {
-            /// The wire spelling — what lands in a status field and in the
-            /// event document.
+            /// The wire spelling — what lands in a status field.
             #[must_use]
             pub fn as_str(self) -> &'static str {
                 match self {
@@ -311,39 +245,6 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// `alerts[].delivery.state`.
-    DeliveryState {
-        /// A Job exists (or is about to) for this transition.
-        Pending => "Pending",
-        /// The Job exited 0 and every configured sink accepted.
-        Delivered => "Delivered",
-        /// Three attempts were made and none succeeded.
-        Failed => "Failed",
-        /// Nothing was sent, on purpose: no route is configured, this kind is
-        /// not in `notifications.kinds`, or `sendResolved` is off and this is
-        /// a resolve.
-        Suppressed => "Suppressed",
-    }
-}
-
-wire_enum! {
-    /// How thoroughly the archive behind an alert was checked.
-    ///
-    /// **THERE IS NO `Complete`.** Logweir compares a sample. The value
-    /// travels into a PagerDuty incident title and a Slack channel, where it
-    /// is read by someone deciding during an incident whether an archive can
-    /// be trusted; a fourth variant here would be the product's one
-    /// unrecoverable lie. `logweir notify deliver` refuses `"complete"` at
-    /// parse time (`logweir::notify::VerificationScope`), and this enum is
-    /// why the controller can never write it.
-    VerificationScope {
-        Sampled => "sampled",
-        Degraded => "degraded",
-        None => "none",
-    }
-}
-
-wire_enum! {
     /// The evidence verdict for a point, as
     /// `status.lastAvailablePoint.evidence` spells it.
     ///
@@ -415,9 +316,7 @@ impl Evidence {
     /// ([`evidence_objective_met`]), and a verdict some verifier DID write is
     /// not "the controller could not look". It is read as [`Evidence::Untrusted`]
     /// — a reached verdict this installation does not accept — so it is refused
-    /// and never deferred to the catalog (final review sweep, 2026-09-22; the
-    /// rehearsal join applies the same rule in
-    /// `controllers::rehearsal_schedule::candidate_from_backup`).
+    /// and never deferred to the catalog (final review sweep, 2026-09-22).
     ///
     /// # A `Valid` is read WITH its basis (TRUST-VALID-BASIS-CLASS)
     ///
@@ -454,11 +353,10 @@ impl Evidence {
 
 /// The four alert kinds keyed on the POLICY UID.
 ///
-/// A separate type from [`AlertKind`] and not a runtime check, mirroring
-/// `logweir::notify::PolicyAlertKind`: `RecoveryCompleted` keys on the
-/// **Restore** UID, and a builder that could be handed it would key every
-/// recovery of a policy onto one incident, so the second restore of the day
-/// overwrites the first one's message. Here the mistake does not compile.
+/// A separate type from [`AlertKind`] and not a runtime check:
+/// `RecoveryCompleted` keys on the **Restore** UID, and a builder that could
+/// be handed it would key every recovery of a policy onto one entry. Here the
+/// mistake does not compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PolicyAlertKind {
     /// [`AlertKind::BackupFailure`].
@@ -527,34 +425,18 @@ pub fn alert_kind_str(kind: AlertKind) -> &'static str {
     }
 }
 
-/// Whether this kind may reach PagerDuty at all.
-///
-/// `RecoveryCompleted` is webhook/Slack only (D3 §3.3). D3 W4 records the
-/// consequence W6 has to honour: a `RecoveryCompleted` event whose routes are
-/// PagerDuty-only configures ZERO sinks, so `logweir notify deliver` exits 1
-/// with `notify-result=none:unconfigured`. That is a **no-op, not a failure**,
-/// and [`classify_delivery`] is where it is turned into
-/// [`DeliveryState::Suppressed`] rather than into three wasted attempts and a
-/// red `NotificationsDelivered`.
-#[must_use]
-pub fn kind_pages(kind: AlertKind) -> bool {
-    !matches!(kind, AlertKind::RecoveryCompleted)
-}
-
 // ===========================================================================
-// Dedup keys — the same family `logweir::notify` builds
+// Alert keys
 // ===========================================================================
 
-/// The prefix that keeps the protection family apart from `logweir-drill-…`,
-/// so a protection `resolve` can never close a drill's open page.
+/// The prefix of every alert key in the ledger.
 pub const DEDUP_PREFIX: &str = "logweir-protection-";
 
 /// What a blank identifier collapses to.
 ///
-/// NOT THE EMPTY STRING. `logweir-protection--Staleness` would be ONE incident
-/// per kind across every policy in the cluster: one team's `resolve` closes
-/// another team's open page, silently. `unknown` is wrong in a way somebody
-/// reads.
+/// NOT THE EMPTY STRING. `logweir-protection--Staleness` would be ONE alert
+/// per kind across every policy in the cluster. `unknown` is wrong in a way
+/// somebody reads.
 pub const UNKNOWN_IDENT: &str = "unknown";
 
 /// `logweir-protection-<policyUID>-<kind>` — D3 §3.3.
@@ -581,64 +463,6 @@ fn ident(raw: &str) -> &str {
     } else {
         raw
     }
-}
-
-/// The first [`NAME_DIGEST_CHARS`] hex characters of `sha256(parts joined by
-/// '|')`.
-#[must_use]
-pub fn sha8(parts: &[&str]) -> String {
-    let joined = parts.join("|");
-    logweir_core::ids::sha256_hex(joined.as_bytes())[..NAME_DIGEST_CHARS].to_string()
-}
-
-/// `<policy>-ev-<sha8(alertKey|transition)>` — the immutable event ConfigMap.
-#[must_use]
-pub fn event_config_map_name(policy: &str, alert_key: &str, transition: i64) -> String {
-    let digest = sha8(&[alert_key, &transition.to_string()]);
-    truncate_name(
-        &format!("{policy}-ev-{digest}"),
-        policy,
-        &format!("ev-{digest}"),
-    )
-}
-
-/// `<policy>-n-<sha8(policyUID|alertKey|transition)>-<attempt>` — the delivery
-/// Job.
-///
-/// THE NAME IS THE DEDUPLICATION. A duplicate reconcile computes the same
-/// string and gets **409 `AlreadyExists`** from the API server rather than
-/// creating a second Job that pages a human a second time — the same property
-/// guard **G-SLOT** gives a scheduled `Backup`. `attempt` is in the name
-/// because a retry is a NEW Job (the previous one has a terminal pod whose
-/// exit code is still being read), and `transition` is in it because a
-/// re-notify is a new message about the same open alert.
-#[must_use]
-pub fn delivery_job_name(
-    policy: &str,
-    policy_uid: &str,
-    alert_key: &str,
-    transition: i64,
-    attempt: i64,
-) -> String {
-    let digest = sha8(&[ident(policy_uid), alert_key, &transition.to_string()]);
-    let suffix = format!("n-{digest}-{attempt}");
-    truncate_name(&format!("{policy}-{suffix}"), policy, &suffix)
-}
-
-/// Keep a derived name inside Kubernetes' 63-character `metadata.name` budget
-/// by trimming the POLICY half, never the digest half.
-///
-/// Trimming the digest would make two policies' Jobs collide; trimming the
-/// prefix only costs readability, and the full policy name is on the owner
-/// reference and in the event document either way.
-fn truncate_name(full: &str, policy: &str, suffix: &str) -> String {
-    const LIMIT: usize = 63;
-    if full.len() <= LIMIT {
-        return full.to_string();
-    }
-    let budget = LIMIT.saturating_sub(suffix.len() + 1);
-    let head: String = policy.chars().take(budget).collect();
-    format!("{}-{suffix}", head.trim_end_matches('-'))
 }
 
 // ===========================================================================
@@ -736,11 +560,7 @@ impl PointCandidate {
 /// independently hashes those bytes and rejects a mismatch; it never publishes
 /// that fetched self-hash as the run's claim. A full-digest catalog join is
 /// therefore evidence that both sources name the same point, not agreement by
-/// construction. That matters because
-/// `logweir::notify::LastAvailablePoint` requires `point_id`: without this,
-/// every event from a `KubernetesStatus`-basis policy would have to omit the
-/// whole `last_available_point` block and print "no available recovery point"
-/// into an incident about a point that exists.
+/// construction.
 ///
 /// `None` for a digest that is not `sha256:` + 64 hex characters. Nothing is
 /// invented: a point with no recorded receipt digest has no identity here.
@@ -1056,13 +876,13 @@ pub struct Verdict {
     pub rehearsal: Option<RehearsalSummary>,
     /// Whether any schedule missed a slot SINCE IT LAST FIRED — the live
     /// signal, as opposed to `missed.lastMissedSlot`'s sticky audit trail
-    /// (review F5). It is what `AtRisk` and the event's `missed_slots` read.
+    /// (review F5). It is what `AtRisk` reads.
     pub missed_since_last_fire: bool,
     /// Which alerts D3 §3.3 says should be OPEN right now.
     pub open_kinds: Vec<PolicyAlertKind>,
-    /// One sentence for a human. Reaches a PagerDuty incident title verbatim,
-    /// and carries the concrete age because an incident title is where a
-    /// number earns its place.
+    /// One sentence for a human, with the point's concrete age. No surface
+    /// carries it since alert delivery was withdrawn; the conditions carry
+    /// [`Verdict::condition_summary`].
     pub summary: String,
     /// The same verdict WITHOUT the clock-derived number — what the `Ready`
     /// and `Protected` condition `message`s carry.
@@ -1074,8 +894,7 @@ pub struct Verdict {
     /// differs from the stored one on a pass where NOTHING about the cluster
     /// changed, a PATCH goes out, `resourceVersion` bumps, and the reconciler's
     /// own write wakes it again — the measured `KafkaCluster` defect, on every
-    /// policy, for ever. The event document is the opposite case: it is written
-    /// once, read by a human in an incident, and never compared to anything.
+    /// policy, for ever.
     pub condition_summary: String,
 }
 
@@ -1695,26 +1514,20 @@ fn open_alert_kinds(
     open
 }
 
-/// The one controller-authored sentence that reaches an incident title.
+/// The controller-authored sentence about a verdict.
 ///
 /// # It says what Logweir DID, and never claims an exhaustive check
 ///
-/// D3 W4's delivery path scans the summary against a fixed phrase list and
-/// replaces a match with `[claim removed]` — including the word `exhaustive`
-/// inside a DENIAL, because these channels truncate and a sentence surviving
-/// as "…an exhaustive comparison" is worse than no sentence. Nothing generated
-/// here reaches for that vocabulary; `no_summary_claims_an_exhaustive_check`
-/// is the test over every arm.
+/// Nothing generated here reaches for that vocabulary;
+/// `no_summary_claims_an_exhaustive_check` is the test over every arm.
 ///
 /// # `with_age`, and why one function produces two sentences
 ///
-/// `true` embeds the concrete age and is what the EVENT carries: it is written
-/// once and read by a human during an incident, where "31h 0m old" is the whole
-/// point. `false` drops it and is what a CONDITION `message` carries, because a
-/// condition is part of the object and a message that changes when the minute
-/// rolls over is a status patch on a pass where nothing happened — erratum
-/// **E11(d)**, review F4. The objective itself is a spec value and never moves,
-/// so it stays in both.
+/// `true` embeds the concrete age. `false` drops it and is what a CONDITION
+/// `message` carries, because a condition is part of the object and a message
+/// that changes when the minute rolls over is a status patch on a pass where
+/// nothing happened — erratum **E11(d)**, review F4. The objective itself is a
+/// spec value and never moves, so it stays in both.
 #[must_use]
 pub fn summarize(
     spec: &ProtectionPolicySpec,
@@ -1799,34 +1612,15 @@ pub fn humanize(seconds: i64) -> String {
 // The ledger
 // ===========================================================================
 
-/// What one pass decided about one alert.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LedgerOutcome {
-    /// The new ledger, capped at [`MAX_ALERTS`], in a stable order.
-    pub alerts: Vec<AlertEntry>,
-    /// The entries whose `transition` has no delivery Job yet, in the order
-    /// they should be delivered. Bounded by [`MAX_DELIVERY_JOBS_PER_PASS`] at
-    /// the CALLER, not here — this reports everything that is due so the
-    /// caller can say how many it deferred.
-    pub due: Vec<AlertEntry>,
-}
-
-/// D3 §3.3's deduplication, as one pure function over the stored ledger.
+/// D3 §3.3's ledger, as one pure function over the stored one: the new
+/// ledger, capped at [`MAX_ALERTS`], in a stable order.
 ///
-/// # The property, stated as the thing that goes wrong without it
-///
-/// A condition that stays true produces NO further transitions. Not one per
-/// reconcile, not one per minute — none, until it resolves or until
-/// `renotifyAfterSeconds` elapses. The failure mode this prevents is an
-/// on-call rotation muting Logweir's integration in week two, after which no
-/// alert from this product reaches anybody ever again. `transition` is the
-/// counter and `notifiedTransition` is the high-water mark a delivery Job was
-/// created for; the pair survives a controller restart because both live in
-/// the object's status and neither is derived from a clock.
+/// A condition that stays true produces NO further transitions — not one per
+/// reconcile, none until it resolves. `transition` is the counter, and it
+/// lives in the object's status, so it survives a controller restart.
 ///
 /// `desired_open` is [`Verdict::open_kinds`]. Entries for kinds no longer open
-/// are RESOLVED, not deleted: the resolve is a transition of its own and the
-/// `resolve` PagerDuty needs under the same `dedup_key`.
+/// are RESOLVED, not deleted: the resolve is a transition of its own.
 ///
 /// # A resolve is a CLAIM, and `health` decides whether it may be made
 ///
@@ -1842,19 +1636,16 @@ pub struct LedgerOutcome {
 ///   the page resolved because Logweir stopped being able to look.
 ///
 /// [`resolves_alerts`] is the gate. Under any other health an open entry is
-/// left EXACTLY as it is — same state, same transition, no delivery — because
-/// nothing was measured and a ledger is not a place to guess.
+/// left EXACTLY as it is — same state, same transition — because nothing was
+/// measured and a ledger is not a place to guess.
 #[must_use]
 pub fn reconcile_alerts(
     existing: &[AlertEntry],
     desired_open: &[PolicyAlertKind],
     health: Health,
     policy_uid: &str,
-    notifications: Option<&Notifications>,
     now: Time,
-) -> LedgerOutcome {
-    let renotify = notifications.map_or(0, |n| i64::from(n.renotify_after_seconds));
-    let send_resolved = notifications.is_none_or(|n| n.send_resolved);
+) -> Vec<AlertEntry> {
     let may_resolve = resolves_alerts(health);
 
     let mut by_key: BTreeMap<String, AlertEntry> = existing
@@ -1878,8 +1669,6 @@ pub fn reconcile_alerts(
                 opened_at: Some(now),
                 resolved_at: None,
                 transition: Some(1),
-                notified_transition: None,
-                delivery: None,
             }),
             (Some(entry), true) => {
                 let open = entry.state == AlertState::Open.as_str();
@@ -1892,14 +1681,8 @@ pub fn reconcile_alerts(
                         transition: Some(entry.transition.unwrap_or(0) + 1),
                         ..entry
                     })
-                } else if renotify > 0 && renotify_due(&entry, renotify, now) {
-                    Some(AlertEntry {
-                        transition: Some(entry.transition.unwrap_or(0) + 1),
-                        ..entry
-                    })
                 } else {
-                    // THE ARM THAT MATTERS: unchanged, so no transition, so
-                    // no delivery, so no page.
+                    // THE ARM THAT MATTERS: unchanged, so no transition.
                     Some(entry)
                 }
             }
@@ -1915,8 +1698,7 @@ pub fn reconcile_alerts(
                 } else {
                     // OPEN AND LEFT ALONE. Protection got worse, or became
                     // unmeasurable; either way this is not the condition
-                    // clearing, and a `resolve` on the shared dedup key would
-                    // close a real incident (review F1).
+                    // clearing (review F1).
                     Some(entry)
                 }
             }
@@ -1934,35 +1716,7 @@ pub fn reconcile_alerts(
     let mut alerts: Vec<AlertEntry> = by_key.into_values().collect();
     alerts.sort_by(|a, b| a.key.cmp(&b.key));
     alerts.truncate(MAX_ALERTS);
-
-    let due: Vec<AlertEntry> = alerts
-        .iter()
-        .filter(|e| {
-            let transition = e.transition.unwrap_or(0);
-            if e.notified_transition.unwrap_or(0) >= transition && !retryable(e) {
-                // Already delivered (or being delivered) for this transition,
-                // and not a failure with attempts left. THIS IS THE ARM THAT
-                // MATTERS: a condition that stays true produces no further
-                // messages.
-                return false;
-            }
-            // `sendResolved: false` silences the CLEARING of a page. A
-            // `RecoveryCompleted` is not the clearing of anything — it is
-            // news, recorded as `Resolved` because it auto-resolves the
-            // instant it opens (D3 §3.3) — so reading its state as a resolve
-            // would silence the one alert in the set that is good news.
-            if e.state == AlertState::Resolved.as_str()
-                && !send_resolved
-                && e.kind != AlertKind::RecoveryCompleted
-            {
-                return false;
-            }
-            true
-        })
-        .cloned()
-        .collect();
-
-    LedgerOutcome { alerts, due }
+    alerts
 }
 
 /// One terminal `Restore` that recovered a point this policy protects.
@@ -1983,19 +1737,15 @@ pub struct RecoveryCompletion {
 
 /// Fold terminal recoveries into the ledger — D3 §3.3's fifth kind.
 ///
-/// # It opens and resolves in the same breath, and never pages
+/// # It opens and resolves in the same breath
 ///
 /// A `RecoveryCompleted` is informational. It is recorded as
 /// [`AlertState::Resolved`] with `openedAt == resolvedAt` so nothing stays
-/// open, nothing re-notifies, and the PagerDuty half of the delivery is a
-/// no-op by construction ([`kind_pages`] is `false`). What it is FOR is the
-/// incident-facing surface: an on-call responder wants to know a recovery
-/// finished and which one, and D3 §3.5's counts and cutover sentences are
-/// rendered by the console from the `Restore` this entry names.
+/// open. What it is FOR is the incident-facing surface: an on-call responder
+/// wants to know a recovery finished and which one.
 ///
 /// **An entry that already exists is never rewritten.** The key is the Restore
-/// UID, and a Restore reaches a terminal state once; re-opening would deliver
-/// a second message about the same recovery on every reconcile.
+/// UID, and a Restore reaches a terminal state once.
 #[must_use]
 pub fn fold_recoveries(
     existing: &[AlertEntry],
@@ -2015,24 +1765,19 @@ pub fn fold_recoveries(
             opened_at: completion.at.or(Some(now)),
             resolved_at: completion.at.or(Some(now)),
             transition: Some(1),
-            notified_transition: None,
-            delivery: None,
         });
     }
     prune_recoveries(out)
 }
 
-/// Keep at most [`MAX_RECOVERY_ALERTS`] recovery entries.
-///
-/// The survivors are the newest by `openedAt`, and an entry with NO delivery
-/// yet outranks a delivered one of the same age: a message nobody has heard is
-/// the one still owed. Ties break on the key so the answer does not vary
-/// between two passes over one ledger.
+/// Keep at most [`MAX_RECOVERY_ALERTS`] recovery entries: the newest by
+/// `openedAt`. Ties break on the key so the answer does not vary between two
+/// passes over one ledger.
 fn prune_recoveries(entries: Vec<AlertEntry>) -> Vec<AlertEntry> {
-    let mut rank: Vec<(bool, Option<Time>, String)> = entries
+    let mut rank: Vec<(Option<Time>, String)> = entries
         .iter()
         .filter(|e| e.kind == AlertKind::RecoveryCompleted)
-        .map(|e| (e.notified_transition.is_none(), e.opened_at, e.key.clone()))
+        .map(|e| (e.opened_at, e.key.clone()))
         .collect();
     if rank.len() <= MAX_RECOVERY_ALERTS {
         return entries;
@@ -2043,8 +1788,7 @@ fn prune_recoveries(entries: Vec<AlertEntry>) -> Vec<AlertEntry> {
     entries
         .into_iter()
         .filter(|e| {
-            e.kind != AlertKind::RecoveryCompleted
-                || rank.contains(&(e.notified_transition.is_none(), e.opened_at, e.key.clone()))
+            e.kind != AlertKind::RecoveryCompleted || rank.contains(&(e.opened_at, e.key.clone()))
         })
         .collect()
 }
@@ -2059,427 +1803,6 @@ fn prune_recoveries(entries: Vec<AlertEntry>) -> Vec<AlertEntry> {
 pub fn resolves_alerts(health: Health) -> bool {
     matches!(health, Health::Healthy | Health::AtRisk)
 }
-
-/// Whether a delivery that FAILED for the current transition may be attempted
-/// again.
-///
-/// The transition has not moved — the condition did not change — so this is a
-/// RETRY of one message and not a second message. The caller still applies the
-/// backoff ([`next_attempt_at`]); this only says the budget is not spent.
-fn retryable(entry: &AlertEntry) -> bool {
-    let Some(delivery) = entry.delivery.as_ref() else {
-        return false;
-    };
-    DeliveryState::parse(delivery.state.as_deref().unwrap_or_default())
-        == Some(DeliveryState::Failed)
-        && delivery.attempts.unwrap_or(0) < MAX_DELIVERY_ATTEMPTS
-}
-
-/// Whether an open alert is due a re-notify.
-///
-/// Measured from the LAST DELIVERY ATTEMPT and not from `openedAt`, because
-/// `transition` already moved for every previous re-notify and measuring from
-/// the open instant would fire every pass once the first interval elapsed.
-fn renotify_due(entry: &AlertEntry, renotify_seconds: i64, now: Time) -> bool {
-    let last = entry
-        .delivery
-        .as_ref()
-        .and_then(|d| d.last_attempt_at)
-        .or(entry.opened_at);
-    last.is_some_and(|at| (now - at).num_seconds() >= renotify_seconds)
-}
-
-/// Whether this alert should be delivered at all, given the policy's routes.
-///
-/// Four suppressions, each of which is a real operator choice and not a
-/// failure:
-///
-/// * no `notifications` block, or no route;
-/// * `notifications.kinds` is set and does not list this kind;
-/// * a resolve while `sendResolved` is off;
-/// * `RecoveryCompleted` with PagerDuty-only routes — D3 W4's recorded no-op,
-///   which must NOT burn three delivery attempts and must NOT turn
-///   `NotificationsDelivered` red.
-#[must_use]
-pub fn is_suppressed(
-    notifications: Option<&Notifications>,
-    kind: AlertKind,
-    state: AlertState,
-) -> bool {
-    let Some(n) = notifications else {
-        return true;
-    };
-    let routes = n.routes.as_deref().unwrap_or_default();
-    if routes.is_empty() {
-        return true;
-    }
-    if let Some(kinds) = n.kinds.as_deref() {
-        if !kinds
-            .iter()
-            .any(|k| alert_kind_str(*k) == alert_kind_str(kind))
-        {
-            return true;
-        }
-    }
-    if state == AlertState::Resolved && !n.send_resolved && kind != AlertKind::RecoveryCompleted {
-        return true;
-    }
-    if !kind_pages(kind)
-        && routes
-            .iter()
-            .all(|r| r.webhook.is_none() && r.slack.is_none())
-    {
-        return true;
-    }
-    false
-}
-
-/// What the delivery Job's exit code and `notify-result=` lines mean.
-///
-/// # D3 W4's contract, read exactly
-///
-/// | exit | lines | verdict |
-/// |---|---|---|
-/// | 0 | one `…:ok` per configured sink | [`DeliveryState::Delivered`] |
-/// | 1 | `notify-result=none:unconfigured` | [`DeliveryState::Suppressed`] — nothing was configured for this kind, which for `RecoveryCompleted` with PagerDuty-only routes is BY DESIGN and is not retried |
-/// | 1 | at least one `…:failed` | [`DeliveryState::Failed`], retried |
-/// | 3 | none | the document was unreadable and nothing was posted: [`DeliveryState::Failed`], retried (the ConfigMap is immutable, so a retry re-reads the same bytes and fails the same way — three attempts and then a named, permanent `DeliveryFailed`) |
-/// | 1 | at least one `…:refused` | FX-20: [`DeliveryState::Failed`], and the message OPENS with `CredentialBindingMismatch` ([`binding_refused`]): a route's Secret is not bound to this policy, sink and endpoint, so nothing was posted to that sink |
-/// | other / absent | — | [`DeliveryState::Failed`] |
-#[must_use]
-pub fn classify_delivery(exit_code: Option<i32>, log_tail: &[&str]) -> (DeliveryState, String) {
-    let results: Vec<&'static str> = log_tail
-        .iter()
-        .filter_map(|l| l.trim().strip_prefix(NOTIFY_RESULT_PREFIX))
-        .filter_map(known_result)
-        .collect();
-    let unconfigured = results.contains(&"none:unconfigured");
-    let refused: Vec<&'static str> = results
-        .iter()
-        .filter_map(|r| r.strip_suffix(":refused"))
-        .collect();
-    if exit_code == Some(1) && !refused.is_empty() {
-        return (
-            DeliveryState::Failed,
-            format!(
-                "{}: the credential Secret of the {} route is not bound to this policy, its \
-                 sink and its endpoint, so the delivery Job refused it and posted nothing to it \
-                 ({}). {}",
-                logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH,
-                refused.join(" and "),
-                sinks(&results),
-                logweir_core::credential_binding::BINDING_REMEDY
-            ),
-        );
-    }
-    match exit_code {
-        Some(0) => (
-            DeliveryState::Delivered,
-            format!("every configured sink accepted ({})", sinks(&results)),
-        ),
-        Some(1) if unconfigured => (
-            DeliveryState::Suppressed,
-            "no sink was configured for this alert kind; nothing was posted and nothing is \
-             retried"
-                .to_string(),
-        ),
-        Some(1) => (
-            DeliveryState::Failed,
-            format!("a configured sink did not accept ({})", sinks(&results)),
-        ),
-        Some(3) => (
-            DeliveryState::Failed,
-            "the delivery Job refused the event document and posted nothing".to_string(),
-        ),
-        Some(code) => (
-            DeliveryState::Failed,
-            format!("the delivery Job exited {code}"),
-        ),
-        None => (
-            DeliveryState::Failed,
-            "the delivery Job finished with no exit code".to_string(),
-        ),
-    }
-}
-
-/// What a delivery attempt whose pod was REFUSED AT CREATION means — FX-11.
-///
-/// [`DeliveryState::Failed`], retried like any other failed attempt (three in
-/// all): a `ResourceQuota` that refused one pod may admit the next once other
-/// pods finish. The sentence names the shared terminal state a `Backup`'s or a
-/// `Restore`'s runner reaches for the same refusal, `PodCreationForbidden`,
-/// and carries `admission` — the Job controller's `FailedCreate` message,
-/// already redacted by [`crate::check::waiting`] — so the operator reads the
-/// quota rather than [`classify_delivery`]'s "no exit code".
-///
-/// NOT A POD LOG. [`known_result`]'s rule — no byte of a pod's output reaches
-/// the status — is untouched: a pod that was never created wrote nothing, and
-/// this text is an API-server Event, the same one a `Preflight` publishes.
-#[must_use]
-pub fn refused_delivery(admission: &str) -> (DeliveryState, String) {
-    (
-        DeliveryState::Failed,
-        format!(
-            "the delivery Job never ran ({}), so nothing was posted: {admission}",
-            crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN
-        ),
-    )
-}
-
-fn sinks(results: &[&'static str]) -> String {
-    if results.is_empty() {
-        return "no notify-result line".to_string();
-    }
-    results.join(", ")
-}
-
-/// D3 W4's key line prefix — matched BY KEY NAME from a bounded tail, never by
-/// position (erratum **E4**: a pod log is stdout and stderr merged in
-/// nondeterministic order).
-pub const NOTIFY_RESULT_PREFIX: &str = "notify-result=";
-
-/// Every `notify-result=` value this build understands.
-///
-/// FX-20 adds `<sink>:refused`: the sink's credential Secret did not carry
-/// the binding the controller expected, so the deliverer posted nothing to it
-/// (it never dialled). An older controller reading the line finds no known
-/// value and reports the exit code alone — still `Failed`.
-pub const NOTIFY_RESULTS: [&str; 10] = [
-    "pagerduty:ok",
-    "pagerduty:failed",
-    "pagerduty:refused",
-    "webhook:ok",
-    "webhook:failed",
-    "webhook:refused",
-    "slack:ok",
-    "slack:failed",
-    "slack:refused",
-    "none:unconfigured",
-];
-
-/// Whether a ledger entry's last delivery failed because a route's Secret was
-/// refused for its binding — FX-20. Read from the controller's OWN message
-/// ([`classify_delivery`] writes it from a closed table), never from a pod log.
-#[must_use]
-pub fn binding_refused(delivery: &crate::crds::protection_policy::AlertDelivery) -> bool {
-    delivery.last_error.as_deref().is_some_and(|e| {
-        e.starts_with(logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH)
-    })
-}
-
-/// A `notify-result=` value mapped to the `'static` spelling this build knows,
-/// or `None`.
-///
-/// # THIS IS A CREDENTIAL BOUNDARY AND NOT A TIDINESS RULE
-///
-/// The value goes into `alerts[].delivery.lastError`, which lands in the
-/// object's status, in the API's response and in the console. A pod log is
-/// **adopter-influenced input** — a sink's error body, a runner's stderr, a
-/// line a compromised image printed — so echoing the tail of a matched line
-/// back into a CR status is how a routing key put on that line by anything at
-/// all becomes a permanently stored, API-served secret. Returning a
-/// `&'static str` from a closed table makes that unwritable: no byte of the
-/// log can reach the status through this path, whatever the log says.
-#[must_use]
-pub fn known_result(value: &str) -> Option<&'static str> {
-    let value = value.trim();
-    NOTIFY_RESULTS.iter().copied().find(|k| *k == value)
-}
-
-/// Cap an error sentence at [`MAX_ERROR_CHARS`], on a character boundary.
-#[must_use]
-pub fn cap_error(message: &str) -> String {
-    if message.chars().count() <= MAX_ERROR_CHARS {
-        return message.to_string();
-    }
-    message
-        .chars()
-        .take(MAX_ERROR_CHARS - 1)
-        .collect::<String>()
-        + "…"
-}
-
-/// When the next attempt of a failed delivery may be made.
-///
-/// `None` once [`MAX_DELIVERY_ATTEMPTS`] have been made: exhaustion sets
-/// `NotificationsDelivered=False/DeliveryFailed` **and nothing else** — no
-/// Backup is touched, no phase moves, no evidence changes.
-#[must_use]
-pub fn next_attempt_at(delivery: &AlertDelivery) -> Option<Time> {
-    let attempts = delivery.attempts.unwrap_or(0);
-    if attempts >= MAX_DELIVERY_ATTEMPTS {
-        return None;
-    }
-    let index = usize::try_from(attempts.max(1) - 1).unwrap_or(0);
-    let backoff = DELIVERY_BACKOFF_SECONDS
-        .get(index)
-        .copied()
-        .unwrap_or(DELIVERY_BACKOFF_SECONDS[DELIVERY_BACKOFF_SECONDS.len() - 1]);
-    delivery
-        .last_attempt_at
-        .map(|at| at + chrono::Duration::seconds(backoff))
-}
-
-// ===========================================================================
-// The event document
-// ===========================================================================
-
-/// `application/vnd.logweir.protection-event+json;version=1.0.0`.
-pub const EVENT_MEDIA_TYPE: &str = "application/vnd.logweir.protection-event+json;version=1.0.0";
-
-/// The document's `format_version`.
-pub const EVENT_FORMAT_VERSION: &str = "1.0.0";
-
-/// The `ConfigMap` key the delivery Job mounts the event at.
-pub const EVENT_DATA_KEY: &str = "event.json";
-
-/// Where the event volume is mounted in the delivery pod.
-pub const EVENT_MOUNT_PATH: &str = "/event";
-
-/// What one event says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventFacts<'a> {
-    /// The policy's namespace.
-    pub namespace: &'a str,
-    /// The policy's name.
-    pub name: &'a str,
-    /// The policy's UID.
-    pub uid: &'a str,
-    /// The alert key — the controller is the authority on this value.
-    pub alert_key: &'a str,
-    /// Which of the five kinds.
-    pub kind: AlertKind,
-    /// `trigger` on Open (and on re-notify), `resolve` on Resolved.
-    pub open: bool,
-    /// The transition this event is about.
-    pub transition: i64,
-    /// The health at the moment of the transition.
-    pub health: Health,
-    /// One sentence for a human.
-    pub summary: &'a str,
-    /// The newest available point, or `None` — and its absence is the fact.
-    pub point: Option<&'a AvailablePointFacts>,
-    /// Consecutive failed slots.
-    pub consecutive_failed_runs: i64,
-    /// Missed schedule slots.
-    pub missed_slots: i64,
-    /// How thoroughly the archive was checked. Never `complete`.
-    pub scope: VerificationScope,
-    /// When the controller generated the event.
-    pub generated_at: Time,
-}
-
-/// `sha256:<hex>` of `policyUID|alertKey|transition` — the document's
-/// `event_id`.
-#[must_use]
-pub fn event_id(policy_uid: &str, alert_key: &str, transition: i64) -> String {
-    let joined = format!("{}|{alert_key}|{transition}", ident(policy_uid));
-    logweir_core::ids::sha256_prefixed(joined.as_bytes())
-}
-
-/// Build D3 §3.4's event document.
-///
-/// # Why this is a `serde_json::Value` and not `logweir::notify::ProtectionEvent`
-///
-/// `weirkeeper` does not depend on `crates/logweir`, and it must not: that
-/// crate links `logweir-evidence`, the SIGNER, and
-/// `scripts/check-one-signer.sh` computes the set of crates that do. A
-/// `[dev-dependencies]` edge would put the signer in this crate's test graph
-/// and break guard **G-SIGN** for a type import. So the document is built here
-/// and the two spellings are held together by a test that parses
-/// `docs/formats/protection-event.md`'s own worked example and asserts this
-/// builder emits exactly that field set — a rename on either side is a red
-/// test, which is what the shared type would have bought.
-///
-/// The delivery Job parses with `deny_unknown_fields`, so an extra key here is
-/// a refusal (exit 3) and not a silently dropped detail.
-#[must_use]
-pub fn event_document(facts: &EventFacts<'_>) -> Value {
-    let mut doc = json!({
-        "format_version": EVENT_FORMAT_VERSION,
-        "event_id": event_id(facts.uid, facts.alert_key, facts.transition),
-        "policy": {
-            "namespace": facts.namespace,
-            "name": facts.name,
-            "uid": facts.uid,
-        },
-        "alert": {
-            "key": facts.alert_key,
-            "kind": alert_kind_str(facts.kind),
-            "action": if facts.open { "trigger" } else { "resolve" },
-            "transition": facts.transition.max(0),
-        },
-        "health": facts.health.as_str(),
-        "summary": facts.summary,
-        "consecutive_failed_runs": facts.consecutive_failed_runs.max(0),
-        "missed_slots": facts.missed_slots.max(0),
-        "verification_scope": facts.scope.as_str(),
-        "details_route": details_route(facts.namespace, facts.name),
-        "generated_at": rfc3339(facts.generated_at),
-    });
-
-    // `last_available_point` is emitted ONLY when every one of its four
-    // required fields is present. The delivery Job's type requires all four,
-    // so a partial block is a parse failure and a refused delivery; an absent
-    // block is a documented, renderable "no available recovery point".
-    if let Some(point) = facts.point {
-        if let (Some(id), Some(at), Some(age)) = (
-            point.point_id.as_deref(),
-            point.recovery_point_at,
-            point.age_seconds,
-        ) {
-            doc.as_object_mut()
-                .expect("the event document is an object")
-                .insert(
-                    "last_available_point".to_string(),
-                    json!({
-                        "point_id": id,
-                        "recovery_point_at": rfc3339(at),
-                        "age_seconds": age,
-                        "evidence": point.evidence.as_str(),
-                    }),
-                );
-        }
-    }
-    doc
-}
-
-/// The UI fragment route an incident responder opens.
-///
-/// A FRAGMENT AND NOT AN ABSOLUTE URL: the controller does not know the
-/// installation's external hostname, and inventing one puts a dead link in an
-/// incident.
-#[must_use]
-pub fn details_route(namespace: &str, name: &str) -> String {
-    format!("#/protection?ns={namespace}&name={name}")
-}
-
-/// RFC 3339 with a `Z` offset and second precision — what the delivery Job's
-/// `chrono::DateTime<Utc>` parses and what every other timestamp in this
-/// project's documents looks like.
-#[must_use]
-pub fn rfc3339(at: Time) -> String {
-    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
-/// Every top-level field name [`event_document`] can emit, in order.
-///
-/// Exposed so the format test can compare this builder against the documented
-/// example without reflecting over a `Value` twice.
-pub const EVENT_FIELDS: [&str; 12] = [
-    "format_version",
-    "event_id",
-    "policy",
-    "alert",
-    "health",
-    "summary",
-    "last_available_point",
-    "consecutive_failed_runs",
-    "missed_slots",
-    "verification_scope",
-    "details_route",
-    "generated_at",
-];
 
 // ===========================================================================
 // Status assembly

@@ -750,8 +750,8 @@ them, and what the comparison does not cover, is in
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
-The current engine wrapper inherits the refusing default for `validation_run`,
-so emitted scorecards have `engine_subreport: null`. Phase 8's missing-report
+Logweir never runs the engine's `validation run`, so emitted scorecards have
+`engine_subreport: null`. Phase 8's missing-report
 message is in structured logs, not the already frozen scorecard. Populated
 checked-in fixtures are hand-authored format examples, not current production
 output; their bodies can be minimal placeholders.

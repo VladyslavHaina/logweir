@@ -68,7 +68,6 @@ import {
   renderDestinationForm,
   renderDestinationList,
   renderLastTest,
-  renderLegacyRefusal,
   renderPreflight,
   renderRotateForm,
   renderUsage,
@@ -78,7 +77,6 @@ import {
   validateGrants,
 } from "../pages/destinations.js";
 import {
-  CONNECTION_CHECK_LEGACY_SENTENCE,
   CONNECTION_CHECK_NO_TOPICS_SENTENCE,
   CONNECTION_CHECK_SENTENCE,
   connectionCheckRequest,
@@ -201,19 +199,6 @@ test("the_usage_list_renders_its_basis_beside_an_empty_answer", () => {
   assert.match(empty, /Nothing labelled by this service names it/);
   assert.match(empty, /id="usage-basis"/,
     "an empty list without its basis would read as 'nothing uses this'");
-});
-
-test("a_legacy_adoption_refusal_is_rendered_as_what_it_is_and_not_as_not_found", () => {
-  const problem = console_("problem-legacy-unknown.json");
-  const error = new Error(problem.detail);
-  error.code = problem.code;
-  const html = renderLegacyRefusal(error);
-  assert.match(html, /id="legacy-location-unknown"/);
-  assert.match(html, /The object was found/);
-  assert.match(html, /refuses to derive a destination from a guess/);
-  assert.doesNotMatch(html, /does not exist/);
-  assert.equal(renderLegacyRefusal({ code: "not_found" }), "",
-    "and any other code is left to the ordinary error box");
 });
 
 // ---------------------------------------------- the credential, and the draft
@@ -1492,47 +1477,6 @@ test("a_follow_that_outlives_its_route_paints_nothing", async () => {
   assert.equal(reads, 0, "the route left during the wait, so no read was issued");
   assert.ok(atDeparture >= 0, "the follower did reach its first wait");
   assert.equal(painted.length, atDeparture, "and nothing was painted after it left");
-});
-
-test("a_legacy_console_seeds_the_panel_with_its_own_reason", async () => {
-  // THE WIRING, NOT ONLY THE BRANCH. The row below drives `renderConnectionCheck`
-  // with `unavailable: true` and pins what it renders; this one pins WHO decides
-  // it, because a branch nothing sets is the dead state F6 was about.
-  resetMode();
-  try {
-    await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-    const painted = [];
-    const node = checkNode();
-    const routes = createRouteLifecycle();
-    await mountClusterDetail(node, "team-a", "legacy", (html) => { painted.push(html); return []; },
-      routes.begin(), {
-        get: async () => clusterObject("legacy"),
-        latestDiscoveries: async () => { throw new Error("kubectl proxy serves no check routes"); },
-      });
-    const html = painted[painted.length - 1];
-    assert.match(html, /id="connection-check-unavailable"/);
-    assert.match(html, /needs the product API/);
-    assert.doesNotMatch(html, /id="connection-check-form"/,
-      "no control is offered in a mode that cannot create one");
-  } finally {
-    resetMode();
-  }
-});
-
-test("a_kubectl_proxy_console_is_told_up_front_that_it_cannot_start_a_check", () => {
-  // REVIEW F6. The `unavailable` branch used to be dead: nothing set it, so a
-  // session that cannot create a Preflight was offered a control whose click
-  // failed at the API. The legacy proxy serves read-only summaries of the
-  // three D2 kinds and creates none, which is a fact the page knows before the
-  // click -- and the discovery panel beside it already says so.
-  const html = renderConnectionCheck({
-    mayOperate: true, state: {}, preflight: null,
-    unavailable: true, unavailableReason: CONNECTION_CHECK_LEGACY_SENTENCE,
-  });
-  assert.match(html, /id="connection-check-unavailable"/);
-  assert.match(html, /needs the product API/);
-  assert.doesNotMatch(html, /<button/, "no control at all, rather than one that cannot work");
-  assert.match(CONNECTION_CHECK_LEGACY_SENTENCE, /kubectl proxy/);
 });
 
 // ===========================================================================

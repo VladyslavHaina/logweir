@@ -55,41 +55,16 @@ const CREDENTIAL: [&str; 5] = [
     "document.cookie",
 ];
 
-/// The serving command, verbatim, in all three places that carry it.
-const SERVING_COMMAND: &str =
-    "kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1";
-
-/// The two flags that must never change, and the sentence that says why.
-const NEVER_CHANGE_A: &str = "--address=127.0.0.1";
-const NEVER_CHANGE_B: &str = "--disable-filter";
-const ESCALATION_SENTENCE: &str = "Changing either turns a local page holding your cluster \
-                                   authority into a network service holding it.";
-const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
-
 /// The module's export list, in source order.
-///
-/// The fifth element carries the `engine-token-ok` escape
-/// `check-no-oso.sh`'s check B requires: that token is the name of a
-/// JavaScript function in `ui/api.js` which lists a Kubernetes kind, and it
-/// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
-/// sits on the element's own line because that gate matches per physical line
-/// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 30] = [
-    "GROUP",
-    "VERSION",
-    "WRITABLE_PLURALS",
+const API_EXPORTS: [&str; 22] = [
     "path",
-    "list", // engine-token-ok: the JS export name in ui/api.js, never an engine subcommand
-    "get",
-    "create",
-    "patchSuspend",
-    "listCluster",
     "apiError",
-    // The console half (PLAT-18.1, decision D0 stage 6): the product API's
-    // reads, its two writes, its session probe and its problem reader. Every
-    // one of them goes through the SAME `request(path(...))` seam the legacy
-    // half does, which is what `every_api_path_is_relative` holds. Nothing
-    // here is a generic request helper: each names one route.
+    // The product API's reads, its writes, its session probe and its problem
+    // reader (PLAT-18.1, decision D0 stage 6). Every one of them goes through
+    // the SAME `request(path(...))` seam, which is what
+    // `every_api_path_is_relative` holds. Nothing here is a generic request
+    // helper: each names one route. (The legacy `kubectl proxy` half was
+    // withdrawn in v1, PROD-17.1 C4.)
     "CONSOLE_WRITABLE_PLURALS",
     "session",
     // MCP-5: sign out. `POST /api/v1/session/logout`, a WRITE like every
@@ -269,45 +244,6 @@ fn shown(path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
-}
-
-#[test]
-fn chart_readme_ui_harness_binds_readiness_and_cleans_up_on_bash_3_2() {
-    let readme = read(&repo_root().join("charts/logweir/README.md"));
-    let readiness = readme
-        .split("wait_for_ui() {")
-        .nth(1)
-        .and_then(|rest| rest.split("\n}\n").next())
-        .expect("chart README wait_for_ui function");
-    assert_eq!(
-        readiness.matches("kill -0 \"$port_forward_pid\"").count(),
-        2,
-        "the exact kubectl child must be checked before and after HTTP"
-    );
-    for identity in [
-        "Forwarding from 127.0.0.1:18132 -> 8001",
-        "<title>Logweir</title>",
-        "id=\"view-slot\"",
-    ] {
-        assert!(readiness.contains(identity), "readiness omits {identity}");
-    }
-    assert!(
-        readme.contains("${owned_namespaces[@]+\"${owned_namespaces[@]}\"}"),
-        "empty owned_namespaces must be safe under Bash 3.2 nounset"
-    );
-    assert!(
-        readme.contains("image rm \"$image\" >/dev/null 2>&1 || cleanup_status=1")
-            && readme.contains("rm -rf \"$wrapper\" || cleanup_status=1")
-            && readme.contains("rm -f \"$port_forward_log\" || cleanup_status=1"),
-        "cleanup-only failures must make an otherwise successful recipe nonzero"
-    );
-}
-
-/// Collapses every run of whitespace to one space, so an assertion can name a
-/// sentence without depending on where the author wrapped it. The
-/// `one_signer_gate.rs::comment_prose` precedent.
-fn prose(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Runs the gate. `ui_root`, when given, is exported as `LOGWEIR_UI_ROOT` so
@@ -954,163 +890,20 @@ fn is_call_position(source: &str, start: usize) -> bool {
     !is_word_byte(source.as_bytes()[start - 1])
 }
 
-// ------------------------------------------ 10. the write carries its manager
-
-#[test]
-fn create_carries_the_ui_field_manager() {
-    let api = read(&ui_root().join("api.js"));
-    let occurrences = api.matches("?fieldManager=logweir-ui").count();
-    assert_eq!(
-        occurrences, 1,
-        "the field manager is written once, as a module-level constant, so every write \
-         carries the same one and a second spelling cannot drift away from it"
-    );
-
-    let declaration = "const FIELD_MANAGER = \"?fieldManager=logweir-ui\";";
-    assert!(
-        api.contains(declaration),
-        "the literal must be the value of a module-level `const FIELD_MANAGER`; expected the \
-         line {declaration:?}"
-    );
-    let offset = api.find(declaration).expect("the declaration was found");
-    let line_start = api[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    assert_eq!(
-        &api[line_start..offset],
-        "",
-        "the declaration is at module level, not indented inside a function; api.js:{}",
-        line_of(&api, offset)
-    );
-
-    assert!(
-        api.contains("+ FIELD_MANAGER"),
-        "`create` appends FIELD_MANAGER to the identifier `path(...)` built, and appends \
-         nothing else"
-    );
-}
-
-// ----------------------------------------- 11. the serving command, in three
-
-#[test]
-fn the_serving_command_is_documented_identically_in_three_places() {
-    let readme = read(&ui_root().join("README.md"));
-    assert!(
-        readme.contains(SERVING_COMMAND),
-        "ui/README.md must carry the serving command verbatim:\n{SERVING_COMMAND}"
-    );
-
-    let kubernetes = read(&repo_root().join("docs").join("kubernetes.md"));
-    assert!(
-        kubernetes.contains(SERVING_COMMAND),
-        "docs/kubernetes.md must carry the serving command verbatim:\n{SERVING_COMMAND}"
-    );
-
-    let justfile = std::fs::read_to_string(repo_root().join("justfile")).expect("justfile is read");
-    let body = recipe_body(&justfile, "ui");
-    assert!(
-        body.contains(SERVING_COMMAND),
-        "the `ui` recipe must run the serving command verbatim -- `--context docker-desktop` \
-         included. Without the context, `just ui` proxies whatever context happens to be \
-         current, with whatever credential it carries, on the one command in this product \
-         that hands a browser a cluster credential. The `ui` body was:\n{body}"
-    );
-
-    // A FOURTH PLACE, ONCE IT EXISTS. Task 29's `docs/install.md` reproduces
-    // the serving command and the viewer-authority paragraph a fourth time,
-    // and four copies of one string drift exactly the way three do. The arm is
-    // guarded by the file's existence rather than by a task number: this
-    // test's own name counts the three places that are always on disk, and
-    // `install.md` is checked whenever it is there. (Renaming the test to say
-    // "four" is the next editor's call; it costs a line in a name diff, which
-    // is why it is not done here.)
-    let install_path = repo_root().join("docs").join("install.md");
-    let install = if install_path.is_file() {
-        let contents = read(&install_path);
-        assert!(
-            contents.contains(SERVING_COMMAND),
-            "docs/install.md exists and must carry the serving command verbatim -- it is the \
-             document an adopter reads FIRST, so a drifted copy there is the copy most people \
-             run:\n{SERVING_COMMAND}"
-        );
-        Some(contents)
-    } else {
-        // Recorded, not skipped silently: a guard that went quiet when its
-        // subject was absent is a guard nobody can tell from a passing one.
-        println!(
-            "note: docs/install.md is not on disk, so the fourth copy of the serving command \
-             was not compared. The three that are always present still must agree."
-        );
-        None
-    };
-
-    // Three copies of one string is a thing that drifts, so the last assertion
-    // is that every serving line in all three files is the SAME line, not that
-    // each of them looks plausible on its own.
-    let mut spellings: BTreeSet<String> = BTreeSet::new();
-    for source in [&readme, &kubernetes, &justfile]
-        .into_iter()
-        .chain(install.iter())
-    {
-        for line in source.lines() {
-            if line.contains("proxy --www=./ui") {
-                spellings.insert(line.trim().to_string());
-            }
-        }
-    }
-    assert_eq!(
-        spellings,
-        BTreeSet::from([SERVING_COMMAND.to_string()]),
-        "the serving command is spelled more than one way across ui/README.md, \
-         docs/kubernetes.md, the `ui` recipe and docs/install.md when it exists. One of \
-         those is the one an adopter will copy, and there is no way to tell which."
-    );
-}
-
-// --------------------------------------------- 12. the cost is in the product
-
-#[test]
-fn the_viewer_authority_cost_is_stated() {
-    for relative in ["ui/README.md", "docs/kubernetes.md"] {
-        let path = repo_root().join(relative);
-        let contents = prose(&read(&path));
-
-        assert!(
-            contents.contains(VIEWER_AUTHORITY),
-            "{relative} must say that the page runs with the viewer's entire cluster \
-             authority. The four ClusterRoles bind the USER; under this serving path they \
-             bind nothing about the page, and a document that leaves that out is describing \
-             a product that does not exist."
-        );
-        assert!(
-            contents.contains(NEVER_CHANGE_A),
-            "{relative} must name {NEVER_CHANGE_A}: the proxy binds loopback only"
-        );
-        assert!(
-            contents.contains(NEVER_CHANGE_B),
-            "{relative} must name {NEVER_CHANGE_B}: never pass it; the default keeps the \
-             cross-site request filter on"
-        );
-        assert!(
-            contents.contains(&prose(ESCALATION_SENTENCE)),
-            "{relative} must carry the sentence that says what changing either flag does:\n{}",
-            prose(ESCALATION_SENTENCE)
-        );
-    }
-}
-
 // ===========================================================================
 // TASK 26 -- the four read-and-create pages, and the behaviour gate.
 // ===========================================================================
 
-/// The six `api.js` identifiers a page module may reach for. `create` plus one
-/// update is the whole write surface of this product's UI, and these are the
-/// only names under `ui/pages/` that come from that module.
+/// The six identifiers a page module may reach for: the `ui/client.js` facade's
+/// read and write methods (the Kubernetes-shaped `api.js` functions of the same
+/// names went with the legacy mode, PROD-17.1 C4) and `api.js`'s `apiError`.
 ///
 /// The first element carries the `engine-token-ok` escape `check-no-oso.sh`'s
-/// check B requires, for the same reason [`API_EXPORTS`]'s fifth element does:
-/// the token names a JavaScript function in `ui/api.js` that lists a Kubernetes
-/// kind, and has nothing to do with the `kafka-backup` subcommand GC3 denies.
-/// That gate matches per physical line, which is why the escape sits on the
-/// element's own line and this paragraph spells the name without its quotes.
+/// check B requires: the token names a JavaScript method that lists a
+/// Kubernetes kind, and has nothing to do with the `kafka-backup` subcommand
+/// GC3 denies. That gate matches per physical line, which is why the escape
+/// sits on the element's own line and this paragraph spells the name without
+/// its quotes.
 const PAGE_API_IDENTIFIERS: [&str; 6] = [
     "list", // engine-token-ok: the JS export name in ui/api.js, never an engine subcommand
     "get",
@@ -1160,13 +953,12 @@ const DIAL_TOKENS: [&str; 16] = [
     "from 'dgram'",
 ];
 
-/// The ONE file under `ui/tests/` that may dial, BY NAME: the fixture-driven
-/// preview server (Task 36), a tool a developer runs to look at the page and
-/// the gate never runs. `the_preview_server_binds_loopback_and_refuses_writes`
-/// pins what it may do (loopback only; every write refused). The converse arm
-/// of `the_ui_behaviour_suite_never_dials` keeps this list from going stale:
-/// a file listed here that carries no dial token fails the test.
-const DIALLING_TOOLS: [&str; 1] = ["preview-server.js"];
+/// The files under `ui/tests/` that may dial, BY NAME. EMPTY since the
+/// fixture-driven preview server went with the legacy `kubectl proxy` mode it
+/// emulated (PROD-17.1 C4). The converse arm of
+/// `the_ui_behaviour_suite_never_dials` keeps this list from going stale: a
+/// file listed here that carries no dial token fails the test.
+const DIALLING_TOOLS: [&str; 0] = [];
 
 /// Every file under `ui/pages/`.
 fn page_modules() -> Vec<PathBuf> {
@@ -2144,186 +1936,8 @@ fn the_behaviour_gate_runs_only_the_spec_files() {
 }
 
 // ===========================================================================
-// TASK 36 -- the design system, and the fixture-driven preview.
+// TASK 36 -- the design system.
 // ===========================================================================
-
-// -------------------- 25. the preview binds loopback and refuses writes
-
-#[test]
-fn the_preview_server_binds_loopback_and_refuses_writes() {
-    // `ui/tests/preview-server.js` serves the page over checked-in JSON so
-    // the design can be looked at with no cluster. It is a development tool
-    // and it opens a socket, which is exactly why its two safety properties
-    // are pinned from here, over its source, the way every other claim in
-    // this file is pinned: it binds the loopback address and nothing else,
-    // and it answers every write with a 405 and never stores, forwards or
-    // mutates anything.
-    let path = ui_root().join("tests").join("preview-server.js");
-    let source = read(&path);
-
-    // (i) LOOPBACK, by a module-level constant `listen` is handed by name.
-    let declaration = "const HOST = \"127.0.0.1\";";
-    assert!(
-        source.contains(declaration),
-        "{} must bind the loopback literal through a module-level `const HOST`; expected the \
-         line {declaration:?}. A preview that listened anywhere else would be a directory \
-         listing and a JSON store on the LAN.",
-        shown(&path)
-    );
-    let offset = source.find(declaration).expect("the declaration was found");
-    let line_start = source[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    assert_eq!(
-        &source[line_start..offset],
-        "",
-        "the declaration is at module level, not indented inside a function; {}:{}",
-        shown(&path),
-        line_of(&source, offset)
-    );
-    assert!(
-        source.contains(".listen(PORT, HOST"),
-        "and `listen` is handed HOST by name, so the address cannot drift away from the \
-         declaration"
-    );
-    for token in ["0.0.0.0", "[::]", "\"::\""] {
-        assert!(
-            !source.contains(token),
-            "{} carries the wildcard address {token:?}",
-            shown(&path)
-        );
-    }
-    assert!(
-        contains_bare_token(&source, "127.0.0.1").is_some(),
-        "the loopback literal is present as a bare token"
-    );
-
-    // (ii) WRITES REFUSED, before anything is looked up, with the code the
-    // page renders as the API server's refusal.
-    assert!(
-        source.contains("const METHOD_NOT_ALLOWED = 405;"),
-        "the refusal is a module-level constant"
-    );
-    assert!(
-        contains_bare_token(&source, "405").is_some(),
-        "and 405 is the bare token the response carries"
-    );
-    assert!(
-        source.contains("method !== \"GET\" && method !== \"HEAD\""),
-        "every method that is not a read is refused"
-    );
-    for token in [
-        "writeFileSync",
-        "appendFileSync",
-        "createWriteStream",
-        "child_process",
-    ] {
-        assert!(
-            !source.contains(token),
-            "{} names {token:?}; the preview writes nothing, not even a file, and spawns \
-             nothing",
-            shown(&path)
-        );
-    }
-
-    // (iii) A TOOL, NOT A SUITE, AND NOT AN ASSET. The gate's glob cannot
-    // match it, the gate never names it, and the shipped-asset scan skips it
-    // by the one scope rule this file has.
-    assert!(
-        !path.to_string_lossy().ends_with(".spec.js"),
-        "the preview is not a test file"
-    );
-    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
-    assert!(
-        !gate.contains("preview-server"),
-        "scripts/check-ui-behaviour.sh must not run the preview: a lint gate never opens a \
-         socket (STANDING RULE 7)"
-    );
-    assert!(is_under_tests(&path), "it lives under ui/tests/");
-    assert!(
-        !shipped_assets().contains(&path),
-        "and is therefore outside the shipped assets and the release bundle"
-    );
-
-    // (iv) DOCUMENTED, under its own heading, with the command.
-    let readme = read(&ui_root().join("README.md"));
-    assert!(
-        readme.contains("## Previewing with fixtures"),
-        "ui/README.md carries the `Previewing with fixtures` heading"
-    );
-    assert!(
-        readme.contains("node ui/tests/preview-server.js"),
-        "and the command that starts it"
-    );
-}
-
-/// The live console journey and the page agree about the probe panel's
-/// control, BY ITS LABEL.
-///
-/// # The staleness this exists to catch happened
-///
-/// `scripts/plat12-13-ui-e2e.mjs`'s journey *"a failed probe shows the
-/// controller's reason"* asserted `panel.includes("Test connection")` on
-/// `#cluster-probe`. `d2-source-check` relabelled that panel's button to
-/// `Re-read probe` and moved "Test connection" to the control that really
-/// dials — and the assertion KEPT PASSING, because the panel's own sentence
-/// still says those words while pointing somewhere else. The lab reported a
-/// 20-of-20 run in which one journey had quietly stopped checking that the
-/// probe panel offers a control at all (`lab-refresh-4` §10.3).
-///
-/// A live harness is the wrong place to notice that: it needs a cluster, so it
-/// runs rarely, and it asserts on rendered TEXT, which two different sentences
-/// can satisfy. This is the cheap half — the page's button label and the
-/// journey's expectation are read out of the two sources and compared, in the
-/// default `cargo test` suite, so relabelling one without the other is red in
-/// seconds rather than a green run that checks less than it says.
-#[test]
-fn the_live_journey_expects_the_probe_control_the_page_actually_ships() {
-    let select = read(&repo_root().join("ui").join("select.js"));
-    let harness = read(&repo_root().join("scripts").join("plat12-13-ui-e2e.mjs"));
-
-    // The label the page emits, read out of `renderTestConnection`'s own
-    // button rather than out of a constant a test could drift from.
-    let at = select
-        .find("export function renderTestConnection(")
-        .expect("ui/select.js still renders the probe panel's control");
-    let body = &select[at..];
-    let open = body
-        .find("<button type=\\\"submit\\\"")
-        .expect("that control is still a submit button");
-    let after = &body[open..];
-    let start = after.find('>').expect("the button tag closes") + 1;
-    let end = after.find("</button>").expect("the button element closes");
-    let label = after[start..end].trim().to_string();
-
-    assert!(
-        !label.is_empty() && !label.contains('+') && !label.contains("esc("),
-        "the probe control's label is no longer a plain literal in \
-         `renderTestConnection`, so this guard can no longer read it: `{label}`"
-    );
-
-    // The journey's expectation, read out of the one assertion about it.
-    let journey = harness
-        .find("aFailedProbeShowsTheControllersReason")
-        .expect("the journey still exists");
-    let scope = &harness[journey..];
-    let expected = "check(rereadLabel === \"";
-    let e_at = scope.find(expected).unwrap_or_else(|| {
-        panic!(
-            "the journey no longer compares the probe control's label to an exact string. It \
-             asserted `panel.includes(...)` on the panel's TEXT until the label moved under it \
-             and the assertion kept passing; reading the BUTTON is what makes it a control \
-             assertion, and this guard is what keeps the two in step."
-        )
-    });
-    let rest = &scope[e_at + expected.len()..];
-    let wanted = &rest[..rest.find('"').expect("the expected label closes")];
-
-    assert_eq!(
-        wanted, label,
-        "the live console journey expects the probe panel's button to read `{wanted}` and \
-         `ui/select.js` renders `{label}`. One of them was relabelled without the other, which \
-         is exactly how that journey came to assert nothing after the `Re-read probe` rename."
-    );
-}
 
 // ------------------------------------------------ PLAT-18.2: the token layer
 //

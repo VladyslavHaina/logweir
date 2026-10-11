@@ -66,9 +66,13 @@ archive holding transaction markers is refused unless the plan allows them), 68
 empty capture), 69 (FX-44, a failed restore removes or names the scratch
 topic it created), 70 (FX-49, the console's original-name box takes effect
 when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
-points) and 72 (PROD-01.5a
+points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
-changes) so far. Items continue the next entry's
+changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
+authorizations withdrawn), 74 (PROD-17.1, four parts v1 does not use are
+withdrawn), 75 (PROD-17.1, surfaces withdrawn for the v1 cut) and 76
+(PROD-17.1, the Helm chart is the only install) so far. Items continue the
+next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3327,9 +3331,214 @@ changes, and no broker line's status changes
 twice. The shards' durations are measured on the pull request's CI run.
 **Rollback:** revert the change; nothing deployed is affected.
 
+#### 73. Scheduled rehearsals and standing authorizations are withdrawn (PROD-17.1 C1)
+
+**Changed.** The `RehearsalSchedule` kind, its reconciler, its CRD and RBAC,
+the product API's `GET .../rehearsal-schedules[/{name}]` with its `rehearsals`
+capability flag, and `logweir drill approve --standing` are removed. Why: a
+standing authorization needs a personal approver key, which v1 does not ship
+(OD-12, after OD-8). A `Restore` carrying `spec.authorization` is now refused
+`StandingAuthorizationRefused` before its `Approval` is read and before any
+Job exists, and an `Approval` whose `spec.subjectRef.kind` is
+`RehearsalSchedule` is refused `StandingAuthorizationRefused` and is never
+`Verified`. Both fields stay in the CRDs, so objects written before v1 still
+parse. `drill approve --standing` and `--subject-kind RehearsalSchedule` are
+usage errors. Every standing authorization already signed (formats 1.0.0 and
+1.1.0) and every scorecard a rehearsal signed still verify as before.
+**What an upgraded install sees.** `helm upgrade` leaves the
+`rehearsalschedules.logweir.dev` CRD in the cluster (Helm never deletes
+`crds/`), and its objects stay, unreconciled. A rehearsal `Restore` that had
+not started is refused; one whose Job was already running finishes under the
+bundle it was started with; one already finished keeps its status. To remove
+them:
+
+```
+kubectl --context "$LOGWEIR_CONTEXT" get rehearsalschedules -A
+kubectl --context "$LOGWEIR_CONTEXT" delete crd rehearsalschedules.logweir.dev
+```
+
+Deleting the CRD deletes every `RehearsalSchedule` with it.
+**Do:** before the controller rolls, list `RehearsalSchedule` objects with the
+first command. Run restore tests as per-run `Restore`s, which the console
+confirms.
+**Scope:** controller rows over a recording API double (each refusal by name,
+with no `POST` and no `Approval` read, and its negative control), CLI rows
+through the shipped binary, the regenerated CRDs, chart renders and OpenAPI
+document. [UNVERIFIED — no live install has run this build's refusals yet; PROD-14.1's clean install carries them.]
+**Rollback:** roll the chart, the controller and the runner back together.
+Helm does not re-create a deleted CRD. If you deleted it, re-apply the older
+chart's `crds/` (`kubectl apply --server-side --force-conflicts -f
+charts/logweir/crds/`) before rolling the controller back. Its controller then
+resumes any schedule left in the cluster, under standing documents that still
+verify until they expire.
+
+#### 74. Withdrawn for v1: alert sinks, the drill's notification post, an unused ACL read and phase 7's engine validation call (PROD-17.1)
+
+**Withdrawn.** v1 is cut to what one team per install needs (owner decision
+OD-12); each part below did nothing v1 uses.
+- **Phase 7 no longer calls the engine's `validation run`.** The engine never
+  implemented it, so every drill logged a WARN that it "failed or could not
+  be run", and nothing read the result. No verdict changes, and
+  `engine_subreport` stays `null`.
+- **Alert sinks are withdrawn.** A `ProtectionPolicy` delivers no alert to
+  PagerDuty, Slack or a webhook: the controller creates no delivery Job and
+  writes no protection event (its format page says "no longer written"),
+  `logweir notify deliver` is gone, and so are the sink fields, the
+  `credentialBindings` status and the chart's `notify.allowInsecureSinks`.
+  Health, the objectives, the alert ledger (`status.alerts`: open and
+  resolved, no delivery state) and the console's `#/protection` page stay.
+  An upgraded install sees: a policy that still carries `spec.notifications`
+  parses, the API server keeps the key and drops its contents, and the
+  policy's `NotificationsDelivered` condition reads `False` /
+  `NotificationsWithdrawn`, naming the field; a values file that sets
+  `notify` is refused at render, naming it; `scripts/bind-credential.py`
+  refuses `--kind ProtectionPolicy`. A delivery Job an older controller left
+  running finishes and then stays, because nothing patches its TTL any more:
+  `kubectl delete jobs,configmaps -n <ns> -l app.kubernetes.io/component=notification,app.kubernetes.io/managed-by=weirkeeper`
+  removes them and their event ConfigMaps, including a ConfigMap the policy
+  owned rather than the Job.
+- **The drill's own notification post is withdrawn.** A run no longer posts
+  to a webhook, Slack or PagerDuty, after a drill or on a failure. The plan's
+  `notifications` block still parses, because it sits inside signed plan
+  bytes: absent or empty (`webhooks: []`, what the console writes) is
+  accepted, and a block that names a sink is refused by name, by the
+  controller's admission of a destination-backed `Restore` and by the runner
+  at startup (exit 3, `refusal-reason=GuardRefused`), before anything is read
+  or dialled; phase 0 repeats the check.
+  An upgraded install sees such a `Restore` or `drill run` refused; remove the
+  sinks and approve the plan again. Alert on the runner's metrics textfile or
+  the `Restore`'s conditions instead.
+- **The ACL read is gone** (item 37's `DescribeAcls` capture and its `unsafe`
+  wrapper). Nothing called it: no run reads or records ACLs. The
+  consumer-group and cluster reads behind the same crate are unchanged, and
+  consumer positions are still written, read and documented.
+
+**Do:** remove the `notify` block from your values before `helm upgrade`
+and the sinks from every plan that names one (see *Required operator
+actions*), apply the CRDs, and remove `spec.notifications` from each
+`ProtectionPolicy` when convenient.
+**Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone);
+controller rows over a recording API double (a policy that still names sinks
+is evaluated as before and its condition names the withdrawal; the control
+without the field publishes no such condition; no row's route table has a
+Job or ConfigMap route, so any delivery would panic); API rows over an older
+live object (its routes and delivery state are not published); the chart's
+refusal row and its control (`notify=null` renders); the bind-credential
+refusal row and its control; the plan's `notifications` refusal at the
+controller's admission, at phase 0 and through the binary (before any
+phase), with an empty block as the control; the unsafe-scope gate over the smaller crate;
+the e2e group rows (the three ACL rows are removed with the read).
+[UNVERIFIED — no cluster has applied the narrowed ProtectionPolicy CRD over an older policy yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the chart, the CRDs, the controller and the runner
+together. The older CRD types `spec.notifications` again, but the API server
+already dropped what was inside it, so each route must be written again; an
+older runner posts a plan's notifications and logs phase 7's warning again.
+
+#### 75. Surfaces withdrawn for the v1 cut (PROD-17.1, OD-12)
+
+**Changed.** The v1 cut withdraws what v1 does not need (OD-12).
+`POST /api/v1/namespaces/{ns}/destinations:from-legacy` and the console's
+*Adopt an existing archive location* form are gone: the route could only
+refuse (`legacy_location_unknown`), because no source it could read records a
+legacy archive's endpoint, region and addressing. The route now answers `404
+not_found`, and the problem codes `legacy_location_unknown` and
+`legacy_location_mismatch` are no longer published. A legacy schedule's
+archive keeps working as before.
+The legacy `kubectl proxy` page is withdrawn too (C4): the chart's `ui.*`
+values and the objects they rendered, the `logweir-ui` image (main CI now
+publishes three images, and the chart names three), the laptop `just ui`
+path, and the page's legacy mode in `ui/`. The page is served by the console
+(`api.console.*`) only. The chart refuses any `ui` block by name, `ui.* is
+withdrawn`, pointing at the console. An upgraded install that set
+`ui.enabled` loses that page: `helm upgrade` refuses until the block is
+removed, and then Helm deletes the `<release>-ui` Deployment, Service,
+ServiceAccount, ClusterRoles and RoleBindings it rendered. `scripts/helm-demo.sh`
+step 9 now fetches the console's page and session through a port-forward.
+**Do:** create a destination explicitly with `POST .../destinations` (or the
+console's *Create a destination* form), naming the bucket, prefix and endpoint
+your runs used. Remove `ui:` from every values file; for a page, enable the
+console (`api.console.enabled`, [install.md](install.md) §5e). Delete any
+`<release>-ui` RoleBinding created by hand in another namespace (NOTES.txt
+printed the command): `kubectl delete rolebinding <release>-ui -n <namespace>`.
+**Scope:** product API rows (the route table, the role matrix and the
+published document, one operation fewer), console contract rows, the chart
+gate's named refusal of `ui.*` with its control (`scripts/check-chart.sh`), and
+the console UI suite, where two console-mode rows replace legacy-mode ones
+(every mount half through the console client; the standalone approvals page).
+[UNVERIFIED — no install has been upgraded across this item yet; PROD-14.1's clean install walks helm-demo step 9.]
+**Rollback:** the product API and console images, and the previous chart for
+the page; an older API serves the route and refuses as before, and the
+`logweir-ui` images already published stay pullable.
+
+#### 76. The Helm chart is the only install (PROD-17.1)
+
+**Changed.** The static `kubectl apply` bundle `logweir.yaml`, its renderer
+`scripts/render-install.sh`, the walks that applied it (`just k8s-demo`,
+`just laptop-demo`, `scripts/kind-demo.sh`, `scripts/demo-steps.sh`), the v0.1
+drill demo (`scripts/demo.sh`, `scripts/demo-approve.sh`) and quickstart Paths 2
+and 4 are withdrawn (OD-12: v1 installs one way). The bundle had no signing
+identity, console or approval key, so it could not produce v1's evidence or
+console approvals. `just mvp-demo` and `scripts/helm-demo.sh` stay. The
+bundle's three checks moved into `scripts/check-chart.sh`: the runner image
+ships `logweir-retention`, the console principal's grants are the adapter's
+both ways, and only the two allowed holders may create a `TrustPolicy`.
+The kustomize `config/` tree goes with it: `config/manager`, `config/rbac`,
+`config/overlays` and the `config/crd` copy. `charts/logweir/crds/` is the one
+CRD copy (`just crds` writes it, `just crds-check` holds it to the emitter),
+the chart's roles carry every grant `config/rbac` did (compared rule for rule,
+by default and in shared mode, before the cut), and the two per-namespace
+ServiceAccount fragments moved to `config/samples/`.
+**Do:** nothing on a chart install. An author-only install from
+`config/overlays/local-images` uses
+`-f charts/logweir/examples/author-only.values.yaml`; a script that applied
+`config/rbac/backup-runner-serviceaccount.yaml` or
+`retention-serviceaccount.yaml` applies them from `config/samples/`. An
+install made with `kubectl apply -f logweir.yaml` keeps running, with no
+newer bundle to apply; move it to the chart. Its CRDs, custom resources, namespace and Secrets stay. Remove the
+bundle's control plane, then install the chart into the same namespace
+([install.md](install.md) (c); `identity.enabled=false` keeps the signer you
+provisioned):
+
+```bash
+kubectl --context <ctx> -n logweir-system delete deployment,serviceaccount,networkpolicy \
+  -l app.kubernetes.io/name=logweir
+kubectl --context <ctx> delete clusterrole,clusterrolebinding -l app.kubernetes.io/name=logweir
+```
+
+A `weirkeeper-policy` ConfigMap you created by hand blocks `helm install`,
+because Helm will not adopt it. Set its settings as chart values (`checks.*`,
+`runs.*`, `engine.*`, `evidence.*`), then
+`kubectl --context <ctx> -n logweir-system delete configmap weirkeeper-policy`
+before installing.
+
+Your RoleBindings to the five human roles keep working: the chart recreates
+the roles under the same names. Helm skips CRDs that exist; apply a newer set
+by hand ([the chart README](../charts/logweir/README.md), *Upgrading the CRDs by
+hand*).
+[UNVERIFIED — the move from a bundle install to the chart has not been run; PROD-14.1's clean install runs the chart path only.]
+**Scope:** the chart gate (`just chart-check`) carries the three moved checks;
+`cargo test` rows that read only the bundle or the `config/` copies were
+removed with them, and the rows that read RBAC, the controller Deployment and
+the CRDs now read the chart's render and `charts/logweir/crds/`.
+**Rollback:** check out a tree before this item to get the bundle back; no
+image changes.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before `helm upgrade`, remove the `notify` block from your values**
+  (item 74): the chart refuses it by name. With `--reuse-values`, pass
+  `--set notify=null`. A `ProtectionPolicy` that still sets
+  `spec.notifications` keeps working and says the field is withdrawn; remove
+  the field when convenient. **Before the runner image rolls, remove the
+  sinks from every restore plan that names one** (item 74) and approve it
+  again: a plan whose `notifications` block names a sink is refused.
+- **Before `helm upgrade`, remove any `ui` block from the values file**
+  (item 75): the chart refuses `ui.*` by name. Use the console for the page.
+- **An install made with `kubectl apply -f logweir.yaml` moves to the chart**
+  (item 76); the two commands there remove the bundle's control plane and keep
+  everything else.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
@@ -3337,6 +3546,8 @@ In addition to the next entry's six, in its order:
   whole. Re-create a catalog whose `viewLimit` cut its view with a larger one
   (`spec.sync` is immutable), and read a stopped walk's `Synced` condition. An
   archive of more than 5000 points is not enforced on v1.
+- **Before the controller rolls, list every `RehearsalSchedule`** (item 73):
+  after the upgrade none runs, and its CRD stays until you delete it.
 - **Before the upgrade, split every `Backup` and `BackupSchedule` that names
   or resolves to more than 1,000 topics** (item 65). The two commands in
   [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
@@ -3404,8 +3615,8 @@ In addition to the next entry's six, in its order:
   install replaces its engine with Logweir's build and exports
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
   item 41).
-- **Bind every destination, retention, notification and inline-archive
-  credential Secret, one at a time, with `scripts/bind-credential.py`**
+- **Bind every destination, retention and inline-archive credential Secret,
+  one at a time, with `scripts/bind-credential.py`**
   (item 38), after suspending the schedules that use them and rolling the
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
@@ -3430,14 +3641,13 @@ In addition to the next entry's six, in its order:
   still verifies a sample. The signed scorecard says which in
   `integrity.verification.coverage`; the `Restore`'s status, the product API
   (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
-  it. A protection event's `verification_scope` describes a policy's newest
-  POINT and still never says `complete`. A complete verification that did not
+  it. A complete verification that did not
   cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71 and 72, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75 and 76, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3516,9 +3726,18 @@ console and the chart, and needs nothing until a namespace is bound
 `two-person`; item 67 changes the
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
-transaction markers; items 69 and 71 change the runner and the controller and
-need nothing, in either order; item 70 changes the console only; item 72
-changes only how the repository is tested and needs nothing. To roll back to
+transaction markers; item 68 changes the runner, the controller and both
+verifiers, and needs nothing: an older runner fails a backup of an emptied
+source exit 1 again, the receipts already signed keep verifying, and an older
+verifier refuses an empty capture's receipt, the safer verdict; items 69 and
+71 change the runner and the controller and need nothing, in either order;
+item 70 changes the console only; item 72 changes only how the repository is
+tested and needs nothing; item 73 removes a kind, a route and a flag, and
+leaves the `RehearsalSchedule` CRD for the operator to delete; item 74
+withdraws what its own section lists; item 75 changes the product API, the
+console, the chart and the published image set, and needs any `ui` block
+removed from values files first; item 76 changes no image, and a bundle
+install moves to the chart once. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

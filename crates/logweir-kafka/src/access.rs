@@ -3,14 +3,10 @@
 //! `crate::rdkafka_admin` (feature `client`), through
 //! `logweir-rdkafka-ffi::cluster::describe_cluster`.
 //!
-//! Two decisions read it (`docs/to-do/decisions/PROD-04.0-admin-path.md`):
-//!
-//! - **T14, listing completeness.** ListGroups shows a principal without
-//!   Describe on the cluster only the groups it may Describe, silently. With
-//!   Describe on the cluster the listing is unfiltered (§3.9).
-//! - **T9, the second positive probe.** DescribeAcls answers "0 bindings, no
-//!   error" both with no authorizer and to a principal it refuses; Describe on
-//!   the cluster is what DescribeAcls itself needs (§3.8).
+//! It decides **T14, listing completeness**
+//! (`docs/to-do/decisions/PROD-04.0-admin-path.md`): ListGroups shows a
+//! principal without Describe on the cluster only the groups it may Describe,
+//! silently. With Describe on the cluster the listing is unfiltered (§3.9).
 //!
 //! The answer has THREE states, and the first two must never be confused:
 //! the broker REPORTED a set (possibly empty: a refusal), the broker reported

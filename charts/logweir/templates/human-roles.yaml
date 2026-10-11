@@ -1,9 +1,6 @@
 {{- /*
-The five human roles —
-`config/rbac/{viewer,operator,approver,trust_admin,retention_admin}_role.yaml`,
-rule for rule, SHIPPED UNBOUND exactly as `logweir.yaml` ships them. Who may
-view, operate, approve, administer trust or administer retention in which
-namespace is your decision:
+The five human roles, SHIPPED UNBOUND. Who may view, operate, approve,
+administer trust or administer retention in which namespace is your decision:
 
     kubectl create rolebinding logweir-approver \
       --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
@@ -15,7 +12,10 @@ different keys"). `logweir-operator`'s `update` and `patch` on
 rule — `spec.sourceRef` is immutable and everything else is editable policy —
 applied to every subject, cluster-admin included. `patch` is there because
 `kubectl edit` and `kubectl apply` send one, so `update` alone cannot edit a
-schedule at all.
+schedule at all. An RBAC `rules[]` entry is `apiGroups`, `resources`, `verbs`
+and `resourceNames` and nothing else — there is no field in which a CEL
+expression could be written, so the restriction lives in
+`charts/logweir/crds/backupschedules.yaml` and not here.
 
 D2 W11 added the fourteen-kind read (two rules, the original six kept byte-
 identical to the controller's so a widening of that list is visible), the
@@ -30,10 +30,10 @@ keys may sign an approval; bind it to somebody who does NOT hold
 `delete`: deleting a policy sends every namespace it bound back to the legacy
 roster, which is a widening dressed as a cleanup.
 
-D3 W13 added the operator's three D3 kinds (`create` on `protectionpolicies`,
-`recoverycatalogs` and `rehearsalschedules`; `update`/`patch` on the first,
-whose spec is not sealed, and `patch` on the other two, whose CRDs leave
-exactly one field mutable each) and a FIFTH role.
+D3 W13 added the operator's D3 kinds (`create` on `protectionpolicies` and
+`recoverycatalogs`; `update`/`patch` on the first, whose spec is not sealed,
+and `patch` on the second, whose CRD leaves exactly one field mutable;
+`rehearsalschedules` is withdrawn in v1) and a FIFTH role.
 
 `logweir-retention-admin` IS NAMESPACED and needs a RoleBinding per namespace.
 It is the only holder of a write verb on `RetentionPolicy` — the one kind whose
@@ -42,8 +42,8 @@ installation from reporting to deleting. Bind it to somebody who does NOT hold
 `logweir-operator`. It carries no `delete` either, for a reason of its own:
 turning enforcement off is `mode: Report`, and deleting the object while an
 enforcement Job holds its lease takes the lease record the restore-side hold
-reads. Holding the role deletes nothing on its own — see
-`config/rbac/retention_admin_role.yaml` for the other three gates.
+reads. Holding the role deletes nothing on its own: `charts/logweir/README.md`
+(`retention.enabled`) lists the other three gates.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -62,15 +62,13 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
-  # The eight kinds Amendments F and G added. Read only. See
-  # `config/rbac/viewer_role.yaml`.
+  # The seven kinds Amendments F and G added. Read only.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
       - preflights
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
       - retentionpolicies
       - topicdiscoveries
       - trustpolicies
@@ -109,25 +107,23 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
-  # D3 §9 — declare protection, connect an archive, schedule a rehearsal…
+  # D3 §9 — declare protection, connect an archive…
   - apiGroups: ["logweir.dev"]
     resources:
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
     verbs: ["create"]
   # …tune an objective (no seal on that spec)…
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies"]
     verbs: ["update", "patch"]
-  # …and flip the ONE field each of the other two leaves mutable:
-  # `spec.suspend` and `spec.syncRequest`. `patch` without `update`. See
-  # `config/rbac/operator_role.yaml`. `retentionpolicies` is NOT here — its
-  # writes are `logweir-retention-admin`'s.
+  # …and flip the ONE field a catalog leaves mutable, `spec.syncRequest`.
+  # `patch` without `update`.
+  # `retentionpolicies` is NOT here — its writes are
+  # `logweir-retention-admin`'s.
   - apiGroups: ["logweir.dev"]
     resources:
       - recoverycatalogs
-      - rehearsalschedules
     verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

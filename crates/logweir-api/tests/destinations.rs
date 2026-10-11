@@ -718,145 +718,6 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
     app.fake.assert_strict();
 }
 
-/// **A legacy location is adopted from facts, or not at all.**
-///
-/// D2 §3.12 step 2 has three branches and this build can reach only (c). A
-/// legacy `archive.url` carries the bucket and the prefix; the endpoint, the
-/// region, the addressing and the transport live in the frozen execution
-/// inputs (PLAT-06.1) or the installation policy ConfigMap (W11), neither of
-/// which the sealed adapter can read. So the route refuses — and, critically,
-/// refuses for a URL that an AWS installation and a MinIO installation would
-/// produce IDENTICALLY, which is why no guess can be right.
-#[tokio::test]
-async fn a_legacy_location_is_refused_until_a_source_that_records_it_is_readable() {
-    let app = TestApp::new();
-    app.fake.seed(
-        "backupschedules",
-        NS_A,
-        json!({
-            "metadata": {"name": "nightly"},
-            "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://legacy-bucket/team-a"}}
-        }),
-    );
-    let request = json!({
-        "name": "adopted",
-        "sourceSchedule": "nightly",
-        "access": {"archiveWrite": {"mode": "workloadIdentity"}}
-    });
-    let response = app
-        .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-            Some("from-legacy-000001"),
-            &request.to_string(),
-        )
-        .await;
-    response.assert_problem(404, "legacy_location_unknown");
-    let detail = response.json()["detail"].as_str().unwrap().to_string();
-    // The two facts that WERE recovered are named, so an operator can paste
-    // them into an explicit create.
-    assert!(detail.contains("s3://legacy-bucket/team-a"), "{detail}");
-    // And the refusal says which source is missing and when it arrives.
-    assert!(detail.contains("policy ConfigMap"), "{detail}");
-    assert!(detail.contains("W11"), "{detail}");
-    // NOTHING WAS CREATED. A half-adopted destination at a guessed location is
-    // worse than none, because it looks derived from facts.
-    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
-
-    // THE MINIO CASE, WHICH IS THE WHOLE POINT. An installation whose runs
-    // used MinIO over a custom endpoint with path-style addressing writes the
-    // SAME archive.url as one that used AWS S3. The previous shape answered
-    // 201 here with `endpoint: null`, `addressing: virtualHosted` and
-    // `addressingSource: "installationConfig"` — a different location, under a
-    // provenance label naming a source it had not read.
-    app.fake.seed(
-        "backups",
-        NS_A,
-        json!({
-            "metadata": {"name": "logweir-backup-nightly-20260915-030000"},
-            "spec": {"sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://kafka-backups/team-a/prod"}, "triggeredBy": "schedule", "deadlineSeconds": 3600}
-        }),
-    );
-    let mut minio = request.clone();
-    minio["name"] = json!("adopted-minio");
-    minio["sourceSchedule"] = Value::Null;
-    minio["sourceBackup"] = json!("logweir-backup-nightly-20260915-030000");
-    let response = app
-        .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-            Some("from-legacy-000002"),
-            &minio.to_string(),
-        )
-        .await;
-    response.assert_problem(404, "legacy_location_unknown");
-    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
-
-    // No response from this route names a provenance it did not read.
-    for body in [
-        response.text(),
-        app.get(&format!("/api/v1/namespaces/{NS_A}/destinations"))
-            .await
-            .text(),
-    ] {
-        assert!(!body.contains("installationConfig"), "{body}");
-        assert!(!body.contains("addressingSource"), "{body}");
-    }
-    app.fake.assert_strict();
-}
-
-/// A scheme this adoption cannot describe at all is refused before the source
-/// question is even reached.
-#[tokio::test]
-async fn a_legacy_archive_that_is_not_s3_is_refused_by_scheme() {
-    let app = TestApp::new();
-    app.fake.seed(
-        "backupschedules",
-        NS_A,
-        json!({
-            "metadata": {"name": "filey"},
-            "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "file:///var/archive"}}
-        }),
-    );
-    let response = app
-        .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-            Some("from-legacy-000003"),
-            &json!({
-                "name": "adopted-file",
-                "sourceSchedule": "filey",
-                "access": {"archiveWrite": {"mode": "workloadIdentity"}}
-            })
-            .to_string(),
-        )
-        .await;
-    response.assert_problem(404, "legacy_location_unknown");
-    assert!(response.json()["detail"]
-        .as_str()
-        .unwrap()
-        .contains("scheme"));
-    app.fake.assert_strict();
-}
-
-/// The route still requires and validates its `Idempotency-Key`, so a client
-/// learns the durable-POST contract here rather than after W11 makes the route
-/// create something.
-#[tokio::test]
-async fn from_legacy_still_requires_an_idempotency_key() {
-    let app = TestApp::new();
-    app.post(
-        &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-        None,
-        &json!({
-            "name": "adopted",
-            "sourceSchedule": "nightly",
-            "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "s"}}}}
-        })
-        .to_string(),
-    )
-    .await
-    .assert_problem(400, "idempotency_key_required");
-    assert!(app.fake.requests().is_empty());
-}
-
 // ======================================================================
 // H1: a rotation that cannot write the value changes nothing
 // ======================================================================
@@ -1348,7 +1209,7 @@ async fn the_default_check_selects_on_a_label_rather_than_scanning() {
 /// key id and a replayable signature there. No existing Secret can carry the
 /// binding of a destination that does not exist yet, so a create names none.
 ///
-/// KILLS: `secret.existing` accepted on create (or on `:from-legacy`); the
+/// KILLS: `secret.existing` accepted on create; the
 /// binding omitted from the written Secret; the binding computed over anything
 /// but this destination's UID and route.
 #[tokio::test]
@@ -1371,25 +1232,6 @@ async fn fx20_a_new_destination_naming_an_existing_secret_is_refused_and_writes_
         !app.fake.requests().iter().any(|r| r.method == "POST"),
         "a refused create wrote something: {:?}",
         app.fake.requests()
-    );
-
-    // `:from-legacy` takes a grant block too, and refuses the same way.
-    let legacy = app
-        .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-            Some("fx20-thief-legacy-1"),
-            &json!({
-                "name": "adopted",
-                "sourceSchedule": "nightly",
-                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "lwd-victim-archive-write"}}}}
-            })
-            .to_string(),
-        )
-        .await;
-    legacy.assert_problem(422, "destination_invalid");
-    assert_eq!(
-        legacy.json()["errors"][0]["code"],
-        "existing_credential_refused"
     );
 
     // CONTROL: the credential entered once becomes a Secret bound to this

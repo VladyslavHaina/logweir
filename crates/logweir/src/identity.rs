@@ -1416,8 +1416,8 @@ fn public_material(key: &SigningKey) -> Result<PublicMaterial, String> {
 
 /// The one ureq agent this module builds, for the Kubernetes API: connect, read
 /// and write are bounded, and redirects are not followed. `tests/notify.rs`
-/// sanctions exactly this builder as the second reviewed timeout policy beside
-/// `notify_agent_with`. The unit tests pass no TLS and keep the same bounds.
+/// sanctions exactly this builder as the crate's one reviewed timeout policy.
+/// The unit tests pass no TLS and keep the same bounds.
 fn kubernetes_agent(tls: Option<Arc<rustls::ClientConfig>>) -> ureq::Agent {
     let builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))

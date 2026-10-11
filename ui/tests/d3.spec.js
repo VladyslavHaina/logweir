@@ -49,7 +49,6 @@ import {
   decodeCatalogSigners,
   decodeD3List,
   decodeD3Operation,
-  decodeLegacyObject,
   isContractFailure,
 } from "../contract.js";
 import {
@@ -1524,23 +1523,6 @@ test("every_d3_shape_route_and_vocabulary_is_pinned_against_the_published_docume
       holder + "." + field + " is published as an open string; a page that refused an " +
         "unrecognised value would turn a newer controller's status into a rendered failure");
     assert.equal(property.enum, undefined);
-  }
-});
-
-test("the_four_d3_custom_resources_decode_in_legacy_mode_and_refuse_a_missing_required_field", () => {
-  for (const [plural, name] of [
-    ["protectionpolicies", "protection-healthy.json"],
-    ["recoverycatalogs", "catalog-truncated.json"],
-    ["retentionpolicies", "retention-report.json"],
-    ["trustpolicies", "trustpolicy-lifecycle.json"],
-  ]) {
-    const object = d3(name);
-    assert.deepEqual(decodeLegacyObject(plural, object).value, object,
-      plural + " decodes and is returned unchanged");
-    const broken = JSON.parse(JSON.stringify(object));
-    delete broken.spec;
-    assert.throws(() => decodeLegacyObject(plural, broken), isContractFailure,
-      plural + " with no spec is a contract failure and not an empty page");
   }
 });
 

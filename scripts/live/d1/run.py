@@ -3296,7 +3296,7 @@ TASK_SCENARIOS = {
     "PLAT-09.2": ["L-09-1", "L-09-2", "L-09-3a", "L-09-3b", "L-09-4", "L-09-5", "L-09-6"],
     # PLAT-06.2's done evidence, which D1 §13.2 does not give an L- number:
     # "Demonstrate the same manual CR path through CLI/API and UI." The UI half
-    # is `scripts/plat06-2-ui-e2e.mjs`; this is the CLI/API half.
+    # was a one-off browser harness (now in git history); this is the CLI/API half.
     "PLAT-06.2": ["L-06-2-cli"],
 }
 

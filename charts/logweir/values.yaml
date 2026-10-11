@@ -8,7 +8,7 @@ environment: ""                 # a label on every object; switches nothing
 # Runner Jobs are the operator's: imagePullSecrets reach them through the
 # runner ServiceAccount, node placement does not (not implemented).
 kubernetes:
-  namespace: ""                 # feeds ui.namespaces and api.namespaces; `-n` decides the install
+  namespace: ""                 # feeds api.namespaces; `-n` decides the install
   connectionsNamespace: ""      # kafka.enabled's KafkaClusters + minio's logweir-s3; "" = release ns. Must be watched
   nodeSelector: {}
   tolerations: []
@@ -65,8 +65,6 @@ controller:
   nodeSelector: {}              # each component may override kubernetes.* for its own pods
   tolerations: []
   affinity: {}
-notify:                         # what the controller tells its delivery Jobs
-  allowInsecureSinks: false     # DEV ONLY: lets one POST to an http:// sink. Production: false
 
 # ------------------------------ the installation policy (D2 §4.4), rendered
 # as the `weirkeeper-policy` ConfigMap in the release namespace. Only someone
@@ -234,15 +232,3 @@ api:
     nodeSelector: {}
     tolerations: []
     affinity: {}
-
-# ------------------------------------------- ui.enabled — the page, in-cluster
-# `kubectl proxy` with the ServiceAccount's own authority: anyone who reaches
-# the Service acts as it. No Ingress; reach it with kubectl port-forward.
-ui:
-  enabled: false
-  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the twenty-six page files
-  imagePullPolicy: Always      # use Never for locally loaded images
-  namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}

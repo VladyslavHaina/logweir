@@ -547,7 +547,7 @@ pub struct StoreWrite {
 /// the refusal OBSERVABLE: the object as it stands after the pass is here, and
 /// the next pass can be handed exactly that object, as a watch would hand it.
 ///
-/// Objects are keyed by a path suffix (`/rehearsalschedules/weekly-orders`),
+/// Objects are keyed by a path suffix (`/backupschedules/nightly`),
 /// matched with `ends_with` like a [`Route`]. For a tracked object the store
 /// answers `GET` (the object, or `404` once removed), merge `PATCH` of the
 /// object and of its `/status` subresource (seam S7's precondition enforced,

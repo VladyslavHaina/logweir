@@ -2,9 +2,9 @@
 
 This directory is a **versioned proof-of-concept installation** of the supported
 path in [docs/quickstart.md](../../docs/quickstart.md): everything installed with
-Helm — Logweir itself from its **published OCI chart**, which names the four
+Helm — Logweir itself from its **published OCI chart**, which names the three
 published Docker Hub images of the same commit (`docker.io/vladyslavhaina/weirkeeper`,
-`logweir`, `logweir-console`, `logweir-ui`, by their `sha-<commit>` tags —
+`logweir`, `logweir-console`, by their `sha-<commit>` tags —
 tags, which Docker Hub lets the publisher move; the publication step records
 each image's digest in its run summary, and a registry policy that needs
 immutability pins those digests) — the console in `shared` mode behind **Traefik**, with real TLS from a
@@ -287,7 +287,6 @@ helm upgrade --install logweir ./charts/logweir --kube-context "$CTX" -n "$LOGWE
   --set "controllerImage=docker.io/vladyslavhaina/weirkeeper:$LOGWEIR_TAG" \
   --set "runnerImage=docker.io/vladyslavhaina/logweir:$LOGWEIR_TAG" \
   --set "api.console.image=docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
-  --set "ui.image=docker.io/vladyslavhaina/logweir-ui:$LOGWEIR_TAG" \
   --wait --timeout 15m
 ```
 
@@ -667,7 +666,7 @@ rollback, exactly as before the `v0.1.5` install (the runner ServiceAccount from
 retained signing identity (`helm.sh/resource-policy: keep`) is not affected.
 
 Then the three upgrade steps. **The live round must show, after R1:**
-1. all fourteen CRDs `Established`; the six old kinds' objects unchanged;
+1. all thirteen CRDs `Established`; the six old kinds' objects unchanged;
 2. **identity** — `logweir-signing-trust`'s `key-id` equals the recorded
    `r1-signing` key id, `logweir-signing-key` in both namespaces still holds
    that key (same `uid` and `creationTimestamp`: nothing re-created it), and the

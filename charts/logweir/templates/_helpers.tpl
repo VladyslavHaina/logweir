@@ -1,8 +1,8 @@
 {{- /*
 The chart's helpers. Every namespaced object renders into `.Release.Namespace`
 and nothing here spells a namespace by name; the release name prefixes only
-the OPTIONAL components (`<release>-minio`, `<release>-kafka-*`, `<release>-ui`),
-while the control plane keeps the names `logweir.yaml` ships — `weirkeeper`,
+the OPTIONAL components (`<release>-minio`, `<release>-kafka-*`, `<release>-api`),
+while the control plane keeps fixed names — `weirkeeper`,
 `logweir-viewer`/`-operator`/`-approver`, `logweir-runner-egress`,
 `logweir-runner` — because those are cluster-scoped or code-named constants and
 Global Constraint 30 allows one controller per cluster anyway.
@@ -62,17 +62,6 @@ us-east-1
 {{- end -}}
 
 {{- /*
-`logweir.ui.key` LIVED HERE UNTIL TASK 39 and is DELETED, not kept beside its
-replacement. It turned a UI file's path into a ConfigMap key
-(`ui/pages/approvals.js` -> `pages__approvals.js`) for the ConfigMap this chart
-built from its own copy of `ui/`. The page now arrives as the `logweir-ui`
-IMAGE — `ui.image`, built by `Dockerfile.ui`, asserted by
-`scripts/check-image-ui.sh` — so there is no ConfigMap, no copy of `ui/` under
-`charts/`, and nothing for this helper to key. A template helper with no caller
-is a helper the next reader has to prove is dead.
-*/ -}}
-
-{{- /*
 Task 38. The three cross-cutting values the owner's own file asked for, in one
 place: a label, node placement, and pull secrets. Each renders NOTHING when its
 value is empty, so the shipped default render is byte-identical to what it was.
@@ -121,22 +110,6 @@ imagePullSecrets:
 {{- end -}}
 
 {{- /*
-The namespaces the UI is bound in: the release namespace, plus `ui.namespaces`,
-plus `kubernetes.namespace` when that is set and `ui.namespaces` is empty —
-ruling 11's ONE use of that key, because a RoleBinding needs a namespace name
-the chart cannot derive. DEDUPLICATED: `-n kafka` beside
-`kubernetes.namespace: kafka` would otherwise render the same RoleBinding twice
-and refuse the install.
-*/ -}}
-{{- define "logweir.ui.namespaces" -}}
-{{- $extra := .Values.ui.namespaces -}}
-{{- if and (not $extra) .Values.kubernetes.namespace -}}
-{{- $extra = list .Values.kubernetes.namespace -}}
-{{- end -}}
-{{- (prepend ($extra | default list) .Release.Namespace) | uniq | toJson -}}
-{{- end -}}
-
-{{- /*
 THE CONSOLE/API ServiceAccount'S NAME, IN ONE PLACE — review finding **F3**.
 
 Two templates need it and they used to spell it differently: `ui/api-rbac.yaml`
@@ -161,13 +134,11 @@ at render time rather than installed — see `admission-policy.yaml`.
 {{- end -}}
 
 {{- /*
-The namespaces the console/API ServiceAccount is bound in — the same shape, and
-a SEPARATE key on purpose. The legacy proxy and the console are two principals
-with two arguments (`templates/ui/api-rbac.yaml`'s header), and an installation
-that serves the console for ten namespaces while the local proxy is bound in
-one must be able to say so without widening the proxy. Empty `api.namespaces`
-falls back to `kubernetes.namespace` exactly as the proxy's does, so the common
-case still needs one key and not two.
+The namespaces the console/API ServiceAccount is bound in: the release
+namespace, plus `api.namespaces`, or `kubernetes.namespace` when that list is
+empty, so the common case needs one key and not two. DEDUPLICATED: `-n kafka`
+beside `kubernetes.namespace: kafka` would otherwise render the same
+RoleBinding twice and refuse the install.
 */ -}}
 {{- define "logweir.api.namespaces" -}}
 {{- $extra := .Values.api.namespaces -}}

@@ -1,5 +1,4 @@
-# The `kind` cluster `.github/workflows/kind-demo.yml` creates for Demo 1 in CI
-# (spec §16 clause 2). Task 31.
+# The `kind` cluster `.github/workflows/helm-demo.yml` creates in CI. Task 31.
 #
 # ===========================================================================
 # ONE NODE, AND THE NODE IMAGE IS PINNED BY DIGEST
@@ -44,10 +43,8 @@
 # The broker's metadata response redirects every client to the ADVERTISED
 # listener `K8S://host.docker.internal:9095` (Task 7, STANDING RULE 15) whatever
 # address it bootstrapped at, so no address substitution can work either — the
-# NAME has to resolve inside the cluster. `scripts/kind-demo.sh` reads the kind
-# network's gateway and adds a CoreDNS `hosts` block for
-# `host.docker.internal`, and the bootstrap string stays the literal
-# `host.docker.internal:9095` in both demos.
+# NAME has to resolve inside the cluster, so the bootstrap string stays the
+# literal `host.docker.internal:9095`.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: logweir

@@ -17,12 +17,9 @@ does. Both are stated here so nobody reads the example as a description of
 output.**
 
 - **`engine_subreport` is POPULATED. The shipping code always emits `null`.**
-  `OsoCliEngine` does not override `DataEngine::validation_run`, so the engine's
-  own `validation run` is never invoked and no report is retained. The block is
-  kept populated because it is the only checked-in example of the format, and
-  because `crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d
-  marker test — run on every CI build — that turns green the day the override
-  lands. Reading `engine_subreport: null` in a real scorecard means "no engine
+  Logweir never runs the engine's own `validation run`, so no report is
+  retained. The block is kept populated because it is the only checked-in
+  example of the format. Reading `engine_subreport: null` in a real scorecard means "no engine
   sub-report was retained", **not** "the engine reported nothing wrong". See
   `docs/stability.md`.
 
@@ -151,8 +148,8 @@ drills the archive.
 
 Harness scripts and specs that drive named failure paths — an engine that exits
 non-zero, one that drops a rendered key, an archive with no backup set, an
-unreachable target. `engine-docker.sh` is the container route the e2e suite and
-`scripts/demo.sh` fall back to on a host that cannot exec a linux/amd64 ELF; it
+unreachable target. `engine-docker.sh` is the container route the e2e suite
+falls back to on a host that cannot exec a linux/amd64 ELF; it
 invokes nothing itself and forwards argv verbatim.
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

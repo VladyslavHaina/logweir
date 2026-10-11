@@ -1,5 +1,5 @@
 //! Destinations: `BackupDestination` projections, a typed create, an access
-//! rotation, an explicit access test and a legacy adoption.
+//! rotation and an explicit access test.
 //!
 //! # No credential value ever leaves here
 //!
@@ -55,12 +55,11 @@ use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
     AccessGrantRequest, AccessGrantView, AccessModeDto, AccessRequest, AccessView, AddressingDto,
-    CaBundleRequest, CaBundleView, CreateDestinationRequest, Destination,
-    DestinationFromLegacyRequest, DestinationList, DestinationResponse, DestinationRoleDto,
-    DestinationStatusView, DestinationSummary, DestinationUsageResponse, DestinationUseView,
-    LastTestView, PreflightResponse, StorageProviderDto, StorageRequest, StorageView,
-    TestDestinationRequest, TransportRequest, TransportSecurityDto, TransportView,
-    UpdateDestinationAccessRequest, WriteProbeDto,
+    CaBundleRequest, CaBundleView, CreateDestinationRequest, Destination, DestinationList,
+    DestinationResponse, DestinationRoleDto, DestinationStatusView, DestinationSummary,
+    DestinationUsageResponse, DestinationUseView, LastTestView, PreflightResponse,
+    StorageProviderDto, StorageRequest, StorageView, TestDestinationRequest, TransportRequest,
+    TransportSecurityDto, TransportView, UpdateDestinationAccessRequest, WriteProbeDto,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
@@ -78,15 +77,11 @@ pub const ROUTE_UPDATE_ACCESS: &str =
     "POST /api/v1/namespaces/{ns}/destinations/{name}:update-access";
 /// The test route identifier (idempotency scope).
 pub const ROUTE_TEST: &str = "POST /api/v1/namespaces/{ns}/destinations/{name}:test";
-/// The legacy-adoption route identifier (idempotency scope).
-pub const ROUTE_FROM_LEGACY: &str = "POST /api/v1/namespaces/{ns}/destinations:from-legacy";
 
 /// The `:update-access` command suffix.
 pub const UPDATE_ACCESS: &str = ":update-access";
 /// The `:test` command suffix.
 pub const TEST: &str = ":test";
-/// The collection-level `:from-legacy` command name.
-pub const FROM_LEGACY: &str = "destinations:from-legacy";
 
 /// The annotation that marks the namespace default. At most one destination
 /// per namespace may hold it; the create route refuses a second.
@@ -2056,162 +2051,8 @@ fn configured_roles(object: &BackupDestination) -> Vec<DestinationRoleDto> {
     roles
 }
 
-// ======================================================================
-// Legacy adoption (D2 §3.12)
-// ======================================================================
-
-/// D2 §3.12 STEP 2 HAS THREE BRANCHES, AND THIS ROUTE IS ON (c).
-///
-/// (a) is the PLAT-06.1 frozen `execution-inputs.json` of the newest succeeded
-/// `Backup` — the one place that records the exact bucket, prefix, endpoint,
-/// region, `path_style` and `allow_http` a runner actually used. (b) is the
-/// `archive.url` plus the installation's legacy addressing, published in the
-/// policy `ConfigMap` W11 renders, and it requires the operator to confirm
-/// because a global setting is not a fact about this archive.
-///
-/// NEITHER IS READABLE HERE. Both live in `ConfigMap`s, and the sealed adapter
-/// reads a `ConfigMap` only when a CHECK owns it (owner UID, immutability and
-/// digest all verified); an execution input and a policy document are owned by
-/// neither. So this route takes (c) and refuses.
-///
-/// WHY REFUSING BEATS DERIVING. A legacy `archive.url` carries the bucket and
-/// the prefix and nothing else. An installation whose runs used MinIO
-/// (`endpoint: https://minio…:9000`, path-style) and one that used AWS S3
-/// produce the SAME url, so any endpoint, region, addressing or transport this
-/// route filled in would be a guess — and `locationDigest`, which restore
-/// selection and catalog indexing compare, is computed over exactly those
-/// fields. A destination adopted at the wrong location is worse than no
-/// destination: it is a location that looks derived from facts.
-///
-/// [`SOURCE_FROZEN_EXECUTION`] and [`SOURCE_INSTALLATION_CONFIG`] are the two
-/// provenance values `addressingSource` will carry when (a) and (b) land. No
-/// route emits either today, and a provenance label naming a source that was
-/// not read is the defect this replaced.
-pub const SOURCE_FROZEN_EXECUTION: &str = "frozenExecution";
-/// See [`SOURCE_FROZEN_EXECUTION`].
-pub const SOURCE_INSTALLATION_CONFIG: &str = "installationConfig";
-
-/// The bucket and the prefix — the only two facts a legacy `archive.url`
-/// carries — checked so that the refusal below is about the missing SOURCE and
-/// not about an unreadable URL.
-///
-/// # Errors
-///
-/// `legacy_location_unknown` for a scheme this adoption cannot describe or a
-/// URL that names no bucket.
-fn legacy_location_facts(url: &str) -> Result<(String, String), ApiError> {
-    let Some(rest) = url.strip_prefix("s3://") else {
-        return Err(ApiError::new(
-            ProblemCode::LegacyLocationUnknown,
-            "Only an s3:// archive can become a BackupDestination; this one names another \
-             scheme.",
-        ));
-    };
-    let mut parts = rest.splitn(2, '/');
-    let bucket = parts.next().unwrap_or_default().to_string();
-    let prefix = parts
-        .next()
-        .unwrap_or_default()
-        .trim_matches('/')
-        .to_string();
-    if bucket.is_empty() {
-        return Err(ApiError::new(
-            ProblemCode::LegacyLocationUnknown,
-            "The legacy archive URL names no bucket.",
-        ));
-    }
-    Ok((bucket, prefix))
-}
-
-/// The refusal, with the bucket and prefix that WERE recovered named in it, so
-/// an operator can paste them straight into `POST .../destinations`.
-fn refuse_until_a_source_is_readable(bucket: &str, prefix: &str) -> ApiError {
-    let location = if prefix.is_empty() {
-        format!("s3://{bucket}")
-    } else {
-        format!("s3://{bucket}/{prefix}")
-    };
-    ApiError::new(
-        ProblemCode::LegacyLocationUnknown,
-        format!(
-            "The legacy archive at `{location}` gives its bucket and prefix and nothing else. A \
-             BackupDestination also needs the endpoint, the region, the addressing and the \
-             transport, and this build can read neither source that records them: the frozen \
-             execution inputs of a succeeded Backup nor the installation's legacy \
-             addressing in the policy ConfigMap. Those are facts about how the runs \
-             actually reached the store, and guessing them would move the location. Create the \
-             destination explicitly with `POST /api/v1/namespaces/{{ns}}/destinations`, naming \
-             this bucket and prefix and the endpoint your runs used; adoption from the \
-             installation config arrives with W11."
-        ),
-    )
-}
-
-/// `POST .../destinations:from-legacy`.
-pub async fn from_legacy(
-    State(state): State<AppState>,
-    RequestId(_request_id): RequestId,
-    actor: Actor,
-    ApiPath(ns): ApiPath<String>,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Body,
-) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ManageDestinations)?;
-    crate::http::parse_query(uri.query(), &[])?;
-    // THE KEY IS STILL REQUIRED AND STILL VALIDATED. This is a durable POST by
-    // contract; a client that forgets the header learns that here rather than
-    // discovering it after W11 makes the route create something.
-    let _key = IdempotencyKey::from_headers(&headers)?;
-    let request: DestinationFromLegacyRequest = read_json(body, MAX_JSON_BODY).await?;
-    let mut errors = Vec::new();
-    if !validate::is_dns_subdomain(&request.name) || request.name.len() > 63 {
-        errors.push(FieldError::new(
-            "name",
-            "invalid_name",
-            "a destination name is a Kubernetes object name of at most 63 characters",
-        ));
-    }
-    match (&request.source_schedule, &request.source_backup) {
-        (Some(_), Some(_)) | (None, None) => errors.push(FieldError::new(
-            "sourceSchedule",
-            "grant_mode_fields",
-            "name exactly one of sourceSchedule or sourceBackup",
-        )),
-        _ => {}
-    }
-    validate_access(&request.access, &mut errors);
-    refuse_existing_secrets(
-        &request.access,
-        &std::collections::BTreeSet::new(),
-        &mut errors,
-    );
-    if !errors.is_empty() {
-        return Err(ApiError::destination_invalid(errors));
-    }
-    if access_carries_a_value(&request.access) {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
-    }
-    let legacy_url = if let Some(schedule) = &request.source_schedule {
-        let object = get_object::<BackupSchedule>(&state, &actor, &ns, schedule).await?;
-        object.spec.archive.url.clone()
-    } else {
-        let name = request.source_backup.clone().unwrap_or_default();
-        let object = get_object::<BackupCr>(&state, &actor, &ns, &name).await?;
-        object.spec.archive.url.clone()
-    };
-    let (bucket, prefix) = legacy_location_facts(&legacy_url)?;
-    // NOTHING IS CREATED. The idempotency key was validated, the legacy object
-    // was read and the grants were checked — so the operator learns the
-    // request itself is well formed — and then the route refuses, because the
-    // one thing it would have to invent is the one thing that decides where
-    // the archive is.
-    Err(refuse_until_a_source_is_readable(&bucket, &prefix))
-}
-
 /// The command dispatcher for `POST .../destinations/{target}`, where `target`
-/// is `<name>:update-access`, `<name>:test` or the collection command
-/// `destinations:from-legacy` (which arrives on the collection path).
+/// is `<name>:update-access` or `<name>:test`.
 #[allow(clippy::too_many_arguments)]
 pub async fn command(
     State(state): State<AppState>,

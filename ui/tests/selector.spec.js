@@ -939,22 +939,6 @@ test("console_mode_types_the_credential_once_names_no_secret_and_refuses_what_it
   }
 });
 
-test("the_legacy_decoder_hands_back_contract_v1s_fields_untouched", async () => {
-  const { decodeLegacyObject } = await import("../contract.js");
-  const object = cluster({
-    auth: {
-      mode: "scramSha512", username: "u", tls: true,
-      secretRef: { name: "s", passwordKey: "sasl-pw" },
-      tlsCa: { configMapKeyRef: { name: "ca", key: "ca.crt" } },
-    },
-  });
-  const decoded = decodeLegacyObject("kafkaclusters", object);
-  assert.equal(decoded.value, object, "the legacy decoder returns the API server's own object");
-  assert.equal(decoded.value.spec.auth.secretRef.passwordKey, "sasl-pw");
-  assert.deepEqual(decoded.value.spec.auth.tlsCa, { configMapKeyRef: { name: "ca", key: "ca.crt" } });
-  assert.deepEqual(decoded.unknown, [], "and neither reference is an unknown field");
-});
-
 // ===========================================================================
 // 7. THE LIST's OWN Test connection control, and its UID check.
 // ===========================================================================

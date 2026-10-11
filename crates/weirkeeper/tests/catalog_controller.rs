@@ -1511,7 +1511,7 @@ fn the_crd_refuses_a_cadence_below_the_floor() {
     );
     let crd = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/crd/recoverycatalogs.yaml"),
+            .join("../../charts/logweir/crds/recoverycatalogs.yaml"),
     )
     .expect("the generated CRD is on disk");
     assert!(
@@ -3396,7 +3396,7 @@ fn the_crd_and_the_plan_spell_the_two_enums_identically() {
 // ===========================================================================
 
 /// A REAL Ed25519 public key (SubjectPublicKeyInfo PEM) — public material, the
-/// same one `trust_policy_controller.rs` and `rehearsal_controller.rs` use —
+/// same one `trust_policy_controller.rs` uses —
 /// so the policy's key is USABLE: it parses and hashes to its declared id.
 const POLICY_KEY_PEM: &str =
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n";

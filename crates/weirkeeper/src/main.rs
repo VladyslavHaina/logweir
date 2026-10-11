@@ -581,37 +581,14 @@ fn run() -> ExitCode {
         )));
         // D3 W6 (PLAT-14.2) pushes the TWELFTH — the `ProtectionPolicy`
         // reconciler that turns runs that already happened into a freshness
-        // verdict, and a verdict that changed into exactly one delivery Job
-        // per alert transition. It takes the runner image because it CREATES
-        // Jobs (`logweir notify deliver` in the runner image) and NO archive
-        // handle: protection reads `Backup` status and the catalog's own
-        // materialised view, never an object store. `tests/linkage.rs`'s
-        // controller count moved in this same commit.
+        // verdict. It creates no Job and holds NO archive handle: protection
+        // reads `Backup` status and the catalog's own materialised view, never
+        // an object store. `tests/linkage.rs`'s controller count moved in the
+        // commit that added it.
         controllers.push(Box::pin(
-            weirkeeper::controllers::protection_policy::controller(client.clone(), runner.clone()),
+            weirkeeper::controllers::protection_policy::controller(client.clone()),
         ));
-        // D3 W7 (PLAT-14.3) pushes the THIRTEENTH — the `RehearsalSchedule`
-        // reconciler that turns a cron, a qualifying recovery point and ONE
-        // signed standing authorization into one isolated scratch restore per
-        // slot, and records a reason for every slot that produced none. It
-        // takes only the client: it creates `Restore` objects and their
-        // approval bundles, and the `Restore` reconciler is what turns those
-        // into Jobs — so neither the runner image nor the read-only archive
-        // handle would ever be read here (the same argument `backup_schedule`
-        // makes one line up). `tests/linkage.rs`'s controller count moved in
-        // this same commit.
-        //
-        // **ORDERING NOTE, SETTLED AT W9's INTEGRATION.** D3 §14 sequences
-        // W9's `RetentionPolicy` as the thirteenth and this one as the
-        // fourteenth; the two landed the other way round, so this line is the
-        // THIRTEENTH and W9's below is the fourteenth. Nothing depends on the
-        // order — each reconciler watches its own kind and shares no state
-        // with the other — so the ordinals are a fact about the registration
-        // vector and not about the design. The line itself never changed.
-        controllers.push(Box::pin(
-            weirkeeper::controllers::rehearsal_schedule::controller(client.clone()),
-        ));
-        // D3 W9 pushes the FOURTEENTH — the `RetentionPolicy` reconciler that
+        // D3 W9 pushes the THIRTEENTH — the `RetentionPolicy` reconciler that
         // reports what WOULD be removed from one destination and, only when an
         // administrator has both selected `Enforce` and approved the current
         // plan digest, creates one Job that removes it. It takes the runner
@@ -620,7 +597,8 @@ fn run() -> ExitCode {
         // deletes an object, and `scripts/check-no-archive-write.sh` proves the
         // deleting crate is unreachable from here. `tests/linkage.rs`'s
         // `"controllers":14` moved in this same commit (D3 W7's
-        // `rehearsal_schedule` took it to thirteen).
+        // `rehearsal_schedule` had taken it to thirteen; that reconciler is
+        // withdrawn in v1, OD-12, so the count is thirteen again).
         controllers.push(Box::pin(
             weirkeeper::controllers::retention_policy::controller(client.clone(), runner.clone()),
         ));

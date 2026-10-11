@@ -25,8 +25,7 @@ The controller itself watches exactly the listed namespaces
 (`LOGWEIR_WATCH_NAMESPACES`, rendered by `deployment.yaml` from the same value).
 
 WHAT IT DOES NOT CHANGE. The `weirkeeper` ClusterRole is rendered exactly as
-before (`clusterrole.yaml`), so `logweir.yaml` and the default render still
-agree; the execution namespaces still carry O1 for their own signing key
+before (`clusterrole.yaml`); the execution namespaces still carry O1 for their own signing key
 (`docs/kubernetes.md` §15.4 — that residual is the design's, and moving the
 signer out is not this stage). Cluster-admin is out of scope (O0).
 
@@ -73,7 +72,7 @@ rules:
   # the trust, approval, backup and restore reconcilers and its status patched
   # by `controllers::trust_policy`, which also places and releases the
   # compromise-revocation finalizer — the one `patch` on the object itself
-  # (TRUSTPOLICY-DELETE-DROPS-REVOCATION; see `config/rbac/role.yaml`).
+  # (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
   - apiGroups: ["logweir.dev"]
     resources: ["trustrosters"]
     verbs: ["get", "list", "watch"]

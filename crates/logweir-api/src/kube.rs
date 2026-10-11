@@ -4,7 +4,7 @@
 //! and every method is typed over the closed [`ProductResource`] set —
 //! `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore`, `Approval`,
 //! `BackupDestination`, `TopicDiscovery`, `Preflight`, `ProtectionPolicy`,
-//! `RehearsalSchedule`, `RecoveryCatalog` and `RetentionPolicy` — plus the one
+//! `RecoveryCatalog` and `RetentionPolicy` — plus the one
 //! CLUSTER-SCOPED kind, `TrustPolicy`, behind its own read-only seal
 //! ([`ClusterResource`]), and ONE cluster-scoped object that is not a kind in
 //! any seal: the `TrustRoster` named `default`, read by
@@ -75,7 +75,6 @@ use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Preflight;
 use weirkeeper::crds::protection_policy::ProtectionPolicy;
 use weirkeeper::crds::recovery_catalog::RecoveryCatalog;
-use weirkeeper::crds::rehearsal_schedule::RehearsalSchedule;
 use weirkeeper::crds::restore::Restore;
 use weirkeeper::crds::retention_policy::RetentionPolicy;
 use weirkeeper::crds::selection::AllUserTopics;
@@ -104,7 +103,6 @@ mod sealed {
     impl Sealed for weirkeeper::crds::topic_discovery::TopicDiscovery {}
     impl Sealed for weirkeeper::crds::preflight::Preflight {}
     impl Sealed for weirkeeper::crds::protection_policy::ProtectionPolicy {}
-    impl Sealed for weirkeeper::crds::rehearsal_schedule::RehearsalSchedule {}
     impl Sealed for weirkeeper::crds::recovery_catalog::RecoveryCatalog {}
     impl Sealed for weirkeeper::crds::retention_policy::RetentionPolicy {}
 
@@ -138,7 +136,6 @@ impl ProductResource for BackupDestination {}
 impl ProductResource for TopicDiscovery {}
 impl ProductResource for Preflight {}
 impl ProductResource for ProtectionPolicy {}
-impl ProductResource for RehearsalSchedule {}
 impl ProductResource for RecoveryCatalog {}
 impl ProductResource for RetentionPolicy {}
 

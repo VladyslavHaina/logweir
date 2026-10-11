@@ -70,7 +70,6 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/approvals/{name}",
             "/api/v1/namespaces/{ns}/approvals/{name}/packet",
             "/api/v1/namespaces/{ns}/destinations",
-            "/api/v1/namespaces/{ns}/destinations:from-legacy",
             "/api/v1/namespaces/{ns}/destinations/{name}",
             "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
             "/api/v1/namespaces/{ns}/destinations/{name}:test",
@@ -84,13 +83,11 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
             "/api/v1/namespaces/{ns}/preflights/{id}/details",
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
-            // D3 W11: the stream, the five read families and the one write
+            // D3 W11: the stream, the read families and the one write
             // among them.
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
             "/api/v1/namespaces/{ns}/protection-policies",
             "/api/v1/namespaces/{ns}/protection-policies/{name}",
-            "/api/v1/namespaces/{ns}/rehearsal-schedules",
-            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
             "/api/v1/namespaces/{ns}/catalogs",
             "/api/v1/namespaces/{ns}/catalogs/{name}",
             "/api/v1/namespaces/{ns}/catalogs/{name}/points",
@@ -115,8 +112,10 @@ fn the_document_names_every_route_and_every_route_answers() {
         }
     }
     // 56 + PLAT-19.2's two (submitGovernedApproval, getApprovalPolicy) +
-    // PROD-16.2's two (getApprovalRequest, approveInConsole).
-    assert_eq!(operation_ids.len(), 60);
+    // PROD-16.2's two (getApprovalRequest, approveInConsole), less the two
+    // rehearsal-schedule reads withdrawn in v1 and PROD-17.1 A4's one
+    // (createDestinationFromLegacy).
+    assert_eq!(operation_ids.len(), 57);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -269,8 +268,8 @@ fn request_schemas_are_strict_all_the_way_down() {
 ///
 /// A REQUEST MAY CARRY A CREDENTIAL; A RESPONSE MAY NOT. Write-only entry
 /// exists precisely so a value can be typed once into a request body
-/// (`CreateDestinationRequest`, `UpdateDestinationAccessRequest`,
-/// `DestinationFromLegacyRequest`), and the property scan below would refuse
+/// (`CreateDestinationRequest`, `UpdateDestinationAccessRequest`), and the
+/// property scan below would refuse
 /// every one of them by name. So the scan is applied to what a response can
 /// reach, and `a_response_envelope_never_reaches_the_write_only_credential`
 /// asserts the other half: no response schema in the document can contain the

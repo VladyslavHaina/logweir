@@ -3,8 +3,8 @@
 Logweir backs up Apache Kafka topics, restores a sampled point-in-time window
 into new topics, reconciles records against the archive, and signs the result.
 The CLI runs independently; the `weirkeeper` Kubernetes controller schedules
-jobs and verifies their evidence, and a static UI operates the Kubernetes API.
-The UI can run locally or through the Helm chart’s `logweir-ui` image.
+jobs and verifies their evidence, and the console (`logweir-console`) serves
+the UI over a bounded product API.
 
 Code is [Apache-2.0](LICENSE); documentation is
 [CC-BY-4.0](docs/LICENSE-docs). See [NOTICE](NOTICE) and
@@ -28,8 +28,7 @@ Python with `cryptography`. Output goes to the ignored `.demo/mvp/` directory.
 The generated demo keys prove integrity but have no independent provenance.
 
 [Quickstart](docs/quickstart.md) starts with the one supported setup-and-recovery
-path on Kubernetes, then covers the scratch-cluster drill demo and running
-against your own archive.
+path on Kubernetes, then covers running a drill against your own archive.
 [Verification](docs/verify-a-scorecard.md) explains what the signed result proves.
 
 ## Install
@@ -37,22 +36,23 @@ against your own archive.
 Kubernetes 1.29 or newer is required. The supported path is the published Helm
 chart with its managed installation identity: [quickstart](docs/quickstart.md),
 *The supported path*, then [the installation guide](docs/install.md) and
-[the chart reference](charts/logweir/README.md). The low-level manifests and
+[the chart reference](charts/logweir/README.md). The chart is the only install;
 locally built images remain in the installation guide.
 
 **What is published.** A push to `main` that changes something outside
 `docs/` and passes CI publishes the controller (`weirkeeper`), runner
-(`logweir`), console (`logweir-console`) and UI (`logweir-ui`) images under
+(`logweir`) and console (`logweir-console`) images under
 `sha-<commit>` (and moves `main` and `latest`), and the chart
 `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version
-0.1.0-sha-<commit>`, whose image defaults are those four tags; a push that
+0.1.0-sha-<commit>`, whose image defaults are those three tags (the `logweir-ui`
+image was withdrawn in v1, release-notes item 75); a push that
 changes only `docs/` publishes nothing
 ([gates.md](docs/gates.md#pull-requests-and-main)). A version tag
 (`v<X.Y.Z>`, or a pre-release such as `v0.2.0-rc.1`) runs
 [the release pipeline](docs/gates.md#versioned-releases), which does not
 rebuild the images: it gives the tagged commit's `sha-<commit>` images the
 version tag (the same digests), publishes the chart `--version <X.Y.Z>` with
-all four images pinned by digest, and creates a GitHub Release carrying the CLI
+all three images pinned by digest, and creates a GitHub Release carrying the CLI
 archives, the independent verifier (`verify_scorecard.py`), `LICENSE`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md`, the engine's licence, the chart package,
 `release.json` and `SHA256SUMS`. No tag has done so yet: the runs for
@@ -68,7 +68,7 @@ helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir
   --version <X.Y.Z> -n logweir-system --create-namespace --wait --timeout 10m
 ```
 
-From a checkout the chart's four image defaults are `:latest`; install a
+From a checkout the chart's three image defaults are `:latest`; install a
 published chart, or pin the images as the installation guide describes.
 
 **The CLI** comes from a release's archives — check the download against the
@@ -154,7 +154,7 @@ no metrics HTTP endpoint. See [metrics](docs/metrics.md) and
 
 ## Threat model: what this does **not** protect against
 
-Four residuals, accepted and stated here rather than left to be discovered.
+Three residuals, accepted and stated here rather than left to be discovered.
 They are not undiscovered bugs, and a report that one of them is true is not a
 vulnerability report.
 
@@ -169,22 +169,16 @@ vulnerability report.
 - **A cluster-admin defeats every control described here.** They can mount the
   signing Secret and sign, edit the `TrustRoster`, or delete an admission
   policy. Nothing here constrains that subject and nothing claims to.
-- **RBAC bounds the viewer, not the page.** The UI is static files served by
-  `kubectl proxy` under the viewer's own kubeconfig, so the shipped
-  `logweir-viewer` / `logweir-operator` / `logweir-approver` ClusterRoles bind
-  the **user** and bind nothing at all about the page. Running the UI from a
-  cluster-admin kubeconfig gives the shipped bundle cluster-admin. The optional
-  Helm UI proxy instead uses its ServiceAccount; its RBAC applies to everyone
-  who can reach that proxy.
 - **`self_attested: false` means only "two different keys".** One person
   holding both keypairs satisfies it. It is not evidence of an independent
   auditor, and a scorecard carrying it must not be read as one.
 
-[SECURITY.md](SECURITY.md) carries the same four beside what **is** in scope.
+[SECURITY.md](SECURITY.md) carries the same three beside what **is** in scope.
+(A fourth, "RBAC bounds the viewer, not the page", went with the legacy
+`kubectl proxy` page in v1, release-notes item 75.)
 
-**[Release notes](docs/release-notes.md) list the `ui/` bundle by digest.** The page runs with the
-viewer's authority, so what is in the bundle matters: there is no telemetry in
-it, nothing in it is fetched from anywhere else, and its contents are listed by
+**[Release notes](docs/release-notes.md) list the `ui/` bundle by digest.** What is in the bundle
+matters: there is no telemetry in it, nothing in it is fetched from anywhere else, and its contents are listed by
 digest in the release notes so that the bytes a browser executed can be
 compared against the bytes that were released.
 

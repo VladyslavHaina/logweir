@@ -210,15 +210,14 @@ fn crd_task_ids(rel: &str, text: &str) -> Vec<String> {
 
 /// THE CRD DESCRIPTIONS TOO (review L7). `kubectl explain` prints every field's
 /// description, and they are generated from the CRD types' doc comments -- the
-/// one place a doc comment IS a message a person reads. The emitted copies
-/// (`config/crd/`), the chart's byte-identical copies and the install file
-/// are all read, so a description is caught wherever it is installed from.
+/// one place a doc comment IS a message a person reads. The one checked-in
+/// copy, `charts/logweir/crds/`, is read.
 #[test]
 fn no_crd_description_names_a_tracker_task() {
     let root = repo_root();
     let mut found = Vec::new();
     let mut read = 0usize;
-    for dir in ["config/crd", "charts/logweir/crds"] {
+    for dir in ["charts/logweir/crds"] {
         for entry in std::fs::read_dir(root.join(dir)).expect("a CRD directory reads") {
             let path = entry.expect("an entry").path();
             if path.extension().is_none_or(|e| e != "yaml") {
@@ -235,12 +234,7 @@ fn no_crd_description_names_a_tracker_task() {
             found.extend(crd_task_ids(&rel, &text));
         }
     }
-    // AND THE INSTALL FILE, which carries the same CRDs to a plain
-    // `kubectl apply` (`scripts/render-install.sh`).
-    let install = std::fs::read_to_string(root.join("logweir.yaml")).expect("logweir.yaml reads");
-    assert!(install.contains("kind: CustomResourceDefinition"));
-    found.extend(crd_task_ids("logweir.yaml", &install));
-    assert!(read >= 20, "only {read} CRDs were read");
+    assert!(read >= 13, "only {read} CRDs were read");
     assert!(
         found.is_empty(),
         "a CRD description names a tracker task; say what it means in the type's doc \

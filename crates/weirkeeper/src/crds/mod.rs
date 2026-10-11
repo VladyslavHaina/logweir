@@ -52,7 +52,6 @@ pub mod kafka_cluster;
 pub mod preflight;
 pub mod protection_policy;
 pub mod recovery_catalog;
-pub mod rehearsal_schedule;
 pub mod restore;
 pub mod retention_policy;
 pub mod selection;
@@ -73,15 +72,15 @@ pub const VERSION: &str = "v1alpha1";
 /// fixes the kind list and requires a recorded architectural decision for each
 /// addition: the first six are Amendment A's, `BackupDestination`,
 /// `TopicDiscovery` and `Preflight` are **Amendment F**'s, and `TrustPolicy`,
-/// `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog` and
-/// `RetentionPolicy` are **Amendment G**'s. `TrustRoster` is NOT removed: it
+/// `ProtectionPolicy`, `RecoveryCatalog` and `RetentionPolicy` are
+/// **Amendment G**'s (its `RehearsalSchedule` is withdrawn in v1, OD-12). `TrustRoster` is NOT removed: it
 /// stays served and reconciled, deprecated in its own description, so a
 /// cluster that has one keeps working while `TrustPolicy` is adopted.
 /// `the_kind_list_is_exactly_the_adr` asserts the emitted set against this
 /// list and additionally asserts that no kind is named `Drill`,
 /// `RestoreDrill`, `Switchover` or `MetadataSnapshot`, and that no kind
 /// contains `Kafka` other than `KafkaCluster`.
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 13] = [
     "KafkaCluster",
     "BackupSchedule",
     "Backup",
@@ -93,7 +92,6 @@ pub const KINDS: [&str; 14] = [
     "Preflight",
     "TrustPolicy",
     "ProtectionPolicy",
-    "RehearsalSchedule",
     "RecoveryCatalog",
     "RetentionPolicy",
 ];
@@ -855,7 +853,7 @@ fn node_at<'a>(
 pub struct Rendered {
     /// The kind, as it appears in [`KINDS`].
     pub kind: &'static str,
-    /// The file this document is checked in as, under `config/crd/`.
+    /// The file this document is checked in as, under `charts/logweir/crds/`.
     pub file_name: &'static str,
     /// The YAML text, header comment included.
     pub yaml: String,
@@ -865,7 +863,7 @@ pub struct Rendered {
 const HEADER: &str = "\
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -890,12 +888,11 @@ const NUMERIC_BOUND_KEYS: [&str; 5] = [
 /// # Why this exists, and why it is not cosmetic
 ///
 /// `JSONSchemaProps::maximum` is an `f64`, so `serde_yaml` writes `600.0`.
-/// `kubectl kustomize` — the one renderer of `logweir.yaml` — round-trips the
-/// same document through its own YAML library and writes `600`. The two
-/// installs Logweir ships would then carry BYTE-DIFFERENT CRDs for the same
-/// kind, and `chart_lint_default_render_agrees_with_the_install_file` fails on
-/// it. Normalising here means both renderers see the same text, so neither has
-/// anything left to normalise.
+/// `kubectl kustomize` — which rendered the static bundle until v1 withdrew it
+/// (release-notes item 76) — round-trips the same document through its own
+/// YAML library and writes `600`, so two renderers would carry BYTE-DIFFERENT
+/// CRDs for the same kind. Normalising here means every renderer sees the same
+/// text, so none has anything left to normalise.
 ///
 /// JSON has one number type, so `600` and `600.0` are the same value to the
 /// API server; this changes the spelling and never the schema. A bound with a
@@ -1101,18 +1098,6 @@ pub fn render_all() -> Vec<Rendered> {
             crd
         },
         &protection_policy::SPEC_RULES,
-    );
-    push(
-        "RehearsalSchedule",
-        "rehearsalschedules.yaml",
-        {
-            let mut crd = rehearsal_schedule::RehearsalSchedule::crd();
-            for (path, rule, message) in rehearsal_schedule::NESTED_RULES {
-                attach_rule(&mut crd, path, rule, message);
-            }
-            crd
-        },
-        &rehearsal_schedule::SPEC_RULES,
     );
     push(
         "RecoveryCatalog",

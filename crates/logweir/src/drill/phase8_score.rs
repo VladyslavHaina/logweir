@@ -315,7 +315,7 @@ fn sig<E: std::fmt::Display>(e: E) -> DrillError {
 /// the record of its own signing. So `phases.iter_mut().find(|p| p.phase == 8)`
 /// answered `None` on every real run, and the "no engine validation report
 /// under the per-run prefix" note — which fires on EVERY v0.1 run, because
-/// `DataEngine::validation_run` is never invoked — was pushed onto nothing and
+/// the engine's `validation run` is never invoked — was pushed onto nothing and
 /// discarded in silence, while `docs/stability.md` and
 /// `docs/verify-a-scorecard.md` both asserted it reached the document. A
 /// documented guarantee the code does not deliver is this build's recurring
@@ -413,7 +413,7 @@ pub(crate) fn run_with_signer(
     // a different bucket and principal by default. The mismatch is inert today
     // (the engine's `validation run` is never invoked, so nothing is ever
     // written under either) and is named at both sites so that whoever wires
-    // `DataEngine::validation_run` has to resolve it; see
+    // the engine's `validation run` has to resolve it; see
     // `crates/logweir-engine-oso/src/render_validation.rs`.
     match store.list_keys(&format!("logweir/{run_id}/engine-validation/")) {
         Ok(keys) if !keys.is_empty() => {

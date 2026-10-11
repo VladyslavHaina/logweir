@@ -272,44 +272,6 @@ async fn the_create_route_stores_the_coverage_request_and_refuses_a_bound_on_not
     );
 }
 
-/// The rehearsal view says what each slot verifies: `sampled` for a schedule
-/// that states nothing, `complete` (with its bound) for one that asks.
-#[test]
-fn a_rehearsal_schedule_view_says_sampled_or_complete() {
-    let schedule =
-        |bounds_extra: Value| -> weirkeeper::crds::rehearsal_schedule::RehearsalSchedule {
-            let mut bounds = json!({"deadlineSeconds": 3600, "recordsPerPartition": 25,
-                                "maxPartitions": 200});
-            for (k, v) in bounds_extra.as_object().unwrap() {
-                bounds[k] = v.clone();
-            }
-            serde_json::from_value(json!({
-            "apiVersion": "logweir.dev/v1alpha1",
-            "kind": "RehearsalSchedule",
-            "metadata": {"name": "weekly", "namespace": NS_A, "uid": "u"},
-            "spec": {
-                "schedule": "0 3 * * 0",
-                "point": {"scheduleRefs": [{"name": "nightly"}], "requireVerifiedEvidence": true},
-                "target": {"clusterRef": {"name": "scratch"}, "topicPrefix": "rehearsal-",
-                           "markerTopic": "logweir.scratch"},
-                "bounds": bounds,
-                "authorization": {"standingApprovalRef": {"name": "a"}}
-            }
-        }))
-        .expect("a RehearsalSchedule")
-        };
-    let plain =
-        serde_json::to_value(logweir_api::routes::rehearsals::view(&schedule(json!({})))).unwrap();
-    assert_eq!(plain["bounds"]["coverage"], "sampled");
-    assert!(plain["bounds"].get("completeMaxRecords").is_none());
-    let complete = serde_json::to_value(logweir_api::routes::rehearsals::view(&schedule(
-        json!({"coverage": "complete", "completeMaxRecords": 50000}),
-    )))
-    .unwrap();
-    assert_eq!(complete["bounds"]["coverage"], "complete");
-    assert_eq!(complete["bounds"]["completeMaxRecords"], 50000);
-}
-
 /// **The live chain, over scorecards a real run signed** (`#[ignore]`d: it
 /// reads the outcome files `e2e/tests/record_semantics.rs`'s
 /// `a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack`

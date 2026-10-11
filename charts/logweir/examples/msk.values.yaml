@@ -28,5 +28,3 @@ archive:
   s3: { endpoint: "http://logweir-minio.kafka.svc:9000", region: us-east-1, allowHttp: true }
 minio:
   enabled: true                 # drop this for a real S3 bucket and clear archive.s3.endpoint
-ui:
-  enabled: true

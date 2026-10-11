@@ -1258,9 +1258,6 @@ pub fn refine_against_status(
 /// is the schedule's own and fires; one a second earlier does not. An object
 /// with no `creationTimestamp` (a test fixture; the API server always sets it)
 /// is not bounded, which is the behaviour before this rule existed.
-///
-/// Shared with the `RehearsalSchedule` controller, which applies the same rule
-/// to its cadence step (`rehearsal_schedule::latest_owned_slot`).
 #[must_use]
 pub fn slot_predates_creation(due: DateTime<Utc>, created_at: Option<DateTime<Utc>>) -> bool {
     created_at.is_some_and(|created| due < created)
@@ -1842,8 +1839,8 @@ pub fn backup_is_terminal(backup: &Backup) -> bool {
 /// CONCURRENCY ONE. `Api::replace_status` issues `PUT`, which the API server
 /// authorises as the verb `update` on `backupschedules/status`; the shipped
 /// ClusterRole grants `patch` on the status subresources and deliberately
-/// grants no `update` anywhere (`config/rbac/role.yaml`, and the chart and
-/// install-file copies of it). A reservation sent as a replace is therefore
+/// grants no `update` anywhere (`charts/logweir/templates/clusterrole.yaml`). A reservation sent as a
+/// replace is therefore
 /// **403 on every shipped install** — with the default `concurrencyPolicy:
 /// Forbid` that is every due slot of every schedule, so nothing is ever
 /// created. The compare-and-set is not lost by moving to a patch: Kubernetes

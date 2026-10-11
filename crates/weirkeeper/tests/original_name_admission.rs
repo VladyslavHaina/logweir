@@ -165,8 +165,7 @@ fn an_original_name_restore_needs_its_own_approval_subject() {
         admit(
             &restore,
             Some(&approval(ORIGINAL_PLAN, Some("originalName"))),
-            Some(&cluster),
-            None
+            Some(&cluster)
         ),
         RestoreAdmission::Ok
     );
@@ -174,7 +173,6 @@ fn an_original_name_restore_needs_its_own_approval_subject() {
         &restore,
         Some(&approval(ORIGINAL_PLAN, None)),
         Some(&cluster),
-        None,
     );
     assert!(
         matches!(
@@ -193,8 +191,7 @@ fn an_original_name_restore_needs_its_own_approval_subject() {
         admit(
             &plain_restore,
             Some(&approval(&plain, None)),
-            Some(&cluster),
-            None
+            Some(&cluster)
         ),
         RestoreAdmission::Ok
     );
@@ -202,7 +199,6 @@ fn an_original_name_restore_needs_its_own_approval_subject() {
         &plain_restore,
         Some(&approval(&plain, Some("originalName"))),
         Some(&cluster),
-        None,
     );
     assert!(
         matches!(reverse, RestoreAdmission::ApprovalSubjectNotThePlans { .. }),
@@ -213,7 +209,6 @@ fn an_original_name_restore_needs_its_own_approval_subject() {
         &restore,
         Some(&approval(ORIGINAL_PLAN, Some("everything"))),
         Some(&cluster),
-        None,
     );
     assert!(
         matches!(unknown, RestoreAdmission::ApprovalSubjectNotThePlans { .. }),

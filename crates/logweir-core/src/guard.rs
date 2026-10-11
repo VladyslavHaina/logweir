@@ -63,6 +63,29 @@ fn walk(v: &serde_yaml::Value, path: String, out: &mut Vec<String>) {
     }
 }
 
+/// The plan's `notifications` block is withdrawn: a run posts nothing to a
+/// webhook, Slack or PagerDuty. An absent or empty block parses and passes; a
+/// block that names a sink is refused by name, never silently ignored, so a
+/// plan written for the old behaviour does not run believing it will page.
+///
+/// # Errors
+///
+/// [`GuardRefusal`] naming `notifications` when any sink is set.
+pub fn reject_withdrawn_notifications(
+    notifications: &crate::spec::Notifications,
+) -> Result<(), GuardRefusal> {
+    if notifications.is_empty() {
+        return Ok(());
+    }
+    Err(GuardRefusal(
+        "notifications is withdrawn: a run no longer posts to a webhook, Slack or PagerDuty, \
+         so a plan that names a sink (notifications.webhooks, slack_webhook, \
+         pagerduty_routing_key or pagerduty_endpoint) is refused. Remove the sinks (an empty \
+         `notifications: {webhooks: []}` is accepted) and approve the plan again"
+            .to_string(),
+    ))
+}
+
 /// The six characters upstream's topic selector treats as GLOB PATTERN
 /// SYNTAX rather than as part of a name.
 ///

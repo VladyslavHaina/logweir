@@ -607,9 +607,9 @@ fn a_refused_verdict_that_names_no_point_makes_the_join_incomplete() {
 /// before `just crds-check` has to notice the drift.
 #[test]
 fn the_shipped_crd_carries_the_catalog_point_reference_and_rule_p10() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/crd/preflights.yaml");
-    let text = std::fs::read_to_string(&path).expect("config/crd/preflights.yaml");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../charts/logweir/crds/preflights.yaml");
+    let text = std::fs::read_to_string(&path).expect("charts/logweir/crds/preflights.yaml");
     let crd: serde_yaml::Value = serde_yaml::from_str(&text).expect("the CRD parses");
     let restore = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
         ["properties"]["request"]["properties"]["restore"];

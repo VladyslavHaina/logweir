@@ -94,8 +94,8 @@ impl Default for ChecksPolicy {
 ///
 /// # What it does not touch
 ///
-/// Scheduled, catch-up and retry `Backup`s, and a `RehearsalSchedule`'s
-/// `Restore`s, are neither counted nor queued: their own policy bounds them,
+/// Scheduled, catch-up and retry `Backup`s are neither counted nor queued:
+/// their own policy bounds them,
 /// and a slot that waited behind a browser click would miss its window. The
 /// ceilings are the administrator's (this `ConfigMap` lives in the release
 /// namespace), never a tenant's.

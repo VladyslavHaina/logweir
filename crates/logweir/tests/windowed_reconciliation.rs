@@ -42,8 +42,8 @@ use logweir::drill::{phase8_score, DrillError};
 use logweir::exit::ExitCode;
 use logweir_core::engine::{
     expected_restored_count, BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId,
-    EngineRun, PartitionFacts, PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts,
-    RestorePlan, SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    PartitionFacts, PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan,
+    SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::{IntegrityResult, Outcome};
 use logweir_core::spec::{Anchor, ObjectivesSpec};
@@ -128,8 +128,7 @@ impl ClusterReader for WindowReader {
 }
 
 /// A `DataEngine` that answers `describe` and `fingerprints` from fields and
-/// refuses everything phase 7 does not call. `validation_run` returns exit 0:
-/// phase 7 records it and never reads it as corroboration.
+/// refuses everything phase 7 does not call.
 struct WindowEngine {
     facts: BackupSetFacts,
     fingerprints: Vec<RecordFingerprint>,
@@ -161,9 +160,6 @@ impl DataEngine for WindowEngine {
     }
     fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
         Ok(self.fingerprints.clone())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 

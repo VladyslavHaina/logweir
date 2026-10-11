@@ -59,7 +59,7 @@
 //!   `ConfigMap`, no `Backup` and nothing in object storage — the owned
 //!   `ConfigMap`s and the check Job go by owner cascade, which is why a
 //!   collected `TopicDiscovery` leaves nothing behind. The grant is
-//!   `config/rbac/role.yaml`'s one `delete` rule, on `topicdiscoveries` and
+//!   `charts/logweir/templates/clusterrole.yaml`'s one `delete` rule, on `topicdiscoveries` and
 //!   `preflights` and nothing else.
 //! * **It reads Events only to explain a pod that has not started** (FX-11).
 //!   D2 §4.3's event-sourced waiting codes (`RunnerServiceAccountMissing`,
@@ -819,7 +819,7 @@ pub struct TerminalDiscovery {
 /// **ITS ONE CALLER IS [`collect_expired`]**, on the terminal guard of this
 /// file's own reconcile. The `delete` verb it implies is granted on
 /// `topicdiscoveries` and `preflights` and on nothing else
-/// (`config/rbac/role.yaml`), and
+/// (`charts/logweir/templates/clusterrole.yaml`), and
 /// `crates/logweir/tests/manifest_lint.rs::every_granted_verb_has_a_caller`
 /// holds both halves of that to exactly this shape.
 #[must_use]

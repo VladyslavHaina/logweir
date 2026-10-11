@@ -15,9 +15,9 @@ workflow summaries and downloaded artifacts provide execution evidence.
 |---|---|---|---|
 | 1 | Repository checks and Compose backup/restore tests pass for the exact commit | `open` | `.github/workflows/ci.yml`, `scripts/ci-check.sh` |
 | 2 | Required Kubernetes changes have been exercised through installation, scheduling, restore and verification | `open` | `.github/workflows/helm-demo.yml`, `scripts/test-k8s-scram.py`, `docs/kubernetes.md` |
-| 3 | Runner, controller, console and UI candidates pass image checks, and the version tag names the same digests as the `sha-<commit>` publication it promotes | `open` | `.github/workflows/images.yml`, `scripts/ci-images.sh`, `scripts/check-image-api.sh`, `scripts/release.sh` |
+| 3 | Runner, controller and console candidates pass image checks, and the version tag names the same digests as the `sha-<commit>` publication it promotes | `open` | `.github/workflows/images.yml`, `scripts/ci-images.sh`, `scripts/check-image-api.sh`, `scripts/release.sh` |
 | 4 | The version tag identifies the intended commit, the dry run and the release workflow succeed | `open` | `.github/workflows/release.yml` |
-| 5 | License notices, dependency inventory and UI assets are included in the applicable artifacts | `open` | `scripts/check-image.sh`, `scripts/check-image-weirkeeper.sh`, `scripts/check-image-ui.sh`, `scripts/release-build.sh`, `THIRD_PARTY_NOTICES.md` |
+| 5 | License notices, dependency inventory and UI assets are included in the applicable artifacts | `open` | `scripts/check-image.sh`, `scripts/check-image-weirkeeper.sh`, `scripts/check-image-api.sh`, `scripts/release-build.sh`, `THIRD_PARTY_NOTICES.md` |
 | 6 | Downloadable artifacts contain the independent verifier, the packaged Linux CLI completes the release drill, and every archive performs `drill countersign` on its own platform | `open` | `.github/workflows/release-drill.yml`, `.github/workflows/release.yml`, `docs/verify_scorecard.py`, `scripts/release-countersign-check.py` |
 | 7 | Both signed document schemas are current and the independent readers agree on accepted and rejected fixtures | `open` | `scripts/check-verifier-parity.sh`, `crates/logweir/tests/two_reader_parity.rs`, `crates/logweir/tests/two_reader_parity_receipt.rs` |
 | 8 | Install instructions identify the published references, prerequisites and supported architectures | `open` | `docs/install.md`, `charts/logweir/README.md` |
@@ -99,7 +99,7 @@ artifacts.
    (cd rc && sha256sum -c SHA256SUMS)        # macOS: shasum -a 256 -c SHA256SUMS
    helm pull oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.2.0-rc.1 -d pulled
    cmp pulled/logweir-chart-0.2.0-rc.1.tgz rc/logweir-chart-0.2.0-rc.1.tgz
-   for image in weirkeeper logweir logweir-console logweir-ui; do
+   for image in weirkeeper logweir logweir-console; do   # rc.1 also published logweir-ui
      docker buildx imagetools inspect "docker.io/vladyslavhaina/$image:v0.2.0-rc.1" --format '{{json .Manifest}}' | jq -r .digest
    done                                      # each equals release.json's .images.refs[<image>].digest
    ```
@@ -145,9 +145,8 @@ release. A push to `main` need not create a tag or GitHub Release. See
 
 Project naming and announcement requirements remain in
 [TRADEMARKS.md](../TRADEMARKS.md); they are not a claim established by CI.
-Historical local transcripts remain useful in [kubernetes.md](kubernetes.md)
-and [e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md), but cannot substitute
-for evidence about the current release candidate.
+Historical local transcripts remain useful in [kubernetes.md](kubernetes.md),
+but cannot substitute for evidence about the current release candidate.
 
 ---
 

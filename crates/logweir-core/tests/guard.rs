@@ -547,3 +547,37 @@ fn fx20_a_region_that_is_not_a_region_name_is_refused_and_every_region_is_not() 
     )
     .is_ok());
 }
+
+/// **The plan's `notifications` block is withdrawn, and refused by name.** A
+/// block that names any one sink is refused, naming `notifications` and never
+/// echoing a value. CONTROL: an absent block, the console's
+/// `notifications: {webhooks: []}` and an empty mapping all pass.
+#[test]
+fn a_notifications_block_that_names_a_sink_is_refused_by_name() {
+    use logweir_core::guard::reject_withdrawn_notifications;
+    use logweir_core::spec::Notifications;
+    let sinks = [
+        "webhooks: [\"https://example.test/hook\"]",
+        "slack_webhook: \"https://hooks.slack.test/T0/B0/x\"",
+        "pagerduty_routing_key: \"R0-not-a-real-key\"",
+        "pagerduty_endpoint: \"https://events.eu.pagerduty.com/v2/enqueue\"",
+    ];
+    for sink in sinks {
+        let n: Notifications = serde_yaml::from_str(sink).expect("the grammar still parses");
+        let refusal = reject_withdrawn_notifications(&n).expect_err(sink);
+        assert!(
+            refusal.0.starts_with("notifications is withdrawn"),
+            "{sink}: {}",
+            refusal.0
+        );
+        assert_eq!(terminal_state(&refusal.0), TERMINAL_STATE_GUARD_REFUSED);
+        for value in ["example.test", "hooks.slack.test", "R0-not-a-real-key"] {
+            assert!(!refusal.0.contains(value), "{sink}: echoed {value}");
+        }
+    }
+    for empty in ["{}", "webhooks: []"] {
+        let n: Notifications = serde_yaml::from_str(empty).unwrap();
+        assert!(reject_withdrawn_notifications(&n).is_ok(), "{empty}");
+    }
+    assert!(reject_withdrawn_notifications(&Notifications::default()).is_ok());
+}

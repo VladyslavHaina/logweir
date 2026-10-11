@@ -98,7 +98,6 @@ fn every_namespaced_reconciler_runs_once_per_watched_namespace() {
         "preflight",
         "protection_policy",
         "recovery_catalog",
-        "rehearsal_schedule",
         "restore",
         "retention_policy",
         "topic_discovery",

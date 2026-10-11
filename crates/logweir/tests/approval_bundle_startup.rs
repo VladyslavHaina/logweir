@@ -10,8 +10,6 @@ use logweir_core::spec::ApprovalDoc;
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::io::Write;
 use std::process::Command;
 
 #[cfg(unix)]
@@ -496,117 +494,5 @@ fn startup_plan_digest_tamper_cannot_trigger_its_notification_destination() {
     assert!(
         !contacted.load(Ordering::SeqCst),
         "the digest-rejected plan supplied an unauthenticated network destination"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn late_projected_plan_replacement_cannot_redirect_the_authenticated_notification() {
-    use logweir_core::spec::AuthSpec;
-    use std::sync::atomic::Ordering;
-
-    let trusted_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let trusted_endpoint = format!("https://{}/events", trusted_listener.local_addr().unwrap());
-    let (trusted_contacted, trusted_stop, trusted_observer) = observe_connections(trusted_listener);
-    let substituted_listener =
-        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let substituted_endpoint = format!(
-        "https://{}/events",
-        substituted_listener.local_addr().unwrap()
-    );
-    let (substituted_contacted, substituted_stop, substituted_observer) =
-        observe_connections(substituted_listener);
-
-    let mut trusted: logweir_core::spec::DrillSpec =
-        serde_yaml::from_slice(include_bytes!("../../../examples/drill.yaml")).unwrap();
-    trusted.target.auth = AuthSpec::ScramSha512 {
-        username: "startup-test".into(),
-        tls: false,
-    };
-    trusted.notifications.pagerduty_routing_key = Some("AUTHENTICATED-ROUTE".into());
-    trusted.notifications.pagerduty_endpoint = Some(trusted_endpoint);
-    let trusted_plan = serde_yaml::to_string(&trusted).unwrap().into_bytes();
-    let fixture = fixture_with_plan(trusted_plan.clone());
-    let contract = contract(&fixture.bundle);
-
-    let mut substituted = trusted;
-    substituted.notifications.pagerduty_endpoint = Some(substituted_endpoint);
-    let substituted_plan = serde_yaml::to_string(&substituted).unwrap();
-
-    let dir = tempfile::tempdir().unwrap();
-    let plan = dir.path().join("restore.yaml");
-    let approval = dir.path().join("approval.pipe");
-    let approver_key = dir.path().join("approver.pub.pem");
-    let allowed = dir.path().join("allowed-clusters.json");
-    let signing = dir.path().join("signing.pem");
-    std::fs::write(&plan, &trusted_plan).unwrap();
-    let mkfifo = Command::new("mkfifo").arg(&approval).status().unwrap();
-    assert!(mkfifo.success(), "mkfifo failed: {mkfifo}");
-    std::fs::write(
-        approval.with_extension("sig"),
-        fixture.bundle.approval_sidecar.as_deref().unwrap(),
-    )
-    .unwrap();
-    std::fs::write(&approver_key, &fixture.bundle.approver_key).unwrap();
-    std::fs::write(&allowed, &fixture.bundle.allowed_clusters).unwrap();
-    std::fs::write(&signing, fixture.signing.to_pkcs8_pem().unwrap()).unwrap();
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
-    command
-        .args(["restore", "run", wire::VERSION_ARG, wire::VERSION, "--spec"])
-        .arg(&plan)
-        .arg("--approval")
-        .arg(&approval)
-        .arg("--approver-key")
-        .arg(&approver_key)
-        .arg("--allowed-clusters")
-        .arg(&allowed)
-        .arg("--signing-key")
-        .arg(&signing)
-        .args(["--triggered-by", "approval/approval-a"])
-        .env_remove("LOGWEIR_SOURCE_PASSWORD")
-        .env_remove("LOGWEIR_TARGET_PASSWORD")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    for (name, value) in env_map(&contract) {
-        command.env(name, value);
-    }
-    let child = command.spawn().unwrap();
-
-    // Opening the FIFO for writing returns only after the runner has opened it
-    // for reading. The runner reads the plan first, so it is now blocked after
-    // capturing trusted bytes and before approval verification completes.
-    let mut approval_writer = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&approval)
-        .unwrap();
-    std::fs::write(&plan, substituted_plan).unwrap();
-    approval_writer
-        .write_all(fixture.bundle.approval.as_deref().unwrap())
-        .unwrap();
-    drop(approval_writer);
-
-    let output = child.wait_with_output().unwrap();
-    trusted_stop.store(true, Ordering::SeqCst);
-    substituted_stop.store(true, Ordering::SeqCst);
-    trusted_observer.join().unwrap();
-    substituted_observer.join().unwrap();
-    let transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.status.code(), Some(1), "{transcript}");
-    assert!(
-        transcript.contains("LOGWEIR_TARGET_PASSWORD is unset"),
-        "the run must fail after authenticated startup and before Kafka construction: {transcript}"
-    );
-    assert!(
-        trusted_contacted.load(Ordering::SeqCst),
-        "the authenticated notification destination was not used"
-    );
-    assert!(
-        !substituted_contacted.load(Ordering::SeqCst),
-        "reporting followed the late projected-plan substitution"
     );
 }

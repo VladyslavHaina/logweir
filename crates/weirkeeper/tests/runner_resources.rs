@@ -1,9 +1,8 @@
 //! FX-2 — `runnerResources` is applied or refused, never dropped and never
 //! clamped.
 //!
-//! PURE ROWS ONLY. The reconciler rows — the `Restore` Job's container and
-//! the `RehearsalSchedule`'s child — are in `restore_controller.rs` and
-//! `rehearsal_controller.rs`, over their route tables.
+//! PURE ROWS ONLY. The reconciler rows — the `Restore` Job's container — are
+//! in `restore_controller.rs`, over its route table.
 //!
 //! READ [`a_valid_block_reaches_the_container_verbatim_and_in_the_right_places`]
 //! FIRST: it is the defect's own row, one layer down. Before FX-2 there was no
@@ -14,11 +13,10 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use serde_json::{json, Value};
-use weirkeeper::crds::rehearsal_schedule::{RunnerResources, QUANTITY_PATTERN};
+use weirkeeper::crds::restore::{RunnerResources, QUANTITY_PATTERN};
 use weirkeeper::job::{self, ContainerResources};
 use weirkeeper::runner_resources::{
-    parse, validate, Refused, CPU_CEILING, MEMORY_CEILING, MEMORY_LIMIT_FLOOR, REHEARSAL_PATH,
-    RESTORE_PATH,
+    parse, validate, Refused, CPU_CEILING, MEMORY_CEILING, MEMORY_LIMIT_FLOOR, RESTORE_PATH,
 };
 
 /// A `runnerResources` block, from the JSON an object would carry.
@@ -479,17 +477,6 @@ fn every_refusal_is_reported_under_its_own_field() {
             "spec.runnerResources.limits.memory",
         ]
     );
-    // The schedule's block names the schedule's path.
-    let Err(refused) = validate(
-        Some(&block(json!({"limits": {"memory": "16Gi"}}))),
-        REHEARSAL_PATH,
-    ) else {
-        panic!("refused")
-    };
-    assert_eq!(
-        refused.0[0].field,
-        "spec.bounds.runnerResources.limits.memory"
-    );
 }
 
 /// **THE NUMBERS THE DOCUMENTATION STATES ARE THE NUMBERS THE CODE USES.**
@@ -502,10 +489,7 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
     assert_eq!(MEMORY_CEILING, "8Gi", "D3 §4.1: memory limit <= 8Gi");
     assert_eq!(MEMORY_LIMIT_FLOOR, "32Mi");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for crd in [
-        "config/crd/restores.yaml",
-        "config/crd/rehearsalschedules.yaml",
-    ] {
+    for crd in ["charts/logweir/crds/restores.yaml"] {
         let text = std::fs::read_to_string(root.join(crd)).expect("the generated CRD");
         for needle in [
             format!("at most {CPU_CEILING} CPUs and {MEMORY_CEILING}"),
@@ -532,9 +516,7 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
             );
         }
     }
-    let restores = std::fs::read_to_string(root.join("config/crd/restores.yaml")).expect("the CRD");
+    let restores =
+        std::fs::read_to_string(root.join("charts/logweir/crds/restores.yaml")).expect("the CRD");
     assert!(restores.contains("ExecutionSpecInvalid"));
-    let schedules =
-        std::fs::read_to_string(root.join("config/crd/rehearsalschedules.yaml")).expect("the CRD");
-    assert!(schedules.contains("skips the slot as `AuthorizationInvalid`"));
 }

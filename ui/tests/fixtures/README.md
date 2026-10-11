@@ -21,7 +21,7 @@ because `logweir drill approve` requires `--key`, and compares the `plan_hash` l
 `await planHash(bytes)` computed in the browser's own `crypto.subtle`. The value of that test is
 that the two numbers come from two languages; a stub would make it a test of one.
 
-It was generated in this worktree with the two commands `scripts/demo.sh` uses:
+It was generated in this worktree with these two commands:
 
 ```
 openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out approver.pem
@@ -65,8 +65,8 @@ restore wizard met on a real cluster and refused, and the two rows at the end of
 about them.
 
 - **`wizard-clusters-source-only.json`** is ONE `KafkaCluster`, `role: source`, at the published `K8S`
-  listener -- the namespace `scripts/laptop-demo.sh` builds and the namespace `scripts/k8s-demo.sh`
-  runs a green `mode: newTopic` restore in. Until Task 28a step 4 filtered the target select down to
+  listener -- the namespace the withdrawn laptop and Phase B walks built and ran a green
+  `mode: newTopic` restore in. Until Task 28a step 4 filtered the target select down to
   `role: target` and rendered nothing here.
 - **`wizard-backups-schedule-running.json`** is a two-minute schedule caught mid-flight: two
   `Succeeded` `Backup` objects and, LAST in the list, one still `Running` with no `backupId` and no
@@ -135,7 +135,7 @@ volatile `metadata` keys dropped:
 reached `coverage: VisibleUserTopicsOnly`: D1's L-09-5 (the ACL-limited row) is the scenario that
 produces one, and W8's dynamic runs ended at their discovery deadline instead. It is the only
 place in the D1 W7 fixtures where a VALUE was not observed; the shape is the CRD's and
-`config/crd/backups.yaml` is where each field of it is declared.
+`charts/logweir/crds/backups.yaml` is where each field of it is declared.
 
 ## The D3 fixtures (`d3/`)
 
@@ -245,15 +245,15 @@ must not collide here. All six names are distinct.
 
 ## The preview fixtures
 
-`preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in
-the suite reads it. `preview/namespaces/default/<plural>.json` is one populated list per kind --
+`preview/` is what the legacy `ui/tests/preview-server.js` answered the page's Kubernetes reads
+from (withdrawn with the `kubectl proxy` mode, PROD-17.1 C4); today
+`crates/logweir-api/tests/status_mapping.rs` reads it. `preview/namespaces/default/<plural>.json`
+is one populated list per kind --
 clusters in both reachable states, schedules with and without a retention report and one
 suspended, backups in every phase and both verification outcomes, restores that passed, failed
 integrity and still wait for an approval, approvals verified and not -- so every badge kind and
-every panel has something to show. `preview/trustrosters.json` is the cluster-scoped roster. A
-namespace with no directory lists nothing, which is how the empty states are seen; the namespace
-`forbidden` is answered by the server with a 403, which is how the error box is seen. The shapes
-follow the suite fixtures above field for field.
+every panel has something to show. `preview/trustrosters.json` is the cluster-scoped roster.
+The shapes follow the suite fixtures above field for field.
 
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software Foundation. Logweir
 is not affiliated with or endorsed by the ASF.

@@ -13,7 +13,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONSOLE,
-  LEGACY,
   SIGNED_OUT,
   apiClient,
   mode,
@@ -98,22 +97,10 @@ test("mcp_1_a_product_api_401_on_session_is_signed_out_and_never_legacy", async 
   const record = await probeWith({ ok: false, status: 401, body: unauthenticated("unauthenticated") });
   assert.equal(record.mode, SIGNED_OUT, "the shared console with nobody signed in");
   assert.equal(mode(), SIGNED_OUT);
-  assert.notEqual(mode(), LEGACY, "BEFORE: a 401 was read as 'not the product API' -- legacy mode");
   assert.equal(signedOutReason(), "unauthenticated");
 
   await probeWith({ ok: false, status: 401, body: unauthenticated("session_expired") });
   assert.equal(signedOutReason(), "session_expired", "an expired session is told so");
-});
-
-test("mcp_1_a_kubernetes_401_through_kubectl_proxy_stays_legacy", async () => {
-  // kubectl proxy forwards /api/v1/session to kube-apiserver; a proxy whose own
-  // credential expired answers a Kubernetes Status with a NUMBER in `code`.
-  const status = { kind: "Status", apiVersion: "v1", status: "Failure", message: "Unauthorized", reason: "Unauthorized", code: 401 };
-  assert.equal((await probeWith({ ok: false, status: 401, body: status })).mode, LEGACY);
-  assert.equal((await probeWith({ ok: false, status: 404, body: null })).mode, LEGACY);
-  assert.equal((await probeWith({ ok: false, status: 401, body: null })).mode, LEGACY,
-    "a 401 with no problem document is not the product API asking for a sign-in");
-  assert.equal(signedOutReason(), null);
 });
 
 test("mcp_4_signed_out_the_client_sends_nothing_and_refuses_by_name", async () => {
@@ -1033,7 +1020,7 @@ test("review_m1_a_saved_schedule_s_next_runs_keep_its_zone", () => {
 // Review L1: a console whose first request fails is never legacy mode
 // ===========================================================================
 
-import { UNAVAILABLE, servedByConsole, unavailableReason } from "../client.js";
+import { UNAVAILABLE, unavailableReason } from "../client.js";
 import { renderUnavailable } from "../app.js";
 
 async function probeServed(answerOrThrow, extra) {
@@ -1043,27 +1030,6 @@ async function probeServed(answerOrThrow, extra) {
     probe: typeof answerOrThrow === "function" ? answerOrThrow : async () => answerOrThrow,
   }, extra || {}));
 }
-
-test("review_l1_the_console_marker_is_the_services_runtime_js_and_nothing_else", () => {
-  const saved = globalThis.LOGWEIR_CONSOLE;
-  try {
-    delete globalThis.LOGWEIR_CONSOLE;
-    assert.equal(servedByConsole(), false, "the legacy file sets no marker");
-    globalThis.LOGWEIR_CONSOLE = { servedBy: "logweir-api" };
-    assert.equal(servedByConsole(), true);
-    globalThis.LOGWEIR_CONSOLE = { servedBy: "something-else" };
-    assert.equal(servedByConsole(), false);
-  } finally {
-    if (saved === undefined) {
-      delete globalThis.LOGWEIR_CONSOLE;
-    } else {
-      globalThis.LOGWEIR_CONSOLE = saved;
-    }
-  }
-  const file = readFileSync(UI + "runtime.js", "utf8");
-  assert.doesNotMatch(file.replace(/\/\/.*$/gm, ""), /LOGWEIR_CONSOLE/,
-    "ui/runtime.js -- what kubectl proxy serves -- never claims to be the console");
-});
 
 test("review_l1_a_failed_probe_behind_the_console_is_unavailable_never_legacy", async () => {
   const problem = (status, code) => ({ ok: false, status: status,
@@ -1078,7 +1044,6 @@ test("review_l1_a_failed_probe_behind_the_console_is_unavailable_never_legacy", 
   ]) {
     const record = await probeServed(answer);
     assert.equal(record.mode, UNAVAILABLE, said + ": BEFORE, legacy mode behind the console");
-    assert.notEqual(mode(), LEGACY);
     assert.match(unavailableReason(), words, said);
   }
   const failed = await probeServed(async () => { throw new TypeError("Failed to fetch"); });
@@ -1090,16 +1055,6 @@ test("review_l1_a_failed_probe_behind_the_console_is_unavailable_never_legacy", 
   // The two answers that DO decide stay what they were.
   assert.equal((await probeServed({ ok: false, status: 401, body: unauthenticated() })).mode, SIGNED_OUT);
   assert.equal((await probeServed({ ok: true, status: 200, body: con("session.json") })).mode, CONSOLE);
-});
-
-test("review_l1_a_page_the_console_did_not_serve_still_reads_a_refusal_as_legacy", async () => {
-  // NEGATIVE CONTROL: without the marker -- `kubectl proxy` -- the same answers
-  // are legacy mode, exactly as before.
-  for (const answer of [{ ok: false, status: 404, body: null }, { ok: false, status: 503, body: null }]) {
-    resetMode();
-    const record = await selectMode({ servedByConsole: false, probe: async () => answer });
-    assert.equal(record.mode, LEGACY);
-  }
 });
 
 test("review_l1_unavailable_sends_nothing_and_renders_retry_not_a_namespace_prompt", async () => {

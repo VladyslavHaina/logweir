@@ -19,20 +19,13 @@ use support::{FakeKube, Fault, Options, TestApp, HOST, NS_A, ORIGIN};
 /// Codes observed end to end in this file, checked against the full list at
 /// the end so a new code cannot be added without a producing test or an
 /// explicit reservation.
-const RESERVED_FOR_LATER_STAGES: [ProblemCode; 3] = [
+const RESERVED_FOR_LATER_STAGES: [ProblemCode; 2] = [
     // PLAT-17.2 session authenticator.
     ProblemCode::SessionExpired,
     // PLAT-19.2 approval policy: `policy_mismatch` is now produced
     // (approval_policy::a_submission_outside_a_governed_binding_is_policy_mismatch);
     // `approval_required` stays reserved.
     ProblemCode::ApprovalRequired,
-    // D2 §3.12 step 4: refusing a REPLACEMENT schedule whose destination's
-    // locationDigest differs from the legacy one. The replacement is created
-    // through `POST .../schedules`, which does not accept a destinationRef
-    // yet (PLAT-06.2 / D2 W13), so nothing in this build can produce it. The
-    // code is published so the adoption contract is complete and a client can
-    // branch on it before the producing route exists.
-    ProblemCode::LegacyLocationMismatch,
 ];
 
 fn schedules() -> String {
@@ -491,7 +484,6 @@ fn every_code_is_produced_or_reserved() {
         "destination_invalid", // destinations::the_rules_are_evaluated_before_the_object_exists
         "destination_location_immutable", // a_rejected_rotation_is_reported_as_an_immutable_location
         "transport_downgrade_forbidden", // destinations::update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext
-        "legacy_location_unknown", // destinations::a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused
         "result_integrity_failed", // topic_discoveries::a_chunk_that_fails_its_integrity_check_refuses_the_page
         // D1 W6.
         "policy_changed", // manual_backups::an_expected_generation_that_moved_is_policy_changed

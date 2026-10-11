@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same

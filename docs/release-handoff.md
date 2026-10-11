@@ -6,9 +6,11 @@ exactly this — "shipped task IDs, commit/image identities, tested
 environments, results, limitations and rollback instructions" — so that a
 person or an agent picking this release up does not have to rebuild it from the
 platform tracker. This file is current at **`main` `fdb48cd8` (2026-09-25)**.
-The tracker ([platform-improvements.md](to-do/platform-improvements.md)) stays
-the authority for each task's full completion record, and this file is updated
-per release rather than claiming the roadmap complete.
+Each PLAT task's full completion record lived in the platform tracker, which
+was retired once all 41 rows were Done (PROD-17.1, 2026-10-11) and stays in git
+history; the product tracker ([product-expansion.md](to-do/product-expansion.md))
+carries its open rows. This file is updated per release rather than claiming
+the roadmap complete.
 
 **State at this revision.**
 - The last version tag is `v0.1.5` (`9cc78a3`). **No tag is cut at

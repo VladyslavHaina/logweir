@@ -201,11 +201,6 @@ pub const ROUTES: &[RouteAccess] = &[
         ns(&[Action::ManageDestinations]),
     ),
     route(
-        "POST",
-        "/api/v1/namespaces/{ns}/destinations:from-legacy",
-        ns(&[Action::ManageDestinations]),
-    ),
-    route(
         "GET",
         "/api/v1/namespaces/{ns}/destinations/{name}",
         ns(&[Action::ReadDestinations]),
@@ -393,16 +388,6 @@ pub const ROUTES: &[RouteAccess] = &[
         "GET",
         "/api/v1/namespaces/{ns}/protection-policies/{name}",
         ns(&[Action::ReadProtectionPolicies]),
-    ),
-    route(
-        "GET",
-        "/api/v1/namespaces/{ns}/rehearsal-schedules",
-        ns(&[Action::ReadRehearsalSchedules]),
-    ),
-    route(
-        "GET",
-        "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
-        ns(&[Action::ReadRehearsalSchedules]),
     ),
     route(
         "GET",

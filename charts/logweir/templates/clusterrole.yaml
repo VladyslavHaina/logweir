@@ -1,12 +1,12 @@
 {{- /*
-The `weirkeeper` ClusterRole — `config/rbac/role.yaml`, rule for rule. Every
-granted verb has a caller (`manifest_lint.rs::every_granted_verb_has_a_caller`
-over the source manifest; `chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file`
-holds this copy to it as a set of rules). No verb on `secrets`; `delete` on
-EXACTLY the two transient check kinds and nothing else (D2 §4.3 `gc.rs`, §5.8
-retention — the whole reasoning is in `config/rbac/role.yaml`'s header); one
-rule naming `pods/log` with `get`; nothing naming `pods/exec` or `pods/attach`.
-The reasoning is in the source file and is not repeated here.
+The `weirkeeper` ClusterRole. Every granted verb has a caller and every call
+has a grant: `manifest_lint.rs` (`every_granted_verb_has_a_caller`,
+`every_call_site_has_a_grant`) reads this role out of every rendered variant
+and the `Api<T>` calls out of `crates/weirkeeper/src/`. No verb on `secrets`;
+`delete` on EXACTLY the two transient check kinds and nothing else (D2 §4.3
+`gc.rs`, §5.8 retention); one rule naming `pods/log` with `get`; nothing naming
+`pods/exec` or `pods/attach`. Each rule's reason is the comment above it; the
+longer history is `config/rbac/role.yaml` in git before PROD-17.1 C6.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -26,32 +26,30 @@ rules:
       - trustrosters
     verbs: ["get", "list", "watch"]
   # D2 W7 (PLAT-08.1): the seventh kind, in its own rule so the six-kind list
-  # the `logweir-viewer` role shares is untouched. See `config/rbac/role.yaml`.
+  # the `logweir-viewer` role shares is untouched.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
   # D2 W8 (PLAT-09.1): the eighth kind. `list`/`watch` only — the reconciler
-  # never re-reads a discovery, and every granted verb here has a caller. See
-  # `config/rbac/role.yaml`.
+  # never re-reads a discovery, and every granted verb here has a caller.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
   # D3 W8 (PLAT-15.1): the ninth kind, `list`/`watch` for the catalog
   # reconciler's own watch, plus the `get` D3 W6 needs to read the ONE catalog a
-  # `ProtectionPolicy` names. See `config/rbac/role.yaml`.
+  # `ProtectionPolicy` names.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
     verbs: ["get", "list", "watch"]
   # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
   # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
-  # look one up (D2 §6.8). See `config/rbac/role.yaml` for the NOTE FOR W11.
+  # look one up (D2 §6.8).
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
   # `create` is one `Backup` per due slot; `patch` is PLAT-05.2's history
   # migration (D1 §6.8) — a metadata-only merge patch that removes the
   # schedule's ownerReference from a terminal run. No `update`, no `delete`.
-  # See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create", "patch"]
@@ -79,7 +77,7 @@ rules:
   # D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule, on the two TRANSIENT
   # check kinds and nothing else. `collect_expired` in each of the two
   # reconcilers, with `DeleteParams { preconditions: { uid } }` and a
-  # per-pass cap. See `config/rbac/role.yaml`.
+  # per-pass cap.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries", "preflights"]
     verbs: ["delete"]
@@ -103,7 +101,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["create", "get"]
   # `patch` on the object is the compromise-revocation finalizer and nothing
-  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION). See `config/rbac/role.yaml`.
+  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
     verbs: ["list", "watch", "patch"]
@@ -112,32 +110,18 @@ rules:
     verbs: ["patch"]
   # PLAT-14.2 (D3 W6): the `ProtectionPolicy` reconciler's `Controller::new`
   # watch and its `Api::patch_status`. No `get` on the kind and no `update`
-  # anywhere. See `config/rbac/role.yaml`.
+  # anywhere.
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies"]
     verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies/status"]
     verbs: ["patch"]
-  # PLAT-14.3 (D3 W7): the `RehearsalSchedule` reconciler's watch, its referent
-  # `get` from `controllers/approval.rs`, its `Api::patch_status`, and the ONE
-  # `Restore` it creates per due slot. No `delete`, no `update`, no verb on
-  # `secrets`. See `config/rbac/role.yaml`.
-  - apiGroups: ["logweir.dev"]
-    resources: ["rehearsalschedules"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["rehearsalschedules/status"]
-    verbs: ["patch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["restores"]
-    verbs: ["create"]
   # PLAT-16.1 / PLAT-16.2 (D3 W9): the `RetentionPolicy` reconciler's
   # `Controller::new` watch, its namespace-wide `list` for the two-policies-one-
   # destination conflict check, and its `Api::patch_status`. No `get` on the
   # kind, no `update` anywhere, and no `delete` on anything: the controller
-  # creates the retention Job and does not link the code that deletes. See
-  # `config/rbac/role.yaml`.
+  # creates the retention Job and does not link the code that deletes.
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies"]
     verbs: ["list", "watch"]

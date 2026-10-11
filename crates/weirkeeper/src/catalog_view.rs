@@ -249,8 +249,7 @@ pub fn selectable(availability: Availability, verification: Verification) -> boo
 /// — `Invalid`, `Untrusted`, or a spelling this build does not know (reachable
 /// after a rollback past a build that wrote a fifth verdict) — is a refusal no
 /// catalog row may overrule. The same rule as
-/// `protection::evidence_objective_met` and
-/// `controllers::rehearsal_schedule::candidate_from_backup`.
+/// `protection::evidence_objective_met`.
 ///
 /// # `Valid` is a pass only on a basis [`ValidBasis`] admits (TRUST-VALID-BASIS-CLASS)
 ///

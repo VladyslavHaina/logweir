@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -40,7 +40,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` gained `RehearsalSchedule` in ADR 0008 Amendment G: the enum only GROWS, but the decode is closed, so a controller image that predates that amendment cannot deserialize such an object and its whole Approval watch stalls. Nothing in this build creates one; before anything does, every rollback target must already understand the value (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).'
+        description: 'A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` also admits `RehearsalSchedule` (ADR 0008 Amendment G) so objects written before v1 still decode; standing rehearsal authorizations are withdrawn in v1 and such an Approval is refused `StandingAuthorizationRefused`. A controller image that predates Amendment G cannot deserialize such an object and its whole Approval watch stalls, so delete them before rolling back that far (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).'
         properties:
           spec:
             description: '`Approval.spec` — **four fields, all required**.'

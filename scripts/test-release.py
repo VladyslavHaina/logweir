@@ -26,7 +26,7 @@ MOCKS = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(MOCKS)
 
 NS = "release-test"
-PRODUCTS = ("weirkeeper", "logweir", "logweir-console", "logweir-ui")
+PRODUCTS = ("weirkeeper", "logweir", "logweir-console")
 TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 COPIED = ("LICENSE", "NOTICE", "README.md", "THIRD_PARTY_NOTICES.md", "docs/verify_scorecard.py",
           "third_party/LICENSE-MIT", "scripts/release.sh", "scripts/ci-changes.sh",
@@ -99,7 +99,7 @@ class Release(unittest.TestCase):
         return json.loads(self.registry.read_text())
 
     def publish(self, commit, revision=None, skip=(), platforms=None):
-        """main CI's publication of `commit`: four sha-<commit> images."""
+        """main CI's publication of `commit`: three sha-<commit> images."""
         state = self.state()
         for product in PRODUCTS:
             if product in skip:
@@ -274,7 +274,7 @@ class Resolve(Release):
         self.resolve(notice, success=False)
 
     def test_an_incomplete_publication_is_not_one(self):
-        self.publish(self.head, skip=("logweir-ui",))
+        self.publish(self.head, skip=("logweir-console",))
         _, result = self.resolve(self.head, success=False)
         self.assertIn("no complete", result.stderr)
 
@@ -300,7 +300,7 @@ class Resolve(Release):
         self.publish(self.head)
         tip = self.commit("docs/release-notes.md")
         self.publish(tip)
-        ref = f"docker.io/{NS}/logweir-ui:sha-{tip}"
+        ref = f"docker.io/{NS}/logweir-console:sha-{tip}"
         self.env["MOCK_UNREACHABLE_REF"] = ref
         _, result = self.resolve(tip, success=False)
         self.assertIn(f"could not tell whether {ref} exists", result.stderr)
@@ -360,16 +360,16 @@ class Promote(Release):
             self.assertEqual(state[f"docker.io/{NS}/{product}:{self.TAG}"]["digest"],
                              self.images["images"][product]["digest"])
         creates = self.creates()
-        self.assertEqual(len(creates), 4)
+        self.assertEqual(len(creates), 3)
         for call in creates:
             self.assertIn("--prefer-index=false", call, "one source and no index: a carbon copy")
             self.assertEqual(len([a for a in call if "@sha256:" in a]), 1)
-        self.assertEqual(self.summary.read_text().count(self.TAG), 4)
+        self.assertEqual(self.summary.read_text().count(self.TAG), 3)
 
     def test_a_re_run_writes_nothing(self):
         self.promote()
         self.promote()
-        self.assertEqual(len(self.creates()), 4)
+        self.assertEqual(len(self.creates()), 3)
 
     def test_a_tag_already_on_other_bytes_is_never_moved(self):
         state = self.state()
@@ -380,15 +380,15 @@ class Promote(Release):
         self.assertEqual(self.creates(), [], "nothing is tagged when one tag conflicts")
 
     def test_a_failed_read_is_not_an_absent_tag(self):
-        self.env["MOCK_UNREACHABLE_REF"] = f"docker.io/{NS}/logweir-ui:{self.TAG}"
+        self.env["MOCK_UNREACHABLE_REF"] = f"docker.io/{NS}/logweir-console:{self.TAG}"
         result = self.promote(success=False)
-        self.assertIn(f"could not tell whether docker.io/{NS}/logweir-ui:{self.TAG} exists", result.stderr)
+        self.assertIn(f"could not tell whether docker.io/{NS}/logweir-console:{self.TAG} exists", result.stderr)
         self.assertEqual(self.creates(), [])
         # Words that merely CONTAIN "not found" are no answer about this tag:
         # only the registry's own line for this exact reference is.
         for error in (f"ERROR: unexpected status from HEAD request to https://registry-1.docker.io/v2/{NS}/"
-                      f"logweir-ui/manifests/{self.TAG}: 404 page not found",
-                      f"ERROR: docker.io/{NS}/logweir-ui:v0.2.0-rc.2: not found"):
+                      f"logweir-console/manifests/{self.TAG}: 404 page not found",
+                      f"ERROR: docker.io/{NS}/logweir-console:v0.2.0-rc.2: not found"):
             with self.subTest(error=error):
                 self.env["MOCK_UNREACHABLE_ERROR"] = error
                 result = self.promote(success=False)

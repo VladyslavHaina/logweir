@@ -2,7 +2,7 @@
 //!
 //! # The selection rule, fixed here and inherited by Tasks 22 and 23
 //!
-//! Every file under `config/**` and `examples/**`, plus `logweir.yaml`, is
+//! Every file under `config/**` and `examples/**` is
 //! parsed with [`serde_yaml::Deserializer::from_str`] as a MULTI-DOCUMENT
 //! stream, and a document is treated as a Kubernetes manifest when it carries
 //! **both `apiVersion` and `kind`** — never by filename and never by extension.
@@ -20,14 +20,9 @@
 //! # Why all of this is in-process
 //!
 //! Global Constraint 22: every test here parses checked-in bytes, shells
-//! nothing, dials nothing, and finishes in milliseconds. Two acceptance lines
-//! for this task read as though they were tests —
-//! `bash scripts/render-install.sh --check` and `just check-secrets <ns>` —
-//! and both shell out, one to `kubectl kustomize` and one to `just`. They are
-//! `just` recipes and recorded transcript steps. The PROPERTIES they check are
-//! tested here without a subprocess: [`install_yaml_has_no_drift`] compares the
-//! rendered file against the source manifests document by document, and
-//! [`check_secrets_refuses_a_missing_secret`] parses the recipe.
+//! nothing, dials nothing, and finishes in milliseconds. `just check-secrets
+//! <ns>` shells out to `kubectl`; [`check_secrets_refuses_a_missing_secret`]
+//! parses the recipe instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -152,7 +147,7 @@ fn manifests_in(path: &Path) -> Vec<Manifest> {
 
 use serde::Deserialize;
 
-/// Every manifest under the three shipped locations.
+/// Every manifest under the two shipped locations.
 fn all_manifests() -> Vec<Manifest> {
     let mut out = Vec::new();
     for dir in ["config", "examples"] {
@@ -160,12 +155,7 @@ fn all_manifests() -> Vec<Manifest> {
             out.extend(manifests_in(&f));
         }
     }
-    out.extend(manifests_in(&repo().join("logweir.yaml")));
     out
-}
-
-fn install_file() -> Vec<Manifest> {
-    manifests_in(&repo().join("logweir.yaml"))
 }
 
 /// One `ClusterRole`'s rules, as `(apiGroups, resources, verbs)` triples with
@@ -218,16 +208,16 @@ const SIX_KINDS: [&str; 6] = [
     "trustrosters",
 ];
 
-/// The eight kinds ADR 0008's Amendments F (D2) and G (D3) added, in the plural
-/// order `config/crd/` lists them. `logweir-viewer` reads all eight in ONE
-/// rule; the controller's grants are per kind, in rules of their own, because
-/// each one has a different caller to name.
-const EIGHT_NEW_KINDS: [&str; 8] = [
+/// The seven kinds ADR 0008's Amendments F (D2) and G (D3) added, in the
+/// plural order `charts/logweir/crds/` lists them (G's `rehearsalschedules` is
+/// withdrawn in v1). `logweir-viewer` reads all seven in ONE rule; the
+/// controller's grants are per kind, in rules of their own, because each one
+/// has a different caller to name.
+const SEVEN_NEW_KINDS: [&str; 7] = [
     "backupdestinations",
     "preflights",
     "protectionpolicies",
     "recoverycatalogs",
-    "rehearsalschedules",
     "retentionpolicies",
     "topicdiscoveries",
     "trustpolicies",
@@ -236,89 +226,22 @@ const EIGHT_NEW_KINDS: [&str; 8] = [
 /// The three kinds D2 §7.2 gives `logweir-operator` `create` and `patch` on.
 const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topicdiscoveries"];
 
-/// The three kinds D3 §9 gives `logweir-operator` `create` on.
+/// The two kinds D3 §9 gives `logweir-operator` `create` on.
 ///
-/// THREE AND NOT FOUR. Amendment G added five kinds; `trustpolicies` is
-/// cluster-scoped and write-fenced to `logweir-trust-admin`, and
-/// `retentionpolicies` is write-fenced to `logweir-retention-admin`, so what an
-/// operator may bring into existence is protection, a catalog and a rehearsal.
-const THREE_D3_OPERATOR_KINDS: [&str; 3] = [
-    "protectionpolicies",
-    "recoverycatalogs",
-    "rehearsalschedules",
-];
+/// `trustpolicies` is cluster-scoped and write-fenced to
+/// `logweir-trust-admin`, `retentionpolicies` is write-fenced to
+/// `logweir-retention-admin`, and `rehearsalschedules` is withdrawn in v1, so
+/// what an operator may bring into existence is protection and a catalog.
+const TWO_D3_OPERATOR_KINDS: [&str; 2] = ["protectionpolicies", "recoverycatalogs"];
+
+/// The chart's default render: the install, since the `config/` tree went
+/// (PROD-17.1 C6). Every ClusterRole below is read from it.
+const DEFAULT_RENDER: &str = "charts/logweir/rendered/default.yaml";
 
 fn v(items: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     out.sort();
     out
-}
-
-// ---------------------------------------------------------------------------
-// The Namespace, and the order it appears in
-// ---------------------------------------------------------------------------
-
-/// `logweir.yaml` creates the namespace it installs into, and creates it FIRST.
-///
-/// Critique B **H12**, interface **I27**. Without the Namespace document the
-/// first apply on a clean cluster fails with `namespaces "logweir-system" not
-/// found` and X-APPLY is unsatisfiable — which is the whole "a stranger applies
-/// one file" claim of spec §1. Without the ORDER, the same thing happens: the
-/// documents are applied in file order and a ServiceAccount cannot precede its
-/// namespace.
-#[test]
-fn logweir_yaml_creates_its_own_namespace() {
-    let docs = install_file();
-    let namespaces: Vec<&Manifest> = docs.iter().filter(|m| m.kind == "Namespace").collect();
-    assert_eq!(
-        namespaces.len(),
-        1,
-        "logweir.yaml must carry EXACTLY ONE `kind: Namespace` document; found {}: {:?}",
-        namespaces.len(),
-        namespaces.iter().map(|m| m.name()).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        namespaces[0].name(),
-        "logweir-system",
-        "the namespace logweir.yaml creates must be `logweir-system` — \
-         `config/rbac/role_binding.yaml`'s subject names that literal"
-    );
-
-    let ns_at = docs
-        .iter()
-        .position(|m| m.kind == "Namespace")
-        .expect("just asserted there is one");
-    for (i, m) in docs.iter().enumerate() {
-        if m.namespace().is_some() {
-            assert!(
-                i > ns_at,
-                "namespaced document {} (index {i}) precedes the Namespace (index {ns_at}) in \
-                 logweir.yaml; `kubectl apply -f` applies documents in file order, so this one \
-                 fails on a clean cluster",
-                m.id()
-            );
-        }
-    }
-}
-
-/// No document in `logweir.yaml` is a Logweir custom resource.
-///
-/// The CRD-not-yet-established ordering failure is avoided BY CONSTRUCTION and
-/// not by a `kubectl wait`: a `KafkaCluster` in the same file as the CRD that
-/// defines it races the establishment on the first apply and races it
-/// differently on the second — and the second apply is the one X-APPLY reads.
-#[test]
-fn logweir_yaml_contains_no_custom_resource() {
-    for m in install_file() {
-        assert_ne!(
-            m.api_version,
-            "logweir.dev/v1alpha1",
-            "logweir.yaml carries a custom resource ({} at document {}); samples are separate \
-             files, applied second",
-            m.id(),
-            m.index
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +260,7 @@ fn logweir_yaml_contains_no_custom_resource() {
 /// looks like a transient API error.
 #[test]
 fn weirkeeper_can_read_pod_logs_and_nothing_more() {
-    let rules = rules_of("config/rbac/role.yaml", "weirkeeper");
+    let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
 
     let log_rules: Vec<_> = rules
         .iter()
@@ -393,7 +316,7 @@ fn weirkeeper_can_read_pod_logs_and_nothing_more() {
 /// The narrow statement is the one asserted here.
 #[test]
 fn weirkeeper_has_no_verb_on_secrets() {
-    for (groups, resources, verbs) in rules_of("config/rbac/role.yaml", "weirkeeper") {
+    for (groups, resources, verbs) in rules_of(DEFAULT_RENDER, "weirkeeper") {
         for r in &resources {
             assert!(
                 r != "secrets" && !r.starts_with("secrets/"),
@@ -404,7 +327,7 @@ fn weirkeeper_has_no_verb_on_secrets() {
     }
 }
 
-/// Every verb granted in `config/rbac/role.yaml` is named by at least one
+/// Every verb granted in `charts/logweir/templates/clusterrole.yaml` is named by at least one
 /// `Api::` call under `crates/weirkeeper/src/`, and `delete` is granted nowhere.
 ///
 /// Critique B **M18**. A verb nobody calls is a capability nobody audits. The
@@ -650,8 +573,6 @@ fn every_granted_verb_has_a_caller() {
             "retentionpolicies" => "RetentionPolicy",
             // PLAT-14.2 (D3 W6).
             "protectionpolicies" => "ProtectionPolicy",
-            // PLAT-14.3 (D3 W7), the other direction of the same mapping.
-            "rehearsalschedules" => "RehearsalSchedule",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
                  `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
@@ -699,7 +620,7 @@ fn every_granted_verb_has_a_caller() {
     /// EXACTLY ONE ENTRY, asserted below: a second one must show up in a diff.
     const GRANTED_FOR_UNIFORMITY: [(&str, &str); 1] = [("backupschedules", "get")];
 
-    let rules = rules_of("config/rbac/role.yaml", "weirkeeper");
+    let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
     assert!(!rules.is_empty(), "role.yaml granted no verb at all");
 
     // ----------------------------------------------------------------------
@@ -797,7 +718,7 @@ fn every_granted_verb_has_a_caller() {
     for ty in ["TopicDiscovery", "Preflight"] {
         assert!(
             callers.get(ty).is_some_and(|c| c.contains("delete")),
-            "`config/rbac/role.yaml` grants `delete` on this kind and nothing under \
+            "`charts/logweir/templates/clusterrole.yaml` grants `delete` on this kind and nothing under \
              crates/weirkeeper/src/ calls `Api<{ty}>::delete`. Remove the grant, or restore \
              the collector"
         );
@@ -871,7 +792,7 @@ fn every_granted_verb_has_a_caller() {
 /// `preflight_controller` (82/82), `topic_discovery_controller` (54/54) and
 /// `linkage` (17/17). A delete by NAME removes whatever holds that name — a
 /// same-named `Preflight` created between the LIST and the DELETE is somebody
-/// else's verdict — while `config/rbac/role.yaml`'s header, the doc comment
+/// else's verdict — while `charts/logweir/templates/clusterrole.yaml`'s header, the doc comment
 /// above, and the worker's own report all claimed "the two call sites are…".
 ///
 /// # Why this one is in `manifest_lint` and not in a controller suite
@@ -1087,16 +1008,16 @@ fn every_call_site_has_a_grant() {
             "Approval" => ("logweir.dev", "approvals"),
             "Backup" => ("logweir.dev", "backups"),
             // D2 W7 (PLAT-08.1): the seventh kind. Its two rules are in
-            // `config/rbac/role.yaml` beside the six-kind list rather than
+            // `charts/logweir/templates/clusterrole.yaml` beside the six-kind list rather than
             // inside it, so the `logweir-viewer` role is untouched.
             "BackupDestination" => ("logweir.dev", "backupdestinations"),
             // D2 W8 (PLAT-09.1): the eighth kind. `controllers/topic_discovery.rs`
             // reaches it for exactly two things — the `Controller::new` watch and
-            // `patch_status` — and `config/rbac/role.yaml` grants exactly those.
+            // `patch_status` — and `charts/logweir/templates/clusterrole.yaml` grants exactly those.
             "TopicDiscovery" => ("logweir.dev", "topicdiscoveries"),
             "BackupSchedule" => ("logweir.dev", "backupschedules"),
             // D3 W8 (PLAT-15.1): the eighth kind. Its two rules are in
-            // `config/rbac/role.yaml` beside the six-kind list, with a NOTE FOR
+            // `charts/logweir/templates/clusterrole.yaml` beside the six-kind list, with a NOTE FOR
             // W13 that folds them into D3's own RBAC pass.
             "RecoveryCatalog" => ("logweir.dev", "recoverycatalogs"),
             // D2 W9. `Preflight` is the tenth kind; `Event` is the first core
@@ -1118,12 +1039,6 @@ fn every_call_site_has_a_grant() {
             // and ONE named `RecoveryCatalog` for `get_opt`. Nothing else is
             // granted and nothing else is called.
             "ProtectionPolicy" => ("logweir.dev", "protectionpolicies"),
-            // PLAT-14.3 (D3 W7): `controllers/rehearsal_schedule.rs` reaches
-            // its own kind for the `Controller::new` watch and `patch_status`,
-            // and `controllers/approval.rs` `get`s the one a standing
-            // `Approval` names — D3 §4.3's digest is recomputed from the
-            // referent's own sealed spec, so the referent has to be read.
-            "RehearsalSchedule" => ("logweir.dev", "rehearsalschedules"),
             // PLAT-16.1 / PLAT-16.2 (D3 W9): `controllers/retention_policy.rs`
             // reaches its own kind for the `Controller::new` watch, the
             // namespace-wide conflict `list` and `patch_status`; ONE named
@@ -1186,16 +1101,11 @@ fn every_call_site_has_a_grant() {
         callers
     );
 
-    // EVERY SHIPPED COPY, not just the source manifest. An operator applies
-    // `logweir.yaml` or renders the chart; a fix that lands in `config/rbac`
-    // and nowhere else is still a broken install. The Helm TEMPLATE
+    // EVERY RENDERED COPY. The Helm TEMPLATE
     // (`charts/logweir/templates/clusterrole.yaml`) is not parseable YAML on
-    // its own — it carries `{{ include }}` lines — and is held to the install
-    // file by `chart_lint`'s render comparison, over these rendered outputs.
-    let mut files = vec![
-        "config/rbac/role.yaml".to_string(),
-        "logweir.yaml".to_string(),
-    ];
+    // its own — it carries `{{ include }}` lines — so the rendered outputs are
+    // read.
+    let mut files: Vec<String> = Vec::new();
     for path in files_under("charts/logweir/rendered") {
         let rel = path
             .strip_prefix(repo())
@@ -1466,26 +1376,6 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies/status"]),
             v(&["patch"]),
         ),
-        // PLAT-14.3 (D3 W7) — the `RehearsalSchedule` reconciler's own rows.
-        // `get` HAS a caller here where the other new kinds have none:
-        // `controllers/approval.rs` reads the referent a standing `Approval`
-        // names, because the digest it binds is recomputed from that object's
-        // sealed spec (D3 §4.3(a)).
-        (
-            v(&["logweir.dev"]),
-            v(&["rehearsalschedules"]),
-            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-        (
-            v(&["logweir.dev"]),
-            v(&["rehearsalschedules/status"]),
-            v(&["patch"]),
-        ),
-        // The ONE `Restore` a due slot creates. `create` only — nothing in the
-        // crate updates, replaces or deletes a `Restore` object, and a
-        // rehearsal that could edit its own child after creating it could
-        // change the plan its approver's scope was proved against.
-        (v(&["logweir.dev"]), v(&["restores"]), v(&["create"])),
         // PLAT-16.1 / PLAT-16.2 (D3 W9) — the `RetentionPolicy` reconciler's
         // own rows. `watch` is `Controller::new`; `list` is the conflict check,
         // which needs the whole namespace to find a second policy covering the
@@ -1510,7 +1400,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         ),
     ];
     assert_eq!(
-        rules_of("config/rbac/role.yaml", "weirkeeper"),
+        rules_of(DEFAULT_RENDER, "weirkeeper"),
         weirkeeper,
         "the `weirkeeper` ClusterRole's rules are not the expected set"
     );
@@ -1525,7 +1415,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&SIX_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D2 §7.2 and D3 §9 — the eight kinds Amendments F and G added, read
+        // D2 §7.2 and D3 §9 — the seven kinds Amendments F and G added, read
         // only, in a SEPARATE rule so the six-kind list stays byte-identical
         // to the controller's own first rule. `trustpolicies` is
         // cluster-scoped, so a `RoleBinding` of this role does not convey it;
@@ -1533,11 +1423,11 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // is a separate and visible decision.
         (
             v(&["logweir.dev"]),
-            v(&EIGHT_NEW_KINDS),
+            v(&SEVEN_NEW_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
     ];
-    let got = rules_of("config/rbac/viewer_role.yaml", "logweir-viewer");
+    let got = rules_of(DEFAULT_RENDER, "logweir-viewer");
     assert_eq!(
         got, viewer,
         "`logweir-viewer`'s rules are not the expected set"
@@ -1578,16 +1468,15 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // `the_schedule_edit_restriction_is_cel_not_rbac` records for
         // `backupschedules`.
         (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["patch"])),
-        // D3 §9 — declare protection, connect an existing archive, schedule a
-        // rehearsal. THREE of D3's four namespaced kinds;
-        // `retentionpolicies` is the fourth and is asserted ABSENT below.
+        // D3 §9 — declare protection, connect an existing archive. TWO of
+        // D3's namespaced kinds; `retentionpolicies` is asserted ABSENT below.
         (
             v(&["logweir.dev"]),
-            v(&THREE_D3_OPERATOR_KINDS),
+            v(&TWO_D3_OPERATOR_KINDS),
             v(&["create"]),
         ),
         // A `ProtectionPolicy`'s `.spec` carries NO immutability seal —
-        // `config/crd/protectionpolicies.yaml`'s only object-level rule is
+        // `charts/logweir/crds/protectionpolicies.yaml`'s only object-level rule is
         // "exactly one of destinationRef or legacyArchive" — so an objective is
         // policy an operator tunes, and both verbs are needed for the reason
         // `backupschedules` needs both: `kubectl edit` and `kubectl apply` send
@@ -1597,20 +1486,15 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies"]),
             v(&["update", "patch"]),
         ),
-        // The other two seal everything but one field each — `spec.suspend`
-        // ("the standing authorization binds a digest of this spec") and
-        // `spec.syncRequest` ("a catalog of a different location is a
-        // different catalog"). A merge patch reaches exactly that field, so
+        // A catalog seals everything but `spec.syncRequest` ("a catalog of a
+        // different location is a different catalog"). A merge patch reaches
+        // exactly that field, so
         // `patch` WITHOUT `update`: a PUT is the shape most likely to carry a
         // second, unnoticed field, which the API server would then refuse for
         // that field alone.
-        (
-            v(&["logweir.dev"]),
-            v(&["recoverycatalogs", "rehearsalschedules"]),
-            v(&["patch"]),
-        ),
+        (v(&["logweir.dev"]), v(&["recoverycatalogs"]), v(&["patch"])),
     ];
-    let operator_rules = rules_of("config/rbac/operator_role.yaml", "logweir-operator");
+    let operator_rules = rules_of(DEFAULT_RENDER, "logweir-operator");
     assert_eq!(
         operator_rules, operator,
         "`logweir-operator`'s rules are not the expected set"
@@ -1636,7 +1520,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     // `update` (which would let the bytes be swapped under a `Verified` status
     // computed from different bytes), no `delete` (which would erase an
     // authorisation a `Restore` already ran against).
-    let approver = rules_of("config/rbac/approver_role.yaml", "logweir-approver");
+    let approver = rules_of(DEFAULT_RENDER, "logweir-approver");
     assert_eq!(
         approver,
         vec![
@@ -1684,7 +1568,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     //
     // **NO VERB ON `trustrosters`**: a different kind with a different
     // lifecycle.
-    let trust_admin = rules_of("config/rbac/trust_admin_role.yaml", "logweir-trust-admin");
+    let trust_admin = rules_of(DEFAULT_RENDER, "logweir-trust-admin");
     assert_eq!(
         trust_admin,
         vec![(
@@ -1720,10 +1604,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     // **NAMESPACED**, unlike `logweir-trust-admin`: `RetentionPolicy` is a
     // namespaced kind, so this is bound per namespace and an installation can
     // have a different retention administrator for each one.
-    let retention_admin = rules_of(
-        "config/rbac/retention_admin_role.yaml",
-        "logweir-retention-admin",
-    );
+    let retention_admin = rules_of(DEFAULT_RENDER, "logweir-retention-admin");
     assert_eq!(
         retention_admin,
         vec![(
@@ -1746,9 +1627,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     // The separation is the whole reason the fifth role exists, so it is
     // asserted here rather than left to the reader of two files.
     for (file, role) in [
-        ("config/rbac/operator_role.yaml", "logweir-operator"),
-        ("config/rbac/approver_role.yaml", "logweir-approver"),
-        ("config/rbac/viewer_role.yaml", "logweir-viewer"),
+        (DEFAULT_RENDER, "logweir-operator"),
+        (DEFAULT_RENDER, "logweir-approver"),
+        (DEFAULT_RENDER, "logweir-viewer"),
     ] {
         for (_, resources, verbs) in rules_of(file, role) {
             for (kind, admin, why) in [
@@ -1778,13 +1659,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     // into one another would satisfy every assertion above and none of the
     // separation either of them exists for.
     for (file, role, own) in [
+        (DEFAULT_RENDER, "logweir-trust-admin", "trustpolicies"),
         (
-            "config/rbac/trust_admin_role.yaml",
-            "logweir-trust-admin",
-            "trustpolicies",
-        ),
-        (
-            "config/rbac/retention_admin_role.yaml",
+            DEFAULT_RENDER,
             "logweir-retention-admin",
             "retentionpolicies",
         ),
@@ -1817,8 +1694,8 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
 ///
 ///  What is asserted, and the one grant that is allowed to exist
 ///
-/// Across every shipped manifest — `logweir.yaml`, `config/rbac/`,
-/// `config/samples/` and every rendered chart file — no `Role` or `ClusterRole`
+/// Across every shipped manifest — `config/samples/` and every rendered chart
+/// file — no `Role` or `ClusterRole`
 /// rule names `secrets` (or `*`) with:
 ///
 /// * `delete`, `deletecollection` or `*`, **ever**, however scoped; or
@@ -1846,8 +1723,8 @@ fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
     /// comment: the identity bootstrap legitimately holds `get`/`patch` on the
     /// one Secret it names.
     const FORBIDDEN: [&str; 3] = ["delete", "deletecollection", "*"];
-    let mut files: Vec<String> = vec!["logweir.yaml".to_string()];
-    for dir in ["config/rbac", "config/samples", "charts/logweir/rendered"] {
+    let mut files: Vec<String> = Vec::new();
+    for dir in ["config/samples", "charts/logweir/rendered"] {
         for path in files_under(dir) {
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
@@ -1948,7 +1825,8 @@ fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
 /// unable to perform the edit the CRD now permits.
 #[test]
 fn the_schedule_edit_restriction_is_cel_not_rbac() {
-    let role = read("config/rbac/operator_role.yaml");
+    // The role's prose lives in the chart template; its rules in the render.
+    let role = read("charts/logweir/templates/human-roles.yaml");
 
     // --- no CEL, structurally -------------------------------------------
     //
@@ -1960,7 +1838,11 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     // exist.
     const RULE_KEYS: [&str; 4] = ["apiGroups", "resources", "verbs", "resourceNames"];
     const DOC_KEYS: [&str; 5] = ["apiVersion", "kind", "metadata", "rules", "aggregationRule"];
-    let doc = &manifests_in(&repo().join("config/rbac/operator_role.yaml"))[0];
+    let rendered = manifests_in(&repo().join(DEFAULT_RENDER));
+    let doc = rendered
+        .iter()
+        .find(|m| m.kind == "ClusterRole" && m.name() == "logweir-operator")
+        .expect("the default render carries `logweir-operator`");
     for key in doc
         .value
         .as_mapping()
@@ -1970,7 +1852,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     {
         assert!(
             DOC_KEYS.contains(&key),
-            "config/rbac/operator_role.yaml carries the top-level key `{key}`, which is not one \
+            "`logweir-operator` carries the top-level key `{key}`, which is not one \
              of {DOC_KEYS:?}. RBAC has no expression language and the API server ignores what it \
              does not know."
         );
@@ -1987,7 +1869,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
         {
             assert!(
                 RULE_KEYS.contains(&key),
-                "config/rbac/operator_role.yaml has a rule carrying `{key}`. A `rules[]` entry is \
+                "`logweir-operator` has a rule carrying `{key}`. A `rules[]` entry is \
                  {RULE_KEYS:?} and nothing else, so \"CEL-restricted `update`\" is not \
                  expressible here (critique B H13, claim C97)."
             );
@@ -1998,7 +1880,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     for token in ["oldSelf", "self.spec", "self.suspend"] {
         assert!(
             !role.contains(token),
-            "config/rbac/operator_role.yaml contains `{token}`. RBAC has no expression language; \
+            "charts/logweir/templates/human-roles.yaml contains `{token}`. RBAC has no expression language; \
              the restriction to `suspend` is the CRD's own CEL rule and cannot be written in a \
              ClusterRole."
         );
@@ -2007,20 +1889,20 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     // The sentence that says where the restriction actually is.
     assert!(
         role.contains("no field in which a CEL")
-            && role.contains("config/crd/backupschedules.yaml"),
-        "config/rbac/operator_role.yaml must carry the one-sentence explanation: that an RBAC \
-         rule has no field a CEL expression could go in, and that the restriction lives in \
-         config/crd/backupschedules.yaml"
+            && role.contains("charts/logweir/crds/backupschedules.yaml"),
+        "charts/logweir/templates/human-roles.yaml must carry the one-sentence explanation: that \
+         an RBAC rule has no field a CEL expression could go in, and that the restriction lives \
+         in charts/logweir/crds/backupschedules.yaml"
     );
 
     // And the CRD really does carry it, over `sourceRef` and nothing else
     // (Task 15b's shape, D1 §5.1's content).
-    let crd = manifests_in(&repo().join("config/crd/backupschedules.yaml"));
+    let crd = manifests_in(&repo().join("charts/logweir/crds/backupschedules.yaml"));
     let schema =
         &crd[0].value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
-    let validations = schema["x-kubernetes-validations"]
-        .as_sequence()
-        .expect("config/crd/backupschedules.yaml carries an object-level `.spec` CEL rule");
+    let validations = schema["x-kubernetes-validations"].as_sequence().expect(
+        "charts/logweir/crds/backupschedules.yaml carries an object-level `.spec` CEL rule",
+    );
     // ONE SEAL, PLUS WHATEVER VALIDATION RULES SIT BESIDE IT. The seal is the
     // rule that names `oldSelf`; the others (D2's destination sentinel) are
     // ordinary validation rules that run on CREATE, where a transition rule is
@@ -2072,7 +1954,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
 // ---------------------------------------------------------------------------
 
 /// Runner pods automount no ServiceAccount token; the controller Deployment is
-/// the one exemption, and the exemption is a literal path list.
+/// the one exemption, asserted on the chart's default render (arm (b)).
 ///
 /// Critique B **H14**, spec §9. Runner pods make zero Kubernetes API calls and
 /// hold the signing key; the controller is the only Kubernetes API client in
@@ -2080,18 +1962,6 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
 /// its token.
 #[test]
 fn runner_pods_do_not_automount_a_token() {
-    // THE EXEMPTION. A literal list, never a pattern: a third exempt PodSpec is
-    // a diff in these lines, reviewed on its own merits. Each entry is
-    // `<file>::<Kind>/<name>`, and the rendered install file carries the same
-    // two objects a second time — so they are named twice rather than matched
-    // by a rule that would also match something else.
-    const EXEMPT: [&str; 4] = [
-        "config/manager/deployment.yaml::Deployment/weirkeeper",
-        "config/rbac/service_account.yaml::ServiceAccount/weirkeeper",
-        "logweir.yaml::Deployment/weirkeeper",
-        "logweir.yaml::ServiceAccount/weirkeeper",
-    ];
-
     // --- arm (a), the shipped manifests -----------------------------------
     let mut checked = 0usize;
     for m in all_manifests() {
@@ -2114,27 +1984,14 @@ fn runner_pods_do_not_automount_a_token() {
                 continue;
             }
             let key = format!("{}::{}", m.origin, m.id());
-            let exempt = EXEMPT.contains(&key.as_str());
             let field = spec
                 .get("automountServiceAccountToken")
                 .and_then(Value::as_bool);
-            if exempt {
-                assert!(
-                    field.is_none(),
-                    "{key} ({where_}) is the `automountServiceAccountToken` EXEMPTION and must \
-                     not set the field at all; it is set to {field:?}. The controller is the only \
-                     Kubernetes API client in the design and removing its token stops it opening \
-                     a watch."
-                );
-            } else {
-                assert_eq!(
-                    field,
-                    Some(false),
-                    "{key} ({where_}) does not carry `automountServiceAccountToken: false`, and \
-                     it is not one of the {} exempt objects {EXEMPT:?}",
-                    EXEMPT.len()
-                );
-            }
+            assert_eq!(
+                field,
+                Some(false),
+                "{key} ({where_}) does not carry `automountServiceAccountToken: false`"
+            );
             checked += 1;
         }
     }
@@ -2161,8 +2018,12 @@ fn runner_pods_do_not_automount_a_token() {
     );
 
     // --- arm (b), the controller Deployment -------------------------------
-    let deployment = manifests_in(&repo().join("config/manager/deployment.yaml"));
-    let pod = &deployment[0].value["spec"]["template"]["spec"];
+    let rendered = manifests_in(&repo().join(DEFAULT_RENDER));
+    let deployment = rendered
+        .iter()
+        .find(|m| m.kind == "Deployment" && m.name() == "weirkeeper")
+        .expect("the default render carries the weirkeeper Deployment");
+    let pod = &deployment.value["spec"]["template"]["spec"];
     assert_eq!(
         pod["serviceAccountName"].as_str(),
         Some("weirkeeper"),
@@ -2175,24 +2036,6 @@ fn runner_pods_do_not_automount_a_token() {
          component that talks to the API server; setting it to `false` ships a control plane that \
          cannot start a watch, and setting it to `true` is a redundant line that invites the \
          first form."
-    );
-}
-
-/// `logweir.yaml`'s header carries Global Constraint 37's literal.
-#[test]
-fn the_install_file_records_blocked_images_not_published() {
-    let text = read("logweir.yaml");
-    assert!(
-        text.contains("blocked: images not published"),
-        "logweir.yaml's header must contain the literal `blocked: images not published` (Global Constraint \
-         37): the images it references are referenced by TAG, no such image has been pushed, and \
-         a locally built one is author-only and never satisfies spec §16 clause 1"
-    );
-    // It is a HEADER, not a line buried mid-file: a stranger reads the top.
-    let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
-    assert!(
-        head.contains("blocked: images not published"),
-        "the `blocked: images not published` line must be in logweir.yaml's header comment (first 60 lines)"
     );
 }
 
@@ -2237,8 +2080,7 @@ fn the_trustroster_sample_is_named_default() {
 // The selection rule itself, and drift
 // ---------------------------------------------------------------------------
 
-/// The five non-manifest files under `examples/` are skipped BY THE PARSE, and
-/// `logweir.yaml` yields exactly the expected document count.
+/// The five non-manifest files under `examples/` are skipped BY THE PARSE.
 ///
 /// The mutant this exists for: selecting manifests by a `*.yaml` glob. That
 /// passes every other test in this file and fails here, on `drill.yaml`.
@@ -2278,141 +2120,6 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         cronjob.len(),
         2,
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
-    );
-
-    // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
-    // ServiceAccount + 6 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
-    // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
-    // six, Amendment F's three and Amendment G's five — and a kind that
-    // reaches `config/crd/` without reaching
-    // `config/crd/kustomization.yaml` shows up here as a count that did not
-    // move. SIX ClusterRoles since D3 W13: `weirkeeper`, the three human
-    // roles, `logweir-trust-admin` and `logweir-retention-admin`.
-    let docs = install_file();
-    let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
-    for m in &docs {
-        *by_kind.entry(m.kind.clone()).or_default() += 1;
-    }
-    assert_eq!(
-        by_kind,
-        BTreeMap::from([
-            ("Namespace".to_string(), 1),
-            ("CustomResourceDefinition".to_string(), 14),
-            ("ServiceAccount".to_string(), 1),
-            ("ClusterRole".to_string(), 6),
-            ("ClusterRoleBinding".to_string(), 1),
-            ("Deployment".to_string(), 1),
-            ("NetworkPolicy".to_string(), 1),
-        ]),
-        "logweir.yaml's document census changed"
-    );
-    assert_eq!(
-        docs.len(),
-        25,
-        "logweir.yaml must hold exactly 25 documents"
-    );
-}
-
-/// `logweir.yaml` is what `config/` renders to — checked without a subprocess.
-///
-/// `scripts/render-install.sh --check` is the shell form and a `just` recipe;
-/// this is the same property, asserted in-process (Global Constraint 22). No
-/// kustomize transformer in `config/kustomization.yaml` rewrites anything — no
-/// `namePrefix`, no `namespace`, no `commonLabels` — so each rendered document
-/// must be VALUE-EQUAL to the source document it came from, and the two
-/// document sets must match exactly.
-#[test]
-fn install_yaml_has_no_drift() {
-    // The sources the install root actually names, in one flat list.
-    let mut sources: Vec<Manifest> = Vec::new();
-    for rel in ["config/manager", "config/crd", "config/rbac"] {
-        for f in files_under(rel) {
-            let name = f.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-            if name == "kustomization.yaml" {
-                continue;
-            }
-            // The three files `config/rbac/kustomization.yaml` deliberately
-            // does not list must not appear in the rendered file: Task 17's
-            // REQUEST fragment, and the two PER-NAMESPACE Job ServiceAccounts.
-            // Asserted below rather than skipped silently.
-            //
-            // `retention-serviceaccount.yaml` joined them at D3 W13's fix round
-            // 1 (review F2), for exactly the reason the runner's carries:
-            // enforcement Jobs run in the namespace of the `RetentionPolicy`
-            // that produced them, which is an adopter's namespace and never
-            // `logweir-system`, so rendering it here would create the account
-            // in the one namespace no enforcement Job ever runs in.
-            if name == "backup-reconciler-rbac-request.yaml"
-                || name == "backup-runner-serviceaccount.yaml"
-                || name == "retention-serviceaccount.yaml"
-            {
-                for m in manifests_in(&f) {
-                    assert!(
-                        !install_file().iter().any(|r| r.id() == m.id()),
-                        "{} is a REQUEST fragment / a per-namespace file and must not be rendered \
-                         into logweir.yaml, but {} is in there",
-                        name,
-                        m.id()
-                    );
-                }
-                continue;
-            }
-            sources.extend(manifests_in(&f));
-        }
-    }
-
-    let rendered = install_file();
-    let src_ids: BTreeSet<String> = sources.iter().map(Manifest::id).collect();
-    let out_ids: BTreeSet<String> = rendered.iter().map(Manifest::id).collect();
-    assert_eq!(
-        src_ids, out_ids,
-        "logweir.yaml's documents are not the documents config/ carries. Run `just install-yaml`."
-    );
-
-    for s in &sources {
-        let r = rendered
-            .iter()
-            .find(|r| r.id() == s.id())
-            .unwrap_or_else(|| panic!("{} is in config/ and not in logweir.yaml", s.id()));
-        assert_eq!(
-            s.value,
-            r.value,
-            "logweir.yaml's `{}` differs from `{}`. Either config/ changed and logweir.yaml was \
-             not regenerated, or logweir.yaml was edited by hand. Both are fixed by \
-             `just install-yaml`.",
-            s.id(),
-            s.origin
-        );
-    }
-}
-
-/// The author-only overlay reaches the same bases as the install root.
-///
-/// `config/overlays/local-images` cannot say `resources: [../..]` — that is a
-/// cycle, because the overlay lives inside `config/` — so it repeats the base
-/// list. This is what keeps the repetition honest: a base added to one and not
-/// the other would make the author-only install path quietly incomplete.
-#[test]
-fn the_local_images_overlay_covers_the_same_bases() {
-    let list = |rel: &str, strip: &str| -> BTreeSet<String> {
-        let docs = manifests_in(&repo().join(rel));
-        docs[0]["resources"]
-            .as_sequence()
-            .unwrap_or_else(|| panic!("{rel} has no `resources`"))
-            .iter()
-            .map(|r| {
-                r.as_str()
-                    .expect("a resource entry is a string")
-                    .trim_start_matches(strip)
-                    .to_string()
-            })
-            .collect()
-    };
-    assert_eq!(
-        list("config/kustomization.yaml", ""),
-        list("config/overlays/local-images/kustomization.yaml", "../../"),
-        "config/overlays/local-images/kustomization.yaml does not name the same bases as \
-         config/kustomization.yaml"
     );
 }
 
@@ -2467,7 +2174,7 @@ fn install_docs_name_all_operator_managed_secrets() {
     assert!(
         docs.contains("short-lived bootstrap Job")
             && docs.contains("identity.authorizedRunnerNamespaces")
-            && docs.contains("low-level `logweir.yaml`"),
+            && docs.contains("(the low-level path)"),
         "managed signer bootstrap/distribution and low-level provisioning must be distinct"
     );
     assert!(
@@ -2492,16 +2199,11 @@ fn install_docs_name_all_operator_managed_secrets() {
 }
 
 /// `just check-secrets` is its own recipe, names the current Secrets with
-/// `logweir-signing-key` first, exits 1, and is NOT part of `just apply-install`.
+/// `logweir-signing-key` first, and exits 1.
 ///
-/// Critique B **M15**, interface **I26**. `just apply-check` was two different
-/// jobs under one name: X-APPLY is "apply the file twice and read both exit
-/// codes", and the missing-Secret check is "inspect a namespace and refuse".
-/// Folding the second into the first would make the install refuse on a clean
-/// cluster — which is precisely the state X-APPLY is defined against. The live
-/// `rc=1` run is a recorded transcript step; the recipe's SHAPE is asserted
-/// here, in-process (Global Constraint 22 forbids a `#[test]` that shells
-/// `just`).
+/// Critique B **M15**, interface **I26**. The live `rc=1` run is a recorded
+/// transcript step; the recipe's SHAPE is asserted here, in-process (Global
+/// Constraint 22 forbids a `#[test]` that shells `just`).
 #[test]
 fn check_secrets_refuses_a_missing_secret() {
     let justfile = read("justfile");
@@ -2547,33 +2249,6 @@ fn check_secrets_refuses_a_missing_secret() {
         check.contains("exit 1"),
         "`just check-secrets` must exit 1 when a Secret is absent"
     );
-
-    let apply = recipe("apply-install");
-    assert!(
-        !apply.contains("check-secrets"),
-        "`just apply-install` invokes `check-secrets`. X-APPLY is defined against a CLEAN cluster \
-         that has no Secrets at all; folding the check in makes the install refuse in exactly the \
-         state it is specified to succeed in (critique B M15)."
-    );
-    // And X-APPLY really is two applies with their exit codes read directly.
-    assert_eq!(
-        apply.matches("apply --server-side -f logweir.yaml").count(),
-        2,
-        "`just apply-install` is X-APPLY: `kubectl --context docker-desktop apply --server-side \
-         -f logweir.yaml`, TWICE"
-    );
-    // STANDING RULE 12: the context is named explicitly, always — as the
-    // variable the demo drivers export, whose DEFAULT is the laptop's cluster.
-    // The literal `--context docker-desktop` was what failed the first CI run
-    // of the demo on a `kind` cluster (2026-09-12).
-    assert!(
-        apply.contains("--context \"${LOGWEIR_KUBE_CONTEXT:-docker-desktop}\""),
-        "STANDING RULE 12: `just apply-install` must pass `--context \"${{LOGWEIR_KUBE_CONTEXT:-docker-desktop}}\"` — the driver's context, defaulting to the laptop's"
-    );
-    assert!(
-        !apply.contains("| grep") && !apply.contains("|grep"),
-        "STANDING RULE 20: an exit code is never read through a pipe"
-    );
 }
 
 /// Every YAML file the gate walks actually parses.
@@ -2599,7 +2274,8 @@ fn every_shipped_yaml_file_parses() {
             seen += 1;
         }
     }
-    assert!(seen >= 20, "only {seen} YAML files were walked");
+    // The floor counted the `config/` tree's manifests before PROD-17.1 C6.
+    assert!(seen >= 15, "only {seen} YAML files were walked");
 }
 
 // ---------------------------------------------------------------------------
@@ -2635,8 +2311,9 @@ fn manifest_lint_approval_bundle_comes_from_a_secret() {
     const BUNDLE: &str = "logweir-approval-bundle";
 
     let manifests = all_manifests();
+    // The floor counted the `config/` tree's manifests before PROD-17.1 C6.
     assert!(
-        manifests.len() >= 20,
+        manifests.len() >= 15,
         "only {} manifests were walked; this gate would pass vacuously",
         manifests.len()
     );
@@ -2892,10 +2569,12 @@ fn is_digest_reference(reference: &str) -> bool {
 #[test]
 fn manifest_lint_every_image_reference_is_a_digest() {
     let refs = image_references();
+    // The CronJob example: the controller Deployment's pin left with the
+    // `config/` tree, and the chart's images are held by `check-chart.sh` arm 5.
     assert!(
-        refs.len() >= 3,
-        "only {} container image references were found across config/**, examples/** and \
-         logweir.yaml; this gate would then be asserting almost nothing. Found: {refs:?}",
+        !refs.is_empty(),
+        "only {} container image references were found across config/** and examples/**; \
+         this gate would then be asserting almost nothing. Found: {refs:?}",
         refs.len()
     );
     for (where_, reference) in &refs {
@@ -2918,8 +2597,8 @@ fn manifest_lint_every_image_reference_is_a_digest() {
 /// no list anywhere.
 ///
 /// THE MUTANT THIS EXISTS FOR: replacing the parsed selection with a hard-coded
-/// list of files — `["config/manager/deployment.yaml", "examples/cronjob-drill.yaml",
-/// "logweir.yaml"]`. That mutant passes every other assertion in this file,
+/// list of files — `["examples/cronjob-drill.yaml"]`.
+/// That mutant passes every other assertion in this file,
 /// because those are in fact the files that carry images today. It fails here,
 /// because this document is written to a temporary directory the repository
 /// has never heard of and is still selected and still has its image read.
@@ -3069,20 +2748,19 @@ fn both_dockerfiles_copy_the_fingerprint() {
     }
 }
 
-/// **`Dockerfile.console` is the fourth image and it declares what it runs.**
+/// **`Dockerfile.console` is the third image and it declares what it runs.**
 ///
 /// D0 stage 7 owns it, and four things about it are assertions rather than
 /// style — each one is a way the image can be wrong while every other gate in
 /// this repository stays green, because the other gates need a built image and
 /// this row reads checked-in bytes in microseconds:
 ///
-///   1. It COPYs the page with `Dockerfile.ui`'s TWO globs and never
-///      `COPY ui /ui`. A whole-directory copy takes `ui/README.md` and
+///   1. It COPYs the page with TWO globs and never `COPY ui /ui`. A
+///      whole-directory copy takes `ui/README.md` and
 ///      `ui/tests/` — the second of which carries a throwaway keypair (Global
 ///      Constraint 28) — and keeps taking whatever lands under `ui/` next.
-///   2. It carries all THREE licence files, where `Dockerfile.ui` carries two:
-///      this image ships a statically linked Rust binary, so the dependency
-///      graph's notices travel with it.
+///   2. It carries all THREE licence files: this image ships a statically
+///      linked Rust binary, so the dependency graph's notices travel with it.
 ///   3. It does NOT carry the org-root anchor. That anchor is in the runner and
 ///      the controller because each is an EXECUTION component; this service
 ///      verifies no archive and mints no evidence, and a file that ships
@@ -3456,66 +3134,5 @@ fn the_controller_image_owes_no_mit_notice() {
         checker.contains("ldd /usr/local/bin/weirkeeper"),
         "scripts/check-image-weirkeeper.sh must run `ldd /usr/local/bin/weirkeeper` (interface \
          I25, check 1)"
-    );
-}
-
-/// Pinning a LOCALLY BUILT digest does not make the install file publishable.
-///
-/// Global Constraint 37 and spec §11's amendment 5: "published" means a PULL
-/// from a registry the author does not control. `docker inspect --format
-/// '{{index .RepoDigests 0}}'` on a locally built image returns the digest of
-/// bytes that exist on exactly one laptop — and if that image was pushed to a
-/// local `registry:2` to obtain one, the bytes exist on exactly one laptop
-/// still. So the install file now carries `@sha256:` references AND still reads
-/// `blocked: images not published`, and those two facts are not in tension: the first is
-/// Global Constraint 7, the second is Global Constraint 37.
-///
-/// THIS IS NOT A DUPLICATE OF [`the_install_file_records_blocked_images_not_published`].
-/// That one asserts the literal is present. This one asserts the literal
-/// survived the digest pin AND that the header still says, in the same breath,
-/// that a locally built image is author-only and never satisfies spec §16
-/// clause 1 — the mutant being "record the `registry:2` run as satisfying it",
-/// which deletes the qualifying sentence and leaves the four words behind.
-#[test]
-fn the_install_file_still_records_blocked_images_not_published() {
-    let text = read("logweir.yaml");
-    let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
-
-    // The pin really did land — otherwise this test would pass on a tree where
-    // nothing changed.
-    let deployment = install_file()
-        .into_iter()
-        .find(|m| m.kind == "Deployment" && m.name() == "weirkeeper")
-        .expect("logweir.yaml carries the weirkeeper Deployment");
-    let images = images_in(&deployment);
-    assert_eq!(images.len(), 1, "the Deployment has one container");
-    assert!(
-        is_digest_reference(&images[0].1),
-        "logweir.yaml's controller image must be pinned by digest; it is `{}`",
-        images[0].1
-    );
-
-    assert!(
-        head.contains("blocked: images not published"),
-        "logweir.yaml's header must STILL carry Global Constraint 37's literal \
-         `blocked: images not published` after the digest pin. A digest that names bytes on one laptop is \
-         not a publication."
-    );
-    assert!(
-        head.contains("author-only"),
-        "logweir.yaml's header must say that a locally built or locally loaded image is \
-         `author-only`"
-    );
-    assert!(
-        head.contains("never satisfies spec §16 clause 1"),
-        "logweir.yaml's header must say that an author-only image `never satisfies spec §16 \
-         clause 1`. Deleting that clause while leaving `blocked: images not published` behind is how a local \
-         `registry:2` run comes to be recorded as a publication."
-    );
-    assert!(
-        !head.contains("referenced by tag"),
-        "logweir.yaml's header still says the images are `referenced by tag`. They are referenced \
-         by DIGEST after Task 23, and a header that describes the previous state is worse than no \
-         header: it is the one comment a stranger reads."
     );
 }

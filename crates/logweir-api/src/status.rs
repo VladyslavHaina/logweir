@@ -981,8 +981,7 @@ pub struct TeardownView {
     pub deleted: Vec<String>,
     /// Whether `deleted` was cut short by this projection's row bound.
     pub deleted_truncated: bool,
-    /// The ones that could not be removed. A non-empty list is what makes the
-    /// next rehearsal slot SKIP rather than adopt topics it did not create.
+    /// The ones that could not be removed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub failed: Vec<TeardownFailureView>,

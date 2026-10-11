@@ -95,8 +95,8 @@ engine trait method implements it.
   at `LOGWEIR_ENGINE_BIN`; the container image carries both, for linux/amd64
   and linux/arm64 (amendment below).
 
-`OsoCliEngine` currently inherits the refusing default for `validation_run`;
-its `engine_subreport` is therefore null. The upstream operator's restore CR
+Logweir never runs the engine's `validation run`, so `engine_subreport` is
+null. The upstream operator's restore CR
 write path was rejected because its dry-run gate did not establish a real
 restore. Logweir's own runner Jobs were subsequently admitted by Amendment C.
 
@@ -204,7 +204,7 @@ lint`) enforces the perimeter, the lint table and the attribute, and scans
 the tree for `unsafe` outside the perimeter as a second layer.
 
 The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
-DescribeCluster and DescribeAcls, the legacy group listing
+DescribeCluster, the legacy group listing
 (`rd_kafka_list_groups`, for the names of every group type: rust-rdkafka
 0.36.2's wrapper builds a member slice from a NULL pointer for a group without
 members and hides each group's error), and DescribeTopics (PROD-01.4a: each
@@ -377,6 +377,14 @@ particular cluster, fleet, topic, connector or backup. None contains `Kafka`, so
 Accepted from 2026-09-16. Adds five kinds to Amendment A's list: `TrustPolicy`
 (cluster-scoped), `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog` and
 `RetentionPolicy` (namespaced). With Amendment F's three that makes fourteen.
+
+**Withdrawn in v1 (OD-12, 2026-10-11): `RehearsalSchedule`.** Its CRD, its
+controller and the standing-authorization arms of `Restore` admission and the
+`Approval` controller are removed, so v1 ships thirteen kinds.
+`Approval.spec.subjectRef.kind: RehearsalSchedule` and `Restore.spec.authorization`
+stay in the schemas so objects written before v1 still decode, and both are
+refused by name (`StandingAuthorizationRefused`). The rest of this amendment is
+kept as the record of the decision (release-notes item 73).
 
 | Kind | Scope | Why it is a kind and not a field |
 |---|---|---|

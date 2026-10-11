@@ -2,10 +2,8 @@
 //!
 //! # The defect this module closes
 //!
-//! `Restore.spec.runnerResources` and a `RehearsalSchedule`'s
-//! `spec.bounds.runnerResources` were accepted by the schema, documented as
-//! "what the runner pod asks for and is capped at", and copied from the
-//! schedule onto the `Restore` it creates — and then [`crate::job::build`]
+//! `Restore.spec.runnerResources` was accepted by the schema, documented as
+//! "what the runner pod asks for and is capped at" — and then [`crate::job::build`]
 //! rendered a container with no `resources` at all. An operator who set
 //! `limits.memory: 2Gi` got a `BestEffort` pod with no cap.
 //!
@@ -27,7 +25,7 @@
 //! # The rules, in the order they are checked
 //!
 //! 1. **The quantity parses** in the grammar
-//!    [`crate::crds::rehearsal_schedule::QUANTITY_PATTERN`] admits. The
+//!    [`crate::crds::restore::QUANTITY_PATTERN`] admits. The
 //!    schema already enforces the pattern; the controller re-checks because
 //!    it never trusts a field it projects into a pod, and because a pattern
 //!    alone cannot say anything about the VALUE.
@@ -65,7 +63,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::crds::rehearsal_schedule::{ResourceQuantities, RunnerResources};
+use crate::crds::restore::{ResourceQuantities, RunnerResources};
 use crate::job::ContainerResources;
 
 /// The resource name `cpu`.
@@ -86,8 +84,6 @@ pub const MEMORY_LIMIT_FLOOR: &str = "32Mi";
 
 /// The field path of `Restore.spec.runnerResources`.
 pub const RESTORE_PATH: &str = "spec.runnerResources";
-/// The field path of `RehearsalSchedule.spec.bounds.runnerResources`.
-pub const REHEARSAL_PATH: &str = "spec.bounds.runnerResources";
 
 /// One refused quantity: the field it is in, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,9 +118,8 @@ impl std::error::Error for Refused {}
 ///
 /// `Ok(None)` for an absent block, and for a block that names no quantity at
 /// all: the container then carries no `resources`, exactly as before FX-2.
-/// `path` is the block's own field path ([`RESTORE_PATH`] or
-/// [`REHEARSAL_PATH`]); every refusal names the full path of the field it is
-/// about.
+/// `path` is the block's own field path ([`RESTORE_PATH`]); every refusal
+/// names the full path of the field it is about.
 ///
 /// # Errors
 ///

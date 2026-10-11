@@ -9,8 +9,7 @@
 //! 1. **FIELD EXISTENCE.** Every field the page cites must exist in the document
 //!    the citation names. The field sets are DERIVED, never typed here: the
 //!    newest version of each of the three JSON schemas under `schemas/`
-//!    (chosen by numeric semver), the generated `RehearsalSchedule` and
-//!    `Restore` CRD schemas, and — for the two documents with no checked-in
+//!    (chosen by numeric semver), the generated `Restore` CRD schema, and — for the two documents with no checked-in
 //!    schema — the Rust type that reads them, by round-tripping their
 //!    documented example through it (the put receipt's example in
 //!    `docs/verify-a-scorecard.md`, and the standing-authorization fixture
@@ -429,18 +428,16 @@ enum Doc {
     BackupReceipt,
     CatalogPoint,
     StandingAuthorization,
-    RehearsalSchedule,
     Restore,
 }
 
 impl Doc {
-    const ALL: [Doc; 7] = [
+    const ALL: [Doc; 6] = [
         Doc::Scorecard,
         Doc::PutReceipt,
         Doc::BackupReceipt,
         Doc::CatalogPoint,
         Doc::StandingAuthorization,
-        Doc::RehearsalSchedule,
         Doc::Restore,
     ];
 
@@ -451,7 +448,6 @@ impl Doc {
             Doc::BackupReceipt => "Backup receipt",
             Doc::CatalogPoint => "Catalog point",
             Doc::StandingAuthorization => "Standing authorization",
-            Doc::RehearsalSchedule => "RehearsalSchedule",
             Doc::Restore => "Restore",
         }
     }
@@ -471,8 +467,7 @@ impl Doc {
             Doc::StandingAuthorization => {
                 "stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"
             }
-            Doc::RehearsalSchedule => "../config/crd/rehearsalschedules.yaml",
-            Doc::Restore => "../config/crd/restores.yaml",
+            Doc::Restore => "../charts/logweir/crds/restores.yaml",
         }
     }
 
@@ -541,10 +536,9 @@ impl Fields {
             json_schema_paths(&read_json(&newest_schema("catalog-point"))),
         );
         sets.insert(
-            Doc::RehearsalSchedule,
-            crd_paths(&read("config/crd/rehearsalschedules.yaml")),
+            Doc::Restore,
+            crd_paths(&read("charts/logweir/crds/restores.yaml")),
         );
-        sets.insert(Doc::Restore, crd_paths(&read("config/crd/restores.yaml")));
         sets.insert(
             Doc::PutReceipt,
             put_receipt_paths(&read("docs/verify-a-scorecard.md")),
@@ -1340,7 +1334,6 @@ fn a_made_up_or_misattributed_field_is_refused() {
         (Doc::CatalogPoint, "topics[].config_coverage.coverage"),
         (Doc::PutReceipt, "create_only_enforced"),
         (Doc::StandingAuthorization, "scope.templateDigest"),
-        (Doc::RehearsalSchedule, "status.lastSucceeded.rtoSeconds"),
         (Doc::Restore, "status.exitCode"),
     ] {
         assert!(
@@ -1356,10 +1349,6 @@ fn a_made_up_or_misattributed_field_is_refused() {
         (Doc::CatalogPoint, "capture.verified_at"),
         (Doc::PutReceipt, "object_lock_mode"),
         (Doc::StandingAuthorization, "scope.maxRecords"),
-        (
-            Doc::RehearsalSchedule,
-            "status.lastSucceeded.allRecordsVerified",
-        ),
         (Doc::Restore, "status.signedFailure"),
     ] {
         assert!(
@@ -1378,9 +1367,8 @@ fn a_made_up_or_misattributed_field_is_refused() {
         (Doc::BackupReceipt, "integrity.level"),
         (Doc::CatalogPoint, "exit_code"),
         (Doc::PutReceipt, "outcome"),
-        (Doc::StandingAuthorization, "spec.schedule"),
-        (Doc::RehearsalSchedule, "scope.templateDigest"),
-        (Doc::Restore, "status.lastFailed.reason"),
+        (Doc::StandingAuthorization, "status.exitCode"),
+        (Doc::Restore, "scope.templateDigest"),
     ] {
         assert!(fields.any_has(elsewhere), "`{elsewhere}` is real somewhere");
         assert!(
@@ -1419,8 +1407,8 @@ fn a_made_up_or_misattributed_field_is_refused() {
             "a citation must read `[Document](definition)",
         ),
         (
-            "| A schedule cited through the operator guide. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule` |",
-            "a RehearsalSchedule citation must link its definition `../config/crd/rehearsalschedules.yaml`",
+            "| A restore cited through the operator guide. | [Restore](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here): `status.exitCode` |",
+            "a Restore citation must link its definition `../charts/logweir/crds/restores.yaml`",
         ),
     ] {
         let mutated = with_extra_row(&page, row);
@@ -1593,24 +1581,21 @@ fn every_cited_field_is_named_on_its_definition() {
     );
     assert!(problems[0].contains("`modes`"), "{problems:?}");
 
-    // The operator guide's §7g, which describes the schedule and never names
-    // the objective's field:
-    let guide_7g = definition_text(
-        "kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization",
+    // The operator guide's §12, which describes the kind and never names
+    // the backup set's field:
+    let guide_12 = definition_text(
+        "kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here",
     );
-    assert!(guide_7g.len() > 1000, "the §7g section was found");
-    let schedule = [(
-        Doc::RehearsalSchedule,
-        "spec.objectives.rtoSeconds".to_string(),
-    )];
+    assert!(guide_12.len() > 1000, "the §12 section was found");
+    let restore = [(Doc::Restore, "spec.backupSetRef".to_string())];
     assert_eq!(
-        unnamed_citations(&schedule, |_| guide_7g.clone()).len(),
+        unnamed_citations(&restore, |_| guide_12.clone()).len(),
         1,
-        "§7g does not name `rtoSeconds`, so a citation linking it must be refused"
+        "§12 does not name `backupSetRef`, so a citation linking it must be refused"
     );
     assert!(
-        unnamed_citations(&schedule, |doc| definition_text(doc.definition())).is_empty(),
-        "the CRD schema names `rtoSeconds`"
+        unnamed_citations(&restore, |doc| definition_text(doc.definition())).is_empty(),
+        "the CRD schema names `backupSetRef`"
     );
     // A name inside a longer identifier is not a name.
     assert!(!names_identifier("`last_phase_completed`", "phase"));

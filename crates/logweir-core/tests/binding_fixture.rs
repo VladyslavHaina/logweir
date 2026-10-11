@@ -8,8 +8,7 @@
 //! `scripts/test_bind_credential_rows.py` reads the same file.
 
 use logweir_core::credential_binding::{
-    archive_location_binding, destination_binding, notification_binding, retention_binding,
-    NotificationSink,
+    archive_location_binding, destination_binding, retention_binding,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, StorageProvider, TransportSecurity,
@@ -134,28 +133,6 @@ fn the_tool_and_the_product_compute_one_destination_and_retention_binding() {
                 case["uid"].as_str().expect("uid"),
                 &destination_route(&case["destinationSpec"]),
                 case["scope"].as_str().expect("scope"),
-            ),
-            case["binding"].as_str().expect("binding"),
-            "{case}"
-        );
-    }
-}
-
-#[test]
-fn the_tool_and_the_product_compute_one_notification_binding() {
-    let doc = fixture();
-    for case in cases(&doc, "notification", 4) {
-        let sink = match case["sink"].as_str() {
-            Some("pagerduty") => NotificationSink::PagerDuty,
-            Some("webhook") => NotificationSink::Webhook,
-            Some("slack") => NotificationSink::Slack,
-            other => panic!("sink {other:?}"),
-        };
-        assert_eq!(
-            notification_binding(
-                case["uid"].as_str().expect("uid"),
-                sink,
-                case["endpoint"].as_str()
             ),
             case["binding"].as_str().expect("binding"),
             "{case}"

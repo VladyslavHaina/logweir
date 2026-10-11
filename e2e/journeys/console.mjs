@@ -2,7 +2,7 @@
 // on the CURRENT console (logweir-api serving ui/, localAdmin, loopback).
 //
 // 1. REGISTRATION AND DISCOVERY THAT THE CONTROLLER COMPLETES. The console rows
-//    that exist (scripts/d2w13-ui-e2e.mjs) were written for a lab with no
+//    that existed (the one-off D2 W13 harness) were written for a lab with no
 //    controller for BackupDestination/TopicDiscovery/Preflight and assert
 //    "pending, never succeeded" -- on today's lab they fail at :353. Here the
 //    page registers a connection and a destination and starts a discovery, and
@@ -10,10 +10,10 @@
 //    Succeeded, and the discovered inventory names the topic this run created
 //    on the broker.
 // 2. STALE NAMESPACE REQUEST (PLAT-13.1, "slow A response after switching to
-//    B" and "stale submit callback"). The only live row is
-//    scripts/plat13-ui-e2e.mjs's multi stage, which needs a deployed legacy UI
-//    proxy. Here: A's list answer is held until after B has rendered, and must
-//    not paint over B; a form left behind in A must write nothing anywhere;
+//    B" and "stale submit callback"). The legacy plat13 harness that once held
+//    the only live row was withdrawn in v1 with the kubectl proxy page. Here:
+//    A's list answer is held until after B has rendered, and must not paint
+//    over B; a form left behind in A must write nothing anywhere;
 //    and a submit after the switch must land in B only -- each read back with
 //    kubectl, not only from the DOM.
 //

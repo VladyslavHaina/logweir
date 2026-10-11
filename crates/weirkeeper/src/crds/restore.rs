@@ -51,7 +51,7 @@ pub const EXACTLY_ONE_AUTHORIZATION_RULE: &str = "has(self.approvalRef) != has(s
 
 /// The message [`EXACTLY_ONE_AUTHORIZATION_RULE`] travels with.
 pub const EXACTLY_ONE_AUTHORIZATION_MESSAGE: &str =
-    "set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized";
+    "set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization, withdrawn in v1 and refused by the controller); a Restore is never unauthorized";
 
 /// The CEL rule that keeps a record bound beside the coverage
 /// it bounds: `completeMaxRecords` only with `coverage: complete`.
@@ -60,9 +60,7 @@ pub const EXACTLY_ONE_AUTHORIZATION_MESSAGE: &str =
 /// (`sample.complete_max_records` beside a sampled coverage) and the
 /// controller refuses a spec that disagrees with its plan, so this rule is the
 /// earliest of three refusals, at admission, before any approval is asked
-/// for. One rule serves both kinds: on `Restore` it sits on `.spec`, on
-/// `RehearsalSchedule` on `.spec.bounds`, and the two field names are the
-/// same.
+/// for. It sits on `Restore`'s `.spec`.
 pub const COMPLETE_MAX_RECORDS_RULE: &str =
     "!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage == 'complete')";
 
@@ -118,8 +116,68 @@ pub const SPEC_RULES: [SpecRule; 7] = [
     SpecRule::new(ORIGINAL_NAME_COVERAGE_RULE, ORIGINAL_NAME_COVERAGE_MESSAGE),
 ];
 
-/// How much of a restore phase 7 verifies, as a `Restore` or
-/// a `RehearsalSchedule` asks for it: the plan grammar's `sample.coverage`
+/// A Kubernetes quantity, in **the grammar `apimachinery` actually accepts**:
+/// a decimal number with an optional decimal SI suffix (`n`, `u`, `m`, none,
+/// `k`, `M`, `G`, `T`, `P`, `E`), an optional binary SI suffix (`Ki`, `Mi`,
+/// `Gi`, `Ti`, `Pi`, `Ei`) or an optional decimal exponent (`e9`, `E-3`).
+///
+/// # Two corrections, both from review finding F6
+///
+/// The first form of this pattern was `(m|Ki|Mi|Gi|K|M|G)?`. It **refused legal
+/// quantities** an operator would reasonably write — `2Ti` for a scratch
+/// restore, `100n`, `1e9` — with a message that says only "should match", and
+/// it **accepted `K`**, which Kubernetes does not: the decimal kilo suffix is
+/// lowercase `k`, and `Ki` is the binary one.
+///
+/// # What a pattern still cannot say
+///
+/// It cannot tell a cpu quantity from a memory one, so `cpu: 5Gi` and
+/// `memory: 100m` are both well-formed here and both nonsense. Nor can it
+/// express the numeric ceilings D3 §4.1 states (memory limit 8Gi, cpu limit 4):
+/// comparing quantities in CEL needs the `quantity` library, whose presence
+/// cannot be proved on the 1.29 floor Global Constraint 25 fixes — the same
+/// reason D2 R5 uses a regex instead of the CEL URL library. **Both are the
+/// controller's** — [`crate::runner_resources::validate`], since FX-2, which
+/// the `Restore` controller runs before anything else (such a `Restore` is
+/// refused `ExecutionSpecInvalid` before its Job exists).
+pub const QUANTITY_PATTERN: &str =
+    r"^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$";
+
+/// A cpu/memory pair.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceQuantities {
+    /// CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. A whole number of
+    /// millicores, at most 4: the **ceiling** is the controller's, not this
+    /// pattern's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
+    pub cpu: Option<String>,
+    /// Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. A whole number of
+    /// bytes (`100m` is a tenth of a byte), at most 8Gi, and as a limit at
+    /// least 32Mi: the **bounds** are the controller's, not this pattern's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(path = "QUANTITY_PATTERN"), length(max = 20))]
+    pub memory: Option<String>,
+}
+
+/// What the runner pod asks for and is capped at — FX-2 applies it to the
+/// runner container's `resources`, exactly as written, after
+/// [`crate::runner_resources::validate`] accepted every quantity.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerResources {
+    /// The runner container's `resources.requests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<ResourceQuantities>,
+    /// The runner container's `resources.limits`. A limit is never zero, and
+    /// no request is above its limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ResourceQuantities>,
+}
+
+/// How much of a restore phase 7 verifies, as a `Restore` asks for it: the
+/// plan grammar's `sample.coverage`
 /// (`logweir_core::spec::Coverage`) in the CRDs' camelCase.
 ///
 /// - **`sampled`** — today's check: a canary of `recordsPerPartition` records
@@ -682,19 +740,18 @@ pub struct RestoreSpec {
     /// approval's `planHash` must equal the sha256 of `planBytes` above, and
     /// its `subjectRef` must name this object.
     ///
-    /// # Why this became optional, and why that is not a weakening
+    /// # Why this is optional, and why that is not a weakening
     ///
-    /// A rehearsal is authorised by a STANDING document instead
-    /// ([`RestoreAuthorization`]), so exactly one of this and `authorization`
-    /// is set and CEL refuses both and neither. An OLDER controller reading a
-    /// standing-authorised `Restore` sees no `approvalRef`, resolves the empty
-    /// name to nothing and refuses terminally with `ApprovalNotReceived` —
-    /// fail closed, which is the required rollback behaviour. An unauthorised
-    /// restore has never been reachable through either field.
+    /// Exactly one of this and `authorization` is set, and CEL refuses both
+    /// and neither. `authorization` (a standing authorization) is withdrawn in
+    /// v1 and the controller refuses it by name, so in v1 this field is the
+    /// only way a `Restore` is authorised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_ref: Option<LocalRef>,
-    /// A standing authorisation, for an unattended run (D3 §4.3). Exactly one
-    /// of this and `approvalRef`.
+    /// A standing authorisation (D3 §4.3). WITHDRAWN IN V1: kept in the
+    /// schema so objects written before v1 still parse, and refused by the
+    /// controller by name (`StandingAuthorizationRefused`) before any Job.
+    /// Exactly one of this and `approvalRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<RestoreAuthorization>,
     /// The archive to restore from.
@@ -740,7 +797,7 @@ pub struct RestoreSpec {
     /// `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true:
     /// resources come from here and never from the target mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_resources: Option<super::rehearsal_schedule::RunnerResources>,
+    pub runner_resources: Option<RunnerResources>,
     /// How much of the restore phase 7 verifies: `sampled`
     /// (absent means this) or `complete` — every record of every restored
     /// partition, compared with the archive, with exact per-partition counts.
@@ -778,23 +835,16 @@ impl RestoreSpec {
     /// `""` IS THE SHAPE EVERY CALLER ALREADY HANDLED. Before `approvalRef`
     /// became optional, an empty NAME was the "no authorisation" case and each
     /// call site refused it terminally with `ApprovalNotReceived`. Collapsing
-    /// absent to `""` keeps those three refusals byte-identical — which is
-    /// also exactly what an older controller does with a standing-authorised
-    /// `Restore`, so the rollback behaviour and the current behaviour are the
-    /// same code path rather than two that have to be kept in step.
+    /// absent to `""` keeps those three refusals byte-identical.
     #[must_use]
     pub fn approval_ref_name(&self) -> &str {
         self.approval_ref.as_ref().map_or("", |r| r.name.as_str())
     }
 }
 
-/// How an unattended `Restore` is authorised.
-///
-/// THE CONTROLLER DOES NOT MINT THIS. `approvalRef` names the `Approval`
-/// carrying the signed standing scope, and `rehearsalScheduleRef` names the
-/// schedule whose sealed spec the scope's `templateDigest` is over. The
-/// controller re-verifies both every slot, and the runner re-proves
-/// `plan ∈ scope` against the mounted bundle before any client is constructed.
+/// How an unattended `Restore` was authorised before v1: a standing
+/// authorization. Withdrawn in v1 (OD-12); the type stays so objects written
+/// before v1 still parse, and the controller refuses any `Restore` carrying it.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreAuthorization {
@@ -810,8 +860,8 @@ pub struct RestoreAuthorization {
 /// `Approval`.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
 pub enum AuthorizationKind {
-    /// One signed document covering every slot of one sealed schedule, checked
-    /// again each slot and again by the runner.
+    /// One signed document covering every slot of one sealed schedule.
+    /// Withdrawn in v1.
     #[default]
     Standing,
 }
@@ -981,8 +1031,8 @@ pub struct RestoreStatus {
     /// waits for a slot in its namespace's manual-restore pool
     /// (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle
     /// and no Job exist for it yet; it starts in creation order when a slot
-    /// frees. Absent on a rehearsal's `Restore` (never queued), on every other
-    /// run, and on anything an older controller wrote.
+    /// frees. Absent on every other run, and on anything an older controller
+    /// wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<super::RunQueue>,
     /// What this run is doing right now. Absent on a `Restore` an older
@@ -1082,8 +1132,7 @@ pub struct TeardownFailure {
 /// run's prefix. The controller writes `failed` from the runner's
 /// `teardown-failed=` line (FX-44), on a run that passed and on one that
 /// failed after its creation step; it writes neither `deleted` nor
-/// `attestationKey`. A non-empty `failed` is what makes the next rehearsal
-/// slot SKIP rather than adopt topics it did not create.
+/// `attestationKey`.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Teardown {

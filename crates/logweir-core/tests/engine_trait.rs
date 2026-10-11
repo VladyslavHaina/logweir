@@ -35,52 +35,11 @@ fn the_data_engine_trait_is_object_safe() {
     let _: &dyn DataEngine = &NullEngine;
 }
 
-/// Task 19 added `validation_run` to this trait WITH a default body specifically
-/// so `NullEngine` above (and every other pre-existing implementor) keeps
-/// compiling unchanged — see `DataEngine::validation_run`'s own doc comment.
-/// That default must fail loudly (`Operational`), never fabricate a
-/// plausible-looking `Ok(EngineRun { exit_code: 0 })`: a silent fake pass here
-/// would let a caller believe an engine validation ran when it did not.
-#[test]
-fn validation_run_defaults_to_an_operational_refusal_not_a_fabricated_pass() {
-    let plan = RestorePlan {
-        set: BackupSetRef {
-            backup_id: "b".into(),
-            manifest_key: "b/manifest.json".into(),
-        },
-        storage: StorageUrl::Filesystem {
-            path: "/tmp".into(),
-        },
-        target_bootstrap: vec!["broker:9092".into()],
-        target_auth: logweir_core::engine::AuthRender::Plaintext,
-        topic_mapping: Default::default(),
-        // A fixed timestamp, not `Utc::now()` — Task 19 fix round 1, review
-        // finding F14: `logweir-core` is otherwise clock-free by convention
-        // (Global Constraint 1 governs the library; this is a test, but there
-        // is no reason to be the one place that reaches for the clock when a
-        // fixed value is exactly as good here).
-        time_window: (
-            "2026-08-29T00:00:00Z".parse().unwrap(),
-            "2026-08-30T02:00:00Z".parse().unwrap(),
-        ),
-        window_floor_source: WindowFloorSource::ArchiveManifest,
-        source_partitions: Default::default(),
-        default_replication_factor: 1,
-        checkpoint_state: "/tmp/checkpoint.json".into(),
-        checkpoint_interval_secs: 30,
-        offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
-    };
-    let err = NullEngine.validation_run(&plan).unwrap_err();
-    assert!(matches!(err, EngineError::Operational(_)));
-}
-
-/// Task 4 added `backup` to this trait WITH a default body, for the same
-/// reason `validation_run` has one: `NullEngine` above and every other
-/// pre-existing implementor keeps compiling unchanged.
+/// Task 4 added `backup` to this trait WITH a default body, so `NullEngine`
+/// above and every other pre-existing implementor keeps compiling unchanged.
 ///
 /// That default must fail loudly, never fabricate `Ok(BackupFacts { exit_code:
-/// 0, .. })`. A silent fake pass here is worse than the `validation_run` case
-/// it mirrors: `crates/logweir/src/backup/phase_run.rs` reads the ARCHIVE
+/// 0, .. })`: `crates/logweir/src/backup/phase_run.rs` reads the ARCHIVE
 /// immediately after this call returns, so a fabricated clean exit would put a
 /// real `records_per_topic` and a real covered window — read from whatever
 /// archive happens to be at the configured location — behind a backup that

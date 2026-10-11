@@ -17,14 +17,13 @@
 # seal an OPTIONAL field: an absent field can still be ADDED on update, because
 # `oldSelf` has nothing to compare against. Immutability over an object with
 # optional fields is therefore an object-level rule (critique B M3) — which is
-# exactly the shape `config/crd/backupschedules.yaml` already uses for
+# exactly the shape `charts/logweir/crds/backupschedules.yaml` already uses for
 # `BackupSchedule.spec`, inside the CRD, where it works on 1.29.
 #
 # WHY IT IS COMMENTED OUT RATHER THAN OMITTED. A `ValidatingAdmissionPolicy`
-# document applied to a 1.29 cluster is rejected — `no matches for kind` — and
-# a `logweir.yaml` carrying one would fail X-APPLY on the stated floor. This
-# file is not listed by any kustomization and is never rendered into
-# `logweir.yaml`; it is an example an adopter on 1.30+ opts into, by hand.
+# document applied to a 1.29 cluster is rejected — `no matches for kind` — so
+# an install carrying one would fail on the stated floor. This file is an
+# example an adopter on 1.30+ opts into, by hand.
 #
 # WHAT IT WOULD ADD. Nothing that a cluster-admin cannot defeat — O0, default
 # (a), accept it and say so (spec §9): a cluster-admin can delete this policy.

@@ -91,9 +91,6 @@ fn a_credential_projected_without_an_expectation_fails_closed() {
         weirkeeper::destination::AWS_ACCESS_KEY_ID_ENV,
         weirkeeper::destination::EVIDENCE_ACCESS_KEY_ID_ENV,
         logweir_core::check_contract::EVIDENCE_READ_ENV.access_key_id,
-        weirkeeper::controllers::protection_policy::ROUTING_KEY_ENV,
-        weirkeeper::controllers::protection_policy::WEBHOOK_URL_ENV,
-        weirkeeper::controllers::protection_policy::SLACK_WEBHOOK_URL_ENV,
     ] {
         assert!(names.contains(&credential), "{credential} is not guarded");
     }

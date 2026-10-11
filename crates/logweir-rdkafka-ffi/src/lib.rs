@@ -6,7 +6,7 @@
 //! unsoundly (PROD-04.0 §1.2 C1, C2, T1). This crate makes exactly those calls
 //! through `rdkafka::bindings` and hands back OWNED values: integers, `String`s,
 //! `Vec`s. It interprets nothing: what a code, a state or a clamped enum MEANS
-//! is decided in `logweir-kafka` (`groups`, `acls`), which keeps
+//! is decided in `logweir-kafka` (`groups`, `access`), which keeps
 //! `#![forbid(unsafe_code)]` and is unit-tested without a broker.
 //!
 //! | Call | librdkafka | Module |
@@ -15,7 +15,6 @@
 //! | the name listing (every group type) | `rd_kafka_list_groups` | [`groups::list_group_names`] |
 //! | group description, and the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | [`groups::describe_consumer_groups`] |
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
-//! | the broker's ACL bindings | `rd_kafka_DescribeAcls` | [`acls::describe_acls`] |
 //! | topic IDs (KIP-516) of named topics (PROD-01.4a) | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
 //! | the client's own log lines, as events on a private queue (PROD-01.2: the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
 //!
@@ -25,7 +24,7 @@
 //! `// SAFETY:` comment in this crate names the ones its block relies on.
 //!
 //! 1. **Every librdkafka object is destroyed exactly once.** Options, queues,
-//!    events, ACL filters and the name listing are each held by one owning
+//!    events and the name listing are each held by one owning
 //!    guard (`raw.rs`) whose `Drop` is the only destroy, so an early return or a
 //!    panic cannot leak one or destroy it twice. Objects a result owns (a
 //!    listing, a description, an error inside a description) are never
@@ -88,7 +87,6 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(missing_docs)]
 
-pub mod acls;
 pub mod cluster;
 pub mod groups;
 pub mod logs;

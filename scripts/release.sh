@@ -9,7 +9,7 @@
 #   release.sh verify <dir>                   SHA256SUMS and each archive's sidecar, again
 #   release.sh promote <images.json>          the version tag on the SAME digests [tag push only]
 #
-# THE IMAGES ARE NOT REBUILT. A release ships the four images main CI already
+# THE IMAGES ARE NOT REBUILT. A release ships the three images main CI already
 # built, checked and published for its commit as `sha-<commit>` — the
 # publications the PoC installs and upgrades from — and `promote` gives them
 # the version tag without changing a byte: `imagetools create` of ONE source is
@@ -26,7 +26,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export LC_ALL=C
 
-PRODUCTS=(weirkeeper logweir logweir-console logweir-ui)
+PRODUCTS=(weirkeeper logweir logweir-console)
 TARGETS=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin)
 TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 # Ancestors examined for a publication. Each docs-only commit after the newest
@@ -45,7 +45,7 @@ sha256_of() { # file -> hex
 }
 
 expected_platforms() { # product -> os/arch,... as main CI publishes it (docs/gates.md)
-  # All four, since PROD-00.2 built the runner's engine from source for arm64.
+  # All three, since PROD-00.2 built the runner's engine from source for arm64.
   echo linux/amd64,linux/arm64
 }
 
@@ -87,7 +87,7 @@ published() { # ref [file for the manifest JSON]
   die "could not tell whether $ref exists (the registry did not answer 'not found'); nothing was tagged"
 }
 
-complete_publication() { # commit -> 0 when all four sha-<commit> images exist, 1 when the registry says one does not
+complete_publication() { # commit -> 0 when all three sha-<commit> images exist, 1 when the registry says one does not
   local product
   for product in "${PRODUCTS[@]}"; do
     published "docker.io/$NS/$product:sha-$1" || return 1
@@ -152,7 +152,7 @@ resolve() {
     git merge-base --is-ancestor "$PUBLICATION" "$COMMIT" \
       || die "PUBLICATION $PUBLICATION is not an ancestor of $COMMIT"
     complete_publication "$PUBLICATION" \
-      || die "docker.io/$NS has no complete sha-$PUBLICATION publication (all four images)"
+      || die "docker.io/$NS has no complete sha-$PUBLICATION publication (all three images)"
     publication="$PUBLICATION"
     how="named by the dry run, whose own commit has no publication"
   else
@@ -250,7 +250,7 @@ assemble() {
   cp docs/verify_scorecard.py LICENSE NOTICE THIRD_PARTY_NOTICES.md "$out/"
   cp third_party/LICENSE-MIT "$out/kafka-backup-LICENSE"
 
-  # 3. The chart, packaged ONCE, its four images pinned by the digests resolved
+  # 3. The chart, packaged ONCE, its three images pinned by the digests resolved
   #    above. These bytes are the release asset AND what `promote`'s job pushes.
   jq '.images | map_values(.digest)' "$images" > "$work/digests.json"
   package=$(GITHUB_SHA="$COMMIT" TAG="$TAG" NS="$NS" IMAGE_DIGESTS="$work/digests.json" \
@@ -330,14 +330,13 @@ release_notes() { # release.json -> the GitHub Release body (Markdown)
     "  -n logweir-system --create-namespace --wait --timeout 10m",
     "```",
     "",
-    "The chart pins its four images by digest. They are main CI'"'"'s `sha-\(.images.publication)` publication (\(.images.how)), given the tag `\(.tag)` without a rebuild, so the commit tag and the version tag name the same bytes:",
+    "The chart pins its three images by digest. They are main CI'"'"'s `sha-\(.images.publication)` publication (\(.images.how)), given the tag `\(.tag)` without a rebuild, so the commit tag and the version tag name the same bytes:",
     "",
     "| Image | Reference | Platforms |",
     "|---|---|---|",
     "| controller | `\(ref("weirkeeper"))` | \(plats("weirkeeper")) |",
     "| runner | `\(ref("logweir"))` | \(plats("logweir")) |",
     "| console | `\(ref("logweir-console"))` | \(plats("logweir-console")) |",
-    "| UI | `\(ref("logweir-ui"))` | \(plats("logweir-ui")) |",
     "",
     "`\(.chart.package)` is the chart package itself (sha256 `\(.chart.sha256)`); `helm pull \(.chart.repository) --version \(.chart.version)` returns the same bytes. Before upgrading an installation, read the upgrade order in [docs/release-notes.md](https://github.com/VladyslavHaina/logweir/blob/\(.commit)/docs/release-notes.md): the CRDs move first.",
     "",

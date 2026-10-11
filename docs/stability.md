@@ -212,7 +212,7 @@ which it selected by time with **no recorded timestamp type**
   an existing value, and it can only move a verdict to the safer side** — a
   plan that ran and was signed `pass` is now refused before any target is
   created — so it is MINOR under OD-7's third case. It changes what an
-  installation does: a point-in-time restore or a scheduled rehearsal over a
+  installation does: a point-in-time restore over a
   topic recorded as `LogAppendTime` that ran before FX-8 is refused after it
   ([the limitation](#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
 - **The backup receipt's format does not change.** FX-4 already records each
@@ -1058,35 +1058,10 @@ reversible direction until the owning task rules.
 
 ## Known limitations of v0.1
 
-- **The PagerDuty `dedup_key` is an interim key, not a durable drill
-  identity.** PagerDuty's Events v2 API keys an incident by `dedup_key`, and
-  v0.1's key was `logweir-drill-{cluster_id}` — so two drill specs pointed at
-  one scratch cluster shared a single incident, and because a passing drill
-  sends `event_action: resolve`, a nightly smoke drill passing at 03:00 closed
-  the weekly full drill's open page. The key is now
-  `logweir-drill-{name-or-plan-hash-prefix}-{cluster_id}`, built from the drill
-  spec's **optional** `name` (`notifications` is documented in
-  [`docs/formats/drill-spec.md`](formats/drill-spec.md)) falling back to the
-  first 12 hex characters of the approval's `plan_hash` when the spec has no
-  name — a sha256 over the approved plan bytes, so it is distinct per spec and
-  stable across re-runs.
-
-  Two residuals, both deliberate:
-
-  - **The durable fix is an artifact-side `drill_id`** that travels on the
-    scorecard itself (backlog **T1-8**), which §12 assigns to decision **O16**
-    with default *not funded*. Until that lands, a drill's identity for
-    alerting purposes is spec-side only: rename a spec and its open incidents
-    are orphaned; copy a spec to a second file without changing its `name` and
-    the two share an incident again. Give every spec a distinct, stable `name`.
-  - **The operational-failure key is separate from the drill-result key, on
-    purpose.** Exits 1, 3 and 4 page under
-    `logweir-drill-{name-or-"unnamed"}-preflight`, never under the result key,
-    so a later passing run's `resolve` does **not** automatically close an
-    incident that says "logweir could not run this drill at all" — those are
-    different facts about different things. The cost is that a spec with no
-    `name` collapses every operational failure on the install to one incident,
-    which is the second reason to set `name`.
+- **A drill posts no notification.** Its webhook, Slack and PagerDuty post
+  is withdrawn (release notes, item 74), and a plan that names a sink is
+  refused ([`docs/formats/drill-spec.md`](formats/drill-spec.md)). Alert on
+  the runner's metrics textfile or the `Restore`'s conditions instead.
 
 - **Backups and drills are separate commands.** `logweir backup run` captures
   the source cluster and writes a signed backup receipt; `logweir restore run`
@@ -1140,8 +1115,8 @@ reversible direction until the owning task rules.
   point-in-time range you are recovering to, so a checked-in example cannot
   carry a correct one. A window that overlaps no segment is REFUSED with exit
   1 — "a drill over an empty window would report a pass that means nothing" —
-  rather than reported as a pass over nothing. `scripts/demo.sh` and the e2e
-  harness both rebind those two fields at run time, and only those two.
+  rather than reported as a pass over nothing. The e2e harness rebinds those
+  two fields at run time, and only those two.
 
 - **The exit-code contract is nearly invisible under Kubernetes** unless the
   Job is shaped with `restartPolicy: Never` and `backoffLimit: 0`. Exit 2 ("a
@@ -1290,8 +1265,8 @@ build reads host headers. A cross attempt failed on `sys/types.h` in the
 recorded 2026-09-11 trial; the native arm64 build took 182 s with cached base
 layers. These are historical measurements, not build-time guarantees.
 
-Local rebuilds change image digests. `config/manager/deployment.yaml` and
-`logweir.yaml` retain local digest pins; the Helm chart uses `:latest` for the
+Local rebuilds change image digests. The runner pin in
+`crates/weirkeeper/src/job.rs` is a digest; the Helm chart uses `:latest` for the
 Logweir repositories by the owner's 2026-09-12 decision. Third-party chart
 images remain digest-pinned. See the [chart guide](../charts/logweir/README.md)
 for the pull-policy and registry consequences.
@@ -1399,12 +1374,10 @@ coverage and portability and PROD-05.2 applies a reviewed target configuration:
 ### `engine_subreport` is always null in v0.1
 
 The scorecard reserves `engine_subreport` for the upstream engine's own
-verbatim evidence report. **v0.1 never populates it.** `OsoCliEngine` does not
-override `DataEngine::validation_run`, so Logweir never runs the engine's
-`validation run` subcommand and nothing is ever written under
-`logweir/<run_id>/engine-validation/` for phase 8 to retain. The default
-implementation refuses rather than fabricating a report, so there is no risk of
-a scorecard claiming an engine validation that never happened — the field is
+verbatim evidence report. **v0.1 never populates it.** Logweir never runs the
+engine's `validation run` subcommand (phase 7's unused call to it was removed
+in v1, release-notes item 74), so nothing is ever written under
+`logweir/<run_id>/engine-validation/` for phase 8 to retain — the field is
 simply `null`.
 
 The structured log explains the missing report. The signed scorecard cannot
@@ -1413,9 +1386,8 @@ phase 8's own record is appended. Read null as "no engine sub-report retained",
 not as a successful upstream validation. Populated format fixtures are
 explained in the [fixture notes](../e2e/fixtures/README.md).
 
-`crates/logweir-engine-oso/tests/engine.rs` and
 `e2e/tests/full_drill.rs::the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
-record this limitation and fail when the implementation changes.
+records this limitation and fails when the implementation changes.
 
 ### A crashed restore is not resumable in v0.1
 
@@ -1445,11 +1417,9 @@ or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersIn
 message names the topics, the partitions and the count. To restore such an archive as it is, state
 `restore.allow_transaction_markers: true` in the plan. The field is inside `plan_hash`, so the
 changed plan needs a new approval. Under the override the check is skipped, and the signed
-scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
-cannot state the override, so its slots over such an archive are refused and its
-`lastFailed.reason` names the refusal, nor does a standing authorization: a `Restore` under
-`spec.authorization` whose plan states the override is refused as outside the signed scope, because
-no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
+scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A standing
+authorization cannot state it either: a run under one whose plan states the override is refused as
+outside the signed scope, because no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
 the run with `GuardRefused`. A segment after the window that the store does not hold or the check
 cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
 output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
@@ -1534,10 +1504,7 @@ unknown. It is never read as `CreateTime` (rule 3: old evidence is never read as
 guarantee), and it is not refused, because that would stop every point-in-time restore of every
 archive written before FX-4, where a `CreateTime` topic's selection is right.
 
-A `RehearsalSchedule` states the opt-in as `spec.point.timeBasis: producerTime`, rendered into
-every slot's plan and bound by its standing authorization's `templateDigest`; a schedule without it
-has every slot over a topic recorded as `LogAppendTime` refused, and records
-`lastFailed.reason: PointInTimeByProducerTime` ([kubernetes.md](kubernetes.md) §7g). Measured by
+Measured by
 `e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output` (the topic-override
 arm: refused with no target topic, then run and labelled with the opt-in) and
 `e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`
@@ -1663,9 +1630,6 @@ just mutant-clean
 `just deps-count` fails above 50,000 files in `target/debug/deps` and prints
 the count on each run. This guards against accumulated mutation artifacts
 making Cargo's fingerprint checks dominate test time.
-
-Notification POSTs use a 5 s connection timeout and 10 s overall timeout.
-Transport failures are logged and do not change a signed drill result.
 
 **Image smoke checks require Docker.** `just smoke` builds the runner image
 for `$LOGWEIR_IMAGE_PLATFORM` (this host's architecture by default) and checks
@@ -2134,9 +2098,8 @@ code (when the code is one of I9's states and the sentence named it with `: `) o
   read as a reason, and the condition's message is byte for byte what it was before this line
   existed.
 
-**Not printed by the other three binaries that exit 3.** `logweir check run` prints
-`refusal-reason=CheckContractMismatch` and nothing else on stdout, `logweir notify deliver` prints
-no line at all for a refused event document, and `logweir-retention` prints
+**Not printed by the other two binaries that exit 3.** `logweir check run` prints
+`refusal-reason=CheckContractMismatch` and nothing else on stdout, and `logweir-retention` prints
 `retention-refusal=<code>` for the one refusal the controller names. Their contracts are below and
 are unchanged, and none of them is given a line token.
 
@@ -2514,8 +2477,9 @@ a slot may run:
 | `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
 
 **Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
-defined from `formatVersion` 1.1.0. `logweir drill approve --standing` mints 1.1.0 exactly when the
-scope carries one of them, and 1.0.0 — byte for byte as before — otherwise; the DSSE payload type is
+defined from `formatVersion` 1.1.0. `logweir drill approve --standing` (withdrawn in v1,
+release-notes item 73) minted 1.1.0 exactly when the scope carried one of them, and 1.0.0 — byte for
+byte as before — otherwise; the DSSE payload type is
 unchanged. This build refuses either field under a document whose minor is below 1 or not a number,
 `completeMaxRecords` beside a scope that does not authorise complete coverage, a bound of 0, and
 **a scope that authorises `coverage: complete` with any `maxPartitions` but 0** (the minter refuses
@@ -2581,8 +2545,9 @@ genuinely signed document goes looking at the wrong thing.
 claims to be; the signed document's `subjectRef.uid` says which schedule the human authorised; the
 runner requires them to agree. What the runner does **not** check is `scope.templateDigest` —
 whether the scope matches the schedule's sealed spec. That is recomputed from the
-`RehearsalSchedule`'s own spec and is the controller's each-slot check (D3 §4.3(a)); a runner
-holding no cluster credential cannot read that spec at all.
+`RehearsalSchedule`'s own spec and was the controller's each-slot check (D3 §4.3(a)), withdrawn
+in v1 with the kind (release-notes item 73); a runner holding no cluster credential cannot read
+that spec at all.
 
 **The expiry is checked, against the node's clock, as a second line of defence.** `issuedAt` must
 not be in the future, `expiresAt` must not have passed, and `expiresAt - issuedAt` must not exceed
@@ -2621,106 +2586,9 @@ here.
 
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 
-`logweir notify deliver --event <path>` posts one protection event
-(`application/vnd.logweir.protection-event+json;version=1.0.0`,
-[docs/formats/protection-event.md](formats/protection-event.md)) to every configured sink. It is the
-runner-side half of PLAT-14.2: the protection controller decides what the alert says and has no way
-to send it — `config/rbac/role.yaml` gives it no Secret verb, so it cannot read a routing key, and it
-is given no HTTP egress — so delivery runs as a short Job built from the runner image, with the sink
-credentials projected into that Job and nowhere else.
-
-**Sinks come from the environment, never from a flag.** A routing key or a signed webhook URL on an
-argv is visible in `/proc/<pid>/cmdline`, in every process listing on the host, and in the Job spec
-anyone with pod read can see — the same reason `logweir cluster-probe` takes its SASL password from
-`LOGWEIR_SOURCE_PASSWORD` and offers no `--password`.
-
-| variable | sink name | what is posted |
-|---|---|---|
-| `PAGERDUTY_ROUTING_KEY` | `pagerduty` | one Events v2 enqueue, `trigger`/`resolve` from `alert.action`, `dedup_key` = `alert.key` |
-| `NOTIFY_WEBHOOK_URL` | `webhook` | one POST of the event document |
-| `NOTIFY_SLACK_WEBHOOK_URL` | `slack` | one POST of `{"text": …}` |
-| `PAGERDUTY_ENDPOINT` | — | not a sink: the PagerDuty service region, `https://` only, US default |
-| `NOTIFY_{PAGERDUTY,WEBHOOK,SLACK}_CREDENTIAL_BINDING[_EXPECTED]` | — | not sinks (FX-20): each sink Secret's `logweir-binding` and the controller's expectation; when an expectation is set and the two differ, that sink is `refused` |
-
-**A variable that is present and blank is not a configured sink.** `std::env::var` returns `Ok("")`
-— not `Err(NotPresent)` — for a Kubernetes `env:` entry with an empty `value:`, and a `secretKeyRef`
-to a key that exists and is blank projects the same thing.
-
-**Stdout is one line per configured sink**, in the fixed order `pagerduty`, `webhook`, `slack`, as
-the final lines the process writes:
-
-```
-notify-result=pagerduty:ok
-notify-result=webhook:failed
-notify-result=slack:ok
-```
-
-A reader scans a bounded tail and matches **by key name**, never by position — the rule erratum E4
-draws for `refusal-reason=` and `offset-report-key=`, and for the same reason: a pod log is stdout
-and stderr merged in nondeterministic order.
-
-**A delivery with no configured sink prints exactly one line and exits 1:**
-
-```
-notify-result=none:unconfigured
-```
-
-**FX-20 adds a third per-sink value, `refused`**: the sink's credential Secret
-carried no `logweir-binding`, or one written for another policy, sink or
-endpoint, so nothing was composed or dialled for it; the other sinks are still
-attempted. An older controller knows no `refused` value and reads such a run by
-its exit code alone (`Failed`). The set of values is closed: `ok`, `failed`,
-`refused`, and `none:unconfigured`.
-
-`none` is not a sink and cannot collide with one, and `unconfigured` is deliberately not `failed`:
-a sink that refused and an alert with nowhere to go are different findings that an operator fixes
-in different places. **Do not read a bare exit 0 as delivered.** Before this line existed, "nothing
-was configured" and "every sink accepted" were the same machine-readable answer — empty stdout,
-exit 0 — so a `secretKeyRef` that had been rotated, renamed or left blank made a caller record a
-delivery that reached nobody. A delivery Job that delivered nothing did not deliver; the
-controller's retries exhaust and `NotificationsDelivered=False` is the correct record of it.
-
-**The exit codes.**
-
-| code | meaning |
-|---|---|
-| **0** | every configured sink accepted, and at least one was configured |
-| **1** | at least one configured sink did not accept (`notify-result=…:failed` says which), or was refused before anything was built or dialled because its credential Secret is not bound to this policy, sink and endpoint (`notify-result=…:refused`, FX-20), **or** no sink was configured at all (`notify-result=none:unconfigured`) |
-| **3** | the event document is missing, unreadable, larger than a ConfigMap can hold, of another `format_version` major, or malformed — **nothing was posted** |
-
-**2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
-Global Constraint 11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and
-signed" and 4 for "signing or lock-proof failed"; `notify deliver` signs nothing and writes no
-artifact, so either code would make a delivery failure indistinguishable from a drill result to
-every reader of the exit contract, including `weirkeeper::conditions::reason_for_exit`.
-
-**1 and 3 are distinguishable without parsing prose.** A refusal posted nothing, so it prints no
-`notify-result=` line at all; a delivery failure prints one per configured sink, and a delivery with
-nowhere to go prints `none:unconfigured`. A controller reads the exit code *and* the lines, which is
-what D3 §3.4 specifies.
-
-**A failed notification never rewrites a backup result.** This subcommand writes no Kubernetes
-object of any kind — it reads a file, posts to sinks, and exits. Delivery failures reach a `Backup`
-only through what the protection controller chooses to write on `protectionpolicies/status`.
-
-**Sink credentials never reach stdout, stderr, a `tracing` field or a `Debug` output.** The routing
-key travels in the PagerDuty request body and is never printed; every sink URL that reaches a
-display surface is reduced to `scheme://host` by `redact_url` first, on the success arm and the
-failure arm alike. All three streams are asserted together, over the shipped process with a routing
-key really set, because a pod log has no stream selector and a `tracing` field is a surface a log
-aggregator reads.
-
-**The event's `summary` is the only free prose, and a claim in it is edited, not obeyed and not
-fatal.** If the controller's `summary` contains a phrase claiming exhaustive verification, the
-phrase is replaced with `[claim removed]`, the edit is reported on a named log line, and the alert
-**is still delivered** — Logweir verifies a sample, and dropping the page would punish the responder
-for the controller's wording. Identifiers are never scanned: `exhaustive` is a legal DNS-1123 label,
-so a `ProtectionPolicy` named `exhaustive-backups` delivers normally. The one hard refusal is a
-`verification_scope` outside `sampled`/`degraded`/`none`, which reads an enumerated field this
-product serializes and cannot be tripped by a naming choice.
-
-**Timeouts are the drill path's**: 5 s to connect and 10 s overall per POST, so three sinks cost at
-most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
+Withdrawn in v1 (release notes, item 74): the subcommand is gone with the
+alert sinks it served, and an argv that names it is refused by clap
+(`unrecognized subcommand 'notify'`).
 
 ### `logweir check run`'s exit codes, its frames and the one key it may write (D2 §4.2)
 
@@ -3263,20 +3131,10 @@ spend).
   it supports, and **refuses** a document whose major is higher than it
   supports, rather than guessing at a shape it has never seen.
 
-  **One document is a deliberate exception and it is named here rather than
-  left to be discovered: the protection event**
-  (`application/vnd.logweir.protection-event+json;version=1.0.0`,
-  [formats/protection-event.md](formats/protection-event.md)). It **refuses**
-  unknown fields instead of ignoring them. The policy above is about SIGNED,
-  ARCHIVAL documents read years later by something that was not there when
-  they were written; the protection event is neither — it is a control message
-  passed between the protection controller and a delivery Job whose image the
-  same chart pins, and the thing a lenient reader would silently drop is an
-  alert detail an on-call responder then never learns. **The cost is real and
-  is stated:** a minor bump that adds a field is *not* backward-compatible for
-  an older runner, which exits 3 and posts nothing, so the controller and the
-  runner image upgrade together. The chart already pins both, so this binds a
-  hand-edited deployment rather than a supported upgrade.
+  The protection event
+  ([formats/protection-event.md](formats/protection-event.md)) was the one
+  exception: it refused unknown fields. It is no longer written (release
+  notes, item 74).
 
 - **CLI flags and exit codes are stable within a major.** A given Logweir
   major version does not remove or repurpose a flag, nor change the meaning
@@ -3389,12 +3247,12 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
 | 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07), through v0.4.0 (2026-10-06); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine (0.23.3 since PROD-00.3f), so what matters is the archive. The CLI drill reads 0.21, 0.22 and 0.23 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
-| 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
+| 4 | **`OsoCliEngine::validation_run`** | Not implemented: the engine's own validation run is never executed (v1 removed phase 7's unused call, release-notes item 74), and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
 | 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
-| 9 | **A Helm chart — delivered** | The self-contained chart now ships alongside kustomize. `just chart-check` verifies copied assets and rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
+| 9 | **A Helm chart — delivered** | The chart is the install. `just chart-check` verifies rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
 | 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |
 | 11 | **Key generation and rotation — partly delivered** | The chart's bootstrap Job now generates and retains the installation signing key (PLAT-02.1), and a `TrustPolicy` carries a key lifecycle so a rotation is an overlap rather than a replacement (PLAT-19.1). Still not shipped: an in-place runner cutover to a new signing key (`identity.activeSigningSecretName` and `logweir identity rotate` do not exist), and approver keys remain operator-generated. | [keys.md](keys.md), *The supported procedure* |
 | 12 | **A PVC for the runner pod** | The runner streams and writes to an emptyDir; a large restore is bounded by that, and a persistent volume would be a new lifecycle to own. | spec §13 |

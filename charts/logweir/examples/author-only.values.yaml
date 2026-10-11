@@ -42,10 +42,11 @@ identity:
   bootstrapImage: logweir:check
   bootstrapImagePullPolicy: Never
   allowMutableBootstrapImageForDevelopment: true
-# AND THE PAGE'S IMAGE, for the same reason (Task 39 moved the page out of a
-# ConfigMap and into `logweir-ui`). `just image-ui` builds and loads this tag;
-# without it the chart's default names a repository this branch cannot pull,
-# and `helm install --wait` times out on a Deployment that never becomes Ready.
-ui:
-  imagePullPolicy: Never
-  image: logweir-ui:check
+# AND THE CONSOLE'S IMAGE, for the same reason. `just image-console` builds and
+# loads this tag; without it the chart's default names a repository this branch
+# cannot pull, and `helm install --wait` times out on a Deployment that never
+# becomes Ready. It changes nothing unless `api.console.enabled` is on.
+api:
+  console:
+    imagePullPolicy: Never
+    image: logweir-console:check

@@ -56,10 +56,6 @@ pub enum ProblemCode {
     OriginMismatch,
     /// 404 — no such route or no such object.
     NotFound,
-    /// 404 — a legacy object carries no frozen execution and the installation
-    /// publishes no legacy addressing, so no destination can be derived from
-    /// facts (D2 §3.12 step 2c).
-    LegacyLocationUnknown,
     /// 405 — the route exists and does not accept this method.
     MethodNotAllowed,
     /// 409 — the idempotency key was already used with a different request.
@@ -75,9 +71,6 @@ pub enum ProblemCode {
     /// 409 — `:update-access` tried to change a destination's transport;
     /// `spec.transport.security` is immutable in BOTH directions (D2 R2).
     TransportDowngradeForbidden,
-    /// 409 — a legacy adoption named a destination whose `locationDigest`
-    /// differs from the one derived from the legacy object (D2 §3.12).
-    LegacyLocationMismatch,
     /// 409 — a stored result chunk failed its owner, immutability or digest
     /// check (D2 §5.6). The page is refused rather than served from bytes
     /// whose provenance did not hold.
@@ -122,7 +115,7 @@ pub enum ProblemCode {
 impl ProblemCode {
     /// Every code, in declaration order. The OpenAPI document and the tests
     /// iterate this list, so a new code cannot be undocumented or untested.
-    pub const ALL: [ProblemCode; 33] = [
+    pub const ALL: [ProblemCode; 31] = [
         ProblemCode::MalformedRequest,
         ProblemCode::HeaderNotAllowed,
         ProblemCode::IdempotencyKeyRequired,
@@ -134,7 +127,6 @@ impl ProblemCode {
         ProblemCode::NamespaceForbidden,
         ProblemCode::OriginMismatch,
         ProblemCode::NotFound,
-        ProblemCode::LegacyLocationUnknown,
         ProblemCode::MethodNotAllowed,
         ProblemCode::IdempotencyConflict,
         ProblemCode::StateConflict,
@@ -143,7 +135,6 @@ impl ProblemCode {
         ProblemCode::PolicyChanged,
         ProblemCode::DestinationLocationImmutable,
         ProblemCode::TransportDowngradeForbidden,
-        ProblemCode::LegacyLocationMismatch,
         ProblemCode::ResultIntegrityFailed,
         ProblemCode::CursorExpired,
         ProblemCode::PreconditionFailed,
@@ -173,7 +164,6 @@ impl ProblemCode {
             ProblemCode::NamespaceForbidden => "namespace_forbidden",
             ProblemCode::OriginMismatch => "origin_mismatch",
             ProblemCode::NotFound => "not_found",
-            ProblemCode::LegacyLocationUnknown => "legacy_location_unknown",
             ProblemCode::MethodNotAllowed => "method_not_allowed",
             ProblemCode::IdempotencyConflict => "idempotency_conflict",
             ProblemCode::StateConflict => "state_conflict",
@@ -182,7 +172,6 @@ impl ProblemCode {
             ProblemCode::PolicyChanged => "policy_changed",
             ProblemCode::DestinationLocationImmutable => "destination_location_immutable",
             ProblemCode::TransportDowngradeForbidden => "transport_downgrade_forbidden",
-            ProblemCode::LegacyLocationMismatch => "legacy_location_mismatch",
             ProblemCode::ResultIntegrityFailed => "result_integrity_failed",
             ProblemCode::CursorExpired => "cursor_expired",
             ProblemCode::PreconditionFailed => "precondition_failed",
@@ -211,7 +200,7 @@ impl ProblemCode {
             ProblemCode::Forbidden
             | ProblemCode::NamespaceForbidden
             | ProblemCode::OriginMismatch => StatusCode::FORBIDDEN,
-            ProblemCode::NotFound | ProblemCode::LegacyLocationUnknown => StatusCode::NOT_FOUND,
+            ProblemCode::NotFound => StatusCode::NOT_FOUND,
             ProblemCode::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             ProblemCode::IdempotencyConflict
             | ProblemCode::StateConflict
@@ -220,7 +209,6 @@ impl ProblemCode {
             | ProblemCode::PolicyChanged
             | ProblemCode::DestinationLocationImmutable
             | ProblemCode::TransportDowngradeForbidden
-            | ProblemCode::LegacyLocationMismatch
             | ProblemCode::ResultIntegrityFailed => StatusCode::CONFLICT,
             ProblemCode::CursorExpired => StatusCode::GONE,
             ProblemCode::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
@@ -252,7 +240,6 @@ impl ProblemCode {
             ProblemCode::NamespaceForbidden => "Namespace not granted",
             ProblemCode::OriginMismatch => "Origin not allowed",
             ProblemCode::NotFound => "Not found",
-            ProblemCode::LegacyLocationUnknown => "Legacy location unknown",
             ProblemCode::MethodNotAllowed => "Method not allowed",
             ProblemCode::IdempotencyConflict => "Idempotency key conflict",
             ProblemCode::StateConflict => "State conflict",
@@ -261,7 +248,6 @@ impl ProblemCode {
             ProblemCode::PolicyChanged => "Schedule policy changed",
             ProblemCode::DestinationLocationImmutable => "Destination location immutable",
             ProblemCode::TransportDowngradeForbidden => "Transport change forbidden",
-            ProblemCode::LegacyLocationMismatch => "Legacy location mismatch",
             ProblemCode::ResultIntegrityFailed => "Result integrity failed",
             ProblemCode::CursorExpired => "Cursor expired",
             ProblemCode::PreconditionFailed => "Precondition failed",

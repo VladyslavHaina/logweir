@@ -11,7 +11,7 @@ be measured from the only place that sees them.
 
 Why the rewrite table is explicit, and why an unknown resource is NOT rewritten
 -----------------------------------------------------------------------------
-The controller watches fourteen Logweir kinds.  Twelve are namespaced and are
+The controller watches thirteen Logweir kinds.  Eleven are namespaced and are
 watched with `Api::all`, so their collection URL carries no namespace and must
 be rewritten or the fenced controller reconciles the whole cluster — including
 the shared lab release this fence exists to stay out of.  TWO ARE CLUSTER-
@@ -58,7 +58,6 @@ NAMESPACED_LOGWEIR = frozenset(
         "preflights",
         "protectionpolicies",
         "recoverycatalogs",
-        "rehearsalschedules",
         "restores",
         "retentionpolicies",
         "topicdiscoveries",

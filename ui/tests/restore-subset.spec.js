@@ -64,6 +64,7 @@ import {
   wizardDraftValues,
   applyWizardDraft,
 } from "../pages/restore-wizard.js";
+import { resetMode } from "../client.js";
 import { renderRetryAction, retryRoute } from "../pages/operation.js";
 import { renderPlanBytes } from "../plan.js";
 import { COMPLETION_GUIDANCE, TARGET_MODE_MEANING } from "../render.js";
@@ -845,6 +846,9 @@ test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () =>
 // ------------------------------------------------------ 4. the fresh-target retry
 
 test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval", () => {
+  // An earlier mount in this file asked for the session with no server
+  // behind it; this row renders for a page whose grants are not yet known.
+  resetMode();
   const backups = fixture("wizard-backups.json");
   const point = recoveryPoints(backups)[0];
   const failedName = "rst-01jb7z0000000000000abcdef";

@@ -1020,8 +1020,8 @@ const FOLLOWED: &[Followed] = &[
             ".legacy_archive_addressing.allow_http",
         ],
         sites: Err(
-            "D2 §3.12 (b): `POST …/destinations:from-legacy` is to read it, and refuses with \
-             branch (c) today; the restore readiness check takes transport from the PLAN \
+            "Its one planned reader, the legacy adoption route, was withdrawn (release-notes \
+             item 75); the restore readiness check takes transport from the PLAN \
              (D-SEAMS S5). FX-10 report, Class sweep owed.",
         ),
     },

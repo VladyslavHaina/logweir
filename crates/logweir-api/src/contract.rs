@@ -2063,25 +2063,6 @@ pub struct UpdateDestinationAccessRequest {
     pub transport: Option<UpdateTransportRequest>,
 }
 
-/// `POST .../destinations:from-legacy`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct DestinationFromLegacyRequest {
-    /// The new destination's name.
-    pub name: String,
-    /// The legacy `BackupSchedule` to derive the location from.
-    #[serde(default)]
-    pub source_schedule: Option<String>,
-    /// Or the legacy `Backup`.
-    #[serde(default)]
-    pub source_backup: Option<String>,
-    /// The four credential grants for the derived location.
-    pub access: AccessRequest,
-    /// What this destination is.
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
 /// `POST .../destinations/{name}:test`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2334,18 +2315,6 @@ pub struct DestinationResponse {
     /// On a durable create: whether this replays an earlier identical request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replayed: Option<bool>,
-    //
-    // THERE IS NO `addressingSource` AND NO `notes` HERE, DELIBERATELY. D2
-    // §3.12 defines both for the legacy adoption: `addressingSource` names
-    // WHICH source the storage block was derived from (`frozenExecution` or
-    // `installationConfig`), and `notes` carries the confirmations that
-    // derivation owes the operator. Neither source is readable in this build,
-    // so `:from-legacy` refuses instead of deriving (see
-    // `routes::destinations`), and a field nothing can fill is a field a
-    // console would render as "derived from nothing".
-    //
-    // Adding a field later is a MINOR change to this document; removing one is
-    // MAJOR. So they wait for W11, which is the task that can populate them.
     /// The item.
     pub item: Destination,
 }

@@ -1113,7 +1113,7 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
     // an author types beside the signed bytes. It can say anything while the
     // document says something else, which is the whole reason check 7 on the
     // Approval side and `admit` on this side both RECOMPUTE.
-    let shipped = workspace_yaml("config/crd/approvals.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/approvals.yaml");
     let status_props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"];
     assert!(
@@ -1170,7 +1170,7 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
         "and it is read from INSIDE spec.approvalBytes"
     );
     assert_eq!(
-        admit(&restore, Some(&good), Some(&cluster(true)), None),
+        admit(&restore, Some(&good), Some(&cluster(true))),
         RestoreAdmission::Ok
     );
 }
@@ -1215,7 +1215,7 @@ fn admission_binds_the_complete_verified_subject_identity() {
     let restore = restore();
     let cluster = cluster(true);
     assert_eq!(
-        admit(&restore, Some(&approval(true)), Some(&cluster), None),
+        admit(&restore, Some(&approval(true)), Some(&cluster)),
         RestoreAdmission::Ok
     );
 
@@ -1245,7 +1245,7 @@ fn admission_binds_the_complete_verified_subject_identity() {
             serde_json::from_str(&approval_json(true, &plan_hash(), &plan_hash())).unwrap();
         mutate(&mut value);
         let approval = serde_json::from_value(value).unwrap();
-        let verdict = admit(&restore, Some(&approval), Some(&cluster), None);
+        let verdict = admit(&restore, Some(&approval), Some(&cluster));
         assert!(
             matches!(verdict, RestoreAdmission::ApprovalSubjectMismatch { .. }),
             "{label} must not replay an Approval: {verdict:?}"
@@ -1264,7 +1264,7 @@ fn a_legacy_verified_status_waits_for_subject_provenance_refresh() {
         .remove("verifiedSubjectRef");
     let approval = serde_json::from_value(value).unwrap();
     assert_eq!(
-        admit(&restore(), Some(&approval), Some(&cluster(true)), None),
+        admit(&restore(), Some(&approval), Some(&cluster(true))),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
@@ -1354,21 +1354,21 @@ async fn an_unreachable_target_cluster_is_terminal_and_creates_nothing() {
     // reported the cluster first would send an operator to look at a broker
     // when the answer is that nobody approved the run.
     assert_eq!(
-        admit(&restore(), None, None, None),
+        admit(&restore(), None, None),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
         "the approval is checked before the cluster"
     );
     assert_eq!(
-        admit(&restore(), Some(&approval(false)), None, None),
+        admit(&restore(), Some(&approval(false)), None),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
         "…and an UNVERIFIED approval over an absent cluster still reports the approval"
     );
     assert_eq!(
-        admit(&restore(), Some(&approval(true)), None, None),
+        admit(&restore(), Some(&approval(true)), None),
         RestoreAdmission::ClusterNotReachable {
             cluster: "scratch".to_string()
         },
@@ -5021,7 +5021,7 @@ async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
 
 /// **Interface I21.** `crds/restore.rs`'s `outcome` field description states
 /// that green requires verification `Valid` and outcome `pass`, and
-/// `config/crd/restores.yaml` declares `status.outcome`.
+/// `charts/logweir/crds/restores.yaml` declares `status.outcome`.
 #[test]
 fn the_restore_green_rule_reads_the_outcome() {
     let doc = restore_crd_field_description(&["status", "outcome"]);
@@ -5034,12 +5034,12 @@ fn the_restore_green_rule_reads_the_outcome() {
     }
 
     // And the SHIPPED file declares it, not just the emitter.
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"];
     assert!(
         props.get("outcome").is_some(),
-        "config/crd/restores.yaml declares status.outcome — the field the badge reads"
+        "charts/logweir/crds/restores.yaml declares status.outcome — the field the badge reads"
     );
     assert!(
         props.get("objectives").is_some() && props.get("integrity").is_some(),
@@ -5082,7 +5082,7 @@ fn the_restore_green_rule_reads_the_outcome() {
 #[tokio::test]
 async fn every_status_write_sets_the_scalar_reason() {
     // ---- ARM 1: the column, and the field it names ------------------------
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let columns = shipped["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Restore CRD declares printer columns");
@@ -5115,8 +5115,8 @@ async fn every_status_write_sets_the_scalar_reason() {
         "this fix ADDS a field; it does not take GC11's vocabulary away"
     );
     // `Backup` IS UNAFFECTED, and this says so mechanically.
-    let backup_columns: Vec<String> = workspace_yaml("config/crd/backups.yaml")["spec"]["versions"]
-        [0]["additionalPrinterColumns"]
+    let backup_columns: Vec<String> = workspace_yaml("charts/logweir/crds/backups.yaml")["spec"]
+        ["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Backup CRD declares printer columns")
         .iter()
@@ -5320,7 +5320,7 @@ async fn every_status_write_sets_the_scalar_reason() {
 /// The printer columns are the contract.
 #[test]
 fn the_restore_printer_columns_are_the_contract() {
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let columns: Vec<String> = shipped["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Restore CRD declares printer columns")
@@ -7050,6 +7050,50 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
             .contains("PlanEvidenceDestinationMismatch"),
         "got {error}"
     );
+}
+
+/// **A plan that names a notification sink is refused by name at admission**,
+/// before any Job exists: the drill's notification post is withdrawn, and the
+/// reason is the runner's own `GuardRefused`. CONTROL: the same destinations
+/// and the same plan without the block are admitted.
+#[tokio::test]
+async fn a_plan_that_names_a_notification_sink_is_refused_at_admission() {
+    let now = utc(2026, 9, 7, 14, 30);
+    let with_sink =
+        format!("{PLAN_BYTES}notifications:\n  webhooks: [\"https://example.test/hook\"]\n");
+    let mut value: Value = serde_json::from_str(&restore_json(&with_sink, APPROVAL, NAME))
+        .expect("the fixture is JSON");
+    value["spec"]["sourceArchive"] = serde_json::json!({"url": "logweir-destination://src"});
+    value["spec"]["sourceDestinationRef"] = serde_json::json!({"name": "src"});
+    value["spec"]["evidenceDestinationRef"] = serde_json::json!({"name": "ev"});
+    let restore: Restore = serde_json::from_value(value).expect("the mutated fixture is a Restore");
+
+    let (client, _r, _b) = mock_client_recording_bodies(destination_routes(
+        source_destination_value(),
+        evidence_destination_value(),
+    ));
+    let error = admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect_err("a plan that names a sink is refused");
+    let said = error.to_string();
+    assert!(said.contains("GuardRefused"), "{said}");
+    assert!(said.contains("notifications is withdrawn"), "{said}");
+    assert!(
+        !said.contains("example.test"),
+        "the sink is never echoed: {said}"
+    );
+
+    // CONTROL: the plan without the block.
+    let (client, _r, _b) = mock_client_recording_bodies(destination_routes(
+        source_destination_value(),
+        evidence_destination_value(),
+    ));
+    assert!(matches!(
+        admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+            .await
+            .expect("the reads succeed"),
+        RestoreDestinationAdmission::Resolved(_)
+    ));
 }
 
 /// **HALF A DESTINATION-BACKED RESTORE IS REFUSED, AND AN ABSENT DESTINATION
@@ -9513,7 +9557,6 @@ mod p12_controller_read_retry {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use weirkeeper::controllers::rehearsal_schedule::verdict_owed;
     use weirkeeper::controllers::restore::{reconcile_restore_rereading, RestoreOutcome};
     use weirkeeper::evidence_fetch::{ReadMemory, MODE_ARCHIVE_HANDLE};
 
@@ -9615,8 +9658,7 @@ mod p12_controller_read_retry {
     /// scorecard read through the controller's handle produces nothing (the
     /// credential is missing): the verdict is `NotAttempted` naming the key —
     /// P5's rule — AND attempt 1 of a schedule, and the terminal `Restore`,
-    /// which otherwise waits for a change, requeues for the retry. A rehearsal
-    /// schedule reading it sees a verdict still OWED. Before `retryAfter`
+    /// which otherwise waits for a change, requeues for the retry. Before `retryAfter`
     /// nothing is read or written and the requeue is the time left; once it has
     /// passed and the scorecard is readable, attempt 2 writes `Valid`, the
     /// scorecard's outcome and the completion, and the verdict is reached.
@@ -9655,10 +9697,6 @@ mod p12_controller_read_retry {
             Requeue::After(60),
             "a terminal Restore waiting for its retry comes back for it"
         );
-        assert!(
-            verdict_owed(&r).is_some(),
-            "a rehearsal over this Restore waits for the scheduled attempt"
-        );
         assert!(status["completion"].is_null());
 
         // PASS 2 — before `retryAfter`.
@@ -9688,7 +9726,6 @@ mod p12_controller_read_retry {
         assert!(!status["evidence"]["scorecardSha256"].is_null(), "{status}");
         assert_eq!(status["evidence"]["observation"]["attempt"], json!(2));
         assert!(status["evidence"]["observation"]["retryAfter"].is_null());
-        assert!(verdict_owed(&done).is_none(), "the verdict is reached");
 
         // PASS 4 — reached: nothing read, nothing written, waits for a change.
         let (_, written, outcome) =
@@ -9768,10 +9805,6 @@ mod p12_controller_read_retry {
                     "{handle:?}: no attempt is advertised: {v}"
                 );
                 assert!(status["evidence"]["observation"]["retryAfter"].is_null());
-                assert!(
-                    verdict_owed(&settled).is_none(),
-                    "a rehearsal over it does not wait an hour for an attempt that cannot come"
-                );
                 // And from then on: no write, no timer.
                 for later in [62_i64, 3_600, 86_400] {
                     let (_, written, outcome) = go(settled.clone(), handle, later).await;
@@ -13326,7 +13359,7 @@ async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
 }
 
 // ---------------------------------------------------------------------------
-// FX-34 / PoC batch 5 F-2 — a condition names the field the object uses
+// PROD-17.1 C1 (OD-12) — a standing authorization is refused by name
 // ---------------------------------------------------------------------------
 
 /// [`restore`] as a STANDING (rehearsal) `Restore`: `spec.authorization` names
@@ -13348,21 +13381,24 @@ fn fx34_standing_restore(approval_ref: &str) -> Restore {
     standing
 }
 
-/// **A standing `Restore` waiting for its approval names
-/// `spec.authorization.approvalRef`.** PoC batch 5 recorded "spec.approvalRef
-/// names the Approval …" on an object that has no such field
-/// (`prod081a/k8/pb5-k8b-control-declared.after.json`).
+/// **A `Restore` carrying `spec.authorization` is refused BY NAME, before its
+/// `Approval` is read and before anything is created** — standing
+/// authorizations are withdrawn in v1 (OD-12). The route table HAS the
+/// `Approval` (verified), the reachable cluster and every `POST` route, so the
+/// zero counts below are the refusal's and not the table's.
 ///
-/// The CONTROL is the ordinary `Restore` over the same route table: its
-/// sentence is the one it always was, byte for byte.
+/// The CONTROL is the ordinary `Restore` that names no approval: still
+/// `ApprovalNotReceived`, the sentence it always had.
 ///
-/// KILLS: writing the hold from `Display` instead of `message_for`.
+/// KILLS (negative control): removing step 0 of `admit_with_policy` — the
+/// standing `Restore` then falls to `ApprovalNotReceived`, which is terminal
+/// but not the named refusal, and the first assertion fails.
 #[tokio::test]
-async fn a_standing_restore_waiting_for_its_approval_names_the_field_it_uses() {
-    let hold = |restore: Restore| async move {
-        let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
-            404,
-            not_found_body("approvals.logweir.dev", APPROVAL),
+async fn a_standing_restore_is_refused_by_name_and_creates_nothing() {
+    let refused = |restore: Restore| async move {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(true, &plan_hash(), &plan_hash()),
             200,
             cluster_json(true, PLAINTEXT_AUTH),
         ));
@@ -13374,98 +13410,86 @@ async fn a_standing_restore_waiting_for_its_approval_names_the_field_it_uses() {
             now(),
         )
         .await
-        .expect("a hold is an answer");
-        assert_eq!(outcome.requeue, Requeue::After(30));
-        let seen = bodies.lock().expect("readable").clone();
-        let status = patched_statuses(&seen).remove(0);
-        assert_eq!(
-            conditions_of(&status),
-            vec![(
-                "Admitted".to_string(),
-                "False".to_string(),
-                REASON_APPROVAL_NOT_VERIFIED.to_string()
-            )]
-        );
-        status["conditions"][0]["message"]
-            .as_str()
-            .expect("a message")
-            .to_string()
-    };
-    let rest = "names the Approval `a1`, which does not exist yet or is not Verified=True; no Job \
-                is created until it is, and this object is looked at again in 30s (interface I19)";
-    assert_eq!(
-        hold(fx34_standing_restore(APPROVAL)).await,
-        format!("spec.authorization.approvalRef {rest}")
-    );
-    assert_eq!(
-        hold(restore()).await,
-        format!("spec.approvalRef {rest}"),
-        "an ordinary Restore's sentence is unchanged"
-    );
-}
-
-/// The TERMINAL half: a standing `Restore` whose authorization names no
-/// approval is refused naming `spec.authorization.approvalRef.name`, where it
-/// said `spec.approvalRef.name`. The control is the ordinary `Restore`.
-///
-/// KILLS: writing a terminal admission refusal from `Display`.
-#[tokio::test]
-async fn a_standing_restore_refused_at_admission_names_the_field_it_uses() {
-    let refused = |restore: Restore| async move {
-        // No Approval route: an empty name is never asked about.
-        let routes: Vec<Route> =
-            admission_routes(404, String::new(), 200, cluster_json(true, PLAINTEXT_AUTH))
-                .into_iter()
-                .filter(|r| !r.path_suffix.starts_with("/approvals/"))
-                .collect();
-        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
-        let outcome = reconcile_restore(
-            &restore,
-            &client,
-            &unobserved_scorecard,
-            &unverified_evidence,
-            now(),
-        )
-        .await
         .expect("a terminal refusal is an outcome");
-        assert_eq!(
-            outcome.terminal_state.as_deref(),
-            Some(TERMINAL_STATE_APPROVAL_NOT_RECEIVED)
-        );
+        assert!(!outcome.created);
         let seen = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&seen, "/jobs"), 0, "no Job");
+        assert_eq!(post_count(&seen, "/configmaps"), 0, "no plan, no bundle");
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "refused before any Approval is read: {calls:?}"
+        );
         let status = patched_statuses(&seen).remove(0);
-        status["conditions"][0]["message"]
-            .as_str()
-            .expect("a message")
-            .to_string()
+        (
+            outcome.terminal_state,
+            status["conditions"][0]["message"]
+                .as_str()
+                .expect("a message")
+                .to_string(),
+        )
     };
-    let rest = ".name is `` — it names nothing, so no Approval can ever bind to this Restore; \
-                spec is immutable, so create a new Restore that names one";
-    assert_eq!(
-        refused(fx34_standing_restore("")).await,
-        format!("spec.authorization.approvalRef{rest}")
+    let (state, message) = refused(fx34_standing_restore(APPROVAL)).await;
+    assert_eq!(state.as_deref(), Some("StandingAuthorizationRefused"));
+    assert!(
+        message.starts_with(&format!(
+            "spec.authorization names the standing Approval `{APPROVAL}`"
+        )) && message.contains("withdrawn in v1")
+            && message.contains("no Job is created"),
+        "{message}"
     );
+    let (state, message) = refused(restore_with_no_approval_ref()).await;
+    assert_eq!(state.as_deref(), Some(TERMINAL_STATE_APPROVAL_NOT_RECEIVED));
     assert_eq!(
-        refused(restore_with_no_approval_ref()).await,
-        format!("spec.approvalRef{rest}")
+        message,
+        "spec.approvalRef.name is `` — it names nothing, so no Approval can ever bind to this \
+         Restore; spec is immutable, so create a new Restore that names one"
     );
 }
 
-/// Every admission sentence that names the approval field names the one the
-/// object carries, and the sentences that name no such field are the same for
-/// both kinds of `Restore`.
-#[test]
-fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
-    use weirkeeper::controllers::restore::{
-        approval_ref_field, APPROVAL_REF_FIELD, STANDING_APPROVAL_REF_FIELD,
-    };
-    let ordinary = restore();
-    let standing = fx34_standing_restore(APPROVAL);
-    assert_eq!(approval_ref_field(&ordinary), "spec.approvalRef");
+/// An ordinary `Restore` waiting for its approval names `spec.approvalRef`,
+/// byte for byte the sentence it always had.
+#[tokio::test]
+async fn an_ordinary_restore_waiting_for_its_approval_names_spec_approval_ref() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        404,
+        not_found_body("approvals.logweir.dev", APPROVAL),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a hold is an answer");
+    assert_eq!(outcome.requeue, Requeue::After(30));
+    let seen = bodies.lock().expect("readable").clone();
+    let status = patched_statuses(&seen).remove(0);
     assert_eq!(
-        approval_ref_field(&standing),
-        "spec.authorization.approvalRef"
+        conditions_of(&status),
+        vec![(
+            "Admitted".to_string(),
+            "False".to_string(),
+            REASON_APPROVAL_NOT_VERIFIED.to_string()
+        )]
     );
+    assert_eq!(
+        status["conditions"][0]["message"],
+        "spec.approvalRef names the Approval `a1`, which does not exist yet or is not \
+         Verified=True; no Job is created until it is, and this object is looked at again in \
+         30s (interface I19)"
+    );
+}
+
+/// Every admission sentence that names the approval field names
+/// `spec.approvalRef`, and the others name no such field.
+#[test]
+fn every_admission_sentence_names_the_approval_field_it_is_about() {
+    use weirkeeper::controllers::restore::APPROVAL_REF_FIELD;
     let a = || APPROVAL.to_string();
     let d = || "a detail".to_string();
     let naming = [
@@ -13475,9 +13499,6 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
             approval: a(),
             detail: d(),
         },
-        // PROD-15.1's variant. It is reached from the ordinary path only
-        // today; its sentence takes the field as the others do, so the day a
-        // standing Restore reaches it the condition names the right one.
         RestoreAdmission::ApprovalSubjectNotThePlans {
             approval: a(),
             detail: d(),
@@ -13494,27 +13515,6 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
     for admission in &naming {
         let plain = admission.to_string();
         assert!(plain.starts_with(APPROVAL_REF_FIELD), "{plain}");
-        assert_eq!(
-            admission.message_for(&ordinary),
-            plain,
-            "an ordinary Restore's sentence is Display's, byte for byte"
-        );
-        let for_standing = admission.message_for(&standing);
-        assert!(
-            for_standing.starts_with(STANDING_APPROVAL_REF_FIELD),
-            "{for_standing}"
-        );
-        assert_eq!(
-            for_standing,
-            plain.replacen(APPROVAL_REF_FIELD, STANDING_APPROVAL_REF_FIELD, 1),
-            "the same sentence, the field aside"
-        );
-        assert!(
-            !for_standing
-                .replace(STANDING_APPROVAL_REF_FIELD, "")
-                .contains("approvalRef"),
-            "and no second mention of a field it does not have: {for_standing}"
-        );
     }
     let neutral = [
         RestoreAdmission::Ok,
@@ -13525,13 +13525,9 @@ fn every_admission_sentence_names_the_approval_field_the_restore_carries() {
         RestoreAdmission::ClusterNotReachable {
             cluster: "scratch".to_string(),
         },
-        RestoreAdmission::StandingAuthorizationRefused {
-            approval: a(),
-            detail: d(),
-        },
+        RestoreAdmission::StandingAuthorizationRefused { approval: a() },
     ];
     for admission in &neutral {
-        assert_eq!(admission.message_for(&standing), admission.to_string());
         assert!(!admission.to_string().contains("spec.approvalRef"));
     }
     // The two lists are written by hand. This match has no wildcard arm, so
@@ -13727,7 +13723,7 @@ async fn fx19_a_restore_does_not_admit_on_a_probe_reading_too_old_to_vouch_for()
         }
         let folded: weirkeeper::crds::kafka_cluster::KafkaCluster =
             serde_json::from_value(folded).expect("a KafkaCluster");
-        let verdict = admit(&restore(), Some(&approval(true)), Some(&folded), None);
+        let verdict = admit(&restore(), Some(&approval(true)), Some(&folded));
         if admitted {
             assert_eq!(outcome.reason, None, "inside the bound nothing is written");
             assert_eq!(verdict, RestoreAdmission::Ok, "at {at}");

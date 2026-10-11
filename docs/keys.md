@@ -207,7 +207,7 @@ test pins that body.
 
 ### Who administers a `TrustPolicy`, and through what
 
-**`logweir-trust-admin`**, a cluster-scoped ClusterRole `logweir.yaml` ships
+**`logweir-trust-admin`**, a cluster-scoped ClusterRole the chart ships
 unbound, is the only holder of a write verb on `trustpolicies`. It carries
 `get`/`list`/`watch` so the holder can read what they are about to change, and
 `create`/`update`/`patch` so a policy can be written and rotated — `patch`

@@ -260,7 +260,6 @@ fn admit_under(approval: &Approval, policy: &str) -> RestoreAdmission {
         &restore(),
         Some(approval),
         Some(&cluster()),
-        None,
         Some(&PolicyAdmission {
             policy: &bound,
             now: now(),
@@ -290,7 +289,7 @@ fn both_modes_admit_a_verified_document_naming_the_current_binding() {
 fn an_unbound_namespace_admits_todays_approval_unchanged() {
     assert_eq!(admit_under(&v1_approval(), ""), RestoreAdmission::Ok);
     assert_eq!(
-        admit(&restore(), Some(&v1_approval()), Some(&cluster()), None),
+        admit(&restore(), Some(&v1_approval()), Some(&cluster())),
         RestoreAdmission::Ok
     );
 }
@@ -354,7 +353,6 @@ fn a_policy_changed_since_verification_admits_nothing() {
         &restore(),
         Some(&ordinary_approval()),
         Some(&cluster()),
-        None,
         Some(&PolicyAdmission {
             policy: &edited,
             now: now(),
@@ -1118,7 +1116,6 @@ fn admit_original(approval: &Approval, policy: &str) -> RestoreAdmission {
         &original_restore(),
         Some(approval),
         Some(&cluster()),
-        None,
         Some(&PolicyAdmission {
             policy: &effective(policy),
             now: now(),

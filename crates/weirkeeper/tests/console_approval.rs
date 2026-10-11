@@ -678,7 +678,6 @@ fn admit(f: &Fixture, case: &str, bound: &ApprovalPolicy, now: DateTime<Utc>) ->
         &restore(f, "planBytes", false),
         Some(&approval),
         Some(&cluster(f)),
-        None,
         Some(&PolicyAdmission {
             policy: &EffectivePolicy::Bound(bound.clone()),
             now,
@@ -814,7 +813,6 @@ fn restore_admission_refuses_a_console_approval_under_any_other_policy() {
             &f.text("approverKeyId"),
         )),
         Some(&cluster(&f)),
-        None,
         Some(&PolicyAdmission {
             policy: &EffectivePolicy::Bound(f.strict()),
             now: f.now(),
@@ -841,7 +839,6 @@ fn restore_admission_holds_an_original_name_console_approval_to_the_plans_subjec
                 &f.text("consoleKeyId"),
             )),
             Some(&cluster(&f)),
-            None,
             Some(&PolicyAdmission {
                 policy: &EffectivePolicy::Bound(f.pair()),
                 now: f.now(),

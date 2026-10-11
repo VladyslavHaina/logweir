@@ -136,32 +136,6 @@
       "binding": "v1:7d1c2b9e-0000-4000-8000-0000000000r1:sha256:0612818a807a24c257843ed64a91d3d0ac1937f69adf67c4bca0bb20609de45f"
     }
   ],
-  "notification": [
-    {
-      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
-      "sink": "pagerduty",
-      "endpoint": null,
-      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:d3c4a77dbaa94c2650138824db1f2bdd644ad00b2f4dc13c33710befa6261d12"
-    },
-    {
-      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
-      "sink": "pagerduty",
-      "endpoint": " https://events.eu.pagerduty.com/v2/enqueue ",
-      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:652657cff97ad943e9ea192df0512de443c8b5b057de9ea181977eebdd2242c3"
-    },
-    {
-      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
-      "sink": "webhook",
-      "endpoint": null,
-      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:fec0e5231f70b0973b4b3002d5a964da7152144f8d235fb509e6590e5b9deac3"
-    },
-    {
-      "uid": "3a9e7f10-0000-4000-8000-0000000000p1",
-      "sink": "slack",
-      "endpoint": null,
-      "binding": "v1:3a9e7f10-0000-4000-8000-0000000000p1:sha256:a6c8b343cb12828350d915e731a82001b0632f468451049701e21a16b95b89b5"
-    }
-  ],
   "kafka": [
     {
       "uid": "5b1e0000-0000-4000-8000-0000000000k1",

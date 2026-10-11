@@ -665,7 +665,7 @@ fn yaml(relative: &str) -> serde_yaml::Value {
 /// The `Backup` CRD as the EMITTER renders it, in process.
 ///
 /// MUTATION ROUND FINDING, AND THE REASON BOTH CRD ASSERTIONS BELOW READ TWO
-/// SOURCES. A test that reads only `config/crd/backups.yaml` cannot see a
+/// SOURCES. A test that reads only `charts/logweir/crds/backups.yaml` cannot see a
 /// change to `crds/backup.rs` until somebody runs `just crds` — so the brief's
 /// "add a `status.outcome`" and "rename a printer column" mutants both PASSED
 /// the tests they are filed against, and died only in Task 15b's drift gate.
@@ -1488,8 +1488,8 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
             hits.is_empty(),
             "ZERO requests may end in `{forbidden}` — the `pods{forbidden}` subresource. Either \
              would let the controller run a process inside the pod that holds the SIGNING KEY, \
-             which is strictly more than reading its stdout — and the RBAC request under \
-             config/rbac/ asks for neither. Got {hits:?}"
+             which is strictly more than reading its stdout — and the controller's ClusterRole \
+             grants neither. Got {hits:?}"
         );
     }
 
@@ -4449,7 +4449,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
     );
 
     // And the CRD says integer, in the checked-in file the API server reads.
-    let doc = yaml("config/crd/backups.yaml");
+    let doc = yaml("charts/logweir/crds/backups.yaml");
     let window_schema = &doc["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"]["windowCovered"]["properties"];
     for field in ["fromMs", "toMs"] {
@@ -5199,7 +5199,10 @@ fn the_printer_columns_are_the_contract() {
     // server consumes is what was asserted). See `emitted_backup_crd`.
     for (source, doc) in [
         ("the emitter", emitted_backup_crd()),
-        ("config/crd/backups.yaml", yaml("config/crd/backups.yaml")),
+        (
+            "charts/logweir/crds/backups.yaml",
+            yaml("charts/logweir/crds/backups.yaml"),
+        ),
     ] {
         let columns = doc["spec"]["versions"][0]["additionalPrinterColumns"]
             .as_sequence()
@@ -5219,7 +5222,7 @@ fn the_printer_columns_are_the_contract() {
         );
     }
 
-    let doc = yaml("config/crd/backups.yaml");
+    let doc = yaml("charts/logweir/crds/backups.yaml");
     let columns = doc["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("backups.yaml declares additionalPrinterColumns");
@@ -5248,7 +5251,10 @@ fn the_backup_green_rule_reads_exit_code_and_not_an_outcome() {
     // alone is not enough.
     for (source, doc) in [
         ("the emitter", emitted_backup_crd()),
-        ("config/crd/backups.yaml", yaml("config/crd/backups.yaml")),
+        (
+            "charts/logweir/crds/backups.yaml",
+            yaml("charts/logweir/crds/backups.yaml"),
+        ),
     ] {
         let status = doc["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
             ["status"]["properties"]
@@ -5272,7 +5278,7 @@ fn the_backup_green_rule_reads_exit_code_and_not_an_outcome() {
         );
     }
 
-    let doc = yaml("config/crd/backups.yaml");
+    let doc = yaml("charts/logweir/crds/backups.yaml");
     let status = &doc["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]
         ["properties"];
     let description = status["exitCode"]["description"]
@@ -5291,120 +5297,11 @@ fn the_backup_green_rule_reads_exit_code_and_not_an_outcome() {
     );
 }
 
-/// The RBAC fragments request `pods/log` and nothing more.
-///
-/// THE REQUESTING HALF OF INTERFACE **I28**. Task 21's
-/// `weirkeeper_can_read_pod_logs_and_nothing_more` asserts what the INSTALLED
-/// ClusterRole grants; this asserts what the request asks for, so that task's
-/// implementer has a checkable pointer rather than a sentence.
-///
-/// RENAMED IN THIS TASK'S FIX ROUND (errata **E5a**). It was
-/// `the_rbac_fragments_request_pod_logs_and_nothing_more`; the reconciler now
-/// also CREATES the plan ConfigMap the runner Job mounts and READS the
-/// `KafkaCluster` it renders that plan from, so "pod logs and nothing more"
-/// had stopped being what the request says. The name states the whole request
-/// rather than half of it.
+/// The runner's ServiceAccount fragment names the account the Job template
+/// names, refuses a projected token, and binds nothing.
 #[test]
-fn the_rbac_fragments_request_pod_logs_the_plan_config_map_and_nothing_more() {
-    let role = yaml("config/rbac/backup-reconciler-rbac-request.yaml");
-    assert_eq!(
-        role["kind"].as_str(),
-        Some("ClusterRole"),
-        "the request is written in the shape the grant will take"
-    );
-    let rules = role["rules"]
-        .as_sequence()
-        .expect("the request carries rules");
-    let rule_for = |resource: &str| -> Option<Vec<String>> {
-        rules
-            .iter()
-            .find(|r| {
-                r["resources"]
-                    .as_sequence()
-                    .is_some_and(|rs| rs.iter().any(|x| x.as_str() == Some(resource)))
-            })
-            .map(|r| {
-                r["verbs"]
-                    .as_sequence()
-                    .expect("a rule has verbs")
-                    .iter()
-                    .map(|v| v.as_str().expect("a verb").to_string())
-                    .collect()
-            })
-    };
-
-    assert_eq!(
-        rule_for("pods/log"),
-        Some(vec!["get".to_string()]),
-        "`pods/log` IS A SUBRESOURCE AND `pods` DOES NOT COVER IT (critique B H8). A ClusterRole \
-         listing only `pods` produces a controller that reads every pod's spec, cannot read one \
-         line of any pod's stdout, and fails at exactly the step interface I7 exists for — with a \
-         403 that looks like a transient API error. `get` only: the final two stdout lines are \
-         READ, nothing is written and no process is started."
-    );
-    // THE ESCAPE BELOW IS NOT A WEAKENING OF `check-no-oso.sh`. Its check B
-    // greps `crates/**/*.rs` for a denied ENGINE subcommand token, and one of
-    // those tokens is spelled the same as the Kubernetes RBAC verb this
-    // assertion is about. The gate cannot tell a `kafka-backup list` from a
-    // ClusterRole verb in a string literal — nothing in a grep can — so the
-    // sanctioned same-line escape with a reason is exactly the mechanism for
-    // this case, and Task 18's `runner_argv` note records the mirror-image
-    // situation for the permitted `backup` token.
-    let list_verb = "list".to_string(); // engine-token-ok: a Kubernetes RBAC verb on pods, never the engine's denied `list` subcommand
-    assert!(
-        rule_for("pods").is_some_and(|v| v.contains(&list_verb)),
-        "`list` on `pods` is what finds the pod carrying the exit code, by the job-name label"
-    );
-
-    // THE PLAN CONFIGMAP — `create` AND `get`, AND NOTHING ELSE. `get` is how
-    // the 409 is decided (whose ConfigMap is it?); `patch`/`update` would be
-    // the ability to REWRITE a plan document a running pod already mounted,
-    // and `delete` is refused everywhere by Global Constraint 6.
-    assert_eq!(
-        rule_for("configmaps"),
-        Some(vec!["create".to_string(), "get".to_string()]),
-        "the runner Job mounts `<backup name>-plan` at `/plan` and Task 17 renders it in the \
-         same reconcile pass, ConfigMap `POST` before Job `POST` (errata E5a). `create` writes \
-         it; `get` decides the 409. NOT `patch`, because the plan is a pure function of a \
-         CEL-immutable spec and a pass that could rewrite it is a pass that could change the \
-         document a running pod already mounted."
-    );
-    for forbidden_verb in ["patch", "update", "delete", "deletecollection"] {
-        assert!(
-            !rule_for("configmaps").is_some_and(|v| v.contains(&forbidden_verb.to_string())),
-            "the ConfigMap rule must not ask for `{forbidden_verb}`"
-        );
-    }
-
-    // THE REFERENT — `get` ONLY, and no cache. The bootstrap addresses and the
-    // auth block in the rendered `backup.yaml` come from here and never from
-    // `Backup.spec`, which carries neither.
-    assert_eq!(
-        rule_for("kafkaclusters"),
-        Some(vec!["get".to_string()]),
-        "`spec.sourceRef` is read as ONE named object. `list`/`watch` would be a cache this \
-         reconciler does not keep, and a wider read than the render needs."
-    );
-
-    let text = workspace_file("config/rbac/backup-reconciler-rbac-request.yaml");
-    let requested: String = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for forbidden in ["secrets", "pods/exec", "pods/attach", "delete"] {
-        assert!(
-            !requested.contains(forbidden),
-            "the request must not name `{forbidden}`. `secrets`: spec §9 — `weirkeeper` holds NO \
-             `get` on Secrets anywhere, and the runner's key reaches its pod because KUBELET \
-             projects it, a read the controller never performs. `pods/exec`/`pods/attach`: either \
-             would let the controller run a process inside the pod that HOLDS THE SIGNING KEY. \
-             `delete`: Global Constraint 6 gives no Logweir component a delete capability in tag \
-             1, and a failed pod is the only place its exit code exists."
-        );
-    }
-
-    let sa = yaml("config/rbac/backup-runner-serviceaccount.yaml");
+fn the_runner_service_account_fragment_is_granted_nothing() {
+    let sa = yaml("config/samples/backup-runner-serviceaccount.yaml");
     assert_eq!(
         sa["metadata"]["name"].as_str(),
         Some(RUNNER_SERVICE_ACCOUNT),
@@ -5419,7 +5316,7 @@ fn the_rbac_fragments_request_pod_logs_the_plan_config_map_and_nothing_more() {
          from the cluster API."
     );
     assert!(
-        !workspace_file("config/rbac/backup-runner-serviceaccount.yaml")
+        !workspace_file("config/samples/backup-runner-serviceaccount.yaml")
             .lines()
             .any(|l| !l.trim_start().starts_with('#') && l.contains("RoleBinding")),
         "there is nothing to bind: the runner account is granted no verb on any resource, and a \

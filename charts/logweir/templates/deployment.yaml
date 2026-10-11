@@ -1,41 +1,27 @@
 {{- /*
-The `weirkeeper` Deployment — `config/manager/deployment.yaml`, with three
-things parameterised and nothing else changed: the image and its pull policy
+The `weirkeeper` Deployment. Parameterised: the image and its pull policy
 (`controllerImage`, `imagePullPolicy`), the runner image AND the runner pull
-policy the controller hands every Job (`runnerImage`, `runnerImagePullPolicy`
-— the TWO envs this chart renders that `logweir.yaml` does not,
-`LOGWEIR_RUNNER_IMAGE` from Task 33 and `LOGWEIR_RUNNER_PULL_POLICY` from Task
-37; they are set TOGETHER because the chart's `runnerImage` default names a
-`latest` tag and a tag under a policy that never pulls is a Job no kubelet can
-start), and the archive addressing env the `config/overlays/k8s-demo` patch
-sets (`archive.*`, rendered only when a value or `minio.enabled` supplies one).
+policy the controller hands every Job (`runnerImage`, `runnerImagePullPolicy`,
+as `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY`, set TOGETHER because
+the `runnerImage` default names a `latest` tag and a tag under a policy that
+never pulls is a Job no kubelet can start), and the archive addressing env
+(`archive.*`, rendered only when a value or `minio.enabled` supplies one).
 
-W13 adds `notify.allowInsecureSinks`, which renders
-`LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` and ONLY when the value is true — the
-default render is unchanged, and the controller forwards it into every
-delivery Job as `NOTIFY_ALLOW_INSECURE_SINKS=1` (NOTIFY-INSECURE-SINK-UNEXPOSED:
-`logweir notify deliver` refuses a non-`https://` sink before it dials, and
-nothing set the documented hatch).
+`notify` is WITHDRAWN with the alert sinks it configured: a values file that
+still sets it is refused below, naming it.
 
 Task 38 adds node placement (`kubernetes.nodeSelector`/`tolerations`/`affinity`,
 overridable by `controller.*`) — which renders NOTHING when nothing is set, so
 the shipped default render is byte-identical to what it was. The controller's
 pull secrets are on its ServiceAccount, not here.
 
-Everything the source manifest says about this PodSpec still holds: it is the
-ONE `automountServiceAccountToken` exemption (the only Kubernetes API client
-in the design), one replica with `Recreate` and no leader election (Global
-Constraint 30), no probes and no ports (Global Constraint 32 — no HTTP surface),
-`RUST_LOG` pinned at `info` as the floor, and the `logweir-evidence-ro` Secret
-projected `optional: true` so a cluster that has not created it still gets a
-running controller whose verifications read `NotAttempted`.
-`chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file` holds
-this copy to `logweir.yaml`: args, every other env name and value, both
-security contexts, the resources and the ServiceAccount. It permits exactly
-four differences, all of them the image ruling `values.yaml` records: the
-controller image (the SAME repository, at `:latest` rather than at the install
-file's digest), `imagePullPolicy` (`Always` rather than `IfNotPresent`) and the
-two runner envs.
+This PodSpec is the ONE `automountServiceAccountToken` exemption (the only
+Kubernetes API client in the design), one replica with `Recreate` and no leader
+election (Global Constraint 30), no ports (Global Constraint 32 — no HTTP
+surface), `RUST_LOG` pinned at `info` as the floor, and the
+`logweir-evidence-ro` Secret projected `optional: true` so a cluster that has
+not created it still gets a running controller whose verifications read
+`NotAttempted`.
 */ -}}
 {{- $endpoint := include "logweir.archive.endpoint" . -}}
 {{- $region := include "logweir.archive.region" . -}}
@@ -89,34 +75,19 @@ spec:
               value: {{ include "logweir.archive.url" . | quote }}
             # D2 §4.4 — the installation policy. The override ships empty and
             # the namespace comes from the pod; `templates/policy.yaml` renders
-            # `weirkeeper-policy` into exactly that namespace. See
-            # `config/manager/deployment.yaml` for the whole reasoning.
+            # `weirkeeper-policy` into exactly that namespace.
             - name: LOGWEIR_POLICY_CONFIGMAP
               value: ""
             - name: LOGWEIR_INSTALLATION_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- /*
-            The delivery Jobs' one installation setting, and RENDERED ONLY WHEN
-            TRUE so the default install is byte-identical to `logweir.yaml`
-            (`chart_lint_default_render_agrees_with_the_install_file` permits
-            exactly four differences and this is not a fifth). `1` is the only
-            value `weirkeeper`'s predicate and `logweir notify deliver` both
-            read as yes, so a rendered `"false"` could never be mistaken for
-            one. A `ProtectionPolicy` cannot set this: it is the cluster
-            administrator's switch, on the Deployment only.
-            */ -}}
-            {{- if .Values.notify.allowInsecureSinks }}
-            - name: LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS
-              value: "1"
+            {{- if .Values.notify }}
+            {{- fail "notify is withdrawn: Logweir no longer delivers ProtectionPolicy alerts, so notify.allowInsecureSinks configures nothing (release notes, item 74). Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
             {{- end }}
             {{- /*
             D3 §2.3 and §2.7's two controller-wide windows, RENDERED ONLY WHEN
-            CONFIGURED for the same reason the line above is: an install that
-            sets neither is byte-identical to `logweir.yaml`, and
-            `chart_lint_default_render_agrees_with_the_install_file` permits
-            four differences, not six.
+            CONFIGURED for the same reason the line above is.
 
             THE EMPTY STRING IS "THE BUILD'S OWN DEFAULT", NOT ZERO, and the
             distinction is load-bearing exactly once: `failFastSeconds: 0` is
@@ -137,8 +108,7 @@ spec:
             */ -}}
             {{- /*
             D0 STAGE 5: THE NAMESPACES THIS CONTROLLER WATCHES AND ACTS IN,
-            RENDERED ONLY WHEN SCOPED so the default install stays byte-identical
-            to `logweir.yaml`. It must be exactly the list the RoleBindings in
+            RENDERED ONLY WHEN SCOPED. It must be exactly the list the RoleBindings in
             `controller-scope.yaml` grant: a namespace named here and not bound
             is a watch the API server refuses, and one bound and not named is a
             namespace nobody reconciles. Both come from the one value.
@@ -157,8 +127,7 @@ spec:
             {{- end }}
             {{- /*
             PLAT-19.2 — the installation's approval policies, RENDERED ONLY WHEN
-            CONFIGURED (the default install stays byte-identical to
-            `logweir.yaml`). See `templates/approval-policy.yaml`: the same
+            CONFIGURED. See `templates/approval-policy.yaml`: the same
             immutable, content-addressed ConfigMap is mounted into the console,
             and absent means every namespace on `legacy-governed-v1`.
             */ -}}
@@ -171,8 +140,7 @@ spec:
             identity ConfigMap in the release namespace, beside the TrustPolicy
             its claim names). RENDERED ONLY WITH A CONSOLE AND THE MANAGED
             IDENTITY (`logweir.freshInstallConfirm`): without a console nothing
-            could confirm, and the default install stays byte-identical to
-            `logweir.yaml`.
+            could confirm.
             */ -}}
             {{- if include "logweir.freshInstallConfirm" . }}
             - name: LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP
@@ -204,8 +172,7 @@ spec:
                   optional: true
           {{- /*
           CHART GAP G5: exec probes against the controller's loopback health
-          listener — `config/manager/deployment.yaml` carries the argument and
-          the same two blocks, so the default render stays the install file.
+          listener.
           */}}
           livenessProbe:
             exec:

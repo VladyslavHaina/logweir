@@ -4,7 +4,7 @@
   "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_helpers.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui", "checks", "runs", "engine", "evidence", "admissionPolicy", "notify", "retention", "api"],
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "checks", "runs", "engine", "evidence", "admissionPolicy", "retention", "api"],
   "definitions": {
     "nodeSelector": {
       "type": "object",
@@ -124,7 +124,7 @@
     "runs": {
       "type": "object",
       "additionalProperties": false,
-      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one namespace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups and a RehearsalSchedule's Restores are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
+      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one namespace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
       "required": ["maxManualBackupsActivePerNamespace", "maxManualRestoresActivePerNamespace"],
       "properties": {
         "maxManualBackupsActivePerNamespace": { "type": "integer", "minimum": 1 },
@@ -153,13 +153,7 @@
       }
     },
     "notify": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "What the controller tells the delivery Jobs it creates for `ProtectionPolicy` alerts. NOT part of the policy `ConfigMap`: it is rendered as `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` on the `weirkeeper` Deployment, and only when true. `allowInsecureSinks` is the documented local-development escape hatch for a `http://` webhook or Slack URL \u2014 `logweir notify deliver` refuses a non-`https://` sink before it dials, so without it an in-cluster echo sink on a laptop cluster receives nothing. It is an INSTALLATION setting and a `ProtectionPolicy` cannot turn it on: a namespaced object that could would let whoever creates a policy downgrade their own alerts' transport to cleartext, carrying the event, the policy's name and (for Slack, where the URL is the credential) a bearer token. Production leaves it `false`.",
-      "required": ["allowInsecureSinks"],
-      "properties": {
-        "allowInsecureSinks": { "type": "boolean" }
-      }
+      "description": "WITHDRAWN (release notes, item 74): alert sinks are gone, so this block configures nothing. Accepted here only so the render can refuse it by name; remove it from your values."
     },
     "admissionPolicy": {
       "type": "object",
@@ -285,7 +279,7 @@
     },
     "controllerImage": {
       "type": "string",
-      "description": "The weirkeeper image. The default is the repository config/manager/deployment.yaml pins, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
+      "description": "The weirkeeper image. The default is the runner pin's namespace with the name weirkeeper, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
       "minLength": 1
     },
     "runnerImage": {
@@ -423,21 +417,7 @@
       }
     },
     "ui": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "type": "string", "minLength": 1 },
-        "imagePullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
-        "namespaces": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
-        "tolerations": { "$ref": "#/definitions/tolerations" },
-        "affinity": { "$ref": "#/definitions/affinity" }
-      }
+      "description": "WITHDRAWN (PROD-17.1 C4, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image. Accepted here only so templates/ui/ui.yaml can refuse it by name, pointing at the console (api.console.*)."
     },
     "retention": {
       "type": "object",

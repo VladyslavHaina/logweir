@@ -2,14 +2,15 @@
 # `just helm-demo` — THE HELM CHART, WALKED END TO END ON A REAL CLUSTER.
 # Task 35 (post-plan).
 #
-# The chart (`charts/logweir`) has been installed with all three optional
-# components on — `minio.enabled`, `demoKafka.enabled`, `ui.enabled` — and this
-# script walks the product over it: two keypairs, the five Secrets, the
+# The chart (`charts/logweir`) has been installed with its optional components
+# on — `minio.enabled`, `demoKafka.enabled` and the console in its loopback
+# administrator mode (`api.console.enabled`, `api.console.mode=localAdmin`;
+# `examples/demo.values.yaml`) — and this script walks the product over it: two keypairs, the five Secrets, the
 # cluster-scoped TrustRoster, two KafkaClusters that the controller probes to
 # `status.reachable: true`, a BackupSchedule and the Backup it fires, a Restore
 # whose plan bytes come from the PAGE's own emitter, an approval minted on the
 # host with the shipped CLI, the Restore's terminal status with
-# `status.outcome: pass`, BOTH readers over the scorecard, the in-cluster UI
+# `status.outcome: pass`, BOTH readers over the scorecard, the console
 # answering through a port-forward, and a teardown that leaves the cluster
 # holding no `logweir-*` namespace.
 #
@@ -52,8 +53,8 @@
 # ===========================================================================
 # It proves the chart's objects work together: the runner reaches the chart's
 # brokers by the names the brokers advertise, the archive lands on the chart's
-# MinIO, the controller's evidence handle verifies against it, and the UI
-# served in-cluster answers with its own ServiceAccount's authority. Run with
+# MinIO, the controller's evidence handle verifies against it, and the console
+# serves the page and its product API through a port-forward. Run with
 # `examples/author-only.values.yaml` it is AUTHOR-ONLY (Global Constraint 37):
 # the images were built and loaded on this host, never pulled, so nothing here
 # is evidence for spec §16 clause 1, and no checklist row moves.
@@ -78,8 +79,11 @@ S3_ENDPOINT="http://${REL}-minio.${SYS}.svc:9000"
 S3_REGION=us-east-1
 SOURCE_BOOTSTRAP="${REL}-kafka-source.${SYS}.svc.cluster.local:9092"
 TARGET_BOOTSTRAP="${REL}-kafka-target.${SYS}.svc.cluster.local:9092"
-PROXY_BASE=http://127.0.0.1:8001
-API_BASE="$PROXY_BASE/apis/logweir.dev/v1alpha1/namespaces/$NS"
+# The console's localAdmin listener: loopback in the pod, reached with
+# `kubectl port-forward`. The local port must equal the listen port, because
+# the console's origin carries it (docs/install.md §5e).
+CONSOLE_PORT="$(sed -n 's/^    port:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$CHART/values.yaml" | head -1)"
+CONSOLE_BASE="http://127.0.0.1:${CONSOLE_PORT}"
 # The `mc` image the chart pins, read from the chart so the two cannot drift.
 MC_IMAGE="$(sed -n 's/^  mcImage:[[:space:]]*//p' "$CHART/values.yaml")"
 PF_PID=""
@@ -246,12 +250,12 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# 0/10 PREFLIGHT — the release is installed, both brokers, MinIO and the UI are
+# 0/10 PREFLIGHT — the release is installed, both brokers, MinIO and the console are
 # Ready, the seed Jobs succeeded (a succeeded hook Job is DELETED by the chart's
 # hook-delete-policy, so "succeeded" is asserted as: the release is `deployed`,
 # no failed Job remains, and the seeds' EFFECTS are on the brokers).
 # ---------------------------------------------------------------------------
-step "0/10 preflight: tools, the release, the brokers, MinIO, the UI, the seeds' effects"
+step "0/10 preflight: tools, the release, the brokers, MinIO, the console, the seeds' effects"
 mkdir -p "$OUT"
 for tool in kubectl helm openssl awk node curl; do
   command -v "$tool" >/dev/null 2>&1 || die "\`$tool\` is not on \$PATH."
@@ -281,13 +285,13 @@ rm -f "$OUT/helm-status.json"
 echo "    release status: $release_status"
 [ "$release_status" = "deployed" ] || die "the release is '$release_status', not deployed — a failed hook Job leaves the release in that state; \`kubectl -n $SYS get jobs\` and \`kubectl logs job/…\` say why"
 
-for target in "deploy/weirkeeper" "statefulset/${REL}-kafka-source" "statefulset/${REL}-kafka-target" "deploy/${REL}-minio" "deploy/${REL}-ui"; do
+for target in "deploy/weirkeeper" "statefulset/${REL}-kafka-source" "statefulset/${REL}-kafka-target" "deploy/${REL}-minio" "deploy/${REL}-api"; do
   set +e
   kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" rollout status "$target" --timeout=300s > "$OUT/rollout-${target##*/}.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl rollout status $target --timeout=300s)"
-  [ "$rc" -eq 0 ] || { cat "$OUT/rollout-${target##*/}.log"; die "$target is not Ready (rc=$rc); the chart's flags minio.enabled, demoKafka.enabled and ui.enabled must all be on"; }
+  [ "$rc" -eq 0 ] || { cat "$OUT/rollout-${target##*/}.log"; die "$target is not Ready (rc=$rc); the chart's flags minio.enabled, demoKafka.enabled and api.console.enabled (mode localAdmin) must all be on"; }
 done
 
 set +e
@@ -361,7 +365,7 @@ echo "    both keypairs were minted seconds ago and are attested by nothing; the
 
 # ---------------------------------------------------------------------------
 # 2/10 THE DEMO NAMESPACE, THE FIVE SECRETS, THE RUNNER ServiceAccount, THE
-#      NetworkPolicy, THE UI's RoleBinding — then `just check-secrets`.
+#      NetworkPolicy — then `just check-secrets`.
 # ---------------------------------------------------------------------------
 step "2/10 namespace $NS, the five Secrets, the runner ServiceAccount, then just check-secrets $NS"
 set +e
@@ -451,27 +455,15 @@ echo "    rc=$rc  (kubectl rollout status deploy/weirkeeper, after the evidence 
 [ "$rc" -eq 0 ] || die "the controller did not come back (rc=$rc)"
 
 # The runner ServiceAccount, in the namespace that runs Jobs (docs/install.md
-# step 4). The NetworkPolicy is NOT applied here: the shipped file carries
-# `namespace: logweir-system` in its metadata, so `kubectl -n <ns> apply -f`
-# of it refuses with a namespace mismatch (measured on this walk's first run,
-# 2026-09-12) — the laptop demo does not apply it into its namespace either,
-# and neither cluster this walk runs on enforces NetworkPolicy.
+# step 4): the walk's namespace is not in identity.authorizedRunnerNamespaces.
+# No NetworkPolicy is applied here; neither cluster this walk runs on enforces
+# one.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" apply -f config/rbac/backup-runner-serviceaccount.yaml > "$OUT/runner-sa.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" apply -f config/samples/backup-runner-serviceaccount.yaml > "$OUT/runner-sa.log" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl apply -f config/rbac/backup-runner-serviceaccount.yaml -n $NS)"
+echo "    rc=$rc  (kubectl apply -f config/samples/backup-runner-serviceaccount.yaml -n $NS)"
 [ "$rc" -eq 0 ] || die "could not create the runner ServiceAccount (rc=$rc)"
-
-# The page's RoleBinding in THIS namespace: the chart binds `<release>-ui` in
-# the release namespace, and every other namespace the page should see gets
-# the same one-line binding (NOTES.txt prints it).
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create rolebinding "${REL}-ui" --clusterrole="${REL}-ui" --serviceaccount="${SYS}:${REL}-ui" > "$OUT/ui-rolebinding.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (kubectl create rolebinding ${REL}-ui --clusterrole=${REL}-ui --serviceaccount=${SYS}:${REL}-ui -n $NS)"
-[ "$rc" -eq 0 ] || die "could not bind the page's role in $NS (rc=$rc)"
 
 # `just check-secrets` reads the fifth Secret from the literal `logweir-system`
 # (its recipe), which is this walk's default release namespace. Under another
@@ -892,51 +884,50 @@ cat "$OUT/verify-python.out"
 [ "$py_rc" -eq 0 ] || die "the Python reader refused the scorecard (rc=$py_rc)"
 
 # ---------------------------------------------------------------------------
-# 9/10 THE UI, IN-CLUSTER, THROUGH A PORT-FORWARD: the page 200, the API 200
-#      with the Backup listed, and one path the proxy refuses.
+# 9/10 THE CONSOLE, THROUGH A PORT-FORWARD: the page 200 and the tree's own
+#      app.js, the session 200 in localAdmin mode, the release namespace's
+#      Backups through the product API, and a Kubernetes path it does not serve.
+#      (Until PROD-17.1 C4 this step fetched the legacy `kubectl proxy` page.)
 # ---------------------------------------------------------------------------
-step "9/10 the UI: kubectl port-forward svc/${REL}-ui 8001:8001, then three fetches"
+step "9/10 the console: kubectl port-forward deploy/${REL}-api ${CONSOLE_PORT}:${CONSOLE_PORT}, then five fetches"
+[ -n "$CONSOLE_PORT" ] || die "could not read api.console.port from $CHART/values.yaml"
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" port-forward "svc/${REL}-ui" 8001:8001 > "$OUT/port-forward.log" 2>&1 &
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" port-forward "deploy/${REL}-api" "${CONSOLE_PORT}:${CONSOLE_PORT}" > "$OUT/port-forward.log" 2>&1 &
 rc=$?
 set -e
 PF_PID=$!
-echo "    rc=$rc  (kubectl port-forward svc/${REL}-ui 8001:8001, backgrounded; pid $PF_PID — killed by the trap)"
+echo "    rc=$rc  (kubectl port-forward deploy/${REL}-api ${CONSOLE_PORT}:${CONSOLE_PORT}, backgrounded; pid $PF_PID — killed by the trap)"
 up=""
 for _ in $(seq 1 30); do
   set +e
-  curl -sS -o /dev/null "$PROXY_BASE/ui/" > "$OUT/pf-poll.txt" 2>&1
+  curl -sS -o /dev/null "$CONSOLE_BASE/ui/" > "$OUT/pf-poll.txt" 2>&1
   rc=$?
   set -e
   [ "$rc" -eq 0 ] && up=yes && break
   sleep 1
 done
-echo "    rc=$rc  (curl $PROXY_BASE/ui/ — the readiness poll, up to 30 s)"
-[ -n "$up" ] || die "the port-forward never answered on 8001; see $OUT/port-forward.log"
+echo "    rc=$rc  (curl $CONSOLE_BASE/ui/ — the readiness poll, up to 30 s)"
+[ -n "$up" ] || die "the port-forward never answered on ${CONSOLE_PORT}; see $OUT/port-forward.log"
 echo
-echo "    WHOSE AUTHORITY: the page is served by kubectl proxy in the ${REL}-ui pod, and the proxy"
-echo "    attaches THAT ServiceAccount's credential to every request it forwards — anyone who can"
-echo "    reach the Service acts with ${REL}-ui's authority. The page holds no credential."
+echo "    WHOSE AUTHORITY: the console in localAdmin mode binds loopback in its pod; whoever may"
+echo "    port-forward to deploy/${REL}-api acts as its one administrator. The page holds no credential."
 echo
-expect_http "$PROXY_BASE/ui/" "200" "the page itself"
-expect_http "$PROXY_BASE/ui/app.js" "200" "the router"
+expect_http "$CONSOLE_BASE/ui/" "200" "the page itself"
+expect_http "$CONSOLE_BASE/ui/app.js" "200" "the router"
 served_sha=$(shasum -a 256 "$OUT/http-body.txt" | awk '{print $1}')
 tree_sha=$(shasum -a 256 ui/app.js | awk '{print $1}')
-# TASK 39: THIS IS THE WHOLE POINT OF THE IMAGE, AND IT IS PROVED THROUGH THE
-# NETWORK. The fourteen files used to arrive as a ConfigMap the chart built from
-# its own copy of `ui/`; they now arrive inside `ui.image`, and what the browser
-# actually receives is compared with the tree here — end to end, through
-# `kubectl proxy`, on a real cluster. `scripts/check-image-ui.sh` makes the same
-# comparison over all fourteen files against the image's filesystem; this line
-# makes it over the one file the router lives in, against the HTTP response.
+# What the browser receives is compared with the tree, through the network.
+# `scripts/check-image-api.sh` makes the same comparison over every file
+# against the image's filesystem; this line makes it over the router, against
+# the HTTP response.
 echo "    served ui/app.js sha256 $served_sha"
 echo "    tree   ui/app.js sha256 $tree_sha"
-[ "$served_sha" = "$tree_sha" ] || die "the page served from the logweir-ui image is not the tree's ui/app.js"
-expect_http "$API_BASE/backups" "200" "the API, same origin, the ${REL}-ui ServiceAccount's authority"
-grep -q "\"name\": *\"$BACKUP_NAME\"" "$OUT/http-body.txt" || die "the Backup list through the proxy does not name $BACKUP_NAME"
-echo "    the Backup list names $BACKUP_NAME"
-expect_http "$PROXY_BASE/api/v1/namespaces/$NS/pods/nothing/exec" "403 404" "a Pod exec path — refused by the proxy's path filter"
-expect_http "$PROXY_BASE/api/v1/namespaces/$NS/secrets" "403 404" "the core API — refused by the proxy's path filter"
+[ "$served_sha" = "$tree_sha" ] || die "the page served from the logweir-console image is not the tree's ui/app.js"
+expect_http "$CONSOLE_BASE/api/v1/session" "200" "the session"
+grep -q '"authenticationMode": *"localAdmin"' "$OUT/http-body.txt" || die "the session does not say localAdmin"
+echo "    the session is the console's one administrator (localAdmin)"
+expect_http "$CONSOLE_BASE/api/v1/namespaces/$SYS/backups" "200" "the product API, the console's own authority"
+expect_http "$CONSOLE_BASE/api/v1/namespaces/$SYS/secrets" "404" "a Kubernetes core path — not a product route"
 
 echo
 echo "==> HELM DEMO EXIT CRITERION MET"
@@ -948,5 +939,5 @@ echo "                          scorecardKey=$r_scorecard"
 echo "                          verification=$r_result   wall clock $((RESTORE_T1 - RESTORE_T0)) s from the create"
 echo "    Both readers agreed, each exit code read directly: logweir drill verify -> $rust_rc,"
 echo "    python3 docs/verify_scorecard.py -> $py_rc."
-echo "    The UI answered 200 (page), 200 (the Backup list), and refused a Pod exec path."
+echo "    The console answered 200 (page, session, the Backup list) and 404 for a core path."
 echo "    NO PRIVATE KEY LEFT THIS HOST; the approver's never reached the cluster at all."

@@ -1,43 +1,19 @@
 //! The `ProtectionPolicy` reconciler and its pure half — PLAT-14.2, D3 §3.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST. Nothing
-//! posts to a sink, nothing waits on a Job, and the double PANICS on a request
-//! it was not given a route for — which is what turns "it never patched a
-//! Backup", "it never read that pod's log" and "it created exactly one
-//! delivery Job" into assertions rather than absences of evidence.
+//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST, and the
+//! double PANICS on a request it was not given a route for — which is what
+//! turns "it never patched a Backup" and "it created nothing" into assertions
+//! rather than absences of evidence.
 //!
-//! READ THESE FIVE FIRST, in this order:
-//!
-//! 1. [`a_condition_that_stays_true_pages_exactly_once`] — the whole point of
-//!    PLAT-14.2's deduplication. The mutant is a ledger that keys on the
-//!    reconcile rather than on the transition, which is how an on-call
-//!    rotation mutes an integration in week two.
-//! 2. [`a_notification_failure_never_patches_a_backup`] — the tracker's own
-//!    acceptance sentence, over a route table with no `backups/status` route
-//!    at all.
-//! 3. [`a_label_wearing_pod_the_delivery_job_does_not_own_is_never_read`] —
-//!    seam **S6**, defect `SEC-PODLOG`.
-//! 4. [`the_ttl_is_patched_only_after_the_status_landed`] — seam **S7**'s
-//!    ordering, asserted on the recorded request sequence.
-//! 5. [`a_sink_credential_value_never_reaches_the_status`] — the API server
-//!    echoes a routing key back in the Job it returns and prints one on the
-//!    pod log; not one byte of it may reach a status, a condition, a plan or
-//!    a log line this controller writes.
+//! Alert delivery is withdrawn (OD-12): the ledger rows below assert what the
+//! ledger records, and
+//! [`a_policy_that_still_names_alert_sinks_says_they_are_withdrawn`] the
+//! named withdrawal.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use logweir_core::credential_binding::{
-    notification_binding, NotificationSink, CREDENTIAL_BINDING_KEY,
-    NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV, NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
-    NOTIFY_SLACK_CREDENTIAL_BINDING_ENV, NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
-    NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV, NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
-    UNBOUND_NO_UID,
-};
 use serde_json::{json, Value};
 use weirkeeper::controllers::protection_policy::{self as pp, ProtectionContext};
-use weirkeeper::crds::protection_policy::{
-    AlertDelivery, AlertEntry, AlertKind, ProtectionPolicy, ProtectionPolicySpec,
-};
-use weirkeeper::job::RunnerImage;
+use weirkeeper::crds::protection_policy::{AlertKind, ProtectionPolicy, ProtectionPolicySpec};
 use weirkeeper::protection as p;
 use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Recorder, Route};
 
@@ -64,57 +40,22 @@ const CATALOG_PATH: &str = "/recoverycatalogs/primary";
 const RESTORES_PATH: &str = "/restores";
 const PAGE_PATH: &str = "/configmaps/primary-catalog-p0";
 
-/// A routing key the fake API server echoes back everywhere it can. No byte of
-/// it may reach anything this controller writes.
-const ROUTING_KEY: &str = "R0UT1NGK3Y-do-not-leak-me";
-
-/// The literal env the fixture spec's delivery Job carries: `RUST_LOG`, the
-/// installation's hatch when it is on, and FX-20's binding expectation for
-/// each of the fixture's two sinks (PagerDuty at the default endpoint, the
-/// webhook), in projection order.
-fn fixture_literals(hatch: bool) -> Vec<(String, String)> {
-    let mut out = vec![("RUST_LOG".to_string(), "warn".to_string())];
-    if hatch {
-        out.push((pp::ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string()));
-    }
-    out.push((
-        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
-        notification_binding(POLICY_UID, NotificationSink::PagerDuty, None),
-    ));
-    out.push((
-        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
-        notification_binding(POLICY_UID, NotificationSink::Webhook, None),
-    ));
-    out
-}
-
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 17, 12, 0, 0)
         .single()
         .expect("the fixture instant exists")
 }
 
-fn at(offset_hours: i64) -> String {
-    p::rfc3339(now() - Duration::hours(offset_hours))
+fn rfc3339(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// The reconciler's context, with the INSTALLATION's insecure-sink hatch
-/// named.
-///
-/// `false` is the default every other test here drives, and it is the shipped
-/// one: `notify.allowInsecureSinks` is `false` in `charts/logweir/values.yaml`
-/// and `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` is rendered by nothing until an
-/// administrator sets it.
-fn context_with(client: kube::Client, allow_insecure_sinks: bool) -> ProtectionContext {
-    ProtectionContext {
-        client,
-        runner_image: RunnerImage::default(),
-        allow_insecure_sinks,
-    }
+fn at(offset_hours: i64) -> String {
+    rfc3339(now() - Duration::hours(offset_hours))
 }
 
 /// The default spec: one source, one saved destination, one schedule, a
-/// 26-hour objective, one PagerDuty + webhook route.
+/// 26-hour objective.
 fn spec_value() -> Value {
     json!({
         "protects": {
@@ -128,15 +69,6 @@ fn spec_value() -> Value {
             "maxConsecutiveFailedRuns": 2,
             "requireVerifiedEvidence": true,
             "requireCatalogAvailability": true
-        },
-        "notifications": {
-            "routes": [{
-                "name": "oncall",
-                "pagerDuty": {"routingKeySecretRef": {"name": "pd", "key": "routing-key"}},
-                "webhook": {"urlSecretRef": {"name": "hooks", "key": "ops"}}
-            }],
-            "sendResolved": true,
-            "renotifyAfterSeconds": 86400
         },
         "evaluationIntervalSeconds": 300
     })
@@ -328,31 +260,15 @@ fn ok(path: &'static str, body: String) -> Route {
     }
 }
 
-fn post(path: &'static str, body: String) -> Route {
-    Route {
-        method: "POST",
-        path_suffix: path,
-        status: 201,
-        body,
-    }
-}
-
 /// A PATCH route. The answer is the object the API server would return, not
 /// `{}`: `Api::patch_status` deserializes the response into the typed object.
 fn patch(path: &'static str) -> Route {
-    let body = if path.contains("/jobs/") {
-        json!({
-            "apiVersion": "batch/v1", "kind": "Job",
-            "metadata": {"name": "j", "namespace": NS, "uid": JOB_UID}, "spec": {}
-        })
-    } else {
-        json!({
-            "apiVersion": "logweir.dev/v1alpha1", "kind": "ProtectionPolicy",
-            "metadata": {"name": POLICY, "namespace": NS, "uid": POLICY_UID,
-                         "resourceVersion": "9091"},
-            "spec": spec_value()
-        })
-    };
+    let body = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "ProtectionPolicy",
+        "metadata": {"name": POLICY, "namespace": NS, "uid": POLICY_UID,
+                     "resourceVersion": "9091"},
+        "spec": spec_value()
+    });
     Route {
         method: "PATCH",
         path_suffix: path,
@@ -371,15 +287,6 @@ fn read_routes(backups: Vec<Value>, schedule_status: Value) -> Vec<Route> {
         ok(BACKUPS_PATH, backup_list(backups)),
         ok(RESTORES_PATH, restore_list(Vec::new())),
     ]
-}
-
-/// The GET route the event `ConfigMap`'s owner read needs (review F7): the
-/// FIRST delivery Job for a transition, answered with the UID the ConfigMap's
-/// `ownerReferences` entry is built from.
-fn first_job_route(key: &str, transition: i64) -> Route {
-    let name = p::delivery_job_name(POLICY, POLICY_UID, key, transition, 1);
-    let path: &'static str = Box::leak(format!("/jobs/{name}").into_boxed_str());
-    ok(path, running_job(&name))
 }
 
 /// A `RestoreList`, for the `RecoveryCompleted` path.
@@ -412,16 +319,6 @@ fn restore(name: &str, uid: &str, backup_set: &str, overrides: Value) -> Value {
     });
     merge(&mut object, &overrides);
     object
-}
-
-/// The request path with its query string removed.
-///
-/// A route table is written against paths, and a namespace called
-/// `logweir-d3-w6` contains the substring `/log` — which is exactly the kind of
-/// coincidence that makes a "this log was never read" assertion pass for the
-/// wrong reason.
-fn path_of(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
 }
 
 fn requests(recorder: &Recorder) -> Vec<(String, String)> {
@@ -1242,115 +1139,69 @@ fn the_catalog_answers_the_evidence_objective_only_where_the_controller_did_not(
 // NOTIFICATION)
 // ===========================================================================
 
-fn notifications(
-    spec: &ProtectionPolicySpec,
-) -> Option<&weirkeeper::crds::protection_policy::Notifications> {
-    spec.notifications.as_ref()
-}
-
+/// A condition that stays true is ONE transition, however many passes see it.
+/// (Re-pointed when alert delivery was withdrawn: the delivery half of this
+/// row, `due` and re-notify, went with the path.)
 #[test]
-fn a_condition_that_stays_true_pages_exactly_once() {
-    let spec = spec();
+fn a_condition_that_stays_true_is_one_transition() {
     let open = [p::PolicyAlertKind::Staleness];
 
-    // Pass 1 — the alert opens at transition 1 and is due.
-    let first = p::reconcile_alerts(
-        &[],
-        &open,
-        p::Health::Stale,
-        POLICY_UID,
-        notifications(&spec),
-        now(),
-    );
-    assert_eq!(first.alerts.len(), 1);
-    assert_eq!(first.alerts[0].transition, Some(1));
-    assert_eq!(first.due.len(), 1);
+    // Pass 1 — the alert opens at transition 1.
+    let mut ledger = p::reconcile_alerts(&[], &open, p::Health::Stale, POLICY_UID, now());
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0].transition, Some(1));
 
-    // The controller records that a Job was created for transition 1.
-    let mut delivered = first.alerts.clone();
-    delivered[0].notified_transition = Some(1);
-    delivered[0].delivery = Some(AlertDelivery {
-        state: Some("Delivered".to_string()),
-        attempts: Some(1),
-        last_attempt_at: Some(now()),
-        job_ref: None,
-        last_error: None,
-    });
-
-    // Passes 2..=5 — the condition is still true. NOTHING is due.
-    let mut ledger = delivered;
+    // Passes 2..=5 — the condition is still true; nothing moves.
     for pass in 0..4 {
         let out = p::reconcile_alerts(
             &ledger,
             &open,
             p::Health::Stale,
             POLICY_UID,
-            notifications(&spec),
             now() + Duration::minutes(5 * (pass + 1)),
         );
-        assert!(
-            out.due.is_empty(),
-            "pass {pass}: a condition that stays true produces no further transitions — one \
-             page per reconcile is how an integration gets muted"
+        assert_eq!(
+            out[0].transition,
+            Some(1),
+            "pass {pass}: a condition that stays true produces no further transitions"
         );
-        assert_eq!(out.alerts[0].transition, Some(1));
-        ledger = out.alerts;
+        ledger = out;
     }
-
-    // The re-notify window, and exactly one more transition when it elapses.
-    let out = p::reconcile_alerts(
-        &ledger,
-        &open,
-        p::Health::Stale,
-        POLICY_UID,
-        notifications(&spec),
-        now() + Duration::seconds(86_400),
-    );
-    assert_eq!(out.alerts[0].transition, Some(2));
-    assert_eq!(out.due.len(), 1);
 }
 
 #[test]
 fn the_key_is_stable_across_open_and_resolve_and_is_its_own_family() {
-    let spec = spec();
     let open = p::reconcile_alerts(
         &[],
         &[p::PolicyAlertKind::Staleness],
         p::Health::Stale,
         POLICY_UID,
-        notifications(&spec),
         now(),
     );
-    let key = open.alerts[0].key.clone();
+    let key = open[0].key.clone();
     assert_eq!(key, format!("logweir-protection-{POLICY_UID}-Staleness"));
 
     let resolved = p::reconcile_alerts(
-        &open.alerts,
+        &open,
         &[],
         p::Health::Healthy,
         POLICY_UID,
-        notifications(&spec),
         now() + Duration::hours(1),
     );
+    assert_eq!(resolved[0].key, key, "one key across open and resolve");
+    assert_eq!(resolved[0].state, "Resolved");
     assert_eq!(
-        resolved.alerts[0].key, key,
-        "PagerDuty gets `trigger` and `resolve` under ONE dedup_key; a key that changed between \
-         them leaves the incident open forever"
+        resolved[0].transition,
+        Some(2),
+        "the resolve is its own transition"
     );
-    assert_eq!(resolved.alerts[0].state, "Resolved");
-    assert_eq!(resolved.alerts[0].transition, Some(2));
-    assert_eq!(resolved.due.len(), 1, "the resolve is its own transition");
 
-    assert!(
-        key.starts_with(p::DEDUP_PREFIX),
-        "the prefix keeps this family apart from `logweir-drill-…`, so a protection resolve can \
-         never close a drill's open page"
-    );
+    assert!(key.starts_with(p::DEDUP_PREFIX));
     assert_eq!(
         p::dedup_key("   ", p::PolicyAlertKind::Staleness),
         "logweir-protection-unknown-Staleness",
         "a blank UID collapses to `unknown`, never to an empty segment — that key would be ONE \
-         incident per kind across every policy in the cluster"
+         alert per kind across every policy in the cluster"
     );
 }
 
@@ -1375,15 +1226,6 @@ fn recovery_completed_keys_on_the_restore_uid_and_never_on_the_policy() {
         p::PolicyAlertKind::narrow(AlertKind::RecoveryCompleted),
         None
     );
-    assert!(!p::kind_pages(AlertKind::RecoveryCompleted));
-    for kind in [
-        AlertKind::BackupFailure,
-        AlertKind::Staleness,
-        AlertKind::ArchiveUnavailable,
-        AlertKind::RehearsalFailure,
-    ] {
-        assert!(p::kind_pages(kind));
-    }
 }
 
 #[test]
@@ -1426,135 +1268,9 @@ fn slot(name: &str, attempt: u32, outcome: p::SlotOutcome) -> p::SlotRun {
     }
 }
 
-#[test]
-fn suppression_is_a_choice_and_not_a_failure() {
-    // No notifications block at all.
-    assert!(p::is_suppressed(
-        None,
-        AlertKind::Staleness,
-        p::AlertState::Open
-    ));
-
-    // A kinds list that does not name this kind.
-    let narrowed: ProtectionPolicySpec = serde_json::from_value({
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"notifications": {"kinds": ["BackupFailure"]}}),
-        );
-        value
-    })
-    .expect("the narrowed spec parses");
-    assert!(p::is_suppressed(
-        notifications(&narrowed),
-        AlertKind::Staleness,
-        p::AlertState::Open
-    ));
-    assert!(!p::is_suppressed(
-        notifications(&narrowed),
-        AlertKind::BackupFailure,
-        p::AlertState::Open
-    ));
-
-    // `sendResolved: false` suppresses the resolve and not the open.
-    let quiet: ProtectionPolicySpec = serde_json::from_value({
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"notifications": {"sendResolved": false}}),
-        );
-        value
-    })
-    .expect("the quiet spec parses");
-    assert!(p::is_suppressed(
-        notifications(&quiet),
-        AlertKind::Staleness,
-        p::AlertState::Resolved
-    ));
-    assert!(!p::is_suppressed(
-        notifications(&quiet),
-        AlertKind::Staleness,
-        p::AlertState::Open
-    ));
-
-    // D3 W4's recorded no-op: `RecoveryCompleted` with PagerDuty-only routes.
-    let pager_only: ProtectionPolicySpec = serde_json::from_value(json!({
-        "protects": {"sourceRef": {"name": SOURCE}, "destinationRef": {"name": DESTINATION}},
-        "objectives": {"maxRecoveryPointAgeSeconds": 93600},
-        "notifications": {"routes": [{
-            "name": "oncall",
-            "pagerDuty": {"routingKeySecretRef": {"name": "pd", "key": "routing-key"}}
-        }]}
-    }))
-    .expect("the pager-only spec parses");
-    assert!(
-        p::is_suppressed(
-            notifications(&pager_only),
-            AlertKind::RecoveryCompleted,
-            p::AlertState::Open
-        ),
-        "a RecoveryCompleted with PagerDuty-only routes configures zero sinks: `logweir notify \
-         deliver` exits 1 with `none:unconfigured` BY DESIGN, and burning three attempts on it \
-         would turn a no-op into a red NotificationsDelivered"
-    );
-    assert!(!p::is_suppressed(
-        notifications(&pager_only),
-        AlertKind::Staleness,
-        p::AlertState::Open
-    ));
-}
-
 // ===========================================================================
-// U — sampled-versus-complete labelling
+// U — the summary never claims an exhaustive check
 // ===========================================================================
-
-/// MUTANT: add a `Complete => "complete"` variant to
-/// `protection::VerificationScope`, or make `event_document` write the literal.
-/// This test fails on the enum's member list AND on the document, and
-/// `logweir notify deliver` would refuse the document at parse time on top of
-/// that — three independent refusals for the one claim this product must never
-/// make.
-#[test]
-fn nothing_can_label_a_verification_complete() {
-    assert_eq!(
-        p::VerificationScope::ALL
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-        vec!["sampled", "degraded", "none"]
-    );
-    assert_eq!(p::VerificationScope::parse("complete"), None);
-
-    for scope in p::VerificationScope::ALL {
-        let point = facts_point();
-        let document = p::event_document(&p::EventFacts {
-            namespace: NS,
-            name: POLICY,
-            uid: POLICY_UID,
-            alert_key: &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-            kind: AlertKind::Staleness,
-            open: true,
-            transition: 3,
-            health: p::Health::Stale,
-            summary: "the newest available recovery point is 31h 0m old, past the objective of \
-                      26h 0m",
-            point: Some(&point),
-            consecutive_failed_runs: 2,
-            missed_slots: 1,
-            scope: *scope,
-            generated_at: now(),
-        });
-        let rendered = document.to_string();
-        assert!(
-            !rendered.contains("\"complete\""),
-            "no event document may carry a `complete` verification scope: {rendered}"
-        );
-        assert_eq!(
-            document["verification_scope"].as_str(),
-            Some(scope.as_str())
-        );
-    }
-}
 
 /// D3 W4 scans the summary and edits a claim out of it; nothing this
 /// controller generates should ever trip that scan. The word `exhaustive` is
@@ -1634,147 +1350,8 @@ fn facts_point() -> p::AvailablePointFacts {
 }
 
 // ===========================================================================
-// U — the event document, held to the format page's own worked example
+// U — the point identity
 // ===========================================================================
-
-/// The cross-crate contract, without the cross-crate dependency.
-///
-/// `weirkeeper` cannot depend on `crates/logweir` — that crate links the
-/// SIGNER, and `scripts/check-one-signer.sh` computes the set of crates that
-/// do, so even a `[dev-dependencies]` edge would break guard **G-SIGN** for a
-/// type import. So the document is built here and held to
-/// `docs/formats/protection-event.md`'s own worked example, which
-/// `crates/logweir/tests/notify_deliver.rs` parses into
-/// `logweir::notify::ProtectionEvent` from the SAME page. A rename on either
-/// side is a red test on one of the two.
-#[test]
-fn the_event_document_is_the_documented_field_set() {
-    let page = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/formats/protection-event.md"),
-    )
-    .expect("the format page is readable");
-    let example = fenced_json(&page).expect("the format page carries a worked JSON example");
-    let documented: Value = serde_json::from_str(&example).expect("the example is JSON");
-
-    let point = facts_point();
-    let built = p::event_document(&p::EventFacts {
-        namespace: NS,
-        name: POLICY,
-        uid: POLICY_UID,
-        alert_key: &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        kind: AlertKind::Staleness,
-        open: true,
-        transition: 3,
-        health: p::Health::Stale,
-        summary: "a summary",
-        point: Some(&point),
-        consecutive_failed_runs: 2,
-        missed_slots: 1,
-        scope: p::VerificationScope::Sampled,
-        generated_at: now(),
-    });
-
-    let mut documented_keys: Vec<&String> = documented
-        .as_object()
-        .expect("an object")
-        .keys()
-        .collect::<Vec<_>>();
-    let mut built_keys: Vec<&String> = built.as_object().expect("an object").keys().collect();
-    documented_keys.sort();
-    built_keys.sort();
-    assert_eq!(
-        built_keys, documented_keys,
-        "the delivery Job parses with `deny_unknown_fields`, so an extra key here is a refused \
-         delivery and a missing one is a refused parse"
-    );
-    for key in &built_keys {
-        assert!(
-            p::EVENT_FIELDS.contains(&key.as_str()),
-            "`{key}` is emitted but is not in EVENT_FIELDS"
-        );
-    }
-    for nested in ["policy", "alert", "last_available_point"] {
-        let mut a: Vec<&String> = built[nested]
-            .as_object()
-            .expect("an object")
-            .keys()
-            .collect();
-        let mut b: Vec<&String> = documented[nested]
-            .as_object()
-            .expect("an object")
-            .keys()
-            .collect();
-        a.sort();
-        b.sort();
-        assert_eq!(a, b, "`{nested}`'s field set drifted from the format page");
-    }
-    assert_eq!(built["alert"]["action"].as_str(), Some("trigger"));
-    assert_eq!(
-        built["details_route"].as_str(),
-        Some(format!("#/protection?ns={NS}&name={POLICY}").as_str()),
-        "a fragment route and not an absolute URL: the controller does not know the \
-         installation's hostname, and inventing one puts a dead link in an incident"
-    );
-    assert_eq!(
-        built["event_id"].as_str(),
-        Some(
-            p::event_id(
-                POLICY_UID,
-                &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-                3
-            )
-            .as_str()
-        )
-    );
-}
-
-/// A `health: Unprotected` event has NO point, and its absence is the fact.
-#[test]
-fn an_unprotected_event_omits_the_point_rather_than_inventing_one() {
-    let document = p::event_document(&p::EventFacts {
-        namespace: NS,
-        name: POLICY,
-        uid: POLICY_UID,
-        alert_key: &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        kind: AlertKind::Staleness,
-        open: true,
-        transition: 1,
-        health: p::Health::Unprotected,
-        summary: "there is no available recovery point for this policy at all",
-        point: None,
-        consecutive_failed_runs: 0,
-        missed_slots: 0,
-        scope: p::VerificationScope::None,
-        generated_at: now(),
-    });
-    assert!(document.get("last_available_point").is_none());
-
-    // A point with no derivable identity is also omitted, rather than emitted
-    // half-filled: the delivery Job requires all four sub-fields.
-    let partial = p::AvailablePointFacts {
-        point_id: None,
-        ..facts_point()
-    };
-    let document = p::event_document(&p::EventFacts {
-        namespace: NS,
-        name: POLICY,
-        uid: POLICY_UID,
-        alert_key: "k",
-        kind: AlertKind::Staleness,
-        open: false,
-        transition: 2,
-        health: p::Health::Healthy,
-        summary: "s",
-        point: Some(&partial),
-        consecutive_failed_runs: 0,
-        missed_slots: 0,
-        scope: p::VerificationScope::Sampled,
-        generated_at: now(),
-    });
-    assert!(document.get("last_available_point").is_none());
-    assert_eq!(document["alert"]["action"].as_str(), Some("resolve"));
-}
 
 #[test]
 fn the_point_identity_is_the_recorded_receipt_digest() {
@@ -1791,152 +1368,6 @@ fn the_point_identity_is_the_recorded_receipt_digest() {
         p::point_id_from_receipt_digest(&format!("sha256:{}", "zz".repeat(32))),
         None,
         "nothing is invented from a digest that is not one"
-    );
-}
-
-fn fenced_json(page: &str) -> Option<String> {
-    let mut lines = page.lines();
-    while let Some(line) = lines.next() {
-        if line.trim() != "```json" {
-            continue;
-        }
-        let block: Vec<&str> = lines.by_ref().take_while(|l| l.trim() != "```").collect();
-        let joined = block.join("\n");
-        if joined.contains("\"format_version\"") {
-            return Some(joined);
-        }
-    }
-    None
-}
-
-// ===========================================================================
-// U — the delivery verdict (tracker row: NOTIFICATION TRANSPORT FAILURE)
-// ===========================================================================
-
-#[test]
-fn the_delivery_verdict_reads_d3_w4s_exit_contract() {
-    assert_eq!(
-        p::classify_delivery(Some(0), &["notify-result=pagerduty:ok"]).0,
-        p::DeliveryState::Delivered
-    );
-    assert_eq!(
-        p::classify_delivery(Some(1), &["notify-result=webhook:failed"]).0,
-        p::DeliveryState::Failed
-    );
-    assert_eq!(
-        p::classify_delivery(Some(1), &["notify-result=none:unconfigured"]).0,
-        p::DeliveryState::Suppressed,
-        "exit 1 with `none:unconfigured` is a no-op, not a transport failure: D3 W4's recorded \
-         hand-off for a RecoveryCompleted with PagerDuty-only routes"
-    );
-    assert_eq!(
-        p::classify_delivery(Some(3), &[]).0,
-        p::DeliveryState::Failed,
-        "exit 3 refused the document and posted nothing"
-    );
-    assert_eq!(p::classify_delivery(None, &[]).0, p::DeliveryState::Failed);
-    assert_eq!(
-        p::classify_delivery(Some(2), &[]).0,
-        p::DeliveryState::Failed
-    );
-}
-
-/// The sink error is SWALLOWED AND REPORTED: it becomes a bounded sentence on
-/// this policy's status and nothing else moves.
-#[test]
-fn a_sink_error_is_reported_and_never_echoed_from_the_log() {
-    let (state, message) = p::classify_delivery(
-        Some(1),
-        &[
-            "notify-result=pagerduty:failed",
-            &format!("notify-result=webhook:ok {ROUTING_KEY}"),
-            &format!("some sink said: {ROUTING_KEY}"),
-        ],
-    );
-    assert_eq!(state, p::DeliveryState::Failed);
-    assert!(
-        !message.contains(ROUTING_KEY),
-        "a pod log is adopter-influenced input; echoing a matched line's tail into a CR status \
-         is how a credential on that line becomes a permanently stored, API-served secret. \
-         Got: {message}"
-    );
-    assert!(message.contains("pagerduty:failed"));
-    assert!(
-        !message.contains("webhook:ok"),
-        "`webhook:ok <key>` is not one of the ten values this build knows, so it is not read \
-         at all"
-    );
-    assert_eq!(p::known_result("pagerduty:ok"), Some("pagerduty:ok"));
-    assert_eq!(p::known_result("pagerduty:maybe"), None);
-    // FX-20 added the three `<sink>:refused` values.
-    assert_eq!(p::NOTIFY_RESULTS.len(), 10);
-
-    let long = "x".repeat(4096);
-    assert!(p::cap_error(&long).chars().count() <= p::MAX_ERROR_CHARS);
-}
-
-#[test]
-fn the_retry_schedule_is_three_bounded_attempts() {
-    assert_eq!(p::MAX_DELIVERY_ATTEMPTS, 3);
-    assert_eq!(p::DELIVERY_BACKOFF_SECONDS, [60, 300]);
-    let mut delivery = AlertDelivery {
-        state: Some("Failed".to_string()),
-        attempts: Some(1),
-        last_attempt_at: Some(now()),
-        job_ref: None,
-        last_error: Some("nope".to_string()),
-    };
-    assert_eq!(
-        p::next_attempt_at(&delivery),
-        Some(now() + Duration::seconds(60))
-    );
-    delivery.attempts = Some(2);
-    assert_eq!(
-        p::next_attempt_at(&delivery),
-        Some(now() + Duration::seconds(300))
-    );
-    delivery.attempts = Some(3);
-    assert_eq!(
-        p::next_attempt_at(&delivery),
-        None,
-        "exhaustion sets NotificationsDelivered=False/DeliveryFailed AND NOTHING ELSE"
-    );
-}
-
-#[test]
-fn the_derived_names_are_pure_functions_and_fit_kubernetes() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let a = p::delivery_job_name(POLICY, POLICY_UID, &key, 3, 1);
-    let b = p::delivery_job_name(POLICY, POLICY_UID, &key, 3, 1);
-    assert_eq!(
-        a, b,
-        "a duplicate reconcile must compute the same name and get a 409"
-    );
-    assert_ne!(a, p::delivery_job_name(POLICY, POLICY_UID, &key, 4, 1));
-    assert_ne!(a, p::delivery_job_name(POLICY, POLICY_UID, &key, 3, 2));
-    assert_ne!(
-        a,
-        p::delivery_job_name(POLICY, "another-uid", &key, 3, 1),
-        "two policies of the same name in different namespaces must not share a Job name"
-    );
-
-    let long = "a".repeat(200);
-    for name in [
-        p::delivery_job_name(&long, POLICY_UID, &key, 3, 1),
-        p::event_config_map_name(&long, &key, 3),
-    ] {
-        assert!(name.len() <= 63, "`{name}` is {} characters", name.len());
-        assert!(
-            name.ends_with(|c: char| c.is_ascii_alphanumeric()),
-            "a Kubernetes name ends in an alphanumeric: {name}"
-        );
-    }
-    // The digest half survives truncation; the readable half is what is cut.
-    let truncated = p::delivery_job_name(&long, POLICY_UID, &key, 3, 1);
-    let digest = p::sha8(&[POLICY_UID, &key, "3"]);
-    assert!(
-        truncated.contains(&digest),
-        "trimming the digest would make two policies' Jobs collide: {truncated}"
     );
 }
 
@@ -1961,28 +1392,80 @@ fn drive_at(
     routes: Vec<Route>,
     at: DateTime<Utc>,
 ) -> (pp::Outcome, Recorder, BodyRecorder) {
-    drive_in(policy, routes, at, false)
-}
-
-/// [`drive_at`] with the installation's insecure-sink hatch named — the one
-/// knob that is NOT on the policy and NOT on the clock.
-fn drive_in(
-    policy: &ProtectionPolicy,
-    routes: Vec<Route>,
-    at: DateTime<Utc>,
-    allow_insecure_sinks: bool,
-) -> (pp::Outcome, Recorder, BodyRecorder) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a current-thread runtime");
     runtime.block_on(async {
         let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-        let outcome = pp::reconcile_policy(policy, &context_with(client, allow_insecure_sinks), at)
+        let outcome = pp::reconcile_policy(policy, &ProtectionContext { client }, at)
             .await
             .expect("the reconcile did not error");
         (outcome, recorder, bodies)
     })
+}
+
+/// **Alert sinks are withdrawn, by name.** A policy written before v1 that
+/// still carries `spec.notifications` parses, is evaluated as before, and its
+/// status says `NotificationsDelivered=False/NotificationsWithdrawn`, naming
+/// the field. The route table has no Job or ConfigMap route, so the double
+/// would panic on any delivery. CONTROL: the same policy without the field
+/// publishes no such condition.
+#[test]
+fn a_policy_that_still_names_alert_sinks_says_they_are_withdrawn() {
+    let mut legacy = spec_value();
+    merge(
+        &mut legacy,
+        &json!({
+            "objectives": {"requireCatalogAvailability": false},
+            "notifications": {
+                "routes": [{
+                    "name": "oncall",
+                    "pagerDuty": {"routingKeySecretRef": {"name": "pd", "key": "routing-key"}}
+                }],
+                "renotifyAfterSeconds": 86400
+            }
+        }),
+    );
+    let routes = || {
+        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+    let (outcome, _, bodies) = drive(&policy_with(legacy.clone(), json!({})), routes());
+    assert_eq!(
+        outcome.health,
+        p::Health::Healthy,
+        "health is evaluated as before"
+    );
+    let status = last_status_patch(&bodies);
+    let withdrawn = condition(&status, pp::CONDITION_NOTIFICATIONS_DELIVERED);
+    assert_eq!(withdrawn["status"].as_str(), Some("False"));
+    assert_eq!(
+        withdrawn["reason"].as_str(),
+        Some(pp::REASON_NOTIFICATIONS_WITHDRAWN)
+    );
+    assert!(
+        withdrawn["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("spec.notifications is withdrawn")),
+        "{withdrawn}"
+    );
+
+    // CONTROL: without the field there is no such condition at all.
+    legacy
+        .as_object_mut()
+        .expect("a spec object")
+        .remove("notifications");
+    let (_, _, bodies) = drive(&policy_with(legacy, json!({})), routes());
+    let status = last_status_patch(&bodies);
+    let types: Vec<&str> = status["status"]["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .filter_map(|c| c["type"].as_str())
+        .collect();
+    assert_eq!(types, vec!["Ready", "Protected"]);
 }
 
 /// A healthy policy: one recent verified backup, one ready schedule, no
@@ -2005,7 +1488,6 @@ fn a_healthy_policy_creates_nothing_and_publishes_healthy() {
     let (outcome, recorder, bodies) = drive(&policy_with(no_catalog, json!({})), routes);
 
     assert_eq!(outcome.health, p::Health::Healthy);
-    assert_eq!(outcome.created_jobs, 0);
     assert!(outcome.committed);
     let status = last_status_patch(&bodies);
     assert_eq!(status["status"]["health"].as_str(), Some("Healthy"));
@@ -2100,15 +1582,13 @@ fn a_steady_policy_issues_no_patch_at_all() {
 /// **FX-29's class sweep: a field that becomes absent is cleared, and the
 /// policy then settles.**
 ///
-/// The notification routes are removed from the spec, so the policy publishes
-/// no `credentialBindings` any more. Before FX-29 the patch OMITTED the key
-/// (`skip_serializing_if`; it is not in `CLEARABLE_STATUS_FIELDS`), a merge
-/// patch keeps an omitted key, and `settle_clock_fields` compared the stale
-/// stored bindings with the computed `None` on every pass — so `evaluatedAt`
-/// was `now` on every pass, and every write woke this reconciler's own watch.
-/// The same held for any optional field nested in `lastAvailablePoint`,
-/// `lastAttempt`, `missed` or `rehearsal`. CONTROL: at `a8a30428` pass 3 sends
-/// a PATCH (and the double, which has no PATCH route there, refuses it).
+/// The newest point loses its `windowCovered`, so `lastAvailablePoint` no
+/// longer carries `newestRecordAt`. Before FX-29 the patch OMITTED the nested
+/// key (`skip_serializing_if`), a merge patch keeps an omitted key, and
+/// `settle_clock_fields` compared the stale stored value with the computed
+/// `None` on every pass — so `evaluatedAt` was `now` on every pass, and every
+/// write woke this reconciler's own watch. (Re-pointed when alert delivery was
+/// withdrawn: this row used `credentialBindings`, which went with the sinks.)
 #[test]
 fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
     let no_catalog = {
@@ -2120,52 +1600,53 @@ fn a_field_that_becomes_absent_is_cleared_and_the_policy_settles() {
         value
     };
     let fired = json!({"lastFireTime": at(10)});
-    let with_routes = || {
-        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], fired.clone());
-        routes.push(patch(STATUS_PATH));
-        routes
+    let without_window = || {
+        let mut b = backup("b-1", 2, json!({}));
+        b["status"]
+            .as_object_mut()
+            .expect("a status")
+            .remove("windowCovered");
+        b
     };
 
-    // Pass 1: notification routes configured, so bindings are published.
-    let (_, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), with_routes());
+    // Pass 1: the point's window is known, so `newestRecordAt` is published.
+    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], fired.clone());
+    routes.push(patch(STATUS_PATH));
+    let (_, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
     let first = last_status_patch(&bodies)["status"].clone();
     assert!(
-        first["credentialBindings"].is_array(),
-        "the premise: the routes' bindings are published: {first}"
+        first["lastAvailablePoint"]["newestRecordAt"].is_string(),
+        "the premise: the window is published: {first}"
     );
 
-    // Pass 2: the routes are removed (a spec edit, generation 3 -> 4).
-    let mut without = no_catalog;
-    without
-        .as_object_mut()
-        .expect("a spec object")
-        .remove("notifications");
-    let edited = |status: Value| {
-        let mut policy = policy_with(without.clone(), status);
-        policy.metadata.generation = Some(4);
-        policy
-    };
+    // Pass 2: the window is gone.
+    let mut routes = read_routes(vec![without_window()], fired.clone());
+    routes.push(patch(STATUS_PATH));
     let (_, _, bodies) = drive_at(
-        &edited(first.clone()),
-        with_routes(),
+        &policy_with(no_catalog.clone(), first.clone()),
+        routes,
         now() + Duration::seconds(10),
     );
     let patch = last_status_patch(&bodies);
     assert!(
-        patch["status"]
+        patch["status"]["lastAvailablePoint"]
             .as_object()
-            .expect("a status object")
-            .get("credentialBindings")
+            .expect("a point object")
+            .get("newestRecordAt")
             .is_some_and(Value::is_null),
-        "the bindings are sent as an explicit null, which clears them: {patch}"
+        "the nested key is sent as an explicit null, which clears it: {patch}"
     );
     let mut stored = first;
     weirkeeper::conditions::apply_merge_patch(&mut stored, &patch["status"]);
-    assert!(stored.get("credentialBindings").is_none());
+    assert!(stored["lastAvailablePoint"].get("newestRecordAt").is_none());
 
     // Pass 3: nothing changed. NO PATCH route: the double refuses one.
-    let routes = read_routes(vec![backup("b-1", 2, json!({}))], fired);
-    let (outcome, recorder, _) = drive_at(&edited(stored), routes, now() + Duration::seconds(100));
+    let routes = read_routes(vec![without_window()], fired);
+    let (outcome, recorder, _) = drive_at(
+        &policy_with(no_catalog, stored),
+        routes,
+        now() + Duration::seconds(100),
+    );
     assert!(outcome.committed);
     assert!(
         !requests(&recorder).iter().any(|(m, _)| m == "PATCH"),
@@ -2202,7 +1683,7 @@ fn a_point_that_ages_out_is_seen_by_the_timed_requeue() {
         value
     };
     let objective = 93_600_i64;
-    let started = p::rfc3339(now() - Duration::seconds(objective - 120));
+    let started = rfc3339(now() - Duration::seconds(objective - 120));
     let point = backup(
         "b-1",
         26,
@@ -2326,125 +1807,6 @@ fn past_the_half_interval_only_the_clock_fields_move() {
     assert_ne!(first["evaluatedAt"], second["evaluatedAt"]);
 }
 
-/// The tracker's acceptance sentence, as a test.
-///
-/// The route table has NO route for `backups/status` or `restores/status`, and
-/// the double PANICS on a request it was not given a route for — so an
-/// attempted write is a failing test naming the request, not a silent pass.
-#[test]
-fn a_notification_failure_never_patches_a_backup() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 3);
-    let status = json!({
-        "alerts": [{
-            "key": key,
-            "kind": "Staleness",
-            "state": "Open",
-            "openedAt": at(4),
-            "transition": 1,
-            "notifiedTransition": 1,
-            "delivery": {
-                "state": "Pending",
-                "attempts": 3,
-                "lastAttemptAt": at(1),
-                "jobRef": {"name": job_name.clone()}
-            }
-        }]
-    });
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        status,
-    );
-
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, finished_job(&job_name, "Failed")));
-    routes.push(ok("/pods", pod_list(&job_name, JOB_UID)));
-    routes.push(ok(
-        POD_LOG_PATH,
-        "notify-result=webhook:failed\n".to_string(),
-    ));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-
-    let (outcome, recorder, bodies) = drive(&policy, routes);
-    assert_eq!(outcome.health, p::Health::Stale);
-    let status = last_status_patch(&bodies);
-    let alert = &status["status"]["alerts"][0];
-    assert_eq!(alert["delivery"]["state"].as_str(), Some("Failed"));
-    assert_eq!(alert["delivery"]["attempts"].as_i64(), Some(3));
-    let delivered = condition(&status, "NotificationsDelivered");
-    assert_eq!(delivered["status"].as_str(), Some("False"));
-    assert_eq!(delivered["reason"].as_str(), Some("DeliveryFailed"));
-
-    for (method, uri) in requests(&recorder) {
-        assert!(
-            !(uri.contains("/backups/") || uri.contains("/restores/")),
-            "the protection controller touched `{method} {uri}`; a notification failure must \
-             never rewrite a backup result"
-        );
-    }
-    assert!(
-        !requests(&recorder)
-            .iter()
-            .any(|(method, uri)| method == "POST" && path_of(uri).ends_with("/jobs")),
-        "three attempts are three attempts: a fourth delivery Job is not created"
-    );
-}
-
-const JOB_UID: &str = "1a2b3c4d-0000-4000-8000-0000000000b2";
-const OTHER_JOB_UID: &str = "deadbeef-0000-4000-8000-0000000000c3";
-const POD: &str = "delivery-pod-abcde";
-const POD_LOG_PATH: &str = "/pods/delivery-pod-abcde/log";
-
-fn finished_job(name: &str, condition: &str) -> String {
-    json!({
-        "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {
-            "name": name, "namespace": NS, "uid": JOB_UID,
-            // The fake API server echoes a routing key back inside the object
-            // it returns. Nothing this controller writes may carry it.
-            "annotations": {"an-operator-pasted-this": ROUTING_KEY}
-        },
-        "spec": {},
-        "status": {"conditions": [{"type": condition, "status": "True"}]}
-    })
-    .to_string()
-}
-
-fn pod_list(job_name: &str, owner_uid: &str) -> String {
-    pod_list_exiting(job_name, owner_uid, 1)
-}
-
-fn pod_list_exiting(job_name: &str, owner_uid: &str, exit_code: i32) -> String {
-    json!({
-        "apiVersion": "v1", "kind": "PodList", "metadata": {},
-        "items": [{
-            "apiVersion": "v1", "kind": "Pod",
-            "metadata": {
-                "name": POD, "namespace": NS,
-                "labels": {"batch.kubernetes.io/job-name": job_name},
-                "ownerReferences": [{
-                    "apiVersion": "batch/v1", "kind": "Job",
-                    "name": job_name, "uid": owner_uid, "controller": true
-                }]
-            },
-            "status": {"containerStatuses": [{
-                "name": "runner",
-                "state": {"terminated": {"exitCode": exit_code}}
-            }]}
-        }]
-    })
-    .to_string()
-}
-
 fn condition<'a>(status: &'a Value, r#type: &str) -> &'a Value {
     status["status"]["conditions"]
         .as_array()
@@ -2452,397 +1814,6 @@ fn condition<'a>(status: &'a Value, r#type: &str) -> &'a Value {
         .iter()
         .find(|c| c["type"].as_str() == Some(r#type))
         .unwrap_or_else(|| panic!("no `{type}` condition"))
-}
-
-/// Seam **S6**, defect `SEC-PODLOG`. A `notify-result=` line becomes a status
-/// field and then an API response; reading a stranger's is the whole defect.
-///
-/// MUTANT: replace `find_owned_pod` with a label-only `list(...).items.first()`.
-/// The `/pods/.../log` route below is never registered for the impostor, so
-/// the double panics naming the request.
-#[test]
-fn a_label_wearing_pod_the_delivery_job_does_not_own_is_never_read() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, finished_job(&job_name, "Failed")));
-    // The pod wears the Job's name label and claims a DIFFERENT Job's UID.
-    routes.push(ok("/pods", pod_list(&job_name, OTHER_JOB_UID)));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-
-    let (_, recorder, bodies) = drive(&policy, routes);
-    let calls = requests(&recorder);
-    assert!(
-        !calls.iter().any(|(_, uri)| path_of(uri).ends_with("/log")),
-        "an impostor pod's log is never read — not even to discard it: {calls:?}"
-    );
-    let status = last_status_patch(&bodies);
-    assert_eq!(
-        status["status"]["alerts"][0]["delivery"]["state"].as_str(),
-        Some("Failed"),
-        "a Job whose pod cannot be proved yields no exit code, which is a failed delivery and \
-         never a claimed success"
-    );
-}
-
-/// Seam **S7**'s ordering, as a property of the recorded request sequence.
-///
-/// MUTANT: move the `set_delivery_ttl` call above `write_status`. The index
-/// comparison below fails.
-#[test]
-fn the_ttl_is_patched_only_after_the_status_landed() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, finished_job(&job_name, "Complete")));
-    routes.push(ok("/pods", pod_list_exiting(&job_name, JOB_UID, 0)));
-    routes.push(ok(
-        POD_LOG_PATH,
-        "notify-result=pagerduty:ok\nnotify-result=webhook:ok\n".to_string(),
-    ));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-
-    let (outcome, recorder, body_log) = drive(&policy, routes);
-    assert_eq!(outcome.ttl_patched, 1);
-    let calls = requests(&recorder);
-    let status_at = calls
-        .iter()
-        .position(|(m, u)| m == "PATCH" && u.contains("/status"))
-        .expect("the status was patched");
-    let ttl_at = calls
-        .iter()
-        .position(|(m, u)| m == "PATCH" && u.contains("/jobs/"))
-        .expect("the TTL was patched");
-    assert!(
-        status_at < ttl_at,
-        "the exit code lives on the POD and the TTL controller removes the Job and its pod \
-         together: a TTL set first lets garbage collection race the read. Calls: {calls:?}"
-    );
-    let ttl_body = bodies(&body_log)
-        .into_iter()
-        .find(|(m, u, _)| m == "PATCH" && u.contains("/jobs/"))
-        .expect("a TTL patch body")
-        .2;
-    assert!(ttl_body.contains("ttlSecondsAfterFinished"));
-    let status = last_status_patch(&body_log);
-    assert_eq!(
-        status["status"]["alerts"][0]["delivery"]["state"].as_str(),
-        Some("Delivered")
-    );
-}
-
-/// Exactly one delivery Job per `(key, transition)`, and a 409 on the replay.
-#[test]
-fn one_delivery_job_per_transition_and_a_replay_is_a_409() {
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({}),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
-    routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
-    routes.push(patch(STATUS_PATH));
-
-    let (outcome, recorder, bodies) = drive(&policy, routes);
-    assert_eq!(outcome.health, p::Health::Stale);
-    assert_eq!(outcome.created_jobs, 1);
-    let calls = requests(&recorder);
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs"))
-            .count(),
-        1,
-        "one alert transition is one page: {calls:?}"
-    );
-
-    // The Job is created BEFORE the ConfigMap it mounts, and the ConfigMap's
-    // owner UID is read back from it (review F7). The cost is a window in which
-    // a scheduled pod sits `ContainerCreating` on a mount the kubelet retries;
-    // the benefit is that the Job's TTL collects the immutable object, which
-    // policy ownership never did.
-    let job_at = calls
-        .iter()
-        .position(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs"))
-        .expect("the delivery Job was created");
-    let cm_at = calls
-        .iter()
-        .position(|(m, u)| m == "POST" && path_of(u).ends_with("/configmaps"))
-        .expect("the event ConfigMap was created");
-    assert!(job_at < cm_at, "{calls:?}");
-
-    // The replay: the SAME object, now carrying the ledger the first pass
-    // wrote, against an API server that answers 409 to both creates.
-    let written = last_status_patch(&bodies)["status"].clone();
-    let replayed = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        written,
-    );
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, running_job(&job_name)));
-    let (outcome, recorder, _) = drive(&replayed, routes);
-    assert_eq!(
-        outcome.created_jobs, 0,
-        "the ledger already records a Job for this transition; a second pass must not page \
-         again"
-    );
-    let calls = requests(&recorder);
-    assert!(
-        !calls.iter().any(|(m, _)| m == "POST"),
-        "nothing is created on the replay: {calls:?}"
-    );
-}
-
-fn running_job(name: &str) -> String {
-    json!({
-        "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": name, "namespace": NS, "uid": JOB_UID},
-        "spec": {}, "status": {"active": 1}
-    })
-    .to_string()
-}
-
-/// Every credential is a `secretKeyRef` and nothing echoed back reaches a
-/// status, a condition, the event document or a log line.
-#[test]
-fn a_sink_credential_value_never_reaches_the_status() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    // The API server echoes the routing key back in the Job object AND the
-    // pod prints it on stdout.
-    routes.push(ok(job_path, finished_job(&job_name, "Failed")));
-    routes.push(ok("/pods", pod_list(&job_name, JOB_UID)));
-    routes.push(ok(
-        POD_LOG_PATH,
-        format!("posting with {ROUTING_KEY}\nnotify-result=pagerduty:failed\n"),
-    ));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-
-    let (_, _, body_log) = drive(&policy, routes);
-    for (method, uri, body) in bodies(&body_log) {
-        assert!(
-            !body.contains(ROUTING_KEY),
-            "`{method} {uri}` carried a sink credential value: {body}"
-        );
-    }
-
-    // And the Job this controller builds names a Secret and a KEY, never a
-    // value — which is the only shape a controller with no verb on `secrets`
-    // could produce.
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        spec()
-            .notifications
-            .as_ref()
-            .and_then(|n| n.routes.as_deref()),
-        &RunnerImage::default(),
-        false,
-    );
-    assert!(
-        job_spec.secret_mounts.is_empty(),
-        "a delivery signs nothing, reads no archive and mounts no Secret volume"
-    );
-    let names: Vec<&str> = job_spec
-        .env_from_secret
-        .iter()
-        .map(|e| e.name.as_str())
-        .collect();
-    // FX-20: each credential travels with its Secret's optional binding.
-    assert_eq!(
-        names,
-        vec![
-            pp::ROUTING_KEY_ENV,
-            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
-            pp::WEBHOOK_URL_ENV,
-            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV
-        ]
-    );
-    for entry in &job_spec.env_from_secret {
-        assert!(!entry.secret_name.is_empty() && !entry.key.is_empty());
-    }
-    for (name, value) in &job_spec.env_literal {
-        assert!(
-            !value.contains(ROUTING_KEY),
-            "`{name}` carries a literal credential"
-        );
-    }
-    let built = weirkeeper::job::build(&job_spec);
-    let rendered = serde_json::to_string(&built).expect("the Job serialises");
-    assert!(!rendered.contains(ROUTING_KEY));
-    assert!(rendered.contains("secretKeyRef"));
-    assert!(
-        rendered.contains("\"automountServiceAccountToken\":false"),
-        "a delivery pod makes ZERO Kubernetes API calls"
-    );
-}
-
-/// D3 §3.4 point 3: `blockOwnerDeletion: false`.
-#[test]
-fn the_delivery_job_does_not_block_deleting_its_policy() {
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({}),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
-    routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
-    routes.push(patch(STATUS_PATH));
-    let (_, _, body_log) = drive(&policy, routes);
-
-    for (_, uri, body) in bodies(&body_log).into_iter().filter(|(m, u, _)| {
-        m == "POST" && (path_of(u).ends_with("/jobs") || path_of(u).ends_with("/configmaps"))
-    }) {
-        let object: Value = serde_json::from_str(&body).expect("the created object is JSON");
-        let owner = &object["metadata"]["ownerReferences"][0];
-        assert_eq!(owner["controller"].as_bool(), Some(true), "{uri}");
-        assert_eq!(
-            owner["blockOwnerDeletion"].as_bool(),
-            Some(false),
-            "an operator deleting a policy during an incident must not find the delete hanging \
-             on a notification Job waiting out a 120-second deadline against a sink that is \
-             down: {uri}"
-        );
-        if path_of(&uri).ends_with("/jobs") {
-            assert_eq!(owner["kind"].as_str(), Some("ProtectionPolicy"), "{uri}");
-            assert_eq!(owner["uid"].as_str(), Some(POLICY_UID), "{uri}");
-        } else {
-            // REVIEW F7. The event ConfigMap is `immutable: true` and this role
-            // holds `delete` on nothing, so a policy-owned one is never removed
-            // until the policy is: one object per `(alertKey, transition)`,
-            // thousands a year. Owned by the Job, the API server's TTL
-            // controller collects it.
-            assert_eq!(
-                owner["kind"].as_str(),
-                Some("Job"),
-                "the event ConfigMap must be collected by a Job TTL, not accumulate for the \
-                 life of the policy: {uri}"
-            );
-            assert_eq!(owner["uid"].as_str(), Some(JOB_UID), "{uri}");
-            assert_ne!(owner["uid"].as_str(), Some(POLICY_UID), "{uri}");
-        }
-    }
-
-    // The event ConfigMap is immutable and carries the event under the key the
-    // Job mounts.
-    let (_, _, cm_body) = bodies(&body_log)
-        .into_iter()
-        .find(|(m, u, _)| m == "POST" && path_of(u).ends_with("/configmaps"))
-        .expect("the event ConfigMap was created");
-    let map: Value = serde_json::from_str(&cm_body).expect("JSON");
-    assert_eq!(map["immutable"].as_bool(), Some(true));
-    let event: Value = serde_json::from_str(
-        map["data"][p::EVENT_DATA_KEY]
-            .as_str()
-            .expect("the event.json key"),
-    )
-    .expect("the event document is JSON");
-    assert_eq!(event["health"].as_str(), Some("Stale"));
-    assert_eq!(event["alert"]["action"].as_str(), Some("trigger"));
-    assert_eq!(event["verification_scope"].as_str(), Some("sampled"));
-    assert_eq!(event["policy"]["uid"].as_str(), Some(POLICY_UID));
 }
 
 /// A manual run of the schedule is part of its history — D1 W3b's
@@ -2907,12 +1878,6 @@ fn a_run_of_another_source_is_not_this_policys_history() {
         value
     };
     let mut routes = read_routes(vec![foreign], json!({}));
-    routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
-    routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, _) = drive(&policy_with(no_catalog, json!({})), routes);
     assert_eq!(outcome.health, p::Health::Unprotected);
@@ -2943,7 +1908,7 @@ fn a_fresh_catalog_view_answers_availability_and_an_expired_one_does_not() {
         "metadata": {"name": CATALOG, "namespace": NS},
         "spec": {"destinationRef": {"name": DESTINATION}, "sync": {}},
         "status": {
-            "viewExpiresAt": p::rfc3339(now() + Duration::hours(1)),
+            "viewExpiresAt": rfc3339(now() + Duration::hours(1)),
             "pages": [{"configMapName": PAGE_CM, "index": 0, "count": 1}]
         }
     })
@@ -3006,7 +1971,7 @@ fn a_withdrawn_duplicate_catalog_view_is_stale_not_empty() {
         "metadata": {"name": CATALOG, "namespace": NS},
         "spec": {"destinationRef": {"name": DESTINATION}, "sync": {}},
         "status": {
-            "syncedAt": p::rfc3339(now() - Duration::minutes(10)),
+            "syncedAt": rfc3339(now() - Duration::minutes(10)),
             "counts": {"total": 1, "available": 1},
             "conditions": [{"type": "Ready", "status": "False", "reason": "DuplicateCatalog"}]
         }
@@ -3070,7 +2035,7 @@ fn catalog_routes(entry: Value) -> Vec<Route> {
         "metadata": {"name": CATALOG, "namespace": NS},
         "spec": {"destinationRef": {"name": DESTINATION}, "sync": {}},
         "status": {
-            "viewExpiresAt": p::rfc3339(now() + Duration::hours(1)),
+            "viewExpiresAt": rfc3339(now() + Duration::hours(1)),
             "pages": [{"configMapName": PAGE_CM, "index": 0, "count": 1}]
         }
     })
@@ -3137,7 +2102,7 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
     let point = &status["status"]["lastAvailablePoint"];
     assert_eq!(
         point["recoveryPointAt"].as_str(),
-        Some(p::rfc3339(now() - Duration::hours(2)).as_str()),
+        Some(rfc3339(now() - Duration::hours(2)).as_str()),
         "`recoveryPointAtMs` IS the receipt's `started_at` carried through the view: the same \
          number from the same signed document by a different route"
     );
@@ -3242,8 +2207,7 @@ fn a_secret_keys_destination_is_protected_and_does_not_page() {
     assert_eq!(
         status["status"]["alerts"].as_array().map_or(0, Vec::len),
         0,
-        "an archive with a fresh verified point pages nobody — and the route table carries no \
-         ConfigMap or Job route, so the double would have PANICKED on a delivery attempt"
+        "an archive with a fresh verified point opens no alert"
     );
     assert_eq!(
         status["status"]["lastAvailablePoint"]["pointId"].as_str(),
@@ -3333,22 +2297,6 @@ fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is()
         "Available",
         "Verified",
     )));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap",
-               "metadata": {"name": "cm", "namespace": NS}})
-        .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job",
-               "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-        .to_string(),
-    ));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
 
@@ -3414,24 +2362,6 @@ fn a_valid_backup_protects_only_on_a_basis_the_badge_admits() {
             object["status"]["evidence"]["verification"]["trust"] = trust;
         }
         let mut routes = read_routes(vec![object], json!({}));
-        if !protects {
-            routes.push(post(
-                "/configmaps",
-                json!({"apiVersion": "v1", "kind": "ConfigMap",
-                       "metadata": {"name": "cm", "namespace": NS}})
-                .to_string(),
-            ));
-            routes.push(post(
-                "/jobs",
-                json!({"apiVersion": "batch/v1", "kind": "Job",
-                       "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-                .to_string(),
-            ));
-            routes.push(first_job_route(
-                &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-                1,
-            ));
-        }
         routes.push(patch(STATUS_PATH));
         let (outcome, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
         let status = last_status_patch(&bodies);
@@ -3503,22 +2433,6 @@ fn an_unrecognised_verdict_is_a_refusal_the_catalog_cannot_overrule() {
         "Available",
         "Verified",
     )));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap",
-               "metadata": {"name": "cm", "namespace": NS}})
-        .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job",
-               "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-        .to_string(),
-    ));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
     assert_eq!(
@@ -3582,22 +2496,6 @@ fn a_refused_verdict_is_unprotected_at_every_setting_of_the_evidence_objective()
                     "Verified",
                 )));
             }
-            routes.push(post(
-                "/configmaps",
-                json!({"apiVersion": "v1", "kind": "ConfigMap",
-                       "metadata": {"name": "cm", "namespace": NS}})
-                .to_string(),
-            ));
-            routes.push(post(
-                "/jobs",
-                json!({"apiVersion": "batch/v1", "kind": "Job",
-                       "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-                .to_string(),
-            ));
-            routes.push(first_job_route(
-                &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-                1,
-            ));
             routes.push(patch(STATUS_PATH));
             let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
             let posture =
@@ -3806,29 +2704,12 @@ fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_inc
     )]);
     let stale = p::evaluate(&inputs(&spec, &old, &vouched, &schedules, &[], &rehearsal));
     assert_eq!(stale.health, p::Health::Stale);
-    let open = p::reconcile_alerts(
-        &[],
-        &stale.open_kinds,
-        stale.health,
-        POLICY_UID,
-        notifications(&spec),
-        now(),
-    );
-    assert_eq!(open.alerts.len(), 1);
-    assert_eq!(open.alerts[0].state, "Open");
-    assert_eq!(open.alerts[0].transition, Some(1));
-    assert_eq!(open.due.len(), 1, "exactly one message is owed");
+    let open = p::reconcile_alerts(&[], &stale.open_kinds, stale.health, POLICY_UID, now());
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].state, "Open");
+    assert_eq!(open[0].transition, Some(1));
 
-    // On-call has been woken.
-    let mut delivered = open.alerts.clone();
-    delivered[0].notified_transition = Some(1);
-    delivered[0].delivery = Some(AlertDelivery {
-        state: Some("Delivered".to_string()),
-        attempts: Some(1),
-        last_attempt_at: Some(now()),
-        job_ref: None,
-        last_error: None,
-    });
+    let delivered = open.clone();
 
     // 2. A fresh backup runs. Its receipt is STILL unread — the grant has not
     //    changed — and the catalog harvests the point.
@@ -3848,13 +2729,11 @@ fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_inc
         &healthy.open_kinds,
         healthy.health,
         POLICY_UID,
-        notifications(&spec),
         now() + Duration::hours(1),
     );
-    assert_eq!(resolved.alerts.len(), 1, "one entry, not a second incident");
-    assert_eq!(resolved.alerts[0].state, "Resolved");
-    assert_eq!(resolved.alerts[0].transition, Some(2));
-    assert_eq!(resolved.due.len(), 1, "exactly one resolve is owed");
+    assert_eq!(resolved.len(), 1, "one entry, not a second incident");
+    assert_eq!(resolved[0].state, "Resolved");
+    assert_eq!(resolved[0].transition, Some(2));
 
     // 3. THE ARM THE UPGRADE NOTE IS ABOUT, and it does NOT resolve. A policy
     //    with no catalog to answer for it lands on `Unknown`/`PointFactsUnread`
@@ -3876,15 +2755,10 @@ fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_inc
         &unknown.open_kinds,
         unknown.health,
         POLICY_UID,
-        notifications(&spec),
         now() + Duration::hours(2),
     );
-    assert_eq!(still_open.alerts[0].state, "Open");
-    assert_eq!(still_open.alerts[0].transition, Some(1), "no transition");
-    assert!(
-        still_open.due.is_empty(),
-        "and nothing further is delivered"
-    );
+    assert_eq!(still_open[0].state, "Open");
+    assert_eq!(still_open[0].transition, Some(1), "no transition");
 }
 
 // ===========================================================================
@@ -3943,108 +2817,6 @@ fn the_controller_names_no_backup_or_restore_status_write() {
         !code.contains("Api<Secret>") && !code.contains("secrets"),
         "this controller holds no verb on `secrets` and names none"
     );
-    assert!(
-        code.contains("find_owned_pod"),
-        "the pod is proved by the Job's own UID before one byte of its log is read (seam S6)"
-    );
-}
-
-/// The delivery Job runs exactly D3 §3.4's subcommand, with the deadline and
-/// the mount the contract names.
-#[test]
-fn the_delivery_job_is_the_documented_invocation() {
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        spec()
-            .notifications
-            .as_ref()
-            .and_then(|n| n.routes.as_deref()),
-        &RunnerImage::default(),
-        false,
-    );
-    assert_eq!(
-        job_spec.args,
-        vec!["notify", "deliver", "--event", "/event/event.json"]
-    );
-    assert_eq!(job_spec.deadline_seconds, pp::DELIVERY_DEADLINE_SECONDS);
-    assert_eq!(job_spec.service_account_name, pp::SERVICE_ACCOUNT);
-    assert_eq!(job_spec.config_map_mounts.len(), 1);
-    assert_eq!(
-        job_spec.config_map_mounts[0].mount_path,
-        p::EVENT_MOUNT_PATH
-    );
-    assert!(job_spec.plan_config_map.is_none());
-
-    let built = weirkeeper::job::build(&job_spec);
-    let rendered = serde_json::to_value(&built).expect("the Job serialises");
-    assert!(
-        rendered["spec"]["ttlSecondsAfterFinished"].is_null(),
-        "the TTL is patched on only after the status write; setting it at creation lets garbage \
-         collection race the exit-code read"
-    );
-    assert_eq!(rendered["spec"]["backoffLimit"].as_i64(), Some(0));
-    assert_eq!(
-        rendered["spec"]["activeDeadlineSeconds"].as_i64(),
-        Some(pp::DELIVERY_DEADLINE_SECONDS)
-    );
-}
-
-/// The per-pass burst bound, and the arithmetic it makes exact.
-#[test]
-fn the_number_of_delivery_jobs_per_pass_is_bounded() {
-    assert_eq!(p::MAX_DELIVERY_JOBS_PER_PASS, 4);
-    assert_eq!(p::MAX_ALERTS, 16);
-    assert_eq!(p::MAX_SCHEDULES, 16);
-    assert_eq!(p::MAX_TOPICS, 64);
-    assert_eq!(p::MAX_BACKUPS_SCANNED, 50);
-
-    // The ledger never grows past the CRD's cap, whatever it is handed.
-    let spec = spec();
-    let noise: Vec<AlertEntry> = (0..40)
-        .map(|n| AlertEntry {
-            key: format!("logweir-protection-{POLICY_UID}-noise-{n}"),
-            kind: AlertKind::Staleness,
-            state: "Open".to_string(),
-            opened_at: Some(now()),
-            resolved_at: None,
-            transition: Some(1),
-            notified_transition: Some(1),
-            delivery: None,
-        })
-        .collect();
-    let out = p::reconcile_alerts(
-        &noise,
-        &p::PolicyAlertKind::ALL,
-        p::Health::Stale,
-        POLICY_UID,
-        notifications(&spec),
-        now(),
-    );
-    assert!(out.alerts.len() <= p::MAX_ALERTS);
-
-    // And a point covering more than the cap is truncated, visibly.
-    let many: Vec<String> = (0..200).map(|n| format!("topic-{n}")).collect();
-    let mut candidate = candidate(2);
-    candidate.topics = many;
-    candidate.covers_all_topics = true;
-    let schedules = [healthy_schedule()];
-    let rehearsal = p::RehearsalFacts::default();
-    let catalog = p::CatalogAnswer::NotConsulted;
-    let candidates = [candidate];
-    let verdict = p::evaluate(&inputs(
-        &spec,
-        &candidates,
-        &catalog,
-        &schedules,
-        &[],
-        &rehearsal,
-    ));
-    let point = verdict.point.expect("a point");
-    assert_eq!(point.topics.len(), p::MAX_TOPICS);
-    assert!(point.topics_truncated);
 }
 
 // ===========================================================================
@@ -4054,7 +2826,7 @@ fn the_number_of_delivery_jobs_per_pass_is_bounded() {
 const RESTORE_UID: &str = "77777777-0000-4000-8000-00000000000a";
 
 /// A terminal `Restore` of a point this policy protects produces exactly ONE
-/// informational message, keyed on the RESTORE UID, with action `trigger`.
+/// informational ledger entry, keyed on the RESTORE UID.
 ///
 /// MUTANT: key it on the policy UID (or on `(policy, kind)`, which is what
 /// every other alert here does). `the second restore of the day` below then
@@ -4095,26 +2867,10 @@ fn a_terminal_restore_of_this_policys_point_is_recorded_once_and_never_pages() {
             ),
         ]),
     ));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-    ));
-    routes.push(first_job_route(&p::recovery_completed_key(RESTORE_UID), 1));
     routes.push(patch(STATUS_PATH));
 
     let (outcome, recorder, body_log) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
     assert_eq!(outcome.health, p::Health::Healthy);
-    assert_eq!(
-        outcome.created_jobs, 1,
-        "one completed recovery is one message; the foreign and the running restores are not \
-         recoveries of this policy's points"
-    );
 
     let status = last_status_patch(&body_log);
     let alerts = status["status"]["alerts"]
@@ -4132,213 +2888,20 @@ fn a_terminal_restore_of_this_policys_point_is_recorded_once_and_never_pages() {
         "informational, auto-resolved immediately: nothing stays open and nothing re-notifies"
     );
 
-    let event: Value = serde_json::from_str(
-        serde_json::from_str::<Value>(
-            &bodies(&body_log)
-                .into_iter()
-                .find(|(m, u, _)| m == "POST" && path_of(u).ends_with("/configmaps"))
-                .expect("the event ConfigMap was created")
-                .2,
-        )
-        .expect("JSON")["data"][p::EVENT_DATA_KEY]
-            .as_str()
-            .expect("the event.json key"),
-    )
-    .expect("the event document is JSON");
-    assert_eq!(event["alert"]["kind"].as_str(), Some("RecoveryCompleted"));
-    assert_eq!(
-        event["alert"]["action"].as_str(),
-        Some("trigger"),
-        "a completed recovery is NEWS, not the clearing of a page: a `resolve` would read on a \
-         webhook as `the recovery-completed condition has cleared`"
-    );
-
-    // The replay: the ledger already knows this restore, so nothing is sent.
+    // The replay: the ledger already knows this restore, so nothing moves.
     let replayed = policy_with(no_catalog, last_status_patch(&body_log)["status"].clone());
-    let key = p::recovery_completed_key(RESTORE_UID);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
     let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
     routes.retain(|r| r.path_suffix != RESTORES_PATH);
     routes.push(ok(
         RESTORES_PATH,
         restore_list(vec![restore("r-1", RESTORE_UID, &set, json!({}))]),
     ));
-    routes.push(ok(job_path, running_job(&job_name)));
-    let (outcome, recorder2, _) = drive(&replayed, routes);
-    assert_eq!(outcome.created_jobs, 0);
+    let (_, recorder2, _) = drive(&replayed, routes);
     assert!(
         !requests(&recorder2).iter().any(|(m, _)| m == "POST"),
-        "a Restore reaches a terminal state once; re-opening would deliver a second message \
-         about the same recovery on every reconcile"
+        "a Restore reaches a terminal state once"
     );
     let _ = requests(&recorder);
-}
-
-/// A failed delivery is retried after the backoff, as a NEW attempt with a new
-/// Job name, and the third failure is the last.
-#[test]
-fn a_failed_delivery_is_retried_three_times_and_then_stops() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let no_catalog = {
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"objectives": {"requireCatalogAvailability": false}}),
-        );
-        value
-    };
-    // Attempt 1 failed 10 minutes ago; the 60-second backoff has elapsed.
-    let policy = policy_with(
-        no_catalog,
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Failed", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1)},
-                    "lastError": "a configured sink did not accept (webhook:failed)"
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-    ));
-    routes.push(first_job_route(&key, 1));
-    routes.push(patch(STATUS_PATH));
-    let (outcome, _, body_log) = drive(&policy, routes);
-    assert_eq!(outcome.created_jobs, 1);
-    let status = last_status_patch(&body_log);
-    let delivery = &status["status"]["alerts"][0]["delivery"];
-    assert_eq!(delivery["attempts"].as_i64(), Some(2));
-    assert_eq!(
-        delivery["jobRef"]["name"].as_str(),
-        Some(p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 2).as_str()),
-        "a retry is a NEW Job: the previous one has a terminal pod whose exit code was read"
-    );
-    assert_eq!(
-        status["status"]["alerts"][0]["transition"].as_i64(),
-        Some(1),
-        "a retry is not a new transition; the condition did not change"
-    );
-}
-
-/// The backoff is honoured: a failure one second ago is not retried now.
-#[test]
-fn a_failed_delivery_waits_out_its_backoff() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let no_catalog = {
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"objectives": {"requireCatalogAvailability": false}}),
-        );
-        value
-    };
-    let policy = policy_with(
-        no_catalog,
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Failed", "attempts": 1,
-                    "lastAttemptAt": p::rfc3339(now()),
-                    "jobRef": {"name": p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1)},
-                    "lastError": "nope"
-                }
-            }]
-        }),
-    );
-    // NO create routes at all: the double panics if anything is created.
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(patch(STATUS_PATH));
-    let (outcome, recorder, _) = drive(&policy, routes);
-    assert_eq!(outcome.created_jobs, 0);
-    assert_eq!(outcome.deferred, 1);
-    assert_eq!(
-        outcome.requeue_seconds, 15,
-        "a deferred page is looked at again soon, not at the evaluation interval"
-    );
-    assert!(!requests(&recorder).iter().any(|(m, _)| m == "POST"));
-}
-
-/// The other half of seam **S7**: a status patch that did NOT land leaves the
-/// delivery Job's pod alone.
-///
-/// A 409 means something wrote this status between the read and the write, so
-/// this pass's conclusion is not on the server. Patching the TTL anyway lets
-/// the API server's TTL controller delete the Job and its pod before any pass
-/// has recorded the exit code, and the delivery is then `NoExitCode` forever.
-///
-/// MUTANT: drop the `commit.is_committed()` gate around the TTL patch. The
-/// route table below has no PATCH route for the Job, so the double panics
-/// naming the request.
-#[test]
-fn a_conflicted_status_patch_leaves_the_delivery_job_alone() {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let no_catalog = {
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"objectives": {"requireCatalogAvailability": false}}),
-        );
-        value
-    };
-    let policy = policy_with(
-        no_catalog,
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, finished_job(&job_name, "Complete")));
-    routes.push(ok("/pods", pod_list_exiting(&job_name, JOB_UID, 0)));
-    routes.push(ok(
-        POD_LOG_PATH,
-        "notify-result=pagerduty:ok\nnotify-result=webhook:ok\n".to_string(),
-    ));
-    // The API server says somebody else wrote this status first.
-    routes.push(Route {
-        method: "PATCH",
-        path_suffix: STATUS_PATH,
-        status: 409,
-        body: json!({
-            "kind": "Status", "apiVersion": "v1", "status": "Failure",
-            "message": "the object has been modified", "reason": "Conflict", "code": 409
-        })
-        .to_string(),
-    });
-    // NO PATCH route for the Job at all.
-
-    let (outcome, recorder, _) = drive(&policy, routes);
-    assert!(!outcome.committed);
-    assert_eq!(outcome.ttl_patched, 0);
-    assert!(
-        !requests(&recorder)
-            .iter()
-            .any(|(m, u)| m == "PATCH" && u.contains("/jobs/")),
-        "a conclusion that is not on the server must not garbage-collect the pod that proves it"
-    );
 }
 
 // ===========================================================================
@@ -4358,29 +2921,17 @@ fn a_conflicted_status_patch_leaves_the_delivery_job_alone() {
 /// transition of 2.
 #[test]
 fn protection_getting_worse_never_resolves_the_page() {
-    let spec = spec();
     let open = p::reconcile_alerts(
         &[],
         &[p::PolicyAlertKind::Staleness],
         p::Health::Stale,
         POLICY_UID,
-        notifications(&spec),
         now(),
     );
-    assert_eq!(open.alerts[0].state, "Open");
-    assert_eq!(open.alerts[0].transition, Some(1));
+    assert_eq!(open[0].state, "Open");
+    assert_eq!(open[0].transition, Some(1));
 
-    // On-call has been woken: the ledger records a delivery for transition 1,
-    // which is what makes "nothing further is due" mean "no second message".
-    let mut delivered = open.alerts.clone();
-    delivered[0].notified_transition = Some(1);
-    delivered[0].delivery = Some(AlertDelivery {
-        state: Some("Delivered".to_string()),
-        attempts: Some(1),
-        last_attempt_at: Some(now()),
-        job_ref: None,
-        last_error: None,
-    });
+    let delivered = open.clone();
 
     // Retention or GC took the last point: `Stale` → `Unprotected`.
     let worse = p::reconcile_alerts(
@@ -4388,16 +2939,14 @@ fn protection_getting_worse_never_resolves_the_page() {
         &[],
         p::Health::Unprotected,
         POLICY_UID,
-        notifications(&spec),
         now() + Duration::hours(1),
     );
     assert_eq!(
-        worse.alerts[0].state, "Open",
-        "the objective is breached AND the last point is gone; a `resolve` under the shared \
-         dedup key would close the incident at the instant the archive stopped existing"
+        worse[0].state, "Open",
+        "the objective is breached AND the last point is gone; resolving here would close the \
+         alert at the instant the archive stopped existing"
     );
-    assert_eq!(worse.alerts[0].transition, Some(1), "no transition at all");
-    assert!(worse.due.is_empty(), "and therefore nothing to deliver");
+    assert_eq!(worse[0].transition, Some(1), "no transition at all");
 
     // The catalog view expired: `Stale` → `Unknown`. Nothing was measured.
     let unknown = p::reconcile_alerts(
@@ -4405,14 +2954,12 @@ fn protection_getting_worse_never_resolves_the_page() {
         &[],
         p::Health::Unknown,
         POLICY_UID,
-        notifications(&spec),
         now() + Duration::hours(2),
     );
     assert_eq!(
-        unknown.alerts[0].state, "Open",
+        unknown[0].state, "Open",
         "Logweir stopped being able to look; that is not the condition clearing"
     );
-    assert!(unknown.due.is_empty());
 
     // And the two healths that MAY resolve, still do.
     for health in [p::Health::Healthy, p::Health::AtRisk] {
@@ -4421,12 +2968,10 @@ fn protection_getting_worse_never_resolves_the_page() {
             &[],
             health,
             POLICY_UID,
-            notifications(&spec),
             now() + Duration::hours(3),
         );
-        assert_eq!(resolved.alerts[0].state, "Resolved", "{health}");
-        assert_eq!(resolved.alerts[0].transition, Some(2), "{health}");
-        assert_eq!(resolved.due.len(), 1, "{health}");
+        assert_eq!(resolved[0].state, "Resolved", "{health}");
+        assert_eq!(resolved[0].transition, Some(2), "{health}");
     }
     assert!(p::resolves_alerts(p::Health::Healthy));
     assert!(p::resolves_alerts(p::Health::AtRisk));
@@ -4435,7 +2980,7 @@ fn protection_getting_worse_never_resolves_the_page() {
     }
 }
 
-/// **F2.** `Unprotected` — the worst value the enum has — must page.
+/// **F2.** `Unprotected` — the worst value the enum has — opens an alert.
 ///
 /// MUTANT: narrow the open rule back to `health == Health::Stale`. The first
 /// assertion fails with an empty `open_kinds`, and D3 §15 L5's "exactly 1
@@ -4469,7 +3014,7 @@ fn a_policy_with_no_recoverable_point_at_all_opens_an_alert() {
     assert_eq!(stale.health, p::Health::Stale);
     assert_eq!(stale.open_kinds, verdict.open_kinds);
 
-    // End to end: the controller creates exactly one delivery Job for it.
+    // End to end: the controller opens the alert in the ledger.
     let no_catalog = {
         let mut value = spec_value();
         merge(
@@ -4479,24 +3024,9 @@ fn a_policy_with_no_recoverable_point_at_all_opens_an_alert() {
         value
     };
     let mut routes = read_routes(Vec::new(), json!({}));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-    ));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, body_log) = drive(&policy_with(no_catalog, json!({})), routes);
     assert_eq!(outcome.health, p::Health::Unprotected);
-    assert_eq!(outcome.created_jobs, 1);
     let status = last_status_patch(&body_log);
     assert_eq!(
         status["status"]["alerts"][0]["kind"].as_str(),
@@ -4545,20 +3075,6 @@ fn a_cleared_field_disappears_from_the_merged_status() {
     // (per F2) opens a Staleness alert, which is why the create routes are
     // here.
     let mut routes = read_routes(Vec::new(), json!({}));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-    ));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, body_log) = drive(&policy, routes);
     assert_eq!(outcome.health, p::Health::Unprotected);
@@ -4881,17 +3397,6 @@ fn a_recovery_is_stamped_when_it_finished_and_not_when_it_was_created() {
             }),
         )]),
     ));
-    routes.push(post(
-        "/configmaps",
-        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-    ));
-    routes.push(post(
-        "/jobs",
-        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-    ));
-    routes.push(first_job_route(&p::recovery_completed_key(RESTORE_UID), 1));
     routes.push(patch(STATUS_PATH));
     let (_, _, body_log) = drive(&policy_with(no_catalog, json!({})), routes);
 
@@ -4904,971 +3409,6 @@ fn a_recovery_is_stamped_when_it_finished_and_not_when_it_was_created() {
          surface reads the instant this ledger entry carries"
     );
     assert_eq!(alert["resolvedAt"].as_str(), Some(finished.as_str()));
-}
-
-// ===========================================================================
-// W13 — NOTIFY-INSECURE-SINK-UNEXPOSED: the escape hatch is an INSTALLATION
-// setting
-// ===========================================================================
-//
-// `logweir notify deliver` refuses a non-`https://` webhook or Slack URL
-// BEFORE it dials, and `NOTIFY_ALLOW_INSECURE_SINKS` — the documented
-// local-development hatch — used to be set by nothing in the spec and nothing
-// in `delivery_job_spec`. On a laptop cluster the in-cluster echo sink D3 L5
-// asks for therefore received 0 POSTs and the alert read `webhook:failed`,
-// with no value anywhere an operator could set.
-//
-// The hatch is now `notify.allowInsecureSinks` on the chart, read by THIS
-// process from `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` and forwarded into every
-// delivery Job. The four things these rows hold: it is forwarded ONLY when
-// set, a policy cannot turn it on, the Job is unchanged when it is unset, and
-// the chart's spelling is this crate's constant.
-
-/// The literal env of a delivery Job on a DEFAULT installation, as a golden.
-///
-/// Byte-for-byte what this function built before the hatch existed — one
-/// entry, `RUST_LOG=warn` — so every rendered Job in every install that left
-/// the value alone is unmoved. The mutant is `env_literal.push(...)`
-/// unconditionally, or pushed with a falsy value: both add a name here.
-#[test]
-fn a_delivery_job_carries_no_insecure_sink_variable_unless_the_installation_set_it() {
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        spec()
-            .notifications
-            .as_ref()
-            .and_then(|n| n.routes.as_deref()),
-        &RunnerImage::default(),
-        false,
-    );
-    assert_eq!(
-        job_spec.env_literal,
-        fixture_literals(false),
-        "the unset case is a GOLDEN: a delivery Job on a default installation carries exactly \
-         the literal env it carried before `notify.allowInsecureSinks` existed, plus FX-20's \
-         two binding expectations"
-    );
-    let rendered =
-        serde_json::to_string(&weirkeeper::job::build(&job_spec)).expect("the Job serialises");
-    assert!(
-        !rendered.contains(pp::ALLOW_INSECURE_SINKS_ENV),
-        "an unset hatch renders NOTHING — not the variable with a falsy value, which \
-         `logweir notify deliver` would read as `no` today and which the next reader of \
-         `kubectl get job -o yaml` would read as `this install allows cleartext`: {rendered}"
-    );
-}
-
-/// And with the installation's hatch on: the variable, the value `1`, and
-/// nothing else about the Job moved.
-#[test]
-fn the_installation_hatch_reaches_the_delivery_job_as_the_documented_variable() {
-    let policy_spec = spec();
-    let routes = policy_spec
-        .notifications
-        .as_ref()
-        .and_then(|n| n.routes.as_deref());
-    let off = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        routes,
-        &RunnerImage::default(),
-        false,
-    );
-    let on = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        routes,
-        &RunnerImage::default(),
-        true,
-    );
-    assert_eq!(
-        on.env_literal,
-        fixture_literals(true),
-        "`1` and only `1`: it is the value `logweir::notify`'s reader and this crate's own \
-         predicate both accept, so the two halves of one decision cannot drift"
-    );
-    assert_eq!(
-        pp::ALLOW_INSECURE_SINKS_ENV,
-        "NOTIFY_ALLOW_INSECURE_SINKS",
-        "the Job-side name is the one `logweir notify deliver` reads and the one \
-         `docs/formats/protection-event.md` documents; renaming it here silently disarms the \
-         hatch"
-    );
-
-    // EVERYTHING ELSE IS THE SAME JOB. The hatch is one literal env entry, not
-    // a different Job: same argv (so the command line still names no URL),
-    // same secret env, same mounts, same deadline.
-    assert_eq!(on.args, off.args);
-    assert_eq!(on.env_from_secret, off.env_from_secret);
-    assert_eq!(on.config_map_mounts, off.config_map_mounts);
-    assert_eq!(on.secret_mounts, off.secret_mounts);
-    assert_eq!(on.deadline_seconds, off.deadline_seconds);
-    for argument in &on.args {
-        assert!(
-            !argument.contains("://"),
-            "the delivery Job's command line never carries a sink URL, hatch or no hatch: \
-             {argument}"
-        );
-    }
-    for (name, value) in &on.env_literal {
-        assert!(
-            !value.contains("://"),
-            "`{name}` carries a URL as a literal; a sink URL is a credential and reaches the pod \
-             as a secretKeyRef"
-        );
-    }
-}
-
-/// **A `ProtectionPolicy` cannot turn the hatch on.**
-///
-/// The spec is a namespaced object any namespace operator may write. A field
-/// there would let whoever creates a policy downgrade their own alerts'
-/// transport to cleartext — the event, the policy's name, its health, and on
-/// Slack a bearer credential in the URL — with no place for the administrator
-/// who installed Logweir to say no.
-///
-/// Three locks, and this row holds all three: the CRD has no such property
-/// anywhere (so the API server PRUNES it), the typed spec drops it if one
-/// arrives anyway, and `delivery_job_spec` reads only its own argument.
-#[test]
-fn a_policy_cannot_turn_the_insecure_sink_hatch_on() {
-    let hatch = "allowInsecureSinks";
-    let crd = weirkeeper::crds::render_all()
-        .into_iter()
-        .find(|r| r.kind == "ProtectionPolicy")
-        .expect("the ProtectionPolicy CRD is rendered");
-    assert!(
-        !crd.yaml.contains(hatch),
-        "the CRD offers `{hatch}` somewhere in its schema; a structural schema is how the API \
-         server decides what to keep, so a property here is a policy field whatever this \
-         controller then does with it"
-    );
-
-    // A spec that asks for it in every plausible place. Unknown fields are
-    // pruned by the API server and dropped by serde; the typed value must
-    // carry no trace, and the Job built from it none either.
-    let mut value = spec_value();
-    merge(
-        &mut value,
-        &json!({
-            "notifications": {
-                "allowInsecureSinks": true,
-                "routes": [{
-                    "name": "oncall",
-                    "allowInsecureSinks": true,
-                    "webhook": {
-                        "urlSecretRef": {"name": "hooks", "key": "ops"},
-                        "allowInsecureSinks": true
-                    }
-                }]
-            }
-        }),
-    );
-    let spec: ProtectionPolicySpec =
-        serde_json::from_value(value).expect("an unknown field is ignored, not a parse error");
-    let round_trip = serde_json::to_string(&spec).expect("the typed spec serialises");
-    assert!(
-        !round_trip.contains(hatch),
-        "the typed spec kept `{hatch}`: {round_trip}"
-    );
-
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        spec.notifications
-            .as_ref()
-            .and_then(|n| n.routes.as_deref()),
-        &RunnerImage::default(),
-        // The INSTALLATION says no, which is the whole of the answer.
-        false,
-    );
-    assert_eq!(
-        job_spec.env_literal,
-        vec![
-            ("RUST_LOG".to_string(), "warn".to_string()),
-            (
-                NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV.to_string(),
-                notification_binding(POLICY_UID, NotificationSink::Webhook, None)
-            ),
-        ],
-        "a policy asking three times over still gets the default install's Job"
-    );
-}
-
-/// The reconcile forwards the installation's answer — not a constant, not the
-/// policy's — into the Job it actually creates.
-#[test]
-fn the_reconcile_forwards_the_installations_hatch_into_the_job_it_creates() {
-    for allow in [false, true] {
-        let policy = policy_with(
-            {
-                let mut value = spec_value();
-                merge(
-                    &mut value,
-                    &json!({"objectives": {"requireCatalogAvailability": false}}),
-                );
-                value
-            },
-            json!({}),
-        );
-        let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-        routes.push(post(
-            "/configmaps",
-            json!({"apiVersion": "v1", "kind": "ConfigMap",
-                   "metadata": {"name": "cm", "namespace": NS}})
-            .to_string(),
-        ));
-        routes.push(post(
-            "/jobs",
-            json!({"apiVersion": "batch/v1", "kind": "Job",
-                   "metadata": {"name": "j", "namespace": NS}, "spec": {}})
-            .to_string(),
-        ));
-        routes.push(first_job_route(
-            &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-            1,
-        ));
-        routes.push(patch(STATUS_PATH));
-        let (outcome, _, body_log) = drive_in(&policy, routes, now(), allow);
-        assert_eq!(outcome.created_jobs, 1, "one delivery Job (allow={allow})");
-
-        let body = bodies(&body_log)
-            .into_iter()
-            .find(|(method, uri, _)| method == "POST" && path_of(uri).ends_with("/jobs"))
-            .expect("the delivery Job was created")
-            .2;
-        let job: Value = serde_json::from_str(&body).expect("the created Job is JSON");
-        let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_array()
-            .expect("the container carries env")
-            .clone();
-        let found: Vec<&Value> = env
-            .iter()
-            .filter(|e| e["name"].as_str() == Some(pp::ALLOW_INSECURE_SINKS_ENV))
-            .collect();
-        if allow {
-            assert_eq!(
-                found.len(),
-                1,
-                "the installation allows insecure sinks and the Job it created does not say so, \
-                 so `logweir notify deliver` refuses the sink before it dials: {body}"
-            );
-            assert_eq!(found[0]["value"].as_str(), Some("1"));
-            assert!(
-                found[0]["valueFrom"].is_null(),
-                "a literal, never a reference: it is a switch and not a credential"
-            );
-        } else {
-            assert!(
-                found.is_empty(),
-                "a default installation's delivery Job named the hatch: {body}"
-            );
-        }
-    }
-}
-
-/// **An explicit affirmative only.** `0`, `false`, the empty string a
-/// Kubernetes `env:` entry with an empty `value:` actually produces (plan
-/// erratum E19(e)) and an absent variable are all "no".
-///
-/// A hatch that defaults open is not a hatch, and an operator who switches the
-/// value off must not discover it was still on — the same reading
-/// `logweir::notify::SinkRoutes::from_lookup` gives the Job-side variable.
-#[test]
-fn the_insecure_sink_hatch_is_an_explicit_affirmative_only() {
-    for yes in ["1", "true", "yes", "TRUE", "Yes", "  true  "] {
-        assert!(
-            pp::configured_allow_insecure_sinks(Ok(yes.to_string())),
-            "{yes:?} means yes"
-        );
-    }
-    for no in [
-        "", "   ", "0", "false", "no", "off", "1 true", "y", "on", "enabled",
-    ] {
-        assert!(
-            !pp::configured_allow_insecure_sinks(Ok(no.to_string())),
-            "{no:?} must NOT open a cleartext transport"
-        );
-    }
-    assert!(
-        !pp::configured_allow_insecure_sinks(Err(std::env::VarError::NotPresent)),
-        "an absent variable is the shipped default and it is closed"
-    );
-    assert_eq!(
-        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
-        "LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS",
-        "the controller-side name is `LOGWEIR_`-prefixed like every other variable this process \
-         reads for itself, and it is NOT the Job-side name: they are different decisions and a \
-         `grep` in a cluster must be able to tell them apart"
-    );
-    assert_ne!(
-        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
-        pp::ALLOW_INSECURE_SINKS_ENV
-    );
-}
-
-/// The read happens ONCE, in `controller`, and through the predicate.
-///
-/// Two reads are two answers in one process, and a decision made inline is
-/// reachable from no test at all — which is how plan erratum E19(e)'s wrong
-/// ERROR line survived to Task 24.
-#[test]
-fn the_insecure_sink_hatch_is_read_once_through_the_predicate() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/controllers/protection_policy.rs"),
-    )
-    .expect("the reconciler source is readable");
-    let dense: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-    let reads = dense
-        .matches("std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV")
-        .count();
-    assert_eq!(
-        reads, 1,
-        "the hatch must be read EXACTLY ONCE per process; found {reads}. Two reads are two \
-         answers, and a reconcile that re-read it would let one policy's Jobs differ from \
-         another's inside one controller"
-    );
-    assert!(
-        dense.contains(
-            "configured_allow_insecure_sinks(std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV"
-        ),
-        "the read must be the ARGUMENT of `configured_allow_insecure_sinks`: the predicate is \
-         the whole of the decision and `controller` supplies only the read"
-    );
-    assert!(
-        source.contains("ALLOWS INSECURE notification sinks"),
-        "an installation that allows cleartext alert delivery says so in its own logs, once, at \
-         startup: the operator who set it on a laptop is not always the one reading the \
-         controller a month later"
-    );
-}
-
-/// **The chart's spelling IS this crate's constant.**
-///
-/// `crates/logweir/tests/chart_lint.rs` owns the chart gates, but `logweir`
-/// declares no `weirkeeper` edge and cannot name
-/// [`pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV`] — the same reason
-/// `tests/chart_policy.rs` lives in this crate. This row is the other half:
-/// the rendered variable, the value that turns it on, and the default, held to
-/// the controller that reads them. A chart that rendered
-/// `LOGWEIR_ALLOW_INSECURE_SINKS`, or `"true"` instead of `"1"`, would install
-/// cleanly and change nothing at all — which is exactly the shape of the
-/// defect this fixes.
-#[test]
-fn the_chart_renders_the_hatch_under_the_name_this_controller_reads() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf();
-    let deployment = std::fs::read_to_string(root.join("charts/logweir/templates/deployment.yaml"))
-        .expect("the chart's Deployment template is readable");
-    assert!(
-        deployment.contains(&format!(
-            "- name: {}\n              value: \"1\"",
-            pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV
-        )),
-        "the Deployment must render `{}` with the literal `1` — the only value the predicate \
-         accepts",
-        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV
-    );
-    assert!(
-        deployment.contains("{{- if .Values.notify.allowInsecureSinks }}"),
-        "and it must render ONLY when the value is true, so a default install's manifest is \
-         byte-identical to the one `logweir.yaml` carries"
-    );
-
-    let values = std::fs::read_to_string(root.join("charts/logweir/values.yaml"))
-        .expect("the chart's values file is readable");
-    let parsed: serde_json::Value = serde_yaml::from_str(&values).expect("values.yaml parses");
-    assert_eq!(
-        parsed["notify"]["allowInsecureSinks"].as_bool(),
-        Some(false),
-        "the shipped default is CLOSED: production leaves it false and an adopter who never \
-         heard of the hatch cannot be posting alerts in cleartext"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// FX-11 — a delivery pod the namespace refuses at creation
-// ---------------------------------------------------------------------------
-
-/// The admission's words for a quota-refused delivery pod.
-const QUOTA_REFUSAL: &str = "Error creating: pods \"notify-x2b9c\" is forbidden: exceeded quota: \
-     compute, requested: limits.memory=64Mi, used: limits.memory=1Gi, limited: limits.memory=1Gi";
-
-/// A delivery Job with NO pod, created 45 s before [`now`] and controlled by
-/// the policy: still running (its status counts nothing), or failed on its
-/// deadline.
-fn podless_delivery_job(name: &str, failed: bool) -> String {
-    let status = if failed {
-        json!({"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]})
-    } else {
-        json!({})
-    };
-    json!({
-        "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {
-            "name": name, "namespace": NS, "uid": JOB_UID,
-            "creationTimestamp": p::rfc3339(now() - Duration::seconds(45)),
-            "ownerReferences": [{
-                "apiVersion": "logweir.dev/v1alpha1", "kind": "ProtectionPolicy",
-                "name": POLICY, "uid": POLICY_UID, "controller": true,
-                "blockOwnerDeletion": false
-            }]
-        },
-        "spec": {},
-        "status": status
-    })
-    .to_string()
-}
-
-fn delivery_events(job_name: &str, message: Option<&str>) -> String {
-    let items: Vec<Value> = message
-        .map(|m| {
-            json!({
-                "apiVersion": "v1", "kind": "Event",
-                "metadata": {"name": format!("{job_name}.1"), "namespace": NS},
-                "involvedObject": {"apiVersion": "batch/v1", "kind": "Job", "name": job_name,
-                                   "namespace": NS, "uid": JOB_UID},
-                "reason": "FailedCreate", "type": "Warning", "message": m
-            })
-        })
-        .into_iter()
-        .collect();
-    json!({"apiVersion": "v1", "kind": "EventList", "metadata": {}, "items": items}).to_string()
-}
-
-/// A policy with one open `Staleness` alert whose `attempts`-th delivery is
-/// `Pending` as `job_name`, and the routes a pass over it needs.
-fn pending_delivery(
-    attempts: i64,
-    job: impl Fn(&str) -> String,
-    message: Option<&str>,
-) -> (ProtectionPolicy, Vec<Route>, &'static str) {
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, attempts);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": attempts,
-                    "lastAttemptAt": p::rfc3339(now() - Duration::seconds(45)),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, job(&job_name)));
-    routes.push(ok(
-        "/pods",
-        json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
-    ));
-    routes.push(ok("/events", delivery_events(&job_name, message)));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-    (policy, routes, job_path)
-}
-
-fn job_patch_bodies(body_log: &BodyRecorder, job_path: &str) -> Vec<Value> {
-    bodies(body_log)
-        .into_iter()
-        .filter(|(m, u, _)| m == "PATCH" && path_of(u).ends_with(job_path))
-        .map(|(_, _, b)| serde_json::from_str(&b).expect("JSON"))
-        .collect()
-}
-
-/// **FX-11: A QUOTA-REFUSED DELIVERY POD IS A FAILED ATTEMPT 30 SECONDS AFTER
-/// ITS JOB, NAMING THE QUOTA — AND THE RETRY WAITS FOR THE BACKOFF.** Before
-/// FX-11 the attempt stayed `Pending` for the Job's 120-second deadline and was
-/// then recorded "the delivery Job finished with no exit code".
-///
-/// KILLS: the Events read dropped; the message not propagated; the early
-/// cancel dropped; a retry created in the same pass (a retry storm).
-#[test]
-fn fx11_a_delivery_pod_the_quota_refuses_is_a_failed_attempt_naming_the_quota() {
-    let (policy, routes, job_path) = pending_delivery(
-        1,
-        |name| podless_delivery_job(name, false),
-        Some(QUOTA_REFUSAL),
-    );
-    let (outcome, recorder, body_log) = drive(&policy, routes);
-    let calls = requests(&recorder);
-    let status = last_status_patch(&body_log);
-    let delivery = &status["status"]["alerts"][0]["delivery"];
-    assert_eq!(delivery["state"], json!("Failed"), "{calls:?}");
-    assert_eq!(
-        delivery["attempts"],
-        json!(1),
-        "the refused attempt is attempt 1"
-    );
-    let said = delivery["lastError"].as_str().unwrap_or_default();
-    assert!(
-        said.contains("PodCreationForbidden")
-            && said.contains("exceeded quota: compute")
-            && said.contains("limits.memory=64Mi"),
-        "the refusal and the admission's own words: {said}"
-    );
-    assert!(!said.contains("no exit code"), "{said}");
-    assert_eq!(
-        condition(&status, "NotificationsDelivered")["reason"],
-        json!("DeliveryFailed")
-    );
-
-    let patches = job_patch_bodies(&body_log, job_path);
-    assert_eq!(patches.len(), 2, "the cancel, then the TTL: {calls:?}");
-    assert_eq!(patches[0]["spec"]["activeDeadlineSeconds"], json!(1));
-    assert!(patches[1]["spec"]["ttlSecondsAfterFinished"].is_i64());
-    let status_at = calls
-        .iter()
-        .position(|(m, u)| m == "PATCH" && u.contains("/status"))
-        .expect("a status write");
-    let job_patch_at: Vec<usize> = calls
-        .iter()
-        .enumerate()
-        .filter(|(_, (m, u))| m == "PATCH" && path_of(u).ends_with(job_path))
-        .map(|(i, _)| i)
-        .collect();
-    assert!(
-        job_patch_at[0] < status_at && status_at < job_patch_at[1],
-        "cancel, then the status, then the TTL: {calls:?}"
-    );
-    assert_eq!(outcome.ttl_patched, 1);
-    assert!(
-        !calls
-            .iter()
-            .any(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs")),
-        "the next attempt waits for the backoff; it is not created in this pass: {calls:?}"
-    );
-    let lists: Vec<String> = calls
-        .iter()
-        .filter(|(_, u)| path_of(u).ends_with("/events"))
-        .map(|(_, u)| u.replace("%3D", "="))
-        .collect();
-    assert_eq!(lists.len(), 1, "{lists:?}");
-    assert!(
-        lists[0].contains(&format!("involvedObject.uid={JOB_UID}")),
-        "{lists:?}"
-    );
-}
-
-/// **FX-11: THE THIRD REFUSED ATTEMPT EXHAUSTS THE RETRIES, AND NAMES THE
-/// QUOTA.** A third attempt whose Job died on its deadline without ever having
-/// a pod is recorded with the refusal — not "no exit code" — and no fourth Job
-/// is created: three attempts in all.
-#[test]
-fn fx11_the_third_refused_attempt_is_the_last() {
-    let (policy, routes, job_path) = pending_delivery(
-        3,
-        |name| podless_delivery_job(name, true),
-        Some(QUOTA_REFUSAL),
-    );
-    let (_, recorder, body_log) = drive(&policy, routes);
-    let calls = requests(&recorder);
-    let status = last_status_patch(&body_log);
-    let delivery = &status["status"]["alerts"][0]["delivery"];
-    assert_eq!(delivery["state"], json!("Failed"), "{calls:?}");
-    assert_eq!(delivery["attempts"], json!(3));
-    let said = delivery["lastError"].as_str().unwrap_or_default();
-    assert!(
-        said.contains("PodCreationForbidden") && said.contains("exceeded quota"),
-        "{said}"
-    );
-    assert_eq!(
-        p::next_attempt_at(&serde_json::from_value(delivery.clone()).expect("an AlertDelivery")),
-        None,
-        "no fourth attempt"
-    );
-    assert!(
-        !calls
-            .iter()
-            .any(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs")),
-        "{calls:?}"
-    );
-    let patches = job_patch_bodies(&body_log, job_path);
-    assert_eq!(
-        patches.len(),
-        1,
-        "a finished Job is never cancelled; only the TTL"
-    );
-    assert!(patches[0]["spec"]["ttlSecondsAfterFinished"].is_i64());
-}
-
-/// **FX-11 NEGATIVE CONTROL.** With no `FailedCreate` Event the podless
-/// delivery keeps the pre-FX-11 path: `Pending` and nothing cancelled while
-/// it runs; "no exit code" once its Job has died.
-#[test]
-fn fx11_control_a_podless_delivery_with_no_event_keeps_the_old_path() {
-    let (policy, routes, job_path) =
-        pending_delivery(1, |name| podless_delivery_job(name, false), None);
-    let (_, recorder, body_log) = drive(&policy, routes);
-    let status = last_status_patch(&body_log);
-    assert_eq!(
-        status["status"]["alerts"][0]["delivery"]["state"],
-        json!("Pending"),
-        "{:?}",
-        requests(&recorder)
-    );
-    assert!(job_patch_bodies(&body_log, job_path).is_empty());
-
-    let (policy, routes, _) = pending_delivery(1, |name| podless_delivery_job(name, true), None);
-    let (_, _, body_log) = drive(&policy, routes);
-    let status = last_status_patch(&body_log);
-    assert_eq!(
-        status["status"]["alerts"][0]["delivery"]["lastError"],
-        json!("the delivery Job finished with no exit code")
-    );
-}
-
-// ===========================================================================
-// FX-20: every sink credential is bound to this policy, its sink and endpoint
-// ===========================================================================
-
-fn three_sink_routes(
-    endpoint: Option<&str>,
-) -> Vec<weirkeeper::crds::protection_policy::NotificationRoute> {
-    let mut pd = json!({"routingKeySecretRef": {"name": "pd", "key": "routing-key"}});
-    if let Some(e) = endpoint {
-        pd["endpoint"] = json!(e);
-    }
-    serde_json::from_value(json!([
-        {"name": "oncall", "pagerDuty": pd},
-        {"name": "ops", "webhook": {"urlSecretRef": {"name": "hooks", "key": "ops"}}},
-        {"name": "chat", "slack": {"webhookUrlSecretRef": {"name": "slack", "key": "url"}}}
-    ]))
-    .expect("the route fixture parses")
-}
-
-/// **Every sink's credential travels with its binding pair: the Secret's own
-/// `logweir-binding` as an OPTIONAL `secretKeyRef` from the SAME Secret, and
-/// the controller's expectation — over this policy's UID, the sink kind and
-/// the PagerDuty endpoint — as a literal.**
-///
-/// Optional, because an unbound Secret must still reach the deliverer, which
-/// refuses it by name (`<sink>:refused`); a required key would make the pod
-/// fail to start and the attempt read "no exit code".
-///
-/// KILLS: a sink projected without its pair; the pair read from another
-/// Secret; the binding key required; the endpoint left out of the expectation.
-#[test]
-fn fx20_every_sink_secret_travels_with_its_binding_pair() {
-    let endpoint = "https://events.eu.pagerduty.com/v2/enqueue";
-    let routes = three_sink_routes(Some(endpoint));
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, POLICY_UID),
-        "cm",
-        Some(&routes),
-        &RunnerImage::default(),
-        false,
-    );
-    for (credential_env, secret, sink, projected, expected_env, expected) in [
-        (
-            pp::ROUTING_KEY_ENV,
-            "pd",
-            "pagerduty",
-            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
-            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
-            notification_binding(POLICY_UID, NotificationSink::PagerDuty, Some(endpoint)),
-        ),
-        (
-            pp::WEBHOOK_URL_ENV,
-            "hooks",
-            "webhook",
-            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
-            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
-            notification_binding(POLICY_UID, NotificationSink::Webhook, None),
-        ),
-        (
-            pp::SLACK_WEBHOOK_URL_ENV,
-            "slack",
-            "slack",
-            NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
-            NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
-            notification_binding(POLICY_UID, NotificationSink::Slack, None),
-        ),
-    ] {
-        let credential = job_spec
-            .env_from_secret
-            .iter()
-            .find(|e| e.name == credential_env)
-            .unwrap_or_else(|| panic!("{sink}: no credential variable"));
-        assert_eq!(credential.secret_name, secret);
-        assert!(
-            !credential.optional,
-            "{sink}: the credential itself is required"
-        );
-        let pair = job_spec
-            .env_from_secret
-            .iter()
-            .find(|e| e.name == projected)
-            .unwrap_or_else(|| panic!("{sink}: the Secret's binding is not projected"));
-        assert_eq!(
-            pair.secret_name, secret,
-            "{sink}: the binding comes from the SAME Secret"
-        );
-        assert_eq!(pair.key, CREDENTIAL_BINDING_KEY);
-        assert!(
-            pair.optional,
-            "{sink}: an unbound Secret must reach the deliverer"
-        );
-        let literal = job_spec
-            .env_literal
-            .iter()
-            .find(|(n, _)| n == expected_env)
-            .unwrap_or_else(|| panic!("{sink}: no expectation"));
-        assert_eq!(literal.1, expected, "{sink}");
-    }
-    // The endpoint is IN the expectation: the default endpoint's binding is
-    // not what this route expects.
-    let pd_expected = &job_spec
-        .env_literal
-        .iter()
-        .find(|(n, _)| n == NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV)
-        .expect("the pair")
-        .1;
-    assert_ne!(
-        *pd_expected,
-        notification_binding(POLICY_UID, NotificationSink::PagerDuty, None)
-    );
-    let rendered = serde_json::to_string(&weirkeeper::job::build(&job_spec)).expect("JSON");
-    assert!(rendered.contains("\"optional\":true"), "{rendered}");
-
-    // FAIL CLOSED: a policy with no UID projects an expectation no Secret
-    // satisfies.
-    let job_spec = pp::delivery_job_spec(
-        "j",
-        NS,
-        &pp::owner_of(POLICY, ""),
-        "cm",
-        Some(&routes),
-        &RunnerImage::default(),
-        false,
-    );
-    for (name, value) in &job_spec.env_literal {
-        if name.ends_with("_CREDENTIAL_BINDING_EXPECTED") {
-            assert_eq!(value, UNBOUND_NO_UID, "{name}");
-        }
-    }
-}
-
-/// **The status publishes each route's binding, and editing a PagerDuty
-/// endpoint moves it** — so the Secret bound for the old endpoint is refused
-/// until it is bound again. The policy's spec is mutable; this is the row that
-/// makes "keep the key, change the endpoint" a refusal rather than a re-route.
-///
-/// KILLS: the status field dropped; the endpoint left out of the binding.
-#[test]
-fn fx20_the_status_publishes_each_routes_binding_and_an_endpoint_edit_moves_it() {
-    let routes = three_sink_routes(None);
-    let published = pp::notification_bindings(POLICY_UID, Some(&routes));
-    let view: Vec<(&str, &str, &str)> = published
-        .iter()
-        .map(|b| (b.route.as_str(), b.sink.as_str(), b.secret_name.as_str()))
-        .collect();
-    assert_eq!(
-        view,
-        vec![
-            ("oncall", "pagerduty", "pd"),
-            ("ops", "webhook", "hooks"),
-            ("chat", "slack", "slack")
-        ]
-    );
-    let edited = pp::notification_bindings(
-        POLICY_UID,
-        Some(&three_sink_routes(Some("https://evil.example/v2/enqueue"))),
-    );
-    assert_ne!(
-        edited[0].binding, published[0].binding,
-        "the endpoint edit moves the binding"
-    );
-    assert_eq!(edited[1].binding, published[1].binding);
-    assert_eq!(edited[2].binding, published[2].binding);
-
-    // And the reconcile writes it.
-    let no_catalog = {
-        let mut value = spec_value();
-        merge(
-            &mut value,
-            &json!({"objectives": {"requireCatalogAvailability": false}}),
-        );
-        value
-    };
-    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
-    routes.push(patch(STATUS_PATH));
-    let (_, _, bodies) = drive(&policy_with(no_catalog, json!({})), routes);
-    let status = last_status_patch(&bodies);
-    assert_eq!(
-        status["status"]["credentialBindings"],
-        json!([
-            {"route": "oncall", "sink": "pagerduty", "secretName": "pd",
-             "binding": notification_binding(POLICY_UID, NotificationSink::PagerDuty, None)},
-            {"route": "oncall", "sink": "webhook", "secretName": "hooks",
-             "binding": notification_binding(POLICY_UID, NotificationSink::Webhook, None)}
-        ])
-    );
-}
-
-/// **A refused sink is a failed delivery whose `lastError` and
-/// `NotificationsDelivered` reason name `CredentialBindingMismatch`** — read
-/// from the closed `notify-result=` table, never from the pod's prose.
-///
-/// KILLS: `refused` unknown to the controller (read as "no notify-result
-/// line"); the condition reason left at `DeliveryFailed`; pod text echoed.
-#[test]
-fn fx20_a_refused_sink_is_a_failed_delivery_named_credential_binding_mismatch() {
-    let (state, message) = p::classify_delivery(
-        Some(1),
-        &[
-            &format!("pagerduty: CredentialBindingMismatch: {ROUTING_KEY}"),
-            "notify-result=pagerduty:refused",
-            "notify-result=webhook:ok",
-        ],
-    );
-    assert_eq!(state, p::DeliveryState::Failed);
-    assert!(
-        message.starts_with("CredentialBindingMismatch: "),
-        "{message}"
-    );
-    assert!(message.contains("pagerduty route"), "{message}");
-    assert!(!message.contains(ROUTING_KEY), "{message}");
-    // CONTROL: an ordinary failed sink is not a binding refusal.
-    let (_, message) = p::classify_delivery(Some(1), &["notify-result=pagerduty:failed"]);
-    assert!(
-        !message.starts_with("CredentialBindingMismatch"),
-        "{message}"
-    );
-
-    // Driven: the pod exited 1 with a refused line.
-    let key = p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness);
-    let job_name = p::delivery_job_name(POLICY, POLICY_UID, &key, 1, 1);
-    let job_path: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
-    let policy = policy_with(
-        {
-            let mut value = spec_value();
-            merge(
-                &mut value,
-                &json!({"objectives": {"requireCatalogAvailability": false}}),
-            );
-            value
-        },
-        json!({
-            "alerts": [{
-                "key": key, "kind": "Staleness", "state": "Open",
-                "openedAt": at(4), "transition": 1, "notifiedTransition": 1,
-                "delivery": {
-                    "state": "Pending", "attempts": 1, "lastAttemptAt": at(1),
-                    "jobRef": {"name": job_name.clone()}
-                }
-            }]
-        }),
-    );
-    let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
-    routes.push(ok(job_path, finished_job(&job_name, "Failed")));
-    routes.push(ok("/pods", pod_list_exiting(&job_name, JOB_UID, 1)));
-    routes.push(ok(
-        POD_LOG_PATH,
-        "notify-result=pagerduty:refused\nnotify-result=webhook:ok\n".to_string(),
-    ));
-    routes.push(patch(STATUS_PATH));
-    routes.push(patch(job_path));
-    let (_, _, bodies) = drive(&policy, routes);
-    let status = last_status_patch(&bodies);
-    let delivery = &status["status"]["alerts"][0]["delivery"];
-    assert_eq!(delivery["state"], json!("Failed"));
-    assert!(
-        delivery["lastError"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("CredentialBindingMismatch: "),
-        "{delivery}"
-    );
-    let delivered = condition(&status, "NotificationsDelivered");
-    assert_eq!(delivered["status"], json!("False"));
-    assert_eq!(delivered["reason"], json!("CredentialBindingMismatch"));
-}
-
-// ===========================================================================
-// FX-19 CLASS SWEEP — the reaping of a finished delivery Job flaps nothing
-// ===========================================================================
-
-/// **FX-19 CLASS SWEEP, `ProtectionPolicy` delivery: A RECORDED DELIVERY
-/// WHOSE JOB THE TTL CONTROLLER IS COLLECTING IS NEVER READ.** The delivery
-/// TTL is patched only on a committed status (`controllers/protection_policy.rs`,
-/// "The TTL, LAST, and only on a committed status"), and a delivery Job is
-/// read only while its ledger entry is `Pending` (`observe_delivery`'s first
-/// guard) — so the Job's foreground delete (`deletionTimestamp`, TTL, pod gone)
-/// reaches an entry already `Delivered`, which costs no Job read and logs
-/// nothing above debug.
-///
-/// NEGATIVE CONTROL: the same Job under the same entry still `Pending` IS read
-/// (and, pod-less, judged a failed attempt) — the read this row's zero is
-/// about is reachable.
-#[test]
-fn fx19_a_recorded_delivery_whose_job_is_being_collected_is_never_read() {
-    let collected = |name: &str| {
-        let mut job: Value =
-            serde_json::from_str(&finished_job(name, "Complete")).expect("the fixture is JSON");
-        job["spec"]["ttlSecondsAfterFinished"] = json!(pp::DELIVERY_TTL_SECONDS);
-        job["metadata"]["deletionTimestamp"] = json!(p::rfc3339(now()));
-        job["metadata"]["finalizers"] = json!(["foregroundDeletion"]);
-        job.to_string()
-    };
-    let (pending, routes, job_path) = pending_delivery(1, collected, None);
-    let mut value = serde_json::to_value(&pending).expect("the policy serialises");
-    value["status"]["alerts"][0]["delivery"]["state"] = json!("Delivered");
-    let recorded: ProtectionPolicy =
-        serde_json::from_value(value).expect("the recorded policy parses");
-    let read_the_job = |recorder: &Recorder| {
-        requests(recorder)
-            .iter()
-            .any(|(m, u)| m == "GET" && path_of(u).ends_with(job_path))
-    };
-
-    let log = weirkeeper::testing::CapturedLog::start();
-    let (_outcome, recorder, _bodies) = drive(&recorded, routes.clone());
-    assert!(
-        !read_the_job(&recorder),
-        "a recorded delivery's Job is not read: {:?}",
-        requests(&recorder)
-    );
-    assert!(
-        log.at("WARN").is_empty(),
-        "no WARN: {:?}",
-        log.messages_at("WARN")
-    );
-    drop(log);
-
-    // NEGATIVE CONTROL: the entry still Pending — the Job IS read.
-    let (_outcome, recorder, _bodies) = drive(&pending, routes);
-    assert!(
-        read_the_job(&recorder),
-        "a pending delivery's Job is read: {:?}",
-        requests(&recorder)
-    );
 }
 
 // ------------------------------------------------- PROD-02.1, review EC-1
@@ -5927,15 +3467,8 @@ fn an_empty_capture_is_never_a_policys_recovery_point() {
     );
     assert_eq!(outcome.health, p::Health::Healthy);
 
-    // Alone: no available point at all (the policy pages, as for any stale
-    // point, so the delivery routes are in the table).
+    // Alone: no available point at all.
     let mut routes = read_routes(vec![empty_capture_backup("b-empty", 2)], json!({}));
-    routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
-    routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
-    routes.push(first_job_route(
-        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
-        1,
-    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, bodies) = drive(&no_catalog_policy(), routes);
     let status = last_status_patch(&bodies);

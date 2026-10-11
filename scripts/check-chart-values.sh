@@ -143,8 +143,8 @@ admissionPolicy.extraPrincipals|admission-policy|-|--set-json|["system:serviceac
 # ---- api.* and api.console.*
 api.enabled|default|-|--set|true
 api.namespaces|demo|-|--set-json|["team-x"]
-api.console.enabled|demo|--set-string api.console.mode=localAdmin --set-string api.console.keySecret=fx10-keys|--set|true
-api.console.mode|demo|--set api.console.enabled=true --set-string api.console.keySecret=fx10-keys|--set-string|localAdmin
+api.console.enabled|default|--set api.enabled=true --set-string api.console.mode=localAdmin --set-string api.console.keySecret=fx10-keys|--set|true
+api.console.mode|default|--set api.enabled=true --set api.console.enabled=true --set-string api.console.keySecret=fx10-keys|--set-string|localAdmin
 api.console.image|console|-|--set-string|example.invalid/fx10-probe/logweir-console:probe
 api.console.imagePullPolicy|console|-|--set-string|IfNotPresent
 api.console.replicas|console|-|--set|2
@@ -230,7 +230,6 @@ controller.resources.limits.memory|default|-|--set-string|600Mi
 controller.nodeSelector|default|-|--set-json|{"fx10":"probe"}
 controller.tolerations|default|-|--set-json|[{"key":"fx10","operator":"Exists"}]
 controller.affinity|default|-|--set-json|{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fx10","operator":"Exists"}]}]}}}
-notify.allowInsecureSinks|default|-|--set|true
 retention.enabled|default|-|--set|true
 # ---- identity, environment, placement
 environment|default|-|--set-string|fx10
@@ -298,14 +297,6 @@ demoKafka.resources.limits.memory|demo|-|--set-string|2Gi
 demoKafka.nodeSelector|demo|-|--set-json|{"fx10":"probe"}
 demoKafka.tolerations|demo|-|--set-json|[{"key":"fx10","operator":"Exists"}]
 demoKafka.affinity|demo|-|--set-json|{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fx10","operator":"Exists"}]}]}}}
-# ---- ui.*
-ui.enabled|default|-|--set|true
-ui.image|demo|-|--set-string|example.invalid/fx10-probe/logweir-ui:probe
-ui.imagePullPolicy|demo|-|--set-string|IfNotPresent
-ui.namespaces|demo|-|--set-json|["team-x"]
-ui.nodeSelector|demo|-|--set-json|{"fx10":"probe"}
-ui.tolerations|demo|-|--set-json|[{"key":"fx10","operator":"Exists"}]
-ui.affinity|demo|-|--set-json|{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fx10","operator":"Exists"}]}]}}}
 ROWS
 
 if [ "$rows" -lt 100 ]; then

@@ -26,8 +26,6 @@ import {
   decodeDestinationUsage,
   decodeDetailPage,
   decodeDiscoveryLatest,
-  decodeLegacyList,
-  decodeLegacyObject,
   decodeOperation,
   decodeProblem,
   decodeRequest,
@@ -61,7 +59,7 @@ test("console_fixtures_are_instances_of_the_published_schema", () => {
   // this arm exists to notice.
   const documents = Object.keys(CONSOLE_FIXTURES)
     .filter((name) => CONSOLE_FIXTURES[name].schema !== null);
-  assert.equal(documents.length, 89,
+  assert.equal(documents.length, 88,
     "the console fixture set covers PLAT-17.1, D1, D2, D3 and PROD-16.2");
   for (const name of documents) {
     const schema = CONSOLE_FIXTURES[name].schema;
@@ -209,66 +207,6 @@ test("an_operation_carries_the_evidence_and_the_recorded_verification", () => {
   assert.equal(decoded.value.item.result.exitCode, 0);
   assert.ok(decoded.value.item.evidence.payloadKey.length > 0);
 });
-
-// -------------------------------------------------- the legacy custom resources
-
-test("a_custom_resource_is_validated_and_handed_back_unchanged", () => {
-  const list = fixture("preview/namespaces/default/kafkaclusters.json");
-  const decoded = decodeLegacyList("kafkaclusters", list);
-  assert.equal(
-    decoded.value,
-    list,
-    "the legacy decoder returns THE SAME OBJECT. Copying it field by field would be the " +
-      "field loss this module exists to prevent: a key nobody listed would vanish.",
-  );
-  const one = decodeLegacyObject("kafkaclusters", list.items[0]);
-  assert.equal(one.value, list.items[0]);
-  assert.equal(one.value.status.clusterId, "MkU3NEVCTTlSM0FCQVRMQQ");
-});
-
-test("a_custom_resource_missing_a_required_spec_field_is_a_contract_failure", () => {
-  const list = fixture("preview/namespaces/default/backupschedules.json");
-  const broken = JSON.parse(JSON.stringify(list.items[0]));
-  delete broken.spec.schedule;
-  assert.throws(
-    () => decodeLegacyObject("backupschedules", broken),
-    (error) => {
-      assert.ok(isContractFailure(error));
-      assert.equal(error.contract.dto, "BackupSchedule");
-      assert.equal(error.contract.path, "spec.schedule");
-      return true;
-    },
-  );
-});
-
-test("a_custom_resource_of_another_kind_is_refused_by_name", () => {
-  const cluster = fixture("preview/namespaces/default/kafkaclusters.json").items[0];
-  assert.throws(
-    () => decodeLegacyObject("backups", cluster),
-    (error) => {
-      assert.ok(isContractFailure(error));
-      assert.equal(error.contract.path, "kind");
-      assert.match(error.message, /expected Backup, got "KafkaCluster"/);
-      return true;
-    },
-  );
-});
-
-test("every_shipped_legacy_fixture_satisfies_its_own_contract", () => {
-  const kinds = [
-    ["kafkaclusters", "preview/namespaces/default/kafkaclusters.json"],
-    ["backupschedules", "preview/namespaces/default/backupschedules.json"],
-    ["backups", "preview/namespaces/default/backups.json"],
-    ["restores", "preview/namespaces/default/restores.json"],
-    ["approvals", "preview/namespaces/default/approvals.json"],
-    ["trustrosters", "preview/trustrosters.json"],
-  ];
-  for (const [plural, name] of kinds) {
-    const decoded = decodeLegacyList(plural, fixture(name));
-    assert.ok(decoded.value.items.length > 0, name + " has items");
-  }
-});
-
 
 // ------------------------------------- the closed sets and the request shapes
 

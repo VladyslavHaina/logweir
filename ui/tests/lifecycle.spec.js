@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 
 import { createRouteLifecycle, namespaceContext, parseHash } from "../app.js";
 import { listen } from "../lifecycle.js";
-import { selectMode } from "../client.js";
+import { CONSOLE, mode, selectMode } from "../client.js";
 import { mountBackups } from "../pages/backups.js";
 import { mountClusters } from "../pages/clusters.js";
 import {
@@ -18,16 +18,18 @@ import {
   recoveryPoints,
   submitRestore,
 } from "../pages/restore-wizard.js";
+import { wire } from "./console-fixture.js";
 
 
 // THE MODE IS PINNED, NOT PROBED (PLAT-18.1). `ui/client.js` decides once per
-// loaded page whether the product API is in front of it, by asking
-// `GET /api/v1/session`. A mount in this suite must not issue that request:
-// it would show up in the stubbed request log every assertion below counts,
-// and it is not what any of these tests are about. Pinning it to the refusal a
-// `kubectl proxy` path filter gives is the legacy mode these tests exercise,
-// recorded before the first mount and never asked again.
-await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
+// loaded page by asking `GET /api/v1/session`. A mount in this suite must not
+// issue that request: it would show up in the stubbed request log the two
+// transport rows below count. The pin is the console with two granted
+// namespaces, team-a and team-b, so a mount in either reaches the transport;
+// the other rows hand their page an API double.
+const SESSION = wire("session.json");
+SESSION.namespaces.push(Object.assign({}, SESSION.namespaces[0], { name: "team-b" }));
+await selectMode({ probe: async () => ({ ok: true, status: 200, body: SESSION }) });
 
 /** The route identity for a fixture's newest recovery point. */
 function newestPoint(list) {
@@ -61,31 +63,32 @@ function deferred() {
   return { promise: promise, resolve: resolve };
 }
 
-// A `BackupList` the API server could have returned. THE SPEC IS REAL, and
-// since PLAT-18.1 it has to be: `ui/contract.js` validates what a read
-// returns, so an object with a name and nothing else is a contract failure --
-// which is the whole point of the typed client, and was worth the two lines
-// this helper grew to say it.
-function backup(name) {
-  return {
-    apiVersion: "logweir.dev/v1alpha1",
-    kind: "Backup",
-    metadata: { name: name, namespace: "team-x", uid: "uid-" + name, resourceVersion: "1" },
-    spec: { sourceRef: { name: "orders-prod" }, topics: ["orders"] },
-    status: {},
-  };
+// A console `BackupListResponse` the product API could have returned: the
+// checked-in wire fixture with its one item renamed into `ns`.
+// `ui/contract.js` validates what a read returns, so the body is a real one.
+function backups(ns, name) {
+  const list = wire("backups-list.json");
+  list.items = [Object.assign({}, list.items[0], { name: name, namespace: ns })];
+  return list;
 }
 
-function response(items) {
-  return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ items: items })) };
+function response(body) {
+  return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) };
+}
+
+/** Every pending microtask: a console read awaits the decided mode before it
+ *  reaches `fetch`. */
+function drained() {
+  return new Promise((done) => setImmediate(done));
 }
 
 test("a delayed namespace A response cannot overwrite namespace B", async () => {
+  assert.equal(mode(), CONSOLE, "the pin is the console mode these rows drive");
   const original = globalThis.fetch;
   const requests = [];
   globalThis.fetch = (u, init) => {
     const next = deferred();
-    requests.push({ u: u, init: init, next: next });
+    requests.push({ u: String(u), init: init, next: next });
     return next.promise;
   };
   try {
@@ -96,11 +99,15 @@ test("a delayed namespace A response cannot overwrite namespace B", async () => 
     const aMount = mountBackups(target, "team-a", parse, a);
     const b = routes.begin();
     const bMount = mountBackups(target, "team-b", parse, b);
+    await drained();
 
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].u, /\/namespaces\/team-a\/backups\?/);
+    assert.match(requests[1].u, /\/namespaces\/team-b\/backups\?/);
     assert.equal(requests[0].init.signal.aborted, true, "B aborts A's view-owned GET");
-    requests[1].next.resolve(response([backup("from-b")]));
+    requests[1].next.resolve(response(backups("team-b", "from-b")));
     await bMount;
-    requests[0].next.resolve(response([backup("from-a")]));
+    requests[0].next.resolve(response(backups("team-a", "from-a")));
     await aMount;
 
     assert.equal(target.children.length, 1);
@@ -154,8 +161,8 @@ test("a stale form callback cannot submit into its former namespace", async () =
   const original = globalThis.fetch;
   const seen = [];
   globalThis.fetch = (u, init) => {
-    seen.push({ u: u, init: init });
-    return Promise.resolve(response([]));
+    seen.push({ u: String(u), init: init });
+    return Promise.resolve(response(wire("connections-list.json")));
   };
   try {
     let submit;
@@ -182,17 +189,18 @@ test("a stale form callback cannot submit into its former namespace", async () =
     const target = node();
     target.querySelector = (selector) => selector === "#cluster-form" ? form : null;
     // The clusters page wires one Test connection control per rendered row.
-    // This fake renders no rows, so the lookup answers with none -- and
-    // answering at all is what keeps the page's own error path out of this
-    // test's way.
+    // This fake finds none, and answering at all is what keeps the page's own
+    // error path out of this test's way.
     target.querySelectorAll = () => [];
     const routes = createRouteLifecycle();
     const oldView = routes.begin();
-    await mountClusters(target, "old-ns", (html) => [{ html: html }], oldView);
+    // The former namespace is a granted one, so the old view's read is sent.
+    await mountClusters(target, "team-a", (html) => [{ html: html }], oldView);
     routes.begin();
+    assert.equal(typeof submit, "function", "the old view wired its form");
     await submit({ preventDefault() {} });
     assert.equal(seen.length, 1, "only the old view's GET ran; no stale POST was sent");
-    assert.match(seen[0].u, /namespaces\/old-ns\/kafkaclusters$/);
+    assert.match(seen[0].u, /\/namespaces\/team-a\/connections\?/);
   } finally {
     globalThis.fetch = original;
   }

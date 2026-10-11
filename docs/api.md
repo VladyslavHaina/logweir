@@ -158,7 +158,6 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. A new value is written to a new bound Secret; `secret.existing` may name only a Secret the destination already names (FX-20). |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. `destination.credentialBound` (FX-20c, blocking) compares the `logweir-binding` of every `SecretKeys` grant the destination declares, whichever roles are exercised and `archiveWrite` included, with no request: a grant whose Secret is unbound or bound to another object is `notReady`/`CredentialBindingMismatch`, named in the message by its `spec.access` field, destination and Secret, so the verdict is never `ready` for a destination a backup would refuse ([kubernetes.md](kubernetes.md) §20.10). |
-| `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Adopt a legacy `BackupSchedule` or `Backup`'s location. **This build always refuses** — see below. |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
 | `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
 | `POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | Start a bounded inventory: `202`, or `200` with `reused: true` for a fresh identical result. |
@@ -171,10 +170,9 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/preflights/{id}:cancel` | Ask an unfinished preflight **of one's own** to stop. |
 | `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized status; `kind` is the closed set `backup\|restore\|discovery\|preflight`. |
 | `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}/events` | The same thing as a bounded `text/event-stream`; `kind` is `backup\|restore`. |
-| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger with its delivery state. |
-| `GET /api/v1/namespaces/{ns}/rehearsal-schedules[/{name}]` | Recurring recovery rehearsals: the last pass, the last failure, the last **skip** with its reason, and the leftover topics that block the next slot. |
+| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger (alert delivery is withdrawn, release notes item 74: `notifications` and each alert's `delivery` are always absent). |
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
-| `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
+| `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). From receipt format 1.5.0 each topic also carries `schemaDependency` (PROD-03.0): `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), `basis` or `reason`, the dependent `sides` and the `schemaIds` they name (at most 16, `schemaIdsOmitted` when more were seen); absent is not assessed, never "not schema-dependent". For a point whose backup selected consumer groups (receipt and record format 1.7.0), `consumerPositions`: when the positions were observed, `observedBeforeRecoveryPointMs` (the snapshot's freshness), the listing word and, per group (at most 32, else `groupsOmitted`), its outcome, reason, type, whether it was active and its positions counted by what they say about archived data (`related`, `notRelated`, `neverCommitted`, `beyondEnd`, `failed`, `notObserved`); absent is not published, never "no positions". These are COUNTS: each position's own relation is in the positions document the point's receipt binds, which no route serves. The API neither sets nor shows a `Backup`'s or `BackupSchedule`'s `spec.consumerGroups`: the create bodies refuse the field (an unknown field, never silently dropped), and a selection is set with `kubectl` ([kubernetes.md](kubernetes.md#consumer-position-evidence-specconsumergroups)). |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
@@ -208,8 +206,7 @@ namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit,
 authorizationExpiresAt?}` and nothing created. The queue does not extend an
 approval's maximum age: the authorization is re-checked when a restore leaves
 the queue, and one that expired meanwhile is refused `AuthorizationExpired`
-with a message saying it expired while queued. A rehearsal's restores are never
-counted or queued.
+with a message saying it expired while queued.
 
 **`POST .../restores` answers where the submission goes next.** After the
 Restore exists (so it has a UID) the response carries `authorization`:
@@ -533,15 +530,13 @@ after a resume this service cannot replay), `heartbeat` and `end`.
 
 ### Protection, rehearsals, catalogs, retention and trust
 
-Five bounded read families, the same cursor as every other list, and one write
-among them.
+Four bounded read families, the same cursor as every other list, and one write
+among them. The rehearsal-schedule read is withdrawn in v1, with scheduled
+rehearsals.
 
-**No response carries a credential, and that shapes the projections.** A
-`ProtectionPolicy`'s notification routes carry `secretKeyRef`s; the projection
-publishes each route's **name** and which channels it has as booleans, because
-a webhook URL is a bearer token with a hostname on the front and the name of
-the Secret holding one is what a reader needs to decide what to read next. A
-`RetentionPolicy`'s enforcement block names the one delete-capable credential in
+**No response carries a credential, and that shapes the projections.** Alert
+sinks are withdrawn (release notes, item 74): `notifications` is always absent.
+A `RetentionPolicy`'s enforcement block names the one delete-capable credential in
 the installation; the projection publishes `credentialConfigured: true` and not
 the Secret's name.
 
@@ -1140,7 +1135,7 @@ approval). The console signs `approvalSubject: originalName` into the
 authorization document only for a Restore that declares it, and shows the
 subject on the review step and the approvals page. The controller refuses an
 approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
-terminal), and a standing rehearsal authorization never authorises one. An
+terminal). An
 authorization document that carries `approvalSubject` or
 `originalNameConfirmation` is written as `formatVersion` **2.1.0**; every
 other document stays 2.0.0, byte for byte
@@ -1298,9 +1293,6 @@ partition, not of the topic. **Absent `selection` is an unnarrowed restore,
 exactly as before.** A selection the controller could not read is still served
 (`{"scope": "partial"}`), never omitted. Additive.
 
-`GET .../rehearsal-schedules[/{name}]`'s `bounds` carries `coverage` (`sampled`
-when the schedule states none, or `complete`) and `completeMaxRecords`.
-
 ### Saved destinations
 
 `spec.storage` and `spec.transport.security` are immutable — a different
@@ -1326,26 +1318,8 @@ destination_location_immutable`. A CA bundle on a plaintext destination is `409
 transport_downgrade_forbidden`, because the transport can never be changed and a
 CA means nothing without TLS.
 
-**Adopting a legacy location needs a source that recorded it, and this build has
-none.** A legacy `archive.url` carries the bucket and the prefix. A destination
-also needs the endpoint, the region, the addressing and the transport — and an
-installation whose runs used MinIO over a custom endpoint with path-style
-addressing writes *exactly the same URL* as one that used AWS S3. The two places
-that record the difference are the frozen `execution-inputs.json` of a succeeded
-`Backup` (PLAT-06.1) and the installation's legacy addressing in the policy
-`ConfigMap` (D2 W11); the adapter reads a `ConfigMap` only when a **check** owns
-it, and neither of those is a check result. `locationDigest` — which restore
-selection and catalog indexing compare — is computed over exactly the fields
-that would have to be guessed, so a guess does not produce an approximate
-destination, it produces a different one that looks derived from facts.
-
-So `:from-legacy` takes D2 §3.12's third branch: it validates the request, reads
-the legacy object, and answers `404 legacy_location_unknown` naming the bucket
-and prefix it *did* recover so you can paste them into an explicit `POST
-.../destinations` with the endpoint your runs actually used. **Adoption from the
-installation config arrives with W11**, and `addressingSource` — the field that
-will say which source a derived location came from — is deliberately absent from
-the response until a route can fill it honestly.
+`POST .../destinations:from-legacy`, which could only refuse, was withdrawn in
+v1 (release-notes item 75): create the destination explicitly.
 
 **Connection credentials are entered, never named (PROD-01.3).** A connection
 create carries its credential in `auth.credential` — `password` for
@@ -1367,8 +1341,7 @@ a CA certificate is public and is only ever a local trust anchor.
 
 **Destination credentials are entered, never named (FX-20).** A create
 refuses `access.<role>.secret.existing` with `422 destination_invalid`, code
-`existing_credential_refused` on `access.<role>.secret.existing` (so does
-`:from-legacy`): no existing Secret can carry the binding of a destination that
+`existing_credential_refused` on `access.<role>.secret.existing`: no existing Secret can carry the binding of a destination that
 does not exist yet, and a destination that could name any Secret could make
 Logweir sign requests with another team's key and send them — the access key
 id, a replayable signature and any session token — to an endpoint of its
@@ -1916,8 +1889,8 @@ nothing from inside it.
 
 `/ui/` serves an allowlist built once at startup: the top-level `*.html`,
 `*.js` and `*.css` files of the configured directory and the same three
-extensions directly inside `pages/` — the selection `Dockerfile.ui` makes, and
-nothing else. `README.md`, the `tests/` directory and its throwaway keypair, any
+extensions directly inside `pages/` — the selection `Dockerfile.console` copies,
+and nothing else. `README.md`, the `tests/` directory and its throwaway keypair, any
 other subdirectory, any other extension, dotfiles and symbolic links are never
 in the map. A request path is looked up **exactly**, with no decoding,
 normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
@@ -1928,11 +1901,9 @@ Two entries are the service's own and not files: the page icon
 (`favicon.svg`), and **`runtime.js`**, served compiled in
 (`assets.rs` `CONSOLE_RUNTIME_JS`) in place of the file under `ui/`. It sets the
 empty namespace context the page reads and `window.LOGWEIR_CONSOLE = {servedBy:
-"logweir-api"}`, which is how the page knows it is behind this service even
-when its first `GET /api/v1/session` fails: a failed probe then reads "can't
-reach the service; retry" and never falls back to the legacy `kubectl proxy`
-paths (console-ux-1 review L1). It carries no credential and nothing per
-request. The legacy UI image serves the file, which sets no marker.
+"logweir-api"}`. A failed first `GET /api/v1/session` reads "can't reach the
+service; retry" (console-ux-1 review L1). It carries no credential and nothing
+per request.
 
 ## Shared mode
 
@@ -2542,12 +2513,9 @@ maximum duration with a terminal `end` event.
 The service ships as one image and one optional Helm component.
 
 **The image is `logweir-console`, built by `Dockerfile.console`.** It carries
-`/usr/local/bin/logweir-api` and, at `/ui`, the same twenty-six static files the
-`logweir-ui` image carries — the same two globs, from the same one `ui/`
-directory in the source tree, so there is one copy of the page in the repository
-and two images that copy from it. `scripts/check-image-api.sh` hashes every file
-the image will serve against that directory (as
-`scripts/check-image-ui.sh` does for the other), requires all three licence
+`/usr/local/bin/logweir-api` and, at `/ui`, the twenty-six static files of the
+one `ui/` directory in the source tree. `scripts/check-image-api.sh` hashes every
+file the image will serve against that directory, requires all three licence
 files, requires the CA bundle, and refuses an image carrying any key-shaped path
 anywhere outside the system trust store: this is the one image in the tree that
 *mounts* key material at runtime, and none of it is ever built into a layer.
@@ -2589,9 +2557,8 @@ O1 (`docs/kubernetes.md` §15.4). `controller.watchNamespaces` replaces the
 controller's cluster-wide binding with one RoleBinding per execution namespace
 plus a ClusterRole for the two cluster-scoped trust kinds only, and the
 controller watches exactly those namespaces; the chart refuses shared mode
-without the list, with a list that includes the release namespace, beside the
-legacy `ui.enabled` proxy, and with a product binding in a namespace no
-controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
+without the list, with a list that includes the release namespace, and with a
+product binding in a namespace no controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
 has the `kubectl auth can-i` matrix and the migration. `kubernetes.source` is always `inCluster` and there is
 no chart value for the other source — a pod that read a kubeconfig would act
 with whatever identity that file carried, and the RBAC argument above would be
@@ -2651,8 +2618,7 @@ modes (PLAT-19.2): with a namespace bound Ordinary the console signs the
 configured administrator's confirmation, which is an authorization only
 because the installation chose that policy; under Governed the administrator
 is the requester of everything it submits, so it can never approve one of its
-own requests. What stays unavailable is the legacy `kubectl proxy` page, which
-cannot sign a confirmation at all (D0) and keeps today's governed flow.
+own requests.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

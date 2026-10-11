@@ -3,7 +3,7 @@
 
 Run it directly (`python3 scripts/live/d1/fence/test_scope_proxy.py`) or under
 pytest; it imports `scripts/fixtures/plat04_scope_proxy.py` and touches no
-cluster, no network and no file outside `config/crd`.
+cluster, no network and no file outside `charts/logweir/crds`.
 
 THE ROW THAT MATTERS MOST IS `table_matches_the_generated_crds`. The fence puts
 a real controller behind this proxy: a namespaced kind missing from the table
@@ -40,7 +40,7 @@ def crd_scopes() -> dict[str, str]:
     and keeps the test dependency-free.
     """
     scopes: dict[str, str] = {}
-    for path in sorted((ROOT / "config" / "crd").glob("*.yaml")):
+    for path in sorted((ROOT / "charts" / "logweir" / "crds").glob("*.yaml")):
         if path.name == "kustomization.yaml":
             continue
         text = path.read_text()
@@ -56,16 +56,16 @@ def crd_scopes() -> dict[str, str]:
 
 def test_table_matches_the_generated_crds() -> None:
     scopes = crd_scopes()
-    assert scopes, "no logweir CRDs found under config/crd"
+    assert scopes, "no logweir CRDs found under charts/logweir/crds"
     namespaced = {p for p, s in scopes.items() if s == "Namespaced"}
     cluster = {p for p, s in scopes.items() if s == "Cluster"}
     assert proxy.NAMESPACED_LOGWEIR == namespaced, (
-        "the proxy's namespaced table and config/crd disagree: "
+        "the proxy's namespaced table and the chart CRDs disagree: "
         f"only in proxy={sorted(proxy.NAMESPACED_LOGWEIR - namespaced)}, "
         f"only in CRDs={sorted(namespaced - proxy.NAMESPACED_LOGWEIR)}"
     )
     assert proxy.CLUSTER_SCOPED_LOGWEIR == cluster, (
-        "the proxy's cluster-scoped table and config/crd disagree: "
+        "the proxy's cluster-scoped table and the chart CRDs disagree: "
         f"only in proxy={sorted(proxy.CLUSTER_SCOPED_LOGWEIR - cluster)}, "
         f"only in CRDs={sorted(cluster - proxy.CLUSTER_SCOPED_LOGWEIR)}"
     )
@@ -289,9 +289,9 @@ def test_role_delta_allows_update_on_status_and_nothing_else() -> None:
 def test_role_delta_catches_every_kind_of_widening() -> None:
     """The six undeclared grants review R-12 found, each on its own.
 
-    `secrets` is the one that matters most: `config/rbac/role.yaml` carries the
-    banner "NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE", so a fence
-    that grants one has broken a named product invariant.
+    `secrets` is the one that matters most: the shipped ClusterRole
+    (`charts/logweir/templates/clusterrole.yaml`) says "No verb on `secrets`",
+    so a fence that grants one has broken a named product invariant.
     """
     cases = {
         "core/secrets": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}],
@@ -315,7 +315,7 @@ def test_the_fenced_role_grants_no_verb_on_secrets() -> None:
     grants = fenced.rules_to_grants(fenced.namespaced_role("ns", {})["rules"])
     offenders = sorted(k for k in grants if k[1].split("/")[0] == "secrets")
     assert not offenders, (
-        "config/rbac/role.yaml: NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE — "
+        "charts/logweir/templates/clusterrole.yaml: no verb on `secrets` — "
         f"the fenced Role has {offenders}"
     )
 

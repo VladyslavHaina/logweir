@@ -15,9 +15,8 @@ object store and exits, exactly as the backup and restore runners do; the
 delete capability that makes this the one irreversible component in the product
 is an OBJECT-STORE credential scoped to the policy's own prefix, and no
 Kubernetes verb can widen or narrow it. A binding here would be a line an
-operator has to audit for no benefit — `config/rbac/backup-runner-serviceaccount.yaml`
-makes the same argument for `logweir-runner` and it holds twice as hard for the
-pod that can delete.
+operator has to audit for no benefit — the same argument holds for
+`logweir-runner`, and twice as hard for the pod that can delete.
 
 `automountServiceAccountToken: false`, on the account AND on the PodSpec
 `weirkeeper::job::build` writes. The pod that holds a delete-capable storage
@@ -57,11 +56,9 @@ namespaces this installation runs Logweir Jobs in. It is read here even when
 `identity.enabled` is false, because retention signs nothing — the list is about
 where Jobs run, and only the SIGNER distribution beside it is about identity.
 
-AND THE LOW-LEVEL PATH HAS A FRAGMENT, so the sentence pointing at it is true:
-`config/rbac/retention-serviceaccount.yaml`, applied per namespace exactly as
-`config/rbac/backup-runner-serviceaccount.yaml` is (`docs/install.md` step 4).
-Before this wave both this header and install.md pointed at a step and a file
-that did not cover it.
+AND A NAMESPACE THE CHART DOES NOT LIST HAS A FRAGMENT:
+`config/samples/retention-serviceaccount.yaml`, applied per namespace exactly as
+`config/samples/backup-runner-serviceaccount.yaml` is (`docs/install.md` step 4).
 */}}
 {{- if .Values.retention.enabled }}
 {{- $namespaces := prepend (.Values.identity.authorizedRunnerNamespaces | default list) .Release.Namespace | uniq }}
