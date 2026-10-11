@@ -928,3 +928,120 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
         status: None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// FX-34: the Job's line token
+// ---------------------------------------------------------------------------
+
+use logweir_core::refusal_detail::{LineToken, LINE_TOKEN_ARG};
+
+/// How many random bytes a line token is made of: 20, which is 160 bits and
+/// 40 lower-case hex digits.
+///
+/// More than the 128 bits that make guessing pointless, and 40 digits for a
+/// second reason: an unkeyed hex run of 40 or more is one of the shapes the
+/// credential rules remove from every relayed sentence
+/// (`logweir_core::check_contract::redaction_rules`). So a refusal sentence
+/// that repeated the token would reach a status as `[redacted]`, although
+/// nothing writes one that does.
+pub const LINE_TOKEN_BYTES: usize = 20;
+
+/// A fresh line token, from the operating system's random source.
+///
+/// # What it is for
+///
+/// A pod log is stdout and stderr merged, and whoever wrote a plan can start
+/// a line of their own in it. The controller therefore honours a runner's
+/// `refusal-detail=` line only when the line carries a value the plan's
+/// author could not have had: this one, made HERE, when the Job is built, and
+/// given to the runner as an argument ([`add_line_token`]). A plan is older
+/// than its Job.
+///
+/// # Where the bytes come from
+///
+/// `rustls`'s `ring` provider, which is `ring::rand::SystemRandom`: the
+/// kernel's generator, with no seed this process holds and no state it could
+/// be made to repeat. NEVER derived from a name, a UID, a hash or a clock,
+/// each of which the plan's author can know or guess. It is the provider this
+/// crate already links for TLS, so no dependency is added for it.
+///
+/// `None` when the random source fails. The caller then builds the Job with
+/// no token, and a refused run of that Job says what it said before the line
+/// existed.
+#[must_use]
+pub fn new_line_token() -> Option<LineToken> {
+    let mut bytes = [0u8; LINE_TOKEN_BYTES];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut bytes)
+        .ok()?;
+    LineToken::from_random_bytes(&bytes)
+}
+
+/// Give `job`'s runner `token`, as the LAST two arguments of the container
+/// named [`CONTAINER_NAME`]: [`LINE_TOKEN_ARG`] and the token.
+///
+/// An ARGUMENT, not an environment variable: the engine the runner starts
+/// inherits the runner's environment and expands `${NAME}` over its
+/// configuration text, and neither reaches an argument.
+///
+/// Called by a reconciler on the Job it is about to create, and on nothing
+/// else. It is deliberately NOT part of [`build`] or of an argv a plan
+/// ConfigMap freezes: the token belongs to one Job object, a re-created Job
+/// gets another, and the only place it is kept is that Job's own pod
+/// template.
+pub fn add_line_token(job: &mut Job, token: &LineToken) {
+    let runner = job
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+        .and_then(|pod| pod.containers.iter_mut().find(|c| c.name == CONTAINER_NAME));
+    if let Some(runner) = runner {
+        let args = runner.args.get_or_insert_with(Vec::new);
+        args.push(LINE_TOKEN_ARG.to_string());
+        args.push(token.expose_token().to_string());
+    }
+}
+
+/// [`add_line_token`] with a token made now ([`new_line_token`]). `false`
+/// when the random source failed and the Job was left with none: the caller
+/// says so in its log, and creates the Job all the same, because a run is not
+/// refused over what it would have said had IT been refused.
+#[must_use]
+pub fn add_fresh_line_token(job: &mut Job) -> bool {
+    match new_line_token() {
+        Some(token) => {
+            add_line_token(job, &token);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The line token `job`'s runner was given, read back off the Job's own pod
+/// template: the LAST two arguments of the container named
+/// [`CONTAINER_NAME`], when they are [`LINE_TOKEN_ARG`] and a well-formed
+/// token.
+///
+/// `None` for a Job built without one (an older controller's, or one whose
+/// random source failed). By POSITION IN THE ARGV, which is this controller's
+/// own structure and not a log: [`add_line_token`] appends, so whatever the
+/// arguments before it hold, the last two are what it wrote.
+#[must_use]
+pub fn line_token(job: &Job) -> Option<LineToken> {
+    let args = job
+        .spec
+        .as_ref()?
+        .template
+        .spec
+        .as_ref()?
+        .containers
+        .iter()
+        .find(|c| c.name == CONTAINER_NAME)?
+        .args
+        .as_ref()?;
+    match args.as_slice() {
+        [.., flag, value] if flag == LINE_TOKEN_ARG => LineToken::parse(value),
+        _ => None,
+    }
+}

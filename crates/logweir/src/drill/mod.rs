@@ -1043,7 +1043,7 @@ pub const DRILL_RUN_DEPRECATION: &str =
     "logweir drill run is the tag-0 name for logweir restore run and will be removed in tag 2";
 
 /// The deprecation line, through a writer seam, for the same reason
-/// `crate::exit::print_refusal_reason_to` has one: a `eprintln!` nobody can
+/// `crate::exit::print_refusal_to` has one: a `eprintln!` nobody can
 /// observe is a contract nothing pins.
 ///
 /// It goes on STDERR and it is the ONLY thing the alias adds. Stdout is
@@ -1415,7 +1415,7 @@ fn exiting(
     // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout —
     // a controller tailing the pod log reads the final line, and the pod log
     // API has no stream selector, so stderr would not be distinguishable at
-    // all (`crate::exit::print_refusal_reason`'s doc comment carries the
+    // all (`crate::exit::print_refusal`'s doc comment carries the
     // measurement). Global Constraint 11: EVERY guard refusal prints it.
     //
     // `unwrap_or("")` is the fail-safe direction, not a shrug: `GuardRefused`
@@ -1423,8 +1423,15 @@ fn exiting(
     // message, and an empty message classifies as `GuardRefused` — so a future
     // path that reaches exit 3 without one still satisfies the contract
     // instead of printing nothing.
+    //
+    // FX-34: `print_refusal` writes `refusal-detail=` (the reason code and
+    // the sentence, cleaned and bounded) and THEN `refusal-reason=`, so the
+    // state line is still the last one.
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+        crate::exit::print_refusal(
+            logweir_core::refusal_detail::RefusingRun::Restore,
+            refusal_message.unwrap_or(""),
+        );
     }
     // **PROD-15.1 review M4: the stopped creation step, named.** Exit 1 like
     // any operational failure, but the controller lifts `failure-reason=` (the
@@ -1529,7 +1536,7 @@ fn exiting(
 
 /// **The stopped creation step's TWO stdout lines, through a writer seam**
 /// (PROD-15.1 review 2, L1), for the reason `crate::exit::
-/// print_refusal_reason_to` has one: these two lines carry everything a
+/// print_refusal_to` has one: these two lines carry everything a
 /// controller learns about the stop, and a `println!` nobody can observe is a
 /// contract nothing pins.
 ///
@@ -5185,7 +5192,7 @@ mod tests {
         RestoreOutcome {
             scorecard: sc,
             topic_preflight: phase0_admit::TopicPreflight {
-                timestamp_type: "CreateTime".into(),
+                timestamp_type: Some("CreateTime".into()),
                 retention_ms: "-1".into(),
                 timestamp_bound_ms: None,
                 configs_set: Vec::new(),
@@ -6283,7 +6290,7 @@ mod tests {
                 .collect(),
             topic_mapping_prefix: "drill-".into(),
             topic_preflight: phase0_admit::TopicPreflight {
-                timestamp_type: "CreateTime".into(),
+                timestamp_type: Some("CreateTime".into()),
                 retention_ms: "-1".into(),
                 timestamp_bound_ms: None,
                 configs_set: Vec::new(),

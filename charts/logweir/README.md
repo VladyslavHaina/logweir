@@ -1433,10 +1433,15 @@ nothing. A key that silently did something would be worse than no key.
 ## Amazon MSK
 
 [`examples/msk.values.yaml`](examples/msk.values.yaml) is the shape; these are
-the facts it does not have room for, measured 2026-09-12:
+the facts it does not have room for, written down on 2026-09-12. **None of
+them was measured on an MSK cluster: MSK has not been run against.** Read the
+port, the mechanism and the Secrets Manager arrangement as what AWS documents,
+and the ACL list as what a compose broker required:
 
 * SASL/SCRAM on MSK is port **9096** (not 9092), `SASL_SSL` +
-  `SCRAM-SHA-512` — which is exactly the one SASL combination Logweir speaks.
+  `SCRAM-SHA-512`: `auth.mode: scramSha512` with `tls: true`. **MSK itself has
+  not been run against**, and that mode has no repeatable local row either
+  ([the compatibility contract](../../docs/support-matrix.md#managed-kafka-providers)).
 * The SCRAM credential lives in **AWS Secrets Manager**, associated with the
   cluster. Kubernetes cannot read it directly: sync it into a Kubernetes Secret
   in the release namespace (External Secrets Operator, the Secrets Store CSI
@@ -1447,14 +1452,21 @@ the facts it does not have room for, measured 2026-09-12:
   them; a refusal at drill time is worse than a refusal at creation time.
 * The principal's Kafka ACLs (FX-4 corrected this list; Describe does not
   imply DescribeConfigs, and a refused DescribeConfigs is never read as "no
-  configuration"):
-  * **Source, for a backup:** Describe and Read on the source topics, plus
-    DescribeCluster. Add **DescribeConfigs on the source topics** so the
+  configuration"). PROD-01.2 measured the minimum on the compose stack's ACL
+  broker (Apache Kafka 4.3.1, never on MSK), removing one grant at a time
+  ([support-matrix.md, *Minimum permissions*](../../docs/support-matrix.md#minimum-permissions)):
+  * **Source, for a backup:** Read on the source topics (Read implies
+    Describe). The compose measurement needed no cluster-level grant; this
+    list named DescribeCluster before it, and no MSK cluster has been run
+    against to say whether MSK's authorizer asks for it. Add **DescribeConfigs on the source topics** so the
     backup receipt records each topic's configuration as `captured`. Without
     it the backup still succeeds, the topic reads `captureDenied`, and a later
     restore reports that topic's configuration parity as not assessed.
-  * **Target, for a restore:** Describe, Create and Write on the target topics,
-    and **DescribeConfigs on the Cluster** — required: phase 0 reads the
+  * **Target, for a restore:** Create, Write and **Read** on the target topics
+    (the verification reads the restored records back; without Read the
+    restore fails at phase 7), **Describe on the scratch marker topic** (a
+    marker the principal cannot describe is refused like one that does not
+    exist), and **DescribeConfigs on the Cluster** — required: phase 0 reads the
     broker's timestamp settings and exits 1 without it, and readiness check
     `target.timestampBound` reads `unknown`. **DescribeConfigs on the target
     topics** too: phase 0's probe readback and phase 2 (an existing mapped
@@ -1466,7 +1478,14 @@ the facts it does not have room for, measured 2026-09-12:
     deletes the topics a `scratch` restore created, and on a broker whose
     `log.message.timestamp.type` is `LogAppendTime` phase 0 creates one probe
     topic there and deletes it again. A topic outside that prefix is never
-    deleted: the reader's `TopicDeleter` refuses every other name.
+    deleted: the reader's `TopicDeleter` refuses every other name. **Without
+    Delete a scratch restore still exits 0 with a signed `pass`, and leaves
+    its topics behind** (measured, PROD-01.2). The run says so: a warning
+    names the topic (`teardown left 1 scratch topic behind on the target
+    cluster: …`), the summary line repeats it beside `outcome pass`, and the
+    signed teardown attestation records it. It does not name the missing
+    grant, and a restore that FAILS leaves its topic without a line about it
+    (tracker row FX-44).
 * **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
   refusal in the operator, not an oversight — SASL/SCRAM is the path.
 

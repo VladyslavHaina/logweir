@@ -15,6 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { decoded } from "./console-fixture.js";
 
 import {
   defaultPrefixFor,
@@ -93,7 +94,7 @@ function savedWizardState(extra) {
   const backups = fixture("wizard-backups.json");
   const selection = Object.assign({}, newestPoint(backups), extra || {});
   const point = backups.items.find((item) => item.metadata.uid === selection.uid);
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   point.spec.destinationRef = { name: "primary", uid: destination.uid };
   point.spec.archive = { url: "logweir-destination://primary" };
   point.status.locationDigest = destination.locationDigest;
@@ -519,7 +520,7 @@ test("the_wizard_mount_resolves_the_point_destination_before_it_renders_a_plan",
   const backups = fixture("wizard-backups.json");
   const selection = newestPoint(backups);
   const point = backups.items.find((item) => item.metadata.uid === selection.uid);
-  const destination = fixture("console/destination.json").item;
+  const destination = decoded("destination.json").item;
   point.spec.destinationRef = { name: "primary", uid: destination.uid };
   point.spec.archive = { url: "logweir-destination://primary" };
   point.status.locationDigest = destination.locationDigest;
@@ -528,7 +529,7 @@ test("the_wizard_mount_resolves_the_point_destination_before_it_renders_a_plan",
     list: async (_ns, plural) => plural === "backups" ? backups : fixture("wizard-clusters.json"),
     destination: async (ns, name) => {
       calls.push({ ns: ns, name: name });
-      return fixture("console/destination.json");
+      return decoded("destination.json");
     },
   };
   const node = {

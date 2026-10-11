@@ -124,6 +124,18 @@ floor is 0.21.0;
 from unsupported or untested ones. The engine's own `validation run` is not
 invoked by the current adapter, so `engine_subreport` remains null.
 
+**Compatibility is a tested contract, not a list of logos.** The
+[support matrix](docs/support-matrix.md#the-compatibility-contract) says which
+brokers, authentication modes, schema registries and archive backends are
+supported, limited, untested or unsupported, and every supported row names the
+test behind it and says who runs it. Apache Kafka 3.7.1, 3.9.2, 4.1.2 and
+4.3.1 and Confluent Platform 8.3.2 are supported, each as that one pinned
+version. Redpanda v26.2.4 is a backup source only: the engine cannot write
+to it, and the restore check says so before a restore starts. No managed
+provider has been run against. A Kafka-compatible endpoint is not always
+Apache Kafka, and a passing connection test does not show that a restore
+works: run a `Preflight` (or `logweir check run`) first.
+
 See [architecture and decisions](docs/architecture.md) for the crate map,
 trust boundaries and retained ADR rationale, and
 [stability](docs/stability.md) for compatibility, exit codes and limitations.
@@ -196,7 +208,7 @@ package and fixture READMEs stay beside the files they describe.
 | Collect metrics | [Metrics](docs/metrics.md) |
 | Interpret document fields | [Scorecard](docs/formats/drill-scorecard.md), [backup receipt](docs/formats/backup-receipt.md), [drill spec](docs/formats/drill-spec.md), [protection event](docs/formats/protection-event.md) |
 | Understand architecture and decisions | [Architecture](docs/architecture.md) |
-| Check compatibility and limitations | [Stability](docs/stability.md), [engine support](docs/support-matrix.md) |
+| Check compatibility and limitations | [Support matrix and compatibility contract](docs/support-matrix.md), [stability](docs/stability.md) |
 | Build, test and contribute | [Contributing](CONTRIBUTING.md), [gate reference](docs/gates.md) |
 | Read what changed and what an upgrade requires | [Release notes](docs/release-notes.md) |
 | Assess release readiness | [Release checklist](docs/tag1-checklist.md), [release handoff](docs/release-handoff.md) |

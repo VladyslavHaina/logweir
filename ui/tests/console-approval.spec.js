@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import { apiClient, resetMode, selectMode } from "../client.js";
 import { decodeApprovalRequest, isContractFailure } from "../contract.js";
+import { decoded } from "./console-fixture.js";
 import {
   APPROVE_COMMAND,
   approvalPolicyBlock,
@@ -51,7 +52,9 @@ import {
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
-const request = (name) => fixture("console/approval-request-" + name + ".json").item;
+// What the page is handed: the request view through the decoder the console's
+// own read applies (FX-48), never a member off the raw fixture.
+const request = (name) => decoded("approval-request-" + name + ".json").item;
 
 function transport(answer) {
   const seen = [];
@@ -187,7 +190,7 @@ const SUBJECT = Object.freeze({
   approvalName: "approval-x", ns: "team-a",
 });
 
-const TWO_PERSON = Object.freeze(fixture("console/approval-policy-two-person.json").item);
+const TWO_PERSON = Object.freeze(decoded("approval-policy-two-person.json").item);
 const STRICT = Object.freeze(Object.assign({}, TWO_PERSON, {
   name: "prod-governed", operatorMode: "strict", consoleApprovalAvailable: false,
 }));

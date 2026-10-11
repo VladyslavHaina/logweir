@@ -50,7 +50,11 @@ FX-32, a sign-in state is single-use on each replica, and a refused callback
 really clears the login cookie), 56 (PROD-15.1, a deleted topic
 restored under its own name, behind its own approval subject), 57 (FX-14, a catalog restore's preflight judges the archive as
 the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
-ceiling held back) and 59 (PROD-16.2, two-person approval in the console, no key) so far. Items continue the next entry's
+ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
+sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
+the capability rows a readiness check asks of the endpoint itself) and 61 (FX-34, a
+guard-refused Restore or Backup says why in its status) and 62 (PROD-16.2,
+two-person approval in the console, no key) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -191,6 +195,26 @@ rows over one chain of fixtures; it changes the controller, the
 `RetentionPolicy` CRD (four additive status fields and a printer column), the
 product API and the console, and the PoC upgrade that carries it reads a
 `Report` policy's counts at `keepLast: 300` and at `keepLast: 10`.
+Item 59 is fix-now row FX-48, found by PoC batch 6 and proven by console rows
+over the console's own decoder, projection and request builder; it changes the
+console only, and the PoC upgrade that carries it re-runs batch 6's two failed
+rows (the catalog page's and the restore review's schema note) and item 56's
+console journey, which no install has run.
+Item 60 is row PROD-01.2, proven by unit and mock-cluster rows and on the
+compose stack (the four Apache Kafka lines, Confluent Platform 8.3.2, Redpanda
+v26.2.4, SeaweedFS and the ACL broker); it changes the controller's check plan
+and the runner's check rows together, one `Restore` status field and no signed
+document, and the PoC upgrade that carries it runs a `Backup` and a `Restore`
+`Preflight` and reads their capability rows.
+Item 61 is fix-now row FX-34 (PoC batch 5's findings F-1 and F-2), proven by
+unit rows, rows over the shipped runner binary, controller rows over a recording
+API double with goldens captured at the base commit, and console rows; it
+changes the runner (one more stdout line at exit 3 and one more flag,
+`--line-token`, which the controller writes), the controller (every `Restore`
+and `Backup` Job gains that argument) and the console's text, and the PoC
+upgrade that carries it moves the controller and the runner image in one
+`helm upgrade`, submits a `Restore` the runner refuses and reads the reason
+on its status and in the console after the pod is gone.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -252,7 +276,7 @@ structs ignore unknown keys.
 
 **Changed.** Three approval modes by name: **confirm** (one person clicks
 Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
-refused by name here; item 59 adds it) and **strict** (an approver's personal key; `Governed` or
+refused by name here; item 62 adds it) and **strict** (an approver's personal key; `Governed` or
 `legacy-governed-v1`). On a FIRST `helm install` (Helm 3.19+ or 4.x) with a
 console, the managed identity and `identity.bootstrapFeatures.consoleKey: true`,
 the identity hook generates the console's `ConsoleConfirmation` key
@@ -2523,7 +2547,300 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 `HELD-BACK` column, or ignore them while the older controller runs. An older
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
-#### 59. Two-person approval in the console: the second person signs in and clicks Approve, no key (PROD-16.2)
+#### 59. The shared console shows what the product API publishes and sends what its routes require: the schema note, a restore's integrity level, an original-name restore (FX-48)
+
+**Changed.** Three things the product API publishes never reached a page of
+the shared console, and one request its wizard builds never left it. Each was
+a member the console's own code left out between the API and the page (its
+response decoder, its projection into the custom resource's shape, or its
+request builder), and every row that held the page handed it a document the
+console is never given. Nothing in the API, the controller, the runner, a CRD
+or a signed document changes.
+- **Item 46's note was never shown.** On a live install (PoC batch 6, main
+  `d53da293`) the catalog page rendered no "Schema-dependent topics" section,
+  and the restore review said *not assessed* for a point whose receipt,
+  catalog record and API view said `schemaDependent`. It failed to the
+  cautious side (never "no registry needed"), but the sentence appeared
+  nowhere. Both surfaces now say **"Registry not captured: applications may
+  not read these records after restore."** with each topic, its sides and its
+  schema ids, for a point whose API view carries them. A point from before
+  receipt 1.5.0 still reads *not assessed*.
+- **A Restore's Integrity table read `-` three times.** For a restore that
+  passed, `level` now shows the scorecard's own word (`byte-fingerprint` or
+  `consume-only`), which the operation route publishes as
+  `completion.integrityLevel` and the detail view dropped. The controller
+  writes a completion only for a restore that passed, so for a failed or
+  partial one the level reads **not published by the product API** too. The integrity
+  `result` and `partial reason`, the objectives, the measured values, the
+  target topic preflight and the old topics are published by no route of the
+  product API: those cells now read **not published by the product API**,
+  with one sentence saying the values are on the `Restore` object and (for
+  the scorecard's) in the signed scorecard the page's own commands fetch,
+  where `-` read as "none recorded". Behind `kubectl proxy` the page reads
+  the object itself and shows what it always showed. The detail of a
+  connection that names a credential Secret says the same of the Secret's
+  data key, which the API does not publish either; it read `- (absent means
+  the key every earlier release projected)`, which is a statement about an
+  object the shared console is not sent.
+- **An original-name restore (item 56) could not be submitted from the
+  console.** The page's own check required a non-empty prefix of every
+  `Restore`, so the wizard's request was refused before the network ("this
+  page did not send the request"), behind `kubectl proxy` too; and the shared
+  console sent neither `topicNaming.originalName` nor the typed names
+  (`originalNameConfirmation`). It now sends the request the route requires.
+  The approval page of a shared console said such a `Restore` needed an
+  `ordinary` approval, and an Approval's list row said `unknown`; both now
+  show the subject the API publishes.
+**Do:** nothing. With a console older than this item, read a point's schema
+dependency from the product API (`topics[].schemaDependency` on
+`GET .../catalogs/{name}/points`) or from its receipt with either verifier,
+and create an original-name `Restore` through the product API or as a custom
+resource.
+**Scope:** console rows only, with no cluster. Each of the three is held
+through the console's own client over a stubbed transport: the point page
+through the read both pages use, with the control that the declaration the
+console lacked loses the note while the same bytes handed straight to the
+renderer keep it; the Restore detail through the two routes it reads, with a
+custom resource's cells unchanged; and the wizard's own original-name body
+through the pre-send check and the request builder, held to the published
+request schema. Five mechanical checks now stand between the API's document
+(`schemas/logweir-api-v1.openapi.json`) and a page: every member the document
+publishes is declared by the console or named with why not; every route's
+answer is decoded by the shape the document publishes for it, and every body
+the console sends is an instance of the route's request schema; every console
+fixture is an instance of its schema and survives its decoder; every member a
+projected read decodes reaches what the page is handed, or is named with why
+not; and no test takes a member from an undecoded fixture. 28 mutants of the
+console and the checks are killed. **Not proven on an install:** batch 6's two
+failed rows re-run at the next PoC upgrade, and item 56's console journey has
+run on none; the product API still publishes no integrity result or partial
+reason, which this item says on the page and does not change.
+**Rollback:** an older console shows what it showed: no schema note, `-` in
+the Integrity table, `ordinary` for an original-name `Restore`, and no
+original-name submission. Nothing is stored or signed differently, so there
+is nothing to undo.
+
+#### 60. A readiness check asks the endpoint what it can do; compatibility is a tested contract (PROD-01.2)
+
+**Added.** A `Backup` or `Restore` `Preflight`, and `logweir check run` on the
+same plan, carry capability rows: what the endpoint itself can do, read from
+its own answers before the operation starts
+([kubernetes.md](kubernetes.md) §21.6c). `connection.engineProtocol` (backup)
+and `target.engineProtocol` (restore) are **blocking**: the engine sends each
+request at one fixed version and never negotiates, and these rows compare
+those versions with the ranges the endpoint's ApiVersions answer serves, naming
+each request it does not. `connection.topicConfigsReadable` and
+`connection.groupTypes` are **advisory**: the backup runs, and the row says
+what it will record as not captured. The controller lists the rows in the
+check plan (`capabilityChecks`); a runner answers exactly the rows listed.
+**The rows that read ApiVersions answer for a cluster only when every broker
+of it answered.** The check reads the cluster's broker list, connects to
+every broker on it and to every bootstrap address, and waits for each
+answer inside one budget of at most 10 s. A broker that did not answer makes
+the row `unknown` ("2 of 3 broker(s) the cluster lists answered …; no answer
+from broker 3 (host:port)"), never `ready`; so does a bootstrap address
+nobody answered at. When the brokers' answers differ the row is judged on
+what every one of them serves. The fact `brokersAnswered` counts distinct
+brokers. During the observation the check holds one connection to each
+bootstrap address and to each listed broker.
+**The compatibility contract** is published in
+[support-matrix.md](support-matrix.md#the-compatibility-contract): brokers,
+authentication modes, schema registries, archive backends and managed
+providers, each `supported`, `limited`, `untested` or `unsupported`, with the
+test behind every supported row, the minimum Kafka ACLs for a probe, a backup
+and a restore, and what a connection test does not show. Apache Kafka 3.7.1,
+3.9.2, 4.1.2 and 4.3.1 and Confluent Platform 8.3.2 are supported. **Redpanda
+v26.2.4 is a backup source only**: it serves Produce v0–v7 and the engine sends
+v8, so a restore into it cannot run, and `target.engineProtocol` says so
+first. No managed provider has been run against.
+**Changed, to the safer side.** A value an endpoint did not report is no
+longer recorded as the Apache default
+([stability.md](stability.md#an-endpoints-capability-is-read-from-the-endpoint-and-a-value-it-did-not-report-is-not-recorded-prod-012)):
+`target.timestampBound` is `unknown` (`TimestampBoundNotReported`) for a
+target whose broker configuration carries no bound key, where it was `ready`;
+`Restore.status.topicPreflight.timestampType` is absent for a target that did
+not report its timestamp type, where it said `CreateTime`. Neither changes
+against Apache Kafka, which reports both. A scratch marker topic the restore
+identity may not Describe is refused as before, with a message that names the
+grant. `connection.authenticated` says when the bootstrap address answered
+and the advertised brokers did not. An object store's `404
+XAdminUserNotFound` (versitygw's answer to an unknown access key) is a refused
+credential and no longer a missing object. **An object store's answer is now
+read from its own HTTP status and the `<Code>` of its error document, never
+from a word found in the error's text**, which echoes the bucket, the prefix
+and the key: an archive whose bucket, prefix or backup id happens to spell an
+S3 code (`expiredtoken-archive`, `timeout-logs`) no longer moves a
+classification. Two classes change for failures the object-store client
+retried: a transport failure reads `EndpointUnreachable` where the retry
+clause's own `retry_timeout:` made it `Timeout`, and a 5xx it retried reads
+unclassified where it read `Timeout`; a backup's "retry under a new execution
+id" hint is unchanged for both.
+**On Apache Kafka 3.7** every `Backup` check now carries one advisory warning,
+`connection.groupTypes`: that line's group listing names no group type, so a
+backup that selects consumer groups records each as excluded (item 50). The
+verdict is unchanged.
+**Do:** roll the runner image with the controller. A controller from this
+build lists `capabilityChecks` in every `Backup` and `Restore` check plan, and
+an older runner refuses such a plan: the `Preflight` is `Failed`,
+`CheckContractMismatch`, naming the field. The chart has two image values:
+move **`runnerImage`** with `controllerImage` (a release that pins
+`runnerImage` keeps the old runner through `helm upgrade --reuse-values`); an
+install from `logweir.yaml` sets **`LOGWEIR_RUNNER_IMAGE`** on the controller's
+Deployment in the same change. A `Preflight` that failed this way stays
+`Failed`, and one that was in flight across the upgrade reads `unknown`:
+create a new one after both images have moved
+([kubernetes.md](kubernetes.md) §21.9). Give the restore identity `Read` on
+the target topics and `Describe` on the scratch marker topic if a managed
+cluster's ACLs were written from the chart README's earlier list, which named
+neither; and `Delete` on the scratch prefix. Without `Delete` a scratch
+restore signs `pass` and leaves its topics behind; it says so (a warning that
+names the topic, the same clause on its summary line, and the signed teardown
+attestation), and does not name the grant
+([support-matrix.md](support-matrix.md#minimum-permissions)). Take a
+decommissioned address out of a `KafkaCluster`'s `bootstrapServers`: a
+bootstrap address that does not answer now leaves the engine-protocol rows
+`unknown`.
+**Scope:** unit rows for every new row and code, each with the capability
+present, absent, not observed and not listed; librdkafka's in-process mock
+cluster for the ApiVersions reader, one broker and three (all answering, one
+silent, one stopped); the store's classifier against the real object-store
+client on a loopback responder; a guard that holds the published tables to
+their evidence, with a mutant per rule; and compose rows
+(`e2e/tests/compat_contract.rs`, engine `0.23.3+logweir.2`): the generic row
+on each of the four Apache Kafka lines and on Confluent Platform 8.3.2, with
+a `Restore` Preflight in the shape the controller renders; the Redpanda row
+(a backup, the refused restore and the restore that then fails); both SCRAM
+mechanisms on Redpanda; SeaweedFS through a backup, a restore and a refused
+second claim; the ACL profile with each grant removed in turn; a listener
+that advertises an unreachable address; a three-broker cluster with one
+broker frozen; and backups whose ids spell S3 credential codes. Every compose
+row but one is run by hand: CI runs the capability row on Apache Kafka 3.7.1.
+No managed provider, no cloud object store, one version of each other
+endpoint; every whole-path row is one node.
+[UNVERIFIED — no controller has rendered a capability plan to a check Job on a cluster yet; the PoC upgrade that carries this item runs a Backup and a Restore Preflight.]
+**Rollback:** roll the controller and the runner back together. An older
+controller's plan lists no capability row, and this runner then answers none
+and reports an unreported bound under `BrokerConfigsNotReadable`, a code the
+older controller reads; an older runner answers `ready` for an unreported
+bound again and writes `timestampType: CreateTime` again. No signed document
+and no CRD schema changed, so nothing already written needs attention.
+
+#### 61. A guard-refused Restore or Backup says why in its status (FX-34)
+
+**Changed.** When a `Restore`'s or a `Backup`'s runner exits 3, the `Failed`
+condition's message now ends with the runner's own reason code and sentence,
+after the text it always carried:
+
+```
+the runner exited 3 (guard-refused); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode; the runner's own reason, cleaned and bounded: GuardRefused: source.storage.endpoint is a plain http:// endpoint but source.storage.allow_http is false. … Set allow_http: true to state plaintext explicitly, or use an https:// endpoint.
+```
+
+Before, the object said only that a guard refused; which guard, and what to
+change, was in the pod log, which goes with the pod. `status.progress.message`
+carries the same text and the console's operation page shows it. A rehearsal's
+`Restore` and a scheduled `Backup` are the same two kinds. `status.exitReason`
+and the condition's `reason` are unchanged.
+**How it gets there.** `logweir restore run` and `logweir backup run` print one
+more stdout line at every exit 3,
+`refusal-detail={"token":"…","code":"…","message":"…"}`, immediately before
+`refusal-reason=`, which stays the final line
+([stability.md](stability.md#refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34)).
+The controller treats the log as untrusted text. Whoever writes a plan can
+start a line in the runner pod's log (item 56 escapes the line breaks in the
+error text the runner prints itself; the Kafka client inside it writes to the
+same stderr unescaped, and can repeat a plan value that holds a line break),
+and a pod log is one merged stream, so neither the shape of a line nor its
+place says who wrote it. The
+controller therefore makes a fresh random **line token** each time it builds a
+`Restore`'s or a `Backup`'s Job, gives it to the runner as its last two
+arguments (`--line-token <hex>`), and shows a reason only from a line that
+carries that Job's token: a plan is older than its Job and cannot hold it. A
+`refusal-detail=` line with no token or another one is not read. The token is
+in the Job's pod template and in the runner's one line and nowhere else. The
+line's code must also be one of a closed list for that kind of run (a
+`Backup`'s log cannot carry a restore-only code) and agree with the state line
+after it; the sentence keeps printable ASCII and `§ – — … →`, a line break or
+control character becomes a space and anything else (a bidi override included)
+becomes `U+FFFD`; URLs lose their query string and userinfo and credential
+shapes read `[redacted]`; and it is cut to 760 bytes with a `…`
+([kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34)).
+The sentence is the runner's, and a refusal names what it refused, so it can
+hold words the plan's author chose (a topic name, a field's value), cleaned
+and inside that bound.
+**A log that cannot be read no longer stalls a refused run.** For exit 3 the
+controller reads the `runner` container's last 32 lines, at most 512 KiB,
+once. If the pod is already gone, or the read answers `403` or `500`, the
+object is still `Failed` with `exitCode: 3` and the message says the reason
+could not be read and why; the read is not retried. Before, any failure of
+that read failed the reconcile, so with `pods/log` refused the object stayed
+`Running` over a finished Job. Every other exit code reads the log as it did.
+**Also.** `refusal-reason=`'s value reaches `status.exitReason` only when it
+is a state name (ASCII letters and digits); it was copied as printed. A
+standing (rehearsal) `Restore` waiting for or refused over its approval names
+`spec.authorization.approvalRef`, where it named `spec.approvalRef`, a field
+it does not have. The console shows a bidi control character in any message a
+controller wrote as `U+FFFD`.
+**Do:** move `controllerImage` and `runnerImage` in ONE `helm upgrade`. The
+controller now passes `--line-token` to every `Restore` and `Backup` Job, and
+**every runner image published before this change, the images of this same
+unreleased entry included**, does not know the flag: it stops while parsing
+its arguments, before any work, for every such Job. One `helm upgrade` of the
+packaged chart cannot produce that pair: the chart renders both images into
+one Deployment and the package pins both to one publication. It can occur
+three ways: two pinned tags (the `sha-<commit>` tags, for example) of which
+an upgrade moves only `controllerImage`; the source chart's floating
+`:latest` defaults, pulled at different moments through a mirror or a node's
+older cached copy; and a `runnerImage` pinned apart from the controller (a
+mirror, an air gap). **What it looks like:** each `Restore` and `Backup` ends
+`Failed` with `exitCode: 1`, `exitReason: operational` and no cause named on
+the object; the runner pod's log opens with
+`error: unexpected argument '--line-token' found`; a `BackupSchedule` with a
+retry policy retries the slot and fails the same way. Nothing ran and nothing
+was written. Set `runnerImage` to the image published from the controller's
+build ([kubernetes.md](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller)).
+For a tagged release's runner the roll was already required, by item 35: a
+runner image published before it declares no engine and stops at exit 1 under
+this controller. Jobs created before the upgrade are unaffected. Also: an
+alert or a script that compared a refused run's condition message for
+equality should compare its opening text instead: the message is longer when
+the runner states a reason.
+**Scope:** unit rows over the line's grammar, its token, its closed sets, its
+cleaning and its bounds; rows over the shipped runner binary (given a token
+it prints it once, in that line, at the most verbose log level, and never on
+stderr; given none it prints the line without one; a plan that writes marker
+lines of its own cannot write the token; both streams in written order end
+with the pair; no credential value in it); controller rows over a recording
+API double for both kinds (the reason carried; a forged line never shown,
+wherever it stands, with no token, another Job's, or one digit off; hostile
+lines refused or cleaned; a Job or a line without a token giving the old
+status byte for byte; the token in no status, and in no line the controller
+logs at its most verbose level, on the pass that creates the Job or on the
+read; two created Jobs carrying two tokens and being otherwise what they
+were; the pod gone, the read refused, a connection that drops before any
+answer and a body that breaks part-way; a second reconcile that reads and
+writes nothing), with every status write of exits 0, 1, 2, 4 and 137 compared
+byte for byte, and every request compared with the log read's query aside
+(item 56 bounds that read too), against goldens captured before the change;
+console rows over a message holding markup, an HTML entity and a bidi
+override. No cluster ran it, and no mixed pair of images was run by this
+row's own tests: its live rows are the next PoC upgrade's.
+**Known limit.** The token separates the runner's line from text written
+before the Job existed, which is every plan. It is readable by anyone who can
+read the Job, so text produced after the Job is built, and reaching the pod
+log with a line break intact, could carry it. Item 56 closes that for the
+error text the runner prints itself; the Kafka client's own stderr lines,
+which can repeat what a broker sends, are not escaped. The other lines a
+controller reads from a pod log (`refusal-reason=`, `failure-reason=`, the
+evidence keys) carry no token yet and are read as they were.
+**Not changed:** the check, notification and retention Jobs. Their exit 3
+still names a code from a closed list and no sentence.
+**Rollback:** roll both back together, or the controller first. An older
+controller passes no token and ignores the new line, and writes the message it
+always wrote, over this runner or an older one. The runner image first leaves
+THIS controller over an older runner, which does not start (above). Statuses
+already written keep the text they have.
+
+#### 62. Two-person approval in the console: the second person signs in and clicks Approve, no key (PROD-16.2)
 
 **Added.** A third approval mode, `two-person`
 ([kubernetes.md](kubernetes.md#two-person-approval-in-the-console-prod-162) §8):
@@ -2590,6 +2907,14 @@ In addition to the next entry's six, in its order:
   replaces its engine binary and its `LOGWEIR_ENGINE_VERSION` /
   `LOGWEIR_ENGINE_DIGEST`, and every spec that names an `http://` archive
   endpoint says `allow_http: true` (item 28).
+- **Move `controllerImage` and `runnerImage` in one `helm upgrade`, and never
+  the controller alone** (item 61). This controller gives every `Restore` and
+  `Backup` Job a `--line-token` argument, and every runner image published
+  before that change, the images of this same entry included, stops on it:
+  the object says `exitCode: 1`, `exitReason: operational`, and the runner
+  pod's log opens with `error: unexpected argument '--line-token' found`. A
+  `runnerImage` pinned apart from the controller (a mirror, an air gap) must
+  move with it. To roll back, move both together or the controller first.
 - **After the runner image rolls, set each `RecoveryCatalog`'s
   `spec.syncRequest` to a new value** so its view is published again by the
   new runner (item 31).
@@ -2630,6 +2955,18 @@ In addition to the next entry's six, in its order:
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
   ([install.md](install.md); [kubernetes.md](kubernetes.md) §20.10).
+- **Roll the runner image with the controller, never the controller alone**
+  (item 60): every `Backup` and `Restore` readiness check from this
+  controller lists capability rows, and an older runner refuses the plan
+  (`CheckContractMismatch`). Move the chart's **`runnerImage`** with
+  `controllerImage` (a pinned `runnerImage` survives `--reuse-values`), or
+  **`LOGWEIR_RUNNER_IMAGE`** on the controller's Deployment for an install
+  without the chart; a `Preflight` that failed this way stays `Failed`, so
+  create a new one. Check a restore identity's Kafka ACLs against
+  [the measured minimum](support-matrix.md#minimum-permissions): `Read` on the
+  target topics and `Describe` on the scratch marker topic were missing from
+  an earlier list, and without `Delete` on the scratch prefix a restore passes
+  and leaves its topics, saying so only on its own output.
 
 ### Verification scope after `v0.2.0-rc.1`
 
@@ -2645,7 +2982,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 and 59, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 and 62, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -2702,12 +3039,21 @@ a narrow `archiveRead` grant, the two reads above; item 58 changes the controlle
 the `RetentionPolicy` CRD (four additive status fields and a printer column),
 the product API and the console, and needs the CRDs applied before the
 controller rolls, and any script that reads `kubectl get retentionpolicy` by
-column position updated for the new `HELD-BACK` column; item 59
-changes the controller, the runner, the product API, the console and the
-chart, and needs nothing until a namespace is bound `two-person`. To roll back to
+column position updated for the new `HELD-BACK` column; item 59 changes the
+console only and needs nothing; item 60
+changes the controller's check plan and the runner's check rows together and
+one `Restore` status field, and needs the runner image rolled with the
+controller; item 61 changes the runner, the
+controller and the console's text, and needs `controllerImage` and
+`runnerImage` moved in one upgrade: this controller passes `--line-token` to
+every `Restore` and `Backup` Job, and every runner image published before the
+change exits 1 on it (for a tagged release's runner item 35 already required
+the roll); item 62 changes the controller, the runner, the product API, the
+console and the chart, and needs nothing until a namespace is bound
+`two-person`. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
-0. **Remove every `two-person` policy** (item 59) before rolling an image
+0. **Remove every `two-person` policy** (item 62) before rolling an image
    back: an older controller or console refuses to start on a document that
    carries `approverSignature`.
 
@@ -2747,6 +3093,14 @@ chart, and needs nothing until a namespace is bound `two-person`. To roll back t
    `topicNaming.originalName`, and rolling the `Restore` CRD back prunes the
    field. Finish or delete any original-name `Restore` first, so none is left
    waiting on a runner that refuses it.
+8. Item 60 needs no step of its own beyond rolling the controller and the
+   runner back together: with an older runner the capability rows are gone,
+   and a target that reports no record-timestamp bound reads `ready` again.
+9. Item 61 needs no rollback step of its own when the controller and the
+   runner go back together (step 2). In two steps, the controller goes first:
+   an older controller passes no `--line-token` and ignores the new line,
+   while this controller over an older runner image starts no `Restore` and
+   no `Backup`.
 
 ---
 

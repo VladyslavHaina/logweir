@@ -171,7 +171,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `contract.js` | the typed contract: JSDoc types and strict decoders for every DTO the page consumes, in both modes. A required field that is absent is a **contract failure the page renders**, never an empty cell. |
 | `validate.js` | one set of checks and **one vocabulary of field paths**, so a disagreement from either server lands beside the field it is about. |
 | `workflow.js` | the state machines: named transitions, and a transition error for a move a state does not accept. |
-| `render.js` | DOM helpers. Sets text, never `innerHTML`. |
+| `render.js` | DOM helpers. Sets text, never `innerHTML`; `cell` and `messageText` also show a bidi control character as U+FFFD (`inert`), so prose from the cluster cannot reverse what follows it on screen. |
 | `select.js` | **the saved-cluster selector and the words a connection probe may be described with**. Identity (`{uid, name}`) resolution, the freshness judgement, the searchable control. Shared by the clusters page, the schedule form and both wizard sides -- see *Choosing a saved connection*. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
@@ -194,6 +194,9 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/original-name.spec.js` | **PROD-15.1**: the original-name choice, the owner statement, the complete coverage it requires (selected and locked, with the reason), the golden plan, the request's declaration, the approval subject on the review step and the approvals page, and the topics a stopped creation step left, on the Restore's page. |
 | `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
 | `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
+| `tests/contract-coverage.spec.js` | **FX-48**: nothing the product API publishes is dropped on the way to a page. Five mechanical checks: every member the document publishes is declared by `contract.js` or named with why not; every route's answer is decoded by the shape the document publishes for it, and every body the console sends is an instance of the route's request schema; every console fixture is listed, is an instance of its schema and survives its decoder; every member a projected read decodes reaches what the page is handed, or is named with why not; and no spec takes a member straight off an undecoded console fixture. See *What the product API publishes reaches the page*. |
+| `tests/console-fixture.js` | a helper, never a test: the ONE table of the console fixtures with the schema each is an instance of, `wire(name)` (the product API's document, for a transport answer) and `decoded(name)` (what the page is handed), the validator over the published document, and `lostPaths`. |
+| `tests/restore-detail-integrity.spec.js` | **FX-48**: the Restore detail's Integrity table in the shared console, through the real client: the level the operation route publishes is in its cell, and a value the product API does not publish reads "not published by the product API", never `-`; a custom resource keeps its own cells. |
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
 | `tests/workflow.spec.js` | the named transitions, the transition errors and the wizard's six steps as a machine. |
 | `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
@@ -212,6 +215,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
 | `tests/schema-dependency.spec.js` | **PROD-03.0**: the restore review, the recovery-point step and the catalog page name the schema-dependent topics with their sides and schema ids and say "Registry not captured: applications may not read these records after restore."; a `notDetected` topic is not named, and a topic without the field (or `notAssessed`) is said to be not assessed, never "no registry needed" -- over the fixture the product API's own row answers, each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
+| `tests/condition-message.spec.js` | **FX-34**: a message a controller wrote is shown as text, whatever it holds -- markup escaped, an HTML entity shown as the characters it is, and a bidi control shown as U+FFFD (`render.js`'s `inert`, which `cell` and `messageText` apply, and which the pages apply wherever a message went through `esc` directly) -- on the operation page in both modes and on every other page that shows a controller's message, with a source sweep for a message escaped without it. The message is `tests/fixtures/refusal-condition.json`'s, which a `weirkeeper` row proves is what the controller stores for that pod-log line. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -535,11 +539,34 @@ the adapter records what it cannot supply on every object it projects, under
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` (connection contract v1's data-key reference, which `ConnectionAuthView` does not carry; the CA reference and the mTLS Secret name it does, since PROD-01.3) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
 | `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
-| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
+| `Restore` | `status.integrity.result` and `status.integrity.partialReason`, `status.objectives`, `status.measured`, `status.topicPreflight`, `status.oldTopics` and `status.jobRef`, which no route of the product API publishes; in a LIST, also `status.integrity.level`, `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first, and, for a restore that passed (the controller writes a completion for no other), its `completion.integrityLevel` under `status.integrity.level` (FX-48); a failed or partial restore's level is not published. The coverage and the selection of the integrity block ARE projected, on a list too |
 
 A field that table names is dropped from an object's `__contract.absent` when
 the projection DID supply it, so a page says "not published" only where it was
 not.
+
+**The Restore detail says so, cell by cell (FX-48).** A row of that view whose
+value the projection names absent reads **not published by the product API**
+(`NOT_PUBLISHED`), and one sentence under the Integrity table says the value
+is one the controller keeps on the `Restore` object, that this page cannot say
+whether one is recorded, and that the scorecard's own values are in the signed
+scorecard the *Check it yourself* commands fetch. Before this the cell read
+`-`, which is what "the controller recorded none" looks like: a shared console
+showed an empty Integrity table for a restore whose status read
+`byte-fingerprint` / `pass` (PoC batch 6, F-4). Behind `kubectl proxy` the
+page reads the object and `-` keeps meaning "not recorded". A console
+projection's verification scope is the API's own block or none: it is not
+derived from the projected level.
+
+**So does the connection detail, for the credential key (FX-48).** The detail
+of a connection that names a credential Secret read `- (absent means the key
+every earlier release projected)` in a shared console: a statement about the
+`KafkaCluster` object, made from a document that never carries the Secret's
+data key. That cell now reads **not published by the product API** too; behind
+`kubectl proxy`, where the page reads the object, it says what it said. The
+words and the test for "this projection names the field absent" are
+`ui/render.js`'s (`NOT_PUBLISHED`, `notPublishedIn`, `notPublishedCell`), one
+definition for both views.
 
 **A list row's verdict in console mode.** A list item carries the API's
 `OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
@@ -1252,6 +1279,25 @@ an approval (the CLI line, `logweir drill approve --approval-subject
 original-name`, included), and, for a one-person confirmation, the typed
 names the signed document carries (`typedTopicsOf`).
 
+**What stands between the wizard and the product API carries the choice
+(FX-48).** Three places did not, and no row saw it, because every row that
+submitted used an API double and every row that read the subject was handed
+an object written in the test. `validate.js` required a non-empty prefix of
+every `Restore`, so the wizard's own original-name body was refused before the
+network, in both modes; `client.js`'s `requestBody` sent neither
+`topicNaming.originalName` nor `originalNameConfirmation`; and its projection
+copied neither `approvalSubject` nor `target.originalName`, so the approval
+page of a shared console said such a `Restore` needed an `ordinary` approval
+and an Approval's list row said `unknown`. The check now follows the route's
+two rules (an empty prefix with `originalName`, a non-empty one without), the
+request carries both members and is held to the published request shape
+before it is sent, and the projection writes the declaration at
+`spec.target.topicNaming.originalName` and carries `approvalSubject` beside
+the object under the API's own name. The `fx48_` rows of
+`tests/original-name.spec.js` go through `apiClient()` over the transport
+seam; behind `kubectl proxy` the three request-only members
+(`originalNameConfirmation`, `topicMapping`, `ticket`) are stripped.
+
 **A Restore whose creation step stopped says what it left on the cluster,
 first.** Logweir never deletes a topic under an original name, so when a run
 stops while creating its target topics (a name lost a race, or the broker
@@ -1526,7 +1572,15 @@ sampled, when any was judged over the bounded sample. Only Confluent's payload
 prefix is looked for: ids carried in record headers, Apicurio's 8-byte ids and
 other formats read `notDetected` (see `docs/formats/backup-receipt.md`).
 `tests/schema-dependency.spec.js` holds each sentence, over the fixture the
-API's own row answers (`tests/fixtures/console/catalog-point-schema-dependency.json`).
+API's own row answers (`tests/fixtures/console/catalog-point-schema-dependency.json`),
+and reads every point through `readCatalogPoints`, the read both pages use.
+Until FX-48 its rows handed the fixture's topics straight to the renderers,
+and every one passed while a shared console showed nothing: `PointTopicView`
+in `contract.js` did not declare `schemaDependency`, so the decoder dropped
+what the API sent (PoC batch 6, F-1).
+`fx48_the_declaration_is_what_carries_the_note_to_the_page` keeps that
+control: under the old declaration the note is gone, and the same bytes handed
+to the renderer undecoded still carry it.
 
 ## Complete coverage: asked for as an advanced choice, shown wherever a result is (PROD-08.1a)
 
@@ -3096,6 +3150,91 @@ chart's role is unchanged by this change, so under the Helm UI the three D3 tabs
 are console flows and the keys view falls back to the roster by name, with the
 API server's own refusal rendered rather than an empty table. A local `kubectl
 proxy` run from a kubeconfig that may read them shows them in legacy mode too.
+
+## What the product API publishes reaches the page (FX-48)
+
+**A page is never handed a response.** In console mode it is handed what
+`contract.js` DECODED -- declared members only, an absent optional as `null`,
+every other member dropped and recorded in `unknown` -- and, for the five
+older kinds and the four D3 families, what a projection then copied, member by
+member, into the custom resource's shape. Those are two places a member the
+API sent can stop, and a test that hands a renderer the fixture file itself
+sees neither. Three members stopped that way and reached a live install or a
+merged row with every test green: `PointTopicView.schemaDependency` (the
+decoder did not declare it), the operation route's `completion` (the detail
+view decoded the route with a narrower shape than the route publishes), and a
+Restore's `approvalSubject` and `target.originalName` (decoded, and not
+projected).
+
+`tests/contract-coverage.spec.js` makes each of those a red row, mechanically:
+
+1. **The declarations.** `contract.js` keeps a registry of every shape it
+   declares (`DECLARED_SHAPES`; a shape cannot be declared outside it). Each is
+   compared with `schemas/logweir-api-v1.openapi.json` member for member: a
+   member the document publishes and the shape omits is named, unless
+   `IGNORED_MEMBERS` says why the console deliberately does not read it. The
+   list is empty. Every shape's required set is the document's, every shape is
+   in one of the two maps the older drift arms walk, and a nested member is
+   decoded by the shape the document names for it.
+2. **The routes.** The real client is driven over the transport seam for
+   every route the document publishes with a JSON answer. `contract.js`'s
+   `observeDecodes` -- a seam only the suite calls, like `resetMode` -- reports
+   which shape decoded each answer and what it ignored; the shape must be the
+   one the document publishes for that route, and nothing may be ignored. The
+   routes no page reads are named with why, and so are the two that answer a
+   second document the path's one `200` schema cannot name (`latest=true` on a
+   connection's discoveries, and a discovery or preflight on the operation
+   route). Every body the console sends is held to the request schema the
+   document publishes for its route.
+3. **The fixtures.** Every file under `tests/fixtures/console/` is listed in
+   ONE table (`tests/console-fixture.js`) with the schema it is an instance
+   of, is held to that schema, and survives the decoder its route uses with no
+   member lost -- compared leaf by leaf, independently of the decoder's own
+   `unknown` list.
+4. **The projections.** For every projected read, the fixture is completed
+   with every member its shape declares, each leaf is changed in turn (a
+   closed word by every other member), and what the page is handed must
+   change with it -- or the member is named in `NOT_HANDED_ON` with why. A
+   Backup or Restore DETAIL is a view of the custom resource and takes the
+   run's state, result, evidence, verification, trust basis, scope and
+   integrity level from the operation route; the rest of that view is shown
+   by the operation page, which is handed it whole.
+5. **The tests.** No spec takes a member straight off an undecoded console
+   fixture, and none hands a catalog function a point written out in place.
+   `wire(name)` is the product API's document: what a transport stub answers
+   with, and what a row changes one fact of before it is decoded.
+   `decoded(name)` is what the page's own read hands the page. `wireItem(name)`
+   is for composing another wire document (a list answer, a stream frame). A
+   catalog point a row writes itself goes through `handedPoint`, `handedPoints`
+   or `handedPage`, which decode it with `decodeCatalogPoints` and refuse a
+   member the API does not publish.
+
+**What the fifth check cannot see, said plainly.** It refuses the direct form
+(`fixture("console/x.json").item`, `renderPoints({ items: [...] })`). A wire
+document held in a variable and then handed to a page function is not caught
+by it. Neither is an object written out in a test in the API's shape for the
+other surfaces -- a readiness verdict, a destination, a discovery -- which
+many rows still use to state one fact (the rows of `check-deadline`,
+`check-intent`, `typed-input`, `d2`, `mutation`, `reading-place`,
+`schedules-guided` and `mcp-round2` among them). What makes those safe from
+the defect this section is about is checks 1 and 4: the decoder provably keeps
+every member the document publishes, and the projection provably hands on
+every member it decodes or says why not.
+What they do not make safe is a page function that tells `undefined` from
+`null` (a decoded absent optional is `null`, and a hand-built object usually
+leaves it out), or a row that gives a page a member the API never sends: the
+conversion of the catalog rows found one of each kind (a full `Destination`
+served from a fake list read, and two consumer-position members that are the
+catalog entry's and not the API's).
+
+**The operation route has one detail decode.** `decodeOperation` reads the
+published `OperationViewResponse` with every member the view declares -- it is
+built from the view's own declaration, so a member added to the view is in
+the detail read the moment it is declared -- and with the five members the
+document requires beyond the first sixteen optional, so an answer without them
+keeps the rule that held before they existed. It replaced three decodes: the
+sixteen-member one, and the two that recovered `trust` and
+`verificationScope` after it had dropped them.
 
 ## The three rules, each with a gate
 

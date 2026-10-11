@@ -85,6 +85,7 @@ import {
   disableKeepingFocus,
   errorBox,
   esc,
+  inert,
   facts,
   fieldErrorLine,
   invalidAttributes,
@@ -627,17 +628,17 @@ export function renderApprovalState(found, subject, approvalName) {
       return stateBlock("danger", REVOKED_AFTER_USE_WORDS,
         "Restore " + esc((subject || {}).name) + " was admitted under Approval " + name +
         " at " + esc((f.consumed || {}).at) + ", and a key it names was later revoked for " +
-        "KeyCompromise (reason " + esc(f.reason) + "): " + esc(f.message) + " This is never " +
+        "KeyCompromise (reason " + esc(f.reason) + "): " + esc(inert(f.message)) + " This is never " +
         "green: the record (key " + esc(f.key) + ", the authorization, the admission) is " +
         "kept so the run can be investigated.");
     case "expired":
       return stateBlock("danger", "expired",
         "weirkeeper refused Approval " + name + " because the approver key is past its " +
-        "notAfter (reason KeyIdExpired): " + esc(f.message));
+        "notAfter (reason KeyIdExpired): " + esc(inert(f.message)));
     case "refused":
       return stateBlock("danger", "refused by weirkeeper",
         "weirkeeper refused Approval " + name + " (reason " + esc(f.reason) + "): " +
-        esc(f.message) + " The Restore does not run while this stands. weirkeeper re-evaluates " +
+        esc(inert(f.message)) + " The Restore does not run while this stands. weirkeeper re-evaluates " +
         "it every five minutes, so a refusal about the roster can clear once the roster is " +
         "fixed; a refusal about the documents cannot, because Approval.spec is immutable.");
     case "foreign-subject":
@@ -777,7 +778,7 @@ function errorLine(error) {
   const e = error || {};
   return (
     "<p class=\"complaint\">" + esc(e.status ? String(e.status) + " " + String(e.reason || "") : "error") +
-    ": " + esc(e.message) + "</p>"
+    ": " + esc(inert(e.message)) + "</p>"
   );
 }
 
