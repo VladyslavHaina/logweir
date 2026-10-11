@@ -2869,7 +2869,8 @@ as before; a pass's signed attestation is unchanged.
 the topics the run created, nothing in `newTopic` mode or under `keep`, the
 grant only for an authorization refusal, the line's bounds), controller rows
 over a recording API double (exit 1 and exit 0, an unmapped name dropped, no
-line no block), and the compose ACL row (`Write`, `Read`, `Delete`, and
+line no block), a rehearsal row (a failed child's block becomes
+`pendingTopics`), and the compose ACL row (`Write`, `Read`, `Delete`, and
 `Write` with `Delete` removed; an existing target topic is not deleted).
 [UNVERIFIED — no controller has read a `teardown-failed=` line on a cluster yet; the PoC upgrade that carries this item runs it.]
 **Rollback:** roll back the runner and the controller in either order. An
