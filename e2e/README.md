@@ -51,7 +51,7 @@ their one list is [`compose/stack-lib.sh`](compose/stack-lib.sh):
 | `LOGWEIR_E2E_SASL_PORT` | 9097 | `SASLEXT` host port and its advertisement |
 | `LOGWEIR_E2E_S3_PORT` | 9000 | MinIO's S3 API |
 | `LOGWEIR_E2E_S3_CONSOLE_PORT` | 9001 | MinIO's console |
-| `LOGWEIR_E2E_<PROFILE>_PORT` ×9 | 9102-9141 | each optional profile's ports (below) |
+| `LOGWEIR_E2E_<PROFILE>_PORT` ×22 | 9102-9151 | each optional profile's ports (below) |
 | `KAFKA_VERSION` | `.env`'s pin (4.3.1) | the broker line (`--kafka`) |
 | `KAFKA_IMAGE` | unset | the broker image, pinned by digest (`--kafka LINE`) |
 | `COMPOSE_PROFILES` | none | the optional profiles (`--profiles`) |
@@ -61,7 +61,7 @@ slot has its own network.
 
 **Anything but one coherent stack is refused.** The project must be
 `logweir-e2e` (or unset) or `logweir-e2e-sN`, and EVERY port — the five above
-and the nine profile ports — must be exactly that slot's; an unknown
+and every profile port — must be exactly that slot's; an unknown
 `LOGWEIR_E2E_*_PORT` is refused too. `just e2e-up`, `just e2e-down`,
 `scripts/mvp-demo.sh`, `scripts/e2e-seed.sh` and
 `compose/profile-smoke.sh` check first (`stack-env.sh --check`), and so does the

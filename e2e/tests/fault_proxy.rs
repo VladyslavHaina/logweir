@@ -148,6 +148,7 @@ fn the_fault_proxy_drops_exactly_the_chosen_produce_response() {
         "1",
     ]);
     assert!(made.status.success(), "create {topic}: {made:?}");
+    await_created_on(&bootstrap_faultproxy(), &topic, 1);
 
     // --- 1. drop the third response ------------------------------------------
     let armed = control("arm drop 3");
