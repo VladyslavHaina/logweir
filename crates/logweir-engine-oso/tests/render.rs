@@ -7,8 +7,6 @@ fn plan() -> RestorePlan {
             backup_id: "backup-2026-08-30T02:00:00Z".into(),
             manifest_key: "drills/backup-2026-08-30T02:00:00Z/manifest.json".into(),
         },
-        // Addendum A1: StorageUrl is the tagged enum from Task 8a, not a flat
-        // struct with a `backend` discriminator field.
         storage: StorageUrl::S3 {
             bucket: "kafka-backups".into(),
             prefix: "basic-demo".into(),
@@ -58,13 +56,11 @@ fn validation_yaml_matches_the_golden() {
     );
 }
 
-/// Review fix (round 2, "FIX 2"): `render_storage_block`'s own doc comment
-/// promises "one golden per backend"; only S3 had one. A typo in the Azure,
-/// Gcs or Filesystem arm — a wrong field name, a dropped `prefix:`, bad
-/// indentation (this has already happened once: the addendum had to
-/// hand-repair the Azure arm) — would pass every existing test (none of them
-/// pin the RENDERED SHAPE of these three arms) and then be silently ignored
-/// by the engine at drill time. These three pin them.
+/// `render_storage_block`'s own doc comment promises "one golden per
+/// backend". A typo in the Azure, Gcs or Filesystem arm — a wrong field name,
+/// a dropped `prefix:`, bad indentation — would otherwise pass every test and
+/// then be silently ignored by the engine at drill time. These three pin
+/// them.
 #[test]
 fn restore_yaml_matches_the_golden_for_azure_storage() {
     let mut p = plan();
@@ -104,11 +100,8 @@ fn restore_yaml_matches_the_golden_for_filesystem_storage() {
     );
 }
 
-/// Review fix, "FIX 2" continued: the `triggered_by: None` branch of
-/// `render_validation` (an operator-less, e.g. cron-triggered, drill) was
-/// previously covered only by a `contains` check on a DIFFERENT assertion
-/// (`validation_yaml_points_evidence_storage_at_the_per_run_logweir_prefix`),
-/// never by a golden of the branch itself.
+/// The `triggered_by: None` branch of `render_validation` (an operator-less,
+/// e.g. cron-triggered, drill), pinned by a golden of the branch itself.
 #[test]
 fn validation_yaml_matches_the_golden_with_no_triggered_by() {
     insta::assert_snapshot!(
@@ -124,8 +117,7 @@ fn validation_yaml_matches_the_golden_with_no_triggered_by() {
 /// from `dry_run` and is deliberately rendered (see `render_restore.rs`), so a
 /// substring scan would make this test and
 /// `restore_yaml_sets_both_levers_and_create_topics` mutually unsatisfiable.
-/// `logweir_core::guard` is not reachable from here — it is created in Task 14 —
-/// so the key split is done inline, with no new dependency.
+/// The key split is done inline, with no new dependency.
 #[test]
 fn neither_document_ever_contains_a_forbidden_key() {
     for doc in [
@@ -163,18 +155,18 @@ fn assert_no_forbidden_key_line(doc: &str) {
     }
 }
 
-/// Strengthens the brief's single-example forbidden-key scan into a property
-/// of the renderer: every `StorageUrl` variant `render_storage_block` matches
-/// on (S3, Azure, Gcs, Filesystem), crossed with an empty and a populated
-/// `topic_mapping` and boundary values for the numeric fields, is rendered
-/// through BOTH `render_restore::render` and `render_validation::render` and
-/// scanned line-by-line, whole-key, for the three forbidden keys. Nothing in
-/// either renderer branches on these fields to decide whether to print
-/// `purge_topics`, `dry_run` or `header_preflight_external` — no `format!` or
-/// `push_str` in either source file ever names them — so this is a property
-/// over renderer structure, not a fact about any one input; the point of
-/// varying inputs here is to walk every branch (all four storage arms, zero
-/// vs many topics) rather than to hunt for a data-dependent counterexample.
+/// The forbidden-key scan as a property of the renderer: every `StorageUrl`
+/// variant `render_storage_block` matches on (S3, Azure, Gcs, Filesystem),
+/// crossed with an empty and a populated `topic_mapping` and boundary values
+/// for the numeric fields, is rendered through BOTH `render_restore::render`
+/// and `render_validation::render` and scanned line-by-line, whole-key, for the
+/// three forbidden keys. Nothing in either renderer branches on these fields to
+/// decide whether to print `purge_topics`, `dry_run` or
+/// `header_preflight_external` — no `format!` or `push_str` in either source
+/// file ever names them — so this is a property over renderer structure, not a
+/// fact about any one input; the point of varying inputs here is to walk every
+/// branch (all four storage arms, zero vs many topics) rather than to hunt for
+/// a data-dependent counterexample.
 ///
 /// This test varies SHAPE (which storage variant, how many topics, boundary
 /// integers) but every string value stays a short benign literal. It does
@@ -237,12 +229,11 @@ fn forbidden_keys_are_unreachable_across_every_storage_variant_and_plan_shape() 
     }
 }
 
-/// Review fix (round 2, "FIX 1"): every value in the plan reaches the
-/// document through a bare `format!`, and until this fix none of it was
-/// escaped — `render_validation::render(&plan, "r", Some("x\ndry_run:
-/// true"))` emitted a physical line whose pre-colon token WAS `dry_run`. The
-/// structural property above cannot catch that: it varies shape only and
-/// holds every string at a benign literal.
+/// Every value in the plan is escaped on its way into the document: unescaped,
+/// `render_validation::render(&plan, "r", Some("x\ndry_run: true"))` emits a
+/// physical line whose pre-colon token IS `dry_run`. The structural property
+/// above cannot catch that: it varies shape only and holds every string at a
+/// benign literal.
 ///
 /// This test mutates ONE interpolation site at a time — `backup_id`, a
 /// bootstrap server, both sides of `topic_mapping`, every storage field
@@ -296,11 +287,11 @@ fn forbidden_keys_survive_adversarial_string_content() {
     p.checkpoint_state = PAYLOAD.into();
     cases.push(("checkpoint_state", p, "run-id", None));
 
-    // every S3 field. The REGION is no longer interpolated at all when it is
-    // not a region name (FX-20 fix round, review F1): such a document is
-    // refused before rendering (`RenderError::StorageRegionInvalid`, asserted
-    // in `transport_c15.rs`), which is stronger than escaping it, so its
-    // adversarial case is the refusal below rather than a rendered document.
+    // every S3 field. The REGION is not interpolated at all when it is not a
+    // region name: such a document is refused before rendering
+    // (`RenderError::StorageRegionInvalid`, asserted in `transport_c15.rs`),
+    // which is stronger than escaping it, so its adversarial case is the
+    // refusal below rather than a rendered document.
     {
         let mut p = plan();
         p.storage = StorageUrl::S3 {
@@ -370,7 +361,7 @@ fn forbidden_keys_survive_adversarial_string_content() {
     // run_id (validation.yaml only)
     cases.push(("run_id", plan(), PAYLOAD, None));
 
-    // triggered_by (validation.yaml only) — the review's explicit example
+    // triggered_by (validation.yaml only)
     cases.push(("triggered_by", plan(), "run-id", Some(PAYLOAD)));
 
     for (label, p, run_id, triggered_by) in cases {
@@ -393,9 +384,8 @@ fn forbidden_keys_survive_adversarial_string_content() {
     }
 }
 
-/// The name is kept from before Task 8: this test still asserts that
-/// `create_topics` is SET explicitly rather than left absent. Its VALUE
-/// changed, to `false` — guard **G-TS**: Logweir creates the target topics
+/// `create_topics` is SET explicitly rather than left absent, and to `false`
+/// — guard **G-TS**: Logweir creates the target topics
 /// itself, with `TARGET_TOPIC_CONFIGS`, because the engine's own creation path
 /// carries no configuration at all
 /// [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455].
@@ -468,13 +458,9 @@ fn the_rendered_restore_document_creates_no_topics() {
 fn the_time_window_is_rendered_as_epoch_millis_not_rfc3339() {
     let doc =
         render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
-    // The brief's literals here (1756425600000 / 1756519200000) decode to
-    // 2025-08-29 / 2025-08-30, not the 2026-08-29T00:00:00Z /
-    // 2026-08-30T02:00:00Z the same brief's `plan()` fixture specifies
-    // (matching backup_id "backup-2026-08-30T02:00:00Z" a few lines above).
-    // Corrected to the millis that `plan()`'s own RFC3339 strings actually
-    // convert to; the property under test — epoch millis, not an RFC3339
-    // string — is unchanged.
+    // The millis `plan()`'s own RFC3339 strings convert to
+    // (2026-08-29T00:00:00Z / 2026-08-30T02:00:00Z): epoch millis, not an
+    // RFC3339 string.
     assert!(doc.contains("time_window_start: 1787961600000"));
     assert!(doc.contains("time_window_end: 1788055200000"));
     assert!(
@@ -487,8 +473,8 @@ fn the_time_window_is_rendered_as_epoch_millis_not_rfc3339() {
 fn topic_mapping_is_one_explicit_entry_per_selected_topic() {
     let doc =
         render_restore::render(&plan()).expect("G-GLOB: this fixture holds no glob metacharacter");
-    // Review fix ("FIX 1"): both sides of the mapping now go through
-    // `yaml_scalar`, so a benign topic name is rendered double-quoted.
+    // Both sides of the mapping go through `yaml_scalar`, so a benign topic
+    // name is rendered double-quoted.
     assert!(doc.contains("\"orders\": \"drill-20260903-orders\""));
     assert!(doc.contains("\"payments\": \"drill-20260903-payments\""));
 }
@@ -497,7 +483,7 @@ fn topic_mapping_is_one_explicit_entry_per_selected_topic() {
 fn validation_yaml_points_evidence_storage_at_the_per_run_logweir_prefix() {
     let doc = render_validation::render(&plan(), "01J9X2QK7C4V0R8YB3ZP6MTS5A", None)
         .expect("G-EXP/G-GLOB: this fixture holds no glob metacharacter and no `${`");
-    // Review fix ("FIX 1"): the whole composed value is one `yaml_scalar`
+    // The whole composed value is one `yaml_scalar`
     // call, so it is rendered as a single double-quoted scalar.
     assert!(doc.contains("prefix: \"logweir/01J9X2QK7C4V0R8YB3ZP6MTS5A/engine-validation\""));
 }
@@ -556,7 +542,7 @@ fn topic_include_entries_reject_glob_metacharacters_on_the_restore_side() {
     }
 }
 
-/// Spec §6.1 M5/N1: `strip_offset_headers: false` is rendered EXPLICITLY in
+/// `strip_offset_headers: false` is rendered EXPLICITLY in
 /// both modes. Rendering `true` here would strip `x-original-offset` on the
 /// way into the scratch topic, and that header is the only key phase 7
 /// reconciles on (`phase7_verify.rs:243-265`) — a windowed restore would exit

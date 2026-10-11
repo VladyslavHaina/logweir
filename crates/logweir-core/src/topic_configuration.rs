@@ -48,9 +48,9 @@
 //! | `providerOnly` | a key neither line defines | never |
 //! | `secret` | the broker flagged the entry sensitive | never: the value is not captured, only the key |
 //!
-//! "Never applied as a default" is the rule the configuration coverage and
-//! this row share: an entry that is not applied is still RECORDED, so its absence on the target is a
-//! named difference, not a silent default.
+//! "Never applied as a default" is the rule the configuration coverage and this
+//! row share: an entry that is not applied is still RECORDED, so its absence on
+//! the target is a named difference, not a silent default.
 
 use crate::backup_receipt::{ConfigEntry, TopicOwner};
 use std::collections::BTreeMap;
@@ -550,7 +550,8 @@ pub fn strimzi_owners(
     found
 }
 
-/// **What a restore under the original topic names reads from a `--kafka-topic-resources` file, failing CLOSED.**
+/// **What a restore under the original topic names reads from a
+/// `--kafka-topic-resources` file, failing CLOSED.**
 ///
 /// [`strimzi_owners`] serves a backup's RECORD, where an owner it cannot
 /// record is said so separately ([`strimzi_unrecordable`]). A restore under

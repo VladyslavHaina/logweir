@@ -1,4 +1,4 @@
-//! **PROD-11.1 — one engine run per distinct partition subset**, through
+//! **One engine run per distinct partition subset**, through
 //! `impl DataEngine for OsoCliEngine` against `e2e/fixtures/fake-engine-runs.sh`,
 //! which logs every invocation (subcommand, document, `source_partitions`,
 //! target topics) and writes an offset report per run.
@@ -145,7 +145,7 @@ fn a_plan_with_different_subsets_is_one_engine_run_per_subset() {
 }
 
 /// A plan with no subset is ONE run over `restore.yaml`, its report the
-/// engine's own object at the plan's path — the behaviour before PROD-11.1.
+/// engine's own object at the plan's path — as before partition subsets.
 #[test]
 fn a_plan_without_a_subset_is_one_run_as_before() {
     let (work, out) = (unique_dir("work1"), unique_dir("out1"));
@@ -286,12 +286,12 @@ fn engine_reports_merge_to_a_union_only_when_every_run_was_read() {
     );
 }
 
-/// Review L5: a run's report path equal to the composed report's is refused,
-/// never copied into itself (which never ends: the fix round's mutant without
-/// the guard grew the file to 368 MB in 28 minutes). The call runs on a
-/// thread with a 30-second bound, so a missing guard FAILS this row instead of
-/// hanging it; the stray thread dies with the test process. The control
-/// composes two distinct paths. KILLS: deleting the guard.
+/// A run's report path equal to the composed report's is refused, never copied
+/// into itself (which never ends: without the guard the file grew to 368 MB in
+/// 28 minutes). The call runs on a thread with a 30-second bound, so a missing
+/// guard FAILS this row instead of hanging it; the stray thread dies with the
+/// test process. The control composes two distinct paths. KILLS: deleting the
+/// guard.
 #[test]
 fn composing_a_report_into_itself_is_refused() {
     let dir = unique_dir("self");

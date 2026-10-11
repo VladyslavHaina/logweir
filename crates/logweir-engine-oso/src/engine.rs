@@ -299,7 +299,7 @@ impl OsoCliEngine {
             ))
         })?;
 
-        // Readback (1) of spec §9.3 phase 5: an engine that IGNORES
+        // Readback (1) of phase 5: an engine that IGNORES
         // `header_preflight` defaults to Auto (config.rs:972-980),
         // offset_recovery_requested is false (preflight.rs:196-198), so
         // scan_required is false and report.header_preflight stays None.

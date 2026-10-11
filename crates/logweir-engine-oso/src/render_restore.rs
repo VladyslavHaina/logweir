@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 /// subset, plus one unfiltered run for the topics without one
 /// ([`logweir_core::replay_selection::ReplaySelection::engine_runs`], the
 /// shared selection function, decides the grouping). A plan with no subset is
-/// ONE run whose document is byte for byte the one every plan rendered before
-/// PROD-11.1.
+/// ONE run whose document is byte for byte the one a plan rendered before
+/// partition subsets existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreRun {
     /// 0-based position in render (and execution) order.
@@ -106,7 +106,7 @@ pub fn runs(plan: &RestorePlan) -> Vec<RestoreRun> {
 }
 
 /// The rendered restore document and the SHA-256 of the EXACT bytes that
-/// `OsoCliEngine::write` hands to `std::fs::write`. T0-14: the document is
+/// `OsoCliEngine::write` hands to `std::fs::write`. The document is
 /// rendered at phase 5 and again at phase 6, and `fs::write` truncates, so
 /// the digest — never a re-serialisation of `plan` — is the only thing that
 /// can prove the two are the same document.
@@ -159,7 +159,8 @@ pub fn render(plan: &RestorePlan) -> Result<String, RenderError> {
 }
 
 /// One run's document. For a one-run plan with no subset this is, byte for
-/// byte, the document every plan rendered before PROD-11.1 (the goldens).
+/// byte, the document a plan rendered before partition subsets existed (the
+/// goldens).
 pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, RenderError> {
     // GC18(c) rail 1 / **G-GLOB**, restore side. BOTH SIDES of the mapping
     // are checked, because both reach an include-style position: the keys are
@@ -200,12 +201,8 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     for src in run.topic_mapping.keys() {
         s.push_str(&format!("      - {}\n", yaml_scalar_checked(src)?));
     }
-    // THE SASL BLOCK (Task 6, interface **I1**), and the reason the whole task
-    // exists on this side: before it, the rendered `restore.yaml` emitted a
-    // bare `target: bootstrap_servers:` with no security keys at all, so even a
-    // correctly authenticated Logweir handed the engine a config that could not
-    // authenticate. `Plaintext` emits nothing, which is what keeps the four
-    // `restore_yaml*` goldens byte-identical.
+    // THE SASL BLOCK (interface **I1**). `Plaintext` emits nothing, so the four
+    // plaintext `restore_yaml*` goldens carry no security keys.
     //
     // `plan.target_auth` is the ONLY source this block has — **G-ID**. The
     // username is a field of the PLAN, which `plan_hash` covers; it is never
@@ -234,11 +231,9 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // approved bytes.
     //
     // The engine's default is already false (config.rs:860-863, "safe default
-    // - won't create topics unexpectedly") and Logweir used to render `true`,
-    // because a scratch target contains none of the prefixed topics and the
-    // restore would otherwise have nothing to write to. The problem is HOW the
-    // engine creates them: `TopicToCreate { name, num_partitions,
-    // replication_factor }`
+    // - won't create topics unexpectedly"). Letting the engine create the
+    // target topics is wrong because of HOW it creates them: `TopicToCreate {
+    // name, num_partitions, replication_factor }`
     // [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455] carries no
     // configuration at all, so every target topic lands on cluster defaults —
     // typically `retention.ms = 604800000`, under which an older restore point
@@ -271,7 +266,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // (restore/engine.rs:567-568).
     s.push_str("  dry_run_check_segments: true\n");
     // config.rs:840-846 — Option<PathBuf> plus a u64. Pod-local and never
-    // uploaded: a crashed restore is NOT resumable in v0.1 (spec §11).
+    // uploaded: a crashed restore is NOT resumable in v0.1.
     // The path is a rendered string like any other and goes through
     // `yaml_scalar` for the same reason.
     s.push_str(&format!(
@@ -286,7 +281,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // `pub time_window_start: Option<i64>`. An RFC3339 STRING is a serde TYPE
     // error, not an unknown key, so `Config::from_yaml_with_warnings` fails
     // outright: validate-restore and restore would both abort on config load,
-    // no drill could ever complete, and Task 12's stderr unknown-key readback
+    // no drill could ever complete, and the stderr unknown-key readback
     // cannot catch a type error. These are integers, not strings — no
     // `yaml_scalar` needed; a Rust `i64` cannot contain a YAML metacharacter.
     s.push_str(&format!(
@@ -308,7 +303,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
         let list: Vec<String> = partitions.iter().map(i32::to_string).collect();
         s.push_str(&format!("  source_partitions: [{}]\n", list.join(", ")));
     }
-    // RENDERED EXPLICITLY, IN BOTH MODES, and never `true` (spec §6.1 M5/N1).
+    // RENDERED EXPLICITLY, IN BOTH MODES, and never `true`.
     // `include_offset_headers` defaults true on the BACKUP side and stamps
     // `x-original-offset`/`x-original-timestamp` on every archived record;
     // `strip_offset_headers` defaults false on both
@@ -324,20 +319,15 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // and this golden, not an upstream default we are trusting — the same
     // argument Global Constraint 20 makes for `consumer_group_strategy`.
     s.push_str("  strip_offset_headers: false\n");
-    // ---------------------------------------------------------------------
-    // **THE OFFSET SIDE, RENDERED EXPLICITLY** (Global Constraint 20, spec
-    // §6.1 N6/N9). All four lines, unconditionally, in both modes.
+    // **THE OFFSET SIDE, RENDERED EXPLICITLY** (Global Constraint 20). All four
+    // lines, unconditionally, in both modes.
     //
-    // THE REASON IS THAT AN INHERITED DEFAULT IS NOT AN ASSERTION. Global
-    // Constraint 20 says "tag 1 makes no consumer-group offset commit
-    // anywhere", and until this task the three keys that decide it were left
-    // at the engine's own defaults — the note that stood here said
-    // `reset_consumer_offsets` and `auto_consumer_groups` were "deliberately
-    // not rendered", which meant the invariant was a belief about
-    // [U:crates/kafka-backup-core/src/config.rs:1023, :1029] rather than a
-    // line in this document, in the approved bytes and in this golden. An
-    // upstream bump that flipped either default would have flipped Logweir's
-    // behaviour with nothing to show it.
+    // AN INHERITED DEFAULT IS NOT AN ASSERTION. Global Constraint 20 says "tag
+    // 1 makes no consumer-group offset commit anywhere"; the keys that decide
+    // it are lines in this document, in the approved bytes and in this golden,
+    // so an upstream bump that flipped a default
+    // [U:crates/kafka-backup-core/src/config.rs:1023, :1029] cannot flip
+    // Logweir's behaviour unseen.
     //
     // Each key is a `RestoreOptions` field, so all four sit under `restore:`
     // at this indent [VERIFIED against the pinned engine 0.21.0:
@@ -345,9 +335,8 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // :853-854, `offset_report` :857-858, `auto_consumer_groups` :899-900;
     // upstream's own round-trip test at :1400-1421 parses `restore:
     // consumer_group_strategy: skip` with `warnings.is_empty()`]. Indentation
-    // is part of the contract — plan erratum E3 is the SASL block that landed
-    // one indent too shallow and ran UNAUTHENTICATED behind four "Ignoring
-    // unknown config key" lines.
+    // is part of the contract: a key one indent too shallow is dropped as
+    // unknown ("Ignoring unknown config key").
     //
     // `skip` is `OffsetStrategy::Skip`'s wire spelling: the enum is
     // `#[serde(rename_all = "kebab-case")]` [config.rs:719-726], and `Skip` is
@@ -371,9 +360,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
         yaml_scalar_checked(&run.path(&plan.offset_report).display().to_string())?
     ));
     // Deliberately NOT rendered, at any value: purge_topics, dry_run,
-    // header_preflight_external (Global Constraint 4). `reset_consumer_offsets`
-    // and `auto_consumer_groups` USED to be on that list; they are above now,
-    // pinned at `false`, which is the same invariant stated instead of assumed.
+    // header_preflight_external (Global Constraint 4).
     s.push('\n');
     s.push_str(crate::yaml::METRICS_OFF);
     Ok(s)
@@ -409,7 +396,7 @@ pub fn render_topic_mapping_block(
 /// the archive: one arm set, one golden per backend. Every free-text field
 /// goes through `yaml_scalar`.
 ///
-/// **C15**: a plain `http://` endpoint with `allow_http: false`
+/// A plain `http://` endpoint with `allow_http: false`
 /// is REFUSED here, before a single key is written, because the pinned engine
 /// (0.22.0 and later) would derive plaintext from the scheme and ignore the
 /// rendered `false`. This is the one function every engine document's storage

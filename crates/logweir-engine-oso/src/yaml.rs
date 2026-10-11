@@ -11,10 +11,9 @@
 //!
 //! `tests/render_backup.rs::there_is_exactly_one_yaml_escaper` reads the three
 //! renderer sources and asserts none of them defines `fn yaml_scalar(`.
-//! Task 3 added `yaml_scalar_checked` HERE, beside this one, and swapped every
-//! call site over; `tests/expansion.rs::every_renderer_calls_the_checked_
-//! escaper` reads the same three sources and asserts NO call site calls the
-//! unchecked `yaml_scalar(` any more. The unchecked function is still the one
+//! `tests/expansion.rs::every_renderer_calls_the_checked_escaper` reads the
+//! same three sources and asserts NO call site calls the unchecked
+//! `yaml_scalar(`. The unchecked function is still the one
 //! escaper — `yaml_scalar_checked` is a pre-check in front of it, not a second
 //! escaper — which is why the "exactly one" count is over `fn yaml_scalar(`
 //! and not over the name's every prefix.
@@ -44,9 +43,8 @@ use crate::render_backup::RenderError;
 /// Deliberately NOT an attempt at full YAML plain-scalar-safety detection
 /// (leading indicators, ambiguous ": ", reserved words, …) with quoting only
 /// where "needed": a scalar that is unconditionally quoted is unconditionally
-/// safe, and the resulting document is easier for the human reviewer this
-/// task exists for to audit than one where quoting is conditional on the
-/// input's shape.
+/// safe, and the resulting document is easier for a human reviewer to audit
+/// than one where quoting is conditional on the input's shape.
 ///
 /// What this function does NOT and CANNOT defend against: upstream's
 /// `expand_env_vars` [U/kafka-backup/crates/kafka-backup-cli/src/commands/
@@ -89,8 +87,8 @@ pub(crate) fn yaml_scalar(value: &str) -> String {
 /// Secret supplies the value — which is also why the value itself has to be
 /// safe to substitute into pre-parse text, and why
 /// `logweir_core::guard::credential_is_renderable` exists (interface **I11**).
-/// The SASL block that emits it is Task 6's (interface **I1**); this task
-/// lands the name and the sweep that permits exactly these two.
+/// The SASL block (interface **I1**) emits it, and the sweep permits exactly
+/// these two.
 pub const PLACEHOLDER_SOURCE_PASSWORD: &str = "${LOGWEIR_SOURCE_PASSWORD}";
 /// The target cluster's twin of `PLACEHOLDER_SOURCE_PASSWORD`.
 pub const PLACEHOLDER_TARGET_PASSWORD: &str = "${LOGWEIR_TARGET_PASSWORD}";
@@ -148,8 +146,7 @@ pub const METRICS_OFF: &str = "metrics:\n  enabled: false\n";
 /// WARN Ignoring unknown config key `source.sasl_password`
 /// ```
 ///
-/// which is the `strip_offset_headers` defect exactly (Task 4 review F-1):
-/// `OsoCliEngine::assert_no_dropped_logweir_key` aborts the run at exit 1
+/// and `OsoCliEngine::assert_no_dropped_logweir_key` aborts the run at exit 1
 /// AFTER the document was written, and short of that abort a plan that named
 /// SCRAM would have dialled the cluster unauthenticated. Under `security:`
 /// the same engine emits **no** unknown-key warning at all.
@@ -253,7 +250,7 @@ pub(crate) fn render_security_block(
     Ok(s)
 }
 
-/// PLAT-07.1, Global Constraint 29's engine half. `SecurityConfig` declares
+/// Global Constraint 29's engine half. `SecurityConfig` declares
 /// `ssl_ca_location: Option<PathBuf>` and, when it is set, builds the rustls
 /// root store from that file ALONE instead of the bundled webpki roots
 /// [U:crates/kafka-backup-core/src/config.rs:210-212,
@@ -272,7 +269,7 @@ fn push_ca_location(s: &mut String, tls_ca_file: Option<&str>) -> Result<(), Ren
     Ok(())
 }
 
-/// **PROD-01.3: the `mtls` block.** `security_protocol: SSL`, the optional CA,
+/// **The `mtls` block.** `security_protocol: SSL`, the optional CA,
 /// and the client certificate and key as the engine's
 /// `ssl_certificate_location` / `ssl_key_location` — POD-LOCAL PATHS to the
 /// projected files, checked like every other interpolation, and never PEM

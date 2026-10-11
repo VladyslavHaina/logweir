@@ -2,15 +2,15 @@
 //! unknown-config-key readback.
 //!
 //! v0.1 execution model: a LOCAL SUBPROCESS on the binary extracted at image
-//! build time from the digest-pinned image (spec §6 C4). No kube client, no
+//! build time from the digest-pinned image. No kube client, no
 //! container runtime, no kubeconfig — which is what makes "does not require
 //! Kubernetes" true rather than aspirational.
 use logweir_core::engine::EngineError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The destination CA bundle the controller projected into the runner pod —
-/// D2 §3.5. Set only for a destination-backed run whose `BackupDestination`
+/// The destination CA bundle the controller projected into the runner pod.
+/// Set only for a destination-backed run whose `BackupDestination`
 /// declares `spec.transport.caBundle`.
 ///
 /// It is the CONTROLLER's variable name and this crate reads it rather than
@@ -41,7 +41,7 @@ pub const ENGINE_TRUST_BUNDLE: &str = "/work/trust/archive-bundle.pem";
 pub const LOGWEIR_STREAM: &str = "logweir";
 
 /// The trust bundle this process hands the engine child, or `None` when no
-/// destination CA was projected — D2 §3.5's "engine trust bundle".
+/// destination CA was projected: the engine trust bundle.
 ///
 /// # Why a FILE and not a flag
 ///
@@ -53,8 +53,7 @@ pub const LOGWEIR_STREAM: &str = "logweir";
 /// carrying a `caBundle` for engine-driven runs
 /// (`weirkeeper::controllers::backup::ENGINE_CUSTOM_CA_VERIFIED`), so this path
 /// is reachable only under the administrator's explicit
-/// `engine.allowUnverifiedCustomCa` opt-in — which is exactly how D2 §14's
-/// scenario S2b measures it.
+/// `engine.allowUnverifiedCustomCa` opt-in.
 ///
 /// # It is written, not cached
 ///
@@ -194,17 +193,16 @@ pub fn scan_unknown_key_warnings(text: &str) -> Vec<String> {
 /// binary this warning always lands on stdout, for every subcommand — never on
 /// stderr.
 ///
-/// Scanning stdout is therefore the load-bearing case, and this function
-/// scans BOTH streams anyway: stdout because that is where the real binary
-/// puts it, and stderr as well because (a) it costs nothing extra, (b) a
-/// future engine tag could route logs differently (upstream's tracing setup
-/// is not part of Logweir's contract, only its OBSERVED behaviour is), and
-/// (c) `e2e/fixtures/fake-engine.sh` — this crate's stand-in for the real
-/// binary while Docker is unavailable (Task 13) — happens to write the
-/// warning to stderr, so scanning stderr too is what lets that fixture stand
-/// in for the real binary at all. Scanning only stderr, the naive
-/// assumption, would return an empty vector forever against the real engine
-/// and let `assert_no_dropped_logweir_key` (engine.rs) pass silently for
+/// Scanning stdout is therefore the load-bearing case, and this function scans
+/// BOTH streams anyway: stdout because that is where the real binary puts it,
+/// and stderr as well because (a) it costs nothing extra, (b) a future engine
+/// tag could route logs differently (upstream's tracing setup is not part of
+/// Logweir's contract, only its OBSERVED behaviour is), and (c)
+/// `e2e/fixtures/fake-engine.sh` — this crate's stand-in for the real binary —
+/// happens to write the warning to stderr, so scanning stderr too is what lets
+/// that fixture stand in for the real binary at all. Scanning only stderr, the
+/// naive assumption, would return an empty vector forever against the real
+/// engine and let `assert_no_dropped_logweir_key` (engine.rs) pass silently for
 /// every dropped key — the exact failure mode this whole mechanism exists to
 /// catch.
 pub fn run_engine(
@@ -219,7 +217,7 @@ pub fn run_engine(
         // WARN-level line surviving, while everything at info level would
         // otherwise interleave with the JSON that `preflight()` parses.
         .env("RUST_LOG", "warn");
-    // ON THIS SUBPROCESS ONLY — D2 §3.5. `SSL_CERT_FILE` is a process-wide
+    // ON THIS SUBPROCESS ONLY. `SSL_CERT_FILE` is a process-wide
     // replacement of the trust store, and Logweir's OWN rustls clients (the
     // evidence store, the verifier, the check runner) already take the
     // destination CA explicitly through `StoreOptions::with_root_certificate`.

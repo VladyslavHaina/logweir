@@ -285,10 +285,10 @@ mod tests {
         assert!(!unlisted.is_empty());
     }
 
-    /// **The count bound, at the writer and at the reader**: a list of 150 names is cut to 100 and says 50 more; a
-    /// line carrying 5,000 names is read as 100. KILLS: an unbounded list (a
-    /// status patch over the CRD's `maxItems` would never land); a cut that
-    /// says nothing.
+    /// **The count bound, at the writer and at the reader**: a list of 150
+    /// names is cut to 100 and says 50 more; a line carrying 5,000 names is
+    /// read as 100. KILLS: an unbounded list (a status patch over the CRD's
+    /// `maxItems` would never land); a cut that says nothing.
     #[test]
     fn a_list_is_cut_at_the_bound_and_says_how_many_more() {
         let list = NameList::of(&names(150));

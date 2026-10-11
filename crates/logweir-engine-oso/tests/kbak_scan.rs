@@ -1,4 +1,4 @@
-//! **PROD-03.0 — `kbak::scan_segment`, the streaming prefix scan the backup's
+//! **`kbak::scan_segment`, the streaming prefix scan the backup's
 //! schema dependency detector reads segments through.** It must agree with
 //! `decode_segment` on every record it hands over (offsets, null-ness and the
 //! first bytes of each key and value), stop when told, and refuse — as
@@ -162,7 +162,7 @@ fn frame(value: &[u8]) -> Vec<u8> {
     out
 }
 
-/// M1 (review): a zstd frame that DECLARES a large window is refused before
+/// A zstd frame that DECLARES a large window is refused before
 /// the decoder allocates it — windowLog 27 is 128 MiB of resident memory
 /// whatever the output cap. The same records at the default window read.
 #[test]
