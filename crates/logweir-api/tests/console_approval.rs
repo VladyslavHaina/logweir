@@ -792,6 +792,7 @@ async fn the_requester_cannot_approve_their_own_request_under_any_spelling() {
 /// trailing-slash row above).
 #[tokio::test]
 async fn an_issuer_with_a_trailing_slash_is_the_same_issuer() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "slash").await;
     let sha = stored_sha(&app, &r.confirmation);
@@ -861,6 +862,7 @@ async fn a_requester_who_cannot_be_compared_makes_no_two_person_request() {
 /// person here; what refuses is the REQUESTER inside the verified bytes.
 #[tokio::test]
 async fn a_request_signed_for_the_local_admin_or_a_service_account_is_never_approved() {
+    let (_log, _guard) = capture();
     let (app, console) = pair_app();
     for (tag, issuer, subject, needle) in [
         (
@@ -1098,6 +1100,7 @@ async fn a_valid_signature_copied_from_another_request_binds_that_request() {
 /// subject taken from `spec`.
 #[tokio::test]
 async fn the_stored_objects_metadata_and_unsigned_fields_decide_nothing() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "meta").await;
     let stored = app
@@ -1379,6 +1382,7 @@ async fn an_expired_request_is_not_approved() {
 /// Restore**: the request names the first one's UID.
 #[tokio::test]
 async fn a_restore_recreated_under_the_same_name_is_not_approved() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "uid").await;
     let sha = stored_sha(&app, &r.confirmation);
@@ -1401,6 +1405,7 @@ async fn a_restore_recreated_under_the_same_name_is_not_approved() {
 /// policy, or rebound to confirm: the click is refused in each.
 #[tokio::test]
 async fn a_request_made_under_another_policy_is_not_approved() {
+    let (_log, _guard) = capture();
     let (app, console) = pair_app();
     let r = requested(&app, "alice", "policy").await;
     let sha = stored_sha(&app, &r.confirmation);
@@ -1503,6 +1508,7 @@ async fn an_administrator_is_not_an_approver_unless_bound_as_one() {
 /// * A session past its expiry approves nothing, whatever it carried.
 #[tokio::test]
 async fn the_binding_table_is_read_per_click_and_the_sessions_groups_are_the_sign_ins() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "revoke").await;
     let sha = stored_sha(&app, &r.confirmation);
@@ -1631,6 +1637,7 @@ async fn raw(
 /// genuine second person throughout: only the transport refuses.
 #[tokio::test]
 async fn a_cross_site_request_or_a_get_approves_nothing() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "xsite").await;
     let sha = stored_sha(&app, &r.confirmation);
@@ -1755,6 +1762,7 @@ async fn a_cross_site_request_or_a_get_approves_nothing() {
 /// — its one identity cannot be two people.
 #[tokio::test]
 async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_restore() {
+    let (_log, _guard) = capture();
     let console = console("prod-pair");
     let app = TestApp::with(
         FakeKube::new(),
@@ -1831,6 +1839,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
 /// no personal-key countersignature.
 #[tokio::test]
 async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_countersignature() {
+    let (log, _guard) = capture();
     for binding in ["prod-strict", "team-confirm"] {
         let console = console(binding);
         let app = shared(&console);
@@ -1875,7 +1884,6 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
 
     // A two-person namespace, offered a personal-key countersignature of its
     // own request: refused, nothing stored.
-    let (log, _guard) = capture();
     let (app, _console) = pair_app();
     let r = requested(&app, "alice", "countersign").await;
     let (_, bytes, sidecar) = stored_document(&app, &r.confirmation);
@@ -1930,6 +1938,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
 /// KILLS: the field dropped from the approver's view.
 #[tokio::test]
 async fn a_plan_allowing_transaction_markers_is_shown_to_the_approver() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let alice = signed_in(&app, "alice", &["ops"]);
     let bob = signed_in(&app, "bob", &["approvers"]);
@@ -1972,6 +1981,7 @@ async fn a_plan_allowing_transaction_markers_is_shown_to_the_approver() {
 /// the approval carries the subject and the approver, at 2.2.0.
 #[tokio::test]
 async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exactly_that_subject() {
+    let (_log, _guard) = capture();
     let (app, console) = pair_app();
     let alice = signed_in(&app, "alice", &["ops"]);
     let mut body = restore_request("approval-original");
@@ -2058,6 +2068,7 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
 /// with a personal key has another digest.
 #[tokio::test]
 async fn the_request_names_the_two_person_policys_own_digest() {
+    let (_log, _guard) = capture();
     let (app, console) = pair_app();
     let r = requested(&app, "alice", "digest").await;
     let (request, _, _) = stored_document(&app, &r.confirmation);
@@ -2253,6 +2264,7 @@ async fn a_principal_reaches_the_audit_record_unambiguously_and_a_refusal_only_c
 /// loads it.
 #[test]
 fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
+    let (_log, _guard) = capture();
     use logweir_api::approval::route_of;
     use logweir_api::problem::ProblemCode;
     use logweir_core::approval_policy::{
@@ -2702,6 +2714,7 @@ async fn the_click_refuses_a_request_whose_scope_is_incomplete_whatever_the_view
 /// NEGATIVE CONTROL: the plain ticket is created.
 #[tokio::test]
 async fn a_two_person_request_is_made_only_with_a_ticket_its_scope_can_show() {
+    let (_log, _guard) = capture();
     let (app, _console) = pair_app();
     let alice = signed_in(&app, "alice", &["ops"]);
     for (tag, ticket) in [
