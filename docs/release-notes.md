@@ -1256,11 +1256,13 @@ offered; `logweir restore` and `logweir verify` still read it.
 listed.
 **Scope:** runner, check and controller rows (`topic_budget.rs` in `logweir` and `weirkeeper`) with child-process memory measurements, and a live compose backup of 500 topics listed, relayed, verified by both readers and restored; no signed format changes.
 [UNVERIFIED — no cluster has run this build: the controller and API rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
-**Rollback:** roll the runner and the controller together: this controller asks
-an evidence-fetch Job for up to 5,131,072 bytes, and an OLDER runner refuses any
-request over 1 MiB, so under that pair no backup the controller cannot read
-itself is verified (`NotAttempted`). An older controller with this runner works
-as before.
+**Rollback:** an older runner accepts more than 1,000 topics again and an older
+controller reads a receipt under 1 MiB again, so a backup of about 300 topics or
+more is `NotAttempted` again. Roll the runner and the controller together: this
+controller asks an evidence-fetch Job for up to 5,131,072 bytes, and an OLDER
+runner refuses any request over 1 MiB, so under that pair no backup the
+controller cannot read itself is verified (`NotAttempted`). An older controller
+with this runner works as before.
 
 #### 66. Two-person approval in the console: the second person signs in and clicks Approve, no key (PROD-16.2)
 
@@ -1806,12 +1808,15 @@ rollback steps:
    charts/logweir/crds/`) before rolling the controller back; Helm does not
    re-create it.
 7. **Roll the chart, the CRDs, the controller, the runner and the console back
-   together** (items 28, 33, 60, 61, 65, 67, 74 and 78). If it must be two
-   steps, the controller goes first: this controller over an older runner image
-   starts no `Restore` and no `Backup` (item 61), and an older runner refuses
-   a request for a receipt over 1 MiB (item 65). The older runner signs
-   scorecard 1.3.0 and receipts 1.1.0 or 1.2.0 again; every document already
-   written stays valid. A connection using a mode item 33 added stops working
+   together** (items 28, 33, 60, 61, 65, 67, 74 and 78). After the roll an
+   older runner accepts more than 1,000 topics again and an older controller
+   reads a receipt under 1 MiB again, so a backup of about 300 topics or more
+   is `NotAttempted` again (item 65). If it must be two steps, the controller
+   goes first: this controller over an older runner image starts no `Restore`
+   and no `Backup` (item 61), and an older runner refuses a request for a
+   receipt over 1 MiB (item 65). The older runner signs scorecard 1.3.0 and
+   receipts 1.1.0 or 1.2.0 again; every document already written stays
+   valid. A connection using a mode item 33 added stops working
    (an older build cannot parse it), so delete or re-create those first. The
    bound Secrets keep working (items 33 and 38). After the roll, write each
    `ProtectionPolicy` route again if you need the older alert sinks: the API
