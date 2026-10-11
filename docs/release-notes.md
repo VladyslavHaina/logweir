@@ -1726,9 +1726,10 @@ only to keep the hook on amd64 nodes.
 `chart_lint_the_hook_passes_only_flags_its_pinned_image_runs`,
 `chart_lint_constraints_show_before_install` with a
 moved-floor control, and `scripts/check-chart.sh` arm 13 (Helm refuses 1.28.15;
-1.29.0 renders). [UNVERIFIED — the new pin's cosign signature was not verified
-on this host (no cosign); main run 38173609124 signed it, and the clean install
-runs `cosign verify` before it installs.]
+1.29.0 renders), and `gh attestation verify` of the index: SLSA provenance from
+`images.yml` on `main` at `d4e32956`, run 38173609124. [UNVERIFIED — the
+cosign signature itself was not checked on this host (no cosign); the clean
+install runs `cosign verify` before it installs.]
 **Rollback:** set `identity.bootstrapImage` back to
 `docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968`;
 both images run the same identity steps.
