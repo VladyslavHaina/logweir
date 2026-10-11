@@ -698,6 +698,7 @@ What it fixed:
 - **C7:** the PLAT tracker is retired; its open rows are above.
 - **Size:** 382 files, −206,065 / +4,811 lines. That is 22.6k of code and scripts, 46.8k of tests and harnesses, 3.9k of docs, 128.5k generated, and the 4.4k-line tracker.
 - **The owner's rule held:** the consumer-positions paths differ only by A2's ACL removal, and the signed-format check is empty apart from the regenerated API description.
+- **Published and signed:** main run 38143516017 signed `sha-f013a836`, the first publish without the `logweir-ui` image.
 - **Owed to PROD-14.1:**
   - the live CRD proof and the bundle-to-chart migration walk;
   - `helm-demo.yml`, which builds no console image (step 9 serves the console now);
