@@ -178,7 +178,6 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                     "backupschedules",
                     "kafkaclusters",
                     "recoverycatalogs",
-                    "rehearsalschedules",
                     "restores",
                 ],
                 "verbs": ["get", "list", "watch"],
@@ -196,7 +195,6 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
             },
             {"apiGroups": ["logweir.dev"], "resources": ["backups"],
              "verbs": ["create", "patch"]},
-            {"apiGroups": ["logweir.dev"], "resources": ["restores"], "verbs": ["create"]},
             {
                 "apiGroups": ["logweir.dev"],
                 "resources": [
@@ -208,7 +206,6 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                     "preflights/status",
                     "protectionpolicies/status",
                     "recoverycatalogs/status",
-                    "rehearsalschedules/status",
                     "restores/status",
                     "retentionpolicies/status",
                     "topicdiscoveries/status",

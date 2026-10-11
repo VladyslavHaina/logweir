@@ -271,33 +271,13 @@ pub enum ApprovalRefusal {
         /// The referent's actual kind.
         referent_is: String,
     },
-    /// A standing document's `scope.templateDigest` names another sealed
-    /// schedule template.
-    TemplateDigestMismatch {
-        /// The digest inside the signed scope.
-        got: String,
-        /// The digest recomputed from the referent's sealed spec.
-        want: String,
-    },
-    /// A standing document names another schedule identity.
-    SubjectMismatch {
-        /// A precise description of the signed and observed identities.
-        detail: String,
-    },
-    /// A standing document's issue/expiry window is not usable now.
-    WindowInvalid {
-        /// The exact invalid boundary or duration.
-        detail: String,
-    },
-    /// A standing document is malformed or carries an empty scope.
-    ScopeInvalid {
-        /// The exact missing or unsupported scope member.
-        detail: String,
-    },
-    /// Authentic bytes are not a supported standing-authorization document.
-    StandingDocumentInvalid {
-        /// The parse, format-version or document-kind mismatch.
-        detail: String,
+    /// `spec.subjectRef.kind` is `RehearsalSchedule`: a standing rehearsal
+    /// authorization. Standing authorizations are withdrawn in v1 (OD-12), so
+    /// such an `Approval` is refused by name before its trust, signature or
+    /// referent is read, and authorises nothing.
+    StandingAuthorizationRefused {
+        /// The name `spec.subjectRef.name` gives.
+        name: String,
     },
     /// PLAT-19.2: the authentic bytes are not a well-formed authorization
     /// document v2, or name no requester.
@@ -373,11 +353,7 @@ impl ApprovalRefusal {
             Self::PayloadTypeMismatch { .. } => "PayloadTypeMismatch",
             Self::PlanHashMismatch { .. } => "PlanHashMismatch",
             Self::SubjectKindMismatch { .. } => "SubjectKindMismatch",
-            Self::TemplateDigestMismatch { .. } => "TemplateDigestMismatch",
-            Self::SubjectMismatch { .. } => "SubjectMismatch",
-            Self::WindowInvalid { .. } => "WindowInvalid",
-            Self::ScopeInvalid { .. } => "ScopeInvalid",
-            Self::StandingDocumentInvalid { .. } => "StandingDocumentInvalid",
+            Self::StandingAuthorizationRefused { .. } => "StandingAuthorizationRefused",
             Self::AuthorizationDocumentInvalid { .. } => "AuthorizationDocumentInvalid",
             Self::AuthorizationSubjectMismatch { .. } => "AuthorizationSubjectMismatch",
             Self::ApprovalPolicyMismatch { .. } => "ApprovalPolicyMismatch",
@@ -463,16 +439,14 @@ impl fmt::Display for ApprovalRefusal {
                 "the approval binds subject kind {approval_says:?} and the referent is a \
                  {referent_is}; an approval for one kind never authorises another"
             ),
-            Self::TemplateDigestMismatch { got, want } => write!(
+            Self::StandingAuthorizationRefused { name } => write!(
                 f,
-                "the standing authorization scope names template digest {got}, but the referred \
-                 RehearsalSchedule's sealed spec hashes to {want}"
+                "spec.subjectRef names RehearsalSchedule '{name}': a standing rehearsal \
+                 authorization, and standing authorizations are withdrawn in v1 (scheduled \
+                 rehearsals with them), so this Approval authorises nothing; approve each \
+                 Restore with its own per-run Approval"
             ),
-            Self::SubjectMismatch { detail } => write!(f, "{detail}"),
-            Self::WindowInvalid { detail } => write!(f, "{detail}"),
-            Self::ScopeInvalid { detail } => write!(f, "{detail}"),
-            Self::StandingDocumentInvalid { detail }
-            | Self::AuthorizationDocumentInvalid { detail }
+            Self::AuthorizationDocumentInvalid { detail }
             | Self::AuthorizationSubjectMismatch { detail }
             | Self::ApprovalPolicyMismatch { detail }
             | Self::AuthorizationWindowInvalid { detail }
@@ -522,10 +496,9 @@ pub struct Verified {
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
     /// The policy usage under which the matched signature was admitted.
-    /// The policy usage under which this build admitted the signature.
-    /// Until PLAT-19.2 carries an immutable policy mode through the standing
-    /// document and execution bundle, every approval requires
-    /// `GovernedApproval` and `ConsoleConfirmation` fails closed.
+    /// The policy usage under which this build admitted the signature. A v1
+    /// approval document requires `GovernedApproval`, and
+    /// `ConsoleConfirmation` fails closed.
     pub authorization_usage: KeyUsage,
     /// **The matched key's declared validity window** — `None` only when the
     /// resolved trust does not carry the matched id at all, which check 6 has
@@ -546,8 +519,8 @@ pub struct Verified {
     /// are the same value read twice.
     pub key_window: Option<ApproverKeyWindow>,
     /// The authenticated document's own expiry, when this document kind has
-    /// one. A standing verdict is valid only until the earlier of this instant
-    /// and the matched key's `notAfter`.
+    /// one (an authorization document v2). The verdict is valid only until the
+    /// earlier of this instant and the matched key's `notAfter`.
     pub document_expires_at: Option<DateTime<Utc>>,
     /// The approver named inside the signed bytes.
     pub approver: String,
@@ -697,145 +670,9 @@ pub fn evaluate(
         now,
         referent_kind,
         referent_plan_bytes,
-        None,
     )
 }
 
-/// Verify the standing document carried by an `Approval` for one exact
-/// `RehearsalSchedule` referent.
-///
-/// This is deliberately a second typed entry point rather than a permissive
-/// parse in [`evaluate`]: the per-run path continues to parse only
-/// [`ApprovalDocument`], while this path requires every field of
-/// [`logweir_core::execution_contract::StandingAuthorization`].
-pub fn evaluate_standing(
-    approval_bytes: &[u8],
-    sidecar_bytes: &[u8],
-    trust: &ResolvedTrust,
-    now: DateTime<Utc>,
-    referent: &VerifiedSubjectRef,
-    template_digest: &str,
-) -> Result<Verified, ApprovalRefusal> {
-    evaluate_inner(
-        approval_bytes,
-        sidecar_bytes,
-        trust,
-        now,
-        SubjectKind::RehearsalSchedule.as_str(),
-        &[],
-        Some((referent, template_digest)),
-    )
-}
-
-/// Validate the authenticated claims of one standing document against the
-/// schedule object the API server returned.
-pub fn validate_standing_document(
-    doc: &logweir_core::execution_contract::StandingAuthorization,
-    referent: &VerifiedSubjectRef,
-    template_digest: &str,
-    now: DateTime<Utc>,
-) -> Result<(), ApprovalRefusal> {
-    use logweir_core::execution_contract as wire;
-
-    if doc.format_version.split('.').next() != Some("1")
-        || doc.kind != wire::STANDING_AUTHORIZATION_KIND
-    {
-        return Err(ApprovalRefusal::StandingDocumentInvalid {
-            detail: format!(
-                "the standing authorization declares formatVersion {:?} and kind {:?}; this \
-                 build reads major 1 and kind {:?}",
-                doc.format_version,
-                doc.kind,
-                wire::STANDING_AUTHORIZATION_KIND
-            ),
-        });
-    }
-    let subject = &doc.subject_ref;
-    if subject.api_version != referent.api_version
-        || subject.kind != SubjectKind::RehearsalSchedule.as_str()
-        || subject.namespace != referent.namespace
-        || subject.name != referent.name
-        || subject.uid != referent.uid
-    {
-        return Err(ApprovalRefusal::SubjectMismatch {
-            detail: format!(
-                "the signed standing subject is {}/{}/{} UID {}, but the referent is \
-                 {}/{}/{} UID {}",
-                subject.api_version,
-                subject.namespace,
-                subject.name,
-                subject.uid,
-                referent.api_version,
-                referent.namespace,
-                referent.name,
-                referent.uid
-            ),
-        });
-    }
-    // NO CLOCK IN THE MESSAGE (P9's class). A condition message is compared
-    // byte for byte by the no-write guard; one that names `now` differs on
-    // every pass, so the refused status is rewritten, the write wakes this
-    // controller's own watch, and an expired standing document spins. Which
-    // boundary failed is the stable fact; WHEN it was judged is the condition's
-    // `lastTransitionTime`.
-    let lifetime = doc.expires_at - doc.issued_at;
-    let window = format!(
-        "the standing authorization window {}..{}",
-        doc.issued_at.to_rfc3339(),
-        doc.expires_at.to_rfc3339()
-    );
-    let problem = if lifetime <= chrono::Duration::zero()
-        || lifetime > chrono::Duration::days(wire::MAX_STANDING_AUTHORIZATION_DAYS)
-    {
-        Some(format!(
-            "{window} is empty or exceeds {} days",
-            wire::MAX_STANDING_AUTHORIZATION_DAYS
-        ))
-    } else if doc.issued_at > now {
-        Some(format!("{window} has not opened yet"))
-    } else if doc.expires_at <= now {
-        Some(format!(
-            "{window} has closed; an expired standing authorization authorises no new slot"
-        ))
-    } else {
-        None
-    };
-    if let Some(detail) = problem {
-        return Err(ApprovalRefusal::WindowInvalid { detail });
-    }
-    let scope = &doc.scope;
-    let scope_invalid = scope.template_digest.trim().is_empty()
-        || scope.target_cluster_id.trim().is_empty()
-        || scope.topic_prefix.trim().is_empty()
-        || scope.topics.is_empty()
-        || scope.topics.iter().any(|topic| topic.trim().is_empty())
-        // PROD-08.1a review M1: the partition bound is positive on a sampled
-        // scope and exactly 0 on one that authorises complete coverage (what
-        // makes an older reader refuse every plan under it).
-        || (scope.max_partitions == 0)
-            != (scope.signed_coverage() == logweir_core::spec::Coverage::Complete)
-        || scope.records_per_partition == 0
-        || scope.deadline_seconds == 0
-        || !scope.is_scratch_only();
-    if scope_invalid {
-        return Err(ApprovalRefusal::ScopeInvalid {
-            detail: "the standing authorization scope must name a template digest, target \
-                     cluster, topic prefix, at least one non-blank topic, positive bounds (but \
-                     maxPartitions, which is 0 exactly when the scope authorises complete \
-                     coverage), and exactly scratch mode"
-                .to_string(),
-        });
-    }
-    if scope.template_digest != template_digest {
-        return Err(ApprovalRefusal::TemplateDigestMismatch {
-            got: scope.template_digest.clone(),
-            want: template_digest.to_string(),
-        });
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn evaluate_inner(
     approval_bytes: &[u8],
     sidecar_bytes: &[u8],
@@ -843,7 +680,6 @@ fn evaluate_inner(
     now: DateTime<Utc>,
     referent_kind: &str,
     referent_plan_bytes: &[u8],
-    standing: Option<(&VerifiedSubjectRef, &str)>,
 ) -> Result<Verified, ApprovalRefusal> {
     // ---- 0. the sidecar is a document before it is a signature -----------
     let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|e| {
@@ -854,22 +690,10 @@ fn evaluate_inner(
 
     // ---- 1. the payload type, BEFORE ANY KEY IS TRIED --------------------
     //
-    // WHICH payload type depends on the REFERENT KIND, and that is the whole of
-    // D3 W7's change to this function (PLAT-14.3). A `RehearsalSchedule`
-    // subject carries a STANDING rehearsal authorization, whose DSSE payload
-    // type is its own
-    // (`execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION`) precisely so
-    // that a genuinely signed drill approval replayed as a standing
-    // authorization — or the reverse — is refused by the SIGNATURE layer rather
-    // than by a field comparison somebody could forget to write. The payload
-    // type is part of what `verify_detached` covers, so choosing it here is
-    // choosing what the signature is over.
-    let want_payload =
-        if referent_kind == crate::crds::approval::SubjectKind::RehearsalSchedule.as_str() {
-            logweir_core::execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION
-        } else {
-            PAYLOAD_TYPE_APPROVAL
-        };
+    // The payload type is part of what `verify_detached` covers, so a
+    // genuinely signed document of another kind is refused by the SIGNATURE
+    // layer rather than by a field comparison somebody could forget to write.
+    let want_payload = PAYLOAD_TYPE_APPROVAL;
     if sidecar.payload_type != want_payload {
         return Err(ApprovalRefusal::PayloadTypeMismatch {
             got: sidecar.payload_type,
@@ -886,11 +710,10 @@ fn evaluate_inner(
     // somewhere to record which entry failed. `blocked_for` carries the
     // legacy message byte-for-byte, so the sentence an operator reads did not
     // change on the day this path replaced the roster walk.
-    // This build does not yet carry PLAT-19.2's immutable ordinary/governed
-    // policy mode through the signed standing document. Admitting a
-    // ConsoleConfirmation key merely because one exists would let an ordinary
-    // confirmation authorize governed work. Fail closed on the current
-    // format: both per-run and standing documents require GovernedApproval.
+    // A v1 approval document carries no ordinary/governed policy mode.
+    // Admitting a ConsoleConfirmation key merely because one exists would let
+    // an ordinary confirmation authorize governed work. Fail closed: a v1
+    // document requires GovernedApproval.
     let allowed_usages: &[KeyUsage] = &[KeyUsage::GovernedApproval];
     if let Some(message) = allowed_usages
         .iter()
@@ -1006,49 +829,33 @@ fn evaluate_inner(
         ));
     }
 
-    // ---- the bytes are authentic; now read the RIGHT document shape -------
-    let (approver, ticket, document_expires_at) =
-        if let Some((referent, template_digest)) = standing {
-            use logweir_core::execution_contract as wire;
-
-            let doc: wire::StandingAuthorization =
-                serde_json::from_slice(approval_bytes).map_err(|e| {
-                    ApprovalRefusal::StandingDocumentInvalid {
-                        detail: format!(
-                            "the signature over spec.approvalBytes verified under key id \
-                     {matched_key_id}, but those bytes are not a standing authorization: {e}"
-                        ),
-                    }
-                })?;
-            validate_standing_document(&doc, referent, template_digest, now)?;
-            // v1 standing documents intentionally carry no person/ticket fields.
-            (String::new(), String::new(), Some(doc.expires_at))
-        } else {
-            let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
-                ApprovalRefusal::SignatureInvalid(format!(
+    // ---- the bytes are authentic; now read the document -------------------
+    let (approver, ticket, document_expires_at) = {
+        let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
+            ApprovalRefusal::SignatureInvalid(format!(
                 "the signature over spec.approvalBytes verified under key id {matched_key_id}, but \
                  those bytes are not an approval document: {e}"
             ))
-            })?;
+        })?;
 
-            // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
-            let want = sha256_prefixed(referent_plan_bytes);
-            if doc.plan_hash != want {
-                return Err(ApprovalRefusal::PlanHashMismatch {
-                    got: doc.plan_hash,
-                    want,
-                });
-            }
+        // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
+        let want = sha256_prefixed(referent_plan_bytes);
+        if doc.plan_hash != want {
+            return Err(ApprovalRefusal::PlanHashMismatch {
+                got: doc.plan_hash,
+                want,
+            });
+        }
 
-            // ---- 8. the subject kind, from inside the signed bytes ------------
-            if doc.subject_kind != referent_kind {
-                return Err(ApprovalRefusal::SubjectKindMismatch {
-                    approval_says: doc.subject_kind,
-                    referent_is: referent_kind.to_string(),
-                });
-            }
-            (doc.approver, doc.ticket, None)
-        };
+        // ---- 8. the subject kind, from inside the signed bytes ------------
+        if doc.subject_kind != referent_kind {
+            return Err(ApprovalRefusal::SubjectKindMismatch {
+                approval_says: doc.subject_kind,
+                referent_is: referent_kind.to_string(),
+            });
+        }
+        (doc.approver, doc.ticket, None)
+    };
 
     // LABELLED, NEVER REFUSED — and under a real `TrustPolicy` it is
     // STRUCTURALLY IMPOSSIBLE rather than merely absent. D3 §7.3's CEL rule G8
@@ -1529,14 +1336,8 @@ pub enum ReferentProblem {
     /// Tag 1's approval flow is the restore wizard (interface **I19**);
     /// `Backup` is in [`SubjectKind`] because the CRD's CEL seal admits it and
     /// check 8 must be able to tell the kinds apart.
-    ///
-    /// `RehearsalSchedule` reaches it for a different reason: D3 §4.3 binds a
-    /// digest recomputed from that referent's own sealed spec, and the
-    /// recomputation is the rehearsal worker's. Until it lands, an approval
-    /// naming one is refused HERE rather than verified against bytes nobody
-    /// hashed.
     ReferentHasNoPlanBytes {
-        /// `Backup` or `RehearsalSchedule`.
+        /// `Backup`.
         kind: String,
         /// The name `spec.subjectRef.name` gave.
         name: String,
@@ -2003,6 +1804,14 @@ fn evaluate_restore_referent(
     }
 }
 
+/// The refusal an `Approval` naming a `RehearsalSchedule` gets: standing
+/// authorizations are withdrawn in v1 (OD-12).
+fn standing_withdrawn(approval: &Approval) -> ApprovalOutcome {
+    ApprovalOutcome::Refused(ApprovalRefusal::StandingAuthorizationRefused {
+        name: approval.spec.subject_ref.name.clone(),
+    })
+}
+
 /// [`decide`], under the installation's approval policies — PLAT-19.2.
 ///
 /// # Errors
@@ -2032,6 +1841,16 @@ pub async fn decide_with_policy_at(
     let namespace = approval
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
+
+    // ---- A STANDING AUTHORIZATION IS WITHDRAWN (OD-12) --------------------
+    //
+    // FIRST, before a stored record, the trust or the referent is read: an
+    // `Approval` naming a `RehearsalSchedule` is refused by name and is never
+    // recorded `Verified` or `Consumed`. The kind stays in the CRD's enum so
+    // objects written before v1 still decode.
+    if approval.spec.subject_ref.kind == SubjectKind::RehearsalSchedule {
+        return Ok(standing_withdrawn(approval));
+    }
 
     // ---- P9: A CONSUMED VERDICT IS A RECORD, NOT A GATE -------------------
     //
@@ -2216,111 +2035,16 @@ pub async fn decide_with_policy_at(
                 Err(e) => return Err(e.into()),
             }
         }
-        // D3 W7 (PLAT-14.3) LANDS THE RECOMPUTATION THIS ARM WAS WAITING FOR.
-        //
-        // `ReferentHasNoPlanBytes` no longer applies to this kind (D3 §4.3's
-        // own sentence). A `RehearsalSchedule` has no `planBytes` and does not
-        // need any: what the standing authorization binds is a digest over the
-        // referent's OWN SEALED SPEC MINUS `suspend`
-        // (`crate::rehearsal::template_bytes`), recomputed here, every pass,
-        // from the object the API server just returned. Checks 7 and 8 are
-        // unchanged code — check 7 compares `sha256_prefixed(those bytes)` with
-        // the `plan_hash` inside the signed document, and check 8 compares the
-        // signed `subject_kind` with `RehearsalSchedule` — which is what D3
-        // §4.3 means by "the same rule applied to a different referent".
-        //
-        // The spec is sealed except `suspend`, so the digest cannot drift under
-        // a running authorization; `suspend` is excluded so that PAUSING an
-        // unattended rehearsal does not invalidate the document authorising it,
-        // which would make the one control an operator reaches for in an
-        // incident the control that breaks the schedule.
-        SubjectKind::RehearsalSchedule => {
-            use crate::crds::rehearsal_schedule::RehearsalSchedule;
-            let api: Api<RehearsalSchedule> = Api::namespaced(client.clone(), &namespace);
-            match api.get(&subject.name).await {
-                Ok(schedule) => {
-                    let uid = schedule
-                        .uid()
-                        .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
-                    let current = VerifiedSubjectRef {
-                        api_version: RehearsalSchedule::api_version(&()).to_string(),
-                        kind: SubjectKind::RehearsalSchedule,
-                        name: subject.name.clone(),
-                        namespace: namespace.clone(),
-                        uid,
-                    };
-                    if let Some(previous) = approval
-                        .status
-                        .as_ref()
-                        .and_then(|status| status.verified_subject_ref.as_ref())
-                    {
-                        if previous != &current {
-                            return Ok(ApprovalOutcome::Referent(
-                                ReferentProblem::ReferentUidChanged {
-                                    kind: referent_kind.to_string(),
-                                    name: subject.name.clone(),
-                                    verified_uid: previous.uid.clone(),
-                                    current_uid: current.uid,
-                                },
-                            ));
-                        }
-                    }
-                    let bytes = crate::rehearsal::template_bytes(&schedule.spec).map_err(|e| {
-                        // Unreachable for this type, which carries no float.
-                        // Reported rather than panicking: an admission path is
-                        // not a place to abort.
-                        ReconcileError::Canonicalization(format!(
-                            "the RehearsalSchedule {} spec could not be canonicalised: {e}",
-                            subject.name
-                        ))
-                    })?;
-                    // PROPAGATED, NEVER DEFAULTED. `to_deterministic_json`
-                    // always emits UTF-8, so this cannot fire — and a silent
-                    // `""` would make check 7 compare `sha256("")` against the
-                    // signed `plan_hash`, which is fail-closed by arithmetic
-                    // luck rather than by construction.
-                    let text = String::from_utf8(bytes).map_err(|e| {
-                        ReconcileError::Canonicalization(format!(
-                            "the RehearsalSchedule {}'s canonical spec bytes are not UTF-8: {e}",
-                            subject.name
-                        ))
-                    })?;
-                    (text, Some(current))
-                }
-                Err(kube::Error::Api(e)) if e.code == 404 => {
-                    return Ok(ApprovalOutcome::Referent(
-                        ReferentProblem::ReferentNotFound {
-                            kind: referent_kind.to_string(),
-                            name: subject.name.clone(),
-                        },
-                    ))
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        // Refused at the top of this function; matched here because the
+        // enum is closed.
+        SubjectKind::RehearsalSchedule => return Ok(standing_withdrawn(approval)),
     };
 
     // `.as_bytes()`, WITH NO DECODE STEP. Interface **I18**: `approvalBytes`
     // and `sidecarBytes` are the UTF-8 document text, verbatim, never base64.
     let want = sha256_prefixed(plan_bytes.as_bytes());
-    let evaluated = if subject.kind == SubjectKind::RehearsalSchedule {
-        // Constructed in the schedule arm above. Keeping the option in the
-        // shared tuple makes the Restore path byte-for-byte the same shape.
-        let referent = verified_subject_ref
-            .as_ref()
-            .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
-        evaluate_standing(
-            approval.spec.approval_bytes.as_bytes(),
-            approval.spec.sidecar_bytes.as_bytes(),
-            &trust,
-            now,
-            referent,
-            &want,
-        )
-    } else if subject.kind == SubjectKind::Restore {
-        // PLAT-19.2: THE ONE KIND AN APPROVAL POLICY GOVERNS. The standing
-        // document above keeps its own GovernedApproval-only format (its
-        // schedule-side admission is `rehearsal_schedule`'s), and a `Backup`
+    let evaluated = if subject.kind == SubjectKind::Restore {
+        // PLAT-19.2: THE ONE KIND AN APPROVAL POLICY GOVERNS. A `Backup`
         // referent was refused before this point.
         evaluate_restore_referent(
             approval,
@@ -2363,16 +2087,9 @@ pub async fn decide_with_policy_at(
             // message names both hashes and says both places must agree.
             if approval.spec.plan_hash != want {
                 return Ok(ApprovalOutcome::Refused(
-                    if subject.kind == SubjectKind::RehearsalSchedule {
-                        ApprovalRefusal::TemplateDigestMismatch {
-                            got: approval.spec.plan_hash.clone(),
-                            want,
-                        }
-                    } else {
-                        ApprovalRefusal::PlanHashMismatch {
-                            got: approval.spec.plan_hash.clone(),
-                            want,
-                        }
+                    ApprovalRefusal::PlanHashMismatch {
+                        got: approval.spec.plan_hash.clone(),
+                        want,
                     },
                 ));
             }
@@ -2665,7 +2382,7 @@ pub fn admitted_approval_uid(
 /// OBJECT, not merely this name (review L3).
 ///
 /// * The Restore names this `Approval` in `spec.approvalRef` (an ordinary
-///   Restore, never a rehearsal's standing authorization) and carries
+///   Restore) and carries
 ///   `Admitted=True`, which the Restore controller writes on the pass that
 ///   creates the runner Job and carries on every later one. An
 ///   `Admitted=False` HOLD is exactly the not-yet-admitted request an expiry

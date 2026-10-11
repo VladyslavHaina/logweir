@@ -73,9 +73,9 @@ spec:
                 description: |-
                   The `Approval` that authorises this restore, in this namespace. The approval's `planHash` must equal the sha256 of `planBytes` above, and its `subjectRef` must name this object.
 
-                  # Why this became optional, and why that is not a weakening
+                  # Why this is optional, and why that is not a weakening
 
-                  A rehearsal is authorised by a STANDING document instead ([`RestoreAuthorization`]), so exactly one of this and `authorization` is set and CEL refuses both and neither. An OLDER controller reading a standing-authorised `Restore` sees no `approvalRef`, resolves the empty name to nothing and refuses terminally with `ApprovalNotReceived` — fail closed, which is the required rollback behaviour. An unauthorised restore has never been reachable through either field.
+                  Exactly one of this and `authorization` is set, and CEL refuses both and neither. `authorization` (a standing authorization) is withdrawn in v1 and the controller refuses it by name, so in v1 this field is the only way a `Restore` is authorised.
                 nullable: true
                 properties:
                   name:
@@ -85,7 +85,7 @@ spec:
                 - name
                 type: object
               authorization:
-                description: A standing authorisation, for an unattended run (D3 §4.3). Exactly one of this and `approvalRef`.
+                description: 'A standing authorisation (D3 §4.3). WITHDRAWN IN V1: kept in the schema so objects written before v1 still parse, and refused by the controller by name (`StandingAuthorizationRefused`) before any Job. Exactly one of this and `approvalRef`.'
                 nullable: true
                 properties:
                   approvalRef:
@@ -292,7 +292,7 @@ spec:
               rule: has(self.sourceDestinationRef) == has(self.evidenceDestinationRef)
             - message: with sourceDestinationRef, sourceArchive.url is exactly logweir-destination://<sourceDestinationRef.name> and sourceArchive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.sourceDestinationRef) ? (self.sourceArchive.url == ''logweir-destination://'' + self.sourceDestinationRef.name && !has(self.sourceArchive.secretRef)) : !self.sourceArchive.url.startsWith(''logweir-destination://'')'
-            - message: set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization); a Restore is never unauthorized
+            - message: set exactly one of spec.approvalRef (a per-run Approval) or spec.authorization (a standing authorization, withdrawn in v1 and refused by the controller); a Restore is never unauthorized
               rule: has(self.approvalRef) != has(self.authorization)
             - message: 'completeMaxRecords bounds a complete verification and is set only with coverage: complete'
               rule: '!has(self.completeMaxRecords) || (has(self.coverage) && self.coverage == ''complete'')'
@@ -1049,7 +1049,7 @@ spec:
                 - stage
                 type: object
               queue:
-                description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on a rehearsal''s `Restore` (never queued), on every other run, and on anything an older controller wrote.'
+                description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on every other run, and on anything an older controller wrote.'
                 nullable: true
                 properties:
                   authorizationExpiresAt:

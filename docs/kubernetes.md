@@ -104,10 +104,7 @@ Changing the mode alone does not change group ownership. ConfigMaps use 0644
 and are readable without this group; credentials must remain Secrets.
 
 The restore approval bundle mounts at `/approval`: `approval.json`,
-`approval.sig`, `approver.pub.pem`, and `allowed-clusters.json` — or, for a
-standing-authorized **rehearsal**, `standing-authorization.json`,
-`standing-authorization.sig`, `authorization-keys.json`, `approver.pub.pem` and
-`allowed-clusters.json`, with no per-run approval slot at all (§7g). Keeping the
+`approval.sig`, `approver.pub.pem`, and `allowed-clusters.json`. Keeping the
 allowlist in a Secret prevents a subject with only `patch configmaps` from
 widening a restore's target set. This does not constrain a cluster-admin.
 Use repeatable `--approver-key-ids` flags to restrict the accepted approver
@@ -160,7 +157,7 @@ its missing-file limitation. No alert rules ship with the repository.
 
 ## 6. Runtime boundaries
 
-The repository includes the CLI, `weirkeeper`, the fourteen CRDs of §7, the
+The repository includes the CLI, `weirkeeper`, the thirteen CRDs of §7, the
 optional product API and console (`logweir-api`, [api.md](api.md)) and an
 optional Helm UI deployment. The CLI runs the engine as a local subprocess inside its runner
 pod; the operator creates that Job. A scratch restore uses a marker topic and
@@ -171,7 +168,7 @@ Approval is a DSSE signature checked against rostered public keys, not a
 an HTTP metrics endpoint are not implemented. See [stability.md](stability.md)
 for the full limitations and deferred features.
 
-## 7. The control plane: fourteen kinds on `logweir.dev/v1alpha1`
+## 7. The control plane: thirteen kinds on `logweir.dev/v1alpha1`
 
 **Minimum Kubernetes: 1.29.** That floor is not about the client library — it
 is about **CEL validation rules** (`x-kubernetes-validations`), which reached GA
@@ -197,7 +194,6 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | `Preflight` | Namespaced | One bounded readiness observation for a `Backup`, a `Restore`, a destination's grants or a source connection on its own, run the same way. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. A `ready` verdict **authorises nothing**: every execution-time guard still runs. |
 | `TrustPolicy` | **Cluster** | The keys that may authorise and the keys that may attest, with an explicit **lifecycle** (ADR 0008 Amendment G). The policy names the namespaces it governs; a namespace never names its own trust, and one claimed by two policies resolves to **nothing**. The spec is mutable and every change is one-way: keys are append-only with identical public material, `notAfter` only shortens, `state` moves `Active → Retired → Revoked` and never back, and the revocation instants are write-once. |
 | `ProtectionPolicy` | Namespaced | The recovery objective a set of schedules is meant to meet, and who hears about it when they do not. **The one kind with no CEL seal**: it is evaluation policy, never an execution input, so editing it changes what Logweir *says* about results and never the results. Notification channels are `secretKeyRef` references; no credential value appears in the spec. |
-| `RehearsalSchedule` | Namespaced | A recurring recovery rehearsal on a cron. `spec.suspend` is the only mutable field, because the standing authorisation binds a sha256 of this spec minus `suspend` — an editable template would authorise work nobody approved. The controller deletes no topic; teardown is the runner's phase 9 inside a prefix guard. |
 | `RecoveryCatalog` | Namespaced | The durable list of recovery points in one destination, read from object storage by a short-lived check Job. `spec.syncRequest` is the only mutable field. The Kubernetes view is a bounded newest-first window in immutable `ConfigMap` pages owned by the sync Job; it expires with that Job's TTL and reports `Stale` then `ViewExpired` rather than an empty archive. **Adds no `delete` permission anywhere.** |
 | `RetentionPolicy` | Namespaced | What may be removed from one destination, and under whose authority. `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids. `mode: Report` is the **default and deletes nothing**; see §9. |
 
@@ -274,9 +270,9 @@ as a failure. `Restore.spec.approvalRef` became optional and
 existing `Restore` names an `approvalRef` and is unaffected, and an older
 controller reading a standing-authorised one refuses terminally with
 `ApprovalNotReceived`. `Approval.spec.subjectRef.kind` gained
-`RehearsalSchedule`; no existing spelling changed. A build that does not yet
-carry the rehearsal controller refuses such an `Approval` visibly with
-`ReferentHasNoPlanBytes` rather than verifying it against bytes nobody hashed.
+`RehearsalSchedule`; no existing spelling changed. Standing authorizations are
+withdrawn in v1, and this build refuses both by name,
+`StandingAuthorizationRefused` (§7g).
 
 **Where `Restore.status.completion` comes from.** The controller copies it by
 JSON pointer out of the run's signed scorecard and computes none of it:
@@ -355,8 +351,6 @@ never appears in any of them, in either direction** — path-style versus
 virtual-hosted addressing is not a transport choice, and `InsecureHTTP` is the
 only thing that permits plaintext.
 
-`RehearsalSchedule` carries a `suspend`-only seal of its own, plus one
-validation rule (`point.requireVerifiedEvidence` must be `true` in v1).
 `RecoveryCatalog` seals everything but `spec.syncRequest`. `RetentionPolicy`
 seals `destinationRef`, `catalogRef` and `scope` and ties `mode` to its block.
 `TrustPolicy` is not sealed at all. One object-level rule says an existing
@@ -1751,12 +1745,10 @@ upgrading over duplicates:
 - The survivor is the OLDEST catalog, not the best. If a newer duplicate has
   better settings (a larger `viewLimit`, `mode: Full`), delete the older one
   with kubectl; the console holds no delete.
-- A `RetentionPolicy.catalogRef`, a `RehearsalSchedule`'s point `catalogRef` or
-  a `ProtectionPolicy.protects.catalogRef` that names a newer duplicate loses
-  its input. Retention refuses ("published no view"), the rehearsal falls back
-  to `Backup` candidates, and protection reads `CatalogStale`. All three fail
-  closed. Point them at the survivor; the first two are immutable, so re-create
-  them.
+- A `RetentionPolicy.catalogRef` or a `ProtectionPolicy.protects.catalogRef`
+  that names a newer duplicate loses its input. Retention refuses ("published
+  no view"), and protection reads `CatalogStale`. Both fail closed. Point them
+  at the survivor; the first is immutable, so re-create it.
 
 Rolling back to an older controller makes the duplicates sync again.
 
@@ -2128,8 +2120,8 @@ installation that turns it on logs one `WARN` at startup saying so.
 
 **A protection event's `verificationScope` is `sampled`, `degraded` or `none` —
 never `complete`.** It describes the policy's newest available POINT (`sampled`
-when that point carries verified evidence), not a restore of it. A `Restore` and
-a rehearsal can ask for complete coverage (PROD-08.1a, §12 *Complete coverage*),
+when that point carries verified evidence), not a restore of it. A `Restore` can
+ask for complete coverage (PROD-08.1a, §12 *Complete coverage*),
 and a complete run reports what it covered on the `Restore` itself
 (`status.integrity.coverage` and `.complete`), in the product API's
 `verificationScope.coverage`, in the runner's own notification body and in its
@@ -3000,9 +2992,8 @@ names a candidate's set. That is deliberately wider than the design asks, and it
 is fail-closed: a run refused for a restore it would not have touched costs one
 cadence slot, and the other way costs the set.
 
-The restore-side half is only partly there. Rehearsal point selection holds
-with reason `PointRetentionInProgress` while a matching `status.lease` exists
-(§7g's table); `Restore` admission does **not** consult the lease in this build.
+The restore-side half is not there: `Restore` admission does **not** consult
+the lease in this build.
 So the residual window is a `Restore` **created after** the
 controller's consistent list and before the run's first delete. It is narrow; it
 is real; and until the admission arm lands, an operator planning a large restore
@@ -3066,505 +3057,15 @@ candidate; the next evaluation reads the new receipt, and a set it names is
 never planned again. Since RECEIPT-DUP was fixed a runner with the execution
 claim cannot sign that second receipt at all; the residual remains only for a
 set whose first run was made by a build without the claim.
-### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
+### 7g. Scheduled rehearsals are withdrawn in v1
 
-A backup that has never been restored is a hypothesis. PLAT-14.3's
-`RehearsalSchedule` is the object that tests it on a cadence: every slot it
-picks a qualifying recovery point, restores it into an isolated scratch cluster
-under a prefix nothing else uses, scores the result and tears the topics down —
-and records a reason for every slot that produced no rehearsal at all.
-
-**The spec is sealed except `suspend`.** The standing authorization binds a
-`sha256` over the canonical JSON of `spec` minus `suspend`, so a template that
-could be edited after approval would authorize work nobody approved. One CEL
-rule enumerates every other field; a change means a NEW `RehearsalSchedule` and
-a NEW authorization. `suspend` is outside the digest on purpose: pausing an
-unattended rehearsal must not invalidate the document authorising it, or the
-one control an operator reaches for in an incident would be the control that
-breaks the schedule. The controller publishes the recomputed digest at
-`status.templateDigest`, so minting an authorization is a copy and not an
-arithmetic exercise.
-
-**One standing approval, checked twice — and never minted here.** The
-authorization is an ordinary immutable `Approval` with
-`spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` equal to the
-template digest. The Approval controller parses this arm as a
-`StandingAuthorization`, not as the per-run approval document: after
-the common DSSE, roster and key-lifecycle checks, it requires the exact
-template digest and subject API version/kind/namespace/name/**UID**, a live
-positive window of at most 90 days, and a complete scratch-only scope with
-positive numeric bounds. These failures retain standing-specific reasons
-(`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
-or `StandingDocumentInvalid`); they never masquerade as the Restore arm's
-`PlanHashMismatch`. The standing format carries no approval-policy mode and
-stays `GovernedApproval`-only whatever the namespace is bound to (§8, "Approval
-policy"); PLAT-19.2's policy mode is carried end to end for per-run Restores
-only, and `EvidenceSigning` is never authorization. Its
-`spec.approvalBytes` is a signed `StandingAuthorization` document carrying the
-subject (with its **UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
-that document's own — so a genuinely signed drill approval replayed as a
-standing authorization is refused by the signature layer rather than by a field
-comparison. A verified standing condition is re-evaluated at the earlier of
-the signed `expiresAt` and the matched policy key's `notAfter`; it cannot remain
-green across either boundary. `weirkeeper` links no signer at all
-(`tests/linkage.rs`), so the controller COPIES that envelope and its sidecar
-into the run's bundle byte for byte; it cannot produce one.
-
-Each slot the controller re-checks, in this order, and a failure is a recorded
-skip with no `Restore`:
-
-| It checks | Skip reason |
-|---|---|
-| `spec.suspend`, then topics a previous teardown could not remove | `LeftoverTopics` |
-| the slot is inside `spec.bounds.startingDeadlineSeconds` | `ConcurrencyBlocked` |
-| this schedule's own previous rehearsal finished | `ConcurrencyBlocked` |
-| no other schedule is rehearsing against the same target cluster | `TargetBusy` |
-| `spec.bounds.runnerResources` is one the controller applies: whole millicores and bytes, at most 4 CPUs and 8Gi, no zero limit, a memory limit of at least 32Mi, no request above its limit (FX-2, §12) | `AuthorizationInvalid` |
-| the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
-| the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
-| the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
-| the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
-| a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
-| the RENDERED plan falls inside the signed scope — including its coverage, which must be the scope's own (`coverage`, absent = sampled) and, for a complete plan, inside the scope's `completeMaxRecords` (PROD-08.1a) | `AuthorizationInvalid` |
-
-**`spec.bounds.runnerResources` reaches the runner container.** It is copied
-verbatim onto each child `Restore`'s `spec.runnerResources`, and from there
-onto the runner container (§12, *The runner's requests and limits*). A block
-outside the bounds can never run under the authorization that binds it, so
-every slot is skipped as `AuthorizationInvalid` — the `Authorized` condition's
-message names the field — and no child is created; the spec is sealed, so the
-remedy is a new schedule under a new authorization. Before FX-2 the block was
-copied onto the child and then dropped at the Job.
-
-**A `Restore` carries its signed time basis (FX-8).** When the controller reads
-a run's scorecard it copies `source.time_basis` (format 1.3.0) onto
-`status.timeBasis` — `{plan, producerTime, notRecorded}`, beside `outcome` and
-`integrity` and, like them, a claim until `status.evidence.verification` is
-`Valid` — so the console and the product API can show which topics were
-selected by the producers' clocks and which with an unrecorded timestamp type.
-Absent means not recorded. A refused run (`exitReason:
-PointInTimeByProducerTime`) signs nothing and carries none.
-
-**`spec.point.timeBasis` lets a rehearsal of a `LogAppendTime` topic run
-(FX-8).** Every slot's plan states `restore.point_in_time`, and the archive
-holds each record's PRODUCER timestamp, so over a source topic recorded as
-`LogAppendTime` — the archive manifest's topic override, or the bound receipt's
-effective value, a broker default included — the runner refuses the slot with
-`PointInTimeByProducerTime`, exit 3, before any target topic exists. The
-schedule then records `lastFailed.reason: PointInTimeByProducerTime` and sets
-`RehearsalHealthy=False`; it is never a silent failure. A schedule that states
-`spec.point.timeBasis: producerTime` renders `restore.time_basis: producerTime`
-into every slot's plan, exactly as the chosen point becomes
-`restore.point_in_time`: the slot runs, by the producers' clocks, and its
-signed scorecard lists the topic under `source.time_basis.producer_time`
-([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)). The field has
-one value, is sealed like the rest of the spec, and is inside
-`templateDigest`, so a schedule that states it needs an authorization signed
-for that digest; an authorization signed without it refuses every slot as
-`AuthorizationInvalid`. A schedule that states none serialises none, so every
-existing schedule's digest and authorization are unchanged. To opt an
-existing schedule in, create a new `RehearsalSchedule` with the field and sign
-a new authorization for its `status.templateDigest`.
-
-**`spec.bounds.coverage: complete` makes every slot verify every record
-(PROD-08.1a).** Absent (or `sampled`), each slot runs today's sampled check. With
-`complete`, the slot's plan states `sample.coverage: complete` and **no**
-`sample.max_partitions` (a complete verification checks every partition, and
-phase 0 refuses the pair; `maxPartitions` still bounds which point a slot may
-select), plus `sample.complete_max_records` when `spec.bounds.completeMaxRecords`
-is set (CEL: only beside `complete`), and the child `Restore` declares the same
-on `spec.coverage`/`spec.completeMaxRecords`. **It costs more**: every slot
-reads every archived record of the restored topics and the whole restored
-output — about a minute per GiB of one-KiB records with an optimised build on a
-laptop, against about five seconds for the sampled check
-([the decision record](to-do/decisions/PROD-08.1-integrity-contract.md) §7) — so
-size `deadlineSeconds` and the cron for it. A slot whose bound stops it, or
-whose archive it cannot compare, signs `covered: false`: the run exits 2,
-`fail-integrity`, the `Restore`'s badge is `CompleteNotCovered`, and the
-schedule records `lastFailed` — never `lastSucceeded`.
-
-**The coverage is signed twice.** The field is inside `templateDigest` (the
-spec is sealed, so flipping sampled↔complete after signing changes the digest
-and every slot is `AuthorizationInvalid`), **and** the standing authorization's
-scope must itself say `coverage: complete` (document format 1.1.0, below):
-`plan_within_scope` — the controller's each-slot check and the runner's own,
-over the mounted bundle — requires the plan's coverage to equal the signed one.
-A scope that states no `coverage`, which is every scope signed before this
-field, authorises sampled rehearsals only, so a complete plan under it is
-refused by name; a scope that says `complete` refuses a sampled plan too. A
-scope that says `complete` signs `maxPartitions: 0`, and every reader of this
-build refuses one with any other value: a runner or controller older than
-format 1.1.0 ignores `coverage`, and under a partition bound of 0 it runs
-nothing
-([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)). When
-the scope states `completeMaxRecords`, the plan's bound must be present and no
-larger. The runner cannot see `templateDigest`; it can see the signed scope, so
-an approver who signed sampled rehearsals never finds a complete one run in
-their name, whatever a controller renders.
-
-**A slot that came due before the `RehearsalSchedule` was created is not its
-slot.** The controller never rehearses a slot whose due time is before the
-object's `metadata.creationTimestamp`, even inside
-`spec.bounds.startingDeadlineSeconds`; the pass is idle, and the slot is neither
-named in `status.lastSkipped` nor written to `status.lastScheduledSlot`. The
-first rehearsal is the first slot at or after creation, the same rule as a
-`BackupSchedule` and a Kubernetes CronJob.
-
-**A skipped slot is skipped, never deferred.** Whatever the reason — every row
-above, and a namespace whose trust cannot verify any approver
-(`AuthorizationInvalid`) — the skip names the DUE slot it refused in
-`status.lastSkipped.slot` (not the instant the controller looked) and advances
-`status.lastScheduledSlot` to that slot in the same resourceVersion-checked
-status write. The slot is therefore decided: when the blocker clears inside
-`startingDeadlineSeconds` — last week's rehearsal finishes, the target becomes
-reachable, a Backup lands, the approval is re-verified — **that slot is not run
-late**; the next rehearsal is the next slot. A rehearsal measures recovery AT a
-cadence, and one fired forty minutes late because its predecessor overran would
-record an RTO for a slot that never happened. D3 names each of these reasons as
-a skip of the slot; for `TargetBusy` and `PointRetentionInProgress`, where it
-names the skip but not the late-fire question, the same conservative rule
-applies. A pass inside a slot already decided writes neither field — the `Ready`
-message still carries the current refusal — so `lastSkipped` stays the record
-of the last slot actually refused. Upgrading from a build that deferred: a slot
-that build left undecided is decided by the first pass of this one.
-
-A succeeded destination-backed `Backup` contributes its immutable named topic
-list even when evidence reading was `NotAttempted`, but it is only a joinable,
-non-selectable candidate until a catalog row supplies the receipt-derived
-capture time, window and selectability. `metadata.creationTimestamp` is only a
-sorting placeholder and never makes that candidate selectable. Because
-`pointId` truncates the receipt digest, catalog enrichment additionally requires
-the row's full `receiptSha256` to equal the Backup's captured digest; a colliding
-prefix cannot supply facts for another receipt. The catalog decides only where
-the controller could not look: when the Backup's own verification result is
-`NotAttempted`, `Pending`, absent, or a `Valid` on `trust.basis: Unverified`
-(nothing compared yet). A `Valid` beside no `trust` block or a
-`Current`/`Historical` basis is a pass the catalog may still narrow. A verdict
-the controller reached and refused — `Invalid`, `Untrusted`, a result this build
-does not recognise, or a `Valid` on any other trust basis
-(`RecordedBeforeRevocation`, `None`, a block with no basis) — is never made
-selectable by a catalog row, which
-may have been harvested before the receipt was replaced or its signer revoked.
-The same holds for a catalog-only candidate — a row no `Backup` of the
-schedule's `scheduleRefs` names, which is all a `catalogRef`-only schedule sees:
-the controller walks every page of the namespace's `Backup`s (up to 20 pages of
-500, read leniently so one object this build cannot type is simply no
-candidate) for either kind of source, and a row whose receipt any listed
-`Backup` refused is never selectable. A walk the bound cuts short admits no
-catalog-only row at all, and the `NoQualifyingPoint` skip names the Backup
-history as the reason. Of the schedule's own Backups the newest 200 by
-recovery point are candidates, so a long history never hides the newest run. The catalog also decides selectability only together with a representable,
-positive `recoveryPointAtMs`; a row without one leaves the candidate
-non-selectable. The protection policy applies the same rule, and reads an
-unrecognised verification result as `Untrusted`, never as `NotAttempted`. This
-preserves D3 §4.2's `topics ⊆ point.topics` filter without upgrading the
-Backup's verification or protection-health verdict.
-
-The last row is the one that matters most, and it runs over the bytes that will
-be frozen, before the reservation and before any `POST`: an out-of-scope plan
-reaches no `Restore`, no `ConfigMap` and no Job. **That half is live today.** The
-runner's half — proving the same thing again against the mounted bundle, through
-the same predicate from the same projection, before it constructs any client —
-is live too since PLAT-14.3b, and the `Restore` reconciler makes the same chain
-a THIRD time at admission (see "How a rehearsal executes" below).
-
-**The plan's target block is the saved connection's.** The controller renders
-`target.bootstrap_servers` and `target.auth` (mode, username, TLS) from the
-target `KafkaCluster` resolved for `RestoreTarget` — the resolution the
-`Restore` admission repeats before it compares the plan with the connection, so
-a rehearsal against a SCRAM or TLS target is admitted like any other restore.
-Neither the password, its Secret's name nor the CA is ever in the plan; they
-reach the runner through the connection's own projection. Builds before this
-fix rendered `auth: {mode: plaintext}` whatever the target was, and every
-rehearsal against an authenticated target ended `Failed/ConnectionPlanMismatch`
-with no Job (defect REHEARSAL-PLAN-AUTH-PLAINTEXT). **Existing standing
-Approvals are unaffected:** the template digest covers `RehearsalSchedule.spec`,
-which names the target only by `clusterRef`, and the signed scope carries the
-target cluster id and never its auth — so no authorization needs re-minting on
-upgrade, and a rollback renders plaintext again (and is refused at admission
-again) without touching one.
-
-**What the bundle contains.** One immutable `ConfigMap` owned by the `Restore`:
-the signed standing document at `standing-authorization.json` with its sidecar
-derived at `standing-authorization.sig` (the paths the runner mounts), the
-trusted public keys at `authorization-keys.json`, an allowlist holding **exactly**
-the signed target cluster id, and the approver's public key — **five members,
-and no per-run `approval.json` slot.** Every member is pinned by a sha256 in
-the Job's immutable environment, and no private key material is ever written to
-it. The sidecar keeps its own name: mounted at `approval.sig` the runner would
-verify it under `PAYLOAD_TYPE_APPROVAL` and report a correctly signed rehearsal
-as a substituted approval.
-
-**The rendered prefix is unique per schedule object.**
-`spec.target.topicPrefix` is rendered as `<prefix><schedule-uid-first-8>-`, for
-example `rehearsal-3f2a91c7-`. Two schedules therefore can never map a source
-topic to the same target name, and the runner's own prefix-scoped deletion
-guard can be scoped to one run. A schedule deleted and recreated gets a new UID
-and so a new prefix — correct, because it is a different object and its
-authorization is a different document.
-
-**The controller deletes no topic, ever.** Teardown is the runner's phase 9,
-which deletes the exact names it created through a deleter that refuses any name
-outside the prefix. A run that fails after its creation step completed, from
-phase 6 onwards (exit 1, 3 or 4), tears down what that step created by the
-same rule (FX-44). What either teardown could not remove
-is printed on the runner's `teardown-failed=` line, copied to
-`Restore.status.teardown.failed` and mirrored to
-`RehearsalSchedule.status.cleanup.pendingTopics`; while that list is non-empty
-the next slot is **skipped** with `LeftoverTopics`, because the run that would
-otherwise collide is not allowed to adopt or delete topics it did not create.
-
-**That guard covers a teardown that ran, and not a crash or a stopped
-creation step.** A stopped creation step (`CreatedTopicsLeft`, named on
-`status.targetTopicsAppeared`; nothing deleted, not in `pendingTopics`) leaves
-the next slot to phase 0's refusal too. A run killed
-before its teardown — deadline, OOM, node loss, an evicted pod — prints no
-`teardown-failed=` line, so `Restore.status.teardown` is absent, `pendingTopics` stays
-empty and the next slot fires under the same per-schedule prefix over whatever
-the dead run left behind. What happens then is the runner's phase 0 question (it
-refuses a mapped name that already exists), not this controller's, and the
-controller will not have told you why. If a rehearsal disappears without a
-terminal status, list the target's `rehearsal-<uid8>-` topics before the next
-slot is due. Making the prefix per-slot rather than per-schedule, or treating a
-vanished non-terminal child as `LeftoverTopics`, would close it; neither has
-landed.
-Clear them with your own Kafka tooling and then clear the status field:
-
-```
-kubectl --context <ctx> -n <ns> get rehearsalschedule weekly-orders \
-  -o jsonpath='{.status.cleanup.pendingTopics}'
-# delete those exact topics with kafka-topics.sh, then:
-kubectl --context <ctx> -n <ns> patch rehearsalschedule weekly-orders \
-  --subresource=status --type=merge -p '{"status":{"cleanup":null}}'
-```
-
-**What the status says, and who reads it.** `lastSucceeded` carries the
-`Restore`, the instant, the evidence key and the measured RTO; `lastFailed`
-carries why the run did not pass; `lastSkipped` carries the slot and one of
-the reasons above.
-
-**A rehearsal is recorded on its REACHED evidence verdict, not when its
-`Restore` turns terminal** (REHEARSAL-PASS-RECORDED-AS-FAILED). A
-destination-backed `Restore` writes its exit code and evidence keys first and
-its `outcome` and `evidence.verification` later, from the evidence-fetch Job.
-While that verdict is owed — the keys are named and no verdict is written yet,
-the verdict is `Pending`, or it is `NotAttempted` with a retry scheduled
-(`observation.retryAfter`) — the schedule records nothing, keeps
-`activeRestoreRef`, leaves `RehearsalHealthy` as it was, and a slot that comes
-due meanwhile is skipped `ConcurrencyBlocked` (firing would lose the result
-being waited for). Once the verdict is reached the run is recorded once:
-
-- `lastSucceeded` only for exit `0`, `outcome: pass` **and** a green verdict
-  (the `Restore` badge rule of §15.2 — `Valid` on the `Current` or
-  `Historical` basis);
-- otherwise `lastFailed`, whose `reason` is the verified signed `outcome`
-  (`fail-integrity`, …) or the exit's own reason for a run that did not exit 0,
-  and the badge's reason (`VerificationInvalid`, `VerificationUntrusted`,
-  `VerificationNotAttempted` once the fetch's attempts are spent) for one that
-  did;
-- a verdict still owed an hour after the run finished (`VERDICT_WAIT_SECONDS`,
-  longer than the whole fetch schedule's 35 minutes; the margin is for the
-  per-namespace evidence-fetch slot a Job may queue behind and per-step requeue
-  latency, and a namespace whose fetch slot stays saturated past it records a
-  genuine pass as a failure, never a failure as a pass) is `lastFailed` with
-  reason `EvidenceVerdictNotReached` — never a pass;
-- a run that named its evidence and has **no** verification block at all five
-  minutes after it finished (`UNRECORDED_VERDICT_GRACE_SECONDS`) is decided the
-  same way: on the controller's own read handle that shape is permanent (a
-  scorecard read that failed leaves no digest and so no verdict), and on the
-  fetch path it lasts one reconcile;
-- a rehearsal `Restore` deleted while `activeRestoreRef` still names it is
-  `lastFailed` with reason `RestoreDeleted`, and the ref is released. The same
-  record is written for a reservation (`pendingRestoreRef` with no matching
-  `activeRestoreRef`) whose `Restore` no longer exists, or was never created.
-
-**The reservation protocol, and what a lost write leaves.** A slot that fires
-writes three things in order: `pendingRestoreRef` and `lastScheduledSlot` under
-a resourceVersion-checked status patch, then the deterministic
-`logweir-rehearsal-<schedule>-<slot>` `Restore`, then the pass's commit
-(`activeRestoreRef`, `pendingRestoreRef: null`, the verdict and the three
-conditions). The commit is preconditioned on the version the reservation left,
-so it lands. If another writer changes the schedule in between, the commit is
-refused and nothing of it is stored. The next pass then reads the reserved name
-and adopts that `Restore` as `activeRestoreRef` only when it is this schedule's
-own: controlled by the schedule's UID and standing-authorised by its name. A
-`Restore` of that name owned by anything else is never adopted. The reservation
-is released, and a create that meets such an object is recorded as a
-`ConcurrencyBlocked` skip for its slot, with no bundle written.
-
-One residual remains, and it is bounded. The controller runs as one replica
-with the `Recreate` strategy, so two controllers overlap only when a pod is
-force-deleted or partitioned during a rollout. If that happens, one of them can
-read a reservation in the moment between the other's reservation write and its
-create. It then records `RestoreDeleted` for a child that is created a moment
-later, and that run is not tracked. The error fails loud:
-`RehearsalHealthy=False`, never a false pass. A controller that stops between
-its reservation and its create leaves the same record, and there it is correct,
-because that child never existed.
-
-`RehearsalHealthy` moves with the same decision (`True/Passed`, or
-`False/Failed` naming the reason). *Upgrade:* nothing to migrate. Builds before REHEARSAL-FIRE-PASS-STATUS-LOST's
-fix never stored a firing pass's commit: that write was preconditioned on the
-version the reservation had already moved, and was refused. So a schedule
-whose last-fired run is not yet recorded carries `pendingRestoreRef` and no
-`activeRestoreRef`, and `Authorized` still reads `Unknown/NoResult` after
-rehearsals fired. On upgrade the first pass adopts that pending `Restore`, or
-records it `RestoreDeleted` if it is gone. `Authorized` is evaluated on the next
-slot that fires. Rolling back leaves an older build reading `activeRestoreRef`
-first and `pendingRestoreRef` second, as it always did. A schedule
-whose `activeRestoreRef` names a finished run is simply re-read; a run an older
-controller already recorded (including a pass it recorded as `lastFailed`
-reason `ok`) is not revisited — the next rehearsal records correctly.
-*Rollback:* an older controller records the terminal instant again, so a
-destination-backed pass reads as failed until upgraded. The three conditions are `Ready` (this controller could act),
-`Authorized` (the standing document currently admits a slot: `True` from a
-pass that fired, `False` naming the refusal from a pass that refused the
-authorization, and carried unchanged by a pass that did not evaluate it, such
-as a concurrency skip) and `RehearsalHealthy` (the last finished rehearsal
-passed). A `ProtectionPolicy`
-reads `lastSucceeded.{at,restoreRef}` and `lastFailed.{at,reason}` — the four
-fields its `RehearsalFailure` alert is computed from — and reads nothing else
-here.
-
-**Evidence is never deleted.** Rehearsals write ordinary scorecards, sidecars,
-offset reports and teardown attestations under `logweir/drills/`. Their
-`Restore` objects are owned by the schedule with `blockOwnerDeletion: false`, so
-deleting the schedule collects the CRs and never the signed evidence, and a
-rehearsal in flight never blocks the delete.
-
-**RBAC.** This kind adds three rules to the `weirkeeper` ClusterRole:
-`get`/`list`/`watch` on `rehearsalschedules` (the `get` has a caller — the
-`Approval` reconciler reads the referent whose sealed spec the digest is
-recomputed from), `patch` on `rehearsalschedules/status`, and `create` on
-`restores`. No `delete` anywhere, no `update` on any kind, and no verb on
-`secrets`: the envelope, the sidecar and the approver's PUBLIC key all come from
-an `Approval` and from the namespace's resolved `TrustPolicy`.
-
-**Upgrade and rollback.** The kind is additive and off by default: an
-installation that never creates a `RehearsalSchedule` behaves exactly as before.
-`Restore.spec.approvalRef` became optional in this group, and a
-standing-authorized `Restore` carries `spec.authorization` instead; an OLDER
-controller reading one sees an empty `approvalRef` and refuses terminally with
-`ApprovalNotReceived` — fail closed, which is the required rollback behaviour.
-Rolling the CRDs back deletes any `RehearsalSchedule` objects and, by owner
-cascade, their `Restore` CRs and approval bundles; no archive object and no
-signed evidence is affected.
-
-**How a rehearsal executes.** The schedule fires, selects a point, proves the
-plan is inside the signed scope, reserves, creates the `Restore` and writes its
-bundle; the `Restore` reconciler then admits it and creates the Job. The
-standing document REPLACES the per-run approval rather than sitting beside it
-(PLAT-14.3b) — a per-run approval binds `sha256(plan bytes)` and only a human
-with a signing key can produce one, while the controller links no signer at all
-(Global Constraint 27), so requiring both is requiring a rehearsal never to run.
-
-*The runner.* `logweir restore run` takes `--standing-authorization` and
-`--authorization-keys` and no `--approval`. It verifies the DSSE signature over
-the envelope's exact bytes under a key the bundle pins, judges THAT key's usage
-(`GovernedApproval` only: the standing format carries no approval-policy
-mode, so a `ConsoleConfirmation` key authorises no rehearsal, and
-`EvidenceSigning` never authorizes), admits the document (kind, subject, the UID binding to this schedule,
-and a validity window capped at ninety days), and proves `plan ∈ scope` — all
-before any client is constructed. Each failure is refused by name with exit 3
-and `no data operation was started`. `--approval` is REQUIRED for every other
-shape and refused under `AUTHORIZATION_KIND=standing`; the contract's
-`LOGWEIR_EXECUTION_APPROVAL_SHA256` / `…_SIDECAR_SHA256` are likewise required
-under `approval` and refused under `standing`, so the approval slot's presence
-cannot disagree with the authorization kind in either direction.
-
-*`--triggered-by`.* A rehearsal's reason is a slot, not an approval a human
-clicked for this run, so the value is `rehearsal/<schedule>/<slot>` and it is
-copied verbatim into the signed scorecard. The runner checks its SHAPE before
-anything is parsed and binds the `<schedule>` segment to the signed document's
-own `subjectRef.name` once the signature verifies — a stronger binding than an
-equality against an environment variable the controller set. The scorecard's
-`approval.approver` reads `standing-authorization/<schedule>` and never a
-person's name: what a human signed was a schedule.
-
-*The controller.* `admit` dispatches on the object's own `spec.authorization` —
-never on what `Approval` happens to exist — so a standing document cannot admit
-an ordinary `Restore`, and an ordinary `Restore` still needs its own verified
-`Approval`. For a rehearsal it re-makes the schedule's chain: the `Approval` is
-`Verified=True` and is a `RehearsalSchedule` approval bound to the schedule the
-spec names, the key it verified under is one this namespace's trust still lets
-authorise with an approver's usage, the signed bytes are admissible against the
-UID the `Approval` controller recorded, and `plan ∈ scope`. Running it again
-here is not redundancy: a key can be withdrawn between the slot firing and this
-reconcile, and a `Restore` carrying `spec.authorization` can be created by
-anything with RBAC on the kind. A refusal is terminal with reason
-**`StandingAuthorizationRefused`** — its own reason, because an operator told
-`ApprovalSubjectMismatch` goes looking at a subject binding that is correct —
-and creates no Job. An absent or unverified `Approval` stays a thirty-second
-hold. This is the one kind for which trust is resolved BEFORE admission; the
-ordinary path still resolves it only when a Job is going to exist.
-
-*Minting the document.* `logweir drill approve --standing` signs it — the same
-signer as a per-run approval, under the standing payload type:
-
-```
-logweir drill approve --standing \
-  --key approver-private.pem \
-  --schedule-namespace team-a --schedule-name weekly-orders \
-  --schedule-uid $(kubectl --context <ctx> -n team-a get rehearsalschedule weekly-orders \
-                     -o jsonpath='{.metadata.uid}') \
-  --scope scope.json --valid-days 30 \
-  --out standing-authorization.json
-```
-
-`scope.json` is D3 §4.3's scope in camelCase — `templateDigest`,
-`targetClusterId`, `topicPrefix`, `topics`, `maxPartitions`,
-`recordsPerPartition`, `deadlineSeconds`, `modes` — and, for a schedule whose
-`spec.bounds.coverage` is `complete`, **`coverage: complete`** with
-**`maxPartitions: 0`**, and optionally **`completeMaxRecords`** (PROD-08.1a): a
-scope carrying either new field is minted at `formatVersion` 1.1.0, every other
-one at 1.0.0 as before. A scope that states no `coverage` authorises sampled
-rehearsals only; `completeMaxRecords` without `coverage: complete`, or of 0, and
-`coverage: complete` beside any `maxPartitions` but 0, are refused before
-anything is signed. The 0 is what makes a runner or controller older than
-format 1.1.0 refuse every plan under the document instead of reading it as a
-sampled scope; the schedule's own `spec.bounds.maxPartitions` still bounds the
-point a slot selects, inside the signed `templateDigest`.
-`--spec`, `--approver` and `--ticket` are refused: this document binds a SCOPE
-and covers every slot, and its versions carry neither an approver nor a
-ticket, so a value given for them would not be signed. The two files become the
-`Approval`'s `spec.approvalBytes` and `spec.sidecarBytes`, with
-`spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` set to the
-schedule's `templateDigest`. The signing key's PUBLIC half must be on this
-namespace's trust carrying `GovernedApproval`. `ConsoleConfirmation` is not
-accepted by the standing format merely because such a key exists, and
-`EvidenceSigning` never authorizes (D3 §7.3). The command refuses before signing anything the
-cluster would refuse afterwards: the ninety-day cap, a blank schedule UID, a
-mode this build does not implement, and every scope bound whose absence the
-runner treats as a mismatch.
-
-*Which `Approval` object, and not merely which name.*
-`spec.authorization.approvalRef` is a `LocalRef` and carries a name only, so
-the `Restore` reconciler resolves the standing `Approval` **by name**. To stop
-a different object that later took that name being used, the schedule stamps
-the UID of the `Approval` the slot was actually authorised against onto the
-child `Restore` as `logweir.dev/approval-uid`, and admission requires the
-resolved object to carry it — an `Approval` deleted and recreated under the
-same name is refused. A standing `Restore` with no such annotation is refused
-too: every one this build creates carries it, and one that predates it never
-executed.
-
-**The pin is metadata, and metadata is not frozen by the API server.**
-`Restore.spec` is CEL-immutable; an annotation is not, so "the `Approval`
-object a slot was authorised against cannot be re-pointed" rests on RBAC — no
-shipped human role has `patch` or `update` on `restores` — rather than on
-admission, unlike every other authorization input beside it in `spec`. Once the
-bundle exists the window closes anyway: the bundle is immutable and carries the
-resolved `Approval`'s UID, so any change is a terminal `ApprovalBundleConflict`.
-The real fix is a `uid` field on `approvalRef` so the reference carries the
-identity it means; that is a CRD change queued as a follow-up.
-
-*On the schedule.* A rehearsal that fails — verification, preflight, or its
-authorization — is recorded as the failure it is on `RehearsalHealthy` and
-D3 §4's `rehearsalLast*`, with the `Restore`'s own terminal reason in the
-message. The `StandingAuthorizationNotAdmitted` hold PLAT-14.3 carried while
-this was unwired is gone. Owned-topic cleanup is unchanged: the controller
-deletes no topic, teardown is the runner's phase 9 inside the prefix guard, and
-an unrelated topic on the target is never touched.
+`RehearsalSchedule` and the standing rehearsal authorization it ran under are
+withdrawn in v1 (release-notes item 73). A `Restore` carrying
+`spec.authorization` is refused `StandingAuthorizationRefused` before any Job,
+and an `Approval` naming a `RehearsalSchedule` is refused under the same
+reason. Run a restore test as a per-run `Restore`. Standing documents and
+rehearsal scorecards signed before v1 still verify
+([stability.md](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature)).
 
 ## 8. The approval flow
 
@@ -3764,21 +3265,11 @@ signature alike.
 | 8 | The document's `subject_kind` equals the referent's kind | `SubjectKindMismatch` |
 | 9 | The object's own `spec.planHash` -- the unsigned field beside the documents -- equals that same recomputed hash | `PlanHashMismatch` |
 
-A RehearsalSchedule approval shares checks 1–6, then parses the verified bytes
-as `StandingAuthorization`. The allowed usage set for this document kind is
-explicitly `GovernedApproval` only, whatever the namespace's approval policy,
-and `EvidenceSigning` never authorizes. The per-run table above is the
-`legacy-governed-v1` path; a namespace bound to an approval policy verifies
-authorization document v2 instead ("Approval policy" below).
-Its closed standing arm checks the exact canonical template digest and unsigned
-`spec.planHash`, the full subject
-identity including UID, the live at-most-90-day window, and the complete
-scratch-only scope. The corresponding reasons are
-`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
-and `StandingDocumentInvalid`; no standing failure is reported as the per-run
-`PlanHashMismatch`. `Verified` remains valid only until the earlier of the
-document's `expiresAt` and the matched key's `notAfter`, and reconciliation is
-requeued at that boundary.
+An `Approval` naming a `RehearsalSchedule` is refused
+`StandingAuthorizationRefused` before any check: standing authorizations are
+withdrawn in v1 (§7g). The table above is the `legacy-governed-v1` path; a
+namespace bound to an approval policy verifies authorization document v2
+instead ("Approval policy" below).
 
 Two more `reason`s reach the same `Verified` condition without being checks on
 a signature at all. They are properties of the **referent** — the object
@@ -4363,11 +3854,6 @@ the images back; a console-approved Restore not yet admitted is then refused
 and submitted again under the namespace's new mode, and a run already admitted
 continues.
 
-**What it does not cover.** A `RehearsalSchedule`'s standing authorization
-keeps its own `GovernedApproval`-only format (§7g) whatever the namespace is
-bound to; the ordinary form of a standing authorization (D3 §4.3) is not
-implemented.
-
 **Upgrade.** Existing installations keep their approval requirement: with no
 document every namespace is `legacy-governed-v1` and every existing `Approval`
 and signed archive verifies exactly as before. Binding a namespace applies to
@@ -4939,7 +4425,6 @@ inside — a schedule's policy:
 | manual `Backup` (`spec.trigger.kind: Manual`, or no `trigger` and `triggeredBy` ≠ `schedule`) | manual backups | `runs.maxManualBackupsActivePerNamespace`, default `4` |
 | admitted manual `Restore` (no `spec.authorization`) | manual restores | `runs.maxManualRestoresActivePerNamespace`, default `2` |
 | `Scheduled`, `CatchUp`, `Retry` `Backup` | none — `concurrencyPolicy` and `maxActiveRuns` | unchanged |
-| a `RehearsalSchedule`'s `Restore` | none — one active per schedule | unchanged |
 | topic discovery, preflight, evidence fetch | the check pools (`checks.*`) | unchanged |
 
 **The gate is the last check before anything is created.** A manual run is
@@ -6415,7 +5900,7 @@ turns a lost run into a green badge.
 (PoC batch 1, O-1). For a `KafkaCluster` every row above writes
 `Reachable=Unknown`, **clears `status.reachable`** and keeps `clusterId` (the
 identity last observed) — so no earlier `reachable: true` survives beside
-`NoExitCode` to admit a `Restore` or a rehearsal — and then gives the finished
+`NoExitCode` to admit a `Restore` — and then gives the finished
 Job the usual five-minute TTL, which is the re-probe timer: the pass after the
 TTL controller collects it creates a fresh probe Job. A `ProbeOutputUnreadable`
 verdict and a `NameTooLong` refusal clear `reachable` the same way. Before this
@@ -6475,7 +5960,7 @@ verdict, and no controller reads it as a crash:
   Job, a probe still running — clears `reachable` with reason `ProbeStale`
   (`Reachable=Unknown`, its message naming why no newer probe has answered)
   and leaves `observedAt` and `clusterId` as the record of the last real look.
-  A `Restore` and a rehearsal admit a target on `reachable: true` alone, so a
+  A `Restore` admits a target on `reachable: true` alone, so a
   stale reading admits nothing; the next probe that answers sets `reachable`
   again. A healthy connection is re-read every 315 s plus the probe's run, so
   it never reaches the bound.
@@ -6544,7 +6029,7 @@ the runner exited 3 (guard-refused); the code was read from status.containerStat
 
 `status.progress.message` carries the same text, and the console's operation
 page shows both. `status.exitReason` is unchanged: it stays the terminal state
-off `refusal-reason=`. Both a `Restore` (a rehearsal's included) and a `Backup`
+off `refusal-reason=`. Both a `Restore` and a `Backup`
 (a scheduled one included) do this.
 
 **It is the runner's own words, and a pod log is untrusted text.** The runner
@@ -7016,7 +6501,7 @@ TTL at creation time:
 
 | Volume | From | At | Why |
 |---|---|---|---|
-| `approval` | immutable ConfigMap `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` — a standing-authorized rehearsal projects five DIFFERENT members and neither `approval.*`; see §7g |
+| `approval` | immutable ConfigMap `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` |
 | `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | the runner's own signing key, readable only because `fsGroup: 65532` is set |
 | `plan` | ConfigMap `<name>-plan` | `/plan` | `spec.planBytes`, verbatim |
 | `work` | `emptyDir` | `/work` | the scorecard, the offset report and the checkpoint state, on a pod whose root filesystem is read-only |
@@ -7097,13 +6582,11 @@ object. It is exactly the failure the `Backup` archive sentinel was designed to
 avoid, and the enum cannot be given the same treatment — a sentinel needs a
 field to hide in, and this is the field.
 
-**The hazard is live once anyone has minted a standing authorization.** The
-rehearsal controller exists (§7g) and an operator creates such an `Approval` by
-hand from `logweir drill approve --standing`. An installation that never created
-one can apply these CRDs and roll the controller back unaffected; one that did
-must follow the order below. (An earlier revision of this section said no
-component created one and the rehearsal controller did not exist; that stopped
-being true with PLAT-14.3.)
+**The hazard is live once anyone has minted a standing authorization.** Nothing
+in v1 mints one (`logweir drill approve --standing` is withdrawn, §7g), but an
+installation that ran an earlier build may hold such an `Approval`. One that
+never created one can apply these CRDs and roll the controller back unaffected;
+one that did must follow the order below.
 
 **The rollback order:**
 
@@ -7152,10 +6635,8 @@ requests as requests, limits as limits, in the spelling the object carries (the
 API server stores the canonical form, so `0.5` reads back as `500m`). Absent,
 or with no quantity in it, the container states no `resources` at all, which is
 the Job every `Restore` had before FX-2, and the namespace's `LimitRange`
-defaults apply unchanged. A `RehearsalSchedule`'s `spec.bounds.runnerResources`
-is copied onto each child `Restore` verbatim and arrives the same way (§7g).
-The console never sets the field; it is set with `kubectl` or by a
-`RehearsalSchedule`. Neither the console nor the product API shows it yet, so an
+defaults apply unchanged.
+The console never sets the field; it is set with `kubectl`. Neither the console nor the product API shows it yet, so an
 approver does not see it beside the plan: read it with the `kubectl` line at the
 end of this section. Showing it on the `Restore` view is owed to PROD-10.1,
 which exposes the control.
@@ -7190,9 +6671,7 @@ missing unit before it becomes a pod the runtime cannot create. A `Restore`
 that breaks any rule ends `phase: Failed` with `reason: ExecutionSpecInvalid`
 (`Failed=True`, same reason) **before its approval is read, a manual-run pool
 slot is taken, or anything is created**, and the message names every refused
-field at once, because `spec` is immutable and the remedy is a new `Restore`. A
-`RehearsalSchedule` skips each slot as `AuthorizationInvalid` instead and
-creates no child (§7g).
+field at once, because `spec` is immutable and the remedy is a new `Restore`.
 
 **`LimitRange`, `ResourceQuota` and the scheduler decide the rest, and each
 answer lands on the `Restore`.** The Job is created with the values above; what
@@ -7255,19 +6734,7 @@ member of the approval bundle, so a per-run approver signs the data operation
 and not its container bounds — the same position as a per-run `Restore`'s
 `deadlineSeconds`. `spec` is immutable, so the value cannot change after the
 object is created, and a Job's pod template is immutable too: nothing changes it
-after admission. For a rehearsal the value is inside the `RehearsalSchedule`'s
-sealed spec, whose digest (`templateDigest`) the standing authorization signs,
-so a different value is a different schedule under a different authorization.
-
-**That binds the schedule, not every `Restore` the authorization admits.** The
-signed `RehearsalScope` carries no `runnerResources`. The `Restore` controller's
-standing admission checks a `Restore`'s plan and its `deadlineSeconds` against
-the signed scope, and the schedule's digest is out of its reach. So a standing
-`Restore` written by hand (anyone with `create` on `restores` may name the
-authorization) is held only to the controller's compiled-in bounds above, not to
-the schedule's sealed value; the `Restore`s the schedule creates carry that value
-verbatim. Carrying `runnerResources` in the signed `RehearsalScope`, a versioned
-change to a signed document, is owed to PROD-10.1.
+after admission.
 
 **Upgrade and rollback.** The CRD change is descriptions only; the field and its
 pattern have been served since the D3 W0 schemas. Before the upgrade, list the
@@ -7284,15 +6751,10 @@ objects it changes, those that already carry a block, with the inventory in
   is capped at, what the object said, so it can meet a quota or an OOM limit it
   never met before. A block outside the bounds ends it
   `Failed`/`ExecutionSpecInvalid`.
-- A `RehearsalSchedule` with the block set applies it from its next slot, or
-  skips every slot as `AuthorizationInvalid` when it is outside the bounds.
 - **Rolling back** to a controller from before FX-2 ignores the field again:
   the Jobs it creates carry no `resources`. A `Restore` this build refused stays
-  `Failed` (no controller acts on a terminal `Restore`); a schedule's next slot
-  fires under the older controller and drops the block, as it always did. A
-  schedule this build skipped for its block therefore runs again, uncapped:
-  suspend it first (`spec.suspend`, its one mutable field) if it must not.
-  Nothing has to be deleted in either direction.
+  `Failed` (no controller acts on a terminal `Restore`). Nothing has to be
+  deleted in either direction.
 
 What a runner Job actually carries:
 
@@ -7350,7 +6812,7 @@ segment that would not decode), compares only part of the restore. It signs
 reads `covered` before the outcome, so a real one is named by this reason and
 not by `OutcomeNotPass`, and so is a status whose other fields said pass), the
 product API's `verifiedSuccess` is `false`, the console's badge and list
-verdict say so, a rehearsal over it is `lastFailed`, the runner's notification
+verdict say so, the runner's notification
 body carries `integrity.covered: false` and its metrics
 `logweir_drill_integrity_complete_covered 0`. Alert on either: the condition's
 reason `CompleteNotCovered`, or the gauge
@@ -7453,8 +6915,7 @@ approval never authorises an original-name restore, and an `originalName`
 approval authorises nothing else: the controller refuses the pair terminally
 before any Job (`ApprovalSubjectMismatch`, "whose signed approval subject is
 not the one this Restore's plan needs"), and the runner refuses it again
-before it reads the archive or dials the target (exit 3). A standing rehearsal
-authorization never authorises one.
+before it reads the archive or dials the target (exit 3).
 
 **One person confirms only with the names typed — the owner's decision OD-10
 (2026-10-09).** In a namespace confirmed by one person (`confirm`, internal
@@ -7864,7 +7325,7 @@ proxy and its authority.
 
 `logweir-operator` grants `update` and `patch` on BackupSchedules. CEL in the
 CRD, not RBAC, decides what may change: since PLAT-05.1 every field except
-`spec.sourceRef` (§7, §9). The controller reads all fourteen kinds, patches
+`spec.sourceRef` (§7, §9). The controller reads all thirteen kinds, patches
 their status, creates Backups and Restores **and holds one `patch` on
 Backups**, Job create/read/patch, Pod and `pods/log` reads, ConfigMap
 create/get, and `delete` on exactly two transient kinds (§22.1). It has no
@@ -7876,8 +7337,9 @@ compare-and-set precondition (§10's three RBAC notes). Inspect
 
 ### The five Amendment G kinds, grant by grant
 
-The controller's rules for `ProtectionPolicy`, `RehearsalSchedule`,
-`RecoveryCatalog`, `RetentionPolicy` and `TrustPolicy` are written the way every
+The controller's rules for `ProtectionPolicy`, `RecoveryCatalog`,
+`RetentionPolicy` and `TrustPolicy` (Amendment G's `RehearsalSchedule` is
+withdrawn in v1) are written the way every
 other rule in that file is: a verb appears only where a reconciler calls it, and
 `crates/logweir/tests/manifest_lint.rs` walks both directions over the source
 manifest, the install file and every rendered chart copy.
@@ -7885,13 +7347,11 @@ manifest, the install file and every rendered chart copy.
 | Kind | Controller's verbs | Why not more |
 |---|---|---|
 | `protectionpolicies` | `list`, `watch`; `patch` on `/status` | no `get`: the watcher hands the object over and the reconciler never re-reads one |
-| `rehearsalschedules` | `get`, `list`, `watch`; `patch` on `/status` | `get` has a caller here where the others have none — an `Approval` naming a standing authorization is checked against the referent's own sealed spec, so the referent is read |
 | `recoverycatalogs` | `get`, `list`, `watch`; `patch` on `/status` | `get` is the one catalog a `ProtectionPolicy` names, folded into the existing rule rather than given a second one on the same resource |
 | `retentionpolicies` | `list`, `watch`; `patch` on `/status` | `list` is the namespace-wide conflict check (two policies over one destination); no `get`, no `update` |
 | `trustpolicies` | `list`, `watch`, `patch`; `patch` on `/status` | a namespace never names its own trust, so there is no name to `get`; the write half is `logweir-trust-admin`'s. `patch` on the object is the `logweir.dev/compromise-revocation` finalizer and nothing else (*Trust resolution*, below §8): RBAC cannot grant less than the object, so the one call site's body — `metadata.{name, resourceVersion, finalizers}` — is pinned by a test instead |
 
-Plus `create` on `restores` — one per due rehearsal slot, and nothing in the
-crate updates, replaces or deletes a `Restore` — and `list` on core `events`,
+Plus `list` on core `events`,
 which is how a Job pod that never started can say why: every Job-owning
 reconciler reads its own Jobs' and pods' events, by `involvedObject.uid`
 (FX-11, §12).
@@ -7917,7 +7377,6 @@ the same precondition and touches `metadata.finalizers` only.
 |---|---|---|---|
 | `protectionpolicies` | operator | `update`/`patch` (spec not sealed) | `logweir-operator` |
 | `recoverycatalogs` | operator | `patch` (`spec.syncRequest` only, by CEL) | `logweir-operator` |
-| `rehearsalschedules` | operator | `patch` (`spec.suspend` only, by CEL) | `logweir-operator` |
 | `retentionpolicies` | **retention admin** | `create`/`update`/`patch` | `logweir-retention-admin` |
 | `trustpolicies` | **trust admin** | `create`/`update`/`patch` | `logweir-trust-admin` |
 
@@ -7938,7 +7397,7 @@ upgrading the controller"](install.md#upgrade-crds-before-upgrading-the-controll
 carries the exact loop. Helm installs `crds/` on first release only and neither
 upgrades nor rolls them back, which is why the procedure is by hand.
 
-Five new CRDs are pure addition: nothing existing changes shape, no object is
+The new CRDs are pure addition: nothing existing changes shape, no object is
 converted, and a cluster that applies them and never creates one of the kinds
 behaves exactly as it did. The one carve-out is
 `Approval.spec.subjectRef.kind`, whose new `RehearsalSchedule` value is an enum
@@ -8127,10 +7586,7 @@ environment.
   the same holds for a destination-backed run whose evidence destination reads
   with `ControllerIdentity`: its failed read used to write no block at all
   (and so could never be read again), and now writes `NotAttempted` naming the
-  destination. Both are read again on the schedule in §15.1b, so a rehearsal
-  waits for that schedule — at most about 21 minutes of attempts, inside its
-  hour — and then records the reached verdict, rather than
-  `EvidenceVerdictNotReached` after its five-minute grace.
+  destination. Both are read again on the schedule in §15.1b.
 - **The console writes such a plan's evidence to the archive's own bucket** —
   the bucket the archive credential already wrote the point's receipt to, and on
   the chart's default install the handle's — and its restore readiness check
@@ -8200,7 +7656,7 @@ attempt remains in this process and `retryAfter` is absent.
 handle is removed, or re-pointed at another bucket, while an inline-archive
 run's attempt is scheduled, the next pass records `NotAttempted` with the
 handle's own sentence. It keeps the attempt count and clears `retryAfter`. A
-`Restore` then waits for a change, and a rehearsal over it stops waiting. The
+`Restore` then waits for a change. The
 run is read again when a controller process with a handle over its bucket
 starts.
 
@@ -9714,7 +9170,7 @@ victim's Secret to whichever connection came last; "splitting" a shared Secret
 would copy the victim's credential into a Secret bound to the thief.
 
 1. **Before the roll, suspend the credentialed schedules** (`spec.suspend:
-   true` on each `BackupSchedule` and `RehearsalSchedule` that uses such a
+   true` on each `BackupSchedule` that uses such a
    connection). `status.credentialBinding` exists only once the new controller
    has probed the connection, and until the Secret is bound every run of it is
    refused; suspending turns those refusals into skipped slots.
@@ -9970,7 +9426,7 @@ refused until it does. Binding is the theft §20.9 describes if it is done in a
 loop, so it is done with `scripts/bind-credential.py`, one Secret and one
 object at a time:
 
-1. **Before the roll, suspend** every `BackupSchedule` and `RehearsalSchedule`
+1. **Before the roll, suspend** every `BackupSchedule`
    whose destination, connection or inline archive uses a Secret, and expect
    in-flight runs re-created after the roll to be refused until step 3.
 2. Apply the CRDs (additive: three `status` fields) and roll the controller,
@@ -10036,10 +9492,6 @@ new status fields; bound Secrets keep working, and the extra key is inert.
   Secret's writer put there, and only that writer can change it.
 * **The product API cannot inspect an inline archive's `credentialRef`**: it
   names a Secret, as before, and the runner enforces the location binding.
-* **A standing rehearsal authorization's scope does not name the source or
-  evidence storage** (PLAT-14.3b): a `Restore` under one may name any inline
-  archive and Secret without a per-run approver. The location binding and the
-  region rule are what keep that Secret at its own location.
 
 ## 21. `Preflight`: what a readiness check proves, and what it cannot
 
@@ -10978,7 +10430,7 @@ ones).
 | Role | What it is for |
 |---|---|
 | `weirkeeper` | The controller. Bound by one `ClusterRoleBinding` at install. |
-| `logweir-viewer` | Read on all fourteen kinds. No `/status` resource is named — `get` already returns it — and no verb on `configmaps` or `secrets`. |
+| `logweir-viewer` | Read on all thirteen kinds. No `/status` resource is named — `get` already returns it — and no verb on `configmaps` or `secrets`. |
 | `logweir-operator` | `create` on the operational kinds; `update`/`patch` on `backupschedules`; `create`/`patch` on `backupdestinations`, `topicdiscoveries` and `preflights`. |
 | `logweir-approver` | `create` on `approvals`, `get`/`list` on `preflights`, nothing else. |
 | `logweir-trust-admin` | Cluster-scoped read and write on `trustpolicies`. The only holder of a write verb on the kind. |
@@ -11089,7 +10541,7 @@ renders none is a supported install, not a degraded one.
 | `discovery.defaultMaxTopics`, `preflight.defaultTimeoutSeconds` | **Withdrawn (FX-10, 2026-10-05). Nothing reads them.** They were documented as the defaults for a request that names none, but no request ever names none: the CRDs default `spec.request.maxTopics` (20 000) and `spec.request.timeoutSeconds` (120) at admission, and the console writes both. The controller accepts a document with or without them and applies no range rule to them, only the type: any whole number from 0 to 4 294 967 295 is accepted, and `null`, a negative, a fraction, a quoted number or a larger number is refused like any malformed field, which fails the whole document closed (as it did before FX-10). The chart renders them at fixed values: `hardMaxTopics` if lower than 20 000, else 20 000, and 120. That keeps the document readable by a controller older than FX-10, which requires both keys and refuses a document without them. `charts/logweir/README.md`, *Withdrawn values*, has the upgrade notes. |
 | `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
 | `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
-| `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults (4 and 2), so a document written before the block keeps bounding manual runs — and the chart renders the block **only** when a value differs from those defaults. |
+| `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s are never counted or queued. Absent is the defaults (4 and 2), so a document written before the block keeps bounding manual runs — and the chart renders the block **only** when a value differs from those defaults. |
 | `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only and reserved for `POST …/destinations:from-legacy` (D2 §3.12 branch (b)), which does not read it yet and refuses with branch (c) (§15.5). The restore readiness check over a `legacySourceArchive` point reads `endpoint` and `region` from it; `allowHttp` and `virtualHostedStyle` are read by nothing until that route lands. |
 
 **Who may write it is the access-control statement.** `create`/`update` on a

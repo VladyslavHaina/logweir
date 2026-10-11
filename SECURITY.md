@@ -167,10 +167,7 @@ them; a report that one of them is true is not a vulnerability report.
   namespace already allows. A region that is not a region name is refused
   outright (`StorageRegionInvalid`): without an endpoint the region is part of
   the host, and before FX-20's fix round a plan keeping the victim's bucket
-  could spell one that sent the requests elsewhere. A standing rehearsal
-  authorization's scope does not name the storage a `Restore` reads
-  (PLAT-14.3b), so under one the location binding and the region rule are
-  what keep a Secret at its location.
+  could spell one that sent the requests elsewhere.
 
 ## Cryptography
 

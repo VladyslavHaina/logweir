@@ -23,7 +23,6 @@ resources:
   - preflights.yaml
   - protectionpolicies.yaml
   - recoverycatalogs.yaml
-  - rehearsalschedules.yaml
   - restores.yaml
   - retentionpolicies.yaml
   - topicdiscoveries.yaml

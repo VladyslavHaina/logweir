@@ -601,8 +601,7 @@ pub struct RunnerJobSpec {
     /// `None` IS EVERY JOB'S SHAPE BEFORE FX-2, and it is still the answer
     /// for every Job no custom resource states resources for: the namespace's
     /// `LimitRange` defaults apply to it exactly as they did. Only a `Restore`
-    /// sets it, from `spec.runnerResources` — which a `RehearsalSchedule`
-    /// fills from its sealed `spec.bounds.runnerResources` — and only after
+    /// sets it, from `spec.runnerResources`, and only after
     /// [`crate::runner_resources::validate`] accepted every quantity.
     pub resources: Option<ContainerResources>,
 }

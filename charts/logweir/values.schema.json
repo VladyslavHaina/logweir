@@ -124,7 +124,7 @@
     "runs": {
       "type": "object",
       "additionalProperties": false,
-      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one namespace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups and a RehearsalSchedule's Restores are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
+      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one namespace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
       "required": ["maxManualBackupsActivePerNamespace", "maxManualRestoresActivePerNamespace"],
       "properties": {
         "maxManualBackupsActivePerNamespace": { "type": "integer", "minimum": 1 },

@@ -212,7 +212,7 @@ which it selected by time with **no recorded timestamp type**
   an existing value, and it can only move a verdict to the safer side** — a
   plan that ran and was signed `pass` is now refused before any target is
   created — so it is MINOR under OD-7's third case. It changes what an
-  installation does: a point-in-time restore or a scheduled rehearsal over a
+  installation does: a point-in-time restore over a
   topic recorded as `LogAppendTime` that ran before FX-8 is refused after it
   ([the limitation](#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
 - **The backup receipt's format does not change.** FX-4 already records each
@@ -1445,11 +1445,9 @@ or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersIn
 message names the topics, the partitions and the count. To restore such an archive as it is, state
 `restore.allow_transaction_markers: true` in the plan. The field is inside `plan_hash`, so the
 changed plan needs a new approval. Under the override the check is skipped, and the signed
-scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
-cannot state the override, so its slots over such an archive are refused and its
-`lastFailed.reason` names the refusal, nor does a standing authorization: a `Restore` under
-`spec.authorization` whose plan states the override is refused as outside the signed scope, because
-no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
+scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A standing
+authorization cannot state it either: a run under one whose plan states the override is refused as
+outside the signed scope, because no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
 the run with `GuardRefused`. A segment after the window that the store does not hold or the check
 cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
 output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
@@ -1534,10 +1532,7 @@ unknown. It is never read as `CreateTime` (rule 3: old evidence is never read as
 guarantee), and it is not refused, because that would stop every point-in-time restore of every
 archive written before FX-4, where a `CreateTime` topic's selection is right.
 
-A `RehearsalSchedule` states the opt-in as `spec.point.timeBasis: producerTime`, rendered into
-every slot's plan and bound by its standing authorization's `templateDigest`; a schedule without it
-has every slot over a topic recorded as `LogAppendTime` refused, and records
-`lastFailed.reason: PointInTimeByProducerTime` ([kubernetes.md](kubernetes.md) §7g). Measured by
+Measured by
 `e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output` (the topic-override
 arm: refused with no target topic, then run and labelled with the opt-in) and
 `e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`
@@ -2514,8 +2509,9 @@ a slot may run:
 | `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
 
 **Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
-defined from `formatVersion` 1.1.0. `logweir drill approve --standing` mints 1.1.0 exactly when the
-scope carries one of them, and 1.0.0 — byte for byte as before — otherwise; the DSSE payload type is
+defined from `formatVersion` 1.1.0. `logweir drill approve --standing` (withdrawn in v1,
+release-notes item 73) minted 1.1.0 exactly when the scope carried one of them, and 1.0.0 — byte for
+byte as before — otherwise; the DSSE payload type is
 unchanged. This build refuses either field under a document whose minor is below 1 or not a number,
 `completeMaxRecords` beside a scope that does not authorise complete coverage, a bound of 0, and
 **a scope that authorises `coverage: complete` with any `maxPartitions` but 0** (the minter refuses
@@ -2581,8 +2577,9 @@ genuinely signed document goes looking at the wrong thing.
 claims to be; the signed document's `subjectRef.uid` says which schedule the human authorised; the
 runner requires them to agree. What the runner does **not** check is `scope.templateDigest` —
 whether the scope matches the schedule's sealed spec. That is recomputed from the
-`RehearsalSchedule`'s own spec and is the controller's each-slot check (D3 §4.3(a)); a runner
-holding no cluster credential cannot read that spec at all.
+`RehearsalSchedule`'s own spec and was the controller's each-slot check (D3 §4.3(a)), withdrawn
+in v1 with the kind (release-notes item 73); a runner holding no cluster credential cannot read
+that spec at all.
 
 **The expiry is checked, against the node's clock, as a second line of defence.** `issuedAt` must
 not be in the future, `expiresAt` must not have passed, and `expiresAt - issuedAt` must not exceed

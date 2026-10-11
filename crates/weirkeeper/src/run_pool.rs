@@ -88,9 +88,9 @@
 //! # What this module is not
 //!
 //! It reads no clock (`now` is an argument) and holds no client. It does not
-//! decide anything about a scheduled, catch-up or retry `Backup`, or about a
-//! `RehearsalSchedule`'s `Restore` — those are [`Standing::Outside`] and their
-//! own policies bound them — and it does not change what a run executes: a
+//! decide anything about a scheduled, catch-up or retry `Backup` — those are
+//! [`Standing::Outside`] and their own policies bound them — and it does not
+//! change what a run executes: a
 //! queued run has no plan `ConfigMap`, no Job and no execution claim, and it
 //! freezes its inputs on the pass that admits it, exactly as it would have on
 //! its first pass.
@@ -142,7 +142,7 @@ pub enum Standing {
     Waiting,
     /// Neither: held on something the pool does not own (a missing
     /// destination or approval), or not a pool member at all (a scheduled
-    /// run, a rehearsal's restore).
+    /// run, or a `Restore` carrying a withdrawn standing authorization).
     Outside,
     /// A pool member that has finished (`Succeeded`, `Failed`, `Refused`): it
     /// holds nothing, and a reservation for it is released.
@@ -228,12 +228,12 @@ pub fn is_manual_backup(backup: &Backup) -> bool {
     crate::identity::declared_trigger(backup).0 == TriggerKind::Manual
 }
 
-/// Whether a `Restore` is a pool member at all: not a rehearsal's run.
+/// Whether a `Restore` is a pool member at all.
 ///
-/// A `RehearsalSchedule` creates its `Restore`s with `spec.authorization` (the
-/// standing, once-signed authorization) and bounds them itself — one active
-/// rehearsal per schedule. Every other `Restore` — the console's, `kubectl`'s,
-/// a runbook's — was asked for by a person and is manual.
+/// A `Restore` carrying `spec.authorization` (a standing authorization,
+/// withdrawn in v1) is refused at its admission and never takes a slot. Every
+/// other `Restore` — the console's, `kubectl`'s, a runbook's — was asked for
+/// by a person and is manual.
 #[must_use]
 pub fn is_manual_restore(restore: &Restore) -> bool {
     restore.spec.authorization.is_none()
@@ -331,8 +331,8 @@ pub fn backup_gated(backup: &Backup) -> bool {
 }
 
 /// Whether THIS pass of an ADMITTED `Restore` goes through the gate — **pure**,
-/// and the one predicate `controllers::restore` asks: a manual restore (not a
-/// rehearsal's) that does not already hold a slot.
+/// and the one predicate `controllers::restore` asks: a manual restore that
+/// does not already hold a slot.
 #[must_use]
 pub fn restore_gated(restore: &Restore) -> bool {
     is_manual_restore(restore) && restore_standing(restore) != Standing::Occupying

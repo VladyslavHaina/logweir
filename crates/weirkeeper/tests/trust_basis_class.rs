@@ -7,14 +7,13 @@
 //! rule". So a `Valid` is a pass on `Current`, on `Historical`, and with no
 //! trust block at all — and on nothing else.
 //!
-//! Four sites compared `result == "Valid"` alone (review of
+//! Four sites (one of them, the withdrawn rehearsal join, since removed) compared `result == "Valid"` alone (review of
 //! `claude/api-trust-state`, item 4):
 //!
 //! | site | what a non-pass `Valid` used to do |
 //! |---|---|
 //! | `protection::Evidence::from_verification` | counted as protecting evidence |
 //! | `catalog_view::is_reached_refusal` | was never a refusal |
-//! | `rehearsal_schedule::candidate_from_backup` `selectable` | was selectable |
 //! | `catalog_view`'s `decide` mapping | a wildcard read as `VerifiedHistorical` |
 //!
 //! None misfired on a verdict a current controller writes (`decide` pairs
@@ -30,7 +29,6 @@ use serde_json::{json, Value};
 use weirkeeper::catalog_view::{
     self as view, BackupVerdictFacts, ControllerRefusals, Verification,
 };
-use weirkeeper::controllers::rehearsal_schedule as rs;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::protection as p;
 use weirkeeper::verification::{self as v, ValidBasis, VerificationVerdict};
@@ -340,45 +338,6 @@ fn a_valid_on_a_refused_basis_is_a_reached_refusal_and_is_named_untrusted() {
                 "{result:?} on {basis:?}"
             );
         }
-    }
-}
-
-// ===========================================================================
-// Site 3: rehearsal — a `Backup` candidate's `selectable`
-// ===========================================================================
-
-/// MUTANT: revert `candidate_from_backup`'s `selectable` to
-/// `!needs_catalog_capture && verdict == Some("Valid")`. Every non-pass row
-/// becomes selectable on its own and fails.
-///
-/// A refused basis is also a refusal no `Verified` catalog row may overrule;
-/// `Unverified` defers to the catalog like `NotAttempted` (the badge's word).
-#[test]
-fn a_rehearsal_candidate_is_selectable_only_on_a_passing_basis() {
-    for (label, trust, expect) in shapes() {
-        let candidate = rs::candidate_from_backup(&typed_backup(trust.as_ref()))
-            .expect("a succeeded Backup with a receipt digest is a candidate");
-        assert_eq!(candidate.point_id, POINT_ID);
-        assert_eq!(candidate.selectable, is_pass(expect), "{label}: selectable");
-        assert_eq!(
-            candidate.verdict_refused,
-            expect == Expect::Refused,
-            "{label}: verdict_refused"
-        );
-
-        let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
-        rs::merge_catalog_entry(
-            &mut by_id,
-            verified_row(),
-            Some("primary".to_string()),
-            &ControllerRefusals::default(),
-        );
-        assert_eq!(
-            by_id[POINT_ID].selectable,
-            expect != Expect::Refused,
-            "{label}: a Verified catalog row answers for an undecided Valid and never for a \
-             refused one"
-        );
     }
 }
 

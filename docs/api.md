@@ -207,8 +207,7 @@ namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit,
 authorizationExpiresAt?}` and nothing created. The queue does not extend an
 approval's maximum age: the authorization is re-checked when a restore leaves
 the queue, and one that expired meanwhile is refused `AuthorizationExpired`
-with a message saying it expired while queued. A rehearsal's restores are never
-counted or queued.
+with a message saying it expired while queued.
 
 **`POST .../restores` answers where the submission goes next.** After the
 Restore exists (so it has a UID) the response carries `authorization`:
@@ -1140,7 +1139,7 @@ approval). The console signs `approvalSubject: originalName` into the
 authorization document only for a Restore that declares it, and shows the
 subject on the review step and the approvals page. The controller refuses an
 approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
-terminal), and a standing rehearsal authorization never authorises one. An
+terminal). An
 authorization document that carries `approvalSubject` or
 `originalNameConfirmation` is written as `formatVersion` **2.1.0**; every
 other document stays 2.0.0, byte for byte

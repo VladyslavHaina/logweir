@@ -47,7 +47,7 @@ fn crd_dir() -> PathBuf {
 }
 
 /// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
-const FILES: [&str; 14] = [
+const FILES: [&str; 13] = [
     "kafkaclusters.yaml",
     "backupschedules.yaml",
     "backups.yaml",
@@ -59,7 +59,6 @@ const FILES: [&str; 14] = [
     "preflights.yaml",
     "trustpolicies.yaml",
     "protectionpolicies.yaml",
-    "rehearsalschedules.yaml",
     "recoverycatalogs.yaml",
     "retentionpolicies.yaml",
 ];
@@ -298,12 +297,12 @@ fn the_kind_list_is_exactly_the_adr() {
     );
     assert_eq!(
         weirkeeper::crds::KINDS.len(),
-        14,
-        "ADR 0008 records fourteen kinds — Amendment A's six, Amendment F's \
+        13,
+        "ADR 0008 records thirteen kinds — Amendment A's six, Amendment F's \
          BackupDestination, TopicDiscovery and Preflight, and Amendment G's TrustPolicy, \
-         ProtectionPolicy, RehearsalSchedule, RecoveryCatalog and RetentionPolicy. A \
-         fifteenth needs its own amendment in docs/architecture.md, and this line is where \
-         that decision becomes a diff."
+         ProtectionPolicy, RecoveryCatalog and RetentionPolicy (its RehearsalSchedule is \
+         withdrawn in v1, OD-12). A fourteenth needs its own amendment in \
+         docs/architecture.md, and this line is where that decision becomes a diff."
     );
 
     // AND NO KIND IS REMOVED. `TrustRoster` stays served and reconciled,
@@ -522,7 +521,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// **`Backup`'s table is unchanged and was never affected: it has no `REASON`
 /// column at all** (PHASE/EXIT/RECORDS/SIGNED/AGE), so there was nothing
 /// reading `.status.exitReason` on that kind to repoint.
-const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
+const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
     (
         "KafkaCluster",
         &[
@@ -655,22 +654,6 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
         ],
     ),
     (
-        "RehearsalSchedule",
-        &[
-            ("SCHEDULE", ".spec.schedule", "string"),
-            ("SUSPEND", ".spec.suspend", "boolean"),
-            ("TARGET", ".spec.target.clusterRef.name", "string"),
-            ("LAST-OK", ".status.lastSucceeded.at", "date"),
-            ("NEXT", ".status.nextFireTime", "date"),
-            (
-                "AUTHORIZED",
-                ".status.conditions[?(@.type==\"Authorized\")].status",
-                "string",
-            ),
-            ("AGE", ".metadata.creationTimestamp", "date"),
-        ],
-    ),
-    (
         "RecoveryCatalog",
         &[
             ("DESTINATION", ".spec.destinationRef.name", "string"),
@@ -719,7 +702,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
 /// reference is a privilege-escalation surface. A kind that quietly became
 /// Cluster-scoped would move its objects out of every namespaced RBAC rule
 /// Task 21 writes.
-const SCOPES: [(&str, &str); 14] = [
+const SCOPES: [(&str, &str); 13] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
     ("Backup", "Namespaced"),
@@ -731,7 +714,6 @@ const SCOPES: [(&str, &str); 14] = [
     ("Preflight", "Namespaced"),
     ("TrustPolicy", "Cluster"),
     ("ProtectionPolicy", "Namespaced"),
-    ("RehearsalSchedule", "Namespaced"),
     ("RecoveryCatalog", "Namespaced"),
     ("RetentionPolicy", "Namespaced"),
 ];
@@ -960,7 +942,6 @@ fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
         "kafkaclusters.yaml" | "approvals.yaml" | "trustrosters.yaml" => &crds::WHOLE_SPEC_SEAL,
         "trustpolicies.yaml" => &crds::trust_policy::SPEC_RULES,
         "protectionpolicies.yaml" => &crds::protection_policy::SPEC_RULES,
-        "rehearsalschedules.yaml" => &crds::rehearsal_schedule::SPEC_RULES,
         "recoverycatalogs.yaml" => &crds::recovery_catalog::SPEC_RULES,
         "retentionpolicies.yaml" => &crds::retention_policy::SPEC_RULES,
         "backupschedules.yaml" => &crds::backup_schedule::SPEC_RULES,
@@ -1023,11 +1004,6 @@ fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
         }
         "protectionpolicies.yaml" => {
             for (path, rule, message) in crds::protection_policy::NESTED_RULES {
-                push(path, rule, message);
-            }
-        }
-        "rehearsalschedules.yaml" => {
-            for (path, rule, message) in crds::rehearsal_schedule::NESTED_RULES {
                 push(path, rule, message);
             }
         }
@@ -1420,21 +1396,6 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         "protectionpolicies.yaml",
         weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_RULE,
         weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_MESSAGE,
-    ),
-    (
-        "rehearsalschedules.yaml",
-        weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_RULE,
-        weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_MESSAGE,
-    ),
-    (
-        "rehearsalschedules.yaml",
-        weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_RULE,
-        weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_MESSAGE,
-    ),
-    (
-        "rehearsalschedules.yaml",
-        weirkeeper::crds::rehearsal_schedule::I3_POINT_SOURCE_RULE,
-        weirkeeper::crds::rehearsal_schedule::I3_POINT_SOURCE_MESSAGE,
     ),
     (
         "recoverycatalogs.yaml",
@@ -3072,7 +3033,6 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
         "preflights.yaml",
         "trustpolicies.yaml",
         "protectionpolicies.yaml",
-        "rehearsalschedules.yaml",
         "recoverycatalogs.yaml",
         "retentionpolicies.yaml",
     ] {
@@ -3947,138 +3907,6 @@ fn the_catalog_and_the_retention_policy_seal_what_they_must() {
          version-scoped, not withdrawn: it is unqualified wherever mode is not Enforce, and \
          an object that says nothing about mode is one of those."
     );
-}
-
-/// `RehearsalSchedule` seals every field but `suspend`, and the seal names
-/// each of them.
-#[test]
-fn a_rehearsal_schedule_seals_everything_but_suspend() {
-    let doc = crd("rehearsalschedules.yaml");
-    let rule = &attached_rules(&doc)
-        .into_iter()
-        .find(|r| r.path == ["spec"] && r.rule.contains("oldSelf"))
-        .expect("the rehearsal schedule seals its spec")
-        .rule;
-    let sealed: Vec<&str> = at(spec_schema(&doc), &["properties"])
-        .as_mapping()
-        .expect("the spec has properties")
-        .keys()
-        .filter_map(|k| k.as_str())
-        .filter(|k| *k != "suspend")
-        .collect();
-    assert!(
-        sealed.len() >= 7,
-        "expected the full field set; got {sealed:?}"
-    );
-    for field in &sealed {
-        assert!(
-            rule.contains(&format!("has(self.{field}) == has(oldSelf.{field})")),
-            "the seal must close the absent -> present transition for `{field}`; the standing \
-             authorization binds a digest of this spec, so a field that could be ADDED after \
-             approval would authorize work nobody approved.\nrule: {rule}"
-        );
-    }
-    assert!(
-        !rule.contains("suspend"),
-        "`suspend` is the one mutable field and must not appear in the seal"
-    );
-
-    // And v1's two single-value enums say what the decision says with CEL.
-    let spec = spec_schema(&doc);
-    assert_eq!(
-        enum_values(at(
-            spec,
-            &["properties", "point", "properties", "selection"]
-        )),
-        vec!["NewestAvailable"],
-    );
-    assert_eq!(
-        enum_values(at(
-            spec,
-            &["properties", "bounds", "properties", "concurrencyPolicy"]
-        )),
-        vec!["Forbid"],
-        "two concurrent rehearsals would race over the same mapped topic names"
-    );
-    assert_eq!(
-        at(
-            spec,
-            &[
-                "properties",
-                "target",
-                "properties",
-                "topicPrefix",
-                "pattern"
-            ]
-        )
-        .as_str(),
-        Some(weirkeeper::crds::rehearsal_schedule::TOPIC_PREFIX_PATTERN),
-        "the SPEC field carries the pre-rendering grammar"
-    );
-    assert_eq!(
-        at(
-            spec,
-            &[
-                "properties",
-                "target",
-                "properties",
-                "topicPrefix",
-                "minLength"
-            ]
-        )
-        .as_u64(),
-        Some(10),
-        "ten is `rehearsal-` itself, D3 §4.1's own example"
-    );
-
-    // THE TWO GRAMMARS ARE DIFFERENT, AND THAT IS THE POINT. The decision
-    // states `^rehearsal-[a-z0-9-]*-$` "after rendering": the controller
-    // appends `<uid8>-`, and it is the RENDERED value that has to end in a
-    // hyphen. Putting the rendered pattern on the spec field refused
-    // `rehearsal-` — measured live on 2026-09-16, because RE2 needs one more
-    // character before `-$` once the leading literal is consumed. This walks
-    // the same rendering the controller performs and checks the result,
-    // instead of trusting that the two patterns relate.
-    let rendered_ok = |prefix: &str| {
-        let rendered = format!("{prefix}3f2a91c7-");
-        rendered.starts_with("rehearsal-")
-            && rendered.ends_with('-')
-            && rendered[10..]
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    };
-    for prefix in ["rehearsal-", "rehearsal-eu-", "rehearsal-team-a-"] {
-        assert!(
-            rendered_ok(prefix),
-            "`{prefix}` must render into something matching {}",
-            weirkeeper::crds::rehearsal_schedule::RENDERED_TOPIC_PREFIX_PATTERN
-        );
-    }
-    assert_ne!(
-        weirkeeper::crds::rehearsal_schedule::RENDERED_TOPIC_PREFIX_PATTERN,
-        weirkeeper::crds::rehearsal_schedule::TOPIC_PREFIX_PATTERN,
-        "the two grammars are deliberately different; collapsing them is exactly what the live \
-         probe caught"
-    );
-
-    // And v1 refuses a rehearsal that would accept unverified evidence — which
-    // would prove the archive is READABLE and nothing about whether it is
-    // trustworthy.
-    let rs = weirkeeper::crds::rehearsal_schedule::I2_REQUIRE_VERIFIED_EVIDENCE_RULE;
-    for (name, value, expected) in [
-        (
-            "requireVerifiedEvidence true",
-            yaml("point:\n  requireVerifiedEvidence: true\n"),
-            true,
-        ),
-        (
-            "requireVerifiedEvidence false",
-            yaml("point:\n  requireVerifiedEvidence: false\n"),
-            false,
-        ),
-    ] {
-        assert_eq!(eval(rs, &value, &value), expected, "case `{name}`");
-    }
 }
 
 /// A `Restore` is never unauthorized, and the additive status blocks are all

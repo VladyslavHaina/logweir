@@ -231,11 +231,7 @@ The refusal names every refused topic and the record that made it
 
 **It is inside `plan_hash`.** The field is part of the plan bytes an approver
 signs, so an approval minted over a plan without it does not authorise the same
-plan with it, and the reverse. A `RehearsalSchedule` states it as
-`spec.point.timeBasis: producerTime`, rendered into every slot's plan and
-inside the standing authorization's `templateDigest`; a schedule that states
-none renders none, and its slots over a `LogAppendTime` topic are refused
-([kubernetes.md](../kubernetes.md) §7g).
+plan with it, and the reverse.
 
 **Absent field, old plans, old runners.** Every plan written before FX-8 lacks
 the field and means "no time selection by producer time is accepted". A runner
@@ -311,11 +307,9 @@ an optimised build on a laptop, several times the sampled check).
 `logweir drill run` and `logweir restore run` read it from the plan. A
 `Restore` declares the same value on `spec.coverage` (and
 `spec.completeMaxRecords`), and the controller refuses one whose declaration
-the plan does not say; a `RehearsalSchedule` asks for it with
-`spec.bounds.coverage`, under a standing authorization whose signed scope says
-`coverage: complete`; the console's restore wizard offers it as an advanced
+the plan does not say; the console's restore wizard offers it as an advanced
 choice with this cost beside it (PROD-08.1a,
-[kubernetes.md](../kubernetes.md) §12 and §7g).
+[kubernetes.md](../kubernetes.md) §12).
 
 **It is inside `plan_hash`.** The fields are part of the plan bytes an approver
 signs. Both are omitted from the serialised plan at their defaults, so a plan
@@ -453,7 +447,7 @@ selection reads, and `plan.parse` reports `SelectionInvalid` for a start at or
 after the end.
 
 **It is inside `plan_hash`.** A plan without a selection serialises exactly as
-one written before PROD-11.1 — a `RehearsalSchedule` slot's included.
+one written before PROD-11.1.
 
 **Old plans, old runners.** A plan without a selection restores the full
 window, exactly as before. A runner built BEFORE PROD-11.1 reads

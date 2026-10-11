@@ -2,10 +2,10 @@
 #
 # FOURTEEN, IN TWO RULES. The first is the original six (ADR 0008 Amendment A)
 # and is shared VERBATIM with the `weirkeeper` ClusterRole's own first rule;
-# the second is the eight kinds Amendments F and G added —
+# the second is the seven kinds Amendments F and G added —
 # `backupdestinations`, `topicdiscoveries`, `preflights` (D2 §7.2),
-# `protectionpolicies`, `rehearsalschedules`, `recoverycatalogs`,
-# `retentionpolicies` and `trustpolicies` (D3 §9). They are a SEPARATE rule so
+# `protectionpolicies`, `recoverycatalogs`, `retentionpolicies` and
+# `trustpolicies` (D3 §9; G's `rehearsalschedules` is withdrawn in v1). They are a SEPARATE rule so
 # the six-kind list stays byte-identical to the controller's, which is what
 # makes a widening of it visible in a diff.
 #
@@ -62,7 +62,6 @@ rules:
       - preflights
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
       - retentionpolicies
       - topicdiscoveries
       - trustpolicies

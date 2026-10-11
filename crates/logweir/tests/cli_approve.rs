@@ -232,9 +232,9 @@ fn the_subject_kind_values_are_the_wire_spellings() {
     assert_eq!(out.status.code(), Some(0));
     let help = String::from_utf8(out.stdout).unwrap();
     assert!(
-        help.contains("[possible values: Restore, Backup, RehearsalSchedule]"),
-        "the capitalised wire spellings, in the order the enum declares them; \
-         `RehearsalSchedule` joined them with PLAT-14.3b's standing signer: {help}"
+        help.contains("[possible values: Restore, Backup]"),
+        "the capitalised wire spellings, in the order the enum declares them \
+         (`RehearsalSchedule` left with the withdrawn standing signer): {help}"
     );
     assert!(
         help.contains("[default: Restore]"),
@@ -258,16 +258,6 @@ fn the_subject_kind_values_are_the_wire_spellings() {
     // And the constants the rest of the workspace compares against.
     assert_eq!(logweir::cli::SubjectKindArg::Restore.as_str(), "Restore");
     assert_eq!(logweir::cli::SubjectKindArg::Backup.as_str(), "Backup");
-    assert_eq!(
-        logweir::cli::SubjectKindArg::RehearsalSchedule.as_str(),
-        "RehearsalSchedule",
-        "the spelling the Approval controller compares its referent's kind against"
-    );
-    assert_eq!(
-        logweir::cli::SubjectKindArg::RehearsalSchedule.as_str(),
-        logweir_core::execution_contract::REHEARSAL_SCHEDULE_KIND,
-        "the flag and the SIGNED document name the same kind"
-    );
     assert_eq!(
         logweir_core::spec::SUBJECT_KIND_RESTORE,
         logweir::cli::SubjectKindArg::Restore.as_str(),
@@ -306,343 +296,72 @@ fn a_lower_cased_subject_kind_is_a_usage_error() {
 }
 
 // ===========================================================================
-// PLAT-14.3b fix round 2 — the SHIPPED `--standing` command line
+// PROD-17.1 C1 (OD-12) — the standing mint is withdrawn
 // ===========================================================================
-//
-// The P0 rows in `standing_approve.rs` call `approve::mint_standing` directly,
-// so none of the clap plumbing was covered: not `main.rs`'s
-// "--subject-kind RehearsalSchedule requires --standing" refusal — the only
-// thing stopping a RehearsalSchedule referent being minted under
-// `PAYLOAD_TYPE_APPROVAL` — and not the required/conflicts constraints. These
-// rows spawn the binary, exactly as the rest of this file does.
 
-fn standing_scope(dir: &Path) -> PathBuf {
-    let p = dir.join("scope.json");
-    std::fs::write(
-        &p,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "templateDigest": "sha256:aa",
-            "targetClusterId": "TARGET00000000000000000",
-            "topicPrefix": "rehearsal-3f2a91c7-",
-            "topics": ["orders"],
-            "maxPartitions": 200,
-            "recordsPerPartition": 25,
-            "deadlineSeconds": 3600,
-            "modes": ["scratch"],
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    p
-}
-
-/// The documented command line runs, exits 0, and writes both files.
+/// **`drill approve --standing` is refused by clap, and so is
+/// `--subject-kind RehearsalSchedule`.** Standing rehearsal authorizations are
+/// withdrawn in v1, so this binary mints none: the flag is unknown and the
+/// value is not one of `--subject-kind`'s. Both are usage errors (exit 1,
+/// never 2 — Global Constraint 11) that name what was refused, and nothing is
+/// written.
 ///
-/// It is the block `docs/kubernetes.md` §7g gives an operator, and the review
-/// found that block naming `logweir approve` — a subcommand that does not
-/// exist. This row is what makes the documented spelling a tested one.
+/// NEGATIVE CONTROL: the same command line without the refused word mints
+/// both files, so the refusal is the flag's or the value's and not the rest of
+/// the line's. Restoring `--standing` to the CLI makes the first half fail.
 #[test]
-fn the_documented_standing_command_line_mints_both_files() {
+fn the_withdrawn_standing_mint_is_refused_by_clap() {
     let dir = tempfile::tempdir().unwrap();
-    let key = write_key(dir.path());
-    let scope = standing_scope(dir.path());
-    let out = dir.path().join("standing-authorization.json");
-
-    let done = bin()
-        .args(["drill", "approve", "--standing", "--key"])
-        .arg(&key)
-        .args([
-            "--schedule-namespace",
-            "team-a",
-            "--schedule-name",
-            "weekly-orders",
-            "--schedule-uid",
-            "3f2a91c7-1111-4222-8333-444444444444",
-        ])
-        .arg("--scope")
-        .arg(&scope)
-        .args(["--valid-days", "30"])
-        .arg("--out")
-        .arg(&out)
-        .output()
-        .unwrap();
-    let transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_eq!(done.status.code(), Some(0), "{transcript}");
-    let stdout = String::from_utf8_lossy(&done.stdout);
-    assert!(
-        stdout.contains(
-            "The standing format accepts GovernedApproval only, under\nevery approval policy"
-        ),
-        "success guidance pins the governed-only standing contract: {stdout}"
-    );
-    assert!(
-        stdout.contains("ConsoleConfirmation authorises no rehearsal"),
-        "success guidance says a console key cannot authorize a rehearsal: {stdout}"
-    );
-    assert!(
-        !stdout.contains("GovernedApproval or ConsoleConfirmation"),
-        "the superseded authority claim must not return: {stdout}"
-    );
-    assert!(out.exists(), "the envelope: {transcript}");
-    assert!(
-        out.with_extension("sig").exists(),
-        "and its DERIVED sidecar: {transcript}"
-    );
-
-    // Signed under the STANDING payload type, and readable as the document
-    // both the controller and the runner parse.
-    let sidecar: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.with_extension("sig")).unwrap()).unwrap();
-    assert_eq!(
-        sidecar["payloadType"].as_str(),
-        Some(logweir_core::execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION),
-        "a per-run payload type here makes a rehearsal read as a substituted approval"
-    );
-    let doc: logweir_core::execution_contract::StandingAuthorization =
-        serde_json::from_slice(&std::fs::read(&out).unwrap()).expect("the envelope parses");
-    assert_eq!(doc.subject_ref.uid, "3f2a91c7-1111-4222-8333-444444444444");
-    assert_eq!(doc.scope.deadline_seconds, 3600);
-
-    // And no private material reached either file.
-    for written in [out.clone(), out.with_extension("sig")] {
-        let bytes = std::fs::read(&written).unwrap();
-        assert!(
-            !String::from_utf8_lossy(&bytes).contains("PRIVATE"),
-            "{}: a signed artifact never carries key material",
-            written.display()
-        );
-    }
-}
-
-/// `--subject-kind RehearsalSchedule` WITHOUT `--standing` is refused by name.
-///
-/// It is the guard in `main.rs`: those bytes would be signed under
-/// `PAYLOAD_TYPE_APPROVAL`, and the `Approval` controller refuses an ordinary
-/// approval for a `RehearsalSchedule` referent — so the operator would get a
-/// signed document, spend a key, and learn nothing until the object was
-/// rejected.
-#[test]
-fn a_rehearsal_schedule_subject_without_standing_is_refused_by_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let key = write_key(dir.path());
     let spec = dir.path().join("drill.yaml");
     std::fs::write(&spec, example_spec()).unwrap();
-    let out = dir.path().join("approval.json");
-
-    let done = bin()
-        .args([
-            "drill",
-            "approve",
-            "--subject-kind",
-            "RehearsalSchedule",
-            "--spec",
-        ])
-        .arg(&spec)
-        .arg("--key")
-        .arg(&key)
-        .args(["--approver", "me", "--ticket", "CHG-1"])
-        .arg("--out")
-        .arg(&out)
-        .output()
-        .unwrap();
-    let transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_ne!(done.status.code(), Some(0), "{transcript}");
-    assert!(
-        transcript.contains("requires --standing"),
-        "the refusal says what to do: {transcript}"
-    );
-    assert!(!out.exists(), "and nothing was signed: {transcript}");
-}
-
-/// The rest of the shipped constraints, each over the binary: the ninety-day
-/// cap, `--standing` with no `--scope`, `--standing` with an explicit
-/// `--subject-kind`, and a PER-RUN approval with no `--approver`.
-#[test]
-fn the_standing_command_line_refuses_what_the_flags_promise() {
-    let dir = tempfile::tempdir().unwrap();
     let key = write_key(dir.path());
-    let scope = standing_scope(dir.path());
-    let spec = dir.path().join("drill.yaml");
-    std::fs::write(&spec, example_spec()).unwrap();
-
-    let standing_base = |out: &Path| -> Vec<String> {
-        vec![
-            "drill".into(),
-            "approve".into(),
-            "--standing".into(),
-            "--key".into(),
-            key.display().to_string(),
-            "--schedule-namespace".into(),
-            "team-a".into(),
-            "--schedule-name".into(),
-            "weekly-orders".into(),
-            "--schedule-uid".into(),
-            "u-1".into(),
-            "--out".into(),
-            out.display().to_string(),
-        ]
-    };
-
-    // (a) D3 §4.3's ninety-day cap, refused at minting time.
-    let out = dir.path().join("a.json");
-    let mut argv = standing_base(&out);
-    argv.extend([
-        "--scope".to_string(),
-        scope.display().to_string(),
-        "--valid-days".to_string(),
-        "91".to_string(),
-    ]);
-    let done = bin().args(&argv).output().unwrap();
-    let t = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_ne!(done.status.code(), Some(0), "{t}");
-    assert!(t.contains("90"), "the cap is named: {t}");
-    assert!(!out.exists(), "nothing was signed: {t}");
-
-    // (b) `--standing` with no `--scope` names the flag, not a blank path.
-    let out = dir.path().join("b.json");
-    let done = bin().args(standing_base(&out)).output().unwrap();
-    let t = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_ne!(done.status.code(), Some(0), "{t}");
-    assert!(t.contains("--scope"), "the missing flag is named: {t}");
-
-    // (c) an explicit `--subject-kind` under `--standing` is discarded by the
-    //     document (its kind is always RehearsalSchedule), so it is refused
-    //     rather than silently ignored.
-    let out = dir.path().join("c.json");
-    let mut argv = standing_base(&out);
-    argv.extend([
-        "--scope".to_string(),
-        scope.display().to_string(),
-        "--subject-kind".to_string(),
-        "Backup".to_string(),
-    ]);
-    let done = bin().args(&argv).output().unwrap();
-    let t = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_ne!(done.status.code(), Some(0), "{t}");
-    assert!(t.contains("--subject-kind"), "{t}");
-    assert!(!out.exists(), "nothing was signed: {t}");
-
-    // (d) **THE PER-RUN PATH IS STILL REQUIRED TO NAME A HUMAN.** Fix round 1
-    //     made `--approver`/`--ticket` default to "" so `--standing` need not
-    //     supply them, which let a drill be approved by nobody under no ticket
-    //     — signed bytes that land verbatim in the scorecard.
-    let out = dir.path().join("d.json");
-    let done = bin()
-        .args(["drill", "approve", "--spec"])
-        .arg(&spec)
-        .arg("--key")
-        .arg(&key)
-        .arg("--out")
-        .arg(&out)
-        .output()
-        .unwrap();
-    let t = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_ne!(done.status.code(), Some(0), "{t}");
-    assert!(t.contains("--approver"), "the missing flag is named: {t}");
-    assert!(!out.exists(), "and no approval was signed by nobody: {t}");
-}
-
-/// **The runbook's command line is a TESTED command line.**
-///
-/// `docs/kubernetes.md` §7g gives an operator one copy-pasteable block for the
-/// standing signer, and review 2 found it naming `logweir approve` — a
-/// subcommand that does not exist (`error: unrecognized subcommand 'approve'`).
-/// No gate caught it: `doc_lint` validates notices, footers, pointers and
-/// digests, never a command line.
-///
-/// This reads the block out of the document and requires (a) that it invokes
-/// `logweir drill approve` and (b) that every long flag it uses is one this
-/// binary actually accepts, taken from `--help`. A flag renamed here or a
-/// command renamed there fails this row.
-#[test]
-fn the_documented_standing_command_line_uses_flags_this_binary_has() {
-    let doc = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/kubernetes.md"),
-    )
-    .expect("docs/kubernetes.md");
-
-    // The fenced block that starts with the standing invocation.
-    // The FENCED occurrence, not the inline mention in the sentence above it.
-    let start = doc
-        .find("```\nlogweir drill approve --standing")
-        .map(|i| i + 4)
-        .unwrap_or_else(|| {
-            panic!(
-                "§7g must show `logweir drill approve --standing`; if it says `logweir approve` \
-                 the runbook names a subcommand that does not exist"
-            )
-        });
-    let block: String = doc[start..]
-        .split("```")
-        .next()
-        .expect("the fenced block ends")
-        .to_string();
-    assert!(
-        !block.contains("\nlogweir approve"),
-        "the block must not also teach the non-existent spelling: {block}"
-    );
-
-    let help = {
-        let out = bin().args(["drill", "approve", "--help"]).output().unwrap();
-        assert_eq!(out.status.code(), Some(0));
-        String::from_utf8(out.stdout).unwrap()
-    };
-
-    let mut checked = 0;
-    for token in block.split_whitespace() {
-        // Long flags only; `$(kubectl … -o jsonpath=…)` contributes short ones
-        // and values, which this row deliberately does not police.
-        let Some(flag) = token.strip_prefix("--") else {
-            continue;
-        };
-        let flag = flag.trim_end_matches('\\');
-        if flag.is_empty() || flag.starts_with('-') {
-            continue;
-        }
-        // The `kubectl` substitution inside the block is not this binary's.
-        if ["context", "help"].contains(&flag) {
-            continue;
-        }
-        assert!(
-            help.contains(&format!("--{flag}")),
-            "the runbook passes `--{flag}`, which `logweir drill approve --help` does not list:\n{help}"
+    let attempt = |name: &str, extra: &[&str]| {
+        let out = dir.path().join(format!("{name}.json"));
+        let done = bin()
+            .args(["drill", "approve"])
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--key")
+            .arg(&key)
+            .args(["--approver", "a@example.com", "--ticket", "CHG-1"])
+            .args(extra)
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        let transcript = format!(
+            "{}{}",
+            String::from_utf8_lossy(&done.stdout),
+            String::from_utf8_lossy(&done.stderr)
         );
-        checked += 1;
-    }
+        (done.status.code(), transcript, out)
+    };
+
+    let (code, transcript, out) = attempt("standing", &["--standing"]);
+    assert_eq!(code, Some(1), "{transcript}");
     assert!(
-        checked >= 7,
-        "the documented block should exercise the standing flags; only {checked} were checked"
+        transcript.contains("unexpected argument '--standing'"),
+        "clap names the withdrawn flag: {transcript}"
     );
+    assert!(!out.exists() && !out.with_extension("sig").exists());
+
+    let (code, transcript, out) = attempt("kind", &["--subject-kind", "RehearsalSchedule"]);
+    assert_eq!(code, Some(1), "{transcript}");
+    assert!(
+        transcript.contains("invalid value 'RehearsalSchedule'"),
+        "clap names the withdrawn value: {transcript}"
+    );
+    assert!(!out.exists() && !out.with_extension("sig").exists());
+
+    // The control.
+    let (code, transcript, out) = attempt("control", &[]);
+    assert_eq!(code, Some(0), "{transcript}");
+    assert!(out.exists() && out.with_extension("sig").exists());
 }
 
 /// **The blank-approver refusal is `mint`'s own, not clap's.**
 ///
-/// `--approver` is `required_unless_present = "standing"`, so the command line
-/// cannot omit it — which means a mutant deleting the check inside `mint`
+/// `--approver` is required by clap, so the command line cannot omit it — which means a mutant deleting the check inside `mint`
 /// survives every subprocess row here. This one calls the library directly,
 /// the way any future caller that builds `ApproveArgs` itself would, and a
 /// whitespace-only value is refused for the same reason an absent one is: the
@@ -656,14 +375,13 @@ fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
     let key = write_key(dir.path());
 
     let args = |approver: &str, ticket: &str| logweir::approve::ApproveArgs {
-        spec: Some(spec.clone()),
+        spec: spec.clone(),
         key: key.clone(),
         approver: approver.to_string(),
         ticket: ticket.to_string(),
         out: dir.path().join("blank.json"),
         subject_kind: "Restore".to_string(),
         approval_subject: None,
-        standing: None,
     };
 
     for (approver, ticket, flag) in [
@@ -726,14 +444,13 @@ fn mint_signs_the_callers_now_as_approved_at() {
             .join(format!("approval-{}.json", now.timestamp()));
         logweir::approve::mint(
             &logweir::approve::ApproveArgs {
-                spec: Some(spec.clone()),
+                spec: spec.clone(),
                 key: key.clone(),
                 approver: "operator@example.com".to_string(),
                 ticket: "CHG-42".to_string(),
                 out: out.clone(),
                 subject_kind: "Restore".to_string(),
                 approval_subject: None,
-                standing: None,
             },
             now,
         )
@@ -749,12 +466,10 @@ fn mint_signs_the_callers_now_as_approved_at() {
 
 /// **The binary's half: `drill approve` hands the mint the WALL CLOCK.**
 ///
-/// The library rows prove that `mint` and `mint_standing` stamp and judge the
-/// `now` they are handed. This row proves `run` hands them the wall clock. It
-/// compares each stamp with this test's own clock, read around the
-/// subprocess, so it holds on any date. A `run` that passed a fixed instant
-/// fails (a) or (b), and one that passed an instant before 2020-01-31 also
-/// signs (c).
+/// The library rows prove that `mint` stamps the `now` it is handed. This row
+/// proves `run` hands it the wall clock. It compares the stamp with this
+/// test's own clock, read around the subprocess, so it holds on any date. A
+/// `run` that passed a fixed instant fails.
 #[test]
 fn drill_approve_hands_the_mint_the_wall_clock() {
     // Generous, because the row is about WHICH clock, not about latency: a
@@ -771,70 +486,6 @@ fn drill_approve_hands_the_mint_the_wall_clock() {
         before - slack <= doc.approved_at && doc.approved_at <= after + slack,
         "approved_at {} is not the wall clock ({before} .. {after})",
         doc.approved_at
-    );
-
-    // (b) The standing document's `issuedAt`, with no `--issued-at`.
-    let dir = tempfile::tempdir().unwrap();
-    let key = write_key(dir.path());
-    let scope = standing_scope(dir.path());
-    let standing = |out: &Path, extra: &[&str]| {
-        bin()
-            .args(["drill", "approve", "--standing", "--key"])
-            .arg(&key)
-            .args([
-                "--schedule-namespace",
-                "team-a",
-                "--schedule-name",
-                "weekly-orders",
-                "--schedule-uid",
-                "u-1",
-            ])
-            .arg("--scope")
-            .arg(&scope)
-            .args(extra)
-            .arg("--out")
-            .arg(out)
-            .output()
-            .unwrap()
-    };
-    let out = dir.path().join("standing-authorization.json");
-    let before = chrono::Utc::now();
-    let done = standing(&out, &["--valid-days", "30"]);
-    let after = chrono::Utc::now();
-    assert_eq!(
-        done.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&done.stderr)
-    );
-    let doc: logweir_core::execution_contract::StandingAuthorization =
-        serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
-    assert!(
-        before - slack <= doc.issued_at && doc.issued_at <= after + slack,
-        "issuedAt {} is not the wall clock ({before} .. {after})",
-        doc.issued_at
-    );
-
-    // (c) A window that closed in 2020 is refused through the binary, exit 1,
-    //     with nothing written.
-    let past = dir.path().join("closed-2020.json");
-    let done = standing(
-        &past,
-        &["--valid-days", "30", "--issued-at", "2020-01-01T00:00:00Z"],
-    );
-    let transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&done.stdout),
-        String::from_utf8_lossy(&done.stderr)
-    );
-    assert_eq!(done.status.code(), Some(1), "{transcript}");
-    assert!(
-        transcript.contains("already in the past"),
-        "the refusal says what is wrong: {transcript}"
-    );
-    assert!(
-        !past.exists() && !past.with_extension("sig").exists(),
-        "and nothing was signed: {transcript}"
     );
 }
 

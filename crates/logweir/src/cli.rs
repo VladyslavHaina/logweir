@@ -439,42 +439,19 @@ pub enum DrillCmd {
         /// The drill spec this approval authorises. `plan_hash` is the sha256
         /// of its EXACT bytes, so re-run this after any edit — including a
         /// moved `sample.window_*`.
-        ///
-        /// Required for a per-run approval; **not used with `--standing`**,
-        /// which binds a SCOPE covering every slot of one schedule rather than
-        /// one plan's hash.
         #[arg(long)]
-        spec: Option<PathBuf>,
+        spec: PathBuf,
         /// The approver's PRIVATE key (PKCS#8 PEM, P-256 or Ed25519).
         /// `drill run --approver-key` takes the matching PUBLIC key.
         #[arg(long)]
         key: PathBuf,
         /// Who approved: a person, a rota address, a change-management
         /// identity. Copied into the signed scorecard verbatim.
-        ///
-        /// Not used with `--standing`: version 1.0.0 of the standing document
-        /// carries no such field, so a value would not be signed.
-        //
-        // REQUIRED, AND ONLY `--standing` RELAXES IT. Fix round 1 made both
-        // `default_value = ""` so the standing arm would not have to supply
-        // them, which silently allowed a PER-RUN approval to be minted by
-        // nobody under no ticket — signed bytes that `phase1_approval::verify`
-        // copies verbatim into the scorecard's `approval.approver`. The
-        // accountability record is the product's output; it does not get to be
-        // blank because a sibling subcommand found the flag inconvenient.
-        //
-        // `Option<String>` is the shape clap-derive needs for a CONDITIONALLY
-        // required argument: a bare `String` makes the derive infer
-        // `required(true)` (which then conflicts with `required_unless_present`)
-        // and, with `required(false)`, fail at RUNTIME when extracting the
-        // value. `main` collapses the absent case, which only `--standing`
-        // reaches.
-        #[arg(long, required_unless_present = "standing")]
-        approver: Option<String>,
-        /// The change ticket this drill is authorised under. Not used with
-        /// `--standing`, for the same reason as `--approver`.
-        #[arg(long, required_unless_present = "standing")]
-        ticket: Option<String>,
+        #[arg(long)]
+        approver: String,
+        /// The change ticket this drill is authorised under.
+        #[arg(long)]
+        ticket: String,
         /// Where the approval JSON is written. Its DSSE sidecar lands beside
         /// it with the extension replaced by `.sig`, which is the only place
         /// `drill run` looks for it.
@@ -490,20 +467,7 @@ pub enum DrillCmd {
         /// the `Approval` reconciler's check 8 when the referent it names is
         /// not a `Restore`, because there the field is compared against the
         /// referent's actual kind and an absent field matches nothing.
-        //
-        // `conflicts_with = "standing"` and NOT a silent override. Under
-        // `--standing` the document's `subjectRef.kind` is always
-        // `RehearsalSchedule`, so an operator who wrote `--subject-kind
-        // Backup` had their explicit instruction discarded while this flag's
-        // own help promised it was "written INSIDE the signed bytes". clap
-        // does not count a default as present for a conflict, so the ordinary
-        // `--standing` invocation is unaffected.
-        #[arg(
-            long,
-            value_enum,
-            default_value_t = SubjectKindArg::Restore,
-            conflicts_with = "standing"
-        )]
+        #[arg(long, value_enum, default_value_t = SubjectKindArg::Restore)]
         subject_kind: SubjectKindArg,
         /// **PROD-15.1: the separate approval subject.** `original-name`
         /// approves a restore under the ORIGINAL topic names, into topics that
@@ -513,53 +477,8 @@ pub enum DrillCmd {
         /// ordinary one and its bytes are what they always were. The plan is
         /// read before signing, and a subject that is not the plan's is
         /// refused here rather than by the runner.
-        #[arg(long, value_enum, conflicts_with = "standing")]
+        #[arg(long, value_enum)]
         approval_subject: Option<ApprovalSubjectArg>,
-        /// Mint a **standing rehearsal authorization** (D3 §4.3(e)) instead of
-        /// a per-run approval: one signature covering every slot of one
-        /// `RehearsalSchedule`, which is what
-        /// `logweir restore run --standing-authorization` verifies and what
-        /// the `Approval` controller requires for a `RehearsalSchedule`
-        /// referent.
-        ///
-        /// Requires `--scope`, `--schedule-namespace`, `--schedule-name` and
-        /// `--schedule-uid`; refuses `--spec`, `--approver` and `--ticket`,
-        /// none of which this document binds.
-        #[arg(long)]
-        standing: bool,
-        /// With `--standing`: the `RehearsalSchedule`'s namespace.
-        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
-        schedule_namespace: Option<String>,
-        /// With `--standing`: the `RehearsalSchedule`'s name.
-        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
-        schedule_name: Option<String>,
-        /// With `--standing`: the `RehearsalSchedule`'s `metadata.uid`.
-        ///
-        /// **THE BINDING.** The runner compares it against the UID the
-        /// controller stamps on the Job, so a document signed for a schedule
-        /// that was deleted and recreated under the same name authorises
-        /// nothing.
-        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
-        schedule_uid: Option<String>,
-        /// With `--standing`: a JSON file holding D3 §4.3's `RehearsalScope`
-        /// in camelCase — `templateDigest`, `targetClusterId`, `topicPrefix`,
-        /// `topics`, `maxPartitions`, `recordsPerPartition`,
-        /// `deadlineSeconds`, `modes`.
-        ///
-        /// A FILE, not a dozen flags: it is what the signature covers, so an
-        /// operator should be able to diff it and keep it in version control.
-        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
-        scope: Option<PathBuf>,
-        /// With `--standing`: `expiresAt - issuedAt` in days. D3 §4.3 caps it
-        /// at 90 and this command refuses more, so the limit is learned at
-        /// minting time and not from a Job that will not start.
-        #[arg(long, requires = "standing", default_value_t = 30)]
-        valid_days: i64,
-        /// With `--standing`: override `issuedAt` (RFC 3339). An operator has
-        /// no reason to set it; it exists so a test can mint the same bytes
-        /// twice.
-        #[arg(long, requires = "standing")]
-        issued_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// Countersign a GOVERNED restore request (PLAT-19.2): add a
     /// `GovernedApproval` signature to the console-confirmed authorization
@@ -999,20 +918,6 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
-    // The standing form. Accepted so an operator who reaches for it is told
-    // what to do rather than told nothing: it REQUIRES `--standing`, because a
-    // `RehearsalSchedule` referent whose bytes are signed under
-    // `PAYLOAD_TYPE_APPROVAL` is refused by the `Approval` controller, and
-    // `main` says exactly that when the two are not given together.
-    //
-    // A LINE COMMENT AND NOT A DOC COMMENT, DELIBERATELY. clap renders a
-    // value-enum compactly as `[possible values: …]` only while NO variant
-    // carries help text; one doc comment flips the whole list to the long
-    // per-variant form and changes every `--help` an adopter has scripted
-    // against. `cli_approve.rs::the_subject_kind_values_are_the_wire_spellings`
-    // pins the compact line.
-    #[value(name = "RehearsalSchedule")]
-    RehearsalSchedule,
 }
 
 /// `--approval-subject`'s one value (PROD-15.1). Kebab-case on the command
@@ -1041,7 +946,6 @@ impl SubjectKindArg {
         match self {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
-            Self::RehearsalSchedule => "RehearsalSchedule",
         }
     }
 }

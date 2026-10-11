@@ -221,7 +221,7 @@ by Logweir".
 now": one operator's hundred accepted requests became a hundred runner pods on
 one node, which hit its 110-pod limit and went `NotReady`. Scheduled, catch-up
 and retry `Backup`s keep their own `concurrencyPolicy`/`maxActiveRuns` and are
-neither counted nor queued, and a `RehearsalSchedule`'s `Restore`s likewise. A
+neither counted nor queued. A
 queued run has no plan, no Job and no execution claim; it is
 `Admitted=False/ConcurrencyLimited` with `status.queue.limit`, and the console
 shows "Queued (limit N active)". A queued `Restore` still re-checks its
@@ -1383,8 +1383,7 @@ named rather than silent:
   nodes are tainted, a runner Job will not schedule there. Implementing it is
   an operator change and is out of this chart's scope.
 * Requests and limits reach them **per object, not from a chart value**:
-  `Restore.spec.runnerResources`, and a `RehearsalSchedule`'s
-  `spec.bounds.runnerResources` through the `Restore` it creates. The
+  `Restore.spec.runnerResources`. The
   controller refuses a value above its compiled-in ceilings (4 CPUs, 8Gi) or
   otherwise unrunnable, and never clamps one (`docs/kubernetes.md` §12).
   `Backup`, check, probe, delivery and retention Jobs state no resources, so
@@ -1426,7 +1425,7 @@ the opposite of GHCR's:
 ## `environment:`
 
 A label, and nothing else: `logweir.dev/environment: <value>` on every object
-the chart renders (the fourteen CRDs excepted — Helm copies `crds/` verbatim and
+the chart renders (the thirteen CRDs excepted — Helm copies `crds/` verbatim and
 never templates it). It switches no behaviour, changes no name and gates
 nothing. A key that silently did something would be worse than no key.
 
@@ -1800,7 +1799,7 @@ directory is the same act.
 helm uninstall logweir -n logweir-system
 ```
 
-removes everything the release created **except**: the fourteen CRDs (Helm never
+removes everything the release created **except**: the thirteen CRDs (Helm never
 deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
 resource stored under it), the
 namespace `--create-namespace` made, the cluster-scoped `TrustRoster`, retained

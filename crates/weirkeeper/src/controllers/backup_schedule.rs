@@ -1258,9 +1258,6 @@ pub fn refine_against_status(
 /// is the schedule's own and fires; one a second earlier does not. An object
 /// with no `creationTimestamp` (a test fixture; the API server always sets it)
 /// is not bounded, which is the behaviour before this rule existed.
-///
-/// Shared with the `RehearsalSchedule` controller, which applies the same rule
-/// to its cadence step (`rehearsal_schedule::latest_owned_slot`).
 #[must_use]
 pub fn slot_predates_creation(due: DateTime<Utc>, created_at: Option<DateTime<Utc>>) -> bool {
     created_at.is_some_and(|created| due < created)

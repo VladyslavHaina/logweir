@@ -94,15 +94,6 @@ const APPROVER_KEY_ID: &str = "f27c7f51aad0700db76887b306d413a039156b44ee147c1d8
 const APPROVER_SIG: &str =
     "afLmiRCAVRJGg0IfHJTDWHWQQE+PXZWqryC5ATTC2GUHcvriC4RRyy+4ZzhONWM1V5HmBeSO52eMH+6I75AMBQ==";
 
-// Public-only material for the shared standing-authorization byte fixture.
-// Generated out of tree for the same one-signer reason as the constants above.
-const STANDING_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAet+vMgdQ3pfWnI6dhsflAD9gPHDHXqakzJIfaFRdAv0=\n-----END PUBLIC KEY-----\n";
-const STANDING_KEY_ID: &str = "fcd34b4ee7e11187164366d9ba1d7dee711ce09f75e0fe2ec9e851a2bb3cf043";
-const STANDING_FIXTURE_SIG: &str =
-    "IXERqSVACh2pi6oALMZsSvUZ+e+3HXbBLIReh8axkBaOJ44NpAMl81xZWv+5oVjOSrKBwc9encjAf0HpWyluDw==";
-const PER_RUN_AS_STANDING_SIG: &str =
-    "hYMMnl/cwgxJJW07u14PJyBBV0Bh1TN1KYiAGfo9SoOCYOq9ME8Io+xTlVbBdpKiwjtKTzoLiTJMupB6bcpuDA==";
-
 /// A key that is NOT on the roster — the attacker's, in the two-signature
 /// case. Its **public** half only.
 const OUTSIDER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAKTrTSpPTt1d9M1kMim3Imkt2s1OjRm48GfqVh+fjvyk=\n-----END PUBLIC KEY-----\n";
@@ -2086,268 +2077,83 @@ async fn an_approval_whose_referent_appears_is_patched_once_with_a_new_transitio
 }
 
 // ===========================================================================
-// Standing RehearsalSchedule approvals — D3 §4.3
+// PROD-17.1 C1 (OD-12) — a standing RehearsalSchedule approval is refused
 // ===========================================================================
 
-fn standing_fixture() -> String {
-    std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../logweir-core/tests/fixtures/standing-authorization.json"),
-    )
-    .expect("the shared signer fixture")
-}
-
-fn standing_subject() -> VerifiedSubjectRef {
-    VerifiedSubjectRef {
-        api_version: "logweir.dev/v1alpha1".to_string(),
-        kind: SubjectKind::RehearsalSchedule,
-        namespace: "logweir-d3-w7".to_string(),
-        name: "weekly-orders".to_string(),
-        uid: "3f2a91c7-1111-4222-8333-444444444444".to_string(),
-    }
-}
-
-fn standing_sidecar(signature: &str) -> String {
-    sidecar(
-        logweir_core::execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION,
-        &[(STANDING_KEY_ID, signature)],
-    )
-}
-
-fn standing_trust() -> weirkeeper::trust::ResolvedTrust {
-    weirkeeper::trust::synthesize_legacy(&roster_spec(
-        vec![key(STANDING_KEY_ID, STANDING_PEM, None)],
-        vec![],
-    ))
-}
-
-/// Bytes minted by `logweir drill approve --standing` verify as the standing
-/// document they are, and status publishes both the matched key and schedule
-/// UID. This kills the old/defaulted `ApprovalDocument` parse.
-#[test]
-fn the_shared_minted_standing_document_verifies_and_publishes_its_subject() {
-    let fixture = standing_fixture();
-    let mut verified = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &standing_trust(),
-        at("2026-09-10T00:00:00Z"),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect("the standing document verifies under its own schema");
-    assert_eq!(verified.matched_key_id, STANDING_KEY_ID);
-    verified.verified_subject_ref = Some(standing_subject());
-
-    let mut object = approval_object(
-        &fixture,
-        &standing_sidecar(STANDING_FIXTURE_SIG),
-        SubjectKind::RehearsalSchedule,
-    );
-    object.spec.plan_hash = "sha256:aa".to_string();
-    object.spec.subject_ref.name = "weekly-orders".to_string();
-    let status = approval::status_for(
-        &object,
-        &ApprovalOutcome::Verified(verified),
-        at("2026-09-10T00:00:00Z"),
-    );
-    assert_eq!(status.verified, Some(true));
-    assert_eq!(status.matched_key_id.as_deref(), Some(STANDING_KEY_ID));
-    assert_eq!(
-        status.verified_subject_ref.as_ref().map(|s| s.uid.as_str()),
-        Some("3f2a91c7-1111-4222-8333-444444444444")
-    );
-}
-
-/// A genuinely signed per-run document under the standing payload type still
-/// cannot be accepted as standing. The signature passes; the required-field
-/// parse is what refuses it.
-#[test]
-fn a_per_run_document_never_parses_as_standing() {
-    let refusal = approval::evaluate_standing(
-        APPROVAL_DOC.as_bytes(),
-        standing_sidecar(PER_RUN_AS_STANDING_SIG).as_bytes(),
-        &standing_trust(),
-        now(),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect_err("a per-run approval has no standing subject, scope or window");
-    assert_eq!(refusal.reason(), "StandingDocumentInvalid");
-}
-
-/// The standing format carries no ordinary/governed policy mode — PLAT-19.2
-/// binds one end to end for per-run Restores only (`tests/approval_policy.rs`).
-/// It therefore admits only `GovernedApproval` under every approval policy;
-/// `ConsoleConfirmation` fails closed, and `EvidenceSigning` never authorizes.
-#[test]
-fn standing_authorization_is_governed_only_until_policy_mode_is_bound() {
-    let fixture = standing_fixture();
-    let verified = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &policy_trust(vec![standing_policy_key(SpecUsage::GovernedApproval)]),
-        at("2026-09-10T00:00:00Z"),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect("the current governed standing authorization is admitted");
-    assert_eq!(
-        verified.authorization_usage,
-        logweir_core::trust::KeyUsage::GovernedApproval
-    );
-
-    for usage in [SpecUsage::ConsoleConfirmation, SpecUsage::EvidenceSigning] {
-        let refusal = approval::evaluate_standing(
-            fixture.as_bytes(),
-            standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-            &policy_trust(vec![standing_policy_key(usage)]),
-            at("2026-09-10T00:00:00Z"),
-            &standing_subject(),
-            "sha256:aa",
-        )
-        .expect_err("the current format has no binding that could authorize this usage");
-        assert_eq!(refusal.reason(), "KeyIdNotInRoster", "{usage:?}");
-    }
-}
-
-/// A standing verdict expires at the earlier authenticated boundary: the
-/// document's `expiresAt` or the matched key's `notAfter`. At `expiresAt`
-/// itself the document is already invalid.
-#[test]
-fn standing_validity_and_requeue_stop_at_the_earlier_boundary() {
-    use logweir_core::execution_contract::StandingAuthorization;
-    let fixture = standing_fixture();
-    let doc: StandingAuthorization = serde_json::from_str(&fixture).expect("fixture parses");
-
-    let verified = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &standing_trust(),
-        at("2026-09-10T00:00:00Z"),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect("the standing document is live before expiry");
-    assert_eq!(verified.document_expires_at, Some(doc.expires_at));
-    assert_eq!(verified.valid_until(), doc.expires_at);
-
-    let at_boundary = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &standing_trust(),
-        doc.expires_at,
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect_err("expiresAt is an exclusive boundary");
-    assert_eq!(at_boundary.reason(), "WindowInvalid");
-
-    let key_boundary = at("2026-09-20T00:00:00Z");
-    let mut key = standing_policy_key(SpecUsage::GovernedApproval);
-    key.not_after = key_boundary;
-    let verified = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &policy_trust(vec![key]),
-        at("2026-09-10T00:00:00Z"),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect("the key is live before its earlier boundary");
-    assert_eq!(verified.valid_until(), key_boundary);
-}
-
-/// Every authenticated standing claim has its own refusal name. These are
-/// post-signature checks; field mutations drive the pure validator directly.
-#[test]
-fn each_standing_claim_refuses_by_its_own_name() {
-    use logweir_core::execution_contract::StandingAuthorization;
-    let base: StandingAuthorization =
-        serde_json::from_str(&standing_fixture()).expect("the fixture parses");
-    let subject = standing_subject();
-    let inside = at("2026-09-10T00:00:00Z");
-
-    approval::validate_standing_document(&base, &subject, "sha256:aa", inside)
-        .expect("positive control");
-
-    let mut wrong_template = base.clone();
-    wrong_template.scope.template_digest = "sha256:bb".to_string();
-    assert_eq!(
-        approval::validate_standing_document(&wrong_template, &subject, "sha256:aa", inside)
-            .expect_err("another template")
-            .reason(),
-        "TemplateDigestMismatch"
-    );
-
-    let mut wrong_uid = base.clone();
-    wrong_uid.subject_ref.uid = "another-uid".to_string();
-    assert_eq!(
-        approval::validate_standing_document(&wrong_uid, &subject, "sha256:aa", inside)
-            .expect_err("another schedule")
-            .reason(),
-        "SubjectMismatch"
-    );
-
-    let mut expired = base.clone();
-    expired.expires_at = at("2026-09-09T00:00:00Z");
-    assert_eq!(
-        approval::validate_standing_document(&expired, &subject, "sha256:aa", inside)
-            .expect_err("expired")
-            .reason(),
-        "WindowInvalid"
-    );
-
-    let mut too_long = base.clone();
-    too_long.expires_at = too_long.issued_at + Duration::days(90) + Duration::seconds(1);
-    assert_eq!(
-        approval::validate_standing_document(&too_long, &subject, "sha256:aa", inside)
-            .expect_err("over ninety days")
-            .reason(),
-        "WindowInvalid"
-    );
-
-    let mut empty_scope = base;
-    empty_scope.scope.topics.clear();
-    assert_eq!(
-        approval::validate_standing_document(&empty_scope, &subject, "sha256:aa", inside)
-            .expect_err("empty scope")
-            .reason(),
-        "ScopeInvalid"
-    );
-}
-
-/// **PROD-08.1a review M1: the partition bound is positive on a sampled scope
-/// and exactly 0 on a scope that authorises complete coverage.** A complete
-/// scope with `maxPartitions: 0` is verified (it is the only shape the minter
-/// signs); a complete scope with a positive bound is `ScopeInvalid`, because an
-/// older reader would read it as a sampled scope it could run sampled plans
-/// under. A sampled scope with 0 stays `ScopeInvalid`, and a sampled scope
-/// with a positive bound stays verified (the controls).
+/// **An `Approval` naming a `RehearsalSchedule` is refused BY NAME, before
+/// anything is read, and is never recorded `Verified`.** The route table can
+/// answer the trust, and the request is still refused with zero requests
+/// made — for a fresh object and for one whose stored status already says
+/// `Verified=True` (written by a build before v1).
 ///
-/// KILLS: the controller's zero test left as it was (the complete scope with 0
-/// is refused); the coverage ignored (the complete scope with 200 verifies).
-#[test]
-fn a_complete_scope_signs_a_partition_bound_of_zero_and_a_sampled_one_a_positive_bound() {
-    use logweir_core::execution_contract::StandingAuthorization;
-    use logweir_core::spec::Coverage;
-    let base: StandingAuthorization =
-        serde_json::from_str(&standing_fixture()).expect("the fixture parses");
-    let subject = standing_subject();
-    let inside = at("2026-09-10T00:00:00Z");
-    let with = |coverage: Option<Coverage>, max_partitions: u32| {
-        let mut doc = base.clone();
-        doc.format_version = "1.1.0".to_string();
-        doc.scope.coverage = coverage;
-        doc.scope.max_partitions = max_partitions;
-        approval::validate_standing_document(&doc, &subject, "sha256:aa", inside)
-            .map_err(|refusal| refusal.reason())
-    };
-    assert_eq!(with(Some(Coverage::Complete), 0), Ok(()));
-    assert_eq!(with(Some(Coverage::Complete), 200), Err("ScopeInvalid"));
-    assert_eq!(with(None, 0), Err("ScopeInvalid"));
-    assert_eq!(with(Some(Coverage::Sampled), 0), Err("ScopeInvalid"));
-    assert_eq!(with(None, 200), Ok(()));
+/// NEGATIVE CONTROL: removing the early check in `decide_with_policy_at` makes
+/// this row fail — the request then resolves the namespace's trust first
+/// (`GET …/trustpolicies`), so the zero-request assertion fails.
+#[tokio::test]
+async fn an_approval_naming_a_rehearsal_schedule_is_refused_by_name_before_anything_is_read() {
+    for stored_verified in [None, Some(true)] {
+        let (client, recorder) = mock_client_recording(vec![
+            Route {
+                method: "GET",
+                path_suffix: "/trustpolicies",
+                status: 200,
+                body: serde_json::json!({
+                    "apiVersion": "logweir.dev/v1alpha1",
+                    "kind": "TrustPolicyList",
+                    "metadata": {"resourceVersion": "1"},
+                    "items": [],
+                })
+                .to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/trustrosters/default",
+                status: 200,
+                body: roster_body(&approver_entry_json(), ""),
+            },
+        ]);
+        let mut approval = approval_object(
+            APPROVAL_DOC,
+            &good_sidecar(),
+            SubjectKind::RehearsalSchedule,
+        );
+        approval.status = stored_verified.map(|verified| ApprovalStatus {
+            verified: Some(verified),
+            ..ApprovalStatus::default()
+        });
+        let outcome = approval::decide(&approval, &client)
+            .await
+            .expect("a refusal is a verdict, not an error");
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Refused(ApprovalRefusal::StandingAuthorizationRefused {
+                name: "rs1".to_string()
+            }),
+            "stored verified = {stored_verified:?}"
+        );
+        assert!(
+            seen(&recorder).is_empty(),
+            "nothing is read: {:?}",
+            seen(&recorder)
+        );
+        let status = approval::status_for(&approval, &outcome, now());
+        assert_eq!(status.verified, Some(false));
+        let condition = status
+            .conditions
+            .as_ref()
+            .and_then(|cs| cs.iter().find(|c| c.r#type == "Verified"))
+            .expect("the Verified condition");
+        assert_eq!(condition.status, "False");
+        assert_eq!(
+            condition.reason.as_deref(),
+            Some("StandingAuthorizationRefused")
+        );
+        let message = condition.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("RehearsalSchedule 'rs1'") && message.contains("withdrawn in v1"),
+            "{message}"
+        );
+    }
 }
 
 // ===========================================================================
@@ -2381,14 +2187,6 @@ fn policy_key(usages: Vec<SpecUsage>) -> SpecKey {
         revocation_reason: None,
         revocation_effective_from: None,
     }
-}
-
-fn standing_policy_key(usage: SpecUsage) -> SpecKey {
-    let mut key = policy_key(vec![usage]);
-    key.key_id = STANDING_KEY_ID.to_string();
-    key.spki_pem = STANDING_PEM.to_string();
-    key.principal.id = format!("install:{STANDING_KEY_ID}");
-    key
 }
 
 fn at(s: &str) -> DateTime<Utc> {
@@ -2812,21 +2610,8 @@ fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
             approval_says: "Restore".to_string(),
             referent_is: "Backup".to_string(),
         },
-        ApprovalRefusal::TemplateDigestMismatch {
-            got: "sha256:a".to_string(),
-            want: "sha256:b".to_string(),
-        },
-        ApprovalRefusal::SubjectMismatch {
-            detail: "the signed standing subject names another schedule identity".to_string(),
-        },
-        ApprovalRefusal::WindowInvalid {
-            detail: "the standing authorization is expired at the evaluation instant".to_string(),
-        },
-        ApprovalRefusal::ScopeInvalid {
-            detail: "the standing authorization scope names no topics or bounds".to_string(),
-        },
-        ApprovalRefusal::StandingDocumentInvalid {
-            detail: "the authenticated bytes are not a standing authorization document".to_string(),
+        ApprovalRefusal::StandingAuthorizationRefused {
+            name: "weekly".to_string(),
         },
         ApprovalRefusal::RosterNotFound,
     ];
@@ -2845,8 +2630,8 @@ fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
     }
     assert_eq!(
         refusals.len(),
-        16,
-        "standing verification adds five distinct claim refusals to the eleven existing reasons. \
+        12,
+        "the withdrawn standing authorization adds one refusal to the eleven existing reasons. \
          Another variant must update this count AND \
          docs/kubernetes.md §8, which is the one place they are all named."
     );

@@ -2262,6 +2262,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a catalog's window holds the newest points",
             "It is a partial view",
         ),
+        // PROD-17.1 C1 (2026-10-11, item 73): scheduled rehearsals and
+        // standing authorizations are withdrawn; the reason both refusals
+        // carry.
+        (
+            "scheduled rehearsals and standing authorizations are withdrawn",
+            "StandingAuthorizationRefused",
+        ),
     ];
     assert_eq!(
         items.len(),
