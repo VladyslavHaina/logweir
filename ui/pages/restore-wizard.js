@@ -4348,13 +4348,14 @@ export const READINESS_NOT_RUN_WARNING =
  *  ON EVERY REVIEW STEP, NOT A CHOSEN ONE. The console cannot tell which of a
  *  plan's topics are transactional or out of order -- the archive records
  *  neither -- so the sentence is not narrowed to any topic, and every plan names
- *  at least one. A later detection of transactional archives is what may narrow
- *  it. Code spans render through `messageText`, never as backticks (O2). */
+ *  at least one. Since PROD-01.1a the runner refuses an archive holding
+ *  transaction markers unless the plan allows them, and the sentence says so. Code spans render through `messageText`, never as backticks (O2). */
 export const RESTORE_SEMANTICS_SENTENCE =
-  "Restores copy the archive as written: aborted transactions and transaction markers are " +
-  "restored as ordinary records, `LogAppendTime` timestamps come back as producer `CreateTime`, " +
-  "repeated header keys keep one copy, and when timestamps are out of order a full or " +
-  "point-in-time restore can miss records.";
+  "Restores copy the archive as written: an archive holding transaction markers is refused " +
+  "unless the plan allows them, and under that allowance, or for an open transaction the check " +
+  "cannot see, aborted transactions and transaction markers are restored as ordinary records, " +
+  "`LogAppendTime` timestamps come back as producer `CreateTime`, repeated header keys keep one " +
+  "copy, and when timestamps are out of order a full or point-in-time restore can miss records.";
 
 /** Step 6 -- the rendered plan, its hash, the two minted names, and the one
  *  guided submit.

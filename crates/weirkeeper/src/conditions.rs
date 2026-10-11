@@ -169,6 +169,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     // PROD-01.3 security follow-up: a projected credential whose binding does
     // not name the connection the Job was built for, read off `refusal-reason=`.
     TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    // PROD-01.1a: an archive holding transaction markers under a plan that
+    // does not allow them, read off `refusal-reason=`.
+    logweir_core::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",

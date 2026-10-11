@@ -81,6 +81,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     // already; listed so the vocabulary names every runner refusal state.
     "PointInTimeByProducerTime",
     "TargetTopicConfigRefused",
+    // PROD-01.1a: the runner's refusal of an archive holding transaction
+    // markers. Exit 3 as well; listed for the same reason.
+    "TransactionMarkersInArchive",
 ];
 
 /// A condition view with a bounded message.

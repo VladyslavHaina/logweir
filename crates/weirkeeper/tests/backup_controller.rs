@@ -2186,8 +2186,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        46,
-        "the forty-six terminal states that are NOT an exit code — the original ten, plus \
+        47,
+        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2226,7 +2226,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          off `refusal-reason=` like `TargetTopicConfigRefused`, plus PROD-01.3's two — \
          `PlainWithoutTls` (SASL/PLAIN without TLS, refused by the resolver and by the runner) \
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
-         name the connection the Job was built for); \
+         name the connection the Job was built for), plus PROD-01.1a's \
+         `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
+         markers under a plan that does not allow them); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

@@ -888,6 +888,10 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
             // `templateDigest`, exactly as before.
             window_start: None,
             partitions: std::collections::BTreeMap::new(),
+            // PROD-01.1a: a schedule carries no override, so a slot over an
+            // archive holding transaction markers is refused
+            // (`TransactionMarkersInArchive`); the plan bytes are unchanged.
+            allow_transaction_markers: false,
         },
         objectives: ObjectivesSpec {
             rto_seconds: spec

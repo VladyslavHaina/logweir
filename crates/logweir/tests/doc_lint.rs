@@ -2231,6 +2231,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "two-person approval in the console",
             "approverSignature: Console",
         ),
+        // PROD-01.1a (2026-10-10, item 67): an archive holding transaction
+        // markers is refused unless the plan allows them; the plan field.
+        (
+            "an archive holding transaction markers is refused",
+            "restore.allow_transaction_markers: true",
+        ),
     ];
     assert_eq!(
         items.len(),

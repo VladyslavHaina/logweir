@@ -59,8 +59,9 @@ its recovery point), 64 (FX-39 and FX-40, a retention policy over more than
 500 points keeps enforcing, and no run deletes from a partial or expired
 catalog view), 65 (FX-33, one
 backup names at most 1,000 topics, and a backup of many topics stays listed
-and verified) and 66 (PROD-16.2,
-two-person approval in the console, no key) so far. Items continue the next entry's
+and verified), 66 (PROD-16.2,
+two-person approval in the console, no key) and 67 (PROD-01.1a, an
+archive holding transaction markers is refused unless the plan allows them) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -235,6 +236,13 @@ backup of 500 topics; it changes the runner, the check Jobs, the controller
 and (one line) the product API, signs nothing differently, and
 the PoC upgrade that carries it takes a backup of several hundred topics and
 reads its catalog entry, its verdict and the controller's memory.
+Item 67 is row PROD-01.1a, proven by unit and phase-sequence rows and on the
+compose stack with the shipped engine (the PROD-01.1 transactional fixture,
+refused as a drill and as a `newTopic` restore, restored under the override,
+and a non-transactional twin as the control; a marker after a point-in-time
+window refused); it changes the runner and the controller's list of restore
+refusal codes, and the PoC upgrade that carries it restores one ordinary
+point unchanged.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -3111,6 +3119,60 @@ then refused and submitted again. Scorecards stay valid under older readers.
 SECURITY.md states the residual: whoever controls the console, its key or the
 identity provider can produce both halves.
 
+#### 67. An archive holding transaction markers is refused unless the plan allows them (PROD-01.1a)
+
+**Changed.** The engine archives every transaction commit and abort marker as
+an ordinary record, and a restore wrote each one, with the records of aborted
+transactions beside it, as data every consumer reads. Before it creates
+anything on the target, a restore now reads the segments its window overlaps
+and every segment after the window's end (a marker there can close a
+transaction with records in the window), and counts the records shaped like a
+marker. If there
+are any, the restore is refused, as a drill or as a `newTopic` restore. It
+exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the sentence
+names the topics, partitions and count. The `Restore`'s `exitReason`, the
+product API's `result.exitReason` and the console show the name; the
+`Restore`'s status carries the sentence through item 61's `refusal-detail=`
+line, whose closed list of restore codes gains this one. The plan field
+`restore.allow_transaction_markers: true` restores the archive as before. The
+field is inside `plan_hash`. Under the override the check is skipped, and the
+signed scorecard's `sample.coverage_note` says so. A segment after the window
+that cannot be read does not refuse the run (the restore does not read it);
+the runner's output and the same note say how many. The check reads each
+restored segment once more before the engine runs, and a point-in-time restore
+of an old window also reads the archive's tail after it. It reads the shape only,
+so a record of your own with that shape is counted too. A transaction open at
+backup time whose marker is not archived, a transaction opened after the backup
+began, one whose marker is in an unreadable segment after the window, one whose
+marker is in a segment whose last record is before a stated window start, and
+a marker of another encoding version are not detected
+([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
+**Do:** nothing, unless you restore transactional topics (Kafka Streams or
+Connect exactly-once, Flink): to restore one as it is, add
+`restore.allow_transaction_markers: true` to its plan and approve the changed
+plan. A `RehearsalSchedule` cannot state the field, so its slots over such an
+archive are refused and `lastFailed.reason` names the refusal; a standing
+authorization never admits a plan that states it.
+**Scope:** the shape predicate on hand-built records (a marker of each type,
+a user record of the same shape, a 7-byte value and a non-zero key prefix
+not caught); the whole run over doubles, refused in both target modes with no
+target topic and no scorecard, run under the override with the note, the
+override outside the approved plan refused at phase 1, an unreadable segment
+in the window refused, a marker in a segment after the window refused, and
+unreadable segments after the window noted and not refused; and live on the
+compose stack with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`:
+the transactional row refused as a drill and as a `newTopic` restore with the
+7 archived markers named and nothing on the target, the non-transactional twin
+restored and `pass`, the override's restore `pass` with the note; a
+point-in-time restore whose marker is in a segment after the point refused;
+and PROD-08.1's omitted segment after the window still `pass` sampled and
+`fail-integrity` complete, now with the note).
+**Rollback:** an older runner ignores the plan field and restores such an
+archive without the check, as before. A controller older than this item does
+not know the new code, so for this refusal its status says "the runner gave
+no readable reason" (item 61) while `exitReason` still names it: roll the
+controller with the runner. Plans and approvals are unaffected.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3221,7 +3283,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65 and 66, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66 and 67, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3297,7 +3359,10 @@ needs every `Backup` and `BackupSchedule` that names or resolves
 to more than 1,000 topics split before the upgrade, and each
 `RecoveryCatalog` synced again after the runner image rolls; item 66 changes the controller, the runner, the product API, the
 console and the chart, and needs nothing until a namespace is bound
-`two-person`. To roll back to
+`two-person`; item 67 changes the
+runner and the controller's list of restore refusal codes, and needs the two
+rolled together and a plan field for a restore of an archive that holds
+transaction markers. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

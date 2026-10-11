@@ -807,8 +807,9 @@ does not detect. In each measured case below, the test was signed `pass`
 ([the measured cases](verify-a-scorecard.md#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)):
 
 - Aborted records, records of open transactions, and commit and abort markers
-  are restored as ordinary records
-  ([transactional topics](stability.md#transactional-topics-are-restored-with-aborted-records-and-markers-as-data)).
+  are restored as ordinary records. Since PROD-01.1a, a restore whose archive
+  holds markers is refused unless its plan allows them
+  ([transactional topics](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
 - A topic on `LogAppendTime` is restored with its producers' timestamps, and a
   point-in-time restore selects by those clocks
   ([`LogAppendTime` sources](stability.md#logappendtime-sources-are-restored-with-the-producers-timestamps)).

@@ -6577,7 +6577,8 @@ and cleans it before it is stored:
   `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`,
   `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`,
   `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`,
-  `PointUntrusted`, `RehearsalScopeViolation`. For a `Backup`: `GuardRefused`,
+  `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`.
+  For a `Backup`: `GuardRefused`,
   `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`,
   `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`,
   `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
@@ -7693,11 +7694,14 @@ Secrets" forbids one.
 
 ### Exit 3: the discriminator is a KEY NAME in a bounded tail
 
-`TargetTopicConfigRefused`, `CredentialNotRenderable` and (since FX-8)
+`TargetTopicConfigRefused`, `CredentialNotRenderable`, (since FX-8)
 `PointInTimeByProducerTime` — a point-in-time selection over a source topic
 recorded as `LogAppendTime`, in a plan that does not state
 `restore.time_basis: producerTime`
-([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — are all
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — and (since
+PROD-01.1a) `TransactionMarkersInArchive` — an archive holding transaction
+markers, in a plan that does not state `restore.allow_transaction_markers:
+true` ([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)) — are all
 exit 3, and the only thing that tells them apart is the runner's
 `refusal-reason=` line. The recovery-point binding's refusals —
 `PointBindingMismatch`, `PointUntrusted` and (since FX-16)

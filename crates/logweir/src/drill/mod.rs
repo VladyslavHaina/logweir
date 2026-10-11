@@ -3122,6 +3122,38 @@ fn execute_with_validated_approval(
     .to_string();
     // PROD-16.2: a partition subset approved in the console is 2.1.0.
     raise_version_for_console_approval(&mut sc);
+    // **PROD-01.1a: TRANSACTION MARKERS, checked here**, before phase 2 and
+    // in every target mode: an archive whose restored partitions hold records
+    // shaped like transaction markers is refused exit 3,
+    // `TransactionMarkersInArchive`, with no target topic created and no
+    // engine started, unless the approved plan allows them. Under the
+    // override the check is skipped and the scorecard says so below; so does
+    // a run whose segments after the window could not all be read.
+    let marker_note = if c.spec.restore.allow_transaction_markers {
+        Some(logweir_core::transaction_markers::OVERRIDE_NOTE.to_string())
+    } else {
+        let window = logweir_core::replay_selection::ReplaySelection {
+            topics: selected.iter().cloned().collect(),
+            ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
+                .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+        };
+        let scan = count_transaction_markers(&c.archive, &facts, &window)?;
+        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.counts) {
+            return Err(DrillError::Guard(GuardRefusal(refusal)));
+        }
+        // Never silent: the runner's output names the segments, and the
+        // scorecard's note below says how many.
+        let unread = &scan.unread_after_window;
+        (!unread.is_empty()).then(|| {
+            let note = logweir_core::transaction_markers::unread_after_window_note(unread.len());
+            // One line whatever a manifest key holds (`exit::one_line`).
+            eprintln!(
+                "{}",
+                crate::exit::one_line(&format!("{note}: {}", unread.join(", ")))
+            );
+            note
+        })
+    };
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3193,6 +3225,12 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-01.1a: the override, or the segments after the window the marker
+    // check could not read, in the note `logweir show` prints under the table
+    // (free text: no format change).
+    if let Some(note) = marker_note {
+        sc.sample.coverage_note = format!("{}; {note}", sc.sample.coverage_note);
+    }
     // PROD-16.2: THE LAST VERSION STEP, after every step that can choose the
     // major (`format_version_with_console_approval`).
     raise_version_for_console_approval(&mut sc);
@@ -3933,6 +3971,99 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
+}
+
+/// **PROD-01.1a.** What the transaction-marker check found.
+struct MarkerScan {
+    /// Marker-shaped records per topic and partition.
+    counts: logweir_core::transaction_markers::MarkerCounts,
+    /// The segments after the window's end it could not read.
+    unread_after_window: Vec<String>,
+}
+
+/// **PROD-01.1a.** The records shaped like a transaction marker in the
+/// selected partitions' segments that the window overlaps (the engine's own
+/// rule, `ReplaySelection::segment_overlaps`) AND in every segment after the
+/// window's end: a marker there closes a transaction that can have records in
+/// the window. Segments whose last record is before the window's start are
+/// skipped (out-of-order timestamps can put a closing marker there:
+/// `docs/stability.md` lists it as not detected). Each is
+/// streamed through the bounded `kbak::scan_segment` (one stored segment and a
+/// few hundred KiB held at a time).
+///
+/// A segment the restore reads and the scan cannot decode refuses the run
+/// (`GuardRefused`); one the store does not hold is left to the restore, as
+/// before. A segment after the window that is absent or cannot be read never
+/// refuses (the restore does not read it, PROD-08.1); it is listed in
+/// `unread_after_window`, which the run reports.
+fn count_transaction_markers(
+    archive: &Store,
+    facts: &BackupSetFacts,
+    window: &logweir_core::replay_selection::ReplaySelection,
+) -> Result<MarkerScan, DrillError> {
+    use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
+    use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
+    use logweir_engine_oso::storage::{caps, StoreError};
+    let limits = ScanLimits {
+        max_decompressed: caps::SEGMENT,
+        deadline: None,
+    };
+    let start = window.window_start_ms.unwrap_or(i64::MIN);
+    let mut scan = MarkerScan {
+        counts: MarkerCounts::new(),
+        unread_after_window: Vec::new(),
+    };
+    for topic in &facts.topics {
+        for p in topic
+            .partitions
+            .iter()
+            .filter(|p| window.selects_partition(&topic.name, p.partition_id))
+        {
+            for seg in p.segments.iter().filter(|s| s.end_timestamp >= start) {
+                let after = seg.start_timestamp > window.window_end_ms;
+                let bytes = match archive.get_capped(&seg.key, caps::SEGMENT) {
+                    Ok((bytes, _)) => bytes,
+                    Err(_) if after => {
+                        scan.unread_after_window.push(seg.key.clone());
+                        continue;
+                    }
+                    Err(StoreError::NotFound(_)) => continue,
+                    Err(e) => return Err(logweir_core::engine::EngineError::from(e).into()),
+                };
+                let mut found = 0u64;
+                let read = scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
+                    if is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys) {
+                        found += 1;
+                    }
+                    true
+                });
+                if found > 0 {
+                    *scan
+                        .counts
+                        .entry(topic.name.clone())
+                        .or_default()
+                        .entry(p.partition_id)
+                        .or_default() += found;
+                }
+                match read {
+                    Ok(_) => {}
+                    Err(_) if after => scan.unread_after_window.push(seg.key.clone()),
+                    Err(e) => {
+                        return Err(DrillError::Guard(GuardRefusal(format!(
+                            "the transaction-marker check could not read archive segment `{}` \
+                             of topic `{}` partition {} ({e}), so it cannot say the restored \
+                             partitions hold no transaction marker. The run stopped before any \
+                             target topic was created. State \
+                             `restore.allow_transaction_markers: true` in the plan to restore \
+                             without the check.",
+                            seg.key, topic.name, p.partition_id
+                        ))))
+                    }
+                }
+            }
+        }
+    }
+    Ok(scan)
 }
 
 /// **PROD-11.1.** The signed `source.selection` block of a resolved

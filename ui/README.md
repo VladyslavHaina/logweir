@@ -1197,7 +1197,9 @@ limit with the plan, after its copy caveat and before the approval-policy block
 and *Create the Restore*, on every plan (`RESTORE_SEMANTICS_SENTENCE`); under
 the approval block's heading it read as part of the approval:
 
-> Restores copy the archive as written: aborted transactions and transaction
+> Restores copy the archive as written: an archive holding transaction markers
+> is refused unless the plan allows them, and under that allowance, or for an
+> open transaction the check cannot see, aborted transactions and transaction
 > markers are restored as ordinary records, `LogAppendTime` timestamps come back
 > as producer `CreateTime`, repeated header keys keep one copy, and when
 > timestamps are out of order a full or point-in-time restore can miss records.

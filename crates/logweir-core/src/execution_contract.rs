@@ -958,6 +958,10 @@ pub struct PlanScopeFacts {
     /// **PROD-08.1a.** `sample.complete_max_records`, held to the signed
     /// scope's `completeMaxRecords` when it states one.
     pub complete_max_records: Option<u64>,
+    /// **PROD-01.1a (review OE-1).** `restore.allow_transaction_markers`. The
+    /// plan bytes are not hash-bound to a standing authorization, so
+    /// [`plan_within_scope`] refuses it: only a per-run approval binds it.
+    pub allows_transaction_markers: bool,
 }
 
 /// The facts a mounted restore plan and its allowlist state.
@@ -997,6 +1001,7 @@ pub fn plan_scope_facts(
         },
         coverage: plan.sample.coverage,
         complete_max_records: plan.sample.complete_max_records,
+        allows_transaction_markers: plan.restore.allow_transaction_markers,
     }
 }
 
@@ -1216,6 +1221,15 @@ pub fn plan_within_scope(
             facts.replay_selection.join(", ")
         ));
     }
+    // PROD-01.1a (review OE-1): the override that restores transaction
+    // markers as data needs an approver to have seen it, for the same reason.
+    if facts.allows_transaction_markers {
+        mismatches.push(
+            "the plan states restore.allow_transaction_markers: true; a standing rehearsal \
+             authorization never authorises restoring transaction markers as data"
+                .to_string(),
+        );
+    }
     // The target cluster id, through the allowlist — see this function's doc
     // comment for why that is the strongest form available before a broker
     // exists, and why it is EQUALITY and not membership.
@@ -1405,6 +1419,7 @@ mod tests {
             replay_selection: Vec::new(),
             coverage: crate::spec::Coverage::Sampled,
             complete_max_records: None,
+            allows_transaction_markers: false,
         }
     }
 
@@ -1461,6 +1476,43 @@ mod tests {
         assert!(
             refusal.mismatches[0].contains("partition subsets (restore.partitions)"),
             "{refusal}"
+        );
+    }
+
+    /// **PROD-01.1a (review OE-1).** A standing rehearsal authorization never
+    /// admits `restore.allow_transaction_markers: true`: no approver signed the
+    /// plan bytes. The control is the same plan stating `false`, which is
+    /// inside. KILLS: the mismatch deleted, `plan_scope_facts` not reading the
+    /// field.
+    #[test]
+    fn a_plan_allowing_transaction_markers_is_outside_every_standing_scope() {
+        let plan = |allow: bool| -> crate::spec::DrillSpec {
+            serde_yaml::from_str(&format!(
+                "source:\n  storage: {{backend: filesystem, path: /a}}\n  topics: [orders]\n\
+                 target:\n  bootstrap_servers: [k:9092]\n  topic_mapping_prefix: rehearsal-3f2a91c7-\n\
+                 sample:\n  window_start: \"2026-01-01T00:00:00Z\"\n  window_end: \"2026-01-02T00:00:00Z\"\n  \
+                 max_partitions: 200\n\
+                 restore:\n  point_in_time: \"2026-01-01T12:00:00Z\"\n  allow_transaction_markers: {allow}\n\
+                 objectives: {{}}\n\
+                 evidence: {{backend: filesystem, path: /e}}\n"
+            ))
+            .expect("the plan parses")
+        };
+        let allowed: crate::spec::AllowedClusters =
+            serde_json::from_str(r#"{"allowed_cluster_ids": ["TARGET00000000000000000"]}"#)
+                .expect("the allowlist parses");
+        let control = plan_scope_facts(&plan(false), &allowed);
+        assert!(!control.allows_transaction_markers);
+        plan_within_scope(&control, &scope()).expect("`false` is inside the scope");
+        let allowing = plan_scope_facts(&plan(true), &allowed);
+        let refusal = plan_within_scope(&allowing, &scope()).expect_err("the override is refused");
+        assert_eq!(
+            refusal.mismatches,
+            vec![
+                "the plan states restore.allow_transaction_markers: true; a standing rehearsal \
+                 authorization never authorises restoring transaction markers as data"
+                    .to_string()
+            ]
         );
     }
 
