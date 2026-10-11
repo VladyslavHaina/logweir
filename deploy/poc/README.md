@@ -520,13 +520,21 @@ prints one line per object:
 
 ```bash
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  --dry-run=server --kube-context "$CTX" \
   -f deploy/poc/logweir.values.yaml --set-json 'approvalPolicy.namespaces={}' \
   | kubectl --context "$CTX" apply --server-side --field-manager=helm --dry-run=server -f -
 ```
 
+Keep `--dry-run=server` on `helm template`. Without it the chart's `lookup`
+sees no cluster and renders the identity Secrets and ConfigMaps that
+`helm upgrade` creates only when they are absent. The dry run then reports
+false conflicts on them (manager `ureq`, four on the PoC).
+
 Do not save that render to a file: it carries the demo MinIO's root credential
 (*The demo archive*, step 7). On the PoC the dry run reported 61 objects
-`serverside-applied (server dry run)` and the one conflict above.
+`serverside-applied (server dry run)` and the one conflict above. At the next
+upgrade, with no command-written field left, it reported 66 objects and no
+conflict.
 
 - **Every conflict is a field you know a command wrote, and the chart's value
   is the one you want:** run step 2 again with `--force-conflicts` added. Helm
