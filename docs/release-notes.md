@@ -3345,7 +3345,9 @@ usage errors. Every standing authorization already signed (formats 1.0.0 and
 **What an upgraded install sees.** `helm upgrade` leaves the
 `rehearsalschedules.logweir.dev` CRD in the cluster (Helm never deletes
 `crds/`), and its objects stay, unreconciled. A rehearsal `Restore` that had
-not started is refused; one already finished keeps its status. To remove them:
+not started is refused; one whose Job was already running finishes under the
+bundle it was started with; one already finished keeps its status. To remove
+them:
 
 ```
 kubectl --context "$LOGWEIR_CONTEXT" get rehearsalschedules -A
@@ -3360,10 +3362,12 @@ confirms.
 with no `POST` and no `Approval` read, and its negative control), CLI rows
 through the shipped binary, the regenerated CRDs, chart renders and OpenAPI
 document. [UNVERIFIED — no live install has run this build's refusals yet; PROD-14.1's clean install carries them.]
-**Rollback:** roll the chart, the controller and the runner back together. An
-older chart re-creates the CRD and its controller resumes any schedule left
-in the cluster, under standing documents that still verify until they
-expire.
+**Rollback:** roll the chart, the controller and the runner back together.
+Helm does not re-create a deleted CRD. If you deleted it, re-apply the older
+chart's `crds/` (`kubectl apply --server-side --force-conflicts -f
+charts/logweir/crds/`) before rolling the controller back. Its controller then
+resumes any schedule left in the cluster, under standing documents that still
+verify until they expire.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
