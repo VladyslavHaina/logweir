@@ -8,13 +8,10 @@
 //! may take. It excludes everything that decides **WHEN**: cadence, time zone,
 //! starting deadline, catch-up, retry, concurrency, retention and `suspend`.
 //!
-//! That split is the whole value of the field. PLAT-05.1 makes a schedule's
-//! spec editable, so `metadata.generation` moves whenever anything changes —
-//! including a `suspend` flip, which is the commonest edit there is. An
-//! operator looking at "revision g7 · policy sha256:ab12…" can see at a glance
-//! that suspending and resuming a schedule left the policy digest alone, and
-//! that a topic-list edit did not. A digest over the whole spec could not say
-//! that.
+//! That split is the field's value: a schedule's spec is editable, so
+//! `metadata.generation` moves on any edit, including the commonest, a
+//! `suspend` flip. "revision g7 · policy sha256:ab12…" shows that suspending a
+//! schedule left the policy alone and a topic-list edit did not.
 //!
 //! # One implementation, three callers
 //!
@@ -33,10 +30,7 @@ use crate::crds::selection::{AllUserTopics, IncompleteDiscovery};
 
 /// The format version inside the digested document.
 ///
-/// INSIDE THE BYTES, not beside them. A digest whose input format could change
-/// without the value changing is a digest that silently compares two different
-/// questions; carrying the version in the canonical JSON makes a format change
-/// a digest change, which is what a mismatch is supposed to report.
+/// Inside the bytes, not beside them, so a format change is a digest change.
 pub const RUN_POLICY_FORMAT: &str = "run-policy/v1";
 
 /// The archive half of a run policy.
@@ -83,10 +77,10 @@ struct RunPolicyV1<'a> {
     all_user_topics: Option<AllUserTopicsPolicy>,
     archive: ArchivePolicy<'a>,
     active_deadline_seconds: i64,
-    /// **PROD-04.1.** The selected consumer groups, sorted and deduplicated —
-    /// what the run records positions for is part of what it DOES. ABSENT
-    /// (and skipped) when none is selected, so every policy that selects none
-    /// digests exactly as it did before the field existed.
+    /// The selected consumer groups, sorted and deduplicated: what the run
+    /// records positions for is part of what it does. Absent (and skipped) when
+    /// none is selected, so every policy that selects none digests exactly as
+    /// it did before the field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     consumer_groups: Option<Vec<String>>,
 }
@@ -116,17 +110,9 @@ fn all_user_topics_policy(block: &AllUserTopics) -> AllUserTopicsPolicy {
     }
 }
 
-/// `sha256:<lowercase hex>` over the canonical JSON of this spec's run policy.
-///
-/// # Errors
-///
-/// Never, in practice: the document is a fixed struct of strings and integers,
-/// and `to_deterministic_json` only fails on a value it cannot canonicalise
-/// (a non-finite float, a non-string map key). The `expect` names that, rather
-/// than propagating an error every caller would have to invent a reason for.
-/// **PROD-04.1.** The consumer groups a spec selects: `None` when absent OR
-/// EMPTY, so an empty list is no selection — in the digest, in the frozen
-/// plan and in the runner's document alike.
+/// The consumer groups a spec selects: `None` when absent or empty, so an empty
+/// list is no selection, in the digest, the frozen plan and the runner's
+/// document alike.
 #[must_use]
 pub fn selected_groups(spec: &BackupSpec) -> Option<&[String]> {
     spec.consumer_groups
@@ -134,6 +120,10 @@ pub fn selected_groups(spec: &BackupSpec) -> Option<&[String]> {
         .filter(|groups| !groups.is_empty())
 }
 
+/// `sha256:<lowercase hex>` over the canonical JSON of this spec's run policy.
+/// It cannot fail in practice (the document is a fixed struct of strings and
+/// integers), so the `expect` in `run_policy_document` names that rather than
+/// handing every caller an error to invent a reason for.
 #[must_use]
 pub fn run_policy_sha256(spec: &BackupSpec) -> String {
     logweir_core::ids::sha256_prefixed(&run_policy_document(spec))
@@ -183,17 +173,12 @@ pub enum SelectionShape {
 /// Every field-level problem with this spec's run policy, or the shape it
 /// declares.
 ///
-/// EVERY PROBLEM, NOT THE FIRST, for the reason
-/// `logweir_core::destination::validate` returns every one: a 422 that names
-/// one of three mistakes makes the operator submit three times.
-///
-/// This is [`validate_topic_selection`] plus the bounds that are not about
-/// topics. The two are separate because they are refused in DIFFERENT PLACES:
-/// the selection half is the `Backup` reconciler's terminal
-/// `InvalidTopicSelection` (D1 §3.4), while `deadlineSeconds` already belongs
-/// to PLAT-06.1's `ExecutionSpecInvalid`, which names the field and has its
-/// own test. One function reporting both would move a refusal that already has
-/// an owner.
+/// Every problem, not the first: a 422 that names one of three mistakes makes
+/// the operator submit three times. This is [`validate_topic_selection`] plus
+/// the non-topic bounds, kept separate because they are refused in different
+/// places: the selection half is the `Backup` reconciler's terminal
+/// `InvalidTopicSelection` (D1 §3.4), while `deadlineSeconds` belongs to
+/// `ExecutionSpecInvalid`.
 ///
 /// # Errors
 ///
@@ -214,21 +199,19 @@ pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<Fiel
             ),
         ));
     }
-    // PROD-04.1: the runner refuses such a selection at phase −1 (exit 3);
-    // refusing it here keeps a schedule from admitting a policy every run of
-    // which would be refused.
+    // The runner refuses such a selection at phase −1 (exit 3); refusing it
+    // here keeps a schedule from admitting a policy every run of which would be
+    // refused.
     if let Some(why) =
         selected_groups(spec).and_then(logweir_core::consumer_positions::refuse_selection)
     {
         errs.push(field_error("spec.consumerGroups", why));
     }
-    // FX-33: AND SO DOES A NAMED ALLOWLIST OVER THE MAXIMUM ONE BACKUP MAY
-    // NAME (`logweir_core::topic_budget`). Its receipt could not be listed by
-    // the recovery catalog or verified by this controller, so Logweir does
-    // not write it: the runner refuses at phase −1, the freeze refuses before
-    // any Job exists (`backup_execution`), and this refuses the POLICY — a
-    // schedule is `Ready=False` by name instead of refusing every slot, and
-    // the product API answers 422.
+    // And so does a named allowlist over the maximum one backup may name
+    // (`logweir_core::topic_budget`): its receipt could not be listed by the
+    // recovery catalog or verified by this controller. The runner refuses at
+    // phase −1, the freeze before any Job exists, and this refuses the policy,
+    // so a schedule is `Ready=False` by name and the API answers 422.
     if let Some(why) = logweir_core::topic_budget::refuse_topic_count(spec.topics.len()) {
         errs.push(field_error("spec.topics", why));
     }
@@ -248,14 +231,12 @@ pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<Fiel
 pub fn validate_topic_selection(spec: &BackupSpec) -> Result<SelectionShape, Vec<FieldError>> {
     let mut errs: Vec<FieldError> = Vec::new();
 
-    // THE THIRD SHAPE IS THE ONE THAT MATTERS. `topics` non-empty AND a
-    // dynamic block is two answers to one question; `topics: []` with no
-    // dynamic block is the shape that used to mean "everything" to the engine,
-    // which is the defect guard G-GLOB exists for. Neither is expressible in
-    // CEL at the 1.29 floor without blocking `suspend` updates on objects
-    // stored with `topics: []`, so both are refused here — by the scheduler
-    // before it admits, by the Backup controller before it POSTs, and by the
-    // API as a 422.
+    // The third shape matters most: `topics` non-empty and a dynamic block is
+    // two answers to one question, and `topics: []` with no dynamic block is
+    // the shape that meant "everything" to the engine (guard G-GLOB). Neither
+    // is expressible in CEL at the 1.29 floor without blocking `suspend`
+    // updates on objects stored with `topics: []`, so both are refused here, by
+    // the scheduler, the Backup controller and the API alike.
     let shape = match (spec.topics.is_empty(), spec.all_user_topics.is_some()) {
         (false, false) => Some(SelectionShape::SelectedTopics),
         (true, true) => Some(SelectionShape::AllUserTopics),
@@ -387,10 +368,9 @@ mod tests {
         serde_json::from_value(v).expect("a BackupSpec")
     }
 
-    /// **PROD-04.1: a policy that selects no consumer group is the document it
-    /// was before the field existed**, byte for byte — so every existing
-    /// schedule's and run's `runPolicySha256` is unchanged. The literal is the
-    /// `run-policy/v1` document as it stood before PROD-04.1. KILLS:
+    /// A policy that selects no consumer group is the document it was before
+    /// the field existed, byte for byte, so every existing `runPolicySha256` is
+    /// unchanged. The literal is the original `run-policy/v1` document. KILLS:
     /// serialising an absent selection (`consumerGroups: null`), or an empty
     /// one (`[]`).
     #[test]
