@@ -61,6 +61,9 @@ pub mod ids;
 /// probe's scratch name.
 pub mod original_name;
 pub mod outcome;
+/// FX-33: the facts a reader takes from a backup receipt without building a
+/// tree of it — the shared controller's bounded read.
+pub mod receipt_facts;
 /// FX-34: a guard refusal's reason code and sentence as one validated,
 /// cleaned and bounded `refusal-detail=` line.
 pub mod refusal_detail;
@@ -78,6 +81,9 @@ pub mod spec;
 /// FX-8: which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
+/// FX-33: how many topics one backup may name and what its signed documents
+/// may weigh — the one place every reader's cap and refusal derive from.
+pub mod topic_budget;
 /// PROD-05.1: the topic configuration model's portability table, the capture
 /// rule and the detection of declarative owners.
 pub mod topic_configuration;

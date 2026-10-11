@@ -783,19 +783,20 @@ pub fn verify_evidence(
     // FX-31: EACH UNDER ITS CAP, and never whole. This process serves every
     // namespace, so a tenant's multi-gigabyte object at its receipt key must
     // not take memory the other reconciles need: the document is read under
-    // `caps::CONTROLLER_DOCUMENT` (the evidence relay's 1 MiB, so the two read
-    // paths agree on what can be verified) and the sidecar under
-    // `caps::SIDECAR`. An object over its cap is refused on the size the store
-    // reports, before a body byte is read, and is `NotAttempted` naming the
-    // cap — a FINAL verdict (`not_attempted_class`): the object will not
-    // shrink, so it is not read again on the schedule.
+    // the controller's cap for its payload type ([`controller_cap_for`]: the
+    // evidence relay's cap for the same document, so the two read paths
+    // agree on what can be verified) and the sidecar under `caps::SIDECAR`.
+    // An object over its cap is refused on the size the store reports, before
+    // a body byte is read, and is `NotAttempted` naming the cap — a FINAL
+    // verdict (`not_attempted_class`): the object will not shrink, so it is
+    // not read again on the schedule.
     //
     // AND OUT OF ONE BUDGET (review F2): the document's worst case is reserved
     // before it is read and held until the verdict is built, so concurrent
     // verifications cannot together exceed `read_budget`'s bound.
     let _reservation = crate::read_budget::ReadBudget::controller()
         .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
-    let payload = match store.get_capped(payload_key, caps::CONTROLLER_DOCUMENT) {
+    let payload = match store.get_capped(payload_key, controller_cap_for(payload_type)) {
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
@@ -838,6 +839,36 @@ pub fn verify_fetched(
     sidecar_key: &str,
     payload_type: &str,
 ) -> VerificationResult {
+    // FX-33 — THE CAP OF THE DOCUMENT THIS VERIFICATION IS ABOUT, ENFORCED BY
+    // THE VERIFIER ITSELF. Both ways the bytes get here stop at it (the
+    // capped store read in `verify_evidence`, the capped relay in
+    // `evidence_fetch`), and neither is what this function relies on: bytes
+    // over the cap of their own payload type are not hashed, not copied for
+    // the signature and not read for a claim, whoever passed them. Over it,
+    // the verdict is FX-31's — `NotAttempted` naming the key and the cap,
+    // final — and never `Invalid`: nothing was read that could make a claim.
+    let cap = controller_cap_for(payload_type);
+    if payload.len() as u64 > cap {
+        return VerificationResult::not_attempted(
+            payload_type,
+            over_read_cap_detail(
+                payload_key,
+                cap,
+                &logweir_store::OverCap::Reported(payload.len() as u64),
+            ),
+        );
+    }
+    if sidecar_bytes.len() as u64 > caps::SIDECAR {
+        return VerificationResult::not_attempted(
+            payload_type,
+            over_read_cap_detail(
+                sidecar_key,
+                caps::SIDECAR,
+                &logweir_store::OverCap::Reported(sidecar_bytes.len() as u64),
+            ),
+        );
+    }
+
     // STEP 3. The digest the status recorded, against the bytes in the bucket
     // right now. A MISMATCH IS `Invalid`.
     let computed = sha256_prefixed(payload);
@@ -909,14 +940,10 @@ pub fn verify_fetched(
                 // that ordering is the point: bytes whose signature has not
                 // been checked have no claim worth reading, and a claim read
                 // before the digest comparison would be the SUBSTITUTED
-                // document's claim.
-                let claim = match serde_json::from_slice::<Value>(payload) {
-                    Ok(json) => EvidenceClaim::from_document(payload_type, &json),
-                    // The signature verified over bytes that are not JSON at
-                    // all — possible only for a payload type this build does
-                    // not model. Fails closed with the reason named.
-                    Err(_) => EvidenceClaim::absent(logweir_core::trust::ClaimAbsence::Unparseable),
-                };
+                // document's claim. A signature that verified over bytes that
+                // are not JSON at all fails closed with the reason named
+                // (`Unparseable`).
+                let claim = claim_of(payload_type, payload);
                 return VerificationResult::signed(
                     payload_type,
                     entry.trust.key_id.clone(),
@@ -937,6 +964,64 @@ pub fn verify_fetched(
             "no signing key on the TrustRoster verified this sidecar".to_string()
         }),
     )
+}
+
+/// Whether `payload_type` is a backup receipt's
+/// ([`logweir_core::trust::is_backup_receipt`]): the one document the
+/// controller holds under [`caps::CONTROLLER_RECEIPT`] and never parses into
+/// a tree (FX-33).
+#[must_use]
+pub fn is_backup_receipt(payload_type: &str) -> bool {
+    logweir_core::trust::is_backup_receipt(payload_type)
+}
+
+/// **FX-33 — the cap the SHARED controller reads one signed document of
+/// `payload_type` under**: [`caps::CONTROLLER_RECEIPT`] for a backup receipt,
+/// [`caps::CONTROLLER_DOCUMENT`] for every other type. One of those two rows
+/// and nothing else, whatever the type string is
+/// (`the_controllers_document_cap_is_one_of_its_two_rows`).
+///
+/// A receipt's cap is the larger because a receipt is the document that
+/// grows with a backup's topics, and because the controller no longer parses
+/// one whole ([`claim_of`], `observe_archive`): what it holds of a receipt is
+/// its bytes and the signature's copy of them. A scorecard is still parsed
+/// into a `serde_json::Value`, at up to 37 times its size, so its cap stays
+/// where FX-31 put it.
+#[must_use]
+pub fn controller_cap_for(payload_type: &str) -> u64 {
+    if is_backup_receipt(payload_type) {
+        caps::CONTROLLER_RECEIPT
+    } else {
+        caps::CONTROLLER_DOCUMENT
+    }
+}
+
+/// The signing time a VERIFIED document claims, with its absence named.
+///
+/// **FX-33: a backup receipt is not parsed into a tree.** Its `finished_at`
+/// is folded from the bytes (`logweir_core::receipt_facts`), by the rule
+/// [`EvidenceClaim::from_document`] reads it by: no field is `FieldAbsent`, a
+/// value that is not an RFC 3339 string is `Unparseable`, and bytes that are
+/// not JSON are `Unparseable`. `logweir-core`'s `receipt_facts` rows hold the
+/// two readings together over a corpus, the bodies a lenient skip would
+/// accept included.
+///
+/// Every other document is parsed whole, as before — and only inside the cap
+/// its type is read under: bytes over it are not parsed at all. No caller
+/// passes any (the store read and the relay both stop at the cap), so this is
+/// the bound stated where the parse is rather than a path that is taken.
+fn claim_of(payload_type: &str, payload: &[u8]) -> EvidenceClaim {
+    if is_backup_receipt(payload_type) {
+        let facts = logweir_core::receipt_facts::ReceiptFacts::fold(payload);
+        return EvidenceClaim::from_receipt_facts(facts.as_ref());
+    }
+    if payload.len() as u64 > caps::CONTROLLER_DOCUMENT {
+        return EvidenceClaim::absent(logweir_core::trust::ClaimAbsence::Unparseable);
+    }
+    match serde_json::from_slice::<Value>(payload) {
+        Ok(json) => EvidenceClaim::from_document(payload_type, &json),
+        Err(_) => EvidenceClaim::absent(logweir_core::trust::ClaimAbsence::Unparseable),
+    }
 }
 
 /// [`verify_evidence`], with the namespace's whole [`Resolution`] in front of
@@ -2712,12 +2797,12 @@ pub fn signing_time_in(bytes: &[u8], need: &SigningTimeNeed) -> SigningTime {
             need.payload_key, need.payload_sha256
         ));
     }
-    let Ok(json) = serde_json::from_slice::<Value>(bytes) else {
-        return SigningTime::Absent(ClaimAbsence::Unparseable);
-    };
-    match logweir_core::trust::read_claimed_signing_time(&need.payload_type, &json) {
-        Ok(at) => SigningTime::Recovered(at),
-        Err(absence) => SigningTime::Absent(absence),
+    // FX-33: by [`claim_of`], so a receipt is folded and never parsed whole.
+    let claim = claim_of(&need.payload_type, bytes);
+    match (claim.signed_at, claim.absence) {
+        (Some(at), _) => SigningTime::Recovered(at),
+        (None, Some(absence)) => SigningTime::Absent(absence),
+        (None, None) => SigningTime::Absent(ClaimAbsence::Unparseable),
     }
 }
 
@@ -2735,11 +2820,11 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
     let Some(store) = store else {
         return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
     };
-    // FX-31: under the same cap as `verify_evidence`'s read of the document,
-    // and out of the same budget (review F2).
+    // FX-31: under the same cap as `verify_evidence`'s read of the document
+    // (FX-33: its payload type's), and out of the same budget (review F2).
     let _reservation = crate::read_budget::ReadBudget::controller()
         .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
-    match store.get_capped(&need.payload_key, caps::CONTROLLER_DOCUMENT) {
+    match store.get_capped(&need.payload_key, controller_cap_for(&need.payload_type)) {
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
         // Over the cap: settled, not retried (review F8).
         Err(e @ StoreError::TooLarge { .. }) => SigningTime::OverCap(store_detail(&e)),

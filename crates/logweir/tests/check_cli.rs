@@ -9840,16 +9840,23 @@ fn built_positions(
 /// sizes, through the runner's own builder with every group committed on every
 /// partition: 10 groups over 20 topics of 12 partitions, and 100 groups — the
 /// most a backup may select — over 10 topics of 11. Each receipt is far under
-/// the catalog's 256 KiB read cap (and the evidence fetch's 1 MiB), the catalog
-/// reads the point `Available` with its summary, and the receipt's block alone
-/// is under its enforced cap. NEGATIVE CONTROL: the positions themselves —
-/// the document the receipt binds — are over the 256 KiB cap at both sizes,
-/// which is what the receipt carried inline before the fix, so these sizes
-/// would read `Unreadable` had the positions stayed in it.
+/// the 256 KiB the catalog read a document under when PROD-04.1 landed (and
+/// the evidence fetch's cap), the catalog reads the point `Available` with its
+/// summary, and the receipt's block alone is under its enforced cap. NEGATIVE
+/// CONTROL: the positions themselves — the document the receipt binds — are
+/// over that 256 KiB at both sizes, which is what the receipt carried inline
+/// before the fix.
+///
+/// FX-33 replaced that cap with the topic budget's (`caps::CATALOG_RECEIPT`),
+/// so the number this row holds the receipt under is written down here: the
+/// row's claim is that positions do not grow the receipt, whatever a reader's
+/// cap is.
 #[test]
 fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
-    use logweir::check::kinds::catalog_sync::{MAX_CATALOG_DOCUMENT_BYTES, MAX_ENTRY_GROUPS};
+    use logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS;
     use logweir_core::consumer_positions::{MAX_BLOCK_BYTES, MAX_SELECTED_GROUPS};
+    /// The catalog walk's document cap when this row was written.
+    const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
     for (groups, topics, partitions) in [(10usize, 20usize, 12i32), (MAX_SELECTED_GROUPS, 10, 11)] {
         let names: Vec<String> = (0..topics).map(|t| format!("topic-{t:02}")).collect();
         let layout: Vec<(&str, u32, u32)> = names
@@ -10810,11 +10817,22 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
         counts["total"], 2,
         "the walk still SAW both points — the shard listing is what establishes that"
     );
-    assert!(
-        entries_of(&body).is_empty(),
-        "a point whose record could not be read has no receipt-derived facts to publish, so it \
-         is counted and not listed: {body}"
-    );
+    // FX-33: AND BOTH ARE LISTED, by the point id each key carries. They
+    // used to be counted and listed by no entry. A read that did not answer
+    // is the one cause whose remedy names the grant.
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2, "both points are listed: {body}");
+    for (entry, f) in entries.iter().zip([&newer, &older]) {
+        assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
+        assert_eq!(entry["availability"], "Unreadable", "{entry}");
+        assert_eq!(entry["receiptKey"], "", "nothing was read: {entry}");
+        assert!(
+            entry["remedy"]
+                .as_str()
+                .is_some_and(|r| r.contains("archiveRead grant")),
+            "{entry}"
+        );
+    }
 }
 
 /// A record that contradicts the receipt it names is a `Conflict`, and so is a
@@ -10874,7 +10892,25 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
         counts["available"], 1,
         "the other point still lists: {body}"
     );
-    assert_eq!(entries_of(&body).len(), 1);
+    // FX-33: and the point this build cannot read is listed too, as what it
+    // is, with the version it declares.
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2, "{body}");
+    let unsupported = &entries[0];
+    assert_eq!(unsupported["pointId"], newer.point.point_id.as_str());
+    assert_eq!(
+        unsupported["availability"], "UnsupportedFormat",
+        "{unsupported}"
+    );
+    assert_eq!(unsupported["formatVersion"], "2.0.0", "{unsupported}");
+    assert_eq!(unsupported["backupId"], "", "{unsupported}");
+    assert!(
+        unsupported["remedy"]
+            .as_str()
+            .is_some_and(|r| r.contains("newer Logweir")),
+        "{unsupported}"
+    );
+    assert_eq!(entries[1]["availability"], "Available", "{body}");
 }
 
 /// The window is the plan's `viewLimit`; everything beyond it is COUNTED.
@@ -11489,13 +11525,19 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
     );
     let denied = Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"));
 
-    let cases: Vec<(&str, String, Fault, &str, &str)> = vec![
+    // The last column is the cause (FX-33): the document the examination
+    // stopped at and why, or `None` for a point that is `Available`. Only a
+    // read that did not answer has a remedy naming the grant.
+    type Cause<'a> = Option<(&'a str, &'a str)>;
+    type Case<'a> = (&'a str, String, Fault, &'a str, &'a str, Cause<'a>);
+    let cases: Vec<Case<'_>> = vec![
         (
             "the record is absent",
             f.record_key.clone(),
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("record", "notFound")),
         ),
         (
             "the record is denied",
@@ -11503,6 +11545,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Unreadable",
             "notAttempted",
+            Some(("record", "readFailed")),
         ),
         (
             "the receipt is absent",
@@ -11510,6 +11553,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("receipt", "notFound")),
         ),
         (
             "the receipt is denied",
@@ -11517,6 +11561,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Unreadable",
             "notAttempted",
+            Some(("receipt", "readFailed")),
         ),
         (
             "the sidecar is absent",
@@ -11524,6 +11569,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Available",
             "noEvidence",
+            None,
         ),
         (
             "the sidecar is denied",
@@ -11531,6 +11577,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied.clone(),
             "Available",
             "notAttempted",
+            None,
         ),
         (
             "the manifest is absent",
@@ -11538,6 +11585,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             Fault::NotFound,
             "Missing",
             "notAttempted",
+            Some(("manifest", "notFound")),
         ),
         (
             "the manifest is denied",
@@ -11545,9 +11593,10 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
             denied,
             "Unreadable",
             "notAttempted",
+            Some(("manifest", "readFailed")),
         ),
     ];
-    for (what, key, fault, availability, signature) in cases {
+    for (what, key, fault, availability, signature, cause) in cases {
         let objects = place(FakeObjects::new(), &f).failing_key(&key, fault);
         let run = drive_sync(
             sync_request(),
@@ -11556,11 +11605,26 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         let body = body_of(&run);
         let counts = summary_of(&body, "catalog-counts=");
         assert_eq!(counts["total"], 1, "{what}: {body}");
-        // A point whose RECORD could not be read has no receipt-derived facts
-        // to publish, so it is counted and not listed.
-        if let Some(entry) = entries_of(&body).first() {
-            assert_eq!(entry["availability"], availability, "{what}: {entry}");
-            assert_eq!(entry["signature"], signature, "{what}: {entry}");
+        // FX-33: EVERY counted point is listed — a point whose RECORD could
+        // not be read too, which used to be counted and listed by no entry.
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{what}: the point is not listed: {body}");
+        let entry = &entries[0];
+        assert_eq!(
+            entry["pointId"],
+            f.point.point_id.as_str(),
+            "{what}: {entry}"
+        );
+        assert_eq!(entry["availability"], availability, "{what}: {entry}");
+        assert_eq!(entry["signature"], signature, "{what}: {entry}");
+        if let Some((_, reason)) = cause {
+            assert_eq!(
+                entry["remedy"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("archiveRead grant")),
+                reason == "readFailed",
+                "{what}: {entry}"
+            );
         }
         let bucket = match availability {
             "Missing" => "missing",
@@ -11578,10 +11642,18 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
     }
 }
 
-/// **F4, the size half (question F12).** A document larger than a record could
-/// ever be is `Unreadable`, not parsed.
+/// **F4, the size half (question F12), and FX-33's.** A record larger than
+/// the bound a record is read under is `Unreadable`, is not parsed — and is
+/// LISTED, with its size against the bound.
+///
+/// Before FX-33 the outcome was the count alone: the point had no entry.
+///
+/// KILLS: the record read uncapped or under a larger cap; `build_entry`
+/// dropping a point with no parsed record; the size reported with the
+/// grant remedy.
 #[test]
 fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
+    use logweir_engine_oso::storage::caps;
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let f = catalog_fixture(
         &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
@@ -11594,13 +11666,12 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     // document `read_record` accepts — which is what makes the ceiling, and not
     // the parser, the thing under test. A block of spaces would fail to parse
     // either way and the mutant that deletes the ceiling would survive.
+    let cap = usize::try_from(caps::CATALOG_RECORD).expect("fits");
     let mut doc: serde_json::Value =
         serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
-    doc["e2e_padding"] = serde_json::json!(
-        "x".repeat(logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES)
-    );
+    doc["e2e_padding"] = serde_json::json!("x".repeat(cap));
     let huge = serde_json::to_vec(&doc).expect("JSON");
-    assert!(huge.len() > logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES);
+    assert!(huge.len() > cap);
     // The CONTROL: the same document under the ceiling reads normally.
     let control = place(FakeObjects::new(), &f);
     let run = drive_sync(
@@ -11618,23 +11689,38 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
         &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
     );
     let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["unreadable"], 1, "{body}");
+    assert_eq!(counts["unreadableOverReadCap"], 1, "{body}");
+    let entries = entries_of(&body);
     assert_eq!(
-        summary_of(&body, "catalog-counts=")["unreadable"],
+        entries.len(),
         1,
-        "{body}"
+        "the oversized point is not listed: {body}"
     );
+    let entry = &entries[0];
+    assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
+    assert_eq!(entry["availability"], "Unreadable", "{entry}");
+    let remedy = entry["remedy"].as_str().expect("a remedy");
+    assert!(
+        remedy.contains(&format!("{} bytes", huge.len()))
+            && remedy.contains(&format!("{}-byte bound", caps::CATALOG_RECORD)),
+        "the remedy states the size against the bound: {remedy}"
+    );
+    assert!(!remedy.contains("grant"), "a size names no grant: {remedy}");
 }
 
 /// **FX-31: the catalog walk READS under its caps**, not only measures after:
-/// the record and the receipt under `MAX_CATALOG_DOCUMENT_BYTES`, the sidecar
-/// under `caps::SIDECAR`, the manifest under `caps::MANIFEST`. The row above
-/// holds the outcome (`Unreadable`), which the post-read ceiling alone would
-/// also give; this one holds the read.
+/// the record under `caps::CATALOG_RECORD`, the receipt under
+/// `caps::CATALOG_RECEIPT` (FX-33: the topic budget's two bounds, the second
+/// the controller's own), the sidecar under `caps::SIDECAR`, the manifest
+/// under `caps::MANIFEST`. The row above holds the outcome (`Unreadable`);
+/// this one holds the read.
 ///
-/// KILLS: "the walk reads uncapped" (any of the four caps).
+/// KILLS: "the walk reads uncapped" (any of the four caps); a cap read as
+/// `u64::MAX`; the receipt read under a cap other than the controller's.
 #[test]
 fn a_catalog_walk_reads_every_document_under_its_cap() {
-    use logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES;
     use logweir_engine_oso::storage::caps;
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let f = catalog_fixture(
@@ -11653,7 +11739,6 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
         1,
         "the point reads"
     );
-    let document = MAX_CATALOG_DOCUMENT_BYTES as u64;
     let caps_read = objects.read_caps();
     let cap_of = |key: &str| {
         caps_read
@@ -11662,9 +11747,19 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
             .map(|(_, c)| *c)
             .unwrap_or_else(|| panic!("{key} was not read: {caps_read:?}"))
     };
-    assert_eq!(cap_of(&f.record_key), document);
-    assert_eq!(cap_of(&f.receipt_key), document);
+    assert_eq!(cap_of(&f.record_key), caps::CATALOG_RECORD);
+    assert_eq!(cap_of(&f.receipt_key), caps::CATALOG_RECEIPT);
+    assert_eq!(cap_of(&f.receipt_key), caps::CONTROLLER_RECEIPT);
     assert_eq!(cap_of(&f.sidecar_key), caps::SIDECAR);
+    assert_eq!(cap_of(&f.manifest_key), caps::MANIFEST);
+    // FX-33: each of the five kinds has ITS cap, and no two reads of one walk
+    // share a number by accident — a record is never read under the
+    // manifest's 256 MiB, nor a sidecar under a receipt's 5 MB.
+    const _: () = assert!(
+        caps::SIDECAR < caps::CATALOG_RECEIPT
+            && caps::CATALOG_RECEIPT < caps::CATALOG_RECORD
+            && caps::CATALOG_RECORD < caps::MANIFEST
+    );
     for (key, cap) in &caps_read {
         assert!(
             *cap <= caps::MANIFEST,
@@ -12234,6 +12329,56 @@ fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
     );
 }
 
+/// **THE CROSS-CRATE GUARD, for a point whose record gave no facts (FX-33).**
+/// The EXACT body the emitter produces for the fixture below: one point whose
+/// record reads, one whose record is over its bound, and one whose record is
+/// not a record. The second and third are listed by their point ids alone.
+///
+/// `the_runners_pinned_recordless_body_is_one_this_parser_reads` in
+/// `crates/weirkeeper/tests/catalog_controller.rs` extracts this literal and
+/// runs the controller's own `parse_body` and `materialise` over it.
+const PINNED_RECORDLESS_SYNC_BODY: &str = r#"catalog-format=1
+catalog-page=1/1 count=3 sha256=be12d1d5c6d06e64ac350b4a6be14b79d4e556aa9216d8d2afb775a5d68dd6d3
+catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.1.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
+catalog-entry={"pointId":"lwp1-08cf9d03519c5c31f573595a8b368b15","backupId":"","runId":"","recoveryPointAtMs":0,"coveredFromMs":0,"coveredToMs":0,"receiptKey":"","receiptSha256":"","availability":"Unreadable","signature":"notAttempted","remedy":"The catalog record of this recovery point is larger than the 6131072-byte bound Logweir reads for one (it is 6131073 bytes): its backup named more topics, or recorded more configuration, than one backup may (1000 topics). This is the document's size; no permission or network change lists the point. The archive is intact and can be restored from the command line."}
+catalog-entry={"pointId":"lwp1-f207be56309520fa5ac69057a3c104e4","backupId":"","runId":"","recoveryPointAtMs":0,"coveredFromMs":0,"coveredToMs":0,"receiptKey":"","receiptSha256":"","availability":"Unreadable","signature":"notAttempted","remedy":"The object at this recovery point's catalog record key is not a catalog point record: it is not JSON, or it is another document. This is the object's content; no permission or network change lists the point. Nothing under logweir/ is rewritten, so find which writer produced the object before relying on this point."}
+catalog-counts={"total":3,"available":1,"missing":0,"unreadable":2,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":3},"byDay":[{"day":"2026-09-16","points":1},{"day":"2026-09-15","points":1},{"day":"2026-09-14","points":1}],"unreadableOverReadCap":1,"unreadableMalformed":1}
+catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
+catalog-cursor={"indexShard":"2026-09-14","complete":true}
+"#;
+
+/// The emitter produces [`PINNED_RECORDLESS_SYNC_BODY`], byte for byte.
+#[test]
+fn the_recordless_catalog_sync_body_is_pinned_for_the_controllers_parser() {
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = |set: &str, run: &str, at: &str| {
+        catalog_fixture(
+            &catalog_receipt(set, run, at),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let reads = fixture("set-a", "run-a", "2026-09-16T03:00:00Z");
+    let oversized = fixture("set-b", "run-b", "2026-09-15T03:00:00Z");
+    let broken = fixture("set-c", "run-c", "2026-09-14T03:00:00Z");
+    let objects = place(
+        place(place(FakeObjects::new(), &reads), &oversized),
+        &broken,
+    )
+    .reporting_size(&oversized.record_key, caps::CATALOG_RECORD + 1)
+    .with_object(&broken.record_key, b"not a record");
+    assert_eq!(
+        body_of(&fx33_sync(&objects)),
+        PINNED_RECORDLESS_SYNC_BODY,
+        "the emitted body moved. If the change is intended, paste the left-hand side into \
+         `PINNED_RECORDLESS_SYNC_BODY` AND check that `crates/weirkeeper/tests/\
+         catalog_controller.rs`'s `the_runners_pinned_recordless_body_is_one_this_parser_reads` \
+         still passes — the two are one contract."
+    );
+}
+
 // ===========================================================================
 // PROD-11.1 — the replay selection's PREVIEW, through the shared function
 // ===========================================================================
@@ -12714,3 +12859,1145 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
     );
     assert_eq!(run.row(CheckId::PlanParse).state, CheckState::Ready);
 }
+
+// ===========================================================================
+// FX-33 — a backup of many topics stays listed; a counted point is never
+// dropped
+// ===========================================================================
+
+/// The budget's reference receipt of `topics` topics — each with the 13
+/// recorded entries, a `generations` entry, a `schema_dependency` entry, and
+/// PROD-04.1's largest consumer position summary beside them
+/// (`logweir_core::topic_budget::reference_receipt`, the `FULL` shape) — as a
+/// run on `started` wrote it into set `backup_id`, over [`CATALOG_MANIFEST`].
+fn fx33_receipt(topics: usize, backup_id: &str, started: &str) -> BackupReceipt {
+    use logweir_core::topic_budget::{reference_receipt, ReferenceShape};
+    let mut r = reference_receipt(topics, &ReferenceShape::FULL);
+    let shift = catalog_ts(started) - r.started_at;
+    r.requested_at += shift;
+    r.started_at += shift;
+    r.finished_at += shift;
+    r.covered.from_ms += shift.num_milliseconds();
+    r.covered.to_ms += shift.num_milliseconds();
+    r.backup_id = backup_id.to_string();
+    r.archive.manifest_key = format!("kafka-backups/{backup_id}/manifest.json");
+    r.archive.manifest_sha256 = logweir_core::ids::sha256_prefixed(CATALOG_MANIFEST);
+    if let Some(positions) = r.consumer_positions.as_mut() {
+        positions.observed_from += shift;
+        positions.observed_to += shift;
+        positions.document.key =
+            logweir_core::consumer_positions::document_key(backup_id, &r.run_id);
+    }
+    assert_eq!(r.validate_invariants(), Ok(()), "the reference is valid");
+    r
+}
+
+fn fx33_sync(objects: &FakeObjects) -> Run {
+    drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    )
+}
+
+/// An entry for a point whose record gave no facts: listed, not `Available`,
+/// and carrying nothing a restore binds to or a reader joins on.
+fn fx33_assert_recordless(entry: &serde_json::Value) {
+    assert_ne!(entry["availability"], "Available", "{entry}");
+    assert_eq!(entry["signature"], "notAttempted", "{entry}");
+    for (field, empty) in [
+        ("backupId", serde_json::json!("")),
+        ("runId", serde_json::json!("")),
+        ("recoveryPointAtMs", serde_json::json!(0)),
+        ("coveredFromMs", serde_json::json!(0)),
+        ("coveredToMs", serde_json::json!(0)),
+        ("receiptKey", serde_json::json!("")),
+        ("receiptSha256", serde_json::json!("")),
+    ] {
+        assert_eq!(entry[field], empty, "`{field}`: {entry}");
+    }
+    for absent in [
+        "locations",
+        "manifestKey",
+        "manifestSha256",
+        "signerKeyId",
+        "topics",
+    ] {
+        assert!(entry.get(absent).is_none(), "`{absent}`: {entry}");
+    }
+}
+
+/// **FX-33's acceptance, at the catalog: a backup of 70, 105, 113, 300, 500 or
+/// 1,000 topics with full recorded configuration is LISTED, `Available`, and
+/// its signature VERIFIED** — every one of them a record that the walk's old
+/// 256 KiB cap dropped from the catalog without a line.
+///
+/// KILLS: the walk's record or receipt cap put back to one a backup
+/// outgrows (the point is `Unreadable`, not `Available`); the entry dropped.
+#[test]
+fn a_backup_of_many_topics_is_listed_available_and_verified() {
+    use logweir_engine_oso::storage::caps;
+    /// The catalog walk's one document cap before FX-33.
+    const OLD_WALK_CAP: usize = 256 * 1024;
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let key_id = key.verifying_key().key_id();
+    let pem = key
+        .verifying_key()
+        .to_public_key_pem()
+        .expect("a public key renders");
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        trust_bundle_file: Some("/check/trust/trust-bundle.pem".to_string()),
+        ..sync_request()
+    };
+    for topics in [70usize, 105, 113, 300, 500, 1_000] {
+        let receipt = fx33_receipt(topics, "set-a", "2026-09-16T03:00:00Z");
+        let receipt_bytes =
+            logweir_core::det_json::to_deterministic_json(&receipt).expect("serialises");
+        let sidecar = logweir_evidence::sign::sign_detached(
+            &key,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            &receipt_bytes,
+        )
+        .expect("the sidecar signs");
+        let f = catalog_fixture(&receipt, "s3://lw-archive/kafka-backups", &sidecar, &key_id);
+        let sizes = format!(
+            "{topics} topics: receipt {} bytes, record {} bytes",
+            f.receipt_bytes.len(),
+            f.record_bytes.len()
+        );
+        eprintln!("[fx-33] {sizes}");
+        assert!(
+            f.record_bytes.len() > OLD_WALK_CAP,
+            "NEGATIVE CONTROL: under the old cap this record was dropped: {sizes}"
+        );
+        assert!(
+            f.receipt_bytes.len() as u64 <= caps::CATALOG_RECEIPT
+                && f.record_bytes.len() as u64 <= caps::CATALOG_RECORD,
+            "{sizes}"
+        );
+        let wiring = FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f))
+            .with_file("/check/trust/trust-bundle.pem", pem.as_bytes());
+        let body = body_of(&drive_sync(request.clone(), &wiring));
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{sizes}: the point is not listed");
+        let entry = &entries[0];
+        assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{sizes}");
+        assert_eq!(entry["availability"], "Available", "{sizes}: {entry}");
+        assert_eq!(entry["signature"], "verified", "{sizes}: {entry}");
+        assert_eq!(entry["signerKeyId"], key_id, "{sizes}");
+        assert_eq!(entry["receiptKey"], f.receipt_key.as_str(), "{sizes}");
+        assert_eq!(
+            entry["receiptSha256"],
+            logweir_core::ids::sha256_prefixed(&f.receipt_bytes),
+            "{sizes}"
+        );
+        assert!(entry.get("remedy").is_none(), "{sizes}: {entry}");
+        // More topics than an entry lists: counted, and the signed record
+        // names each (PROD-05.1).
+        assert_eq!(entry["topicsOmitted"], topics, "{sizes}: {entry}");
+        assert_eq!(
+            entry["consumerPositions"]["groupsOmitted"],
+            logweir_core::consumer_positions::MAX_SELECTED_GROUPS,
+            "{sizes}: {entry}"
+        );
+        let counts = summary_of(&body, "catalog-counts=");
+        assert_eq!(counts["total"], 1, "{sizes}");
+        assert_eq!(counts["available"], 1, "{sizes}");
+        assert_eq!(counts["signature"]["verified"], 1, "{sizes}");
+        assert!(counts.get("unreadableOverReadCap").is_none(), "{counts}");
+    }
+}
+
+/// **A backup over the maximum — one an older runner wrote, 5,000 topics — is
+/// LISTED with its size against the bound, and never dropped.** Nothing but
+/// its point id and the reason is published; nothing else is read for it;
+/// and the remedy names no grant.
+///
+/// KILLS: `build_entry` drops again (no entry); the remedy names the grant;
+/// the record read under no cap (a 15 MB record parsed, the point
+/// `Available`).
+#[test]
+fn a_backup_over_the_maximum_is_listed_with_its_size_and_never_dropped() {
+    use logweir_engine_oso::storage::caps;
+    let receipt = fx33_receipt(5_000, "set-big", "2026-09-16T03:00:00Z");
+    let f = catalog_fixture(
+        &receipt,
+        "s3://lw-archive/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let record_len = f.record_bytes.len() as u64;
+    assert!(
+        record_len > caps::CATALOG_RECORD && f.receipt_bytes.len() as u64 > caps::CATALOG_RECEIPT,
+        "5,000 topics are over both bounds: record {record_len}, receipt {}",
+        f.receipt_bytes.len()
+    );
+    let objects = place(FakeObjects::new(), &f);
+    let body = body_of(&fx33_sync(&objects));
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], 1, "{counts}");
+    assert_eq!(counts["unreadable"], 1, "{counts}");
+    assert_eq!(counts["unreadableOverReadCap"], 1, "{counts}");
+    assert_eq!(counts["available"], 0, "{counts}");
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 1, "a counted point is listed: {counts}");
+    let entry = &entries[0];
+    fx33_assert_recordless(entry);
+    assert_eq!(entry["pointId"], f.point.point_id.as_str());
+    assert_eq!(entry["availability"], "Unreadable");
+    let remedy = entry["remedy"].as_str().expect("a remedy");
+    assert!(
+        remedy.contains(&format!("{record_len} bytes"))
+            && remedy.contains(&format!("{}-byte bound", caps::CATALOG_RECORD))
+            && remedy.contains("1000 topics")
+            && remedy.contains("restored from the command line"),
+        "{remedy}"
+    );
+    for word in ["grant", "archiveRead", "endpoint", "credential"] {
+        assert!(!remedy.contains(word), "a size names no `{word}`: {remedy}");
+    }
+    assert!(remedy.len() <= 512, "{} characters", remedy.len());
+    // THE READS: the record under its own cap, and nothing else of this
+    // point — not its index row, not its 15 MB receipt.
+    let reads = objects.read_caps();
+    assert_eq!(
+        reads,
+        vec![(f.record_key.clone(), caps::CATALOG_RECORD)],
+        "nothing else is read of a point whose record gave no facts"
+    );
+}
+
+/// **A counted point is always listed, and each way it can fail has its own
+/// reason.** Nine faults, each on one document of one point: the entry is
+/// there, it is not `Available`, its remedy fits the fault, and the
+/// sub-count that fits the reason — and only that one — moves. A point whose
+/// RECORD gave no facts carries its point id and nothing else; a point whose
+/// record read keeps its record's facts.
+///
+/// KILLS: `build_entry` drops again, for any one cause; a size or a content
+/// fault counted as a permission or transport failure; a cause's remedy
+/// naming the grant.
+#[test]
+fn a_counted_point_is_always_listed_with_its_own_reason() {
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = || {
+        catalog_fixture(
+            &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let f = fixture();
+    let io = || Fault::Io("connection reset by peer".to_string());
+    let other_major = {
+        let mut doc: serde_json::Value = serde_json::from_slice(&f.record_bytes).expect("JSON");
+        doc["format_version"] = serde_json::json!("2.0.0");
+        serde_json::to_vec(&doc).expect("JSON")
+    };
+    let placed = || place(FakeObjects::new(), &f);
+    // (what, the store, availability, document, reason, over-cap, malformed,
+    //  the record gave facts, the remedy names the grant)
+    type Case = (
+        &'static str,
+        FakeObjects,
+        &'static str,
+        &'static str,
+        &'static str,
+        i64,
+        i64,
+        bool,
+        bool,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "the record's read fails",
+            placed().failing_key(&f.record_key, io()),
+            "Unreadable",
+            "record",
+            "readFailed",
+            0,
+            0,
+            false,
+            true,
+        ),
+        (
+            "the record is absent",
+            placed().failing_key(&f.record_key, Fault::NotFound),
+            "Missing",
+            "record",
+            "notFound",
+            0,
+            0,
+            false,
+            false,
+        ),
+        (
+            "the record is over its bound",
+            placed().reporting_size(&f.record_key, caps::CATALOG_RECORD + 1),
+            "Unreadable",
+            "record",
+            "overReadCap",
+            1,
+            0,
+            false,
+            false,
+        ),
+        (
+            "the record is not a record",
+            placed().with_object(&f.record_key, b"not a record"),
+            "Unreadable",
+            "record",
+            "malformed",
+            0,
+            1,
+            false,
+            false,
+        ),
+        (
+            "the record is of another major",
+            placed().with_object(&f.record_key, &other_major),
+            "UnsupportedFormat",
+            "record",
+            "unsupportedFormat",
+            0,
+            0,
+            false,
+            false,
+        ),
+        (
+            "the receipt's read fails",
+            placed().failing_key(&f.receipt_key, io()),
+            "Unreadable",
+            "receipt",
+            "readFailed",
+            0,
+            0,
+            true,
+            true,
+        ),
+        (
+            "the receipt is over its bound",
+            placed().reporting_size(&f.receipt_key, caps::CATALOG_RECEIPT + 1),
+            "Unreadable",
+            "receipt",
+            "overReadCap",
+            1,
+            0,
+            true,
+            false,
+        ),
+        (
+            "the receipt is not a receipt",
+            placed().with_object(&f.receipt_key, b"{\"not\":\"a receipt\"}"),
+            "Unreadable",
+            "receipt",
+            "malformed",
+            0,
+            1,
+            true,
+            false,
+        ),
+        (
+            "the manifest is over its bound",
+            placed().reporting_size(&f.manifest_key, caps::MANIFEST + 1),
+            "Unreadable",
+            "manifest",
+            "overReadCap",
+            1,
+            0,
+            true,
+            false,
+        ),
+    ];
+    for (what, objects, availability, document, reason, over, malformed, backed, grant) in cases {
+        let body = body_of(&fx33_sync(&objects));
+        let counts = summary_of(&body, "catalog-counts=");
+        let entries = entries_of(&body);
+        assert_eq!(counts["total"], 1, "{what}: {counts}");
+        assert_eq!(entries.len(), 1, "{what}: a counted point is not listed");
+        let entry = &entries[0];
+        assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{what}");
+        assert_eq!(entry["availability"], availability, "{what}: {entry}");
+        assert_eq!(
+            counts
+                .get("unreadableOverReadCap")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            over,
+            "{what}: {counts}"
+        );
+        assert_eq!(
+            counts
+                .get("unreadableMalformed")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            malformed,
+            "{what}: {counts}"
+        );
+        if backed {
+            assert_eq!(entry["backupId"], "set-a", "{what}: the record's facts");
+            assert_eq!(entry["receiptKey"], f.receipt_key.as_str(), "{what}");
+        } else {
+            fx33_assert_recordless(entry);
+        }
+        let remedy = entry["remedy"].as_str().unwrap_or_default();
+        assert!(!remedy.is_empty(), "{what}: a point not offered says why");
+        assert_eq!(
+            remedy.contains("grant"),
+            grant,
+            "{what}: only a read that did not answer names the grant: {remedy}"
+        );
+        if reason == "overReadCap" {
+            assert!(
+                remedy.contains("-byte bound") && remedy.contains(document),
+                "{what}: a size names its document and its bound: {remedy}"
+            );
+        }
+    }
+}
+
+/// **Points that only failed to be read never push a readable point out of
+/// the window.** An archive can hold many points nobody can take — an older
+/// build's oversized points, reads that failed — and the window is
+/// `viewLimit` entries in walk order. Here five such points are NEWER than
+/// three readable ones, so the walk meets them first, and the window holds
+/// three: it lists the three readable points, and counts all eight (so the
+/// controller's view says it is a window). CONTROL: with room for all eight,
+/// the five are listed too.
+///
+/// KILLS: entries kept in walk order alone (the window would hold three
+/// unreadable points and no readable one).
+#[test]
+fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut readable = Vec::new();
+    for day in 1..=8 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{day}"),
+                "run-a",
+                &format!("2026-09-{day:02}T03:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+        if day <= 3 {
+            readable.push(f.point.point_id.clone());
+        } else if day % 2 == 0 {
+            // An older build's oversized point.
+            objects = objects.reporting_size(&f.record_key, caps::CATALOG_RECORD + 1);
+        } else {
+            // A read that failed.
+            objects = objects.failing_key(
+                &f.record_key,
+                Fault::Io("connection reset by peer".to_string()),
+            );
+        }
+    }
+    let window = |view_limit: i64| {
+        let body = body_of(&drive_sync(
+            logweir_core::check_contract::CatalogSyncRequest {
+                view_limit,
+                ..sync_request()
+            },
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        ));
+        let counts = summary_of(&body, "catalog-counts=");
+        assert_eq!(counts["total"], 8, "every point is counted: {counts}");
+        assert_eq!(counts["unreadable"], 5, "{counts}");
+        entries_of(&body)
+    };
+    let listed = window(3);
+    let mut ids: Vec<&str> = listed
+        .iter()
+        .map(|e| e["pointId"].as_str().expect("an id"))
+        .collect();
+    ids.sort_unstable();
+    let mut want: Vec<&str> = readable.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    assert_eq!(
+        ids, want,
+        "the window holds the readable points: {listed:?}"
+    );
+    assert!(listed.iter().all(|e| e["availability"] == "Available"));
+    // CONTROL: room for every point, and the unreadable ones are listed.
+    let all = window(8);
+    assert_eq!(all.len(), 8);
+    assert_eq!(
+        all.iter()
+            .filter(|e| e["availability"] == "Unreadable")
+            .count(),
+        5
+    );
+}
+
+/// **A readable point never pushes EVIDENCE out of the window.** Entries
+/// that say something about the archive's integrity — a `Conflict` (the
+/// archive contradicts the signed receipt), a record whose bytes are not a
+/// record — are never the ones an `Available` point displaces. Here three
+/// such points are newer than three readable ones, the window holds three,
+/// and it keeps the three pieces of evidence; the readable points are
+/// counted, and the view says it is a window.
+///
+/// KILLS: an `Available` point displacing any entry that is not `Available`
+/// (a tampered point pushed out of the listing by points written after it).
+#[test]
+fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut evidence = Vec::new();
+    for day in 1..=6 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{day}"),
+                "run-a",
+                &format!("2026-09-{day:02}T03:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+        match day {
+            // The archive's manifest is not the one the receipt signed.
+            4 => objects = objects.with_object(&f.manifest_key, b"{\"topics\":[1]}"),
+            // The record contradicts the receipt it names.
+            5 => {
+                let mut doc: serde_json::Value =
+                    serde_json::from_slice(&f.record_bytes).expect("JSON");
+                doc["covered"]["to_ms"] = serde_json::json!(1i64);
+                objects =
+                    objects.with_object(&f.record_key, &serde_json::to_vec(&doc).expect("JSON"));
+            }
+            // Bytes at the record's key that are not a record.
+            6 => objects = objects.with_object(&f.record_key, b"{\"format_version\":\"1."),
+            _ => continue,
+        }
+        evidence.push(f.point.point_id.clone());
+    }
+    let body = body_of(&drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            view_limit: 3,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    ));
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(
+        (&counts["total"], &counts["available"], &counts["conflict"]),
+        (
+            &serde_json::json!(6),
+            &serde_json::json!(3),
+            &serde_json::json!(2)
+        ),
+        "{counts}"
+    );
+    let listed = entries_of(&body);
+    let mut ids: Vec<&str> = listed
+        .iter()
+        .map(|e| e["pointId"].as_str().expect("an id"))
+        .collect();
+    ids.sort_unstable();
+    evidence.sort_unstable();
+    assert_eq!(ids, evidence, "the evidence stays listed: {listed:?}");
+}
+
+/// The H1 fixture: set `set-x` written twice (a re-created Job), its newer
+/// receipt's read failing in this sync, then `others` older `Available`
+/// points, one a day further back. Returns the store and the newer point's id.
+fn fx33_shared_set(others: usize) -> (FakeObjects, String) {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = |set: &str, run: &str, day: usize| {
+        catalog_fixture(
+            &catalog_receipt(set, run, &format!("2026-09-{day:02}T03:00:00Z")),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let newer = fixture("set-x", "run-b", 16);
+    let older = fixture("set-x", "run-a", 15);
+    let mut objects = place(place(FakeObjects::new(), &newer), &older).failing_key(
+        &newer.receipt_key,
+        Fault::Io("connection reset by peer".to_string()),
+    );
+    for i in 0..others {
+        objects = place(objects, &fixture(&format!("set-o{i}"), "run-a", 14 - i));
+    }
+    (objects, newer.point.point_id.clone())
+}
+
+/// The ids and availabilities a walk at `view_limit` lists.
+fn fx33_listed(objects: &FakeObjects, view_limit: i64) -> Vec<(String, String, String)> {
+    let body = body_of(&drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            view_limit,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    ));
+    entries_of(&body)
+        .iter()
+        .map(|e| {
+            (
+                e["pointId"].as_str().unwrap_or_default().to_string(),
+                e["availability"].as_str().unwrap_or_default().to_string(),
+                e["backupId"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// **Review finding H1, the viewLimit-2 case: a skipped entry that names a
+/// set keeps its place.** Set `set-x` has two receipts; the newer one's read
+/// fails in this sync, so it is `Unreadable` but keeps its record, and with
+/// it the set it names, which retention protects for it. An older
+/// `Available` point arriving at a full window must not push it out (it did:
+/// the window then held the older receipt of `set-x` and an unrelated point,
+/// and retention could plan `set-x` away). CONTROL: with room for all three,
+/// all three are listed.
+///
+/// KILLS: an entry with a record treated as displaceable.
+#[test]
+fn a_skipped_point_that_names_a_set_keeps_its_place_at_view_limit_two() {
+    let (objects, newer) = fx33_shared_set(1);
+    let listed = fx33_listed(&objects, 2);
+    assert!(
+        listed
+            .iter()
+            .any(|(id, a, set)| *id == newer && a == "Unreadable" && set == "set-x"),
+        "the newer receipt of set-x stays listed, naming its set: {listed:?}"
+    );
+    assert_eq!(listed.len(), 2);
+    assert_eq!(fx33_listed(&objects, 3).len(), 3, "CONTROL");
+}
+
+/// **Review finding H1, the viewLimit-3 case: the pair inside the window, and
+/// an unrelated older point arriving.** The window holds the newer and older
+/// receipts of `set-x` and one more point; a fourth, older, `Available` point
+/// does not take the newer receipt's place. CONTROL: with room for all four,
+/// all four are listed.
+///
+/// KILLS: an entry with a record treated as displaceable.
+#[test]
+fn a_skipped_point_that_names_a_set_keeps_its_place_against_an_unrelated_point() {
+    let (objects, newer) = fx33_shared_set(2);
+    let listed = fx33_listed(&objects, 3);
+    assert!(
+        listed
+            .iter()
+            .any(|(id, a, set)| *id == newer && a == "Unreadable" && set == "set-x"),
+        "{listed:?}"
+    );
+    assert_eq!(listed.len(), 3);
+    assert_eq!(fx33_listed(&objects, 4).len(), 4, "CONTROL");
+}
+
+/// **Review HUNT-1: a newer receipt of a set is never overtaken by its older
+/// sibling.** viewLimit 3 over, newest first: an `Available` point; a point
+/// whose record is over its bound (record-less, displaceable); another
+/// `Available` point; the newer receipt of `set-y`, whose receipt read fails
+/// (it keeps its record and names `set-y`); and the older receipt of `set-y`,
+/// `Available`. The newer `set-y` entry takes the record-less entry's place,
+/// so it is listed, naming `set-y`, and its older sibling is not: the listed
+/// points with a record are a walk-order prefix. CONTROL: viewLimit 5 lists
+/// all five (and the two earlier window rows hold the rest of the rule).
+///
+/// KILLS: only an `Available` point taking a record-less entry's place (the
+/// older `set-y` receipt listed, the newer one not).
+#[test]
+fn a_newer_receipt_of_a_set_is_never_overtaken_by_its_older_sibling() {
+    use logweir_engine_oso::storage::caps;
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let fixture = |set: &str, run: &str, day: usize| {
+        catalog_fixture(
+            &catalog_receipt(set, run, &format!("2026-09-{day:02}T03:00:00Z")),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let n1 = fixture("set-a", "run-a", 16);
+    let r = fixture("set-r", "run-a", 15);
+    let n2 = fixture("set-b", "run-a", 14);
+    let newer = fixture("set-y", "run-b", 13);
+    let older = fixture("set-y", "run-a", 12);
+    let objects = [&n1, &r, &n2, &newer, &older]
+        .into_iter()
+        .fold(FakeObjects::new(), place)
+        .reporting_size(&r.record_key, caps::CATALOG_RECORD + 1)
+        .failing_key(
+            &newer.receipt_key,
+            Fault::Io("connection reset by peer".to_string()),
+        );
+    let listed = fx33_listed(&objects, 3);
+    let ids: Vec<&str> = listed.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            n1.point.point_id.as_str(),
+            n2.point.point_id.as_str(),
+            newer.point.point_id.as_str()
+        ],
+        "{listed:?}"
+    );
+    assert_eq!(
+        (listed[2].1.as_str(), listed[2].2.as_str()),
+        ("Unreadable", "set-y")
+    );
+    assert_eq!(fx33_listed(&objects, 5).len(), 5, "CONTROL");
+}
+
+/// **Review finding M1: a record read that did not answer leaves the walk
+/// incomplete.** Such a point is listed by its id only, with no set, so a
+/// view with it in is not whole until a sync reads the record; the cursor
+/// says `complete: false` and the row counts it (`catalogRecordsUnread`).
+/// CONTROL: persistent causes — a record over its bound, bytes that are not
+/// a record — leave the walk complete.
+///
+/// KILLS: the walk reported complete over a record it could not read.
+#[test]
+fn a_record_read_that_did_not_answer_leaves_the_walk_incomplete() {
+    use logweir_engine_oso::storage::caps;
+    let (objects, newer, _) = two_point_objects();
+    let walk = |objects: FakeObjects| {
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+        );
+        let body = body_of(&run);
+        let complete = summary_of(&body, "catalog-cursor=")["complete"].clone();
+        let unread = run
+            .row(CheckId::DestinationArchiveListable)
+            .facts
+            .get("catalogRecordsUnread")
+            .cloned();
+        (complete, unread)
+    };
+    let (complete, unread) =
+        walk(objects.failing_key(&newer.record_key, Fault::Io("timed out".to_string())));
+    assert_eq!(complete, false);
+    assert_eq!(unread.as_deref(), Some("1"));
+    // CONTROL: a size and a content fault are facts that will not change.
+    // (A fresh store: a fake's clones share their faults.)
+    let (objects, newer, older) = two_point_objects();
+    let (complete, unread) = walk(
+        objects
+            .reporting_size(&newer.record_key, caps::CATALOG_RECORD + 1)
+            .with_object(&older.record_key, b"not a record"),
+    );
+    assert_eq!(complete, true);
+    assert!(unread.is_none());
+}
+
+/// **A day shard of more than one page is read to its end (review finding
+/// D4).** Per-minute backups write 1,440 points a day; the walk used to read
+/// a day's first page of keys and report the view complete. Here one day
+/// holds 1,005 points (their records absent, so each costs one read): every
+/// one is counted and listed, and the walk is complete. CONTROL: a budget
+/// that runs out after the shard's first page ends the walk incomplete,
+/// naming the object budget.
+///
+/// KILLS: the shard read to its first page only (1,000 counted, complete).
+#[test]
+fn a_day_shard_of_more_than_one_page_is_listed_whole() {
+    use logweir::check::kinds::catalog_sync::SHARD_PAGE_KEYS;
+    let points = SHARD_PAGE_KEYS + 5;
+    let mut objects = FakeObjects::new();
+    let start = catalog_ts("2026-09-16T00:00:00Z");
+    for i in 0..points {
+        let at = start + chrono::Duration::seconds(i64::try_from(i).expect("fits") * 60);
+        let point_id = format!("lwp1-{i:032x}");
+        objects = objects.with_object(&logweir::catalog::record::log_key(at, &point_id), b"{}");
+    }
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], points, "every key of the day is counted");
+    assert_eq!(counts["missing"], points);
+    assert_eq!(entries_of(&body).len(), points, "and listed");
+    assert_eq!(summary_of(&body, "catalog-cursor=")["complete"], true);
+
+    // CONTROL: two objects — the floor listing and the shard's first page.
+    let run = drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            max_objects_per_run: 2,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        summary_of(&body, "catalog-cursor=")["complete"],
+        false,
+        "{body}"
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogStoppedFor"],
+        "objectBudget"
+    );
+    let spent: i64 = run.row(CheckId::DestinationArchiveListable).facts["catalogObjectsRead"]
+        .parse()
+        .expect("an object count");
+    assert!(
+        spent <= 2,
+        "the shard's pages are paid from the budget: {spent} of 2"
+    );
+}
+
+/// **A `Full` rescan lists a point whose record gave no facts, by the point id
+/// its key carries, and an object under the points prefix whose key names no
+/// point id is not a point.**
+///
+/// KILLS: a rescan dropping a record it cannot read; a key's text published
+/// as a point id.
+#[test]
+fn a_full_rescan_lists_a_point_without_a_record_from_its_key_alone() {
+    let (objects, newer, older) = two_point_objects();
+    let full = || logweir_core::check_contract::CatalogSyncRequest {
+        mode: logweir_core::check_contract::CatalogSyncMode::Full,
+        ..sync_request()
+    };
+    let objects = objects
+        .with_object(&newer.record_key, b"not a record")
+        .with_object(
+            "logweir/catalog/v1/points/<script>alert(1)<\u{2f}script>/record.json",
+            &older.record_bytes,
+        )
+        .with_object(
+            "logweir/catalog/v1/points/not-a-point/record.json",
+            &older.record_bytes,
+        );
+    let run = drive_sync(
+        full(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(
+        counts["total"], 2,
+        "two points; two objects that are not: {counts}"
+    );
+    assert_eq!(counts["available"], 1, "{counts}");
+    assert_eq!(counts["unreadableMalformed"], 1, "{counts}");
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2, "{body}");
+    let broken = entries
+        .iter()
+        .find(|e| e["pointId"] == newer.point.point_id.as_str())
+        .expect("the point whose record is not a record is listed");
+    fx33_assert_recordless(broken);
+    assert!(
+        !run.everything().contains("script"),
+        "a key's text is not shown"
+    );
+}
+
+// FX-33: the walk's peak memory, measured in child processes
+// ---------------------------------------------------------------------------
+
+const FX33_WALK_TEST: &str = "the_walks_peak_memory_is_one_points";
+const FX33_WALK_CHILD_ENV: &str = "FX33_WALK_CHILD";
+const FX33_WALK_ROOT_ENV: &str = "FX33_WALK_ROOT";
+const FX33_WALK_PEAK_LINE: &str = "FX33_WALK_PEAK_RSS=";
+const FX33_WALK_FACT_LINE: &str = "FX33_WALK_AVAILABLE=";
+/// How many maximum-size points the "many" tree holds.
+const FX33_WALK_POINTS: usize = 4;
+/// Where the child mounts the trust bundle.
+const FX33_WALK_BUNDLE: &str = "/check/trust/trust-bundle.pem";
+
+/// This process's own peak resident set, in bytes.
+fn fx33_self_peak_rss() -> u64 {
+    let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
+        .expect("getrusage(RUSAGE_SELF)");
+    let max = u64::try_from(usage.max_rss()).unwrap_or(0);
+    if cfg!(target_os = "macos") {
+        max
+    } else {
+        max * 1024
+    }
+}
+
+/// Write `points` catalog points under `root`, one a day back from the
+/// fixture clock: the largest receipt Logweir writes
+/// (`ReferenceShape::LONGEST_NAMES`, within one percent of its bound) when
+/// `large`, the 1 KB fixture receipt otherwise. Each is signed under `key`.
+/// Returns the largest receipt and record written.
+fn fx33_plant_walk(
+    root: &Path,
+    points: usize,
+    large: bool,
+    key: &logweir_evidence::keys::SigningKey,
+) -> (usize, usize) {
+    use logweir_core::topic_budget::{reference_receipt, ReferenceShape, REFERENCE_AT_THE_BOUND};
+    let key_id = key.verifying_key().key_id();
+    let write = |object_key: &str, bytes: &[u8]| {
+        let path = root.join(object_key);
+        std::fs::create_dir_all(path.parent().expect("a key has a parent")).expect("mkdir");
+        std::fs::write(&path, bytes).expect("the object is written");
+    };
+    let mut largest = (0, 0);
+    for i in 0..points {
+        let day = now().date_naive() - chrono::Duration::days(i as i64);
+        let started = format!("{}T03:00:00Z", day.format("%Y-%m-%d"));
+        let set = format!("set-{i:03}");
+        let receipt = if large {
+            let mut r = reference_receipt(REFERENCE_AT_THE_BOUND, &ReferenceShape::LONGEST_NAMES);
+            let shift = catalog_ts(&started) - r.started_at;
+            r.requested_at += shift;
+            r.started_at += shift;
+            r.finished_at += shift;
+            r.covered.from_ms += shift.num_milliseconds();
+            r.covered.to_ms += shift.num_milliseconds();
+            r.backup_id.clone_from(&set);
+            r.archive.manifest_key = format!("kafka-backups/{set}/manifest.json");
+            r.archive.manifest_sha256 = logweir_core::ids::sha256_prefixed(CATALOG_MANIFEST);
+            if let Some(positions) = r.consumer_positions.as_mut() {
+                positions.observed_from += shift;
+                positions.observed_to += shift;
+                positions.document.key =
+                    logweir_core::consumer_positions::document_key(&set, &r.run_id);
+            }
+            assert_eq!(r.validate_invariants(), Ok(()));
+            r
+        } else {
+            catalog_receipt(&set, "run-a", &started)
+        };
+        let receipt_bytes =
+            logweir_core::det_json::to_deterministic_json(&receipt).expect("serialises");
+        let sidecar = logweir_evidence::sign::sign_detached(
+            key,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            &receipt_bytes,
+        )
+        .expect("the sidecar signs");
+        let f = catalog_fixture(&receipt, "s3://lw-archive/kafka-backups", &sidecar, &key_id);
+        largest = (
+            largest.0.max(f.receipt_bytes.len()),
+            largest.1.max(f.record_bytes.len()),
+        );
+        write(&f.log_key, &f.log_bytes);
+        write(&f.record_key, &f.record_bytes);
+        write(&f.receipt_key, &f.receipt_bytes);
+        write(&f.sidecar_key, &f.sidecar_bytes);
+        write(&f.manifest_key, CATALOG_MANIFEST);
+    }
+    let pem = key
+        .verifying_key()
+        .to_public_key_pem()
+        .expect("a public key renders");
+    std::fs::write(root.join("trust.pem"), pem).expect("the bundle is written");
+    largest
+}
+
+fn fx33_walk_store(root: &Path) -> Arc<logweir_engine_oso::storage::Store> {
+    Arc::new(
+        logweir_engine_oso::storage::Store::read_only_from_url(
+            &logweir_core::engine::StorageUrl::Filesystem {
+                path: root.to_path_buf(),
+            },
+        )
+        .expect("a filesystem handle over an existing directory builds"),
+    )
+}
+
+/// The child's work: one `catalogSync` over the tree, as the check Job runs
+/// one — or (the control) every point's record and receipt read and KEPT.
+fn fx33_walk_child(mode: &str, root: &Path) {
+    let store = fx33_walk_store(root);
+    match mode {
+        "walk" => {
+            let pem = std::fs::read(root.join("trust.pem")).expect("the bundle");
+            let wiring = FakeWiring {
+                shared_store: Some(store),
+                ..FakeWiring::default()
+            }
+            .with_file(FX33_WALK_BUNDLE, &pem);
+            let request = logweir_core::check_contract::CatalogSyncRequest {
+                trust_bundle_file: Some(FX33_WALK_BUNDLE.to_string()),
+                ..sync_request()
+            };
+            let body = body_of(&drive_sync(request, &wiring));
+            let counts = summary_of(&body, "catalog-counts=");
+            assert_eq!(
+                counts["signature"]["verified"], counts["available"],
+                "every available point's signature was verified: {counts}"
+            );
+            assert_eq!(
+                entries_of(&body).len() as u64,
+                counts["total"].as_u64().expect("a total"),
+                "every counted point is listed"
+            );
+            println!("{FX33_WALK_FACT_LINE}{}", counts["available"]);
+        }
+        // THE CONTROL: what a walk that accumulated its documents would hold.
+        "hold" => {
+            let records =
+                ObjectAccess::list_page(&*store, "logweir/catalog/v1/points/", None, 1000)
+                    .expect("the points list");
+            let mut held = Vec::new();
+            for key in records.iter().filter(|k| k.ends_with("/record.json")) {
+                let record = ObjectAccess::get(&*store, key, u64::MAX).expect("a record");
+                let logweir::catalog::reader::RecordVerdict::Point(point) =
+                    logweir::catalog::reader::read_record(&record)
+                else {
+                    panic!("{key} is a record");
+                };
+                let receipt =
+                    ObjectAccess::get(&*store, &point.receipt.key, u64::MAX).expect("a receipt");
+                let typed: BackupReceipt = serde_json::from_slice(&receipt).expect("a receipt");
+                held.push((record, point, receipt, typed));
+            }
+            println!("{FX33_WALK_FACT_LINE}{}", held.len());
+        }
+        other => panic!("unknown {FX33_WALK_CHILD_ENV} mode {other}"),
+    }
+}
+
+/// Runs this test again in a child, in `mode`, over `root`: the child's own
+/// peak resident set and the one number it reported.
+fn fx33_walk_peak(mode: &str, root: &Path) -> (u64, u64) {
+    let out = std::process::Command::new(std::env::current_exe().expect("this binary"))
+        .args(["--exact", FX33_WALK_TEST, "--nocapture", "--test-threads=1"])
+        .env(FX33_WALK_CHILD_ENV, mode)
+        .env(FX33_WALK_ROOT_ENV, root)
+        // The meter measures live memory, not an allocator's cache of freed
+        // blocks (`crates/weirkeeper/tests/read_caps.rs`, review F2).
+        .env("MallocLargeCache", "0")
+        .env("MALLOC_MMAP_THRESHOLD_", "131072")
+        .output()
+        .expect("the child test process starts");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "the {mode} child failed: {}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let number = |prefix: &str| -> u64 {
+        stdout
+            .lines()
+            .find_map(|l| l.find(prefix).map(|at| &l[at + prefix.len()..]))
+            .and_then(|v| {
+                v.trim()
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or_else(|| panic!("the {mode} child printed no {prefix} line:\n{stdout}"))
+    };
+    (number(FX33_WALK_PEAK_LINE), number(FX33_WALK_FACT_LINE))
+}
+
+/// **The catalog walk's peak memory is ONE point's, however many it walks.**
+///
+/// What a walk holds at once is bounded by construction (`examine`): the
+/// parsed record of the point it is on, and beside it one of — the receipt's
+/// bytes with their parse; the receipt's bytes with the signature's copy of
+/// them; the manifest's bytes. Each is released before the next is read, and
+/// the point's entry (under 1 KB without its topic list) is all that is kept
+/// when the walk moves on.
+///
+/// Measured in child processes over points whose receipt is within one
+/// percent of the largest Logweir writes, each signature VERIFIED:
+///
+/// - a walk of [`FX33_WALK_POINTS`] such points adds no more than a walk of
+///   one, plus a fixed slack;
+/// - a walk of one adds less than [`FX33_WALK_BOUND`];
+/// - the CONTROL — the same documents read and kept — adds at least two
+///   points' documents more than the walk of many does, so the meter sees an
+///   accumulating walk.
+///
+/// Check Jobs state no memory limit in the chart (`check/job.rs`,
+/// `resources: None`), so a namespace `LimitRange` is what applies; the
+/// figure printed here is what a `catalogSync` Job needs above its baseline.
+///
+/// KILLS: a walk that keeps each point's record or receipt until the body is
+/// rendered. (A read cap removed is
+/// `a_counted_point_is_always_listed_with_its_own_reason`'s and
+/// `a_catalog_walk_reads_every_document_under_its_cap`'s.)
+#[test]
+fn the_walks_peak_memory_is_one_points() {
+    if let Ok(mode) = std::env::var(FX33_WALK_CHILD_ENV) {
+        let root = PathBuf::from(std::env::var(FX33_WALK_ROOT_ENV).expect(FX33_WALK_ROOT_ENV));
+        fx33_walk_child(&mode, &root);
+        println!("{FX33_WALK_PEAK_LINE}{}", fx33_self_peak_rss());
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let (small, one, many) = (
+        scratch.path().join("small"),
+        scratch.path().join("one"),
+        scratch.path().join("many"),
+    );
+    fx33_plant_walk(&small, FX33_WALK_POINTS, false, &key);
+    let (receipt_len, record_len) = fx33_plant_walk(&one, 1, true, &key);
+    fx33_plant_walk(&many, FX33_WALK_POINTS, true, &key);
+
+    let (base, listed) = fx33_walk_peak("walk", &small);
+    assert_eq!(
+        listed, FX33_WALK_POINTS as u64,
+        "the baseline walk lists its points"
+    );
+    let (peak_one, listed_one) = fx33_walk_peak("walk", &one);
+    let (peak_many, listed_many) = fx33_walk_peak("walk", &many);
+    let (peak_held, held) = fx33_walk_peak("hold", &many);
+    assert_eq!(listed_one, 1, "the one large point is Available");
+    assert_eq!(
+        listed_many, FX33_WALK_POINTS as u64,
+        "every large point is Available"
+    );
+    assert_eq!(held, FX33_WALK_POINTS as u64);
+    let over = |peak: u64| peak.saturating_sub(base);
+    let (one, many, held) = (over(peak_one), over(peak_many), over(peak_held));
+    eprintln!(
+        "[fx33-walk] points of a {receipt_len} B receipt and a {record_len} B record, each \
+         signature verified. Baseline walk {base} B. A walk of one adds {one} B; a walk of \
+         {FX33_WALK_POINTS} adds {many} B; the same {FX33_WALK_POINTS} read and kept add {held} B \
+         (bound for one point {FX33_WALK_BOUND} B)"
+    );
+    // Allocator noise between two child processes, measured at up to 7 MB.
+    let slack: u64 = 16 << 20;
+    assert!(
+        many < one + slack,
+        "a walk of {FX33_WALK_POINTS} maximum-size points added {many} bytes and a walk of one \
+         {one}; the walk may hold one point's documents at a time, never more"
+    );
+    assert!(
+        one < FX33_WALK_BOUND,
+        "a walk of one maximum-size point added {one} bytes (bound {FX33_WALK_BOUND})"
+    );
+    let documents = u64::try_from(receipt_len + record_len).expect("fits");
+    assert!(
+        held > many + 2 * documents,
+        "the control added only {held} bytes against the walk's {many}; the meter cannot tell \
+         a walk that accumulates from one that does not"
+    );
+}
+
+/// The most resident memory the walk of ONE maximum-size point may add to a
+/// baseline walk: 64 MiB.
+///
+/// What it is made of, at the caps: the record's bytes (at most 6,131,072),
+/// the `serde_json::Value` `read_record` reads its version from, and its
+/// typed parse, held while the point is examined; and beside them the larger
+/// of the receipt's bytes with their typed parse, and the receipt's bytes
+/// with the signature's pre-authentication copy (at most 5,131,072 each).
+/// Measured with a 5.09 MB receipt and a 4.2 MB record: about 41 MB.
+///
+/// The MANIFEST is not in this number. The walk reads a point's manifest
+/// whole to hash it, one at a time, under the runner's 256 MiB manifest cap
+/// (FX-31); a real manifest is about 540 bytes a segment, and this row's is
+/// 13 bytes.
+const FX33_WALK_BOUND: u64 = 64 << 20;

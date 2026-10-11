@@ -545,6 +545,13 @@ fetch is still running), an absent result, a passing `Valid`, and a `Valid` on
 `trust.basis: Unverified` (nothing has been compared yet) leave the row in
 charge; `backupVerdict` is absent then, and absent never means "verified".
 
+**A point whose catalog record could not be read is listed too (FX-33)**: a
+record over the bound Logweir reads (a backup of more than 1,000 topics an
+older runner wrote), one that is not a record, or a missing one. Such a row
+carries its `pointId`, `availability`, `selectable: false` and a `remedy` that
+says why; `backupId`, `runId` and `receiptKey` are empty and there is no
+`recoveryPointAt`, window, location or topic list.
+
 **The join degrades per object, never per page.** `Backup` objects are read
 through a lenient projection of the three fields the rule needs, so one object
 this build cannot type (a newer trigger kind, an older stored schema) does not

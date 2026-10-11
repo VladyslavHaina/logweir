@@ -585,10 +585,11 @@ not even the same shape: the walk LISTS only under `logweir/*` (it enumerates
 record names) and READS under both roots, where `archiveRead` lists under the
 archive prefix and reads only there. Neither row is a superset of the other. It does not
 say `AccessDenied` when that happens, either: a walk whose points would not
-open lands `Synced=False` with `PartialScan`, whose message is exact — "a
-permission or transport failure, which is NOT the same as absent; those
-entries say `Unreadable` and never `Missing`" — and a walk whose first
-listing was refused relays no body and lands `ResultUnreadable`. **If you
+open lands `Synced=False` with `PartialScan`, whose message counts the points
+by cause and says of these "for a permission or transport failure, which is
+NOT the same as absent; those entries say Unreadable and never Missing" — and
+a walk whose first listing was refused relays no body and lands
+`ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
@@ -865,7 +866,9 @@ same reason.
 
   Nothing else is projected: no signing key, no `archiveWrite` or
   `evidenceWrite`, no Kafka credential, and no token automount. The pod relays
-  the two objects, at most 1 MiB for the document and 64 KiB for the sidecar.
+  the two objects, at most the cap of what the document is (5,131,072 bytes
+  for a backup receipt, 1 MiB for a scorecard; §7b.4) and 64 KiB for the
+  sidecar.
   The controller reads the relay only from a pod whose controller owner is that
   Job's UID. It then verifies in its own process, in this order:
   1. the relayed receipt's sha256 against the RUNNER-reported
@@ -958,22 +961,36 @@ Every read now names a cap. Nothing in the tree can read an object whole:
 
 | Document | Read by | Cap |
 |---|---|---|
-| Receipt, scorecard (the signed document) | the controller | **1 MiB**, the evidence relay's own cap |
+| Backup receipt | the controller, an evidence relay, the catalog walk | **5,131,072 bytes**: the largest receipt Logweir writes (§7b.5), one number for all three |
+| Scorecard, and every other signed document | the controller, an evidence relay | **1 MiB** |
 | DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
 | Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
-| Receipt, scorecard, catalog record | runner, CLI, check Jobs | 64 MiB (the catalog walk keeps its own 256 KiB) |
+| Catalog record | the catalog walk | **6,131,072 bytes**: the largest record Logweir writes (§7b.5) |
+| Receipt, scorecard, catalog record | runner, CLI | 64 MiB |
 | Engine manifest | runner, CLI, check Jobs | 256 MiB |
 | Archived segment | runner, CLI | 1 GiB |
 | Consumer-groups snapshot, engine report | runner, CLI | 64 MiB |
 
 The controller's caps are the evidence relay's. A document is therefore
 verifiable through the controller's own handle (`ControllerIdentity`, or the
-inline-archive handle) exactly when an evidence-fetch Job can relay it.
+inline-archive handle) exactly when an evidence-fetch Job can relay it, and a
+backup receipt the catalog lists `Available` is one the controller can verify.
 
-The 1 MiB cap is also what bounds the controller's parse. The controller reads
-a receipt's window and a scorecard's outcome before any digest check, and a
-document of tiny values parses into about 37 times its size. That figure was
-measured by `crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB.
+**The cap is chosen by what the document is.** A `Backup`'s evidence is a
+backup receipt and a `Restore`'s is a scorecard. The controller reads each
+under its own cap, asks an evidence-fetch Job for at most that, and measures
+what is relayed against it.
+
+**A scorecard is parsed; a backup receipt never is.** The controller reads a
+scorecard's outcome before any digest check, and a document of tiny values
+parses into about 37 times its size (measured by
+`crates/weirkeeper/tests/read_caps.rs`: 16 MiB of JSON held 621 MB). The 1 MiB
+cap is what bounds that parse. A backup receipt grows with the backup's
+topics, so the controller does not parse one into a tree at all. The five
+facts it needs (`backup_id`, the two capture instants, the covered window and
+the sum of the record counts) are folded from the bytes as they are read, and
+nothing is kept per topic. What it holds of a receipt is the bytes, and one
+more copy of them while the signature is checked.
 
 A manifest is never parsed into a tree. The window is folded as the bytes
 stream past, so the retention report holds at most the 64 MiB it read.
@@ -985,13 +1002,33 @@ once. So every controller read reserves its worst case out of one
 process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
 it reads, and holds the reservation until its bytes and its parse are freed:
 
-- a receipt or scorecard reserves 40 MiB, its 1 MiB cap plus the parse;
+- a receipt or scorecard reserves 40 MiB: a scorecard's 1 MiB cap plus the
+  parse, and a backup receipt's 5,131,072 bytes, held twice while its
+  signature is checked and never parsed into a tree;
 - a manifest reserves 64 MiB.
 
 A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
 - eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
   memory under the budget, and 504 MB without it;
 - sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
+
+And in `crates/weirkeeper/tests/topic_budget.rs`, over a valid receipt of 1,000
+topics and 5,092,802 bytes (within one percent of the cap): the controller's
+three store reads of it add 9.7 MB of peak memory (25.3 MB with the receipt
+parsed into a tree, as before FX-33), and one evidence relay of it, a 6.9 MB
+pod log, adds 26.9 MB.
+
+**The catalog walk holds one point at a time.** A `catalogSync` check Job
+reads a point's record, its receipt, the receipt's sidecar and the manifest,
+each under its own cap from the table above, and releases each before the
+next. Measured by `crates/logweir/tests/check_cli.rs`
+(`the_walks_peak_memory_is_one_points`) over points with a 5.09 MB receipt and
+a 4.2 MB record: a walk of one adds 25 to 37 MB to a walk of small points, a
+walk of four 31 to 41 MB, and the same four read and kept 66 to 80 MB (two
+runs). A check Job states no memory limit in the chart, so a namespace
+`LimitRange` applies: a `catalogSync` Job needs about 64 MiB above its baseline
+for the largest point, plus its largest manifest (read whole to hash it; about
+540 bytes a segment).
 
 A degraded store makes evidence reads for every namespace wait on one another.
 The store's own request timeout bounds that wait, and it is the trade the
@@ -1003,27 +1040,11 @@ a pass:
 | Where | What it says |
 |---|---|
 | `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
-| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. |
+| The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. A pod that relays more than the cap anyway is refused by the controller with the same sentence, and it is final too: no second Job is started for an object that will not shrink. |
 | A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
 | `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | `Preflight` restore check of a plan bound to a recovery point, the bound receipt (`archive.backupSet`) | Not ready, `PointBindingMismatch`: the answer of a receipt that is absent or has other bytes, because a preflight runs before any approval and must not say whether an object exists at a key the plan chose (§21.8). The message gives the three causes together, `…it is absent, its bytes do not hash to the bound digest, or it is larger than the 67108864-byte read cap for a receipt`, and never the object's size. The runner's binding, after approval, fails operationally (exit 1) and names the cap. |
 | Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
-
-**The limit this sets, measured.** A receipt is two-space pretty JSON. With
-FX-4's configuration coverage, PROD-05.1's 14 semantic entries and PROD-03.0's
-schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic,
-so 1 MiB holds about **250–300 topics**: about 300 with no overrides (a
-300-topic receipt measured 1,034,994 bytes through the runner's own
-serializer), and fewer with per-topic configuration overrides (about 250 with
-five each). A run that
-selects more topics writes a receipt that neither path can verify. It reads
-`NotAttempted` naming the cap, and it is not a recovery point. This was
-already true of every evidence-fetch relay before FX-31. It is new for the
-controller's own handle, where such a receipt used to verify. Under OD-7's
-third case this moves a verdict to the safer side only. Lifting it means
-raising the relay and the controller caps together, with a parse that is
-bounded without the cap. It is proposed as a follow-up row and is not done in
-FX-31.
 
 **A manifest has a limit too.** An engine manifest is about 540 bytes per
 segment, so the retention report's 64 MiB holds about 124,000 segments. At
@@ -1032,6 +1053,105 @@ about 15 TB at the engine's 128 MiB default. A set whose manifest is larger is
 listed under `skipped` on every report, naming the cap, and is never listed as
 removable. Runner-side reads, such as a drill or a restore preflight, take a
 manifest of up to 256 MiB.
+
+### 7b.5 One backup names at most 1,000 topics (FX-33)
+
+A backup receipt carries what the backup recorded about every topic: its
+record count, its configuration coverage, its recorded configuration (13
+entries on a Kafka 4.x broker, more with overrides), its schema dependency
+and its topic ID before and after the engine. That is about 3 KB a topic, and
+the catalog point record copies it. So both documents grow with the backup,
+and every reader has a cap. Before FX-33 the caps were fixed numbers nobody
+had tied to a topic count. A backup of about 80 topics wrote a record over
+the catalog walk's 256 KiB and **vanished from the catalog without a line**.
+A backup of about 300 wrote a receipt over the controller's 1 MiB and was
+**never verified**. Each backup had succeeded.
+
+**The budget.** One place states it, `logweir_core::topic_budget`, and every
+cap in the table above is derived from it:
+
+| | |
+|---|---|
+| The most topics one backup may name | **1,000 topics** |
+| What one topic may cost in a receipt | **5,000 bytes a topic** |
+| Everything in a receipt that is not per topic | 131,072 bytes (the consumer position summary is at most 80 KiB of it) |
+| The largest receipt | **5,131,072 bytes** |
+| The largest catalog record | **6,131,072 bytes** (6,000 bytes a topic: a record indents the same blocks deeper) |
+
+**What a topic costs, measured** by `crates/logweir/tests/topic_budget.rs`
+through the real types and the real encoder. "At most" is what the same topic
+can cost once the engine has run: the longest record counts, topic IDs and
+schema dependency entries the format allows.
+
+| Every topic | Receipt, typical | Receipt, at most | Record, at most | Topics that always fit |
+|---|---|---|---|---|
+| broker defaults, a 50-character name | 3,090 | 4,003 | 4,145 | 1,000 |
+| five recorded overrides, a 50-character name | 3,833 | 4,746 | 4,938 | 1,000 |
+| broker defaults, a 249-character name | 4,284 | 5,197 | 4,344 | 972 |
+| all 22 other keys overridden, a 50-character name | 6,485 | 7,398 | 7,760 | 683 |
+
+A receipt writes a topic's name six times. So 1,000 topics always fit at
+broker defaults under names of up to about 200 characters, and with five
+recorded overrides under names of up to about 90. Topics with longer names or
+more recorded overrides fit fewer, and the refusal below says how many bytes
+a topic of that backup costs.
+
+**Logweir never writes a backup it could not later list and verify.** A
+selection over the budget is refused before the engine runs, by name,
+`BackupSelectionTooLarge`. Nothing is left out of a selection to make it fit.
+
+| Where | What is checked | What you see |
+|---|---|---|
+| `logweir backup run`, phase −1 | more than 1,000 `source.topics` | exit 3, before any client exists |
+| `logweir backup run`, after its own configuration read and before the engine | the receipt and the record this run could sign, projected with every field the engine fills at its longest | exit 3; the message gives the projected size, the bytes a topic and the bound. The backup id is claimed, so run the smaller selection under a new id |
+| a `Backup` or `BackupSchedule` with a named `spec.topics` | more than 1,000 names | the schedule is `Ready=False`, `InvalidRunPolicy`, naming `spec.topics`; a `Backup` is refused `SelectionTooLarge` before any plan or Job exists |
+| a dynamic selection (`allUserTopics`) | more than 1,000 resolved names | the `Backup` is `SelectionTooLarge` before any runner Job (§10) |
+| the product API | the same rule, on the run a request would create | `422`, `selection_invalid`. The API's own forms accept at most 256 named topics |
+
+**This maximum was 5,000 for a dynamic selection, and unbounded for a named
+list.** Neither number was safe: a backup of 5,000 topics signs a receipt of
+about 15 MB, which no evidence relay can carry and nothing in the cluster
+could list or verify. After the upgrade:
+
+- a `Backup` or `BackupSchedule` that names, or resolves to, more than 1,000
+  topics is **refused by name at each run**. No topic is dropped silently and
+  no partial backup is taken. Split the selection across schedules;
+- find such objects before you upgrade:
+
+  ```sh
+  kubectl get backupschedules,backups -A -o json | jq -r \
+    '.items[] | select((.spec.topics | length) > 1000)
+     | "\(.kind) \(.metadata.namespace)/\(.metadata.name): \(.spec.topics | length) topics"'
+  kubectl get backups -A -o json | jq -r \
+    '.items[] | select((.status.selection.resolvedTopicCount // 0) > 1000)
+     | "\(.metadata.namespace)/\(.metadata.name) resolved \(.status.selection.resolvedTopicCount) topics"'
+  ```
+
+  The second command finds dynamic schedules by their last run: a cluster with
+  more than 1,000 user topics needs exclusions or more than one schedule;
+- a recovery point **already written** by a larger backup is not lost. Its
+  archive is intact and `logweir restore` and `logweir verify` read it (they
+  read a receipt of up to 64 MiB). The caps are in bytes, not topics: a point
+  whose receipt or record is over its bound (an older build's backup of
+  about 1,650 topics or more at broker defaults) is listed `Unreadable` with
+  the size and the bound (§7d) and is not offered for restore in the console,
+  and a destination-backed run's verdict on it stays `NotAttempted` naming
+  the old 1 MiB cap. A smaller older point, 1,001 topics or more but inside
+  both bounds, is listed and verified as usual.
+
+**Why 1,000.** The reader that binds is the evidence relay. On a destination
+whose `evidenceRead` grant only a pod may hold (every `SecretKeys` or
+`WorkloadIdentity` destination), the controller verifies a receipt from bytes
+a check Job prints to its pod log. The controller reads at most 8 MiB of that
+log, which is set below the kubelet's default 10 MiB log rotation, and base64
+in 4 KiB lines costs 1.354 bytes of log for each byte of document. A receipt
+at the bound and its sidecar are 7,037,746 bytes of log, which leaves 1.35 MB
+for the result document and stderr; a 6 MiB receipt would be 8.1 MiB of log
+and would be cut. 5,131,072 bytes at 5,000 bytes a topic is 1,000 topics. It
+is also the number a restore readiness check already accepts
+(`Preflight.spec.request.backup.topics`, 1,000). A larger number needs either
+less in the receipt for each topic or a relay that is not one pod log; both
+are larger changes than this one and are not made here.
 
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
@@ -1343,7 +1463,7 @@ list` still reads the durable catalog.
 |---|---|
 | `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one, or this bucket does not hold the pinned version at all (a copy of the archive, an unversioned bucket, a version that was expired or deleted): then the digest decided — which an identical manifest over rewritten segments passes — and the entry's `remedy` says the pin could not be checked in this bucket |
 | `Missing` | a definite `NotFound` |
-| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it). **"Could not tell", never "is not there".** |
+| `Unreadable` | any other storage error — 403, timeout, truncated, or a failed read of a pinned manifest version (FX-7; a 403 there is a principal without `s3:GetObjectVersion`, and the entry's remedy names it) — or a document that is over the bound Logweir reads for one, or is not the document its key names (FX-33; the entry's remedy says which, and names no grant). **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
 | `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or this bucket holds the manifest version the receipt pins and it is no longer the current one — the set was written again in this bucket after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
@@ -1516,13 +1636,39 @@ What a walk does NOT reach is said by the fence instead. `catalog-cursor`'s
 counted**; `false` comes with the cursor to resume from, the `Synced` condition
 reads `ScanIncomplete`, and the check result names which bound stopped it
 (`catalogStoppedFor: objectBudget` or `shardBudget`). A point the budget never
-reached is unexamined — **not** `Unreadable`, which is a fact about permissions
-or transport and which the controller renders as `PartialScan`.
+reached is unexamined — **not** `Unreadable`, which is a fact about one point
+and which the controller renders as `PartialScan`.
 
-**A point whose record could not be read is counted and not listed.** An entry
-line's required fields are the receipt-derived facts, and there is no honest
-value for any of them when the record is `Missing` or `Unreadable`; the counts
-carry the fact and a row of zeroes would carry a fiction.
+**Every counted point is listed, and an entry says why it is not available
+(FX-33).** A point whose record could not be read used to be counted and
+listed by no entry. Now:
+
+- its `remedy` fits the cause. A size gives the document's bytes against the
+  bound, says no permission or network change lists the point, and says the
+  archive is intact and restorable from the command line. A content fault
+  says the object is not what its key names. Only a read that did not answer
+  names the `archiveRead` grant, the endpoint and the network;
+- a point whose RECORD gave no facts is listed by its point id alone:
+  `backupId`, `runId` and `receiptKey` are empty, the instants are 0, and
+  there is no window, location or topic list. It is never `Available`, so
+  never selectable, and nothing reads anything else for it;
+- the view is `viewLimit` entries. When it is full, a point with a record
+  (`Available` or not) takes the place only of an entry whose RECORD gave no
+  facts and that only
+  failed to be read (the record is missing, did not answer, is over its
+  bound, or is of a newer format). It never takes the place of an entry with
+  a record, whatever its state (such an entry may name a backup set that
+  retention keeps for it, and carries the signature and `Conflict` verdicts),
+  nor of bytes that are not a record. The counts name every point, and
+  `status.truncated` says the view is a window;
+- a point whose record read did not answer leaves the walk incomplete
+  (`catalog-cursor.complete: false`, `catalogRecordsUnread` on the check
+  row) until a sync reads that record, because its entry names no set;
+- `catalog-counts` gains `unreadableOverReadCap` and `unreadableMalformed`,
+  the two parts of `unreadable` that are not a permission or transport
+  failure, and the `Synced` condition's message counts each by name;
+- the body's grammar is still `catalog-format=1`, and a body with no such
+  point is byte for byte what it was.
 
 **`Deleted` and `Partial` are in the table and this build's sync produces
 neither.** `Partial` needs segment sampling, which does not exist. `Deleted`
@@ -5351,7 +5497,7 @@ of them starts a runner Job.
 | `DiscoveryResultUnreadable` | It produced output that did not verify — frames that do not decode, a result document whose counts or digest the frames do not support, a missing plan ConfigMap, no result document at all, or a verified result carrying neither an inventory nor a blocking check that is not `ready` | no, not without fixing the runner |
 | `DiscoveryIncomplete` | Visibility was not established and the policy is `Refuse` | only with more permission, or an attestation |
 | `SelectionEmpty` | Nothing was left after internal topics, exclusions and the topics the broker would not describe | only if the cluster changes |
-| `SelectionTooLarge` | Over 5,000 resolved names, or over 256 KiB of them | only with more exclusions |
+| `SelectionTooLarge` | Over 1,000 resolved names (the most one backup may name, §7b.5; it was 5,000), or over 256 KiB of them. The message begins `BackupSelectionTooLarge` | only with more exclusions, or by splitting the cluster across schedules |
 | `SelectionTooLarge` (truncated listing) | The runner had to cut the listing at the plan's 20,000-topic `maxTopics` or at its relay budget, so the names are a **prefix** of what the principal can see | **not** with more exclusions — they are applied controller-side, after the listing. Name the topics explicitly, or split the cluster across schedules |
 | `SourceChangedDuringResolution` | The broker's `clusterId` is not the one the `KafkaCluster` observed, or the saved connection changed while the discovery ran | yes |
 | `JobNameConflict` | Something else owns `lwd-<backup uid>` | remove it first |

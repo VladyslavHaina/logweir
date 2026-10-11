@@ -818,3 +818,64 @@ fn the_receipt_window_and_the_crds_window_are_both_half_open() {
          one millisecond would produce a receipt its own invariant 4 refuses"
     );
 }
+
+// ===========================================================================
+// FX-33 — a backup of many topics is accepted by both verifiers
+// ===========================================================================
+
+/// **Both verifiers accept the signed receipt of a backup of 70, 105, 113,
+/// 300, 500, 1,000 and 5,000 topics with full recorded configuration**, and
+/// they agree, in the same words, on one of them broken.
+///
+/// The receipts are `logweir_core::topic_budget`'s reference: every topic
+/// carries the 13 recorded entries, a `generations` entry and a
+/// `schema_dependency` entry, beside PROD-04.1's largest consumer position
+/// summary. Neither verifier has a size limit of its own (each reads a local
+/// file), which is why a backup OVER the supported maximum — the 5,000-topic
+/// receipt an older runner could write, 15.5 MB — is still verifiable by an
+/// operator who holds it: the catalog and the controller refuse to read it,
+/// the verifiers do not.
+///
+/// KILLS: a verifier that stops accepting a large valid receipt (a per-topic
+/// arm that is quadratic, or a size check added to one reader only).
+#[test]
+fn a_backup_of_many_topics_is_accepted_by_both_verifiers() {
+    use logweir_core::topic_budget::{reference_receipt, ReferenceShape};
+    let py = require_python();
+    let root = root();
+    let key = SigningKey::from_pem_file(&root.join("e2e/fixtures/signed/signing.pem"))
+        .expect("the checked-in throwaway fixture signing key");
+    for topics in [70usize, 105, 113, 300, 500, 1_000, 5_000] {
+        let receipt = reference_receipt(topics, &ReferenceShape::FULL);
+        let bytes = logweir_core::det_json::to_deterministic_json(&receipt).expect("serialises");
+        let (_dir, rust, python) = run_both_readers(&key, &py, &root, &bytes);
+        assert_eq!(
+            (rust.status.code(), python.status.code()),
+            (Some(0), Some(0)),
+            "{topics} topics, {} bytes:\nlogweir verify: {}\nverify_scorecard.py: {}",
+            bytes.len(),
+            String::from_utf8_lossy(&rust.stderr),
+            String::from_utf8_lossy(&python.stderr)
+        );
+    }
+
+    // NEGATIVE CONTROL: the 500-topic receipt with ONE topic's record count
+    // removed is refused by both, for the same reason in the same words — so
+    // the acceptances above are verdicts on the documents, not on their size.
+    let mut broken = reference_receipt(500, &ReferenceShape::FULL);
+    let dropped = broken.source.topics[250].clone();
+    broken.records.remove(&dropped);
+    let bytes = logweir_core::det_json::to_deterministic_json(&broken).expect("serialises");
+    let (_dir, rust, python) = run_both_readers(&key, &py, &root, &bytes);
+    assert_eq!(
+        (rust.status.code(), python.status.code()),
+        (Some(4), Some(1))
+    );
+    let rust_reason = strip(&String::from_utf8_lossy(&rust.stderr), RUST_PREFIX);
+    let python_reason = strip(&String::from_utf8_lossy(&python.stderr), PYTHON_PREFIX);
+    assert!(rust_reason.is_some(), "logweir verify names the arm");
+    assert_eq!(
+        rust_reason, python_reason,
+        "the two readers refuse in the same words"
+    );
+}

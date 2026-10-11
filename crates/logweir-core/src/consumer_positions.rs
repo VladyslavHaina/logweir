@@ -281,6 +281,17 @@ const WORST_CASE_DOCUMENT_KEY_BYTES: usize = 1024;
 /// the block larger than the bound it claimed.
 #[must_use]
 pub fn worst_case_block_bytes(selected: &[String]) -> usize {
+    crate::det_json::to_deterministic_json(&worst_case_block(selected))
+        .map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// The block [`worst_case_block_bytes`] measures: every selected group
+/// captured, every field at its longest. A SIZE, not a claim (its counts hold
+/// against no document). FX-33's projection of a whole receipt before the
+/// engine (`logweir::backup::document_budget`) places it where the run's own
+/// block will go.
+#[must_use]
+pub fn worst_case_block(selected: &[String]) -> ConsumerPositions {
     // 2038-01-19T03:14:07.999999999Z: a four-digit year with nine fraction
     // digits, as long as any instant a capture records. In range, so the
     // default (never taken) is only there to keep the pure layer clock-free.
@@ -293,7 +304,7 @@ pub fn worst_case_block_bytes(selected: &[String]) -> usize {
         failed: u32::MAX,
         not_observed: u32::MAX,
     };
-    let block = ConsumerPositions {
+    ConsumerPositions {
         observed_from: at,
         observed_to: at,
         listing: "notComplete".to_string(),
@@ -320,8 +331,7 @@ pub fn worst_case_block_bytes(selected: &[String]) -> usize {
                 )
             })
             .collect(),
-    };
-    crate::det_json::to_deterministic_json(&block).map_or(usize::MAX, |bytes| bytes.len())
+    }
 }
 
 /// The named refusal of a selection over [`MAX_SELECTED_GROUPS`] groups.

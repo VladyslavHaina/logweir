@@ -5513,6 +5513,45 @@ fn the_controller_never_types_a_scorecard() {
     );
 }
 
+/// **FX-33 — a scorecard is parsed only inside its own cap, at the line that
+/// parses it.** `scorecard_observation` builds a `serde_json::Value`, up to 37
+/// times the document, so it refuses bytes over 1 MiB itself, whoever handed
+/// them over: a document one byte over is NOT OBSERVED, and the same document
+/// one byte shorter is.
+///
+/// KILLS: the parse relying on its callers' caps (a 5 MiB scorecard handed
+/// over by a relay parsed into 185 MB).
+#[test]
+fn fx33_a_scorecard_over_its_cap_is_not_parsed_whoever_hands_it_over() {
+    use weirkeeper::controllers::restore::within_scorecard_cap;
+    let cap =
+        usize::try_from(logweir_core::check_contract::MAX_EVIDENCE_SCORECARD_BYTES).expect("fits");
+    let sized = |len: usize| -> Vec<u8> {
+        let mut doc = br#"{"outcome":"pass","pad":""#.to_vec();
+        let tail = br#""}"#;
+        doc.resize(len - tail.len(), b'x');
+        doc.extend_from_slice(tail);
+        assert_eq!(doc.len(), len);
+        doc
+    };
+    let at = sized(cap);
+    assert!(within_scorecard_cap(&at).is_some());
+    assert_eq!(
+        scorecard_observation(&at)
+            .and_then(|o| o.outcome)
+            .as_deref(),
+        Some("pass"),
+        "CONTROL: exactly at the cap is read"
+    );
+    let over = sized(cap + 1);
+    assert!(within_scorecard_cap(&over).is_none());
+    assert_eq!(
+        scorecard_observation(&over),
+        None,
+        "one byte over is not parsed, and is NOT OBSERVED"
+    );
+}
+
 /// Every reason string this reconciler can write is a member of
 /// `conditions::TERMINAL_STATES` or of `conditions::CONDITION_REASONS`.
 ///

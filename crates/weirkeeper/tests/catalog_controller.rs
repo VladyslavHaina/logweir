@@ -1286,6 +1286,8 @@ fn the_counters_are_a_projection_and_the_residue_is_named() {
             not_attempted: 3,
         },
         by_day: vec![],
+        unreadable_over_read_cap: 0,
+        unreadable_malformed: 0,
     };
     let signers = vec![
         SignerSummary {
@@ -3158,6 +3160,11 @@ fn the_frame_expectations_come_from_the_job_that_ran() {
 
 /// The runner's pinned body, read out of `crates/logweir/tests/check_cli.rs`.
 fn runner_pinned_body() -> String {
+    runner_pinned("PINNED_SYNC_BODY")
+}
+
+/// The raw literal `name` out of the runner's own test file.
+fn runner_pinned(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -3165,15 +3172,15 @@ fn runner_pinned_body() -> String {
         .join("crates/logweir/tests/check_cli.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-    const OPEN: &str = "const PINNED_SYNC_BODY: &str = r#\"";
-    let at = source.find(OPEN).unwrap_or_else(|| {
+    let open = format!("const {name}: &str = r#\"");
+    let at = source.find(&open).unwrap_or_else(|| {
         panic!(
-            "`PINNED_SYNC_BODY` is gone from {}; the runner no longer pins the body this parser \
+            "`{name}` is gone from {}; the runner no longer pins the body this parser \
              is the oracle for",
             path.display()
         )
     });
-    let rest = &source[at + OPEN.len()..];
+    let rest = &source[at + open.len()..];
     let end = rest.find("\"#;").expect("the raw literal closes");
     let body = rest[..end].to_string();
     assert!(
@@ -4651,4 +4658,128 @@ async fn fx40_a_walk_given_no_cursor_is_whole_whatever_the_status_says() {
     )
     .await;
     assert_eq!(status["truncated"], false);
+}
+
+// ===========================================================================
+// FX-33 — a point whose record could not be read is listed, and says why
+// ===========================================================================
+
+/// **THE CROSS-CRATE GUARD for a point whose record gave no facts.** The
+/// runner lists it with its point id, `Unreadable`, `signature:
+/// notAttempted` and a remedy, and empty receipt-derived fields; this parser
+/// reads that line as an entry (it used to be dropped by the runner, so the
+/// point was in no view), and the view the controller publishes lists the
+/// point, not selectable, with nothing a restore, a rehearsal or a join by
+/// set id could take from it.
+///
+/// KILLS: the controller skipping such a line (the point vanishing from the
+/// view again, one layer up); such an entry published as selectable.
+#[test]
+fn the_runners_pinned_recordless_body_is_one_this_parser_reads() {
+    let body = runner_pinned("PINNED_RECORDLESS_SYNC_BODY");
+    let parsed = view::parse_body(&body, 2000).unwrap_or_else(|e| {
+        panic!("the runner's own pinned record-less body does not parse here: {e}\n{body}")
+    });
+    assert_eq!(parsed.skipped_entries, 0, "no entry line was skipped");
+    let counts = parsed.counts.clone().expect("a counts line");
+    let entries = parsed.entries();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].availability, Availability::Available);
+    assert!(
+        !entries[0].receipt_key.is_empty(),
+        "CONTROL: a point with a record"
+    );
+    for entry in &entries[1..] {
+        assert_eq!(entry.availability, Availability::Unreadable);
+        assert_eq!(entry.signature, SignatureVerdict::NotAttempted);
+        assert!(
+            entry.backup_id.is_empty()
+                && entry.run_id.is_empty()
+                && entry.recovery_point_at_ms == 0
+                && entry.receipt_key.is_empty()
+                && entry.receipt_sha256.is_empty()
+                && entry.manifest_key.is_none()
+                && entry.locations.is_empty()
+                && entry.topics.is_empty()
+                && (entry.covered_from_ms, entry.covered_to_ms) == (0, 0),
+            "nothing to bind, select or join on: {entry:?}"
+        );
+        assert!(entry.remedy.is_some(), "a point not offered says why");
+    }
+    assert_eq!(
+        (
+            counts.total,
+            counts.unreadable,
+            counts.unreadable_over_read_cap,
+            counts.unreadable_malformed
+        ),
+        (3, 2, 1, 1)
+    );
+    let trust = trust_with(
+        "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        TrustKeyState::Active,
+        None,
+    );
+    let published = view::materialise(
+        entries,
+        counts.total,
+        &trust,
+        &ViewLimits::from_settings(&catalog(json!({}), json!({})).spec.sync),
+        now(),
+    );
+    assert_eq!(published.entries, 3, "every counted point is in the view");
+    let unreadable: Vec<_> = published.pages[0]
+        .entries
+        .iter()
+        .filter(|e| e.availability == Availability::Unreadable)
+        .collect();
+    assert_eq!(unreadable.len(), 2);
+    assert!(unreadable
+        .iter()
+        .all(|e| !e.selectable && e.receipt_key.is_empty()));
+}
+
+/// **The `Synced` message counts each cause by name, and a size is never
+/// called a permission or transport failure.** A body from an older runner,
+/// which carries no sub-counts, reads as it did.
+///
+/// KILLS: the one sentence for every unreadable point put back.
+#[test]
+fn fx33_the_synced_message_counts_each_cause_by_name() {
+    let counts = |unreadable: i64, over: i64, malformed: i64| RunnerCounts {
+        total: 10,
+        unreadable,
+        unreadable_over_read_cap: over,
+        unreadable_malformed: malformed,
+        ..RunnerCounts::default()
+    };
+    let size_only = view::unreadable_message(&counts(2, 2, 0));
+    assert!(
+        size_only.starts_with("2 of 10 points could not be read: 2 because a document is larger")
+            && size_only.contains("no permission or network change lists it")
+            && !size_only.contains("permission or transport failure"),
+        "{size_only}"
+    );
+    let mixed = view::unreadable_message(&counts(6, 2, 1));
+    assert!(
+        mixed.contains("2 because a document is larger")
+            && mixed.contains("1 because an object is not the document its key names")
+            && mixed.contains(
+                "3 for a permission or transport failure, which is NOT the same as absent"
+            )
+            && mixed.ends_with("those entries say Unreadable and never Missing"),
+        "{mixed}"
+    );
+    // An older runner: no sub-counts, so every one is what it always was.
+    let older = view::unreadable_message(&counts(4, 0, 0));
+    assert!(
+        older.contains("4 for a permission or transport failure") && !older.contains("larger"),
+        "{older}"
+    );
+    // Sub-counts that exceed the whole are clamped, never a negative rest.
+    let absurd = view::unreadable_message(&counts(1, 5, 5));
+    assert!(
+        absurd.contains("1 because a document is larger") && !absurd.contains("-"),
+        "{absurd}"
+    );
 }

@@ -4311,14 +4311,39 @@ pub fn topic_preflight(log: &str) -> Option<Value> {
     Some(Value::Object(out))
 }
 
+/// **FX-33 — the bound on every parse of a scorecard into a tree.** `Some`
+/// with the bytes when they are within `caps::CONTROLLER_DOCUMENT` (1 MiB),
+/// `None` when they are over it.
+///
+/// This controller parses a scorecard into a `serde_json::Value` in two
+/// places — [`scorecard_observation`] and the relayed scorecard's `run_id`
+/// read — and a `Value` costs up to 37 times the document. So the cap is
+/// enforced at THOSE two lines, by the code that knows the bytes are about to
+/// become a tree, and not only where the bytes were read: a scorecard reaches
+/// this controller through its own capped read and through an evidence
+/// relay, whose bytes come out of a pod log in the subject's namespace. Both
+/// stop at the cap; this is what holds if either ever does not.
+#[must_use]
+pub fn within_scorecard_cap(bytes: &[u8]) -> Option<&[u8]> {
+    (bytes.len() as u64 <= caps::CONTROLLER_DOCUMENT).then_some(bytes)
+}
+
 /// Read the values [`ScorecardObservation`] names out of a scorecard
 /// document.
 ///
 /// PURE, over bytes, so every status assertion in this module's tests is made
 /// without a socket. `None` when the bytes are not a JSON object at all —
 /// which is NOT OBSERVED, and not "the run had no outcome".
+///
+/// **FX-33: AND NEVER MORE THAN A SCORECARD'S CAP OF THEM.** This is where a
+/// scorecard becomes a `serde_json::Value`, at up to 37 times its size, so
+/// this is where its size is bounded: bytes over
+/// `caps::CONTROLLER_DOCUMENT` are not parsed, whoever handed them over and
+/// whatever cap they were fetched or relayed under
+/// ([`within_scorecard_cap`]).
 #[must_use]
 pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
+    let bytes = within_scorecard_cap(bytes)?;
     let doc: Value = serde_json::from_slice(bytes).ok()?;
     if !doc.is_object() {
         return None;
@@ -4990,6 +5015,9 @@ async fn evidence_fetch_pass(
     let request = crate::evidence_fetch::Request {
         payload_key: payload_key.clone(),
         sidecar_key: sidecar_key.clone(),
+        // FX-33: what this fetch is FOR, which decides how much of it the
+        // controller will hold (`Request::payload_cap`).
+        payload_type,
     };
     let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
     let mode = destination
@@ -5103,8 +5131,9 @@ async fn evidence_fetch_pass(
                 }
                 Relayed::Both { payload, sidecar } => {
                     let fetched = sha256_prefixed(&payload);
-                    let claimed_run = serde_json::from_slice::<Value>(&payload)
-                        .ok()
+                    // FX-33: parsed only within a scorecard's cap, here too.
+                    let claimed_run = within_scorecard_cap(&payload)
+                        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
                         .and_then(|d| d.get("run_id").and_then(Value::as_str).map(str::to_string));
                     match claimed_run {
                         Some(run) if payload_key == format!("logweir/drills/{run}.json") => {

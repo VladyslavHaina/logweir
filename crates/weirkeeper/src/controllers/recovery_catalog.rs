@@ -1218,11 +1218,9 @@ impl Pass<'_> {
             (
                 "False",
                 REASON_PARTIAL_SCAN.to_string(),
-                format!(
-                    "{} of {} points could not be read — a permission or transport failure, which \
-                     is NOT the same as absent; those entries say Unreadable and never Missing",
-                    counts.unreadable, counts.total
-                ),
+                // FX-33: by CAUSE. A document over its read bound is a size,
+                // and is never called a permission or transport failure.
+                view::unreadable_message(&counts),
             )
         } else if !complete {
             (
