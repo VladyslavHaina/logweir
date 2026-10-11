@@ -101,6 +101,7 @@ The loop never decides these. A row gated on an open decision stays Blocked; the
 | OD-9 | A restore of a partition SUBSET (PROD-11.1): how its scorecard is versioned. The review showed an older verifier (1.21.0, 1.22.0) reads a subset-narrowed 1.7.0 scorecard as a full restore ("every mapped partition was held to its own count bound"; `complete.partitions[]` was defined as every partition of every restored topic), so OD-7 rules it MAJOR. | (a) write subset-narrowed scorecards under a new major, 2.0.0, only when a subset is stated, so older readers refuse them; every other document stays 1.x; (b) accept that older readers misread subset documents, as documented; (c) keep refusing partition subsets (start-only selection ships). | (a): the safe direction (an older verifier refuses instead of over-claiming), and it touches only the new documents. Its cost: both verifiers learn major 2 for this shape, and an adopter on an older verifier must upgrade it to read a subset restore. | PROD-11.1's partition subsets (start-only selection ships without it) | **Decided 2026-10-09 as (a)** by the owner: a scorecard for a partition-subset restore is written as format **2.0.0**, and only then; every other scorecard stays 1.x. Older verifiers refuse a 2.0.0 document instead of reading it as a full restore. Implemented by PROD-11.1b; until it merges, `restore.partitions` stays refused by name. |
 | OD-10 | How an original-name restore (PROD-15.1, into an ABSENT topic) is approved on an install using one-person confirmation (OD-8). The PROD-15.1 review (M1) showed that the requester's own submission confirms it, so nobody else looks at the riskiest restore. | (a) typed confirmation: the requester re-types the original topic names in the console, and the evidence records it; two-person or strict namespaces still need a second person; (b) always two people; (c) the namespace's normal mode, with no extra step. | (a) | PROD-15.1 | **Decided 2026-10-09 as (a)** by the owner. |
 | OD-11 | Scope, tenancy and review weight after the owner asked whether the platform is over-engineered (2026-10-10: about 120k lines of product code, 400k of tests and 31k of docs, and reviews filing rows faster than rows closed) | (a) freeze a v1 cut, park the rest, then simplify; (b) simplify first; (c) keep the full tracker | (a); one team per install; lighter reviews | every row | **Decided 2026-10-10:** (a) **freeze a v1 cut** ([The v1 cut](#the-v1-cut-od-11)): finish what is in flight and the rows listed there, fix real defects, mark every other open row Deferred, then PROD-17.1 simplifies before anything new is added. **One team per install:** sound defaults and approvals stay, but the platform stops hardening against hostile tenants sharing one install; shared mode stays available and is documented as not hardened for untrusted tenants. **Lighter reviews:** a full Tier A review only for approvals, deletion (retention, restore targets), authentication and signed evidence; one checklist pass for everything else; a second pass only on a HIGH; mutants only on core logic; reviews and workers report real defects and file NO class-sweep rows. |
+| OD-12 | PROD-17.1's nine decisions on the measured simplification proposal (`claude/prod-17-1/proposal.md`; the page the owner was shown) | Per question: tiers A and B; v0.1.5 upgraded in place or a clean install; C1 to C7, each cut or kept | The proposal's leans, with question 2 left open | PROD-17.1 | **Decided 2026-10-11.** The owner delegated the answers to the orchestrator ("do what ever you think is the best, but keep the consumer positions"). (1) Tiers A and B approved. A1 holds the three PLAT-01/02/04 harnesses until PROD-14.1. A3 cuts only phase 7's `validation run` call: the engine's consumer-group snapshot parse stays with consumer positions. (2) v1 upgrades v0.1.5 installs in place, so the TrustRoster, the inline archive and the other v0.1.x shims stay through v1, at no cost now. (3) C1 cut: scheduled rehearsals and standing authorizations, the one path that still needs a personal key. (4) C2: only the alert sinks are cut; ProtectionPolicy health and the `#/protection` page stay. (5) C3 **kept**, by the owner: consumer positions are still written, read and documented. (6) C4 cut: the legacy `kubectl proxy` console mode and the `logweir-ui` image. (7) C5: the chart is the only install. (8) C6: the kustomize `config/` tree goes after the RBAC check (`config/samples` stays). (9) C7: the PLAT tracker is retired after its open follow-ups move here. |
 
 ## Business (out of platform scope)
 
@@ -242,7 +243,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Done |
 | 3 | PROD-01.2a | Fixtures behind the matrix's hand-run and untested cells: a SCRAM-SHA-512 TLS listener in the `auth` profile with its `auth_modes` row (the mode Amazon MSK's SCRAM endpoint needs); RustFS and versitygw as opt-in profiles or weekly rows; a directory-archive row for the standalone CLI (`backend: filesystem`); and a weekly job for the rows PROD-01.2 ran by hand (Confluent Platform, Redpanda, SeaweedFS, Karapace), so a supported cell is re-proven without a person | P2 | M3 | infra | 01.2 | — | compose | B | Deferred |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
-| 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11 | none | A | Proposed |
+| 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11, OD-12 | none | A | In progress |
 | 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | In progress |
 | 1 | PROD-16.2 | Two-person approval in the console: the second person clicks Approve | P1 | M1 | impl | 16.1 | — | k8s | A | Done |
 | 1 | PROD-16.4 | Auth follow-ups: IdP groups mapped to roles proven live; an audit-log retention recipe | P2 | M1 | impl | — | — | k8s | B | Deferred |
@@ -646,6 +647,23 @@ What it fixed:
   - A catalog's `viewLimit` window holds the newest points with a record, by recovery-point time, in either walk, under FX-33's rules. Memory stays bounded by `viewLimit`.
   - A resumed rescan or an unfinished walk says "It is a partial view" in its `Synced` message. `truncated` is unchanged, so FX-40 still refuses any window.
   - Done after its PoC row in PROD-14.1's clean install: a catalog with `viewLimit: 100` over more than 100 points lists the newest 100.
+
+**PROD-17.1 — decided (OD-12, 2026-10-11); wave 1 started.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
+- **Wave 1, cuts:**
+  - `s1-c1`: C1, with A4's `GET /rehearsal-schedules`. Tier A review, because admission and approval change.
+  - `s1-notify`: C2's alert sinks, B2, A2 and A3's phase-7 call.
+  - `s1-install`: C5, C6 and A5.
+  - `s1-console`: C4, A1 (three PLAT harnesses held) and A4's `destinations:from-legacy`.
+  - C7 by the orchestrator.
+- **Wave 2, folds:** B1, B3, B4 and B5; then B7 and B6.
+- **Wave 3, docs:** B11, B10 with B12, B13. B14 goes inside PROD-14.1.
+- **Wave 4, comments:** B8 and B9, one crate per PR.
+- **Rules for every wave:**
+  - No cut touches the signed-format readers, `schemas/`, the invariant corpus, the Python verifier or the parity scripts.
+  - A withdrawn field or values key is refused by name.
+  - A removed test may only test the removed path.
+  - **Consumer positions stay whole** (OD-12).
+- **PROD-14.1's owed rows that minted a standing authorization** (PROD-08.1a K7/K8(a), PROD-11.1 K4/K6) are re-scoped by C1: a Restore or Approval naming one is refused by name.
 
 ## Foundation dependency map
 
