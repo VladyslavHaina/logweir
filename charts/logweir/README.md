@@ -56,7 +56,8 @@ author-only install is not evidence of publication.**
 
 Nothing optional is on by default. `manifest_lint.rs` holds the controller's
 role to its calls: no verb on `secrets`, no `update`, and `delete` only on
-`topicdiscoveries` and `preflights`.
+`topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
+carrying a `metadata.resourceVersion` precondition.
 
 ## Values
 
