@@ -730,6 +730,7 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
 /// 7. **An expired or retired key still verifies what it signed while valid**:
 ///    [`Verification::VerifiedHistorical`]. Evidence signed after `notAfter`
 ///    is [`Verification::Invalid`]: the key was not accepted then either.
+///
 /// `signed_at` is the point's own recorded instant, and `now` is this pass's.
 #[must_use]
 pub fn classify_verification(
