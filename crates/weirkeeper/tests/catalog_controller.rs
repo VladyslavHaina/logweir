@@ -4660,6 +4660,91 @@ async fn fx40_a_walk_given_no_cursor_is_whole_whatever_the_status_says() {
     assert_eq!(status["truncated"], false);
 }
 
+/// The published `Synced` condition: its status, reason and message.
+fn synced_of(status: &Value) -> (String, String, String) {
+    let synced = status["conditions"]
+        .as_array()
+        .and_then(|c| c.iter().find(|c| c["type"] == "Synced"))
+        .unwrap_or_else(|| panic!("no Synced condition in {status}"));
+    let text = |k: &str| synced[k].as_str().unwrap_or_default().to_string();
+    (text("status"), text("reason"), text("message"))
+}
+
+/// **FX-50 R3 and R4: a view that is not the whole archive says so in its
+/// `Synced` message, and `truncated` is what FX-40 made it.** PoC batch 7's
+/// F-4: a resumed `Full` rescan published `Synced=True` "the newest 136 of
+/// 136 points", which reads as the whole archive. Now the budget-stopped
+/// sync (199 of 300 points) and the resumed one (the other 101) each say they
+/// are a partial view, and `truncated` is unchanged: `false` on the stopped
+/// walk (FX-40 refuses it on `cursor.complete: false`) and `true` on the
+/// resumed one (the FX-40 rows above run the retention guard over both).
+///
+/// CONTROL: the same 300 points walked whole in one sync say nothing of the
+/// kind, and are not a window.
+///
+/// KILLS: the partial-view sentence never printed (FX-50 mutant 4).
+#[tokio::test]
+async fn fx50_a_partial_view_says_so_in_its_synced_message() {
+    let head: Vec<Value> = (0..199).map(full_entry).collect();
+    let tail: Vec<Value> = (199..300).map(full_entry).collect();
+    let cursor_key = "logweir/backups/set-198/r.receipt.json";
+
+    let (stopped, _) = full_harvest(
+        None,
+        PlanAtHarvest::Given(None),
+        &head,
+        json!({"rescanStartAfter": cursor_key, "complete": false}),
+    )
+    .await;
+    let (status, reason, message) = synced_of(&stopped);
+    assert_eq!(
+        (status.as_str(), reason.as_str()),
+        ("False", "ScanIncomplete")
+    );
+    assert!(
+        message.ends_with(
+            ". It is a partial view: 199 point(s) from a walk that did not finish; the archive \
+             may hold more"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        (&stopped["truncated"], &stopped["cursor"]["complete"]),
+        (&json!(false), &json!(false))
+    );
+
+    let (resumed, _) = full_harvest(
+        Some(stopped["cursor"].clone()),
+        PlanAtHarvest::Given(Some(cursor_key)),
+        &tail,
+        json!({"complete": true}),
+    )
+    .await;
+    let (status, reason, message) = synced_of(&resumed);
+    assert_eq!((status.as_str(), reason.as_str()), ("True", "Succeeded"));
+    assert!(
+        message.ends_with(
+            ". It is a partial view: 101 point(s) from a resumed rescan; the archive holds more"
+        ),
+        "{message}"
+    );
+    assert_eq!(resumed["truncated"], true);
+
+    // CONTROL: the whole archive in one sync.
+    let all: Vec<Value> = (0..300).map(full_entry).collect();
+    let (whole, _) = full_harvest(
+        None,
+        PlanAtHarvest::Given(None),
+        &all,
+        json!({"complete": true}),
+    )
+    .await;
+    let (status, _, message) = synced_of(&whole);
+    assert_eq!(status, "True");
+    assert!(!message.contains("partial view"), "{message}");
+    assert_eq!(whole["truncated"], false);
+}
+
 // ===========================================================================
 // FX-33 — a point whose record could not be read is listed, and says why
 // ===========================================================================
