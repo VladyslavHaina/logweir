@@ -15,7 +15,7 @@
 //! `crates/weirkeeper/tests/catalog_controller.rs`. Neither crate depends on
 //! the other; both pin the same bytes.
 //!
-//! # The four things it may not do
+//! # What it may not do
 //!
 //! 1. **It never writes and never deletes.** Not even the create-only
 //!    readiness marker a `destinationAccess` may write: the handle is built
@@ -34,13 +34,10 @@
 //!    `NotFound` is [`Availability::Missing`]; every other storage failure is
 //!    [`Availability::Unreadable`]. That distinction is the reason there are
 //!    seven availability states and not two.
-//! 5. **It never drops a point it counted (FX-33).** A point whose record
-//!    could not be read, is over its read bound, or is not a record at all
-//!    used to be counted and listed by NO entry: the console then offered no
-//!    restore for it and showed no reason. Every counted point now has an
+//! 5. **It never drops a point it counted.** Every counted point has an
 //!    entry: one whose record gave no facts carries its point id and a remedy
-//!    stating which document stopped the examination and why ([`EntryCause`])
-//!    — a document's SIZE never sends an operator to a grant. See
+//!    stating which document stopped the examination and why ([`EntryCause`]);
+//!    a document's SIZE never sends an operator to a grant. See
 //!    [`build_entry`].
 //!
 //! # The body is emitted, or it is not emitted at all
@@ -73,29 +70,20 @@
 //!   [`crate::check::redact_path`], whose long-run clause is applied per RUN,
 //!   exactly as [`redact`] applies it, with one extra way for a run to be
 //!   public — it may be object-key SHAPED without carrying an anchor.
-//!   (Splitting the value on `/` first and running the rule over each piece is
-//!   the spelling that let a `/`-bearing credential through whole; it is not
-//!   what this function does, review finding F1.) The `receiptKey` is the
-//!   load-bearing one: D3 §5.5 step 4 builds a restore plan's
-//!   `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`
-//!   from this line, so a key that arrives redacted is a plan binding the
-//!   runner refuses with exit 3 `PointBindingMismatch`. It survived the
-//!   long-run clause and then died on the free-component budget instead,
-//!   because a run id is a 26-character ULID and the budget is 24
-//!   (CATALOG-RECEIPTKEY-REDACTED); `check_contract::is_ulid` now exempts that
-//!   shape from the LENGTH — not from the count, not by raising the budget
-//!   (which fails an existing redaction row), and not where the run carries no
-//!   archive anchor;
+//!   The `receiptKey` is the load-bearing one: D3 §5.5 step 4 builds a
+//!   restore plan's `source.point {point_id, receipt_key, receipt_sha256,
+//!   manifest_sha256}` from this line, so a redacted key is a plan the runner
+//!   refuses (exit 3, `PointBindingMismatch`). A run id is a 26-character ULID
+//!   against a free-component budget of 24, so `check_contract::is_ulid`
+//!   exempts that shape from the length (not from the count, and not where
+//!   the run carries no archive anchor);
 //! * **everything else copied out of the archive passes the whole
 //!   `check_contract::redact`**, long-run clause included: a `pointId` is 37
 //!   characters and a `runId` 26, so the clause costs nothing there and
-//!   catches a credential planted in one. A `backupId` is NOT always shorter:
-//!   a scheduled run's is `<schedule uid>-<slot>[-r<k>]`, 52 to 55
-//!   characters, and the redactor withheld it — and with it the receipt and
-//!   manifest keys built from it — from every scheduled point until
-//!   `check_contract::is_scheduled_set_id` named it an identity, as a UUID
-//!   already was (FX-17). `backupId` is the plan binding's `source.backup`;
-//!   a redacted one is a point the console cannot offer;
+//!   catches a credential planted in one. A scheduled run's `backupId`
+//!   (`<schedule uid>-<slot>[-r<k>]`, 52 to 55 characters) is exempt as an
+//!   identity (`check_contract::is_scheduled_set_id`), as a UUID is: it is
+//!   the plan binding's `source.backup`;
 //! * the entry's `remedy` is a fixed table in this file and a signer's
 //!   `principalHint` is never emitted at all, so no adopter free text is
 //!   relayed.
@@ -131,18 +119,11 @@ use crate::catalog::record::{self, CatalogPoint};
 use crate::check::store::{self as check_store, ObjectAccess};
 use crate::check::{catalogue, redact_path, Deadline, Emission};
 
-// ===========================================================================
-// The grammar — the spellings `weirkeeper::catalog_view` parses
-// ===========================================================================
-//
-// THESE ARE A SECOND DECLARATION OF ONE GRAMMAR AND THAT IS A COST, NOT A
-// DESIGN. `weirkeeper` and `logweir` share no dependency edge (the controller
-// links `logweir-core` and `logweir-verify`, never the runner), and adding one
-// so two constants could be one would be a dependency decision made to avoid a
-// test. So the constants are declared twice and pinned together twice:
-// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses` reads
-// `crates/weirkeeper/src/catalog_view.rs` and asserts every value below equals
-// the controller's, and the pinned-body pair asserts the BYTES round-trip.
+// The grammar `weirkeeper::catalog_view` parses, declared twice because the
+// two crates share no dependency edge, and pinned together twice:
+// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`
+// asserts every value below equals the controller's, and the pinned-body
+// pair asserts the bytes round-trip.
 
 /// `catalog-format=<n>` — the grammar's own version line, first and required.
 pub const FORMAT_LINE_PREFIX: &str = "catalog-format=";
@@ -172,11 +153,11 @@ pub const MAX_BODY_SIGNERS: usize = 64;
 pub const MAX_ENTRY_LOCATIONS: usize = 16;
 /// The most pages a body may declare — the CRD's `status.pages` `maxItems`.
 pub const MAX_BODY_PAGES: usize = 8;
-/// **PROD-05.1.** The most topics one entry may list. A point naming more
+/// The most topics one entry may list. A point naming more
 /// lists none and says how many it left out (`topicsOmitted`): a partial list
 /// would read as the point's whole topic set.
 pub const MAX_ENTRY_TOPICS: usize = 64;
-/// **PROD-04.1.** The most consumer groups one entry may list. A point naming
+/// The most consumer groups one entry may list. A point naming
 /// more lists none and counts them (`groupsOmitted`): a partial list would
 /// read as the point's whole selection.
 pub const MAX_ENTRY_GROUPS: usize = 32;
@@ -187,9 +168,7 @@ pub const MAX_HISTOGRAM_DAYS: usize = 400;
 /// them tighter to stay inside [`MAX_BODY_PAGES`].
 pub const PAGE_ENTRY_TARGET: usize = 1_000;
 
-// ===========================================================================
-// The walk's own bounds
-// ===========================================================================
+// The walk's own bounds.
 
 /// The most day shards one `Index` walk lists.
 ///
@@ -199,29 +178,19 @@ pub const PAGE_ENTRY_TARGET: usize = 1_000;
 /// `complete: true` whatever its age. A walk that hits this stops, says
 /// `complete: false`, names `catalogShardBudgetReached` on its row, and leaves
 /// the day it stopped at in the cursor.
-///
-/// **It replaced a 1 000-day cap that was a correctness bound, and that cap was
-/// review finding F3.** The floor used to be derived from the previous walk's
-/// reported cursor minus a day, so it receded one day per sync; once it passed
-/// 1 000 days the loop could never reach it, `complete` was never true again,
-/// and every sync published `ScanIncomplete` — "the object budget ran out" — on
-/// a healthy, fully-walked archive whose budget was never touched. A floor read
-/// FROM THE ARCHIVE cannot recede.
 pub const MAX_SHARDS_PER_SYNC: i64 = 3_660;
 
 /// How many objects one point's examination may spend: the record, the
 /// receipt, its sidecar, the manifest and — only for a point whose receipt
 /// pins a manifest version that is not the key's current one — that pinned
-/// version, read by id (FX-7, [`crate::catalog::pin`]).
+/// version, read by id ([`crate::catalog::pin`]).
 ///
 /// The walk checks it can afford the WORST CASE before it starts a point, so a
-/// point is either examined whole or not begun. That is review finding **F5**:
-/// a point abandoned half way used to be reported `Unreadable`, whose remedy
-/// names the grant and the network, and whose bucket the controller reads as
-/// `PartialScan` — "a permission or transport failure" — for what is the
-/// designed, normal state of a budget-bounded walk. Almost every point spends
-/// four; reserving five costs at most the last point of a budget-bounded walk,
-/// which the next walk takes from the cursor.
+/// point is examined whole or not begun: an abandoned point would read as
+/// `Unreadable`, a grant or transport failure, for the normal state of a
+/// budget-bounded walk. Almost every point spends four; reserving five costs
+/// at most the last point of a walk, which the next walk takes from the
+/// cursor.
 pub const OBJECTS_PER_POINT: i64 = 5;
 
 /// How many keys the floor listing asks for.
@@ -240,9 +209,7 @@ pub const SHARD_PAGE_KEYS: usize = 1_000;
 /// How many keys one `Full` rescan page asks for.
 pub const RESCAN_PAGE_KEYS: usize = 1_000;
 
-// ===========================================================================
-// The two axes, as the runner spells them on the wire
-// ===========================================================================
+// The two axes, as the runner spells them on the wire.
 
 macro_rules! wire_vocabulary {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
@@ -308,7 +275,7 @@ wire_vocabulary! {
 }
 
 wire_vocabulary! {
-    /// **FX-33.** The document an examination stopped at.
+    /// The document an examination stopped at.
     CauseDocument {
         Record => "record",
         Receipt => "receipt",
@@ -317,7 +284,7 @@ wire_vocabulary! {
 }
 
 wire_vocabulary! {
-    /// **FX-33.** Why that document could not be used. Five different facts,
+    /// Why that document could not be used. Five different facts,
     /// with different remedies: only `readFailed` is about a grant, an
     /// endpoint or a network.
     ///
@@ -337,11 +304,9 @@ wire_vocabulary! {
     }
 }
 
-// ===========================================================================
-// The documents
-// ===========================================================================
+// The documents.
 
-/// **FX-33.** Which document stopped a point's examination, and why — with
+/// Which document stopped a point's examination, and why — with
 /// its size against the bound when the reason is a size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -398,7 +363,7 @@ pub struct EntryLocation {
     pub availability: Availability,
 }
 
-/// **PROD-05.1.** One topic of a point, as the view lists it: the facts the
+/// One topic of a point, as the view lists it: the facts the
 /// console needs to default a restore's replication factor and to say how the
 /// topic's configuration is held — copied from the point RECORD's
 /// `topics[]`, which the sync has just cross-checked against the verified
@@ -413,21 +378,21 @@ pub struct EntryTopic {
     /// The source's replication factor, when the record's model carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replication_factor: Option<u32>,
-    /// FX-4's `config_coverage` word, when the record carries one.
+    /// The record's `config_coverage` word, when it carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_coverage: Option<String>,
     /// The declarative owner's kind (`strimzi`, `external`), when there is
     /// one: such a topic is restored by desired-state export.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// **PROD-03.0.** The record's schema dependency for the topic, when it
+    /// The record's schema dependency for the topic, when it
     /// carries one (record format 1.5.0): the verdict, the DEPENDENT sides and
     /// the schema ids they name. Absent is NOT ASSESSED.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<EntrySchemaDependency>,
 }
 
-/// **PROD-03.0.** One topic's schema dependency as this Job reports it — the
+/// One topic's schema dependency as this Job reports it — the
 /// controller's `catalog_view::EntrySchemaDependency`, field for field. The
 /// ids are the dependent sides' listed ids, merged
 /// (`logweir_core::schema_dependency::dependent_ids`), so at most
@@ -470,7 +435,7 @@ impl EntrySchemaDependency {
     }
 }
 
-/// **PROD-04.1.** A point's consumer position evidence, as the view lists it:
+/// A point's consumer position evidence, as the view lists it:
 /// the snapshot's freshness, the listing word, and per selected group its
 /// outcome and how many of its positions relate to archived data — copied
 /// from the point RECORD's `consumer_positions`, which the sync has just
@@ -495,7 +460,7 @@ pub struct EntryConsumerPositions {
     pub groups_omitted: Option<u32>,
 }
 
-/// **PROD-04.1.** One selected group of a point, as the view lists it.
+/// One selected group of a point, as the view lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryGroup {
@@ -514,7 +479,7 @@ pub struct EntryGroup {
     pub positions: Option<EntryPositionCounts>,
 }
 
-/// **PROD-04.1.** `logweir_core::consumer_positions::PositionCounts`, in the
+/// `logweir_core::consumer_positions::PositionCounts`, in the
 /// view's camelCase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -529,7 +494,7 @@ pub struct EntryPositionCounts {
 
 /// One point, as this Job reports it.
 ///
-/// FX-33: a point whose RECORD gave no facts is listed too, with its point id
+/// A point whose RECORD gave no facts is listed too, with its point id
 /// (from its key), `availability`, `signature: notAttempted` and a remedy
 /// that states why; its receipt-derived fields are empty strings and zeros,
 /// so no reader can take a set, a receipt or a window from it.
@@ -564,7 +529,7 @@ pub struct CatalogEntry {
     pub signer_key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
-    /// **PROD-05.1.** The point's topics with their recorded layout — present
+    /// The point's topics with their recorded layout — present
     /// only for a point whose record AGREED with its verified receipt
     /// (`Available`) and carries the 1.3.0 configuration model, and at most
     /// [`MAX_ENTRY_TOPICS`] of them. Empty otherwise, which a reader takes as
@@ -576,14 +541,14 @@ pub struct CatalogEntry {
     /// them. A reader then knows the list is not the point's topic set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topics_omitted: Option<u32>,
-    /// **PROD-05.1 (fix round, M2).** The record's `owner_detection` — where
+    /// The record's `owner_detection` — where
     /// the run looked for declarative owners — present beside `topics` and
     /// only there: it is what lets a reader of a topic without an `owner`
     /// tell "no owner found" from "owner never looked for". Absent with the
     /// topics, and absent for a record that predates 1.3.0 (NOT RECORDED).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
-    /// **PROD-04.1.** The point's consumer position evidence — present only
+    /// The point's consumer position evidence — present only
     /// for an `Available` point whose record carries the 1.7.0 summary.
     /// ABSENT is NOT PUBLISHED: no group selected, an older record, or a point
     /// the sync could not stand behind.
@@ -635,12 +600,12 @@ pub struct CatalogCounts {
     pub signature: SignatureCounts,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub by_day: Vec<DayCount>,
-    /// **FX-33.** How many of `unreadable` are a document over its read
-    /// bound. A SIZE, so a reader of the counts never calls it a permission
-    /// failure. Skipped when zero: a walk with none writes the line it wrote.
+    /// How many of `unreadable` are a document over its read bound. A
+    /// SIZE, so a reader of the counts never calls it a permission failure.
+    /// Skipped when zero.
     #[serde(skip_serializing_if = "is_zero")]
     pub unreadable_over_read_cap: i64,
-    /// **FX-33.** How many of `unreadable` are a document that is not what
+    /// How many of `unreadable` are a document that is not what
     /// its key names. Skipped when zero.
     #[serde(skip_serializing_if = "is_zero")]
     pub unreadable_malformed: i64,
@@ -652,7 +617,7 @@ fn is_zero(n: &i64) -> bool {
 }
 
 impl CatalogCounts {
-    /// FX-33: an unreadable point's cause, counted beside `unreadable`.
+    /// An unreadable point's cause, counted beside `unreadable`.
     fn count_cause(&mut self, availability: Availability, cause: Option<&EntryCause>) {
         if availability != Availability::Unreadable {
             return;
@@ -716,9 +681,7 @@ pub struct CursorReport {
     pub complete: bool,
 }
 
-// ===========================================================================
-// Redaction
-// ===========================================================================
+// Redaction.
 
 /// The name of the one redaction rule an archive REFERENCE must not pass.
 ///
@@ -739,15 +702,9 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 /// bodies, URL userinfo, `secret…=value` forms and `AKIA`/`ASIA` key ids — is
 /// applied WHOLE and unweakened.
 ///
-/// **It used to be applied to every archive-derived string, and that was review
-/// question F11.** `backupId`, `runId` and `formatVersion` are not digests and
-/// do not need the exemption, so a 40-character credential planted in a
-/// record's `backup_id` by anyone who can write a new key under the archive
-/// prefix travelled verbatim into an immutable page `ConfigMap`. Those fields
-/// now take the WHOLE [`redact`]; the object keys and the location id take
-/// [`crate::check::redact_path`], which weighs each RUN exactly as [`redact`]
-/// does but will also read a run as an object key on its SHAPE alone, so a key
-/// is not eaten whole; and only the three digests come here.
+/// Archive-derived fields that are not digests take the whole [`redact`];
+/// object keys and the location id take [`crate::check::redact_path`]; only
+/// the three digests come here.
 ///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
@@ -767,9 +724,7 @@ pub fn redact_digest(value: &str) -> String {
     apply_rules(value, &shape)
 }
 
-// ===========================================================================
-// The remedies — a fixed table, so no adopter bytes reach an entry
-// ===========================================================================
+// The remedies: a fixed table, so no adopter bytes reach an entry.
 
 /// The one-sentence remedy for a state that is not selectable, or `None` for a
 /// state that needs none.
@@ -784,7 +739,7 @@ pub fn remedy_for(availability: Availability, signature: SignatureVerdict) -> Op
             "The archive does not hold the objects this recovery point names. Restore from \
              another point, or recover the objects from your own backup of the bucket.",
         ),
-        // A READ THAT DID NOT ANSWER, and only that (FX-33). A document over
+        // A READ THAT DID NOT ANSWER, and only that. A document over
         // its read bound, or one that is not what its key names, is
         // `Unreadable` too and has its own sentence ([`cause_remedy`]):
         // neither is helped by a grant, an endpoint or a network.
@@ -829,16 +784,15 @@ pub fn remedy_for(availability: Availability, signature: SignatureVerdict) -> Op
     }
 }
 
-/// **FX-33.** The remedy for a cause that is a fact about a DOCUMENT and not
+/// The remedy for a cause that is a fact about a DOCUMENT and not
 /// about reaching it — its size against the bound, or its content — or
 /// `None` for every other cause, whose remedy is [`remedy_for`]'s.
 ///
 /// Fixed sentences with two numbers in them (the store's size and the bound),
 /// so no adopter bytes reach an entry. **Neither names a grant, an endpoint
-/// or a network**: no change to any of them lists the point, and telling an
-/// operator to check one is how a backup of 110 topics came to look like a
-/// broken credential. `a_size_or_a_content_remedy_never_sends_anyone_to_a_grant`
-/// holds every sentence here to that.
+/// or a network**: no change to any of them lists the point.
+/// `a_size_or_a_content_remedy_never_sends_anyone_to_a_grant` holds every
+/// sentence here to that.
 #[must_use]
 pub fn cause_remedy(cause: &EntryCause) -> Option<String> {
     let (what, kind) = match cause.document {
@@ -880,9 +834,7 @@ pub fn cause_remedy(cause: &EntryCause) -> Option<String> {
     }
 }
 
-// ===========================================================================
-// The walk
-// ===========================================================================
+// The walk.
 
 /// The object a walk hands to [`examine`]: the record's key, and what the key
 /// itself already says about the point.
@@ -901,27 +853,27 @@ struct Observation {
     signer_key_id: Option<String>,
     point: Option<Box<CatalogPoint>>,
     format_version: Option<String>,
-    /// **FX-7.** The receipt pins a manifest VERSION that this bucket HOLDS
+    /// The receipt pins a manifest VERSION that this bucket HOLDS
     /// and that is not the key's current one: the backup set was written again
     /// here after the point was signed. Always `Conflict`; carried separately
     /// so the entry's remedy is [`pin::SUPERSEDED_REMEDY`] rather than the
     /// generic one.
     superseded: bool,
-    /// **FX-7 fix round (review H-1).** The receipt pins a manifest version
+    /// The receipt pins a manifest version
     /// this bucket does not hold — a copy of the archive, a bucket without
     /// versioning, a version that was expired or deleted — so the pin could
     /// not be checked here and the digest decided. Never a verdict of its own:
     /// it appends [`pin::UNCHECKED_NOTE`] to the entry's remedy.
     pin_unchecked: bool,
-    /// **FX-7 re-check, nit 1.** The pinned version's read BY ID failed for a
+    /// The pinned version's read BY ID failed for a
     /// reason other than "not this bucket's history" (a 403 without
     /// `s3:GetObjectVersion`, an outage). Always `Unreadable`; carried
     /// separately so the entry's remedy is [`pin::UNREADABLE_REMEDY`], which
     /// names that grant, rather than the generic one.
     pin_unreadable: bool,
-    /// **FX-33.** The document the examination stopped at, and why.
+    /// The document the examination stopped at, and why.
     cause: Option<EntryCause>,
-    /// **FX-33.** The point id the object's KEY carries — known for every
+    /// The point id the object's KEY carries — known for every
     /// point, whatever its record said or did not say.
     point_id: String,
 }
@@ -930,7 +882,7 @@ impl Observation {
     /// A point whose RECORD gave no facts: could not be read, is over its
     /// bound, is not a record, is absent, or is of another major.
     ///
-    /// **It is still a point, and it is still listed** (FX-33), with the point
+    /// **It is still a point, and it is still listed**, with the point
     /// id its key carries and nothing else: no other object is read for it.
     fn without_record(
         subject: &Subject<'_>,
@@ -963,15 +915,9 @@ fn availability_of_read(error: &StoreError) -> Availability {
 
 /// Why a walk ended.
 ///
-/// **ONE value, decided once, read once** — and that shape is the fix for a
-/// dead guard the fix-round campaign found. `complete` used to be assigned
-/// `!budget_stopped` at each of four exits, and every budget path `return`ed or
-/// `break`ed before reaching one of them, so the negation was unreachable in
-/// both modes: two mutants that hardcoded `complete = true` there survived a
-/// campaign, which is precisely what "a guard without a mutant is not a guard"
-/// is about. Now nothing assigns `complete` at all; [`cursor_document`] derives
-/// it from this, so there is exactly one place a mutant can attack and every
-/// incomplete-walk row attacks it.
+/// One value, decided once, read once: nothing assigns `complete`;
+/// [`cursor_document`] derives it from this, so every incomplete-walk row
+/// attacks one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WalkStop {
     /// The walk listed its whole range and examined every point it counted.
@@ -1009,11 +955,11 @@ impl WalkStop {
     }
 }
 
-/// **FX-50.** How an entry stands in a full window. The order is the order
+/// How an entry stands in a full window. The order is the order
 /// in which places are given up: an entry whose record gave no facts and
 /// carries no integrity evidence first ([`displaceable`]), then the points
 /// with a record, oldest first. Bytes that are not a record are never given
-/// up (FX-33).
+/// up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Standing {
     GivesWay,
@@ -1021,7 +967,7 @@ enum Standing {
     Kept,
 }
 
-/// **FX-50.** An entry's place in the window: its standing, then its
+/// An entry's place in the window: its standing, then its
 /// recovery point (newer ranks higher), then its point id (smaller ranks
 /// higher, the controller's own tie-break), so the window is the same set
 /// whatever order the walk met the points in.
@@ -1029,7 +975,7 @@ type Rank = (Standing, i64, std::cmp::Reverse<String>);
 
 /// The state one walk accumulates.
 struct Walk {
-    /// FX-50: the window, at most `viewLimit` entries, least rank first.
+    /// The window, at most `viewLimit` entries, least rank first.
     window: BTreeMap<Rank, CatalogEntry>,
     counts: CatalogCounts,
     by_day: BTreeMap<String, i64>,
@@ -1043,12 +989,11 @@ struct Walk {
     last_record_key: Option<String>,
     /// How many index rows could not be read at all.
     unreadable_rows: i64,
-    /// FX-33 (review finding M1): how many points' RECORD reads did not
+    /// How many points' RECORD reads did not
     /// answer. Such a point is listed with no set, so a view with one in it
     /// is not whole until a sync reads the record: the walk is not complete.
     records_unread: i64,
-    /// Why the walk ended. The walk's own outcome, and never a point's
-    /// (review findings F3 and F5).
+    /// Why the walk ended. The walk's own outcome, and never a point's.
     stop: WalkStop,
 }
 
@@ -1086,7 +1031,7 @@ impl Walk {
     ///
     /// Asked before a point is begun, never in the middle of one, so a point
     /// is examined whole or not begun. That is what makes the availability and
-    /// signature buckets sum to `total` BY CONSTRUCTION (review finding F2):
+    /// signature buckets sum to `total` BY CONSTRUCTION:
     /// nothing is counted that was not examined, and nothing is examined that
     /// was not counted.
     fn affordable_point(&self, budget: i64, deadline: Deadline) -> bool {
@@ -1191,8 +1136,8 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     if walk.records_unread > 0 {
         row = row.with_fact("catalogRecordsUnread", &walk.records_unread.to_string());
     }
-    // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED (review findings F3 and
-    // F5). `catalog-cursor.complete: false` says only THAT the walk did not
+    // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED.
+    // `catalog-cursor.complete: false` says only THAT the walk did not
     // finish; the controller's message for it names the object budget, so a
     // shard budget or a shard that would not list has to say so itself.
     if let Some(reason) = walk.stop.fact() {
@@ -1243,7 +1188,7 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
 /// [`OBJECTS_PER_POINT`] objects can be afforded. It is published as a FACT so
 /// an operator can see the invariant hold rather than take it on trust, and
 /// `the_buckets_sum_to_total_on_every_walk` asserts it over a fixture larger
-/// than one page and larger than the view limit (review finding F2).
+/// than one page and larger than the view limit.
 fn examined(counts: &CatalogCounts) -> i64 {
     counts
         .available
@@ -1324,30 +1269,19 @@ fn pem_blocks(text: &str) -> Vec<String> {
 /// The oldest day the durable index holds a point for — **one listing**.
 ///
 /// `logweir/catalog/v1/log/<yyyy>/<mm>/<dd>/<ms:013>-<pointId>.json` sorts
-/// lexicographically by day and then by millisecond, and
-/// [`ObjectAccess::list_page`] returns the SMALLEST keys under a prefix, so a
-/// page of one key IS the oldest point in the archive. One request buys the
-/// walk's floor.
-///
-/// **This is review finding F3's fix, and it is a fix at the root.** The floor
-/// used to be a function of the PREVIOUS walk's reported cursor, minus a day of
-/// overlap — so it receded one day on every sync, for ever, on an archive that
-/// never changed. A floor that is a fact about the archive cannot recede, which
-/// makes `complete: true` reachable for an archive of any age and makes the
-/// reported cursor stable instead of a ratchet.
-///
+/// lexicographically by day and then by millisecond, so the smallest day on
+/// the first page of the listing is the archive's oldest: one request buys
+/// the walk's floor. A floor that is a fact about the archive cannot recede,
+/// so `complete: true` is reachable for an archive of any age and the
+/// reported cursor is stable.
 /// `None` when the index holds nothing, or when the listing failed — the caller
 /// treats the first as an empty archive and the second as a refusal.
 fn archive_floor(access: &dyn ObjectAccess) -> Result<Option<NaiveDate>, StoreError> {
     let keys = access.list_page(record::LOG_PREFIX, None, ARCHIVE_FLOOR_PAGE_KEYS)?;
-    // THE MINIMUM, over a page of several, and not the first of a page of one.
-    // `Store::list_page` sorts, but `object_store` contracts no list ordering
-    // at all — it says so above `list_with_offset` itself — so taking the
-    // smallest DAY is a property of this function rather than one inherited
-    // from whichever backend is configured. A page of one would also make the
-    // direction untestable: `first()` and `last()` are the same expression
-    // there, which is how a mutant that read the NEWEST day as the floor
-    // survived a campaign.
+    // The minimum over a page of several, not the first of a page of one:
+    // `object_store` contracts no list ordering, and with one key `first()`
+    // and `last()` are the same expression, which leaves the direction
+    // untestable.
     Ok(keys.iter().filter_map(|k| day_of_log_key(k)).min())
 }
 
@@ -1373,21 +1307,17 @@ fn day_of_log_key(key: &str) -> Option<NaiveDate> {
 /// one listing, a fact about the archive rather than a token fed back from the
 /// last sync.
 ///
-/// The plan's `indexShard` is therefore **reported and not consumed**. It was
-/// consumed, as a floor derived from the previous reach, and that is exactly
-/// what review finding F3 found ratcheting: the floor receded a day per sync
-/// until it passed the shard cap, after which `complete` was never true again.
-/// The field stays in the request shape because the controller sends it and a
-/// plan is parsed with `deny_unknown_fields`; what it carries now is how far
-/// the last walk got, for an operator and for `status.cursor`.
+/// The plan's `indexShard` is therefore reported and not consumed: a floor
+/// derived from the previous reach recedes a day per sync. The field stays
+/// because the controller sends it and plans are parsed with
+/// `deny_unknown_fields`; it carries how far the last walk got.
 ///
 /// # Everything counted is examined
 ///
 /// A point is begun only when all [`OBJECTS_PER_POINT`] objects can be
 /// afforded, and it is COUNTED only when it is examined. `viewLimit` bounds the
-/// entries the body EMITS and nothing else — bounding examination by a view
-/// parameter is review finding F1, and it is why a `complete` walk could leave
-/// 18 000 of 20 000 points deep-checked by nobody.
+/// entries the body EMITS and nothing else: bounding examination by a view
+/// parameter would leave most of a large archive unchecked.
 fn walk_index(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
@@ -1433,12 +1363,10 @@ fn walk_index(
             day.month(),
             day.day()
         );
-        // THE WHOLE SHARD, PAGE AFTER PAGE (FX-33, review finding D4). A day
-        // with more than one page of points (per-minute backups are 1,440 a
-        // day) used to be read to its first page and reported complete. Each
-        // page is one object of the budget; a budget or a clock that stops the
-        // walk inside a shard ends it `ObjectBudget`, so the view says it is
-        // incomplete.
+        // The whole shard, page after page: a day can hold more than one page
+        // of points (per-minute backups are 1,440 a day). Each page is one
+        // object of the budget; a budget or a clock that stops the walk inside
+        // a shard ends it `ObjectBudget`, so the view says it is incomplete.
         let mut keys: Vec<String> = Vec::new();
         let mut after: Option<String> = None;
         loop {
@@ -1475,9 +1403,8 @@ fn walk_index(
             // `log_key` is `<ms:013>-<pointId>.json`, so a day shard names
             // every point it holds for the price of its one listing. It is
             // also the safer reading: `read_log_entry` exists partly to refuse
-            // a row whose `record_key` is not the one its `point_id` implies
-            // (D3 W3's finding F6), and deriving the key from the id cannot be
-            // lied to at all.
+            // a row whose `record_key` is not the one its `point_id` implies,
+            // and deriving the key from the id cannot be lied to at all.
             let Some(point_id) = point_id_of_log_key(&key) else {
                 walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
                 continue;
@@ -1528,7 +1455,7 @@ pub fn point_id_of_log_key(key: &str) -> Option<String> {
     reader::is_point_id(point_id).then(|| point_id.to_string())
 }
 
-/// **FX-33.** The point id a `Full` rescan's record key carries:
+/// The point id a `Full` rescan's record key carries:
 /// `logweir/catalog/v1/points/<pointId>/record.json`. The key's own
 /// component, whatever it is — a rescan lists what the prefix holds, and an
 /// object there that is not a record is still listed, as what it is.
@@ -1583,18 +1510,14 @@ fn walk_full(
             if walk.seen.contains(&key) {
                 continue;
             }
-            // A KEY THAT NAMES NO POINT ID IS NOT A POINT (FX-33): every
+            // A KEY THAT NAMES NO POINT ID IS NOT A POINT: every
             // record this product writes is at `points/lwp1-<32 hex>/
             // record.json`, the rule an `Index` walk applies to a log key.
             if !reader::is_point_id(point_id_of_record_key(&key)) {
                 continue;
             }
-            // EXAMINATION IS BOUNDED BY THE OBJECT BUDGET AND BY NOTHING ELSE
-            // (review finding F1). It used to stop at `viewLimit` — a VIEW
-            // parameter — while the walk kept counting and then reported
-            // `complete: true` with no cursor, so on a 20 000-point archive
-            // with the default `viewLimit: 2000` the other 18 000 points were
-            // never manifest-checked and never would be, on any cadence.
+            // Examination is bounded by the object budget and nothing else,
+            // never by `viewLimit`, a view parameter.
             if !walk.affordable_point(req.max_objects_per_run, deadline) {
                 walk.stop = WalkStop::ObjectBudget;
                 return Ok(());
@@ -1629,23 +1552,17 @@ fn listing_failure(e: &StoreError, destination: &str) -> check_store::StoreFailu
 
 /// Count one examined point and, if it fits the window, push its entry.
 /// `view_limit` bounds the LINES and never the examination: the buckets
-/// cover every point the walk counted, by construction (review findings F1 and
-/// F2).
+/// cover every point the walk counted, by construction.
 fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, view_limit: usize) {
     walk.counts.count_availability(observation.availability);
     walk.counts
         .count_cause(observation.availability, observation.cause.as_ref());
     walk.counts.count_signature(observation.signature);
     if req.mode == CatalogSyncMode::Full {
-        // A `Full` rescan's keys carry no instant — `points/<pointId>/
-        // record.json` is content-addressed — so the only day it can attribute
-        // a point to is the one inside the record it just read. The histogram
-        // of a rescan therefore covers the EXAMINED points and not the whole
-        // walk, which is the opposite of an `Index` walk, where one shard
-        // listing dates every point it names for free. It is said here because
-        // the two scopes are genuinely different, and smoothing over it would
-        // put a number on `status.histogram` that means one thing on one mode
-        // and another on the other.
+        // A `Full` rescan's keys carry no instant (`points/<pointId>/
+        // record.json` is content-addressed), so it dates a point from the
+        // record it read: a rescan's histogram covers the examined points, an
+        // `Index` walk's every point its shard listings name.
         if let Some(point) = observation.point.as_ref() {
             *walk
                 .by_day
@@ -1663,19 +1580,15 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     {
         walk.records_unread = walk.records_unread.saturating_add(1);
     }
-    // THE WINDOW IS THE NEWEST `viewLimit` POINTS WITH A RECORD (FX-50), kept
-    // in at most `viewLimit` entries while the walk runs. It used to be the
-    // first `viewLimit` the walk met, which is newest first on an `Index` walk
-    // but point-id order on a `Full` rescan: a time-random subset. FX-33's
-    // rules stand. Every counted point is listed while there is room. When
-    // the window is full, a point with a record — `Available` or not, since
-    // either may name a set retention keeps — takes the place of an entry
-    // whose record gave no facts ([`displaceable`]) first, and otherwise of
-    // the oldest point with a record, when it is newer: a set's newer receipt
-    // is never overtaken by its older one (review HUNT-1). Bytes that are not
-    // a record keep their place. The walk then counted more than it listed,
-    // so the view says it is a window (`truncated`), and the counts name
-    // every point.
+    // The window is the newest `viewLimit` points with a record, kept in at
+    // most `viewLimit` entries while the walk runs. Every counted point is
+    // listed while there is room. When the window is full, a point with a
+    // record (`Available` or not: either may name a set retention keeps)
+    // takes the place of an entry whose record gave no facts
+    // ([`displaceable`]) first, and otherwise of the oldest point with a
+    // record when it is newer, so a set's newer receipt is never overtaken by
+    // its older one. Bytes that are not a record keep their place. The view
+    // then says it is a window (`truncated`), and the counts name every point.
     let standing = if observation.point.is_some() {
         Standing::Record
     } else if displaceable(&observation) {
@@ -1702,7 +1615,7 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     }
 }
 
-/// **FX-33.** Whether a listed entry gives its place in a full window to any
+/// Whether a listed entry gives its place in a full window to any
 /// point with a record: only an entry whose RECORD gave no facts, and of those
 /// only one that carries no evidence about the archive's integrity.
 ///
@@ -1710,9 +1623,9 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
 ///   error), is over its read bound (a size) or is of a newer format. Such an
 ///   entry names no set and no location, so it protects nothing a reader
 ///   could lose, and it says nothing about bytes other than what was written.
-/// - **Not to any point**: an entry with a record (review finding H1) may
+/// - **Not to any point**: an entry with a record may
 ///   name a backup set that retention must keep for it, so it gives its place
-///   only to a NEWER point with a record (FX-50), which keeps a set's newer
+///   only to a NEWER point with a record, which keeps a set's newer
 ///   receipt listed whenever its older one is. A record whose bytes are not a
 ///   record (`malformed`) never gives its place: it is what tampered bytes
 ///   look like and also a crashed run's half-written record, which the walk
@@ -1739,14 +1652,10 @@ fn displaceable(observation: &Observation) -> bool {
 /// One point's two axes.
 ///
 /// **It spends up to [`OBJECTS_PER_POINT`] objects and asks no budget question
-/// of its own.** The caller established that all four are affordable before it
-/// began, so a point here is examined whole. That is review finding F5: the
-/// guards used to live inside, and a point abandoned between its record and its
-/// receipt was reported `Availability::Unreadable` — a bucket whose fixed
-/// remedy names the `archiveRead` grant and the network, and which the
-/// controller reads as `PartialScan`, "a permission or transport failure". A
-/// budget-bounded walk is the designed, normal state the cursor exists for, and
-/// it is now the WALK's outcome and never a point's.
+/// of its own.** The caller established they are affordable before it began,
+/// so a point is examined whole: a point abandoned half way would read as
+/// `Unreadable`, a grant or transport failure, for the normal state of a
+/// budget-bounded walk.
 fn examine(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
@@ -1754,12 +1663,9 @@ fn examine(
     trust: &[VerifyingKey],
     subject: &Subject<'_>,
 ) -> Observation {
-    // -- the record ----------------------------------------------------------
-    //
-    // FOUR WAYS IT CAN GIVE NO FACTS, AND EACH IS AN ENTRY (FX-33): the read
-    // failed, the object is over its bound, the bytes are not a record, or
-    // they are a record of another major. Each used to be a bare observation
-    // that `build_entry` dropped.
+    // The record. Four ways it can give no facts, and each is an entry: the
+    // read failed, the object is over its bound, the bytes are not a record,
+    // or they are a record of another major.
     walk.objects = walk.objects.saturating_add(1);
     let record_bytes = match access.get(subject.record_key, caps::CATALOG_RECORD) {
         Ok(b) => b,
@@ -1772,7 +1678,7 @@ fn examine(
         }
     };
     let point = match reader::read_record(&record_bytes) {
-        // A RECORD IS A POINT'S ONLY AT THAT POINT'S OWN KEY (FX-33). A record
+        // A RECORD IS A POINT'S ONLY AT THAT POINT'S OWN KEY. A record
         // that parses and names ANOTHER point — a copy of a real point's
         // record put under this key — is "another document" here: this point
         // is listed without a record, and the point the copy describes is
@@ -1799,7 +1705,7 @@ fn examine(
     // The record's bytes are parsed; nothing below reads them again.
     drop(record_bytes);
 
-    // WHAT THIS POINT HOLDS AT ONCE (FX-33), by construction and not by the
+    // WHAT THIS POINT HOLDS AT ONCE, by construction and not by the
     // caps alone: the parsed record, for as long as the point is examined,
     // and beside it ONE of — the receipt's bytes with their parse; the
     // receipt's bytes with the sidecar and the signature's copy of them; the
@@ -1817,19 +1723,14 @@ fn examine(
         cause: None,
     };
 
-    // -- the receipt: the verification root (D3 §5.2 rule 3) ---------------
-    //
-    // ITS OUTCOMES ARE DIFFERENT FACTS, and review finding F4 is that only
-    // one of them had a test: a `NotFound` is `Missing`, an object over its
-    // bound and bytes that are not a receipt are `Unreadable` for what they
-    // ARE (FX-33: `cause` says which), and any other failure is `Unreadable`
-    // because the read did not answer.
-    // `a_receipt_that_cannot_be_read_is_never_missing` exercises each with a
-    // key-scoped fault.
-    //
-    // UNDER THE CONTROLLER'S OWN BOUND (`caps::CATALOG_RECEIPT` equals
-    // `caps::CONTROLLER_RECEIPT`): a receipt this walk listed `Available`
-    // but the controller could not verify is the defect this cap closes.
+    // The receipt, the verification root (D3 §5.2 rule 3). Its outcomes are
+    // different facts: `NotFound` is `Missing`; an object over its bound and
+    // bytes that are not a receipt are `Unreadable` for what they are
+    // (`cause` says which); any other failure is `Unreadable` because the
+    // read did not answer (`a_receipt_that_cannot_be_read_is_never_missing`).
+    // Read under the controller's own bound (`caps::CATALOG_RECEIPT` equals
+    // `caps::CONTROLLER_RECEIPT`), so nothing listed `Available` is one the
+    // controller cannot verify.
     walk.objects = walk.objects.saturating_add(1);
     let receipt_bytes = match access.get(&point.receipt.key, caps::CATALOG_RECEIPT) {
         Ok(b) => b,
@@ -1863,19 +1764,19 @@ fn examine(
         receipt.archive.manifest_version_id.clone()
     };
 
-    // -- the signature: a verdict and a key id, never a trust decision ------
+    // The signature: a verdict and a key id, never a trust decision.
     walk.objects = walk.objects.saturating_add(1);
     (found.signature, found.signer_key_id) =
         classify_signature(access, &point, &receipt_bytes, trust);
     // The receipt's bytes are verified; the manifest is read without them.
     drop(receipt_bytes);
 
-    // -- the manifest digest -----------------------------------------------
+    // The manifest digest.
     if found.availability == Availability::Available && req.deep_check != CatalogDeepCheck::None {
         walk.objects = walk.objects.saturating_add(1);
         match access.get_with_version(&point.archive.manifest_key, caps::MANIFEST) {
             Ok((bytes, answered)) => {
-                // **FX-7 — the pin, judged in THIS bucket** ([`pin::judge`],
+                // The pin, judged in THIS bucket ([`pin::judge`],
                 // shared with the drill's point binding). The pin is taken from
                 // the RECEIPT, the verification root, and never from the
                 // record, whose copy an older writer may have left out
@@ -1884,7 +1785,7 @@ fn examine(
                 // pin, the pinned version is read BY ID — the fifth object
                 // [`OBJECTS_PER_POINT`] reserves — because a version id
                 // belongs to one bucket and a COPY of the archive carries the
-                // pin without the version (review H-1).
+                // pin without the version.
                 let verdict = pin::judge(
                     pinned_version.as_deref(),
                     answered.as_deref(),
@@ -1976,22 +1877,12 @@ impl Found {
     }
 }
 
-// THE WALK'S READ CAPS ARE ROWS OF `logweir_store::caps` (FX-33), each named
-// at its read: `CATALOG_RECORD` and `CATALOG_RECEIPT` — the largest record
-// and receipt Logweir writes (`logweir_core::topic_budget`), the second equal
-// to the controller's own — `SIDECAR` and `MANIFEST`.
-//
-// There used to be ONE constant here, `MAX_CATALOG_DOCUMENT_BYTES` = 256 KiB,
-// for a record, a receipt and a sidecar alike (review question F12, made the
-// read cap by FX-31). It was written when a record was "about 1.5 KiB"; the
-// receipt and the record have since gained four per-topic blocks and cost
-// about 3 KB a topic, so a backup of about 80 topics crossed it and vanished
-// from the catalog. The caps are still what F12 asked for — a planted
-// multi-gigabyte object under `logweir/catalog/v1/points/…` is refused on the
-// size the store reports, before a body byte is read, and a store that
-// streams past its cap is cut off at it — but they are now derived from what
-// a backup may legitimately sign, in one place, with a test that fails when
-// a format outgrows its budget.
+// The walk's read caps are rows of `logweir_store::caps`, each named at its
+// read: `CATALOG_RECORD` and `CATALOG_RECEIPT` (the largest record and
+// receipt Logweir writes, `logweir_core::topic_budget`; the second equals the
+// controller's own), `SIDECAR` and `MANIFEST`. A planted multi-gigabyte
+// object is refused on the size the store reports, and a store that streams
+// past its cap is cut off at it.
 
 /// The signature verdict and the key id it belongs to.
 ///
@@ -2050,55 +1941,36 @@ fn classify_signature(
 
 /// One observation as an entry line's value.
 ///
-/// **EVERY observation has one (FX-33).** It returned `None` for an
-/// observation with no parsed record — a record that could not be read, was
-/// over its read bound, was not a record, or was of another major — on the
-/// argument that an entry's required fields are receipt-derived and there is
-/// no honest value for them without a record. The argument was right about
-/// the VALUES and wrong about the conclusion: such a point was counted and
-/// listed by no entry, so the console offered no restore for it and showed
-/// no reason, and a backup of 110 topics looked like a backup that never
-/// ran. So the fields are optional instead, and an entry says what is known:
-/// the point id always (it is in the object's key), the recovery instant
-/// when the key carries one, and the index row's facts when the walk has a
-/// row ([`without_record_entry`]). It is never `Available`, so it is never
-/// selectable and nothing binds a restore to it.
+/// Every observation has one. An observation with no parsed record says what
+/// is known: the point id always (it is in the object's key), the recovery
+/// instant when the key carries one, and the index row's facts when the walk
+/// has a row ([`without_record_entry`]). It is never `Available`, so it is
+/// never selectable and nothing binds a restore to it.
 fn build_entry(observation: &Observation) -> CatalogEntry {
     let Some(point) = observation.point.as_ref() else {
         return without_record_entry(observation);
     };
     let availability = observation.availability;
-    // THREE CLASSES, AND EACH FIELD IS IN THE NARROWEST ONE IT CAN BE
-    // (review question F11):
+    // Three classes, and each field is in the narrowest one it can be:
     //
     //   * `redact`        — the whole rule set, long-run clause included, for
     //                       every value that is neither a key nor a digest.
     //                       A `pointId` is 37 characters and a `runId` 26, so
-    //                       the 40-character clause costs nothing there and
-    //                       catches a credential planted in one by anyone who
-    //                       can write a new key under the archive prefix. A
-    //                       SCHEDULED `backupId` is 52-55 characters and is
-    //                       kept because the redactor reads it as an identity
-    //                       (`is_scheduled_set_id`, FX-17), not because it is
-    //                       short.
+    //                       the 40-character clause costs nothing there. A
+    //                       scheduled `backupId` (52-55 characters) is kept
+    //                       because the redactor reads it as an identity
+    //                       (`is_scheduled_set_id`).
     //   * `redact_path`   — the same rules, the long-run clause still weighed
-    //                       per RUN, but a run may also be public by being
-    //                       object-key SHAPED without an anchor. For object
-    //                       keys and the `s3://bucket/prefix` location. The
-    //                       strict rule would redact an ordinary archive key,
-    //                       which is the defect `check::redact_path` itself
-    //                       exists for.
-    //                       `receiptKey` MUST survive it whole: it is half the
-    //                       plan binding a restore is built from, and it did
-    //                       not until `is_ulid` exempted the 26-character run
-    //                       id from the free-component budget
-    //                       (CATALOG-RECEIPTKEY-REDACTED). `redact_path` is
-    //                       the narrowest class it can be in — `redact` would
-    //                       eat the whole key and `redact_digest` would drop
-    //                       the long-run clause a planted credential needs.
-    //   * `redact_digest` — the long-run clause dropped, for the THREE values
-    //                       that are 40-plus hex by definition and that a later
-    //                       restore re-checks.
+    //                       per run, but a run may also be public by being
+    //                       object-key shaped without an anchor. For object
+    //                       keys and the `s3://bucket/prefix` location.
+    //                       `receiptKey` must survive it whole: it is half the
+    //                       plan binding a restore is built from (`is_ulid`
+    //                       exempts the 26-character run id from the
+    //                       free-component budget).
+    //   * `redact_digest` — the long-run clause dropped, for the three values
+    //                       that are 40-plus hex by definition and that a
+    //                       later restore re-checks.
     let mut entry = CatalogEntry {
         point_id: redact(&point.point_id),
         backup_id: redact(&point.backup_id),
@@ -2135,23 +2007,23 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
     // and it is written down so the cap is enforced on the side that renders
     // the line rather than assumed on the side that parses it.
     entry.locations.truncate(MAX_ENTRY_LOCATIONS);
-    // PROD-05.1: the topics, from a record the cross-check let stand.
+    // The topics, from a record the cross-check let stand.
     (entry.topics, entry.topics_omitted) = entry_topics(point, availability);
-    // M2 (fix round): where the run looked for owners travels WITH the
-    // topics, so a topic the view lists is never read without it.
+    // Where the run looked for owners travels with the topics, so a topic the
+    // view lists is never read without it.
     if !entry.topics.is_empty() {
         entry.owner_detection = point
             .owner_detection
             .as_ref()
             .map(|d| d.iter().map(|s| redact(s)).collect());
     }
-    // PROD-04.1: the consumer position summary, from a record the cross-check
+    // The consumer position summary, from a record the cross-check
     // let stand.
     entry.consumer_positions = entry_consumer_positions(point, availability);
     entry
 }
 
-/// **FX-33.** The entry of a point whose RECORD gave no facts: the point id
+/// The entry of a point whose RECORD gave no facts: the point id
 /// its key carries, what the examination found, and a remedy saying why.
 /// Nothing else — no set, run, instant, window, receipt, manifest or location
 /// (empty strings and zeros), so no reader can bind, select or join on it.
@@ -2185,7 +2057,7 @@ fn without_record_entry(observation: &Observation) -> CatalogEntry {
     }
 }
 
-/// **PROD-04.1.** An entry's `consumerPositions`, from the record: only for an
+/// An entry's `consumerPositions`, from the record: only for an
 /// `Available` point whose record carries the summary. A point selecting more
 /// than [`MAX_ENTRY_GROUPS`] groups lists none and counts them.
 fn entry_consumer_positions(
@@ -2229,7 +2101,7 @@ fn entry_consumer_positions(
     })
 }
 
-/// **PROD-05.1.** An entry's `topics` and `topicsOmitted`, from the record.
+/// An entry's `topics` and `topicsOmitted`, from the record.
 ///
 /// Only an `Available` point lists them — every other availability is a
 /// record the sync could not stand behind (a `Conflict` is a record the
@@ -2265,7 +2137,7 @@ fn entry_topics(
                 .as_ref()
                 .and_then(|c| c.owner.as_ref())
                 .map(|o| redact(&o.kind)),
-            // PROD-03.0: the record's own entry, as the view lists it.
+            // The record's own entry, as the view lists it.
             schema_dependency: t.schema_dependency.as_ref().map(EntrySchemaDependency::of),
         })
         .collect();
@@ -2275,7 +2147,7 @@ fn entry_topics(
 /// An entry's remedy: [`pin::SUPERSEDED_REMEDY`] for a pin this bucket holds
 /// and no longer serves, otherwise [`remedy_for`]'s — with
 /// [`pin::UNCHECKED_NOTE`] after it when the receipt's pin could not be checked
-/// in this bucket (FX-7 fix round, review H-1). Fixed sentences only, so no
+/// in this bucket. Fixed sentences only, so no
 /// adopter bytes reach an entry; the note never REPLACES a remedy, because the
 /// state the table names is still the state the point is in.
 fn entry_remedy(observation: &Observation) -> Option<String> {
@@ -2285,7 +2157,7 @@ fn entry_remedy(observation: &Observation) -> Option<String> {
     if observation.pin_unreadable {
         return Some(pin::UNREADABLE_REMEDY.to_string());
     }
-    // FX-33: A SIZE OR A CONTENT FAULT HAS ITS OWN SENTENCE, before the
+    // A SIZE OR A CONTENT FAULT HAS ITS OWN SENTENCE, before the
     // table's — which for `Unreadable` names the grant, the endpoint and the
     // network, none of which is at fault for a document that is too large or
     // is not what its key names.
@@ -2305,9 +2177,7 @@ fn entry_remedy(observation: &Observation) -> Option<String> {
     })
 }
 
-// ===========================================================================
-// Rendering
-// ===========================================================================
+// Rendering.
 
 /// The rendered body and what rendering had to leave out.
 struct RenderedBody {
@@ -2318,12 +2188,12 @@ struct RenderedBody {
 
 /// One entry's two renderings: in FULL, and SLIM — without its topics,
 /// `topicsOmitted` counting them, and without the `ownerDetection` that only
-/// qualifies a listed topic (PROD-05.1). An entry with no topics renders the
-/// same line twice.
+/// qualifies a listed topic. An entry with no topics renders the same line
+/// twice.
 ///
-/// PROD-04.1: the slim rendering also drops the consumer groups' list, keeping
-/// the snapshot's freshness and listing word, with `groupsOmitted` counting
-/// the groups left out.
+/// The slim rendering also drops the consumer groups' list, keeping the
+/// snapshot's freshness and listing word, with `groupsOmitted` counting the
+/// groups left out.
 fn entry_renderings(entry: &CatalogEntry) -> (String, String) {
     let full = serde_json::to_string(entry).unwrap_or_default();
     let groups_listed = entry
@@ -2356,7 +2226,7 @@ fn entry_renderings(entry: &CatalogEntry) -> (String, String) {
 /// walk reached further than it did.
 fn render_body(req: &CatalogSyncRequest, walk: &Walk, entries: &[CatalogEntry]) -> RenderedBody {
     // Each entry in two renderings: with its topics, and SLIM — without them,
-    // `topicsOmitted` counting what was left out (PROD-05.1). The topics are an
+    // `topicsOmitted` counting what was left out. The topics are an
     // enhancement and never cost a point its place in the view.
     let rendered: Vec<(String, String)> = entries.iter().map(entry_renderings).collect();
 
@@ -2423,15 +2293,15 @@ fn render_body(req: &CatalogSyncRequest, walk: &Walk, entries: &[CatalogEntry]) 
     }
 }
 
-/// **PROD-05.1: spend the entry budget.** `rendered` is each entry as `(full,
+/// **Spend the entry budget.** `rendered` is each entry as `(full,
 /// slim)` — with its topics, and without them — in body order, newest first.
 /// Returns the lines kept and how many entries were dropped for space.
 ///
 /// An entry keeps its topic list only when every LATER entry still fits
 /// slim, so a topic list never pushes a point out of the view: the newest
 /// points keep their lists and the oldest give theirs up first. Without topics
-/// in play (`full == slim`) this is exactly the old rule — keep a line while
-/// it fits, drop and count it when it does not.
+/// in play (`full == slim`) a line is kept while it fits and dropped and
+/// counted when it does not.
 fn allocate_entry_lines(
     rendered: Vec<(String, String)>,
     mut budget: usize,
@@ -2538,9 +2408,6 @@ fn signers_document(walk: &Walk) -> Vec<CatalogSigner> {
 /// it counted** — not "the walk ended". A walk stopped by the object budget,
 /// the clock, the shard budget or a shard that would not list is
 /// `complete: false` WITH a cursor to resume from, whichever mode it is in.
-/// `Full` used to report `complete: true` and no cursor whenever it ran out of
-/// `viewLimit`, which is review finding **F1**: the rest of the archive was
-/// never deep-checked and there was nothing left to resume from.
 fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
     match req.mode {
         CatalogSyncMode::Index => CursorReport {
@@ -2571,10 +2438,10 @@ fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
 mod tests {
     use super::*;
 
-    /// PROD-05.1: a topic list never costs a point its place in the view. Three
+    /// A topic list never costs a point its place in the view. Three
     /// entries whose full lines do not all fit: the newest keep their lists
     /// while every later one still fits slim, the rest go slim, none is
-    /// dropped; and with no topics in play the old keep-or-drop rule holds.
+    /// dropped; and with no topics in play the plain keep-or-drop rule holds.
     #[test]
     fn a_topic_list_never_pushes_a_point_out_of_the_view() {
         let line = |c: char, n: usize| c.to_string().repeat(n);
@@ -2603,10 +2470,10 @@ mod tests {
         let (kept, dropped) = allocate_entry_lines(rendered.clone(), 3 * cost(10));
         assert_eq!((kept.len(), dropped), (3, 0));
         assert!(kept.iter().all(|l| l.len() == 10));
-        // Not even that: the old rule — keep while it fits, drop the rest.
+        // Not even that: the plain rule, keep while it fits, drop the rest.
         let (kept, dropped) = allocate_entry_lines(rendered, 2 * cost(10));
         assert_eq!((kept.len(), dropped), (2, 1));
-        // No topics in play: full == slim, the old rule exactly.
+        // No topics in play: full == slim, the plain rule exactly.
         let plain = vec![
             (line('x', 50), line('x', 50)),
             (line('y', 50), line('y', 50)),
@@ -2615,7 +2482,7 @@ mod tests {
         assert_eq!((kept, dropped), (vec![line('x', 50)], 1));
     }
 
-    /// PROD-05.1 fix round (M2): the SLIM rendering drops `ownerDetection`
+    /// The SLIM rendering drops `ownerDetection`
     /// with the topics it qualifies and counts them; the full one keeps both.
     #[test]
     fn a_slim_entry_carries_no_topics_and_no_owner_detection() {
@@ -2669,7 +2536,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// PROD-04.1: the SLIM rendering drops the consumer groups' list and
+    /// The SLIM rendering drops the consumer groups' list and
     /// counts it, keeping the snapshot's freshness and listing word, so the
     /// view can still say how old the positions are.
     #[test]
@@ -2725,7 +2592,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// FX-33: every cause whose remedy is this module's own — a size, or a
+    /// Every cause whose remedy is this module's own — a size, or a
     /// content fault — is a sentence that names NO grant, endpoint or
     /// network, states the size against the bound when it is a size, and
     /// fits the 512 characters the API publishes. The read that did not
@@ -2802,7 +2669,7 @@ mod tests {
         );
     }
 
-    /// FX-33: the two keys a walk reads a point's id from.
+    /// The two keys a walk reads a point's id from.
     #[test]
     fn a_log_key_and_a_record_key_carry_the_point_id() {
         let id = "lwp1-0123456789abcdef0123456789abcdef";
