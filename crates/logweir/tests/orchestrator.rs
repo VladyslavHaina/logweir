@@ -1,6 +1,7 @@
 //! Task 21a — the phase orchestrator, the `DrillError` -> exit-code contract
 //! and the Prometheus textfile metrics.
 mod fixtures;
+mod support;
 
 use logweir::drill::{record, DrillError};
 use logweir::exit::ExitCode;
@@ -231,51 +232,7 @@ use fixtures::Drill;
 use logweir::drill::execute_with;
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, Outcome};
 use logweir_evidence::keys::{SigningKey, VerifyingKey};
-
-struct NeverCalledEngine;
-
-impl logweir_core::engine::DataEngine for NeverCalledEngine {
-    fn id(&self) -> logweir_core::engine::EngineId {
-        panic!("invalid signing material must stop before DataEngine::id")
-    }
-
-    fn list_backup_sets(
-        &self,
-        _: &logweir_core::engine::StorageUrl,
-    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
-        panic!("invalid signing material must stop before DataEngine::list_backup_sets")
-    }
-
-    fn describe(
-        &self,
-        _: &logweir_core::engine::BackupSetRef,
-    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
-        panic!("invalid signing material must stop before DataEngine::describe")
-    }
-
-    fn preflight(
-        &self,
-        _: &logweir_core::engine::RestorePlan,
-    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
-        panic!("invalid signing material must stop before DataEngine::preflight")
-    }
-
-    fn restore(
-        &self,
-        _: &logweir_core::engine::RestorePlan,
-        _: &mut dyn logweir_core::engine::PhaseObserver,
-    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
-        panic!("invalid signing material must stop before DataEngine::restore")
-    }
-
-    fn fingerprints(
-        &self,
-        _: &logweir_core::engine::SampleSelection,
-    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
-    {
-        panic!("invalid signing material must stop before DataEngine::fingerprints")
-    }
-}
+use support::doubles::Engine;
 
 fn signing_pub(f: &fixtures::OrchestratorFixture) -> VerifyingKey {
     SigningKey::from_pem_file(&f.args.signing_key)
@@ -313,7 +270,9 @@ fn invalid_signing_material_stops_before_any_engine_call() {
             _ => unreachable!(),
         }
         f.args.signing_key = path.clone();
-        f.ctx.engine = Box::new(NeverCalledEngine);
+        f.ctx.engine = Box::new(Engine::never_called(
+            "invalid signing material must stop before",
+        ));
 
         let err = execute_with(&f.args, &f.run_id, &f.ctx)
             .expect_err("invalid signing material must refuse the run");
@@ -2136,46 +2095,6 @@ struct ListsACopyFirst {
     described: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-/// A placeholder while the fixture's engine is moved into the wrapper.
-struct NoEngine;
-impl logweir_core::engine::DataEngine for NoEngine {
-    fn id(&self) -> logweir_core::engine::EngineId {
-        unreachable!()
-    }
-    fn list_backup_sets(
-        &self,
-        _: &logweir_core::engine::StorageUrl,
-    ) -> Result<Vec<logweir_core::engine::BackupSetRef>, logweir_core::engine::EngineError> {
-        unreachable!()
-    }
-    fn describe(
-        &self,
-        _: &logweir_core::engine::BackupSetRef,
-    ) -> Result<logweir_core::engine::BackupSetFacts, logweir_core::engine::EngineError> {
-        unreachable!()
-    }
-    fn preflight(
-        &self,
-        _: &logweir_core::engine::RestorePlan,
-    ) -> Result<logweir_core::engine::PreflightReport, logweir_core::engine::EngineError> {
-        unreachable!()
-    }
-    fn restore(
-        &self,
-        _: &logweir_core::engine::RestorePlan,
-        _: &mut dyn logweir_core::engine::PhaseObserver,
-    ) -> Result<logweir_core::engine::RestoreFacts, logweir_core::engine::EngineError> {
-        unreachable!()
-    }
-    fn fingerprints(
-        &self,
-        _: &logweir_core::engine::SampleSelection,
-    ) -> Result<Vec<logweir_core::engine::RecordFingerprint>, logweir_core::engine::EngineError>
-    {
-        unreachable!()
-    }
-}
-
 impl logweir_core::engine::DataEngine for ListsACopyFirst {
     fn id(&self) -> logweir_core::engine::EngineId {
         self.inner.id()
@@ -2253,7 +2172,7 @@ fn a_same_id_copy_listed_first_does_not_refuse_a_truthful_plan() {
     let mut f = fixtures::orchestrator_fixture(Drill::Passes);
     let bound = bound_as_restored(&f);
     let described = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let inner = std::mem::replace(&mut f.ctx.engine, Box::new(NoEngine));
+    let inner = std::mem::replace(&mut f.ctx.engine, Box::new(Engine::unreachable()));
     f.ctx.engine = Box::new(ListsACopyFirst {
         inner,
         copy_key: "0copy/fixture/manifest.json".into(),

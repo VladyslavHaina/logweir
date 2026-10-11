@@ -14,15 +14,15 @@
 //! these rows are the complete restores and the `complete_coverage_*` rows of
 //! `e2e/tests/record_semantics.rs`.
 mod fixtures;
+mod support;
 
 use logweir::drill::phase7_verify::complete::{lineage_offset, LINEAGE_HEADER};
 use logweir::drill::phase7_verify::{compare, lineage_faults, run_with_coverage, VerifyOutcome};
 use logweir::drill::DrillError;
 use logweir_core::backup_receipt::SourceConfigCoverage;
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PartitionFacts, PhaseObserver,
-    PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection, SegmentFacts,
-    StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, EngineError, PartitionFacts, RecordFingerprint, RestorePlan,
+    SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::CompleteVerification;
@@ -31,6 +31,7 @@ use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use support::doubles::Engine;
 
 /// `2025-10-09T08:53:20Z`, PROD-01.1's fixture epoch; `+n` below is
 /// milliseconds after it.
@@ -340,58 +341,34 @@ impl ClusterReader for Target {
 /// The sampled lane's archive side: what `OsoCliEngine::fingerprints`
 /// returns — the selection's first `count` in-window records, by the
 /// segments its window overlaps (the engine's selection).
-struct SampledEngine {
-    archive: BTreeMap<i32, Vec<Vec<Rec>>>,
-}
-
-impl DataEngine for SampledEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Err(EngineError::Operational("not used".into()))
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("not used".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("not used".into()))
-    }
-    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        let (w0, w1) = s.window;
-        Ok(self
-            .archive
-            .get(&s.partition)
-            .into_iter()
-            .flatten()
-            .filter(|seg| seg[0].ts <= w1 && seg[seg.len() - 1].ts >= w0)
-            .flatten()
-            .filter(|r| r.ts >= w0 && r.ts <= w1)
-            .take(s.count)
-            .map(|r| RecordFingerprint {
-                topic: s.topic.clone(),
-                partition: s.partition,
-                offset: r.offset,
-                sha256: logweir_kafka::fingerprint::record_fingerprint(
-                    r.key.as_deref(),
-                    r.value.as_deref(),
-                    &r.headers,
-                    r.ts,
-                ),
-            })
-            .collect())
-    }
+fn sampled_engine(archive: BTreeMap<i32, Vec<Vec<Rec>>>) -> Engine<'static> {
+    Engine::new()
+        .on_describe(|_| Err(EngineError::Operational("not used".into())))
+        .on_preflight(|_| Err(EngineError::Operational("not used".into())))
+        .on_restore(|_, _| Err(EngineError::Operational("not used".into())))
+        .on_fingerprints(move |s| {
+            let (w0, w1) = s.window;
+            Ok(archive
+                .get(&s.partition)
+                .into_iter()
+                .flatten()
+                .filter(|seg| seg[0].ts <= w1 && seg[seg.len() - 1].ts >= w0)
+                .flatten()
+                .filter(|r| r.ts >= w0 && r.ts <= w1)
+                .take(s.count)
+                .map(|r| RecordFingerprint {
+                    topic: s.topic.clone(),
+                    partition: s.partition,
+                    offset: r.offset,
+                    sha256: logweir_kafka::fingerprint::record_fingerprint(
+                        r.key.as_deref(),
+                        r.value.as_deref(),
+                        &r.headers,
+                        r.ts,
+                    ),
+                })
+                .collect())
+        })
 }
 
 fn plan(floor: i64, end: i64) -> RestorePlan {
@@ -459,9 +436,7 @@ impl Case {
         bound: Option<u64>,
     ) -> Result<VerifyOutcome, DrillError> {
         let floor = self.archive.floor();
-        let engine = SampledEngine {
-            archive: self.archive.parts.clone(),
-        };
+        let engine = sampled_engine(self.archive.parts.clone());
         let reader = Target::of(self.target.clone());
         run_with_coverage(
             &engine,
@@ -1073,9 +1048,7 @@ fn the_target_is_read_whole_in_bounded_chunks() {
     let reader = Target::of(case.target.clone());
     let floor = case.archive.floor();
     run_with_coverage(
-        &SampledEngine {
-            archive: case.archive.parts.clone(),
-        },
+        &sampled_engine(case.archive.parts.clone()),
         &reader,
         &store,
         &facts,
@@ -1148,9 +1121,7 @@ fn a_short_target_read_is_refused_and_never_a_smaller_comparison() {
     let mut reader = Target::of(case.target.clone());
     reader.stops_at = Some((0, expected_on_p0));
     let out = run_with_coverage(
-        &SampledEngine {
-            archive: case.archive.parts.clone(),
-        },
+        &sampled_engine(case.archive.parts.clone()),
         &reader,
         &b.store,
         &b.facts,
@@ -1187,9 +1158,7 @@ impl Case {
     /// `verify_with`, under a given plan (PROD-11.1: its start and subsets).
     fn verify_plan(&self, plan: &RestorePlan, coverage: Coverage) -> VerifyOutcome {
         let b = self.archive.build();
-        let engine = SampledEngine {
-            archive: self.archive.parts.clone(),
-        };
+        let engine = sampled_engine(self.archive.parts.clone());
         let reader = Target::of(self.target.clone());
         let (w0, w1) = (
             plan.time_window.0.timestamp_millis(),

@@ -1,9 +1,11 @@
 mod fixtures;
+mod support;
 use logweir::drill::{phase2_target, phase3_diff, phase4_sample, DrillError};
 use logweir_core::engine::BackupSetRef;
 use logweir_core::spec::Anchor;
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::{KafkaError, TopicMeta};
 use std::collections::BTreeMap;
+use support::doubles::Reader;
 
 /// A fixed, arbitrary cluster id shared by the `target_with`/`empty_target`
 /// calls in this file — nothing below asserts on its value except the phase-2
@@ -288,42 +290,16 @@ fn phase_2_records_the_actual_state_of_only_the_topics_of_interest() {
 /// naive phase 2 implementation (one that skips the `meta.error` check)
 /// would happily accept: that is precisely the failure mode this double
 /// exists to catch.
-struct ErroredTopicReader;
-
-impl ClusterReader for ErroredTopicReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("ERRORED0000000000000000".to_string())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![TopicMeta::errored(
-            "drill-orders",
-            "leader election in progress",
-        )])
-    }
-    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
-    /// a broker that surfaces neither `log.message.timestamp.type` nor a
-    /// timestamp bound, which is the harmless case: phase 0's preflight then
-    /// treats the broker as the Apache default (`CreateTime`) and refuses
-    /// nothing. G-TS's own arms live in
-    /// `crates/logweir/tests/topic_preflight.rs`.
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _topic: &str,
-        _partition: i32,
-        _from: i64,
-        _max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
+///
+/// Its broker configuration is empty: a broker that surfaces neither
+/// `log.message.timestamp.type` nor a timestamp bound, which is the harmless
+/// case for phase 0's preflight (guard **G-TS**, whose own arms live in
+/// `crates/logweir/tests/topic_preflight.rs`).
+fn errored_topic_reader() -> Reader {
+    Reader::new("ERRORED0000000000000000").listing(vec![TopicMeta::errored(
+        "drill-orders",
+        "leader election in progress",
+    )])
 }
 
 /// The property this phase exists to protect: a topic the reader could not
@@ -332,7 +308,7 @@ impl ClusterReader for ErroredTopicReader {
 /// those are different facts, and phase 3 draws opposite conclusions from
 /// them ("safe to create fresh" vs. "restoring into this will collide with
 /// what's already there"). Proven at the TYPE level, not just in a log line:
-/// `ErroredTopicReader`'s `end_offsets`/`topic_configs` would happily return
+/// `errored_topic_reader()`'s `end_offsets`/`topic_configs` would happily return
 /// an empty-but-Ok answer for `drill-orders` if phase 2 asked, so a version
 /// of `phase2_target::run` that omitted the `meta.error` check would pass
 /// this topic through as "known, empty" and this test would then observe
@@ -340,7 +316,7 @@ impl ClusterReader for ErroredTopicReader {
 /// test fails if that routing is inverted or dropped.
 #[test]
 fn a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty() {
-    let reader = ErroredTopicReader;
+    let reader = errored_topic_reader();
     let err = phase2_target::run(&reader, &["drill-orders".to_string()]).unwrap_err();
     match err {
         DrillError::Operational(msg) => {
@@ -480,36 +456,16 @@ fn selection_set_arrives_empty_and_bind_backup_set_patches_every_entry() {
 /// A target that HAS `drill-orders` (healthy metadata) but refuses its
 /// DescribeConfigs — what `RdKafkaReader::topic_configs` returns now instead
 /// of the empty map rdkafka 0.36.2 used to hand back for a refused resource.
-struct RefusedConfigsReader;
-
-impl ClusterReader for RefusedConfigsReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok(TARGET_CLUSTER_ID.to_string())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![TopicMeta::new("drill-orders", 3)])
-    }
-    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![(0, 10), (1, 10), (2, 10)])
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Err(logweir_kafka::reader::empty_topic_config_answer(
-            topic,
-            &logweir_kafka::reader::TopicVisibility::Visible,
-        ))
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _topic: &str,
-        _partition: i32,
-        _from: i64,
-        _max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
+fn refused_configs_reader() -> Reader {
+    Reader::new(TARGET_CLUSTER_ID)
+        .lists("drill-orders", 3)
+        .on_end_offsets(|_| Ok(vec![(0, 10), (1, 10), (2, 10)]))
+        .on_topic_configs(|topic| {
+            Err(logweir_kafka::reader::empty_topic_config_answer(
+                topic,
+                &logweir_kafka::reader::TopicVisibility::Visible,
+            ))
+        })
 }
 
 /// **FX-4 / T13, consumer 4.** An existing target topic whose configuration
@@ -520,7 +476,7 @@ impl ClusterReader for RefusedConfigsReader {
 /// in phase 2 makes this `Ok` with an empty map, and this test fails.
 #[test]
 fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
-    let err = phase2_target::run(&RefusedConfigsReader, &["drill-orders".to_string()])
+    let err = phase2_target::run(&refused_configs_reader(), &["drill-orders".to_string()])
         .expect_err("a refused configuration read is not an empty configuration");
     match err {
         DrillError::Kafka(KafkaError::NotAuthorized(m)) => {

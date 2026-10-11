@@ -16,6 +16,7 @@
 //! `logweir/e2e/tests/guards.rs`'s residual-3 probe, under
 //! `#![cfg(feature = "e2e")]`.
 mod fixtures;
+mod support;
 
 use logweir::drill::phase0_admit::{self, TopicPreflight};
 use logweir::drill::DrillError;
@@ -26,11 +27,11 @@ use logweir_core::spec::{
     TargetSpec,
 };
 use logweir_kafka::reader::{
-    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicDeleter, TopicMeta,
-    TARGET_TOPIC_CONFIGS,
+    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicMeta, TARGET_TOPIC_CONFIGS,
 };
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use support::doubles::{Creator, Deleter, Reader};
 
 const CLUSTER: &str = "SCRATCH00000000000000AA";
 const MARKER: &str = "logweir.scratch";
@@ -277,35 +278,8 @@ impl ClusterReader for BrokerDouble {
 }
 
 /// Records every `NewTopicSpec` it is handed, in order.
-#[derive(Default)]
-struct RecordingCreator {
-    calls: Mutex<Vec<NewTopicSpec>>,
-}
-
-impl TopicCreator for RecordingCreator {
-    fn create_topics(
-        &self,
-        topics: &[NewTopicSpec],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(topics);
-        Ok(topics.iter().map(|t| (t.name.clone(), Ok(()))).collect())
-    }
-}
-
-#[derive(Default)]
-struct RecordingDeleter {
-    calls: Mutex<Vec<String>>,
-}
-
-impl TopicDeleter for RecordingDeleter {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(names);
-        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
-    }
-}
+type RecordingCreator = Creator;
+type RecordingDeleter = Deleter;
 
 /// One archive manifest's worth of facts: `orders` with three partitions,
 /// `payments` with one, which is what makes "the source topic's partition
@@ -901,42 +875,21 @@ fn the_apache_default_timestamp_bound_refuses_nothing() {
 /// have in this phase.
 #[test]
 fn a_broker_configs_read_failure_is_operational_not_a_guard_refusal() {
-    struct Unreachable;
-    impl ClusterReader for Unreachable {
-        fn cluster_id(&self) -> Result<String, KafkaError> {
-            Ok(CLUSTER.to_string())
-        }
-        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-            Ok(vec![TopicMeta::new(MARKER, 1)])
-        }
-        fn end_offsets(&self, _t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-            Ok(vec![])
-        }
-        fn topic_configs(&self, _t: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-            unimplemented!()
-        }
-        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+    let unreachable = Reader::new(CLUSTER)
+        .lists(MARKER, 1)
+        .on_topic_configs(|_| unimplemented!())
+        .on_broker_configs(|| {
             Err(KafkaError::Unreachable(
                 "no broker returned its configuration within 20s".into(),
             ))
-        }
-        fn consume_range(
-            &self,
-            _t: &str,
-            _p: i32,
-            _f: i64,
-            _m: usize,
-        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-            Ok(vec![])
-        }
-    }
+        });
     let creator = RecordingCreator::default();
     let deleter = RecordingDeleter::default();
     let err = phase0_admit::run(
         &a_recent_spec(),
         "restore: {}\n",
         &allowed(),
-        &Unreachable,
+        &unreachable,
         &creator,
         &deleter,
     )
@@ -1259,39 +1212,6 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
 // Fix round 1, review finding 1.
 // ---------------------------------------------------------------------------
 
-/// A `TopicCreator` that records what it was asked for and answers
-/// `TopicAlreadyExists` for one named topic — the broker's own error string,
-/// which is what `TopicCreator`'s `Result<(), String>` contract carries
-/// (Global Constraint 1: `crates/logweir` links no rdkafka, so a double must
-/// be able to produce the same value the real client does).
-#[derive(Default)]
-struct CreatorThatFindsOneTopicPresent {
-    calls: Mutex<Vec<NewTopicSpec>>,
-    present: String,
-}
-
-impl TopicCreator for CreatorThatFindsOneTopicPresent {
-    fn create_topics(
-        &self,
-        topics: &[NewTopicSpec],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(topics);
-        Ok(topics
-            .iter()
-            .map(|t| {
-                if t.name == self.present {
-                    (
-                        t.name.clone(),
-                        Err("Broker: Topic already exists".to_string()),
-                    )
-                } else {
-                    (t.name.clone(), Ok(()))
-                }
-            })
-            .collect())
-    }
-}
-
 /// **Spec §6.1, review finding 1.** A mapped target topic that already exists
 /// is REFUSED at phase 0 — exit 3, `refusal-reason=GuardRefused`, the topic
 /// named, nothing created and nothing deleted.
@@ -1459,10 +1379,12 @@ fn topics_created_names_only_the_topics_this_run_created() {
 
     // The racing path: admitted, then the target gains one of the names before
     // the creation step reaches it.
-    let racing = CreatorThatFindsOneTopicPresent {
-        calls: Mutex::new(Vec::new()),
-        present: "drill-payments".to_string(),
-    };
+    // It answers `TopicAlreadyExists` for one named topic — the broker's own
+    // error string, which is what `TopicCreator`'s `Result<(), String>`
+    // contract carries (Global Constraint 1: `crates/logweir` links no
+    // rdkafka, so a double must be able to produce the same value the real
+    // client does).
+    let racing = Creator::default().refusing("drill-payments", "Broker: Topic already exists");
     let mut preflight = admitted.topic_preflight.clone();
     let e = phase0_admit::create_target_topics(
         &racing,

@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 pub mod dial_tokens;
+pub mod doubles;
 pub mod exit_code_lint;
 
 use std::io::ErrorKind;

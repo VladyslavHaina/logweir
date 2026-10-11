@@ -13,6 +13,7 @@
 //! manifest names, and reads the signed receipt back.
 
 mod fixtures;
+mod support;
 
 use logweir::backup::schema_dependency::{
     detect, detect_on_clock, detect_within, DetectionLimits, SegmentSource, MAX_DECOMPRESSED_BYTES,
@@ -341,89 +342,30 @@ fn a_topic_read_whole_says_complete() {
 use logweir::backup::{execute_with, BackupRunArgs};
 use logweir_engine_oso::storage::Store;
 use logweir_evidence::keys::SigningKey;
-use logweir_kafka::reader::{ClusterReader, KafkaError, TopicMeta};
-
-struct Reader;
-
-impl ClusterReader for Reader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("SOURCE-CLUSTER-0000001".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _: &str,
-        _: i32,
-        _: i64,
-        _: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
-}
+use support::doubles::{Engine, Reader};
 
 /// Writes the manifest when it runs (FX-7: a set must be new) and describes
 /// the segments the test seeded OUTSIDE the set's directory.
-struct Engine<'a> {
-    archive: &'a Store,
-    topics: Vec<TopicFacts>,
-}
-
-impl DataEngine for Engine<'_> {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "double".into(),
-            version: "v0.21.0".into(),
-            digest: "sha256:0".into(),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        unimplemented!()
-    }
-    fn describe(&self, set: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        let mut facts = self::set(self.topics.clone());
-        facts.backup_id = set.backup_id.clone();
-        Ok(facts)
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        unimplemented!()
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        unimplemented!()
-    }
-    fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        unimplemented!()
-    }
-    fn backup(
-        &self,
-        plan: &BackupPlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<BackupFacts, EngineError> {
-        let key = format!("logweir/{}/manifest.json", plan.backup_id);
-        self.archive
-            .put_create_only(&key, b"{\"topics\":[]}")
-            .map_err(|e| EngineError::Operational(e.to_string()))?;
-        Ok(BackupFacts {
-            started_at: "2026-10-09T00:00:00Z".parse().unwrap(),
-            finished_at: "2026-10-09T00:01:00Z".parse().unwrap(),
-            exit_code: 0,
-            unknown_key_warnings: vec![],
+fn engine(archive: &Store, topics: Vec<TopicFacts>) -> Engine<'_> {
+    Engine::for_backup()
+        .on_list(|_| unimplemented!())
+        .on_describe(move |set| {
+            let mut facts = self::set(topics.clone());
+            facts.backup_id = set.backup_id.clone();
+            Ok(facts)
         })
-    }
+        .on_backup(move |plan, _| {
+            let key = format!("logweir/{}/manifest.json", plan.backup_id);
+            archive
+                .put_create_only(&key, b"{\"topics\":[]}")
+                .map_err(|e| EngineError::Operational(e.to_string()))?;
+            Ok(BackupFacts {
+                started_at: "2026-10-09T00:00:00Z".parse().unwrap(),
+                finished_at: "2026-10-09T00:01:00Z".parse().unwrap(),
+                exit_code: 0,
+                unknown_key_warnings: vec![],
+            })
+        })
 }
 
 #[test]
@@ -443,13 +385,13 @@ fn a_backup_run_signs_a_1_5_0_receipt_naming_the_framed_topic() {
         &records(0, 4, |_| Some(framed(11))),
     );
     let audit = put("logweir/seeded/audit/0", &records(0, 4, |o| Some(plain(o))));
-    let engine = Engine {
-        archive: &archive,
-        topics: vec![
+    let engine = engine(
+        &archive,
+        vec![
             topic("orders", vec![partition(0, vec![orders])]),
             topic("audit", vec![partition(0, vec![audit])]),
         ],
-    };
+    );
     let (outcome, receipt) = sign_backup(&engine, &archive, &evidence);
     // At least the version that defines `schema_dependency` (an exact pin
     // breaks when a later block, PROD-01.4a's `generations`, moves the minor).
@@ -540,8 +482,15 @@ fn sign_backup(
         strimzi_cluster: None,
         consumer_groups: Vec::new(),
     };
-    let outcome = execute_with(&args, "01JRUN", &Reader, engine, archive, evidence)
-        .unwrap_or_else(|e| panic!("the run failed: {e}"));
+    let outcome = execute_with(
+        &args,
+        "01JRUN",
+        &Reader::new("SOURCE-CLUSTER-0000001"),
+        engine,
+        archive,
+        evidence,
+    )
+    .unwrap_or_else(|e| panic!("the run failed: {e}"));
     let (bytes, _) = evidence
         .get_capped(
             &outcome.receipt_key,
@@ -575,14 +524,14 @@ fn a_manifest_listing_a_topic_twice_still_signs() {
         &records(4, 4, |_| Some(framed(11))),
     );
     let audit = put("logweir/seeded/audit/0", &records(0, 4, |o| Some(plain(o))));
-    let engine = Engine {
-        archive: &archive,
-        topics: vec![
+    let engine = engine(
+        &archive,
+        vec![
             topic("orders", vec![partition(0, vec![first])]),
             topic("orders", vec![partition(1, vec![again])]),
             topic("audit", vec![partition(0, vec![audit])]),
         ],
-    };
+    );
     let (_, receipt) = sign_backup(&engine, &archive, &evidence);
     receipt.validate_invariants().unwrap();
     assert_eq!(receipt.records["orders"], 8);

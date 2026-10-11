@@ -18,6 +18,7 @@
 //! one. Both are the seam; neither names a client constructor.
 mod support;
 use support::assert_format_at_least;
+use support::doubles::Reader;
 
 use logweir::backup::{execute_with, run_with, BackupError, BackupOutcome, BackupRunArgs};
 use logweir::exit::ExitCode;
@@ -2082,70 +2083,45 @@ fn the_shipped_backup_example_is_host_side() {
 /// explicit override and a broker-default `LogAppendTime`; `ledger` is
 /// REFUSED, the way `RdKafkaReader` reports a topic whose DescribeConfigs the
 /// principal may not issue.
-struct ConfigReader;
-
-impl ClusterReader for ConfigReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("SOURCE-CLUSTER-00000001".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        unimplemented!("the backup path reads configuration through describe_topic_configs")
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _topic: &str,
-        _partition: i32,
-        _from: i64,
-        _max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
-    fn describe_topic_configs(
-        &self,
-        topics: &[String],
-    ) -> Result<Vec<(String, logweir_kafka::reader::TopicConfigRead)>, KafkaError> {
-        use logweir_kafka::reader::{ConfigEntryObservation, ConfigSourceKind};
-        let e = |name: &str, value: &str, source| ConfigEntryObservation {
-            name: name.into(),
-            value: Some(value.into()),
-            source,
-            read_only: false,
-            sensitive: false,
-        };
-        Ok(topics
-            .iter()
-            .map(|t| {
-                let answer = match t.as_str() {
-                    "orders" => Ok(vec![
-                        e(
-                            "retention.ms",
-                            "3600000",
-                            ConfigSourceKind::DynamicTopicConfig,
-                        ),
-                        e(
-                            "message.timestamp.type",
-                            "LogAppendTime",
-                            ConfigSourceKind::DynamicDefaultBrokerConfig,
-                        ),
-                    ]),
-                    other => Err(logweir_kafka::reader::empty_topic_config_answer(
-                        other,
-                        &logweir_kafka::reader::TopicVisibility::Visible,
-                    )),
-                };
-                (t.clone(), answer)
-            })
-            .collect())
-    }
+fn config_reader() -> Reader {
+    Reader::new("SOURCE-CLUSTER-00000001")
+        .on_topic_configs(|_| {
+            unimplemented!("the backup path reads configuration through describe_topic_configs")
+        })
+        .on_describe_topic_configs(|topics| {
+            use logweir_kafka::reader::{ConfigEntryObservation, ConfigSourceKind};
+            let e = |name: &str, value: &str, source| ConfigEntryObservation {
+                name: name.into(),
+                value: Some(value.into()),
+                source,
+                read_only: false,
+                sensitive: false,
+            };
+            Ok(topics
+                .iter()
+                .map(|t| {
+                    let answer = match t.as_str() {
+                        "orders" => Ok(vec![
+                            e(
+                                "retention.ms",
+                                "3600000",
+                                ConfigSourceKind::DynamicTopicConfig,
+                            ),
+                            e(
+                                "message.timestamp.type",
+                                "LogAppendTime",
+                                ConfigSourceKind::DynamicDefaultBrokerConfig,
+                            ),
+                        ]),
+                        other => Err(logweir_kafka::reader::empty_topic_config_answer(
+                            other,
+                            &logweir_kafka::reader::TopicVisibility::Visible,
+                        )),
+                    };
+                    (t.clone(), answer)
+                })
+                .collect())
+        })
 }
 
 /// **FX-4, the receipt.** The block is signed with the run, one entry per
@@ -2177,7 +2153,7 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
     // already holds its manifest is refused before the engine.
     let (store, _k, _b) = archive_for("mvp-demo");
 
-    let outcome = exec(&f.args, "run-1", &ConfigReader, &engine, &store, &store).unwrap();
+    let outcome = exec(&f.args, "run-1", &config_reader(), &engine, &store, &store).unwrap();
     let (doc, _v) = store
         .get_capped(
             &outcome.receipt_key,

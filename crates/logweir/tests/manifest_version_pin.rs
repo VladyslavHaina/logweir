@@ -13,13 +13,15 @@
 //! in-process versioned double (`Store::in_memory_versioned`). The READER half
 //! is `drill/binding.rs`'s unit tests and `check_cli.rs`'s catalogSync rows.
 //! No endpoint, no network.
+mod support;
+
 use logweir::backup::{execute_with, BackupOutcome, BackupRunArgs};
 use logweir_core::backup_receipt::{pinnable_version_id, BackupReceipt};
 use logweir_core::engine::*;
 use logweir_engine_oso::storage::{Store, VersionedBucket};
 use logweir_evidence::keys::SigningKey;
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
+use support::doubles::{Engine, Reader};
 
 /// The archive prefix: under `logweir/`, for the reason `backup_run.rs`
 /// records — the in-memory store asserts that root on every put.
@@ -90,11 +92,11 @@ impl Fixture {
 
     /// One run over `store` (archive AND evidence, as the in-process seam
     /// does), with an engine that writes its manifest `writes` times.
-    fn run(&self, store: &Store, engine: &ManifestWriter<'_>) -> BackupOutcome {
+    fn run(&self, store: &Store, engine: &Engine<'_>) -> BackupOutcome {
         execute_with(
             &self.args,
             "01K6FX7RUN00000000000000001",
-            &StubReader,
+            &Reader::new("SOURCE-CLUSTER-01"),
             engine,
             store,
             store,
@@ -118,120 +120,63 @@ impl Fixture {
 /// (an unversioned bucket, or the first write of a versioned one), then — on a
 /// versioned bucket — `rewrites` more times through the bucket handle, as the
 /// real engine re-puts `<backup_id>/manifest.json` several times in one run.
-struct ManifestWriter<'a> {
+fn manifest_writer<'a>(
     store: &'a Store,
     bucket: Option<&'a VersionedBucket>,
     rewrites: usize,
-}
-
-impl DataEngine for ManifestWriter<'_> {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "double".into(),
-            version: "v0.21.0".into(),
-            digest: "sha256:0".into(),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        unimplemented!("the backup path lists through the Store handle, not the engine")
-    }
-    fn describe(&self, set: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(BackupSetFacts {
-            backup_id: set.backup_id.clone(),
-            created_at: "2026-09-29T03:04:00Z".parse().unwrap(),
-            source_cluster_id: None,
-            manifest_sha256: "sha256:from-the-engines-own-handle".into(),
-            manifest_version_id: None,
-            consumer_group_snapshot_sha256: None,
-            topics: vec![TopicFacts {
-                name: "orders".into(),
-                original_partition_count: Some(1),
-                source_replication_factor: Some(1),
-                configurations: BTreeMap::new(),
-                partitions: vec![PartitionFacts {
-                    partition_id: 0,
-                    segments: vec![SegmentFacts {
-                        key: "seg".into(),
-                        start_offset: 0,
-                        end_offset: 99,
-                        start_timestamp: 1_790_000_000_000,
-                        end_timestamp: 1_790_000_060_000,
-                        record_count: 100,
-                        sha256: String::new(),
-                        uploaded_at: 0,
+) -> Engine<'a> {
+    Engine::for_backup()
+        .on_describe(|set| {
+            Ok(BackupSetFacts {
+                backup_id: set.backup_id.clone(),
+                created_at: "2026-09-29T03:04:00Z".parse().unwrap(),
+                source_cluster_id: None,
+                manifest_sha256: "sha256:from-the-engines-own-handle".into(),
+                manifest_version_id: None,
+                consumer_group_snapshot_sha256: None,
+                topics: vec![TopicFacts {
+                    name: "orders".into(),
+                    original_partition_count: Some(1),
+                    source_replication_factor: Some(1),
+                    configurations: BTreeMap::new(),
+                    partitions: vec![PartitionFacts {
+                        partition_id: 0,
+                        segments: vec![SegmentFacts {
+                            key: "seg".into(),
+                            start_offset: 0,
+                            end_offset: 99,
+                            start_timestamp: 1_790_000_000_000,
+                            end_timestamp: 1_790_000_060_000,
+                            record_count: 100,
+                            sha256: String::new(),
+                            uploaded_at: 0,
+                        }],
+                        gaps: vec![],
+                        pruned: vec![],
                     }],
-                    gaps: vec![],
-                    pruned: vec![],
                 }],
-            }],
+            })
         })
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        unimplemented!()
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        unimplemented!()
-    }
-    fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        unimplemented!()
-    }
-    fn backup(
-        &self,
-        plan: &BackupPlan,
-        _obs: &mut dyn PhaseObserver,
-    ) -> Result<BackupFacts, EngineError> {
-        let key = manifest_key(&plan.backup_id);
-        self.store
-            .put_create_only(&key, b"{\"topics\":[],\"snapshot\":0}")
-            .map_err(|e| EngineError::Operational(e.to_string()))?;
-        if let Some(bucket) = self.bucket {
-            for n in 1..=self.rewrites {
-                bucket.overwrite(
-                    &key,
-                    format!("{{\"topics\":[],\"snapshot\":{n}}}").as_bytes(),
-                );
+        .on_backup(move |plan, _obs| {
+            let key = manifest_key(&plan.backup_id);
+            store
+                .put_create_only(&key, b"{\"topics\":[],\"snapshot\":0}")
+                .map_err(|e| EngineError::Operational(e.to_string()))?;
+            if let Some(bucket) = bucket {
+                for n in 1..=rewrites {
+                    bucket.overwrite(
+                        &key,
+                        format!("{{\"topics\":[],\"snapshot\":{n}}}").as_bytes(),
+                    );
+                }
             }
-        }
-        Ok(BackupFacts {
-            started_at: "2026-09-29T03:00:00Z".parse().unwrap(),
-            finished_at: "2026-09-29T03:04:00Z".parse().unwrap(),
-            exit_code: 0,
-            unknown_key_warnings: vec![],
+            Ok(BackupFacts {
+                started_at: "2026-09-29T03:00:00Z".parse().unwrap(),
+                finished_at: "2026-09-29T03:04:00Z".parse().unwrap(),
+                exit_code: 0,
+                unknown_key_warnings: vec![],
+            })
         })
-    }
-}
-
-struct StubReader;
-
-impl ClusterReader for StubReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("SOURCE-CLUSTER-01".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _: &str,
-        _: i32,
-        _: i64,
-        _: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,11 +192,7 @@ impl ClusterReader for StubReader {
 fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     let f = Fixture::new();
     let (store, bucket) = Store::in_memory_versioned("logweir/");
-    let engine = ManifestWriter {
-        store: &store,
-        bucket: Some(&bucket),
-        rewrites: 4,
-    };
+    let engine = manifest_writer(&store, Some(&bucket), 4);
     let outcome = f.run(&store, &engine);
     let versions = bucket.versions(&manifest_key(BACKUP_ID));
     assert_eq!(
@@ -346,11 +287,7 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
 fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     let f = Fixture::new();
     let store = Store::in_memory("logweir/");
-    let engine = ManifestWriter {
-        store: &store,
-        bucket: None,
-        rewrites: 0,
-    };
+    let engine = manifest_writer(&store, None, 0);
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
     // PROD-05.1, PROD-03.0 and PROD-01.4a: an unpinned receipt this build
@@ -454,11 +391,7 @@ fn a_null_or_blank_version_id_is_not_a_pin() {
 fn pinned_receipt_and_bytes() -> (BackupReceipt, Vec<u8>) {
     let f = Fixture::new();
     let (store, bucket) = Store::in_memory_versioned("logweir/");
-    let engine = ManifestWriter {
-        store: &store,
-        bucket: Some(&bucket),
-        rewrites: 1,
-    };
+    let engine = manifest_writer(&store, Some(&bucket), 1);
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
     assert!(receipt.archive.manifest_version_id.is_some());
@@ -514,11 +447,7 @@ fn a_record_that_invents_a_pin_is_a_mismatch() {
     use logweir::catalog::reader::{cross_check, CrossCheck};
     let f = Fixture::new();
     let store = Store::in_memory("logweir/");
-    let engine = ManifestWriter {
-        store: &store,
-        bucket: None,
-        rewrites: 0,
-    };
+    let engine = manifest_writer(&store, None, 0);
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
     let mut record = record_of(&receipt, &bytes);
@@ -568,11 +497,7 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
     let f = Fixture::new();
     // An unversioned run, whose receipt pins nothing…
     let plain = Store::in_memory("logweir/");
-    let engine = ManifestWriter {
-        store: &plain,
-        bucket: None,
-        rewrites: 0,
-    };
+    let engine = manifest_writer(&plain, None, 0);
     let outcome = f.run(&plain, &engine);
     let (bytes, _) = f.receipt(&plain, &outcome);
     let sig = plain
