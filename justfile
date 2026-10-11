@@ -533,6 +533,17 @@ mvp-demo:
     cargo build -p logweir
     ./scripts/mvp-demo.sh
 
+# The same demo with NO Rust toolchain (PROD-14.1's compose sandbox): every
+# `logweir` command, and its engine, runs in the PUBLISHED runner image through
+# scripts/logweir-image.sh. Needs docker, openssl, awk and python3 with
+# `cryptography`. Pin the image of your checkout's release:
+#
+#     just e2e-up
+#     just sandbox docker.io/vladyslavhaina/logweir:<tag>
+#     just e2e-down
+sandbox image="docker.io/vladyslavhaina/logweir:latest":
+    LOGWEIR_IMAGE={{image}} LOGWEIR_BIN="$PWD/scripts/logweir-image.sh" ./scripts/mvp-demo.sh
+
 # The pre-flight: refuse a namespace that is missing any of the four current
 # Secrets, naming the FIRST absent one.
 #
