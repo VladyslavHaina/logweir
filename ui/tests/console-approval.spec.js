@@ -36,7 +36,10 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   COUNTERSIGN_COMMAND,
+  approvalFormView,
   consoleApprovalOffered,
+  loadApprovalSubject,
+  renderApprovalScope,
   countersignOffered,
   noApprovalSentence,
   policyMode,
@@ -362,7 +365,17 @@ test("an_approved_request_names_the_approver_and_is_never_green", () => {
 test("an_original_name_request_shows_the_requesters_owner_statement", () => {
   // REVIEW S-1 (HIGH): the plan's owner statement alone decides whether an
   // original-name write goes ahead from the console, so it is shown.
-  const named = request("original-name");
+  // REVIEW P2-5: rendered from the fixture AS THE CONTRACT DECODES IT, so a
+  // contract that drops `ownerStatement` fails here (as unknown, and as a
+  // statement that reads "nothing stated").
+  const decoded = decodeApprovalRequest(fixture("console/approval-request-original-name.json"));
+  assert.deepEqual(decoded.unknown, [], "every field of the original-name view is declared");
+  const named = decoded.value.item;
+  // The decoder builds prototype-free objects; compare the fields.
+  const decodedStatement = named.scope.target.ownerStatement;
+  assert.ok(decodedStatement !== undefined && decodedStatement !== null, "the statement survives");
+  assert.equal(decodedStatement.ownerPath, false);
+  assert.deepEqual([...decodedStatement.owners], []);
   const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: named }));
   assert.match(html, /id="scope-owner-statement"/);
   assert.ok(html.includes("<strong>no declarative owner</strong>"), html);
@@ -385,6 +398,14 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
   undeclared.scope.target.ownerStatement = { ownerPath: false };
   assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: undeclared }))
     .includes("states nothing about declarative owners"));
+  // REVIEW P2-4: owner_path with NO owners declared reads as the run acts --
+  // it refuses (nowhere to look) -- never as "writes ... although an owner".
+  const pathAlone = structuredClone(named);
+  pathAlone.scope.target.ownerStatement = { ownerPath: true };
+  const pathAloneHtml = renderConsoleApprovalPanel(view(TWO_PERSON, { request: pathAlone }));
+  assert.ok(pathAloneHtml.includes("states nothing about declarative owners"), pathAloneHtml);
+  assert.ok(pathAloneHtml.includes("the run will refuse"), pathAloneHtml);
+  assert.ok(!pathAloneHtml.includes("Restore despite an owner"), pathAloneHtml);
   const owned = structuredClone(path);
   owned.scope.target.ownerStatement.ownerPath = false;
   assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: owned }))
@@ -635,4 +656,80 @@ test("the_submit_step_says_two_person_needs_a_second_person_and_no_key", () => {
     assert.ok(!/approval-policy-two-person/.test(unknown));
   }
   assert.match(approvalPolicyBlock(CONFIRM), /id="approval-policy-ordinary"/);
+});
+
+// ============================================ the page as the approver sees it
+
+/** An API double serving one Restore (under its original names), the
+ *  namespace's policy and the request view -- what `mountApprovals` reads. */
+function approverApi(policy, request) {
+  const restore = {
+    apiVersion: "logweir.dev/v1alpha1", kind: "Restore",
+    metadata: { name: "restore-x", uid: "uid-x", namespace: "team-a" },
+    spec: {
+      planBytes: "a plan\n", approvalRef: { name: "approval-x" },
+      target: { mode: "newTopic", topicNaming: { prefix: "", originalName: true } },
+    },
+    status: { phase: "Pending" },
+  };
+  const missing = () => {
+    const error = new Error("not found");
+    error.status = 404;
+    throw error;
+  };
+  return {
+    async get(ns, plural, name) {
+      return plural === "restores" && name === "restore-x" ? restore : missing();
+    },
+    async approvalPolicy() { return policy; },
+    async approvalRequest() { return request; },
+  };
+}
+
+/** The page as `mountApprovals` renders it: the real load path, the real
+ *  view, the real page renderer. */
+async function approverPage(policy, request) {
+  const loaded = await loadApprovalSubject(
+    approverApi(policy, request), "team-a", { subject: "restore-x" },
+  );
+  const page = approvalFormView(loaded);
+  page.maySubmit = true;
+  return renderApprovalSubject(page);
+}
+
+test("the_whole_page_under_two_person_never_shows_the_one_person_original_name_sentence", async () => {
+  // REVIEW P2-1 (MEDIUM): the v1 sentence -- its `logweir drill approve`
+  // hint and "the runner refuses ... if a declarative owner manages a name"
+  // -- sat ABOVE the two-person panel. Under two-person the requester's own
+  // statement decides that, and the panel says so.
+  const named = decodeApprovalRequest(
+    fixture("console/approval-request-original-name.json")).value.item;
+  const html = await approverPage(TWO_PERSON, named);
+  assert.match(html, /id="console-approval-section"/, "the panel is on the page");
+  assert.match(html, /id="scope-owner-statement"/, "with the owner statement");
+  assert.ok(!/id="original-name-approval"/.test(html), "no one-person sentence");
+  assert.ok(!html.includes("logweir drill approve"), html);
+  assert.ok(!html.includes("if a declarative owner manages a name"), html);
+  // NEGATIVE CONTROL: the strict page for the same Restore still shows it.
+  const strict = await approverPage(STRICT, null);
+  assert.match(strict, /id="original-name-approval"/);
+  assert.ok(strict.includes("logweir drill approve"));
+});
+
+test("a_window_end_is_shown_to_the_millisecond_the_run_uses", () => {
+  // REVIEW P2-2 (MEDIUM): the engine applies both ends to the millisecond;
+  // a `.999` end read as the second before it.
+  const scope = structuredClone(request("pending").scope);
+  scope.recovery.pointInTime = "2026-09-07T14:05:00.999Z";
+  scope.recovery.windowStart = "2026-09-07T14:00:00.001Z";
+  scope.verification.windowEnd = "2026-09-07T15:00:00.250Z";
+  const html = renderApprovalScope(scope);
+  assert.ok(html.includes(">2026-09-07 14:05:00.999 UTC</time>"), html);
+  assert.ok(html.includes(">2026-09-07 14:00:00.001 UTC</time>"), html);
+  assert.ok(html.includes(">2026-09-07 15:00:00.250 UTC</time>"), html);
+  assert.ok(!html.includes(">2026-09-07 14:05:00 UTC</time>"), "never the second before it");
+  // NEGATIVE CONTROL: a whole-second end reads as before, with no fraction.
+  const whole = renderApprovalScope(request("pending").scope);
+  assert.ok(whole.includes(">2026-09-07 14:05:00 UTC</time>"), whole);
+  assert.ok(!whole.includes("14:05:00.000"), whole);
 });

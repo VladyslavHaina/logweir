@@ -312,6 +312,10 @@ pub enum ScopeIncomplete {
     BootstrapServersNotShowable,
     /// The plan states more declarative owners than it restores topics.
     OwnersNotShowable,
+    /// The plan names a notification sink (a webhook, Slack or PagerDuty):
+    /// the run would send its summary there, and the scope does not show
+    /// where (review P2-3).
+    NotificationsNotShown,
     /// A text value is longer than a scope shows, or is not printable ASCII.
     ValueNotShowable {
         /// Which value, in fixed words.
@@ -335,6 +339,7 @@ impl ScopeIncomplete {
             Self::PartitionsNotShowable => "partitionsNotShowable",
             Self::BootstrapServersNotShowable => "bootstrapServersNotShowable",
             Self::OwnersNotShowable => "ownersNotShowable",
+            Self::NotificationsNotShown => "notificationsNotShown",
             Self::ValueNotShowable { .. } => "valueNotShowable",
         }
     }
@@ -397,6 +402,12 @@ impl ScopeIncomplete {
                 "{WAY_OUT}, and this Restore's plan states more declarative owners than it \
                  restores topics, so its owner statement cannot be shown as a statement about \
                  these names. Correct target.topic_naming.original_name.owners"
+            ),
+            Self::NotificationsNotShown => format!(
+                "{WAY_OUT}, and this Restore's plan names a notification sink (a webhook, Slack \
+                 or PagerDuty) the run would send its result to, which a request does not show. \
+                 Submit it from the wizard, which names none, or approve it under a strict \
+                 (personal-key) policy"
             ),
             Self::ValueNotShowable { what } => format!(
                 "{WAY_OUT}, and {what} in this {} is longer than {MAX_SCOPE_TEXT_CHARS} \
@@ -613,6 +624,20 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
         return Err(ScopeIncomplete::TooManyPartitions {
             count: listed_partitions,
         });
+    }
+
+    // ---- where the result goes ---------------------------------------------
+    // Review P2-3: the runner sends its summary to every sink the plan names
+    // (and a PagerDuty resolve on a pass). The scope does not show sinks, so
+    // a plan that names one is not approvable in the console; the wizard's
+    // plans name none (`webhooks: []`).
+    let sinks = &plan.notifications;
+    if !sinks.webhooks.is_empty()
+        || sinks.slack_webhook.is_some()
+        || sinks.pagerduty_routing_key.is_some()
+        || sinks.pagerduty_endpoint.is_some()
+    {
+        return Err(ScopeIncomplete::NotificationsNotShown);
     }
 
     // ---- the target cluster -----------------------------------------------
@@ -1266,6 +1291,40 @@ mod tests {
         assert_eq!(statement(PREFIXED), Ok(None));
     }
 
+    /// **Review P2-3: a plan that names a notification sink is not
+    /// approvable in the console** — the run would send its result there and
+    /// the scope does not show where. Each kind of sink leaves no scope.
+    /// NEGATIVE CONTROL: `webhooks: []` (what the wizard writes) and no
+    /// block at all are complete.
+    /// KILLS: a scope that ignores `notifications`.
+    #[test]
+    fn a_plan_that_names_a_notification_sink_is_not_approvable_in_the_console() {
+        let base = plan(&["orders"]);
+        assert!(plan_scope(base.as_bytes()).is_ok(), "no block");
+        let with = |block: &str| format!("{base}notifications:\n{block}");
+        assert!(
+            plan_scope(with("  webhooks: []\n").as_bytes()).is_ok(),
+            "the wizard's"
+        );
+        for sink in [
+            "  webhooks: [\"http://10.0.3.7:8080/hook\"]\n",
+            "  slack_webhook: \"https://hooks.slack.test/x\"\n",
+            "  pagerduty_routing_key: \"k\"\n",
+            "  pagerduty_endpoint: \"https://events.pagerduty.test\"\n",
+        ] {
+            assert_eq!(
+                plan_scope(with(sink).as_bytes()),
+                Err(ScopeIncomplete::NotificationsNotShown),
+                "{sink}"
+            );
+        }
+        let sentence = ScopeIncomplete::NotificationsNotShown.sentence();
+        assert!(
+            !sentence.contains("10.0.3.7") && sentence.contains("wizard"),
+            "{sentence}"
+        );
+    }
+
     /// Every reason has a stable word and a sentence of fixed words that
     /// says what to do.
     #[test]
@@ -1282,6 +1341,7 @@ mod tests {
             ScopeIncomplete::PartitionsNotShowable,
             ScopeIncomplete::BootstrapServersNotShowable,
             ScopeIncomplete::OwnersNotShowable,
+            ScopeIncomplete::NotificationsNotShown,
             ScopeIncomplete::ValueNotShowable {
                 what: "the backup set",
             },

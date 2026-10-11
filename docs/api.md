@@ -302,7 +302,7 @@ addition to the rows above:
 | a requester whose identity a console approval cannot compare — an issuer or a subject that is empty, longer than 255 characters or not visible ASCII, an issuer containing `#`, a Kubernetes system identity | `409 policy_mismatch`; the sentence carries the identity bounded and escaped, never raw |
 | no change ticket (the policy is `Governed`) | `422`, field `ticket`, `required` |
 | a ticket the approver could not be shown faithfully (not printable ASCII, or over 1024 characters) | `422`, field `ticket`, `not_showable` (not echoed) |
-| a plan whose approval scope cannot be shown in full — more than 1024 topics, more than 8192 listed partitions, a topic that is not a Kafka name before or after its mapping, a value that is not printable ASCII of at most 1024 characters, a plan that does not parse | `422`, field `planBytes`, `scope_incomplete` |
+| a plan whose approval scope cannot be shown in full — more than 1024 topics, more than 8192 listed partitions, a topic that is not a Kafka name before or after its mapping, a value that is not printable ASCII of at most 1024 characters, a plan that does not parse, a plan that names a notification sink (a webhook, Slack or PagerDuty; the wizard names none) | `422`, field `planBytes`, `scope_incomplete` |
 
 **`GET .../restores/{name}/approval-request`** (`getApprovalRequest`) answers
 `ApprovalRequestResponse`. The console reads the stored request, **verifies its

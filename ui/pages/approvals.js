@@ -879,7 +879,11 @@ export function renderApprovalSubject(view, now) {
       ["Restore phase", phaseBadge(((v.restore.status || {}).phase))],
       ["progress", restoreProgressSentence(v.restore)],
     ]) +
-    (restoreApprovalSubject(v.restore) === "originalName"
+    // NOT UNDER TWO-PERSON (review P2-1): this sentence names the v1
+    // `logweir drill approve` command and says the runner checks owners; for
+    // a console request the requester's own statement decides that, and the
+    // two-person panel below says so in its own words.
+    (restoreApprovalSubject(v.restore) === "originalName" && !twoPersonPolicy(v.policy)
       ? "<p class=\"caveat\" id=\"original-name-approval\">" +
         esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
       : "") +
@@ -1450,6 +1454,21 @@ export function scopeShowable(request) {
   return scope;
 }
 
+/** AN END OF THE RESTORE WINDOW, TO THE MILLISECOND THE RUN USES (review
+ *  P2-2). The engine applies both ends to the millisecond, inclusively, and
+ *  `when` shows whole seconds: a `.999` end would read as the second before
+ *  it. A whole-second instant reads as `when` shows it; any other shows its
+ *  milliseconds, in UTC. The exact recorded value stays in `datetime`. */
+export function exactInstant(value) {
+  const at = typeof value === "string" ? Date.parse(value) : NaN;
+  if (isNaN(at) || at % 1000 === 0) {
+    return when(value);
+  }
+  const iso = new Date(at).toISOString();
+  return "<time class=\"ts\" datetime=\"" + esc(value) + "\" title=\"" + esc(value) + "\">" +
+    esc(iso.slice(0, 10) + " " + iso.slice(11, 23) + " UTC") + "</time>";
+}
+
 /** One object-store location of a scope, as text. */
 function scopeStorageWords(storage) {
   const st = storage || {};
@@ -1482,7 +1501,13 @@ export function ownerStatementBlock(statement) {
       esc(w.reference) + "</code>)</li>";
   }).join("");
   let words;
-  if (st.ownerPath === true) {
+  // Not declared reads as the run acts, WHATEVER owner_path says: from the
+  // console the run has nowhere to look and refuses (review P2-4).
+  if (owners === null) {
+    words = "The requester states nothing about declarative owners of these names. This " +
+      "console gives the run nowhere else to look, so the run will refuse before it writes " +
+      "anything.";
+  } else if (st.ownerPath === true) {
     words = "<strong>Restore despite an owner (owner_path):</strong> the requester states that " +
       "each declarative owner's " +
       "reconciliation is paused for this restore and that it adopts the topic afterwards; the " +
@@ -1490,10 +1515,6 @@ export function ownerStatementBlock(statement) {
       (owners !== null && owners.length > 0
         ? ". The owners stated:</p><ul class=\"sets\">" + listed + "</ul><p class=\"note\">"
         : " (no owner is listed).");
-  } else if (owners === null) {
-    words = "The requester states nothing about declarative owners of these names. This " +
-      "console gives the run nowhere else to look, so the run will refuse before it writes " +
-      "anything.";
   } else if (owners.length === 0) {
     words = "The requester states that <strong>no declarative owner</strong> (a Strimzi " +
       "KafkaTopic, a GitOps or Terraform definition) manages any of these names. Nothing in " +
@@ -1530,10 +1551,10 @@ export function renderApprovalScope(scope) {
       ? "<code>" + esc(source.pointId) + "</code> (receipt <code>" + esc(source.receiptSha256) +
         "</code>)"
       : cell(null)],
-    ["restored to", when(recovery.pointInTime) +
+    ["restored to", exactInstant(recovery.pointInTime) +
       (recovery.pointInTimeStated === true ? "" : " (the end of the check window)")],
     ["restored from", typeof recovery.windowStart === "string"
-      ? when(recovery.windowStart)
+      ? exactInstant(recovery.windowStart)
       : "the archive's floor"],
     ["time basis", typeof recovery.timeBasis === "string" ? esc(recovery.timeBasis) : cell(null)],
     ["target cluster", "<span id=\"scope-target-cluster\">" +
@@ -1549,8 +1570,8 @@ export function renderApprovalScope(scope) {
     ["topic prefix", typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? "<code>" + esc(target.topicPrefix) + "</code>"
       : "none: every topic is written under its own name"],
-    ["verification", esc(verification.coverage) + " over " + when(verification.windowStart) +
-      " to " + when(verification.windowEnd)],
+    ["verification", esc(verification.coverage) + " over " +
+      exactInstant(verification.windowStart) + " to " + exactInstant(verification.windowEnd)],
     ["evidence", scopeStorageWords(sc.evidence)],
   ];
   const list = topics.map((t) => {
