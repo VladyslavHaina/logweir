@@ -1,43 +1,31 @@
-//! What a `RetentionPolicy` would remove from ONE destination — D3 §6.4.
+//! What a `RetentionPolicy` would remove from one destination (D3 §6.4).
 //!
-//! # Pure, and that is the whole point
+//! # Pure
 //!
-//! Nothing in this module reads a clock, dials a bucket or holds a
-//! `kube::Client`. `now` is an argument, the catalog points are an argument and
-//! the protection set is an argument, which is what lets every rule in D3 §6.4
-//! and §6.5 be a table test rather than a route table — and what lets the plan
-//! document be a pure function of its inputs, so an administrator who approves
-//! `planSha256` is approving bytes anyone can recompute.
+//! Nothing here reads a clock, dials a bucket or holds a `kube::Client`: `now`,
+//! the catalog points and the protection set are arguments. Every rule in D3
+//! §6.4 and §6.5 is therefore a table test, and the plan document is a pure
+//! function of its inputs, so an administrator who approves `planSha256` is
+//! approving bytes anyone can recompute.
 //!
-//! # RET-WRONGBUCKET closes here, by construction
+//! # A point at another destination cannot be counted
 //!
-//! The defect was that the legacy per-schedule report (withdrawn, PROD-17.1 B1)
-//! listed manifests through the controller's ONE global store while rendering
-//! removal commands for the schedule's own URL, so a schedule writing to
-//! another bucket was reported against `LOGWEIR_ARCHIVE_URL`'s catalog.
-//!
-//! This module cannot make that mistake, and not because it is careful:
-//! [`Located`] is a private newtype whose ONLY constructor is
-//! [`Located::at`], which refuses a point whose `locations[]` does not contain
-//! the destination being evaluated. `kept`, `candidates` and `protected` are
-//! built from `Located` values alone, so a point frozen against destination A
-//! is not merely *not counted* against destination B — there is no value of the
-//! right type to count. `a_point_at_another_destination_is_never_a_candidate`
-//! is the row; deleting the membership check makes it fail.
-//!
-//! The evaluation input is the destination's **catalog view** (D3 §5.3,
-//! `crate::catalog_view`), never a second bucket walk with a global handle, and
-//! never the schedule's current URL.
+//! [`Located`] is a private newtype whose only constructor, [`Located::at`],
+//! refuses a point whose `locations[]` does not contain the destination being
+//! evaluated, and `kept`, `candidates` and `protected` are built from `Located`
+//! values alone. A point frozen against destination A has no value of the
+//! right type to be counted against destination B
+//! (`a_point_at_another_destination_is_never_a_candidate`). The input is the
+//! destination's catalog view (D3 §5.3), never a bucket walk with a global
+//! handle and never a schedule's current URL.
 //!
 //! # `Unknown` is retained
 //!
-//! Step 1 of D3 §6.4 is the safety rule the rest of the design rests on: a
-//! point is a deletion candidate only if the catalog said `Available` AND
-//! (`Verified` | `VerifiedHistorical`). Everything else — `Unreadable`,
-//! `Partial`, `Conflict`, `UntrustedSigner`, `NotAttempted` — is `skipped`, and
-//! a skipped point is never a candidate. A retention pass that cannot read the
-//! archive therefore proposes nothing, which is the opposite of what a
-//! timestamp-driven bucket lifecycle rule does.
+//! D3 §6.4 step 1: a point is a deletion candidate only if the catalog said
+//! `Available` and (`Verified` | `VerifiedHistorical`). Everything else
+//! (`Unreadable`, `Partial`, `Conflict`, `UntrustedSigner`, `NotAttempted`) is
+//! skipped and never a candidate, so a pass that cannot read the archive
+//! proposes nothing, unlike a timestamp-driven bucket lifecycle rule.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,36 +35,24 @@ use serde::{Deserialize, Serialize};
 use crate::catalog_view::{Availability, Verification};
 use logweir_core::check_contract::REDACTED as REDACTION_MARKER;
 
-// ---------------------------------------------------------------------------
-// The media types and the one root nothing may delete under
-// ---------------------------------------------------------------------------
-
 /// The plan document's media type — D3 §6.4 step 6.
 pub const PLAN_MEDIA_TYPE: &str = "application/vnd.logweir.retention-plan+json;version=1.0.0";
 
 /// The plan document's `format_version`.
 pub const PLAN_FORMAT_VERSION: &str = "1.0.0";
 
-/// The evidence root a retention run may never delete under — Global
-/// Constraint 6, and the K4 CEL rule's other half.
-///
-/// Receipts, sidecars, scorecards, catalog records, tombstones and the
-/// retention records themselves live here. A deleted point's audit trail
-/// survives the point precisely because this prefix is excluded from every
-/// plan, from the credential's documented IAM scope, and from the worker's own
-/// pre-delete validation.
+/// The evidence root a retention run may never delete under (Global
+/// Constraint 6, and the K4 CEL rule's other half). Receipts, sidecars,
+/// scorecards, catalog records, tombstones and the retention records live
+/// here, excluded from every plan, from the credential's documented IAM scope
+/// and from the worker's own pre-delete validation, so a deleted point's audit
+/// trail survives it.
 pub const EVIDENCE_ROOT: &str = "logweir/";
 
-// ---------------------------------------------------------------------------
-// The inputs
-// ---------------------------------------------------------------------------
-
-/// The destination being evaluated, as the two facts retention needs.
-///
-/// `location_id` is the catalog view's own spelling of a location — the
-/// destination's canonical `s3://bucket/prefix` URL (`ResolvedDestination::
-/// canonical_url`). `scope_prefix` is `RetentionPolicy.spec.scope.prefix`, the
-/// immutable prefix outside which no key may ever be named.
+/// The destination being evaluated, as the two facts retention needs:
+/// `location_id`, the catalog view's spelling of the destination's canonical
+/// `s3://bucket/prefix` URL, and `scope_prefix`, the immutable
+/// `RetentionPolicy.spec.scope.prefix` outside which no key may be named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     /// The catalog's location id for this destination.
@@ -85,11 +61,9 @@ pub struct Destination {
     pub scope_prefix: String,
 }
 
-/// One catalog point, as retention sees it.
-///
-/// Built from a `catalog_view::ViewEntry` plus the point's own object keys.
-/// Every field is a FACT the catalog established; nothing here is derived from
-/// a bucket walk performed by the control plane.
+/// One catalog point, as retention sees it: a `catalog_view::ViewEntry` plus
+/// the point's own object keys. Every field is a fact the catalog established,
+/// never a control-plane bucket walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointFacts {
     /// `lwp1-<32 hex>` — content-derived from the receipt bytes.
@@ -99,8 +73,8 @@ pub struct PointFacts {
     pub backup_id: String,
     /// `capture.started_at`, in epoch milliseconds. The ordering axis.
     pub recovery_point_at_ms: i64,
-    /// Every location holding this point, as location ids. **The membership
-    /// test that makes a wrong-destination evaluation unconstructible.**
+    /// Every location holding this point, as location ids: the membership test
+    /// that makes a wrong-destination evaluation unconstructible.
     pub locations: Vec<String>,
     /// The catalog's availability verdict.
     pub availability: Availability,
@@ -115,17 +89,15 @@ pub struct PointFacts {
     /// How many bytes the point occupies, when the catalog knew.
     pub bytes: Option<i64>,
     /// This point's own `Backup` carries a verification verdict the controller
-    /// REACHED and that is not a pass (`Invalid`, `Untrusted`, or a result this
-    /// build does not know) — `catalog_view::ControllerRefusals`.
+    /// reached that is not a pass (`Invalid`, `Untrusted`, or unknown to this
+    /// build); see `catalog_view::ControllerRefusals`.
     ///
-    /// **The catalog decides only where the controller could not look.** A view
-    /// row is served until `viewExpiresAt`, so a row harvested before the
-    /// receipt was replaced or its signer revoked still reads
-    /// `Available`/`Verified`; counted as usable, it would take a `keepLast` or
-    /// `minUsablePoints` rank and push an older GOOD point out of the keep set
-    /// and into the plan. Such a point is skipped `Unreadable` (see
-    /// [`skip_reason`]). Always `false` for a point no `Backup` in the namespace
-    /// names (a catalog-only point), whose behaviour is unchanged.
+    /// The catalog decides only where the controller could not look: a view
+    /// row served until `viewExpiresAt` may predate a replaced receipt or a
+    /// revoked signer, and counted as usable it would take a `keepLast` or
+    /// `minUsablePoints` rank and push an older good point into the plan. Such
+    /// a point is skipped `Unreadable` ([`skip_reason`]). Always `false` for a
+    /// catalog-only point.
     pub refused_by_controller: bool,
 }
 
@@ -159,12 +131,10 @@ impl Hold {
     }
 }
 
-/// The protection set the CONTROLLER supplies — the facts that live in the
-/// cluster rather than in the catalog.
-///
-/// Separate from [`Rules`] because these are observations, not policy: an
-/// active restore is a `Restore` object, and a provider refusal is something a
-/// previous run was told. Passing them in keeps [`evaluate`] pure.
+/// The protection set the controller supplies: observations that live in the
+/// cluster rather than the catalog (an active restore is a `Restore` object, a
+/// provider refusal is something a previous run was told). Passed in so
+/// [`evaluate`] stays pure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Protection {
     /// Points named by a nonterminal `Restore` — D3 §6.4 step 4's
@@ -198,10 +168,6 @@ pub struct Input<'a> {
     pub max_deletions_per_run: i64,
 }
 
-// ---------------------------------------------------------------------------
-// The outputs
-// ---------------------------------------------------------------------------
-
 /// Why a point qualifies for removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandidateReason {
@@ -224,8 +190,8 @@ impl CandidateReason {
 
 /// Why a point the rules selected is kept anyway.
 ///
-/// `Unknown` PROTECTS. A point the evaluation could not classify is retained
-/// with a reason, never removed — D3 §6.4 step 4's last line.
+/// `Unknown` protects: a point the evaluation could not classify is retained
+/// with a reason, never removed (D3 §6.4 step 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectReason {
     /// A nonterminal restore references it.
@@ -262,11 +228,10 @@ impl ProtectReason {
 pub enum SkipReason {
     /// The catalog could not read it (`Unreadable`, `Missing`, `Partial`) or
     /// could not establish trust (`UntrustedSigner`, `Invalid`, `NoEvidence`,
-    /// `NotAttempted`, `Revoked`) — or the controller itself refused the
-    /// point's `Backup` evidence (`Invalid`, `Untrusted`), which no catalog row
-    /// overrules ([`PointFacts::refused_by_controller`]). One reason for both,
-    /// because to retention they are the same fact: trust in this point could
-    /// not be established, so it is neither counted as usable nor deleted.
+    /// `NotAttempted`, `Revoked`), or the controller refused the point's
+    /// `Backup` evidence ([`PointFacts::refused_by_controller`]). One reason,
+    /// because to retention it is one fact: trust could not be established, so
+    /// the point is neither counted as usable nor deleted.
     Unreadable,
     /// The record's major version is above this build's.
     UnsupportedFormat,
@@ -311,21 +276,15 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    /// How many object keys removing this point means, **or `None` when this
-    /// build cannot say** (review `d3w9` M1).
+    /// How many object keys removing this point means, or `None` when this
+    /// build cannot say.
     ///
     /// The catalog view carries a point's `manifestKey` and no segment list, so
-    /// for every plan this build writes the honest answer is "not observed".
-    /// The first landing published `1` — the manifest, and nothing else — which
-    /// an administrator approving a three-line plan would read as "this run
-    /// removes three objects" while the run removed several thousand.
-    ///
-    /// **Absent means not observed, never zero and never a floor dressed as a
-    /// total**, which is D3 §12's rule everywhere else. `status.lastEvaluation
-    /// .candidates[].objects` is therefore omitted rather than wrong, the
+    /// for every plan this build writes the answer is "not observed". Absent
+    /// means not observed, never zero and never a floor dressed as a total (D3
+    /// §12): `status.lastEvaluation.candidates[].objects` is omitted, the
     /// `Evaluated` condition says the plan does not enumerate, and
-    /// `logweir-retention --dry-run` — which holds the list grant the run needs
-    /// anyway — prints the real count per point.
+    /// `logweir-retention --dry-run` prints the real count per point.
     #[must_use]
     pub fn objects(&self) -> Option<i64> {
         if self.segment_keys.is_empty() {
@@ -355,12 +314,10 @@ pub struct Skipped {
     pub reason: SkipReason,
 }
 
-/// What one evaluation found. **Nothing here has been deleted.**
+/// What one evaluation found. Nothing here has been deleted.
 ///
-/// # The accounting closes (FX-22)
-///
-/// Every point at this destination is in exactly one of four places, and
-/// [`Evaluation::accounts_for_every_point`] says so:
+/// The accounting closes: every point at this destination is in exactly one of
+/// four places ([`Evaluation::accounts_for_every_point`]):
 ///
 /// ```text
 /// points_evaluated = kept + candidates + held_back + skipped
@@ -372,49 +329,39 @@ pub struct Skipped {
 pub struct Evaluation {
     /// How many points at this destination were considered.
     pub points_evaluated: i64,
-    /// The point ids that STAY, newest first: the rules keep them, or
-    /// something protects them (those are in `protected` too).
-    ///
-    /// **Never a point the per-run ceiling held back** (FX-22). A point the
-    /// rules would remove and `maxDeletionsPerRun` left out of this plan used
-    /// to be pushed here, so 371 points read "321 kept, 50 candidate(s)" for
-    /// `keepLast: 300` and for `keepLast: 10` alike: 21 and 311 points nothing
-    /// keeps were reported as kept. They are in [`Evaluation::held_back`].
+    /// The point ids that stay, newest first: the rules keep them, or something
+    /// protects them (those are in `protected` too). Never a point the per-run
+    /// ceiling held back: those are in [`Evaluation::held_back`].
     pub kept: Vec<String>,
     /// The points THIS PLAN would remove, newest first — at most
     /// `maxDeletionsPerRun` of them.
     pub candidates: Vec<Candidate>,
-    /// The points the rules would remove and nothing protects, that the
-    /// per-run ceiling left out of this plan, newest first. **Due, not kept**:
-    /// they are in no plan line, nothing deletes them in this run, and a later
-    /// plan takes them once the ones ahead of them are gone.
+    /// The points the rules would remove and nothing protects, that the per-run
+    /// ceiling left out of this plan, newest first. Due, not kept: nothing
+    /// deletes them in this run, and a later plan takes them.
     pub held_back: Vec<String>,
     /// The points something protected.
     pub protected: Vec<Protected>,
     /// The points the evaluation could not classify.
     pub skipped: Vec<Skipped>,
-    /// How many points the `maxDeletionsPerRun` ceiling held back —
-    /// `held_back.len()`. A number rather than a bool, so a console can say
-    /// "50 of 380".
+    /// How many points the `maxDeletionsPerRun` ceiling held back
+    /// (`held_back.len()`), so a console can say "50 of 380".
     pub truncated_by_cap: i64,
-    /// What every point at this destination that is NOT a candidate still
-    /// names — its backup set and the object keys the view knows for it.
+    /// What every point at this destination that is not a candidate still
+    /// names: its backup set and the object keys the view knows for it.
     ///
-    /// Not a status field and not in the plan bytes: it is the input of
-    /// [`plan_document`]'s own rail, which refuses to render a line whose set
-    /// a retained point still names (defect SHARED-SET-RETENTION). Derived
-    /// from the evaluation's OUTPUT, independently of the grouping step 4
-    /// performs — so it is a second line against a REGRESSION in step 4 or in
-    /// the ceiling. It reads the same `PointFacts`, so it defends nothing
-    /// against missing or wrong view data (review L2).
+    /// The input of [`plan_document`]'s own rail, which refuses a line whose set
+    /// a retained point still names. Derived from the evaluation's output,
+    /// independently of step 4's grouping, so it catches a regression there or
+    /// in the ceiling; it reads the same `PointFacts`, so it does not defend
+    /// against wrong view data.
     pub retained: RetainedObjects,
 }
 
 impl Evaluation {
     /// Whether every point considered is in exactly one of `kept`,
     /// `candidates`, `held_back` and `skipped`, and `truncated_by_cap` is the
-    /// held-back count — the closed accounting the status publishes (FX-22).
-    /// `true` for every value [`evaluate`] returns.
+    /// held-back count. `true` for every value [`evaluate`] returns.
     #[must_use]
     pub fn accounts_for_every_point(&self) -> bool {
         let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
@@ -436,10 +383,6 @@ pub struct RetainedObjects {
     /// carried for it (none, on every view this build reads).
     pub keys: BTreeSet<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Deletion groups — which points one deletion would take together
-// ---------------------------------------------------------------------------
 
 /// Points linked by what deleting them removes: the same `backup_id`, the same
 /// manifest key, or a common segment key, transitively (a union-find over the
@@ -494,40 +437,28 @@ impl Groups {
         Self { root_of }
     }
 
-    /// The group of a point that is in the slice [`Groups::of`] was built
-    /// from. A point that is not (impossible by construction: every verdict
-    /// is built from that slice) falls into ONE shared group past every real
-    /// root — the conservative direction, since merging groups can only
-    /// protect more.
+    /// The group of a point from the slice [`Groups::of`] was built from. A
+    /// point that is not (impossible: every verdict is built from that slice)
+    /// falls into one shared group past every real root, the conservative
+    /// direction, since merging groups can only protect more.
     fn of_point(&self, point: &PointFacts) -> usize {
         let addr = std::ptr::from_ref(point) as usize;
         self.root_of.get(&addr).copied().unwrap_or(usize::MAX)
     }
 }
 
-// ---------------------------------------------------------------------------
-// The membership newtype — the wrong-destination rail
-// ---------------------------------------------------------------------------
-
-/// A point PROVED to be held at the destination under evaluation.
-///
-/// The type exists so that "we checked the location" is a fact the compiler
-/// carries rather than a line somebody could delete. There is exactly one
-/// constructor and it performs the check; `kept`, `candidates` and `protected`
-/// are built from these alone.
+/// A point proved to be held at the destination under evaluation: "we checked
+/// the location" is a fact the compiler carries. The one constructor performs
+/// the check.
 #[derive(Debug, Clone, Copy)]
 struct Located<'a> {
     point: &'a PointFacts,
 }
 
 impl<'a> Located<'a> {
-    /// `Some` only when `point.locations` names `location_id`.
-    ///
-    /// A point with NO `locations[]` at all is refused too. The catalog writes
-    /// one entry per receipt it actually read, and an entry that names no
-    /// location is one whose location the catalog could not establish — which
-    /// is the "could not tell" case, and "could not tell" never authorises a
-    /// delete.
+    /// `Some` only when `point.locations` names `location_id`. A point with no
+    /// `locations[]` at all is refused too: its location could not be
+    /// established, and "could not tell" never authorises a delete.
     fn at(point: &'a PointFacts, location_id: &str) -> Option<Self> {
         point
             .locations
@@ -536,10 +467,6 @@ impl<'a> Located<'a> {
             .then_some(Self { point })
     }
 }
-
-// ---------------------------------------------------------------------------
-// The evaluation
-// ---------------------------------------------------------------------------
 
 /// D3 §6.4, in order.
 ///
@@ -629,11 +556,10 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     let mut verdicts: Vec<(Located<'_>, Verdict)> = Vec::with_capacity(usable.len());
     for (rank, located) in usable.iter().enumerate() {
         let point = located.point;
-        // THE FLOOR FIRST, and it is not a tie-break: D3 §6.4 step 3 says
-        // "always the newest `minUsablePoints` usable points, whatever the
-        // rules say". A policy that would leave fewer is REPORTED, not obeyed
-        // — so the reason is `MinUsablePoints` and not `Kept`, and the console
-        // can say which points the rules wanted and the floor saved.
+        // The floor first, not as a tie-break (D3 §6.4 step 3: "always the
+        // newest `minUsablePoints` usable points, whatever the rules say"). A
+        // policy that would leave fewer is reported, not obeyed, so the reason
+        // is `MinUsablePoints` and the console can say which points it saved.
         if rank < floor {
             let wanted_gone = keep_last.is_some_and(|n| rank >= n)
                 || cutoff_ms.is_some_and(|c| point.recovery_point_at_ms < c);
@@ -666,24 +592,18 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
             continue;
         };
-        // NOR can a point whose set id names no single directory (review L8):
-        // an empty id is the bound `<scope>//`, and an id with a `/` is a
-        // bound that CONTAINS other sets — set `a`'s enumeration would remove
-        // set `a/b`. Generated ids never look like either; "could not tell"
-        // never authorises a delete, so such a point is kept `Unknown` rather
-        // than left to refuse the whole plan at the writer.
+        // Nor a point whose set id names no single directory: an empty id is
+        // the bound `<scope>//`, and an id with a `/` contains other sets (set
+        // `a`'s enumeration would remove `a/b`). Kept `Unknown` rather than left
+        // to refuse the whole plan at the writer.
         if point.backup_id.is_empty() || point.backup_id.contains('/') {
             verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
             continue;
         }
-        // NOR a point whose set id or manifest key the catalog published as the
-        // redactor's output (FX-17 review L-1). `[redacted]` names no
-        // directory: every such point would share the one set `[redacted]`,
-        // and a candidate among them makes `plan_document`'s `validate_key`
-        // refuse the WHOLE plan (`[redacted].json` is under no set bound), so
-        // one unreadable set id blocked every other set's expiry. A current
-        // runner publishes every set id the controller mints whole; what is
-        // left is a long set id someone chose. "Could not tell" is `Unknown`.
+        // Nor a point whose set id or manifest key the catalog published as the
+        // redactor's output: `[redacted]` names no directory, and one such
+        // candidate makes `validate_key` refuse the whole plan, blocking every
+        // other set's expiry. "Could not tell" is `Unknown`.
         if point.backup_id.contains(REDACTION_MARKER)
             || point
                 .manifest_key
@@ -694,9 +614,8 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             continue;
         }
 
-        // WITHIN the rules is kept; outside either rule is a candidate.
-        // D3 §6.4's union, with `OlderThanKeepDays` taking precedence over
-        // `BeyondKeepLast` — the existing rule in `crate::retention`.
+        // Within the rules is kept; outside either rule is a candidate, with
+        // `OlderThanKeepDays` taking precedence over `BeyondKeepLast`.
         let too_old = cutoff_ms.is_some_and(|c| point.recovery_point_at_ms < c);
         let beyond_rank = keep_last.is_some_and(|n| rank >= n);
         let verdict = if too_old {
@@ -709,39 +628,20 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
         verdicts.push((*located, verdict));
     }
 
-    // 4. Shared sets and shared segments (defect SHARED-SET-RETENTION).
+    // 4. Shared sets and shared segments. Points are grouped by what their
+    //    deletion would remove: the same backup set (`backup_id`), the same
+    //    manifest key, or a common segment key, transitively. A group holding
+    //    any retained point (kept, protected or skipped) deletes none of its
+    //    candidates: each is protected `SharedSegment`. v1 never partially
+    //    deletes a shared set.
     //
-    //    Points are GROUPED by what their deletion would remove: two points are
-    //    in one group when they name the same backup set (`backup_id`), the
-    //    same manifest key, or a common segment key — transitively. A group
-    //    that holds ANY retained point (kept, protected, or skipped) is a group
-    //    none of whose candidates may be deleted: every candidate in it is
-    //    protected `SharedSegment`. v1 never partially deletes a shared set.
-    //
-    //    WHY THE SET AND NOT ONLY THE SEGMENTS. The catalog view carries no
-    //    segment keys, so a segment-only rule had nothing to apply to — and two
-    //    receipts CAN name one set: a runner Job re-created from its frozen
-    //    inputs rewrites the same `<scope>/<backup_id>/` and signs a second
-    //    receipt over it (PLAT-06.1 case e; live on the lab as harness-rows-11's
-    //    `retention-shared-set-is-never-planned-under-a-retained-point`). With
-    //    `keepLast 1` the older receipt was planned, and deleting it enumerates
-    //    and removes the set the KEPT receipt names. Every key a plan line may
-    //    delete is bounded by `<scope>/<backup_id>/` (`validate_key`, and the
-    //    worker's own re-derivation), so the set is exactly the unit a deletion
-    //    removes, and the unit that must be matched.
-    //
-    //    A SKIPPED point is retained too — it is never a candidate — so it
-    //    protects a candidate that shares with it (review L3). Otherwise a
-    //    point the catalog or the controller refused could lose its set through
-    //    another point's deletion.
-    //
-    //    Transitive, so a candidate linked to a retained point through ANOTHER
-    //    candidate is protected as well: that other candidate is now retained.
-    //
-    //    AND A ROW WHOSE LOCATION THE CATALOG COULD NOT ESTABLISH (no
-    //    `locations[]` at all, review L1) is retained too. It is never counted
-    //    here and never a candidate — but if it names a candidate's set, "could
-    //    not tell where it lives" must not authorise deleting what it names.
+    //    The set, not only the segments: the view carries no segment keys, and
+    //    two receipts can name one set (a runner Job re-created from its frozen
+    //    inputs rewrites `<scope>/<backup_id>/` and signs a second receipt).
+    //    Every key a plan line may delete is bounded by `<scope>/<backup_id>/`,
+    //    so the set is exactly the unit a deletion removes. A row whose location
+    //    the catalog could not establish is retained too: "could not tell where
+    //    it lives" must not authorise deleting what it names.
     let location_less: Vec<&PointFacts> = input
         .points
         .iter()
@@ -773,16 +673,12 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
         }
     }
 
-    // 5. Project. `kept` and `candidates` stay in newest-first order; the
-    //    protected list is sorted by id so the status block is stable.
-    //
-    //    THE CEILING IS APPLIED PER GROUP, NEVER THROUGH ONE. Every group that
-    //    still holds a candidate holds ONLY candidates (step 4), and a group is
-    //    selected whole or not at all: selecting one receipt of a shared set
-    //    and keeping its sibling "over the ceiling" would remove the set a
-    //    point this evaluation reports as kept still names. A group larger
-    //    than the room left is HELD BACK whole (`held_back`, counted in
-    //    `truncated_by_cap`), and the walk continues with the groups that fit.
+    // 5. Project. `kept` and `candidates` stay newest first; `protected` is
+    //    sorted by id so the status block is stable. The ceiling applies per
+    //    group: every group still holding a candidate holds only candidates
+    //    (step 4), and a group is selected whole or held back whole, or
+    //    deleting one receipt of a shared set would remove what a kept sibling
+    //    names.
     let cap = usize::try_from(input.max_deletions_per_run.max(0)).unwrap_or(usize::MAX);
     let mut group_size: BTreeMap<usize, usize> = BTreeMap::new();
     for (located, verdict) in &verdicts {
@@ -816,14 +712,10 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                     fits
                 });
                 if !take {
-                    // OVER THE CEILING IS HELD BACK — counted, named, and
-                    // NEVER `kept` (FX-22). It stays in the archive after this
-                    // run, which is why it is in `retained` below; but the
-                    // rules would remove it and nothing protects it, so a
-                    // status that filed it under "kept" told an operator that
-                    // `keepLast: 10` keeps 321 points. Never silently dropped
-                    // either: a console that showed 50 candidates out of 380
-                    // without saying so would read as "50 is all there is".
+                    // Over the ceiling is held back: counted, named, never
+                    // `kept`. It stays in the archive after this run (so it is
+                    // in `retained`), but the rules would remove it and nothing
+                    // protects it.
                     out.held_back.push(point.point_id.clone());
                     continue;
                 }
@@ -842,9 +734,8 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             }
         }
     }
-    // WHAT STAYS, as the objects it names — the input of `plan_document`'s
-    // own rail, derived from the OUTPUT rather than from the grouping above, so
-    // a regression in step 4 is refused at the writer instead of approved.
+    // What stays, as the objects it names: the input of `plan_document`'s rail,
+    // derived from the output rather than from the grouping above.
     let chosen: BTreeSet<&str> = out.candidates.iter().map(|c| c.point_id.as_str()).collect();
     let mut retained = RetainedObjects::default();
     for p in &grouped {
@@ -879,10 +770,9 @@ pub fn skip_reason(point: &PointFacts) -> Option<SkipReason> {
             return Some(SkipReason::Unreadable)
         }
     }
-    // A VERDICT THE CONTROLLER REACHED OUTRANKS THE ROW. The row may predate
-    // the refusal (a view is served until `viewExpiresAt`); the controller's
-    // `Invalid`/`Untrusted` on this point's own `Backup` is newer information
-    // about the same receipt bytes.
+    // A verdict the controller reached outranks the row: the row may predate
+    // the refusal, and the controller's `Invalid`/`Untrusted` on this point's
+    // own `Backup` is newer information about the same receipt bytes.
     if point.refused_by_controller {
         return Some(SkipReason::Unreadable);
     }
@@ -891,10 +781,6 @@ pub fn skip_reason(point: &PointFacts) -> Option<SkipReason> {
         _ => Some(SkipReason::Unreadable),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Scope validation — the rail that runs BEFORE any plan is written
-// ---------------------------------------------------------------------------
 
 /// Why a key may not be named in a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -937,13 +823,10 @@ impl std::fmt::Display for ScopeViolation {
 
 impl std::error::Error for ScopeViolation {}
 
-/// The per-key rule, stated once.
-///
-/// A key must start with `<scope_prefix>/<backup_id>/` and must not start with
-/// `logweir/`. The evidence check is made INDEPENDENTLY of the prefix check
-/// rather than derived from it: a scope prefix that itself began with
-/// `logweir/` is refused by the CRD's K4 rule, but this function is also the
-/// worker's last rail and must not depend on an admission rule having run.
+/// The per-key rule: a key must start with `<scope_prefix>/<backup_id>/` and
+/// must not start with `logweir/`. The evidence check is independent of the
+/// prefix check: the CRD's K4 rule refuses a scope prefix under `logweir/`, but
+/// this is also the worker's last rail and must not depend on admission.
 ///
 /// # Errors
 ///
@@ -964,10 +847,6 @@ pub fn validate_key(key: &str, scope_prefix: &str, backup_id: &str) -> Result<()
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The plan document
-// ---------------------------------------------------------------------------
-
 /// Who wrote a plan, and against what.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanIdentity {
@@ -978,14 +857,10 @@ pub struct PlanIdentity {
     /// The policy's `metadata.uid`.
     pub uid: String,
     /// The `metadata.generation` this plan was computed from.
-    ///
-    /// **It does NOT reach the digested bytes** (review `d3w9` C1): approving a
-    /// plan is a spec patch, a spec patch bumps the generation, and a digest
-    /// that the act of approving changes can never be approved. What
-    /// invalidates an approval is the CONTENT — the rules as applied and the
-    /// exact lines — and both are in the bytes. This value is published on
-    /// `status.lastEvaluation` and recorded in the enforcement record, where it
-    /// is a fact about the pass rather than about the deletion.
+    /// The `metadata.generation` this plan was computed from. Not in the
+    /// digested bytes: approving a plan is a spec patch, which bumps the
+    /// generation, and a digest the approval changes can never be approved.
+    /// Published on `status.lastEvaluation` and in the enforcement record.
     pub generation: i64,
 }
 
@@ -1010,30 +885,23 @@ pub struct PlanLine {
     /// Whether the worker must list `set_prefix` for the keys this plan could
     /// not name.
     ///
-    /// **`true` for every plan this build writes, and that is a recorded
-    /// deviation from D3 §6.4 step 6**, which asks for "the complete, explicit
-    /// list of object keys". The catalog view the evaluation reads carries a
-    /// point's `manifestKey` and no segment list (D3 W8's contract: the window
-    /// is bounded by bytes, so an unbounded per-point key list is not in it),
-    /// and this controller holds no archive credential for the destination with
-    /// which to go and look. So the approved document fixes the point set, the
-    /// manifest keys and the key BOUND, and the worker re-validates every
-    /// enumerated key against that bound before deleting it — which is the
-    /// second half of D3 §6.5's own wrong-prefix rule ("listed from that
-    /// point's own manifest or set directory"). It becomes `false`, with no
-    /// other change, the day a view entry carries its segment keys.
+    /// `true` for every plan this build writes, a recorded deviation from D3
+    /// §6.4 step 6's "complete, explicit list of object keys": the catalog view
+    /// carries a manifest key and no segment list, and this controller holds no
+    /// archive credential to look. So the approved document fixes the points,
+    /// the manifest keys and the key bound, and the worker re-validates every
+    /// enumerated key against that bound before deleting it (D3 §6.5's
+    /// wrong-prefix rule). It becomes `false` when a view entry carries its
+    /// segment keys.
     pub enumerate_set: bool,
     /// Every key this plan could name, manifest first — never a glob.
     pub object_keys: Vec<String>,
-    /// Other points whose receipts name this SAME set and are removed with it
-    /// (review M2). Two receipts over one set that are both due used to render
-    /// two lines with one manifest key, which the worker refuses as
-    /// `DuplicateKey` — the WHOLE plan, on every run, so one shared set stopped
-    /// every deletion the policy owed. One line per set, with every point it
-    /// removes named here: each delete stays attributable to one line and each
-    /// point gets its own outcome and tombstones in the record. Skipped when
-    /// empty, so a plan with no shared set is byte-identical to one from before
-    /// this field and its approved digest still holds.
+    /// Other points whose receipts name this same set and are removed with it:
+    /// one line per set, since two lines over one manifest key are refused by
+    /// the worker as `DuplicateKey` for the whole plan. Each point still gets
+    /// its own outcome and tombstones in the record. Skipped when empty, so a
+    /// plan with no shared set keeps the bytes (and approved digest) it had
+    /// before this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_point_ids: Vec<String>,
 }
@@ -1044,36 +912,16 @@ pub struct PlanLine {
 /// bytes are a pure function of the fields in declaration order and
 /// `planSha256` is reproducible by anyone holding the same inputs.
 ///
-/// # WHAT IS DELIBERATELY *NOT* IN HERE, AND WHY (review `d3w9` C1)
+/// What is deliberately not in here: `evaluated_at`, `policy_generation` and
+/// `points_evaluated`. Each moves without what would be deleted moving (a
+/// requeue, the approval's own spec patch, a newly unreadable point), and a
+/// digest that changes on its own can never be approved. All three are on
+/// `status.lastEvaluation` and in the enforcement record.
 ///
-/// Three fields were in the first landing and are gone: `evaluated_at`,
-/// `policy_generation` and `points_evaluated`. Each of them moves without what
-/// would be deleted moving, and **a digest that changes on its own can never be
-/// approved**:
-///
-/// * `evaluated_at` was `ctx.now`, and the reconciler requeues every 60 s. Two
-///   renderings of one archive three seconds apart digested differently, so an
-///   administrator who copied `status.lastEvaluation.planSha256` onto
-///   `spec.enforcement.approvedPlanSha256` was always copying a value that had
-///   already expired. **No Job could ever be created.**
-/// * `policy_generation` is worse, and is the same defect wearing a different
-///   hat: `approvedPlanSha256` is a SPEC field, so the very act of approving
-///   bumps `metadata.generation`, which would change the digest the approval
-///   names. Approval was circularly impossible.
-/// * `points_evaluated` counts skipped points too, so a newly-arrived
-///   `Unreadable` point invalidated an approval without changing one key.
-///
-/// All three are on `status.lastEvaluation` (and in the enforcement record),
-/// which is where a reader wants them; none is a fact about what the run
-/// removes.
-///
-/// **What still invalidates an approval is content, not a counter.** A rules
-/// edit changes `keep_last` / `keep_days` / `min_usable_points` AND the
-/// candidate set; a `holds` edit changes the protected set and therefore the
-/// lines; a new backup shifts ranks and therefore the lines. `policy_uid`,
-/// `location_id` and `scope_prefix` pin *where*. The digest covers exactly
-/// "these keys, at this location, under these rules" — which is what an
-/// administrator is being asked to approve.
+/// What invalidates an approval is content: a rules edit, a `holds` edit or a
+/// new backup changes the rules as applied or the lines, and `policy_uid`,
+/// `location_id` and `scope_prefix` pin where. The digest covers exactly "these
+/// keys, at this location, under these rules".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct PlanDocument {
@@ -1122,8 +970,7 @@ pub enum PlanError {
     /// The document did not serialise — named rather than unwrapped.
     Encode(String),
     /// A line would remove a set, or an object, that a point this evaluation
-    /// RETAINS still names (defect SHARED-SET-RETENTION). The plan is not
-    /// written at all.
+    /// retains still names. The plan is not written at all.
     SharedWithRetained {
         /// The candidate whose line was refused.
         point_id: String,
@@ -1151,14 +998,10 @@ impl std::error::Error for PlanError {}
 
 /// Render the plan document for an evaluation.
 ///
-/// **Every key is validated before a single byte is written.** A plan
-/// containing one out-of-scope key is not a plan with one bad line; it is not a
-/// plan, and this returns `Err` rather than emitting a document an
-/// administrator could approve.
-///
-/// **It takes no clock.** See [`PlanDocument`]'s own note: an instant in the
-/// digested bytes is what made the first landing's approval gate unreachable,
-/// and the surest way not to put one back is to have none to put.
+/// Every key is validated before a byte is written: a plan with one
+/// out-of-scope key is not a plan, and this returns `Err` rather than a
+/// document an administrator could approve. It takes no clock: an instant in
+/// the digested bytes would make the approval gate unreachable.
 ///
 /// # Errors
 ///
@@ -1174,9 +1017,8 @@ pub fn plan_document(
     let mut lines: Vec<PlanLine> = Vec::with_capacity(evaluation.candidates.len());
     for candidate in &evaluation.candidates {
         let mut object_keys = Vec::with_capacity(candidate.segment_keys.len() + 1);
-        // THE MANIFEST FIRST, and the order is the execution order: a run
-        // interrupted after the manifest and before the segments leaves a set
-        // that cannot be mistaken for usable.
+        // The manifest first, in execution order: a run interrupted between the
+        // manifest and the segments leaves a set that cannot look usable.
         object_keys.push(candidate.manifest_key.clone());
         object_keys.extend(candidate.segment_keys.iter().cloned());
         for key in &object_keys {
@@ -1188,12 +1030,10 @@ pub fn plan_document(
             destination.scope_prefix.trim_end_matches('/'),
             candidate.backup_id
         );
-        // THE WRITER'S OWN RAIL (defect SHARED-SET-RETENTION). The worker may
-        // enumerate and remove everything under `set_prefix`, so no retained
-        // point may name this set, nor any key under it. Checked against what
-        // the evaluation RETAINED — not against the grouping that decided it —
-        // so a regression in `evaluate` step 4 is a refused plan, never an
-        // approvable one.
+        // The writer's own rail: the worker may remove everything under
+        // `set_prefix`, so no retained point may name this set or any key under
+        // it. Checked against what the evaluation retained, not the grouping,
+        // so a regression in `evaluate` step 4 is a refused plan.
         if evaluation
             .retained
             .backup_ids
@@ -1215,11 +1055,9 @@ pub fn plan_document(
                 named: format!("object `{key}`"),
             });
         }
-        // ONE LINE PER SET (review M2). A candidate naming the same set and
-        // manifest as a line already written joins that line as a co-point:
-        // `evaluate` selects a shared set's receipts together, so they arrive
-        // here together, and two lines over one manifest are a plan the worker
-        // refuses whole.
+        // One line per set: a candidate naming the same set and manifest as a
+        // line already written joins it as a co-point, since two lines over one
+        // manifest are a plan the worker refuses whole.
         if let Some(existing) = lines.iter_mut().find(|l| {
             l.backup_id == candidate.backup_id && l.manifest_key == candidate.manifest_key
         }) {
@@ -1273,31 +1111,19 @@ pub fn plan_bytes(document: &PlanDocument) -> Result<(Vec<u8>, String), PlanErro
     Ok((bytes, digest))
 }
 
-/// The plan `ConfigMap`'s name — **the one implementation, and the one the
-/// controller calls** (review `d3w9` L3).
+/// The plan `ConfigMap`'s name, the one implementation the controller calls:
+/// `<stem>-plan-<12 hex of planSha256>`, the stem being [`config_map_stem`] of
+/// the policy's UID.
 ///
-/// `<stem>-plan-<12 hex of planSha256>`, where the stem is
-/// [`config_map_stem`] over the policy's UID. CONTENT-NAMED rather than
-/// generation-named, because a generation-named object collides the moment the
-/// archive moves under an unchanged spec, which is the normal case; and
-/// UID-stemmed rather than name-stemmed, because `metadata.name` is a
-/// 253-character DNS subdomain and a policy name may already use all of it.
-///
-/// The `ConfigMap` is immutable and owned by the policy, so a second pass at the
-/// same digest gets 409 `AlreadyExists` rather than rewriting bytes under an
-/// administrator who is reading them. **The controller publishes the result in
-/// `status.lastEvaluation.planRef`** (finding M9), so no reader ever recomputes
-/// it — but this is the function it would recompute it with, and it is short
-/// enough to be checkable.
-///
-/// **THE EVALUATION PUBLISHES THE REF, NOT THE RUN** (defect
-/// RET-STALE-PLANREF). `publish_evaluation` names the plan it just rendered, so
-/// the ref and the `planSha256` beside it always describe the same plan. The
-/// `ConfigMap` is materialized by the pass that STARTS a run, so in `Report`
-/// mode — and on any evaluation that does not start one — the ref names an
-/// object that does not exist yet. That is the documented absent-object
-/// behaviour and not a fault: the name is a pure function of the policy UID and
-/// the digest, so it is exactly as true as the digest it sits next to.
+/// Content-named, because a generation-named object collides when the archive
+/// moves under an unchanged spec, and UID-stemmed, because a policy name may
+/// already use all 253 characters. The `ConfigMap` is immutable and owned by
+/// the policy, so a second pass at the same digest gets 409 rather than
+/// rewriting bytes under a reader. The evaluation publishes the name in
+/// `status.lastEvaluation.planRef` beside `planSha256`, but the `ConfigMap` is
+/// created only by the pass that starts a run, so in `Report` mode the ref
+/// names an object that does not exist yet: the documented absent-object
+/// behaviour, exactly as true as the digest beside it.
 #[must_use]
 pub fn plan_config_map_name(policy_uid: &str, plan_sha256: &str) -> String {
     let digest = plan_sha256.trim_start_matches("sha256:");
@@ -1327,10 +1153,6 @@ pub const PLAN_DATA_KEY: &str = "plan.json";
 /// The annotation carrying the plan digest, so a reader that fetched the
 /// `ConfigMap` can check what it read without re-serialising.
 pub const PLAN_DIGEST_ANNOTATION: &str = "logweir.dev/retention-plan-sha256";
-
-// ---------------------------------------------------------------------------
-// Where an enforcement record goes
-// ---------------------------------------------------------------------------
 
 /// The key one run's attributable record is written to — D3 §6.5.
 ///
