@@ -67,7 +67,7 @@ empty capture), 69 (FX-44, a failed restore removes or names the scratch
 topic it created), 70 (FX-49, the console's original-name box takes effect
 when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
 points) and 72 (PROD-01.5a
-and FX-41, CI tests on Kafka 4.3.1 in three shards; nothing in the product
+and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
 changes) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
@@ -3307,7 +3307,7 @@ walks' `Synced` messages and `truncated`).
 older runner lists the first points its walk meets; an older controller drops
 the sentence.
 
-#### 72. CI tests on Apache Kafka 4.3.1, in three shards; nothing in the product changes (PROD-01.5a, FX-41)
+#### 72. CI tests on Apache Kafka 4.3.1, in four shards; nothing in the product changes (PROD-01.5a, FX-41)
 
 **Changed.** Only how the repository is tested. The e2e fixture's default
 broker, and the line CI's e2e job runs on every pull request, is Apache Kafka
@@ -3316,12 +3316,12 @@ stays a legacy line: `KAFKA_VERSION=3.7.1` (or `e2e/compose/stack-env.sh
 --kafka 3.7`) starts it, and the weekly `engine-matrix.yml` rows still run the
 whole e2e suite on it. Six consumer-position rows that need a broker that types
 groups now run on every pull request instead of by hand. The e2e job runs in
-three shards by test binary, each with its own stack, and `check` fails when
+four shards by test binary, each with its own stack, and `check` fails when
 a test binary is in no shard or in two.
 **Operator action:** none. No binary, image, chart value or signed document
 changes, and no broker line's status changes
 ([support-matrix.md](support-matrix.md#broker-versions-apache-kafka)).
-**Scope:** the e2e package on 4.3.1 on the default compose stack with the
+**Scope:** the e2e package on 4.3.1 on a compose stack with the
 `auth` profile, the un-ignored rows included; `full_drill`'s main row on
 3.7.1; the shard guard with one binary taken out of its shard and one listed
 twice. The shards' durations are measured on the pull request's CI run.

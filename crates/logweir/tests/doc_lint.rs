@@ -2266,7 +2266,7 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // line is 4.3.1 and its e2e job runs in shards; the variable that
         // still starts the legacy line.
         (
-            "CI tests on Kafka 4.3.1, in three shards",
+            "CI tests on Kafka 4.3.1, in four shards",
             "KAFKA_VERSION=3.7.1",
         ),
     ];

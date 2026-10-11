@@ -308,9 +308,9 @@ Owner: PROD-04.0d; PROD-04.1, 04.2 and 05.3 are the first consumers. Extend it
 as a profile is extended; a new member or group goes in `groups.sh`'s `SET`
 and in `smoke_groups`.
 
-## CI's e2e job: three shards
+## CI's e2e job: four shards
 
-CI runs the e2e package in three shards by test binary (FX-41), each on its
+CI runs the e2e package in four shards by test binary (FX-41), each on its
 own runner with its own default stack (`COMPOSE_PROFILES=auth`, Kafka 4.3.1).
 The lists are `jobs.e2e.strategy.matrix` in `.github/workflows/ci.yml`. **A
 new file under `e2e/tests/` goes into one shard's `tests`:**

@@ -621,7 +621,7 @@ meet the highest floors. That last row ran `v0.21.0` until PROD-00.3f moved the
 pin; the engine's protocol-version table is byte-identical in the two. Each row does the following:
 
 - pins the tag to a digest whose revision label is the tag's commit;
-- sets the stack up and runs the suite as the CI e2e job does, its three
+- sets the stack up and runs the suite as the CI e2e job does, its four
   shards in one run (`just e2e-up`, then `cargo test --locked -p e2e --features e2e`);
 - reads back the version the running broker logged, which is what the Kafka
   broker column records;

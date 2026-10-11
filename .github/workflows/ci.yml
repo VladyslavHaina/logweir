@@ -60,12 +60,15 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
-  # FX-41: the e2e suite in three shards BY TEST BINARY, each on its own
+  # FX-41: the e2e suite in four shards BY TEST BINARY, each on its own
   # runner with its own stack, engine build and logweir build (the Rust cache
-  # is shared). One job ran it in 40 minutes of tests on main at 3c149d4a.
-  # Every file under e2e/tests/ is in exactly one shard's `tests`:
-  # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on that
-  # run's per-binary times; `publish` needs every shard.
+  # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
+  # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
+  # per-binary times of a local run on the default line, 4.3.1 (86 minutes
+  # of tests, 2026-10-10). Each shard's expected minutes of tests read
+  # "local; CI": CI ran the binaries whose rows are the same on 3.7.1 in 0.6
+  # of their local time. Setup takes about 15 minutes before any test runs.
+  # `publish` needs every shard.
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -75,20 +78,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 23; 14
           - shard: 1
-            tests: [record_semantics, record_semantics_oracle, topic_identity, pitr_boundary,
-                    compat_contract, schema_dependency, created_topics, smoke, guards,
-                    check_image, config_coverage, new_topic_parity, topic_budget]
+            tests: [record_semantics, topic_identity, record_semantics_oracle, check_image,
+                    config_coverage, new_topic_parity, topic_budget]
+          # 23; 14. On 4.x group_admin's fixture is seven groups of four types.
           - shard: 2
-            tests: [replay_selection, auth_modes, mvp_demo, consumer_group_snapshot,
-                    backup_argv, stack_params, credential_binding_store, fixture_retention,
-                    original_name, replication_factor_parity, empty_capture]
-          # The `--features e2e` rows under crates/ run here as well.
+            tests: [position_evidence, group_admin, original_name, fixture_retention,
+                    replication_factor_parity, resume_semantics]
+          # 22; 13
           - shard: 3
+            tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
+                    credential_binding_store, compat_contract, stack_params, created_topics,
+                    schema_dependency, smoke, stopped_restore, topic_configuration]
+          # 22; 13, with the `--features e2e` rows under crates/.
+          - shard: 4
             crates: true
-            tests: [position_evidence, full_drill, scram, group_admin, offset_side,
-                    consumer_positions, topic_ids, point_set_binding, resume_semantics,
-                    stopped_restore, topic_configuration]
+            tests: [guards, consumer_group_snapshot, backup_argv, mvp_demo, empty_capture,
+                    topic_ids, scram, consumer_positions, offset_side, point_set_binding]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
