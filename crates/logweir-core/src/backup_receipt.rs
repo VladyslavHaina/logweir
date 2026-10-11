@@ -91,6 +91,17 @@
 //! PROD-02.1 extends the same block with the offset observation and the
 //! lineage of decision §3.2.
 //!
+//! # 1.8.0: the source's watermarks, and the empty capture (PROD-02.1)
+//!
+//! `source_watermarks` records, per named topic, each partition's low and
+//! high watermark as Logweir read them once before the engine. ABSENT (every
+//! receipt before 1.8.0, and a run whose read failed) means the source's
+//! coverage is NOT RECORDED, never complete. With the block, a backup of a
+//! source that held no record (every partition `low == high`) is an EMPTY
+//! CAPTURE: `covered` is the empty window `[t, t)`, which covers no record.
+//! Arms 41-45 read the block, and arm 4 admits the empty window only beside
+//! it — an older reader refuses an empty capture, the safer verdict (OD-7).
+//!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
 //!
@@ -258,6 +269,22 @@ pub struct BackupReceipt {
     /// selects no group writes the document it wrote before, byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<crate::consumer_positions::ConsumerPositions>,
+    /// **Format 1.8.0 (PROD-02.1).** Per named topic, each partition's source
+    /// `[low, high]` watermark (log start offset and high watermark, read
+    /// uncommitted) as Logweir read them once before the engine; the list's
+    /// index is the partition id. One entry per `source.topics` entry and no
+    /// others (arm 42), each with at least one partition (arm 43) and
+    /// `low <= high` (arm 44). A partition with `low == high` held no record
+    /// at capture. An empty `covered` window (an EMPTY CAPTURE) is legal only
+    /// beside this block, with every partition `low == high` and every
+    /// `records` count 0 (arms 4 and 45).
+    ///
+    /// ABSENT means the source's coverage is NOT RECORDED — every receipt
+    /// before 1.8.0, and a run whose watermark read failed — never complete.
+    /// Appended LAST and skipped when absent, so an older document round-trips
+    /// byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_watermarks: Option<BTreeMap<String, Vec<[u64; 2]>>>,
 }
 
 /// **PROD-01.4a, receipt 1.6.0.** What one run observed about one topic's
@@ -445,6 +472,48 @@ pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
 /// together; `tests/backup_receipt.rs::the_written_version_defines_consumer_positions`
 /// keeps them coherent.
 pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = 7;
+
+/// **PROD-02.1.** The `format_version` of a receipt that carries
+/// `source_watermarks` — a MINOR bump over
+/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] under OD-7: arms 41-45 read only
+/// the new block, and arm 4 admits an empty window only beside it, so every
+/// document without it is decided exactly as before and an older reader
+/// refuses an empty capture (the safer verdict). It includes every earlier
+/// minor.
+pub const FORMAT_VERSION_WITH_SOURCE_WATERMARKS: &str = "1.8.0";
+
+/// The first minor of format 1 that defines `source_watermarks` (arm 41). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR`
+/// together.
+pub const SOURCE_WATERMARKS_SINCE_MINOR: u64 = 8;
+
+/// **PROD-02.1 (review F1).** The most bytes a writer lets `source_watermarks`
+/// take in a receipt: 32 KiB, measured as the block encoded exactly as the
+/// receipt encodes it (`crate::det_json`, nested at the receipt's depth; see
+/// [`source_watermarks_encoded_len`]). One partition takes 36 bytes plus its
+/// two offsets' digits, so the budget holds about 430 partitions at 20-digit
+/// offsets and about 650 at 9-digit ones. Over it the writer records no block
+/// (coverage NOT RECORDED), so the block stays inside
+/// [`crate::topic_budget::RECEIPT_BASE_BUDGET_BYTES`] and can never push a
+/// receipt over the bound every reader caps it at
+/// ([`crate::topic_budget::MAX_RECEIPT_BYTES`]). Readers do not check it: an
+/// absent block is always legal.
+pub const SOURCE_WATERMARKS_BUDGET_BYTES: usize = 32 * 1024;
+
+/// The bytes `block` takes as a receipt's `source_watermarks`, encoded as the
+/// receipt encodes it: the one-key document `{"source_watermarks": block}`,
+/// whose key sits at the receipt's own depth.
+///
+/// # Errors
+///
+/// The encoder's error, which a block of integers never produces.
+pub fn source_watermarks_encoded_len(
+    block: &BTreeMap<String, Vec<[u64; 2]>>,
+) -> Result<usize, crate::det_json::DetJsonError> {
+    crate::det_json::to_deterministic_json(&serde_json::json!({ "source_watermarks": block }))
+        .map(|bytes| bytes.len())
+}
 
 /// The `format_version` this build WRITES for a receipt that pins no manifest
 /// version (a pinned one is [`FORMAT_VERSION_WITH_MANIFEST_VERSION`]; see
@@ -932,6 +1001,7 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 /// next: a receipt carrying `generations` is 1.6.0, which defines every
 /// earlier minor's fields. Every receipt this build signs carries
 /// `generations`, so every one is at least 1.6.0.
+/// [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] (PROD-02.1) comes before both.
 #[must_use]
 pub fn format_version_for(
     archive: &ReceiptArchive,
@@ -940,8 +1010,11 @@ pub fn format_version_for(
     auth: &ReceiptAuth,
     generations: bool,
     consumer_positions: bool,
+    source_watermarks: bool,
 ) -> &'static str {
-    if consumer_positions {
+    if source_watermarks {
+        FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+    } else if consumer_positions {
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     } else if generations {
         FORMAT_VERSION_WITH_GENERATIONS
@@ -1229,7 +1302,16 @@ impl BackupReceipt {
         // rather than the empty `[t, t]` this arm now refuses. That
         // conversion is stated once, there, and nothing else in the tree
         // converts between the two conventions.
-        if self.covered.from_ms >= self.covered.to_ms {
+        //
+        // PROD-02.1 (1.8.0): the EMPTY window `[t, t)` is an empty capture —
+        // an archive that holds no record, which an empty range is exactly
+        // right for — and is admitted only beside `source_watermarks`, whose
+        // arm 45 then proves it. Without the block (every older document) the
+        // arm is unchanged, and an older reader refuses an empty capture.
+        let empty_window = self.covered.from_ms == self.covered.to_ms;
+        if self.covered.from_ms > self.covered.to_ms
+            || (empty_window && self.source_watermarks.is_none())
+        {
             return Err(format!(
                 "covered.from_ms {} is not before covered.to_ms {}: the covered window's end is EXCLUSIVE, so an empty range covers no record",
                 self.covered.from_ms, self.covered.to_ms
@@ -1983,7 +2065,72 @@ impl BackupReceipt {
                 }
             }
         }
+        // ARMS 41-45 (format 1.8.0, PROD-02.1): `source_watermarks`, and ONLY
+        // when it is present (OD-7 (a)). Topics in name order, partitions in
+        // index order.
+        if let Some(watermarks) = &self.source_watermarks {
+            // ARM 41. A document declaring a minor before 8 cannot carry it.
+            let minor = parse_semver(&self.format_version).map(|(_, minor, _)| minor);
+            if minor.is_some_and(|m| m < SOURCE_WATERMARKS_SINCE_MINOR) {
+                return Err(format!(
+                    "source_watermarks is present but format_version {:?} predates it: the \
+                     field is defined from 1.{SOURCE_WATERMARKS_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 42. The observed set is the named set — arm 3's twin.
+            let observed: std::collections::BTreeSet<&str> =
+                watermarks.keys().map(String::as_str).collect();
+            if observed != named_topics {
+                return Err(format!(
+                    "source_watermarks covers {} but the named topic set is {}",
+                    render_set(&observed),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, partitions) in watermarks {
+                // ARM 43. A topic has at least one partition.
+                if partitions.is_empty() {
+                    return Err(format!(
+                        "source_watermarks[{topic:?}] records no partition: every named topic \
+                         records each of its partitions, at least one"
+                    ));
+                }
+                // ARM 44. A low watermark is never above its high.
+                for (partition, [low, high]) in partitions.iter().enumerate() {
+                    if low > high {
+                        return Err(format!(
+                            "source_watermarks[{topic:?}] partition {partition} has low {low} \
+                             above high {high}: a partition's low watermark is never above its \
+                             high"
+                        ));
+                    }
+                }
+            }
+            // ARM 45. An empty window claims an EMPTY CAPTURE: no record
+            // counted for any topic, and every partition empty at capture.
+            if empty_window {
+                if let Some(why) = empty_capture_contradiction(&self.records, watermarks) {
+                    return Err(format!(
+                        "covered.from_ms {} equals covered.to_ms {}, an empty capture, but \
+                         {why}: an empty capture counts no record for any topic and recorded \
+                         equal low and high watermarks for every partition",
+                        self.covered.from_ms, self.covered.to_ms
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// **PROD-02.1.** Whether this receipt is an EMPTY CAPTURE: a backup whose
+    /// source held no record in any selected partition, so its archive holds
+    /// none and its `covered` window is the empty `[t, t)`. Meaningful on a
+    /// receipt `validate_invariants` accepted (arm 4 admits the empty window
+    /// only beside `source_watermarks`, and arm 45 proves it).
+    #[must_use]
+    pub fn is_empty_capture(&self) -> bool {
+        self.covered.from_ms == self.covered.to_ms
     }
 
     /// **PROD-04.1: the positions document, checked against THIS receipt**
@@ -2312,6 +2459,46 @@ impl BackupReceipt {
 fn render_set(set: &std::collections::BTreeSet<&str>) -> String {
     let inner: Vec<String> = set.iter().map(|t| format!("{t:?}")).collect();
     format!("{{{}}}", inner.join(", "))
+}
+
+/// **PROD-02.1, arm 45.** Why `records` and `watermarks` do not describe an
+/// empty capture — the first topic (name order) that counts a record, else
+/// the first partition (topic name order, then index) whose low and high
+/// differ — or `None` when they do. The writer asks the same question
+/// before it claims one.
+#[must_use]
+pub fn empty_capture_contradiction(
+    records: &BTreeMap<String, u64>,
+    watermarks: &BTreeMap<String, Vec<[u64; 2]>>,
+) -> Option<String> {
+    if let Some((topic, n)) = records.iter().find(|(_, n)| **n > 0) {
+        return Some(format!("records[{topic:?}] is {n}"));
+    }
+    watermarks.iter().find_map(|(topic, partitions)| {
+        partitions
+            .iter()
+            .enumerate()
+            .find(|(_, [low, high])| low != high)
+            .map(|(p, [low, high])| {
+                format!("source_watermarks[{topic:?}] partition {p} has low {low} and high {high}")
+            })
+    })
+}
+
+/// **PROD-02.1.** The partitions that held no record at capture (`low ==
+/// high`), as `(topic, partition)` in topic name order, then index.
+#[must_use]
+pub fn empty_partitions(watermarks: &BTreeMap<String, Vec<[u64; 2]>>) -> Vec<(String, usize)> {
+    watermarks
+        .iter()
+        .flat_map(|(topic, partitions)| {
+            partitions
+                .iter()
+                .enumerate()
+                .filter(|(_, [low, high])| low == high)
+                .map(|(p, _)| (topic.clone(), p))
+        })
+        .collect()
 }
 
 #[cfg(test)]

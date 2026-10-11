@@ -818,6 +818,10 @@ pub enum Drill {
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill
     /// against a refusing deleter without this shape.
     LeavesATopicBehind,
+    /// **PROD-02.1.** The archive set is an empty capture: its manifest names
+    /// the topic with no segment. The run is refused by name as soon as the
+    /// manifest is read, before phase 2, and creates nothing.
+    ArchivesNoSegment,
     /// Task 10b. The normal point-in-time shape, which no fixture expressed:
     /// the archive's one segment STRADDLES the window's end, so the records it
     /// holds are partly outside the window and the archive can only ever
@@ -1677,6 +1681,14 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         segs.push(after_window(0, absent, b""));
         segs.push(after_window(1, garbage, b"not a segment"));
     }
+    // PROD-02.1: an empty capture's manifest — the topic, no segment.
+    if shape == Drill::ArchivesNoSegment {
+        for t in &mut facts.topics {
+            for part in &mut t.partitions {
+                part.segments.clear();
+            }
+        }
+    }
     // FX-8: the manifest's topic override, exactly as the engine records it
     // for a source topic that set one (PROD-01.1 §2.3).
     if matches!(
@@ -1874,7 +1886,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::HoldsAMarkerAfterTheWindow
         | Drill::HoldsUnreadableSegmentsAfterTheWindow
         | Drill::HoldsAMarkerBeforeAStatedStart
-        | Drill::LeavesATopicBehind => {}
+        | Drill::LeavesATopicBehind
+        | Drill::ArchivesNoSegment => {}
     }
 
     // ---- the target cluster ----

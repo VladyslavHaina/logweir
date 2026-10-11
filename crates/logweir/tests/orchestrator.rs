@@ -1837,6 +1837,31 @@ fn the_time_basis_refusal_creates_no_target_topic() {
     );
 }
 
+/// **PROD-02.1, review P-e.** A restore of an empty capture's set — its
+/// manifest names the topic and no segment — is refused by name, exit 3,
+/// as soon as the manifest is read: no target topic, no phase 4, nothing
+/// signed. (The control is every passing shape: `Passes` restores the same
+/// archive with its segment.)
+#[test]
+fn a_restore_of_an_empty_capture_is_refused_by_name_before_anything_runs() {
+    let f = fixtures::orchestrator_fixture(Drill::ArchivesNoSegment);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.contains("so it holds no record to restore: an empty capture"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+    assert!(
+        fixtures::fingerprint_calls(&f).is_empty(),
+        "the refusal comes before phase 4"
+    );
+    let f = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the control restores");
+}
+
 /// **FX-8, the opt-in.** The same archive and point with `restore.time_basis:
 /// producerTime` in the approved plan: the run passes as `Passes` does, the
 /// target topic IS created, and the signed scorecard — format 1.3.0 — lists

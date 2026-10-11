@@ -600,7 +600,16 @@ FORMAT_VERSION = "1.4.0"
 # The shape layer refuses a block that is not the writer's shape; one
 # `console approval:` line says who approved and how, in the Rust reader's
 # words.
-SCRIPT_VERSION = "1.29.0"
+#
+# 1.30.0 (PROD-02.1) knows receipt format 1.8.0 and its `source_watermarks`:
+# per named topic, each partition's [low, high] watermark read before the
+# engine. Five arms, 41 to 45, mirrored byte for byte and in position: the
+# block only from 1.8.0, the named topic set, at least one partition, low
+# never above high, and an EMPTY window (an empty capture) only over no record
+# and every partition empty. Arm 4 admits the empty window only beside the
+# block. `source_watermarks` lines say "coverage recorded" or, for every
+# receipt without the block, "coverage not recorded".
+SCRIPT_VERSION = "1.30.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -1027,6 +1036,10 @@ def _judged_records(side) -> int:
 # `crates/logweir-core/src/backup_receipt.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_generations_minor_is_the_rust_readers`).
 RECEIPT_GENERATIONS_SINCE_MINOR = 6
+
+# PROD-02.1: the first minor that defines `source_watermarks` (arm 41) --
+# `SOURCE_WATERMARKS_SINCE_MINOR` in `crates/logweir-core/src/backup_receipt.rs`.
+RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR = 8
 
 # PROD-01.4a: why a topic ID is null (arm 39) and where a recorded one came
 # from (arm 40) — `TOPIC_ID_REASONS` and `TOPIC_ID_SOURCES` in
@@ -3409,6 +3422,24 @@ def _receipt_shape(doc) -> str:
     shape = _consumer_positions_shape(doc.get("consumer_positions"))
     if shape:
         return shape
+    # PROD-02.1, format 1.8.0: `source_watermarks` is `Option<BTreeMap<String,
+    # Vec<[u64; 2]>>>`; Rust refuses any other shape at DESERIALISATION.
+    watermarks = doc.get("source_watermarks")
+    if watermarks is not None:
+        if not isinstance(watermarks, dict):
+            return "source_watermarks is not an object"
+        for topic in sorted(watermarks):
+            pairs = watermarks[topic]
+            if not isinstance(pairs, list) or not all(
+                isinstance(pair, list)
+                and len(pair) == 2
+                and all(_is_int_in(x, 0, 2 ** 64 - 1) for x in pair)
+                for pair in pairs
+            ):
+                return (
+                    f"source_watermarks[{_rust_debug_str(topic)}] is not a list of "
+                    "[low, high] u64 pairs"
+                )
     return ""
 
 
@@ -3647,9 +3678,12 @@ def check_backup_receipt_invariants(doc) -> str:
     # an EMPTY range rather than an instantaneous one. A single-record backup
     # is still a window: the writer converts the manifest's inclusive newest
     # timestamp to an exclusive bound, producing `[t, t+1)`.
+    # PROD-02.1 (1.8.0): the EMPTY window `[t, t)` is an empty capture and is
+    # admitted only beside `source_watermarks`, whose arm 45 proves it.
     from_ms = doc["covered"]["from_ms"]
     to_ms = doc["covered"]["to_ms"]
-    if from_ms >= to_ms:
+    empty_window = from_ms == to_ms
+    if from_ms > to_ms or (empty_window and doc.get("source_watermarks") is None):
         return (
             f"covered.from_ms {from_ms} is not before covered.to_ms {to_ms}: the covered "
             "window's end is EXCLUSIVE, so an empty range covers no record"
@@ -4241,7 +4275,69 @@ def check_backup_receipt_invariants(doc) -> str:
                     "not fit its IDs: a source is present exactly when an ID is recorded, and "
                     "is \"describeTopics\" or \"engineManifest\""
                 )
+    # ARMS 41-45 (format 1.8.0, PROD-02.1): `source_watermarks`, and ONLY when
+    # it is present. Topics in NAME order, partitions in index order.
+    watermarks = doc.get("source_watermarks")
+    if watermarks is not None:
+        # ARM 41. A document declaring a minor before 8 cannot carry it.
+        if parsed[1] < RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR:
+            return (
+                f"source_watermarks is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR}.0"
+            )
+        # ARM 42. The observed set is the named set — arm 3's twin.
+        observed = list(watermarks.keys())
+        if sorted(set(observed)) != sorted(set(named_topics)):
+            return (
+                f"source_watermarks covers {_render_topic_set(observed)} but the named topic "
+                f"set is {_render_topic_set(named_topics)}"
+            )
+        for topic in sorted(watermarks):
+            pairs = watermarks[topic]
+            # ARM 43. A topic has at least one partition.
+            if not pairs:
+                return (
+                    f"source_watermarks[{_rust_debug_str(topic)}] records no partition: every "
+                    "named topic records each of its partitions, at least one"
+                )
+            # ARM 44. A low watermark is never above its high.
+            for partition, (low, high) in enumerate(pairs):
+                if low > high:
+                    return (
+                        f"source_watermarks[{_rust_debug_str(topic)}] partition {partition} has "
+                        f"low {low} above high {high}: a partition's low watermark is never "
+                        "above its high"
+                    )
+        # ARM 45. An empty window claims an EMPTY CAPTURE: no record counted for
+        # any topic, and every partition empty at capture.
+        if empty_window:
+            why = _empty_capture_contradiction(doc["records"], watermarks)
+            if why:
+                return (
+                    f"covered.from_ms {from_ms} equals covered.to_ms {to_ms}, an empty capture, "
+                    f"but {why}: an empty capture counts no record for any topic and recorded "
+                    "equal low and high watermarks for every partition"
+                )
 
+    return ""
+
+
+def _empty_capture_contradiction(records, watermarks) -> str:
+    """Why `records` and `watermarks` do not describe an empty capture, or ""
+    — the twin of `backup_receipt.rs`'s `empty_capture_contradiction`: the
+    first topic (name order) that counts a record, else the first partition
+    (topic name order, then index) whose low and high differ."""
+    for topic in sorted(records):
+        if records[topic] > 0:
+            return f"records[{_rust_debug_str(topic)}] is {records[topic]}"
+    for topic in sorted(watermarks):
+        for partition, (low, high) in enumerate(watermarks[topic]):
+            if low != high:
+                return (
+                    f"source_watermarks[{_rust_debug_str(topic)}] partition {partition} has "
+                    f"low {low} and high {high}"
+                )
     return ""
 
 
@@ -4588,6 +4684,38 @@ def _generation_lines(block):
                 "generation is not established by ID and is UNKNOWN"
             )
         lines.append(f"generations[{_rust_debug_str(topic)}]: {said}")
+    return lines
+
+
+def _source_watermark_lines(block, empty_capture):
+    """The receipt's `source_watermarks` — the twin of `crates/logweir/src/
+    verify.rs::source_watermark_lines`, in the same words (PROD-02.1): for an
+    EMPTY CAPTURE one line that says so, then one line per topic naming the
+    partitions empty at capture; or the line that says the coverage was not
+    recorded, which is never complete."""
+    if block is None:
+        return [
+            "source_watermarks: coverage not recorded, so this receipt does not say what the "
+            "source held at capture and never reads as complete"
+        ]
+    lines = []
+    if empty_capture:
+        lines.append(
+            "source_watermarks: an EMPTY CAPTURE: every partition's low and high watermarks "
+            "were equal at capture, so the source held no record and the archive holds none; "
+            "not a recovery point"
+        )
+    for topic in sorted(block):
+        pairs = block[topic]
+        empty = [str(p) for p, (low, high) in enumerate(pairs) if low == high]
+        if empty:
+            said = f"{len(empty)} empty at capture (low == high): {', '.join(empty)}"
+        else:
+            said = "none empty at capture"
+        lines.append(
+            f"source_watermarks[{_rust_debug_str(topic)}]: coverage recorded over "
+            f"{len(pairs)} partition(s), {said}"
+        )
     return lines
 
 
@@ -5546,6 +5674,13 @@ def main(
             doc.get("consumer_positions"), verified_positions
         ):
             print(f"       {line}")
+        # PROD-02.1: the source's coverage at capture, in the same words
+        # `logweir drill verify` prints (`verify.rs::source_watermark_lines`);
+        # the parity script compares them.
+        for line in _source_watermark_lines(
+            doc.get("source_watermarks"), covered.get("from_ms") == covered.get("to_ms")
+        ):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -5555,7 +5690,8 @@ def main(
             "(backup-receipt invariant set: format_version's major, the "
             "exit_code/manifest_key biconditional with trimmed-empty counted as absent, "
             "records covering exactly the named topic set, a covered window whose "
-            "EXCLUSIVE end is after its start, source.auth.mode inside the closed "
+            "EXCLUSIVE end is after its start (or empty beside source_watermarks), "
+            "source.auth.mode inside the closed "
             "two-value set, config_coverage's six: present only from 1.1.0, covering "
             "exactly the named topic set, closed coverage and reason sets, no timestamp "
             "type from a read that did not succeed, and a closed timestamp value and source, "
@@ -5574,9 +5710,12 @@ def main(
             "well-formed digest, closed outcomes and reasons, fields and counts that fit the "
             "outcome with no captured group Dead and memberless, and an active flag the "
             "states derive, "
-            "and the topic IDs' five: generations present only from 1.6.0, covering exactly "
+            "the topic IDs' five: generations present only from 1.6.0, covering exactly "
             "the named topic set, every recorded ID in Kafka's text and never the zero ID, a "
-            "reason exactly for a null ID, and a source exactly for a recorded one)"
+            "reason exactly for a null ID, and a source exactly for a recorded one, "
+            "and the source watermarks' five: present only from 1.8.0, covering exactly the "
+            "named topic set, at least one partition, low never above high, and an empty "
+            "window only over no record and every partition empty)"
         )
         if verified_positions is not None:
             print(

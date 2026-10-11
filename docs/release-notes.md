@@ -60,8 +60,10 @@ its recovery point), 64 (FX-39 and FX-40, a retention policy over more than
 catalog view), 65 (FX-33, one
 backup names at most 1,000 topics, and a backup of many topics stays listed
 and verified), 66 (PROD-16.2,
-two-person approval in the console, no key) and 67 (PROD-01.1a, an
-archive holding transaction markers is refused unless the plan allows them) so far. Items continue the next entry's
+two-person approval in the console, no key), 67 (PROD-01.1a, an
+archive holding transaction markers is refused unless the plan allows them) and 68
+(PROD-02.1, a backup of a source whose records all expired is a signed, named
+empty capture) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -243,6 +245,11 @@ and a non-transactional twin as the control; a marker after a point-in-time
 window refused); it changes the runner and the controller's list of restore
 refusal codes, and the PoC upgrade that carries it restores one ordinary
 point unchanged.
+Item 68 is PROD-02.1 (narrowed by OD-11), proven by live rows on the compose
+stack over a topic whose records were produced and deleted, by runner,
+catalog and controller rows, and by both verifiers over a corpus; it changes
+the runner, the receipt format (1.8.0), both verifiers and the controller, and
+the PoC upgrade that carries it runs the schedules over an emptied source.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -3173,6 +3180,41 @@ not know the new code, so for this refusal its status says "the runner gave
 no readable reason" (item 61) while `exitReason` still names it: roll the
 controller with the runner. Plans and approvals are unaffected.
 
+#### 68. A backup of a source whose records all expired is a signed, named empty capture (PROD-02.1)
+
+**Changed.** A scheduled backup of a topic that retention had emptied failed
+exit 1 "operational" (the PoC's nightly schedules, 2026-10-02 to 10-05): the
+engine wrote a manifest with no segment and the run refused it. Now
+`logweir backup run` reads every named partition's low and high watermark
+once before the engine and records them in the receipt (format **1.8.0**,
+optional `source_watermarks`). When nothing was captured and every partition
+was empty, the run exits 0 as an **empty capture**: the summary says so, the
+signed receipt counts no record and carries the empty window `[t, t)`, no
+catalog point is written (`catalog sync` counts it `empty-capture`), and the
+`Backup` completes with reason `EmptyCapture`, set only after the controller
+verifies the receipt, with no `windowCovered`. An empty capture is not a
+recovery point: a `ProtectionPolicy` never counts it (it ages from the last
+real point), and a restore of its set is refused by name, exit 3, before
+anything runs. A partly empty source is an ordinary backup whose summary and
+receipt name the empty partitions. Nothing captured over a partition that
+held records, or with the watermarks unread, is still exit 1. Both verifiers
+(`verify_scorecard.py` 1.30.0) check arms 41–45 and print "coverage not
+recorded" for every receipt without the block, never complete. The block grows
+with the partition count and is recorded only up to 32 KiB (about 430–650
+partitions); a larger source's receipt reads "coverage not recorded", and an
+empty capture of it stays exit 1.
+
+**Scope:** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
+shipped engine `0.23.3+logweir.2`), `crates/logweir/tests/backup_run.rs`,
+`crates/logweir/tests/catalog.rs`, `crates/weirkeeper/tests/backup_controller.rs`,
+`crates/logweir-core/tests/backup_receipt.rs`, the corpus and
+`scripts/check-verifier-parity.sh`. Not proven live in this branch: the
+`Backup` status, which the PoC upgrade that carries it reads over a schedule
+of an emptied source.
+**Rollback:** an older runner fails the empty source exit 1 again; receipts
+already signed keep verifying with this build, and an older verifier refuses
+an empty capture's receipt (arm 4) — the safer verdict.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3283,7 +3325,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66 and 67, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67 and 68, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the

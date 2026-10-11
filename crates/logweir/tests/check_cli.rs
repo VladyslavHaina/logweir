@@ -8022,10 +8022,9 @@ mod live {
         // A TOPIC OF THIS ROW'S OWN, with records in it.
         //
         // `topic-setup` creates `test-topic` and produces nothing into it, and
-        // `logweir backup run` refuses a backup set that "declares no segment
-        // for any of the named topics" — correctly: an archive of an empty
-        // topic bounds no window, and a receipt naming one would attest to
-        // nothing. So this row seeds its own topic rather than depending on
+        // a backup of it is an EMPTY CAPTURE (PROD-02.1): a receipt with no
+        // window, which is not the evidence this row relays. So this row
+        // seeds its own topic rather than depending on
         // `scripts/e2e-seed.sh`, and it does not touch `test-topic`, which
         // other e2e suites assert the shape of.
         let source_topic = "check-e2e-src";
@@ -9304,6 +9303,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         consumer_positions: None,
         schema_dependency: None,
         generations: None,
+        source_watermarks: None,
     }
 }
 

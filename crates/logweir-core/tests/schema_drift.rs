@@ -46,7 +46,7 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
     );
 }
 
@@ -414,7 +414,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -423,7 +423,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
     );
 }
 
@@ -479,7 +479,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
         )
     );
     assert!(
@@ -1199,6 +1199,45 @@ fn the_frozen_1_4_0_receipt_schema_has_no_consumer_positions() {
     assert_eq!(
         minor,
         logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR
+    );
+}
+
+/// **PROD-02.1: PROD-04.1's 1.7.0 receipt schema is FROZEN** beside the
+/// current one and has no `source_watermarks`; the current file carries it,
+/// optional, at the minor arm 41 gates on.
+#[test]
+fn the_frozen_1_7_0_receipt_schema_has_no_source_watermarks() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.7.0.json"
+    ))
+    .expect("the frozen 1.7.0 receipt schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-backup-receipt-1.7.0.json"
+    );
+    assert!(frozen["properties"]["source_watermarks"].is_null());
+    assert!(frozen["properties"]["consumer_positions"].is_object());
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert!(current["properties"]["source_watermarks"].is_object());
+    assert!(
+        !current["required"]
+            .as_array()
+            .expect("a required array")
+            .iter()
+            .any(|r| r == "source_watermarks"),
+        "source_watermarks is OPTIONAL: absent is coverage not recorded"
+    );
+    let minor: u64 = logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(minor > logweir_core::backup_receipt::CONSUMER_POSITIONS_SINCE_MINOR);
+    assert_eq!(
+        minor,
+        logweir_core::backup_receipt::SOURCE_WATERMARKS_SINCE_MINOR
     );
 }
 

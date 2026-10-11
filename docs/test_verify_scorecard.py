@@ -905,7 +905,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.29.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.30.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2325,9 +2325,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # (CA-1 to CA-8, format 1.9.0 and 2.1.0), its shape check, the member
     # `consoleApproval` of `target.original_name.approval_mode` and the
     # `console approval:` line. Map still five.
+    #
+    # 1.30.0 (PROD-02.1) adds the receipt's five `source_watermarks` arms
+    # (41-45, format 1.8.0), arm 4's empty window beside them, the shape check
+    # and the `source_watermarks` lines. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.29.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.30.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -5205,3 +5209,45 @@ def test_an_old_receipt_verifies_and_reads_not_assessed():
     assert "schema_dependency: not assessed" in r.stdout, r.stdout
     assert "no schema framing detected" not in r.stdout
 
+
+
+def test_the_source_watermarks_minor_is_the_rust_readers():
+    # Arm 41's minor is ONE number in each reader (PROD-02.1).
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const SOURCE_WATERMARKS_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares SOURCE_WATERMARKS_SINCE_MINOR"
+    assert mod.RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR == int(m.group(1))
+
+
+def test_an_old_receipt_reads_coverage_not_recorded_and_a_new_one_recorded():
+    # R3 (PROD-02.1): a receipt without source_watermarks never reads as
+    # complete; one with them says "recorded", and names an empty capture.
+    mod = _verifier_module()
+    assert mod._source_watermark_lines(None, False) == [
+        "source_watermarks: coverage not recorded, so this receipt does not say what the "
+        "source held at capture and never reads as complete"
+    ]
+    lines = mod._source_watermark_lines({"orders": [[0, 9], [4, 4]]}, False)
+    assert lines == [
+        'source_watermarks["orders"]: coverage recorded over 2 partition(s), 1 empty at '
+        "capture (low == high): 1"
+    ]
+    lines = mod._source_watermark_lines({"orders": [[4, 4]]}, True)
+    assert lines[0].startswith("source_watermarks: an EMPTY CAPTURE")
+    assert "recorded over 1 partition(s), 1 empty" in lines[1]
+
+
+def test_arm_44_refuses_a_low_watermark_above_its_high():
+    # R4 (PROD-02.1), the Python half; the corpus walks the same arm with the
+    # Rust reader beside it.
+    mod = _verifier_module()
+    corpus = (pathlib.Path(__file__).resolve().parent.parent / "e2e/fixtures/invariants")
+    doc = json.loads((corpus / "receipt_1_8_with_source_watermarks.json").read_text())
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    doc["source_watermarks"]["orders"][0] = [10, 9]
+    assert mod.check_backup_receipt_invariants(doc) == (
+        'source_watermarks["orders"] partition 0 has low 10 above high 9: a partition\'s low '
+        "watermark is never above its high"
+    )

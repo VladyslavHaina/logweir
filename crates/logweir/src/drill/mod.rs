@@ -3074,6 +3074,24 @@ fn execute_with_validated_approval(
     // if it moves after `time_basis::decide`.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
+    // **PROD-02.1: AN EMPTY CAPTURE IS REFUSED BY NAME, HERE.** A set with no
+    // segment for any topic this restore names has nothing to restore (the
+    // manifest says so; the message names the empty capture as one reason
+    // and claims nothing a receipt has not said); it is
+    // refused exit 3 before phase 2 and before any other archive-based refusal,
+    // so no target topic is created and no engine starts — never phase 4's
+    // exit 1 over an "empty window".
+    let named: BTreeSet<&str> = admitted.topic_mapping.keys().map(String::as_str).collect();
+    if facts.earliest_covered_timestamp_ms(&named).is_none() {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "the archive set `{}` records no segment for any of the topics this restore names \
+             ({}), so it holds no record to restore: an empty capture (a backup of a source \
+             that held none) or a set that never captured these topics. Refused before \
+             anything runs; no target topic was created",
+            set.backup_id,
+            named.iter().copied().collect::<Vec<&str>>().join(", ")
+        ))));
+    }
     // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
     // at which both of its records are in hand — the archive manifest just
     // described (a topic's `message.timestamp.type` override) and the VERIFIED
