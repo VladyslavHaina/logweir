@@ -1379,7 +1379,7 @@ pub fn keep_instant_unless_changed(
 // The API server applies a `resourceVersion` carried in a merge-patch BODY as
 // an update precondition and answers `409 Conflict` on a mismatch, which is
 // how a merge PATCH gets a compare-and-set without the `update` verb —
-// `charts/logweir/README.md:53` and the D3 W2 record both state the rule for
+// `charts/logweir/README.md:59-60` and the D3 W2 record both state the rule for
 // every status write in this crate, and six of the seven kinds that have it
 // spell it out for themselves.
 //

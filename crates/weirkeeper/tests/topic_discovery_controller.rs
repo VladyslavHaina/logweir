@@ -3953,7 +3953,7 @@ async fn fx11_a_running_pod_costs_no_events_list() {
 /// POD's UID.** A check pod whose `runner` container has sat in
 /// `ContainerCreating` past the 60 s mount grace, with a `FailedMount` Event
 /// on the pod, is `VolumeMountFailed`, naming the volume — the `FailedMount`
-/// row the module header and `docs/kubernetes.md` §12 say these check paths
+/// row the module header and `docs/reference.md` (*Preflight rows*) say these check paths
 /// read. The one events list carries `involvedObject.uid=<pod uid>`, never the
 /// Job's: a `FailedMount` is recorded against the pod, so a list by the Job's
 /// UID would come back without it on a real API server.

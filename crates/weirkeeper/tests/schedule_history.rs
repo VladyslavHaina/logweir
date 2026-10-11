@@ -2278,7 +2278,7 @@ async fn the_blocked_sample_is_deterministic_across_passes() {
 ///
 /// This row uses a stateful double — one that pages on `continue=` and
 /// remembers the patches — so the number below is measured rather than derived,
-/// and `docs/kubernetes.md` §9 quotes the closed form this asserts.
+/// and it asserts the closed form.
 #[tokio::test]
 async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
     use std::sync::{Arc, Mutex};
@@ -2421,7 +2421,7 @@ async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
     // walk restarts at page 0 every time and an already-detached page does not
     // stop it; the last pass reads every page and then runs out. So
     //     LISTs = Σ(k=1..P-1)(k+1) + P = P(P+1)/2 + P − 1.
-    // `docs/kubernetes.md` §9 quotes this, and 10 000 pre-upgrade runs are
+    // 10 000 pre-upgrade runs are
     // P = 20 ⇒ 229 LIST requests and ≈ 114 500 objects read — NOT the 21 and
     // 10 000 the table claimed before this row existed.
     let p = PAGES;

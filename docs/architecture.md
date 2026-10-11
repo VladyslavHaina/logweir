@@ -496,7 +496,7 @@ reads nor verifies a provider lifecycle rule, and `status.guarantees` records
 `logweir_core::execution_contract::VERSION` moves to `"2"`, carrying the
 recovery-point binding, the standing rehearsal authorisation and the new key
 lines. `v1` stays accepted for already-created `Restore`s under the documented
-transition in `docs/kubernetes.md` §12.
+transition in `docs/stability.md`, *Execution contract v2: what v1 still buys*.
 
 **Performed.** This amendment was recorded ahead of the code, as Amendment A
 requires for a decision that changes a shipped contract; the rehearsal and

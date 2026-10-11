@@ -78,7 +78,9 @@ and [reference.md](reference.md#exit-codes).
 `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY` (`Never`, `IfNotPresent`
 or `Always`; anything else refuses startup) once at start; the chart sets them
 from `runnerImage` and `runnerImagePullPolicy`, and they reach every Job the
-controller creates. Both images embed `third_party/org-root.fingerprint` at
+controller creates. Both images embed `third_party/org-root.fingerprint`, the
+SHA-256 of `third_party/org-root.pub.pem`'s DER SPKI (`just check-org-root`;
+the private half was not kept), at
 `/etc/logweir/org-root.fingerprint`; no runtime code reads it yet
 ([keys.md](keys.md)).
 
@@ -1980,7 +1982,9 @@ two-person is never served there. The controller's ServiceAccount holds
 cluster-wide `patch` on `trustpolicies` (for the compromise finalizer), so
 whoever can run a pod as `weirkeeper` can append a key to any existing policy; a
 `ValidatingAdmissionPolicy` limiting that account to `metadata.finalizers` closes
-it.
+it. While a first install's identity hook runs, whoever can run a pod as
+`<release>-identity-bootstrap` could create a `TrustPolicy`; the installer holds
+cluster-admin then anyway.
 
 ### Trust: which keys govern a namespace
 
@@ -1994,7 +1998,9 @@ Trust for one namespace resolves in this order:
 **A namespace two policies claim resolves to nothing**: every approval and
 verification there is refused `TrustPolicyConflict`, and both policies report it
 in `status.conflicts`. Two `default: true` policies report it under the sentinel
-namespace `*`. A namespace never names its own trust.
+namespace `*`. A namespace never names its own trust, for the reason the
+roster's name is fixed: a roster whose name the subject supplies is a roster
+the subject can choose.
 
 - A `TrustPolicy` key declares exactly one usage: `EvidenceSigning`,
   `GovernedApproval` or `ConsoleConfirmation` (CEL rule G8). Keys are

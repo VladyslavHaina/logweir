@@ -42,8 +42,8 @@
 #
 #   THE RULE IS THE BARE FORM AND ONLY THE BARE FORM, and that bound is
 #   load-bearing: this repository's real marks are usually written INSIDE
-#   backticks too (`docs/stability.md:499`, `docs/support-matrix.md:70`,
-#   `docs/kubernetes.md:1567` and three more). Exempting every backticked
+#   backticks too (`docs/stability.md:383`, `docs/support-matrix.md:127`,
+#   `docs/kubernetes.md:1408` and three more). Exempting every backticked
 #   occurrence would leave sixteen of the tree's twenty-one occurrences
 #   unjudged and gate five -- a gate that lets a mark through because it sits in
 #   backticks is no gate. So: backticked AND empty is a quotation; anything

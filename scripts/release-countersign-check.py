@@ -3,7 +3,8 @@
 
 A Governed restore waits for an approver who runs `logweir drill countersign`
 on their own machine, with the CLI from the release archive for that machine
-and a key that never leaves it (docs/kubernetes.md, *Approval policy*). The
+and a key that never leaves it (docs/kubernetes.md, *Strict: approving out of
+band*). The
 release cannot hold that key, so this script proves the shipped binary can
 perform the step with THROWAWAY keys instead:
 

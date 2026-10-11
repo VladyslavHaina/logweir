@@ -2603,7 +2603,7 @@ fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
         12,
         "the withdrawn standing authorization adds one refusal to the eleven existing reasons. \
          Another variant must update this count AND \
-         docs/kubernetes.md §8, which is the one place they are all named."
+         docs/reference.md (`Approval`), which is the one place they are all named."
     );
 }
 
@@ -2876,7 +2876,7 @@ fn the_approval_reconcile_requeues_at_its_keys_not_after() {
 
 /// **THE VERDICT WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**.
 ///
-/// `charts/logweir/README.md:53` says every status write in this crate is a
+/// `charts/logweir/README.md:59-60` says every status write in this crate is a
 /// `resourceVersion`-preconditioned merge PATCH, and this one was not: it went
 /// out with no `metadata` at all. Two passes over one `Approval` can overlap —
 /// the `min(10 m, notAfter)` re-check is exactly what makes that likely — and

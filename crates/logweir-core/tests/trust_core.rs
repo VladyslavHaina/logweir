@@ -520,7 +520,7 @@ fn may_sign_new_refuses_for_each_reason_separately() {
         may_sign_new(Some(&expired()), KeyUsage::EvidenceSigning, now()),
         Err(SigningRefusal::KeyIdExpired),
         "`KeyIdExpired` keeps the spelling today's roster path writes onto \
-         status.conditions[type=Verified].reason and that docs/kubernetes.md §8 lists"
+         status.conditions[type=Verified].reason and that docs/reference.md lists"
     );
     assert_eq!(
         may_sign_new(Some(&retired()), KeyUsage::EvidenceSigning, now()),

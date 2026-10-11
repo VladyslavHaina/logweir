@@ -193,7 +193,7 @@ docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir
 
 Retagging cannot make newly built bytes match an older compiled digest. Prefer
 a controller built from the checkout and the override above. See
-[kubernetes.md](kubernetes.md) §14 for the recorded image-resolution findings.
+[kubernetes.md](kubernetes.md#images) for what `ErrImageNeverPull` means.
 
 A local build is **author-only** and **never satisfies spec §16 clause 1**,
 including a local `registry:2` fallback: it does not prove public pullability.

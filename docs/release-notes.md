@@ -524,8 +524,8 @@ coverage onto `Restore.status.integrity`, read by a `COVERAGE` printer column.
 The console's restore wizard offers complete coverage as a closed advanced
 choice with its cost, never as the default, and its lists say sampled or
 complete. The runner's metrics gain `logweir_drill_integrity_coverage` and
-`logweir_drill_integrity_complete_covered` ([kubernetes.md](kubernetes.md) §12
-*Complete coverage*, [api.md](api.md#the-restores-coverage-prod-081a),
+`logweir_drill_integrity_complete_covered` ([kubernetes.md](kubernetes.md#coverage-sampled-or-complete),
+[api.md](api.md#the-restores-coverage-prod-081a),
 [metrics.md](metrics.md)). **`covered: false` is never a pass, anywhere:** the
 `Verified` condition reads `CompleteNotCovered`, the API's `verifiedSuccess`
 and the console refuse it, and `logweir_drill_integrity_complete_covered` is 0.
@@ -819,8 +819,8 @@ body a byte at a time, kept a connection. So:
 **Do:** before `helm upgrade`, a shared console the chart publishes through its
 Ingress names its trusted proxy, `api.console.trustedProxyService:
 {namespace, name}` of the ingress controller's Service (`/readyz` then depends on
-reading its EndpointSlices: [api.md](api.md), *The ingress controller by its
-Service*), or opts out with `api.console.trustedProxy: none`; otherwise the
+reading its EndpointSlices: [api.md](api.md#configuration),
+`trustedProxyService`), or opts out with `api.console.trustedProxy: none`; otherwise the
 render fails, naming the value. A shared console without the chart's Ingress
 should set `trustedProxyService` too. Name any other proxy that carries many
 clients (an L7 load balancer, a second ingress), or they share 32 connections;
@@ -855,7 +855,7 @@ The last verdict stands **for at most 630 s** (twice the 315 s re-probe
 interval). A probe Job stuck mid-deletion or never collected then clears
 `reachable` with the new reason `ProbeStale` (`Reachable=Unknown`, `observedAt`
 and `clusterId` kept), logged once, so a `Restore` is refused
-`ClusterNotReachable` ([kubernetes.md](kubernetes.md), *The crashed Job*).
+`ClusterNotReachable` ([kubernetes.md](kubernetes.md#saved-connections)).
 **Do:** nothing is required. A `KafkaCluster probe reconcile failed` WARN now
 means a real failure. A connection that reads `ProbeStale` has a probe Job
 Kubernetes has not collected: look for a pod stuck `Terminating` or a finalizer
@@ -1247,7 +1247,7 @@ The maximum is lower than it was: a dynamic selection resolved up to 5,000
 names, and a 5,000-topic receipt (about 15 MB) no relay carries.
 **Do, before the upgrade:** find every `Backup` and `BackupSchedule` that
 names, or last resolved to, more than 1,000 topics with the two commands in
-[kubernetes.md](kubernetes.md) §7b.5, and split each across schedules; after
+[kubernetes.md](kubernetes.md#upgrade), and split each across schedules; after
 the upgrade such an object is **refused by name at each run**. An older point
 over its bound (about 1,650 topics or more) is listed `Unreadable` and not
 offered; `logweir restore` and `logweir verify` still read it.
@@ -1633,7 +1633,7 @@ In addition to the next entry's six, in its order.
   on v1.
 - **Split every `Backup` and `BackupSchedule` that names or resolves to more
   than 1,000 topics** (item 65); the two commands in
-  [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
+  [kubernetes.md](kubernetes.md#upgrade) find them. After the upgrade such a
   selection is refused by name at each run.
 - **Apply the CRDs first**, as the next entry's step 6 orders: items 33, 38,
   43, 50, 51, 56, 58 and 64 add fields the controller writes or reads.
@@ -2656,16 +2656,15 @@ upgrading the controller*).
 
 1. Set every `RetentionPolicy` to `mode: Report`, wait for `status.lease` to
    clear and any enforcement Job to finish (items 2 and 3;
-   [kubernetes.md](kubernetes.md) §7f, *Upgrade and rollback*).
+   [kubernetes.md](kubernetes.md#rolling-back)).
 2. Delete `Preflight` objects with `operation: SourceConnection`: an older
    controller cannot decode them and stops reconciling every `Preflight`
-   ([kubernetes.md](kubernetes.md) §21.0).
+   ([kubernetes.md](kubernetes.md#rolling-back)).
 3. If rolling back past Amendment G, delete every `Approval` whose
-   `spec.subjectRef.kind` is `RehearsalSchedule` first ([kubernetes.md](kubernetes.md)
-   §12, *The one widening that is NOT rollback-safe*).
+   `spec.subjectRef.kind` is `RehearsalSchedule` first ([kubernetes.md](kubernetes.md#rolling-back)).
 4. Let destination-backed and `v2`-frozen `Backup`s finish; an older controller
-   refuses them terminally rather than running them ([kubernetes.md](kubernetes.md)
-   §10, *Backups created under the previous execution contract*). Rolling the
+   refuses them terminally rather than running them
+   ([kubernetes.md](kubernetes.md#rolling-back)). Rolling the
    runner back to a build without the execution claim, let EVERY in-flight
    `Backup` finish first (item 11): on an unversioned bucket a re-created Job's
    older runner rewrites the set's segments under an unchanged manifest, and no

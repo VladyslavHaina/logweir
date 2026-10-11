@@ -40,15 +40,15 @@
 /// AND IT IS STILL `blocked: images not published` (Global Constraint 37). "Published"
 /// means a PULL from a registry the author does not control, and this digest
 /// names bytes that exist on exactly one laptop. Two things were MEASURED on
-/// docker-desktop v1.34.1 and are written into `docs/kubernetes.md` §14 rather
-/// than assumed:
+/// docker-desktop v1.34.1 rather than assumed (the command is in
+/// `docs/install.md`):
 ///
 ///   * a pod referencing this exact string with `imagePullPolicy: Never`
 ///     **does start**, once `docker tag logweir:check <this repository>:v0.1.0`
 ///     has put the image under that repository name locally — the kubelet keys
 ///     on the WHOLE reference, and a matching digest alone does not make the
-///     repository name resolve. The exact command is in `docs/kubernetes.md`
-///     §14, which is not under `crates/` and may therefore spell the name out;
+///     repository name resolve. The exact command is in `docs/install.md`,
+///     which is not under `crates/` and may therefore spell the name out;
 ///     this file may not, because the registry path appears here EXACTLY ONCE
 ///     by construction (`crd_shape.rs::the_runner_image_is_named_once`);
 ///   * the digest a locally built image reports **changes on every build**,
@@ -88,7 +88,7 @@ pub const RUNNER_IMAGE: &str =
 /// so `tests/crd_shape.rs::the_runner_image_is_named_once` still finds the
 /// runner image named exactly once under `crates/` — in [`RUNNER_IMAGE`]
 /// above. The literal default is spelt out only outside `crates/`
-/// (`docs/kubernetes.md` §14, `scripts/demo-steps.sh`).
+/// (`docs/install.md`, `scripts/demo-steps.sh`).
 pub const RUNNER_IMAGE_ENV: &str = "LOGWEIR_RUNNER_IMAGE";
 
 /// [`RUNNER_IMAGE_ENV`]'s value as a decision: `Some(image)` or "unset".
@@ -145,8 +145,9 @@ pub const CONTAINER_NAME: &str = "runner";
 ///
 /// `OnFailure` is not a milder choice, it is a destructive one: the job
 /// controller restarts the container in place and then DELETES the pod
-/// (measured live, `docs/kubernetes.md` §1), and since the exit code lives
-/// only on the pod object it is not buried in `lastState` — it is gone. A
+/// (measured live; `docs/kubernetes.md`, *Running the CLI as a CronJob*),
+/// and since the exit code lives only on the pod object it is not buried in
+/// `lastState` — it is gone. A
 /// drill that found a real problem would leave behind no evidence of which
 /// problem it was.
 pub const RESTART_POLICY: &str = "Never";
@@ -232,7 +233,7 @@ pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 /// did not change**, which is the point: the two are separate decisions.
 /// Measured with the digest in place — `ErrImageNeverPull`, with the message
 /// naming the whole reference, until the image is tagged into that repository
-/// name locally; then the pod starts (`docs/kubernetes.md` §14).
+/// name locally; then the pod starts (`docs/install.md`).
 ///
 /// **TASK 33 MADE THE IMAGE OVERRIDABLE AND DELIBERATELY LEFT THIS ALONE —
 /// AND TASK 37 CHANGED THAT. This is the history and the reason.** Task 33's
