@@ -1,10 +1,9 @@
-//! **PROD-04.0b: which consumer groups Logweir may capture, and why each other
-//! one is excluded or failed** (`docs/to-do/decisions/PROD-04.0-admin-path.md`
-//! §4 #1–#2, §5, §6). Pure: the values arrive from librdkafka through
+//! **Which consumer groups Logweir may capture, and why each other one is
+//! excluded or failed.** Pure: the values arrive from librdkafka through
 //! `logweir-rdkafka-ffi` and `crate::rdkafka_admin` (feature `client`), and
 //! every rule below is unit-tested with no broker.
 //!
-//! # The rules, as the record says them
+//! # The rules
 //!
 //! Every selected id gets exactly ONE [`GroupVerdict`]. Nothing is dropped,
 //! and no verdict carries a position: absence is never offset 0.
@@ -45,13 +44,13 @@
 //!   whose result carries per-broker errors is NOT complete, even though the
 //!   call as a whole succeeded (measured: with no broker reachable, librdkafka
 //!   answers `Ok` with no group and one `_TIMED_OUT` entry).
-//! - **T19 (found by PROD-04.0b).** librdkafka's legacy name listing keeps
+//! - **T19.** librdkafka's legacy name listing keeps
 //!   only the LAST broker's error (`rdkafka.c:5028`, `:5119` in rdkafka-sys
 //!   4.10.0+2.12.1), so on a cluster of several brokers it can lose a broker's
 //!   groups and still answer success. Every id of the typed listing must
 //!   therefore appear in the name listing, or the listings are not complete.
 //!   It cannot catch a lost broker that coordinates only share or streams
-//!   groups: a limit stated in the decision record.
+//!   groups: a known limit.
 //! - **T18's class (bytes that are not text).** An id that is not UTF-8 is
 //!   never matched, never lossily converted: it is counted
 //!   ([`GroupListings::unreadable_ids`]) and reported.
@@ -129,8 +128,7 @@ pub enum GroupState {
     /// `Empty`.
     Empty,
     /// librdkafka's Unknown (0), or a value beyond its enum. KIP-848's
-    /// `Assigning` and `Reconciling` arrive as this (C6). Treated as ACTIVE
-    /// (T4, AP-04.1-5, AP-04.2-5).
+    /// `Assigning` and `Reconciling` arrive as this. Treated as ACTIVE (T4).
     UnknownToClient {
         /// The integer librdkafka returned.
         raw: u32,
@@ -360,7 +358,7 @@ pub enum Absence {
 pub enum GroupFailure {
     /// No listing shows it and a targeted describe was refused with
     /// GROUP_AUTHORIZATION_FAILED: it may exist, and this principal may not
-    /// see it. Never "not found" (T14, AP-04.1-6).
+    /// see it. Never "not found" (T14).
     NotVisibleToPrincipal,
     /// The listings contradict themselves or the targeted describe: the same
     /// id typed two ways (T6), or a live group no listing showed (it appeared
@@ -371,8 +369,7 @@ pub enum GroupFailure {
     /// (a typed-listing error, `_PARTIAL`, or T19's mismatch), not only
     /// because of this principal's filtering. On a lost broker the stand-in
     /// cannot tell an absent id from a share or streams group that broker
-    /// coordinates (both answer "Classic, Dead", §3.1), so absence is not
-    /// proven (PROD-04.0b review L1).
+    /// coordinates (both answer "Classic, Dead"), so absence is not proven.
     AbsenceUnproven(String),
     /// Only the name listing shows it, but the TYPED listing lost a broker:
     /// a classic or consumer group that broker coordinates is then missing
@@ -401,7 +398,7 @@ pub enum GroupVerdict {
 }
 
 /// The default bound of one admin call (DescribeCluster, a listing, a
-/// description): the 15 s PROD-04.0 measured its calls with.
+/// description): 15 s, the bound the admin calls were measured with.
 pub const DEFAULT_ADMIN_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One classification: a verdict per selected id, and the evidence behind
@@ -453,9 +450,9 @@ pub enum DescribeAnswer {
     CallFailed(String),
 }
 
-/// **§5 for every selected id, given the listings and a describe call**: the
-/// whole decision, pure, so it is unit-tested with a fake `describe`
-/// (PROD-04.0b review L3). `describe` is called once, with exactly the ids
+/// **The rules for every selected id, given the listings and a describe
+/// call**: the whole decision, pure, so it is unit-tested with a fake
+/// `describe`. `describe` is called once, with exactly the ids
 /// [`GroupListings::needs_targeted_describe`] names, and only when there are
 /// any; an id it does not answer fails, it is never assumed absent.
 ///
@@ -596,10 +593,10 @@ impl GroupListings {
             .collect()
     }
 
-    /// **§5, for every selected id**: one verdict each, in `selected`'s order
-    /// (duplicates already collapsed by [`selected_ids`]). `targeted` holds
-    /// the answer for each id [`Self::needs_targeted_describe`] named; an id
-    /// that needed one and has none fails, it is never assumed absent.
+    /// **The rules, for every selected id**: one verdict each, in `selected`'s
+    /// order (duplicates already collapsed by [`selected_ids`]). `targeted`
+    /// holds the answer for each id [`Self::needs_targeted_describe`] named; an
+    /// id that needed one and has none fails, it is never assumed absent.
     #[must_use]
     pub fn classify(
         &self,
@@ -610,7 +607,7 @@ impl GroupListings {
         let names: BTreeSet<&str> = self.names.iter().map(|n| n.group_id.as_str()).collect();
         let completeness = self.completeness();
         let complete = completeness == ListingCompleteness::Complete;
-        // The stand-in proves absence only against FILTERING (§3.9): when
+        // The stand-in proves absence only against FILTERING: when
         // every reason the listings are incomplete is about this principal's
         // visibility, a describable id would have been listed.
         let lost: Vec<String> = match &completeness {
@@ -687,8 +684,8 @@ fn targeted_verdict(answer: Option<&TargetedAnswer>, lost: &[String]) -> GroupVe
             message: why.clone(),
         }),
         // The classic stand-in, answered without error: the id is describable,
-        // so a FILTERED listing would have shown a group of that id (§3.9).
-        // A listing that lost a broker would not have: no proof (review L1).
+        // so a FILTERED listing would have shown a group of that id. A listing
+        // that lost a broker would not have: no proof.
         Some(TargetedAnswer::Described {
             state: code::STATE_DEAD,
             group_type: code::TYPE_CLASSIC,
@@ -912,7 +909,7 @@ mod tests {
         }
     }
 
-    /// AP-04.1-1 over recorded rows. Mutants killed: classifying from the
+    /// Over recorded rows. Mutants killed: classifying from the
     /// typed listing alone (drops share and streams, T3); typing an absent id
     /// from a describe (T2); a verdict count that is not one per id.
     #[test]
@@ -960,7 +957,7 @@ mod tests {
         );
     }
 
-    /// T14 and AP-04.1-6. Mutants killed: calling an unlisted id absent on a
+    /// T14. Mutants killed: calling an unlisted id absent on a
     /// filtered listing; reading a targeted 30 as absent; reading "not
     /// reported" as complete; assuming absence when the targeted answer is
     /// missing.
@@ -1064,9 +1061,9 @@ mod tests {
         }
     }
 
-    /// T4 and AP-04.1-5 / AP-04.2-5. Mutants killed: Unknown read as Empty
-    /// (inactive); a raw state beyond the enum panicking or mapping to a
-    /// named state; an Unknown type captured.
+    /// T4. Mutants killed: Unknown read as Empty (inactive); a raw state beyond
+    /// the enum panicking or mapping to a named state; an Unknown type
+    /// captured.
     #[test]
     fn an_unknown_state_is_active_and_an_unknown_type_is_other() {
         assert_eq!(
@@ -1196,8 +1193,8 @@ mod tests {
         );
     }
 
-    /// L1 of the PROD-04.0b review. Mutant killed: reading the classic
-    /// stand-in as absence when the listings lost a broker.
+    /// The stand-in proves absence only against filtering. Mutant killed:
+    /// reading the classic stand-in as absence when the listings lost a broker.
     #[test]
     fn the_stand_in_proves_absence_only_against_filtering() {
         let stand_in = TargetedAnswer::Described {
@@ -1240,8 +1237,8 @@ mod tests {
         assert!(!IncompleteReason::NameListingMissesTypedGroups(vec![]).is_visibility());
     }
 
-    /// The type-side twin of L1. Mutant killed: reading "names only" as
-    /// "other type" when the typed listing lost a broker.
+    /// The type-side twin of the stand-in rule. Mutant killed: reading "names
+    /// only" as "other type" when the typed listing lost a broker.
     #[test]
     fn other_type_is_proven_only_by_a_typed_listing_that_lost_no_broker() {
         let mut lost = fixture(all_ops());
@@ -1257,10 +1254,9 @@ mod tests {
         assert!(matches!(v[1].1, GroupVerdict::Capture(_)));
     }
 
-    /// L3 of the PROD-04.0b review: the glue's whole decision, with a fake
-    /// describe. Mutants killed: skipping the describe; calling it on a
-    /// complete listing; describing listed ids; reading a missing answer or
-    /// a failed call as absence.
+    /// The glue's whole decision, with a fake describe. Mutants killed:
+    /// skipping the describe; calling it on a complete listing; describing
+    /// listed ids; reading a missing answer or a failed call as absence.
     #[test]
     fn classify_with_describes_exactly_the_unlisted_ids_and_maps_every_answer() {
         // Complete: the describe is never called.

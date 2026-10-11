@@ -3,8 +3,8 @@
 //!
 //! # The class this closes
 //!
-//! PROD-01.3 bound a `KafkaCluster`'s credential Secret to the connection that
-//! names it ([`crate::connection::credential_binding`]). The same confused
+//! A `KafkaCluster`'s credential Secret is bound to the connection that names
+//! it ([`crate::connection::credential_binding`]). The same confused
 //! deputy exists wherever a writable object names a credential Secret BESIDE an
 //! endpoint its author chooses:
 //!
@@ -21,7 +21,7 @@
 //! access key id, a replayable signature and any session token in clear
 //! headers.
 //!
-//! # The rule, unchanged from PROD-01.3
+//! # The rule, the same as a connection's
 //!
 //! A credential Secret is used only when it carries, under
 //! [`CREDENTIAL_BINDING_KEY`], the binding the CONTROLLER computed for the
@@ -58,7 +58,7 @@
 //!   credential, but only at that location, which is what a
 //!   `BackupDestination` in the same namespace already allows. The region is
 //!   ALSO refused outright when it is not a region name
-//!   ([`crate::guard::reject_invalid_storage_region`]), FX-20's fix round F1.
+//!   ([`crate::guard::reject_invalid_storage_region`]).
 
 use crate::destination::DestinationRole;
 use crate::engine::StorageUrl;
@@ -70,7 +70,7 @@ pub use crate::connection::{
 
 /// The expected value a controller projects when it cannot compute a binding
 /// (no UID). No Secret can carry it by accident, so the credential is refused:
-/// FAIL CLOSED. The same spelling PROD-01.3's connection projection uses.
+/// FAIL CLOSED. The same spelling the connection projection uses.
 pub const UNBOUND_NO_UID: &str = "unbound:no-uid";
 
 /// The projected binding of the credential in `AWS_ACCESS_KEY_ID`,
@@ -220,16 +220,15 @@ fn binding(subject: &str, kind: &str, lines: &[(&str, &str)]) -> String {
 /// request goes and how, in a fixed order. `with_prefix` is `false` for an
 /// inline archive, whose binding is the location and not the key space.
 ///
-/// **EVERY S3 FIELD BUT THE PREFIX IS IN BOTH FORMS** (FX-20 fix round,
-/// review F1). The location form once kept only scheme, bucket and endpoint;
-/// but with no endpoint `object_store` builds the host from the REGION
-/// (`s3.<region>.amazonaws.com`), so a plan keeping the victim's bucket and
-/// naming `region: "x@attacker/"` carried the victim's binding to the
-/// attacker's host. The addressing style decides whether the bucket is a host
-/// label, and `allowHttp` whether the request may travel in the clear, so
-/// they are bound too. The prefix only names keys under the bound bucket on
-/// the bound host (`object_store` encodes each path segment), which is why an
-/// inline location leaves it out.
+/// **EVERY S3 FIELD BUT THE PREFIX IS IN BOTH FORMS.** With no endpoint
+/// `object_store` builds the host from the REGION
+/// (`s3.<region>.amazonaws.com`), so a binding without it would let a plan
+/// keeping the victim's bucket and naming `region: "x@attacker/"` carry the
+/// victim's binding to the attacker's host. The addressing style decides
+/// whether the bucket is a host label, and `allowHttp` whether the request may
+/// travel in the clear, so they are bound too. The prefix only names keys under
+/// the bound bucket on the bound host (`object_store` encodes each path
+/// segment), which is why an inline location leaves it out.
 fn route_lines(storage: &StorageUrl, with_prefix: bool) -> Vec<(&'static str, String)> {
     match storage {
         StorageUrl::S3 {
@@ -436,7 +435,7 @@ mod tests {
 
     #[test]
     fn the_location_binding_covers_the_region_and_every_url_field_but_never_the_prefix() {
-        // Review F1's probe shape: the victim's bucket, no endpoint, and a
+        // The victim's bucket, no endpoint, and a
         // region that is a host injection. Each S3 field that shapes the URL
         // or its transport moves the binding.
         let aws = archive_location_binding(&s3("victim-backups", "team-a", None));
@@ -508,7 +507,7 @@ mod tests {
 
     #[test]
     fn no_binding_kind_can_collide_with_a_kafka_connections() {
-        // PROD-01.3's canonical form has no `kind=` line, so no digest of
+        // The connection's canonical form has no `kind=` line, so no digest of
         // this module can equal a connection's for the same UID.
         let auth = crate::spec::AuthSpec::default();
         let kafka = crate::connection::credential_binding("uid-1", &[], &auth, None);
@@ -594,7 +593,7 @@ mod tests {
         let refusal = check_grant_binding(DestinationRole::ArchiveWrite, &map(vec![(p, "v1:a")]))
             .unwrap_err();
         assert_eq!(refusal.binding_env, p);
-        // A BLANK expectation is the same lost half (review LOW-4), even
+        // A BLANK expectation is the same lost half, even
         // beside a Secret that carries a blank binding too.
         for blank in ["", "  "] {
             assert!(
@@ -649,13 +648,13 @@ mod tests {
         }
     }
 
-    /// FX-20c review LOW-2: EVERY binding refusal text tells the operator to
+    /// EVERY binding refusal text tells the operator to
     /// give the refused object its OWN Secret, and none tells them to write
     /// the refused object's binding into the Secret it named — which, when
     /// that Secret is another object's, hands this one the credential.
     ///
-    /// KILLS: the first landing's "add the key with the value in … status.
-    /// credentialBinding" and "Set the key to the route's entry …" texts.
+    /// KILLS: a text such as "add the key with the value in … status.
+    /// credentialBinding" or "Set the key to the route's entry …".
     #[test]
     fn no_binding_refusal_tells_anyone_to_bind_the_refused_secret_here() {
         let vars = [
@@ -677,8 +676,8 @@ mod tests {
                 for forbidden in ["add the key", "Set the key", "set the Secret's"] {
                     assert!(!text.contains(forbidden), "{var}: `{forbidden}` in {text}");
                 }
-                // The Kafka connection's FOREIGN text is PROD-01.3's, which
-                // already sends the operator to enter the credential again.
+                // The Kafka connection's FOREIGN text already sends the
+                // operator to enter the credential again.
                 let kafka_foreign = !absent
                     && !var.starts_with("LOGWEIR_ARCHIVE_")
                     && !var.starts_with("LOGWEIR_EVIDENCE_");

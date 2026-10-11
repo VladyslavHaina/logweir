@@ -1,4 +1,4 @@
-//! **PROD-04.0a: a consumer group's committed positions, read and written
+//! **A consumer group's committed positions, read and written
 //! through the safe consumer API.** The types and the decisions, with no
 //! broker and no rdkafka, so they are available under
 //! `--no-default-features` and every rule below is unit-testable. The
@@ -6,33 +6,31 @@
 //! through [`RdKafkaReader::committed_positions`] and
 //! [`RdKafkaReader::commit_positions`].
 //!
-//! The contract is PROD-04.0's (`docs/to-do/decisions/PROD-04.0-admin-path.md`),
-//! §4.2, §4.3 and §5:
+//! The contract:
 //!
 //! - **Absence is never offset 0.** A partition the broker answers with "no
 //!   committed offset" (wire −1, librdkafka [`NO_COMMITTED_OFFSET_RAW`],
 //!   rust-rdkafka `Offset::Invalid`) is [`PartitionPosition::NoCommittedPosition`].
-//!   An ABSENT group and a SHARE group answer exactly that too (K7), so a
-//!   caller classifies the group (§5) before it reads anything into it.
+//!   An ABSENT group and a SHARE group answer exactly that too, so a
+//!   caller classifies the group before it reads anything into it.
 //! - **One RequireStable fetch per group.** The handle reads with
 //!   `isolation.level=read_committed`, so librdkafka sets RequireStable and
 //!   retries a partition answering UNSTABLE_OFFSET_COMMIT until the bound
 //!   expires. A pending transactional offset commit therefore surfaces as the
-//!   WHOLE call timing out, with no partition named (§3.4), and the unit of
+//!   WHOLE call timing out, with no partition named, and the unit of
 //!   [`PositionsError::PositionsUnstable`] is the group.
-//! - **The same timeout means something else for a group no listing shows**
-//!   (§5): [`PositionsError::NotVisibleOrUnreachable`]. The caller says which
-//!   case it is in with [`GroupListing`]; the safe fetch cannot know.
+//! - **The same timeout means something else for a group no listing
+//!   shows**: [`PositionsError::NotVisibleOrUnreachable`]. The caller says
+//!   which case it is in with [`GroupListing`]; the safe fetch cannot know.
 //! - **A non-member commit.** Generation −1 and an empty member id, from a
 //!   handle that never joins: the broker refuses it for the WHOLE request
-//!   while the group has members (UNKNOWN_MEMBER_ID, K3), which is the atomic
-//!   liveness guard PROD-04.2 relies on. Codes map as §4.3 says
-//!   ([`commit_error`]).
+//!   while the group has members (UNKNOWN_MEMBER_ID), which is the atomic
+//!   liveness guard a positions apply relies on. Codes map as
+//!   [`commit_error`] says.
 //! - **Leader epochs.** Carried where the route exposes them: the safe API
-//!   exposes none on a read (C3), so [`CommittedPosition::leader_epoch`] is
+//!   exposes none on a read, so [`CommittedPosition::leader_epoch`] is
 //!   `None` there, never a guessed −1; every commit carries
-//!   [`COMMIT_LEADER_EPOCH`] (−1), never a captured source epoch (§4.3,
-//!   AP-04.2-4).
+//!   [`COMMIT_LEADER_EPOCH`] (−1), never a captured source epoch.
 //!
 //! [`RdKafkaReader::committed_positions`]: crate::rdkafka_reader::RdKafkaReader::committed_positions
 //! [`RdKafkaReader::commit_positions`]: crate::rdkafka_reader::RdKafkaReader::commit_positions
@@ -47,18 +45,18 @@ use std::time::Duration;
 pub const NO_COMMITTED_OFFSET_RAW: i64 = -1001;
 
 /// The leader epoch every commit carries: −1, "unknown". A source cluster's
-/// leader epoch means nothing on a target cluster (§4.3), and −1 is also the
-/// only value the safe API can send (C3: rust-rdkafka 0.36.2 has no setter;
+/// leader epoch means nothing on a target cluster, and −1 is also the
+/// only value the safe API can send (rust-rdkafka 0.36.2 has no setter;
 /// librdkafka's default for a new list element is −1).
 pub const COMMIT_LEADER_EPOCH: i32 = -1;
 
-/// The metadata string every commit carries: Logweir's own marker (§4.3), so
+/// The metadata string every commit carries: Logweir's own marker, so
 /// a position Logweir wrote is recognisable in a readback. Never the captured
 /// source metadata, which belongs to the source application.
 pub const COMMIT_METADATA_MARKER: &str = "logweir:positions";
 
-/// The default bound of one fetch or one commit wait: the 15 s PROD-04.0
-/// measured its timeouts with (§3.4, §3.9).
+/// The default bound of one fetch or one commit wait: 15 s, the bound the
+/// admin calls were measured with.
 pub const DEFAULT_POSITION_BOUND: Duration = Duration::from_secs(15);
 
 /// The smallest bound a handle accepts. The commit's wait for a coordinator is
@@ -141,9 +139,9 @@ pub struct CommittedPosition {
     pub offset: i64,
     /// The committed leader epoch, where the route that read it exposes one.
     /// `None` means NOT EXPOSED, never "−1": rust-rdkafka 0.36.2's
-    /// `TopicPartitionList` has no leader-epoch accessor (PROD-04.0 C3), so a
+    /// `TopicPartitionList` has no leader-epoch accessor, so a
     /// read through the safe API is always `None`. A later route that reads
-    /// it (O2's ListConsumerGroupOffsets) fills it, −1 included.
+    /// it (ListConsumerGroupOffsets) fills it, −1 included.
     pub leader_epoch: Option<i32>,
     /// The committed metadata string. `None` when it is not valid UTF-8:
     /// rust-rdkafka's `TopicPartitionListElem::metadata` panics on such bytes
@@ -160,7 +158,7 @@ pub enum PartitionPosition {
     Committed(CommittedPosition),
     /// The broker answered "no committed offset" for this partition. NEVER
     /// offset 0. An absent group and a share group answer this for every
-    /// partition (K7): classify the group before reading meaning into it.
+    /// partition: classify the group before reading meaning into it.
     NoCommittedPosition,
     /// This partition's answer carried an error, or a value that is not a
     /// position.
@@ -172,7 +170,7 @@ pub enum PartitionPosition {
 pub enum PartitionFailure {
     /// TOPIC_AUTHORIZATION_FAILED (29): the principal may not Describe the
     /// topic. The explicit-partition fetch names the refusal; an
-    /// all-partitions fetch would drop the topic silently (T15).
+    /// all-partitions fetch would drop the topic silently.
     TopicNotAuthorized,
     /// UNSTABLE_OFFSET_COMMIT (88), answered for this partition after
     /// librdkafka's own retries: a transactional offset commit is pending.
@@ -192,7 +190,7 @@ pub enum PartitionFailure {
 pub enum GroupListing {
     /// A listing the caller made shows this group id.
     Listed,
-    /// No listing the caller made shows this id: the fetch is §5's targeted
+    /// No listing the caller made shows this id: the fetch is the targeted
     /// probe. An answer with no error means the id is describable and absent
     /// (or holds no position on these partitions); a timeout means it may
     /// exist and be hidden from this principal.
@@ -232,7 +230,7 @@ pub enum PositionsError {
     /// The bounded RequireStable fetch of a LISTED group got no answer: a
     /// pending transactional offset commit, an unavailable coordinator, or a
     /// group this principal may not see. The safe route gives the same timeout
-    /// for all three (§3.4, §3.9), so every requested partition of the group
+    /// for all three, so every requested partition of the group
     /// is unstable, and no position is reported, never the pre-transaction one.
     #[error(
         "{group}: positions unstable: no answer within {bound:?} (pending transactional \
@@ -241,7 +239,7 @@ pub enum PositionsError {
     PositionsUnstable { group: String, bound: Duration },
     /// The bounded fetch of a group NO LISTING SHOWS got no answer: it may
     /// exist and be hidden from this principal, or its coordinator may be
-    /// unreachable (§5). Never "not found".
+    /// unreachable. Never "not found".
     #[error(
         "{group}: not visible or unreachable: no answer within {bound:?} for a group no listing \
          shows (it may exist and be hidden from this principal)"
@@ -249,7 +247,7 @@ pub enum PositionsError {
     NotVisibleOrUnreachable { group: String, bound: Duration },
     /// The broker refused this principal on the group (GROUP_AUTHORIZATION_FAILED,
     /// 30), as a fetch answer or as the coordinator lookup's refusal, on a
-    /// group a listing shows (§5: "NotAuthorized (30 on a listed id)").
+    /// group a listing shows.
     #[error("{group}: not authorized on the group (GROUP_AUTHORIZATION_FAILED)")]
     NotAuthorized { group: String },
     /// As [`Self::NotAuthorized`], for a group no listing shows: it may exist,
@@ -448,7 +446,7 @@ const NOTHING_APPLIED: &[i32] = &[
     code::STALE_MEMBER_EPOCH,
 ];
 
-/// What a failed synchronous commit means (§4.3), from its code and whether
+/// What a failed synchronous commit means, from its code and whether
 /// the handle's queue carried a GROUP_AUTHORIZATION_FAILED refusal of the
 /// coordinator lookup.
 ///
@@ -504,7 +502,7 @@ pub struct CommitEntry {
 /// Only each position's OFFSET is committed. Its leader epoch is replaced by
 /// [`COMMIT_LEADER_EPOCH`] and its metadata by [`COMMIT_METADATA_MARKER`]:
 /// the positions a caller commits were usually captured on another cluster,
-/// whose epochs and application metadata do not describe this one (§4.3).
+/// whose epochs and application metadata do not describe this one.
 ///
 /// Refused: an empty request (librdkafka would answer `_NO_OFFSET`); an empty
 /// topic name; a negative partition; a negative offset (librdkafka silently
@@ -606,9 +604,7 @@ pub fn valid_bound(bound: Duration) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
-    //! The PROD-04.0a mapping, row by row. Each test names the mutant it
-    //! kills; `scratchpad/prod-04-0a/mutants.py` in the worker's report runs
-    //! them.
+    //! The mapping, row by row. Each test names the mutant it kills.
     use super::*;
 
     const B: Duration = Duration::from_secs(9);
@@ -625,8 +621,8 @@ mod tests {
         }
     }
 
-    /// **Absence is never offset 0** (AP-04.1-2's mutant: "mapping
-    /// `Offset::Invalid` (−1001) to 0"). −1001 is "no committed offset"; 0 is
+    /// **Absence is never offset 0** (mutant: mapping `Offset::Invalid` (−1001)
+    /// to 0). −1001 is "no committed offset"; 0 is
     /// a real position and stays one, so the two can never be confused.
     #[test]
     fn no_committed_offset_is_never_position_zero() {
@@ -667,7 +663,7 @@ mod tests {
     }
 
     /// Per-partition codes win over whatever offset sits beside them: a
-    /// refused topic (T15) and a pending transaction never read as positions.
+    /// refused topic and a pending transaction never read as positions.
     #[test]
     fn a_partition_error_is_never_read_as_a_position() {
         for raw in [7, NO_COMMITTED_OFFSET_RAW] {
@@ -689,7 +685,7 @@ mod tests {
         }
     }
 
-    /// §4.2 and §5: a timeout is `PositionsUnstable` for a listed group and
+    /// A timeout is `PositionsUnstable` for a listed group and
     /// `NotVisibleOrUnreachable` for an unlisted one; a group refusal is
     /// `NotAuthorized` or `NotVisibleToPrincipal`. Mutants: swapping the two
     /// listings, ignoring the refusal, or calling a timeout "not found" (an
@@ -765,9 +761,9 @@ mod tests {
         }
     }
 
-    /// §4.3's table, exactly. Mutants: 25 to anything but `GroupActive`, 69 to
-    /// anything but `NotAConsumerGroup`, 30 to anything but `NotAuthorized`,
-    /// `_WAIT_COORD` to `Failed` or to "applied".
+    /// The commit-code table, exactly. Mutants: 25 to anything but
+    /// `GroupActive`, 69 to anything but `NotAConsumerGroup`, 30 to anything
+    /// but `NotAuthorized`, `_WAIT_COORD` to `Failed` or to "applied".
     #[test]
     fn commit_codes_map_as_section_4_3_says() {
         assert_eq!(
@@ -860,7 +856,7 @@ mod tests {
         }
     }
 
-    /// **AP-04.2-4: every committed position carries leader epoch −1 and
+    /// **Every committed position carries leader epoch −1 and
     /// Logweir's marker, never the captured source epoch or metadata.**
     /// Mutants: copying the captured epoch (`7` here), or the captured
     /// metadata.

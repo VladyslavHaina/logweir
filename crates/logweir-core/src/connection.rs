@@ -58,9 +58,7 @@ impl std::fmt::Display for TlsCaWithoutTls {
 
 impl std::error::Error for TlsCaWithoutTls {}
 
-// ---------------------------------------------------------------------------
 // The auth-mode vocabulary, and the two transport refusals.
-// ---------------------------------------------------------------------------
 
 /// `plaintext`: no SASL, no TLS.
 pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
@@ -83,10 +81,10 @@ pub const AUTH_MODE_MTLS: &str = "mtls";
 /// else.
 pub const ORIGINAL_AUTH_MODES: [&str; 2] = [AUTH_MODE_PLAINTEXT, AUTH_MODE_SCRAM_SHA_512];
 
-/// The three modes PROD-01.3 adds. A signed document that names one declares
-/// the format version that defines it (receipt and catalog point 1.3.0,
-/// scorecard 1.4.0); an older reader refuses such a document as naming a value
-/// outside its closed set, which is the safer verdict (OD-7, third case).
+/// The three modes added after the original two. A signed document that names
+/// one declares the format version that defines it (receipt and catalog point
+/// 1.3.0, scorecard 1.4.0); an older reader refuses such a document as naming a
+/// value outside its closed set, which is the safer verdict (OD-7, third case).
 pub const PROD_01_3_AUTH_MODES: [&str; 3] =
     [AUTH_MODE_SCRAM_SHA_256, AUTH_MODE_PLAIN, AUTH_MODE_MTLS];
 
@@ -231,9 +229,7 @@ impl std::fmt::Display for ClientCertificateRefusal {
 
 impl std::error::Error for ClientCertificateRefusal {}
 
-// ---------------------------------------------------------------------------
-// PROD-01.3 security follow-up: the credential BINDING.
-// ---------------------------------------------------------------------------
+// The credential BINDING.
 //
 // THE THREAT. A connection names the Secret its credential is in. Without a
 // binding, anyone who may write a `KafkaCluster` (or ask the console to) could
@@ -337,7 +333,7 @@ impl std::fmt::Display for CredentialBindingRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The same refusal guards object-store credentials; their
         // wording names what they are bound to. A Kafka connection's text is
-        // PROD-01.3's, byte for byte.
+        // fixed, byte for byte.
         let other = if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
             || self.binding_env.starts_with("LOGWEIR_EVIDENCE_")
         {
@@ -398,16 +394,16 @@ impl std::error::Error for CredentialBindingRefusal {}
 /// `expected` of `None` means no controller asked for a binding — a hand-run
 /// `logweir` whose operator supplies their own environment — and is accepted.
 ///
-/// **FX-20: a Secret may carry SEVERAL bindings**, separated by whitespace or
+/// **A Secret may carry SEVERAL bindings**, separated by whitespace or
 /// commas, and is accepted when ONE of them equals `expected` exactly. Each is
 /// an explicit authorization by whoever wrote the Secret — the same act as
 /// copying the credential into a second Secret bound to the second object, and
 /// no wider: a principal who may write a Secret's data could already put any
 /// binding there (Secret `patch` is equivalent to `get` for a credential,
-/// `docs/kubernetes.md` §20.9). It lets one S3 key serve, say, the archive and
-/// the evidence location of an inline restore, or two destinations, without a
-/// copy. A single binding — everything the console writes — reads exactly as
-/// before.
+/// `docs/kubernetes.md`, *Credential binding*). It lets one S3 key serve, say,
+/// the archive and the evidence location of an inline restore, or two
+/// destinations, without a copy. A single binding — everything the console
+/// writes — reads as one.
 pub fn check_credential_binding(
     binding_env: &'static str,
     expected: Option<&str>,
@@ -416,7 +412,7 @@ pub fn check_credential_binding(
     let Some(expected) = expected.map(str::trim).filter(|e| !e.is_empty()) else {
         return Ok(());
     };
-    // FX-20: A FAIL-CLOSED EXPECTATION IS NEVER SATISFIED. A controller that
+    // A FAIL-CLOSED EXPECTATION IS NEVER SATISFIED. A controller that
     // could not compute a binding (no UID) projects `unbound:…`; a Secret that
     // happens to carry the same string must not turn that into an accept.
     if expected.starts_with("unbound:") {
@@ -495,7 +491,7 @@ mod tests {
         ] {
             assert_ne!(other, base);
         }
-        // THE TLS SWITCH moves it too (fix round, review F4): the same SASL
+        // THE TLS SWITCH moves it too: the same SASL
         // mode and username over TLS and in the clear are two endpoints, and
         // a credential entered for the TLS one is not the clear one's.
         let scram = |tls| AuthSpec::ScramSha256 {

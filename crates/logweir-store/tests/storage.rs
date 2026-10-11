@@ -26,9 +26,8 @@ fn a_create_only_put_onto_an_existing_key_is_already_exists() {
     );
 }
 
-// A1: keys seeded under `logweir/` so they satisfy put_create_only's own
-// LOGWEIR_ROOT assertion; the brief's original fixture used `drills/...` and
-// panicked on its own guard.
+// Keys are seeded under `logweir/` so they satisfy put_create_only's own
+// LOGWEIR_ROOT assertion.
 #[test]
 fn list_manifests_returns_only_manifest_json_keys() {
     let s = mem();
@@ -58,18 +57,13 @@ fn a_backend_without_conditional_put_reports_create_only_enforced_false() {
     assert!(!out.create_only_enforced);
 }
 
-// Review FIX 4: the conditional_put=true path's AlreadyExists case
-// (`a_create_only_put_onto_an_existing_key_is_already_exists` above) is
-// produced by object_store's own `put_opts`, which never runs when
-// `conditional_put` is false — so it left the HEAD-then-PUT fallback's OWN
-// AlreadyExists branch (src/storage.rs, inside `put_create_only`, right after
-// the conditional_put block) completely uncovered. This proves that branch:
-// a second put to the same key in fallback mode is refused, not silently
-// overwritten. The gap this does NOT close — a TOCTOU window between the
-// HEAD and the PUT on a genuinely concurrent writer — is inherent to
-// HEAD-then-PUT and is exactly what `create_only_enforced: false` on the
-// first outcome exists to flag to anything building a scorecard from it;
-// see the fix report for why no further field was added.
+// The HEAD-then-PUT fallback's OWN AlreadyExists branch (`put_create_only`
+// with `conditional_put` false): a second put to the same key is refused, not
+// silently overwritten. The conditional-put path's AlreadyExists comes from
+// object_store's own `put_opts`, which never runs in this mode. Not closed
+// here: the TOCTOU window between the HEAD and the PUT on a concurrent writer
+// is inherent to HEAD-then-PUT, and is what `create_only_enforced: false` on
+// the first outcome flags to anything building a scorecard from it.
 #[test]
 fn a_second_put_in_fallback_mode_is_refused_not_overwritten() {
     let s = Store::in_memory_without_conditional_put("logweir");
@@ -91,9 +85,8 @@ fn a_second_put_in_fallback_mode_is_refused_not_overwritten() {
     );
 }
 
-// A2: renamed from `segment_keys_for_filters_by_the_time_window` — this test
-// covers the pure helper `segment_keys_from`, not the manifest-resolving
-// `segment_keys_for` the Interfaces block promises to Task 12.
+// This covers the pure helper `segment_keys_from`, not the manifest-resolving
+// `segment_keys_for`.
 #[test]
 fn segment_keys_from_filters_by_the_time_window() {
     let s = mem();
@@ -105,24 +98,19 @@ fn segment_keys_from_filters_by_the_time_window() {
 #[test]
 #[should_panic(expected = "Global Constraint 6")]
 fn a_write_outside_the_logweir_root_panics_even_when_the_prefix_allows_it() {
-    // Constructed with the OSO ARCHIVE prefix — the disjunct that used to make
-    // the guard vacuous. The fixed root must still refuse the write.
+    // Constructed with the OSO ARCHIVE prefix: the fixed root must still refuse
+    // the write.
     let s = Store::in_memory("kafka-backups/");
     let _ = s.put_create_only("kafka-backups/daily/manifest.json", b"{}");
 }
 
-/// A DEEPER prefix under `logweir/` used to be accepted at construction and
-/// then panic mid-drill.
+/// A DEEPER prefix under `logweir/` is refused at construction, not mid-drill.
 ///
-/// `logweir/prod/` reads as legal against the rule as `examples/drill.yaml`
-/// and `docs/quickstart.md` state it, and `from_url`'s `starts_with` accepted
-/// it — but every key builder in this crate is hard-coded to
-/// `logweir/drills/…`, so `put_create_only`'s
-/// `assert!(key.starts_with(&self.prefix))` fired AFTER the restore had run:
-/// exit 101, outside the five-code exit contract, on the one failure path
-/// where the drill had already written to the operator's cluster. The refusal
-/// belongs at construction, which is what `from_url`'s own doc comment
-/// promised all along.
+/// Every key builder in this crate is hard-coded to `logweir/drills/…`, so a
+/// store over `logweir/prod/` would fail `put_create_only`'s
+/// `assert!(key.starts_with(&self.prefix))` AFTER the restore had run: exit
+/// 101, outside the five-code exit contract, on the one failure path where the
+/// drill had already written to the operator's cluster.
 #[test]
 fn a_prefix_deeper_than_the_sanctioned_root_is_refused_at_construction() {
     let deeper = logweir_core::engine::StorageUrl::S3 {
@@ -169,7 +157,7 @@ fn the_sanctioned_root_still_builds() {
 fn fifty_sequential_puts_share_one_runtime() {
     // InMemory cannot observe connection reuse, so this asserts the property
     // that IS observable here: the store survives many calls with no runtime
-    // churn. The connection-reuse assertion runs against MinIO in Task 20 step 0.
+    // churn.
     let s = Store::in_memory("logweir/");
     for i in 0..50 {
         s.put_create_only(&format!("logweir/k{i}"), b"x").unwrap();
@@ -182,18 +170,14 @@ fn fifty_sequential_puts_share_one_runtime() {
     );
 }
 
-// A2, corrected after review FIX 1: the Interfaces-block method Task 12's
-// `fingerprints()` actually calls — resolves topic/partition against a
+// The method `fingerprints()` calls: resolves topic/partition against a
 // manifest and delegates the overlap test to `segment_keys_from`.
 //
 // The manifest body below uses upstream's REAL prefix-relative key form —
 // `{backup_id}/topics/{topic}/partition={n}/segment-{offset:020}.bin{ext}`
 // [VERIFIED U/kafka-backup/crates/kafka-backup-core/src/backup/engine.rs:
-// 1436-1442] — never the fully-qualified form this test used to seed, which
-// let `segment_keys_for` return the manifest's relative key unqualified and
-// still pass. `s.get(&got[0])` below is the regression guard: it proves the
-// returned key is one `get` can actually resolve, not merely a string that
-// looks right.
+// 1436-1442]. `s.get(&got[0])` below proves the returned key is one `get` can
+// actually resolve, not merely a string that looks right.
 #[test]
 fn segment_keys_for_resolves_topic_partition_against_the_manifest() {
     let s = Store::in_memory("logweir");
@@ -232,10 +216,10 @@ fn segment_keys_for_resolves_topic_partition_against_the_manifest() {
         .is_empty());
 }
 
-// Controller amendment: the second, read-only constructor must physically be
-// unable to put — its handle skips the LOGWEIR_ROOT guard (so it CAN be built
-// over an archive prefix that from_url would refuse) but every put method on
-// it refuses before ever touching the backend or the guard.
+// The read-only constructor must physically be unable to put — its handle skips
+// the LOGWEIR_ROOT guard (so it CAN be built over an archive prefix that
+// from_url would refuse) but every put method on it refuses before ever
+// touching the backend or the guard.
 #[test]
 fn a_read_only_store_rejects_a_put_even_over_the_archive_prefix() {
     let dir = std::env::temp_dir().join(format!(
@@ -256,15 +240,13 @@ fn a_read_only_store_rejects_a_put_even_over_the_archive_prefix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// MINOR-2 (Task 20 review): `list_keys` returns every key under the prefix, in
-// ascending order, and Task 20's phase 8 depends on that when it picks the
-// engine-validation report. Caveat, stated rather than glossed: this test
-// pins the OBSERVABLE contract (all keys, ascending) but cannot pin the
-// `out.sort()` line itself — `object_store`'s `InMemory` is a `BTreeMap` and
-// returns keys ordered regardless, so removing the sort leaves this green
-// (mutant Z4). `storage.rs`'s doc comment says the same. Proving the sort
-// would need a deliberately-unordered `ObjectStore` double, which `Store` has
-// no constructor for and which is not worth widening its public API to allow.
+// `list_keys` returns every key under the prefix, in ascending order; phase 8
+// depends on that when it picks the engine-validation report. This pins the
+// OBSERVABLE contract but not the `out.sort()` line itself: `object_store`'s
+// `InMemory` is a `BTreeMap` and returns keys ordered regardless, so removing
+// the sort leaves this green. Proving the sort would need a
+// deliberately-unordered `ObjectStore` double, which `Store` has no
+// constructor for.
 #[test]
 fn list_keys_returns_every_key_under_the_prefix_sorted() {
     let s = Store::in_memory("logweir");
@@ -288,7 +270,7 @@ fn list_keys_returns_every_key_under_the_prefix_sorted() {
     );
 }
 
-// The sibling half of the same guarantee: `list_manifest_keys` is now expressed
+// The sibling half of the same guarantee: `list_manifest_keys` is expressed
 // as `list_keys` plus a filter, so it must apply the filter and nothing else —
 // and it inherits the sort.
 #[test]
@@ -310,14 +292,13 @@ fn list_manifest_keys_filters_list_keys_and_keeps_the_ordering() {
     );
 }
 
-// Spec §6 C3: `evidence.immutable` may be `true` ONLY after a provider
+// `evidence.immutable` may be `true` ONLY after a provider
 // readback. `object_store` 0.14 models no Object Lock / WORM API on any
 // backend it can build, so the honest answer is "no proof", unconditionally.
 // Pinned directly here because it is the SOURCE of that claim: phase 8's
 // `sc.evidence.immutable = lock.map(..).unwrap_or(false)` is a provable no-op
 // while this returns `None`, so a mutant deleting that assignment cannot be
-// caught downstream — but a mutant fabricating a `Some` here can, and is
-// (Task 20 mutant M15).
+// caught downstream — but a mutant fabricating a `Some` here can.
 #[test]
 fn object_lock_readback_reports_no_proof_rather_than_guessing() {
     let s = Store::in_memory("logweir");
@@ -334,12 +315,12 @@ fn object_lock_readback_reports_no_proof_rather_than_guessing() {
     );
 }
 
-// Interface I12, new with the `logweir-store` extraction. The retention
-// reconciler (spec §5, guard G-RET) runs in `weirkeeper` and therefore cannot
-// call `OsoCliEngine::describe` — the only other thing in this workspace that
-// carries a backup set's timestamps. `list_manifests` returns `BackupSetRef`,
-// which is `{ backup_id, manifest_key }` derived from the KEY STRING alone,
-// with no object read: there is no timestamp anywhere in it.
+// Interface I12. The retention reconciler (guard G-RET) runs in `weirkeeper`
+// and therefore cannot call `OsoCliEngine::describe` — the only other thing in
+// this workspace that carries a backup set's timestamps. `list_manifests`
+// returns `BackupSetRef`, which is `{ backup_id, manifest_key }` derived from
+// the KEY STRING alone, with no object read: there is no timestamp anywhere in
+// it.
 //
 // Both arms matter. The first pins that the window comes out of the manifest
 // BODY — the key below carries no timestamp at all, so anything derived from
@@ -402,22 +383,17 @@ fn manifest_facts_reads_the_window_from_the_body() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TASK 19: the two Task 13 review carries.
-// ---------------------------------------------------------------------------
-
-/// CARRY 1 — an honest error taxonomy for `manifest_facts`.
+/// An honest error taxonomy for `manifest_facts`.
 ///
-/// `{"hello":"world"}` and `{"topics":5}` used to answer
-/// `Backend("… declares no segment, so it bounds no window")` — the SAME error
+/// `{"hello":"world"}` and `{"topics":5}` must not answer
+/// `Backend("… declares no segment, so it bounds no window")`, the error
 /// a real manifest describing an empty backup set gets. "The prefix points at
 /// objects that are not manifests" and "this backup set declares no segment"
 /// are different facts, and a retention report that cannot tell them apart
 /// reports a misconfigured archive as an empty one.
 ///
-/// THE THIRD ARM IS WHY THIS IS A TAXONOMY AND NOT A RENAME: `{"topics":[]}`
-/// must STILL be `Backend`, so the new variant is not simply the old error
-/// under a new name.
+/// THE THIRD ARM: `{"topics":[]}` must STILL be `Backend`, so the variant is a
+/// taxonomy, not a rename.
 #[test]
 fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
     let s = mem();
@@ -469,14 +445,11 @@ fn a_body_that_is_not_a_manifest_is_not_a_segment_less_manifest() {
     }
 }
 
-/// CARRY 2 — the `backup_id` derivation is ONE function.
-///
-/// It was copy-pasted into `list_manifests` and `manifest_facts`, under a doc
-/// comment promising the two agreed. This asserts the promise against the
-/// function both now call, over every shape that reaches either: a plain key,
-/// a deeply prefixed key, a key with no directory at all, and — the one that
-/// makes the two implementations distinguishable if they ever diverge — a
-/// `backup_id` that itself contains the substring `manifest`.
+/// The `backup_id` derivation is ONE function, which `list_manifests` and
+/// `manifest_facts` both call. Asserted over every shape that reaches either: a
+/// plain key, a deeply prefixed key, a key with no directory at all, and — the
+/// one that makes the two implementations distinguishable if they ever diverge
+/// — a `backup_id` that itself contains the substring `manifest`.
 #[test]
 fn the_backup_id_derivation_is_one_function() {
     use logweir_store::backup_id_from_manifest_key;
@@ -488,12 +461,10 @@ fn the_backup_id_derivation_is_one_function() {
             "2026-09-09T00-00Z",
         ),
         // A manifest at the very root has no parent directory, and the shared
-        // function answers with the file name itself. RECORDED RATHER THAN
-        // CHANGED: `trim_end_matches("/manifest.json")` needs the leading
-        // slash to bite, and both callers have always behaved this way, so
-        // this is the behaviour the extraction preserves rather than a defect
-        // the extraction introduces. No archive Logweir writes or reads puts a
-        // manifest at the root — every key is `<backup_id>/manifest.json`.
+        // function answers with the file name itself:
+        // `trim_end_matches("/manifest.json")` needs the leading slash to bite.
+        // No archive Logweir writes or reads puts a manifest at the root —
+        // every key is `<backup_id>/manifest.json`.
         ("manifest.json", "manifest.json"),
         ("archive/manifest-archive/manifest.json", "manifest-archive"),
     ] {
@@ -538,7 +509,7 @@ fn the_backup_id_derivation_is_one_function() {
     assert_eq!(facts.backup_id, "manifest-archive");
 }
 
-/// **FX-16 (review M-1): the key the engine reads a set's manifest at.** For a
+/// **The key the engine reads a set's manifest at.** For a
 /// store over the plan's location, `engine_manifest_key(id)` is the key
 /// kafka-backup's restore loads (`<prefix>/<id>/manifest.json` through
 /// `S3Backend::full_path`), spelled as the listing spells keys — so a set the
