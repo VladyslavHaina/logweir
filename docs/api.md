@@ -536,12 +536,9 @@ after a resume this service cannot replay), `heartbeat` and `end`.
 Five bounded read families, the same cursor as every other list, and one write
 among them.
 
-**No response carries a credential, and that shapes the projections.** A
-`ProtectionPolicy`'s notification routes carry `secretKeyRef`s; the projection
-publishes each route's **name** and which channels it has as booleans, because
-a webhook URL is a bearer token with a hostname on the front and the name of
-the Secret holding one is what a reader needs to decide what to read next. A
-`RetentionPolicy`'s enforcement block names the one delete-capable credential in
+**No response carries a credential, and that shapes the projections.** Alert
+sinks are withdrawn (release notes, item 73): `notifications` is always absent.
+A `RetentionPolicy`'s enforcement block names the one delete-capable credential in
 the installation; the projection publishes `credentialConfigured: true` and not
 the Secret's name.
 

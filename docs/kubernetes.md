@@ -9893,8 +9893,6 @@ new status fields; bound Secrets keep working, and the extra key is inert.
 * **A destination's CA reference is mutable and not bound.** The endpoint is
   immutable, so presenting the credential elsewhere still needs a principal who
   can both edit the CA reference and intercept traffic to that endpoint.
-* **A webhook or Slack URL is the credential**: its host is whatever the
-  Secret's writer put there, and only that writer can change it.
 * **The product API cannot inspect an inline archive's `credentialRef`**: it
   names a Secret, as before, and the runner enforces the location binding.
 * **A standing rehearsal authorization's scope does not name the source or
