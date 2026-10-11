@@ -662,7 +662,7 @@ What it fixed:
   - `publish` needs every shard.
 - **Published and signed:** main run 38134054797 passed all four shards on main and signed `sha-5da3a395`.
 
-**PROD-17.1 — decided (OD-12, 2026-10-11); wave 1 merged (PR #27), wave 2 started.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
+**PROD-17.1 — decided (OD-12, 2026-10-11); waves 1 and 2 merged (PRs #27, #28); wave 3 (docs) running with OD-13's chores.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
 - **Wave 1, cuts:**
   - `s1-c1`: C1, with A4's `GET /rehearsal-schedules`. Tier A review, because admission and approval change.
   - `s1-notify`: C2's alert sinks, B2, A2 and A3's phase-7 call.
@@ -710,6 +710,22 @@ What it fixed:
   - the release notes' per-item proof list stops at 72;
   - `ui/README` legacy wording;
   - comments naming `config/crd` and `config/manager`.
+
+**PR #28 — merged (2026-10-11) as `ae967d0b`, release-notes items 77 and 78: PROD-17.1 wave 2 (the folds).** Workflow `prod-17-1-wave-2`. w2-approval and w2-runnerlog had Tier A reviews; the other two had checklist reviews. Each review's must-fixes were fixed, and none had a HIGH. Integrated by `integrate-13`. PR checks: `check` 27 min, shards 21 to 24 min.
+- **Item 77 (`w2-approval`):**
+  - B3: one approval vocabulary (`ApprovalRoute`). The policy snapshot is byte-identical over 35 documents and 318 chart renders.
+  - B5: a Restore's plan is parsed once per reconcile. Named change: an unparseable plan with nothing declared is `PlanUnparseable` before the Approval is read.
+  - C1's leftovers: `--standing-authorization` is refused by name.
+  - The review's MEDIUM, a kept FX-23 row deleted, was restored.
+- **`w2-runnerlog`:**
+  - B4: one runner-log reader (`weirkeeper/src/runner_log.rs`). It reads the tail and keeps FX-34's token rules; the two unbounded reads are bounded.
+  - The review's MEDIUM, an unnamed `tailLines` on the relay read, was reverted, with a row that refuses a frame after the end frame.
+- **Item 78 (`w2-retention`):**
+  - B1: `BackupSchedule.spec.retention` stops reporting and says `RetentionReportWithdrawn`; schedules keep backing up.
+  - The protection page lost its empty delivery columns.
+  - Left for wave 3: the console form still offers `keepLast`/`keepDays` (w3-surfaces).
+- **`w2-tests`:** B7 shared helpers and B6 one double per runner trait (36 of 74 fakes). The test-name set is identical.
+- **Size:** 156 files, −10,317 / +3,938. Test names went from 5,485 to 5,427, exactly the branches' adds and removes.
 
 ## Carried over from the PLAT tracker
 
