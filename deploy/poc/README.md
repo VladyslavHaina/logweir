@@ -666,7 +666,7 @@ rollback, exactly as before the `v0.1.5` install (the runner ServiceAccount from
 retained signing identity (`helm.sh/resource-policy: keep`) is not affected.
 
 Then the three upgrade steps. **The live round must show, after R1:**
-1. all fourteen CRDs `Established`; the six old kinds' objects unchanged;
+1. all thirteen CRDs `Established`; the six old kinds' objects unchanged;
 2. **identity** — `logweir-signing-trust`'s `key-id` equals the recorded
    `r1-signing` key id, `logweir-signing-key` in both namespaces still holds
    that key (same `uid` and `creationTimestamp`: nothing re-created it), and the
