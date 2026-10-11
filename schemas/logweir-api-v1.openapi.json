@@ -14326,6 +14326,10 @@
           "topicPrefix"
         ],
         "properties": {
+          "allowTransactionMarkers": {
+            "description": "`restore.allow_transaction_markers` (PROD-01.1a): present, and true, only when the run restores the archive's transaction markers and the records of aborted transactions as ordinary data instead of being refused. Absent: the plan does not allow them.",
+            "type": "boolean"
+          },
           "authMode": {
             "description": "How it authenticates there (`plaintext`, `scramSha512`, …).",
             "type": "string"

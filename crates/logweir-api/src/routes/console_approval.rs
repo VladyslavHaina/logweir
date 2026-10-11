@@ -445,6 +445,7 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             }),
             mode: scope.target.mode.to_string(),
             topic_prefix: scope.target.topic_prefix.clone(),
+            allow_transaction_markers: scope.target.allow_transaction_markers,
         },
         topics: scope
             .topics

@@ -4215,6 +4215,12 @@ pub struct ScopeTargetView {
     /// a run writes. Absent for every other restore.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_statement: Option<ScopeOwnerStatementView>,
+    /// `restore.allow_transaction_markers` (PROD-01.1a): present, and true,
+    /// only when the run restores the archive's transaction markers and the
+    /// records of aborted transactions as ordinary data instead of being
+    /// refused. Absent: the plan does not allow them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_transaction_markers: bool,
 }
 
 /// PROD-16.2 (review S-1): the requester's owner statement for an
