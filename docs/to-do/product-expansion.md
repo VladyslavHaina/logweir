@@ -660,7 +660,7 @@ What it fixed:
   - `publish` needs every shard.
 - **Published and signed:** main run 38134054797 passed all four shards on main and signed `sha-5da3a395`.
 
-**PROD-17.1 — decided (OD-12, 2026-10-11); wave 1 started.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
+**PROD-17.1 — decided (OD-12, 2026-10-11); wave 1 merged (PR #27), wave 2 started.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
 - **Wave 1, cuts:**
   - `s1-c1`: C1, with A4's `GET /rehearsal-schedules`. Tier A review, because admission and approval change.
   - `s1-notify`: C2's alert sinks, B2, A2 and A3's phase-7 call.
@@ -676,6 +676,37 @@ What it fixed:
   - A removed test may only test the removed path.
   - **Consumer positions stay whole** (OD-12).
 - **PROD-14.1's owed rows that minted a standing authorization** (PROD-08.1a K7/K8(a), PROD-11.1 K4/K6) are re-scoped by C1: a Restore or Approval naming one is refused by name.
+
+**PR #27 — merged (2026-10-11) as `f013a836`, release-notes items 73 to 76: PROD-17.1 wave 1 (the cuts).** Workflow `prod-17-1-wave-1`: each worker was reviewed (s1-c1 at Tier A, the rest by checklist), every must-fix was fixed, and none had a HIGH. Integrated by `integrate-12`. PR checks: `check` 19 min, shards 21 to 24 min.
+- **Item 73 (`s1-c1`):** C1 and A4's rehearsal read.
+  - Gone: `RehearsalSchedule`, standing authorizations, `drill approve --standing` and `GET /rehearsal-schedules`.
+  - A standing Restore or Approval is refused by name (`StandingAuthorizationRefused`) before any Job or approval record exists.
+  - Every reader of signed standing documents stays.
+- **Item 74 (`s1-notify`):**
+  - C2's alert sinks: delivery Jobs, `notify deliver`, and `notify.*` refused by name. Protection health stays.
+  - B2: a non-empty plan `notifications` block is refused by name.
+  - A2: the ACL capture.
+  - A3: phase 7's call to the engine's `validation run`. The engine's consumer-group snapshot parse stays.
+- **Item 75 (`s1-console`):**
+  - C4: the legacy `kubectl proxy` page and the `logweir-ui` image; `ui.*` is refused by name.
+  - A4: `POST destinations:from-legacy`.
+  - A1: orphan harnesses. The three PLAT harnesses are held until PROD-14.1.
+- **Item 76 (`s1-install`):**
+  - C5: the Helm chart is the only install.
+  - C6: `config/` is gone after a grant-by-grant RBAC check; `config/samples` stays.
+  - A5: the goldens render without CRDs. There are thirteen CRDs, in one copy.
+- **C7:** the PLAT tracker is retired; its open rows are above.
+- **Size:** 382 files, −206,065 / +4,811 lines. That is 22.6k of code and scripts, 46.8k of tests and harnesses, 3.9k of docs, 128.5k generated, and the 4.4k-line tracker.
+- **The owner's rule held:** the consumer-positions paths differ only by A2's ACL removal, and the signed-format check is empty apart from the regenerated API description.
+- **Owed to PROD-14.1:**
+  - the live CRD proof and the bundle-to-chart migration walk;
+  - `helm-demo.yml`, which builds no console image (step 9 serves the console now);
+  - the d3 refused-point live phase, removed whole with its two rehearsal arms. Its 8 retention, catalog and verification rows are re-proved by the clean install;
+  - `test_no_live_ui_harness_drives_a_hidden_control_off_its_step`, which fails on `prod16-1-ui-e2e.mjs:498,551` (pre-existing).
+- **Owed to wave 3:**
+  - the release notes' per-item proof list stops at 72;
+  - `ui/README` legacy wording;
+  - comments naming `config/crd` and `config/manager`.
 
 ## Carried over from the PLAT tracker
 
