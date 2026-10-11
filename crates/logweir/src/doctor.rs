@@ -989,7 +989,7 @@ mod tests {
     fn version_matches_accepts_only_the_exact_pin() {
         assert_eq!(
             ENGINE_PIN, "0.23.3+logweir.3",
-            "the pin is Logweir's build of OSO 0.23.3 with patches 0001 to 0003 (PROD-00.3g)"
+            "the pin is Logweir's build of OSO 0.23.3 with patches 0001 to 0003"
         );
         assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
         assert!(
