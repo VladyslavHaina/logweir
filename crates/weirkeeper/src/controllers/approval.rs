@@ -1,49 +1,39 @@
 //! The `Approval` reconciler: five checks, in an order that is testable.
 //!
-//! # Why this file exists
+//! An `Approval` that exists is not an approval; one whose status the
+//! controller set to `Verified=True` is. Creating an `Approval` object is a
+//! `POST` any namespace tenant can make. What makes it an authorisation is a
+//! DSSE signature, by a key the namespace's trust lists, over bytes that bind
+//! this plan and this kind of subject.
 //!
-//! *"A `DrillApproval` that exists is not an approval; a `DrillApproval` whose
-//! status the controller set to `Verified=True` is"*
-//! (`docs/mvp/design-operator.md:93-95`; `DrillApproval` is the corpus's name
-//! for what Global Constraint 34 renames [`Approval`]). Creating an
-//! `Approval` object is a `POST` any namespace tenant can make. What makes it
-//! an authorisation is a DSSE signature, by a key on the one cluster-scoped
-//! [`TrustRoster`], over bytes that bind **this** plan and **this** kind of
-//! subject. This module is that sentence.
+//! # The order is load-bearing
 //!
-//! # The order is load-bearing, and getting it wrong collapses every refusal
-//!
-//! [`logweir_verify::verify_detached`] refuses a `payloadType` mismatch
-//! FIRST (`crates/logweir-verify/src/verify.rs:18-29`) and returns
-//! `"no signature by key <want> in the sidecar"` for a key that is not in the
-//! sidecar at all (`:66-68`). Both come back as
-//! `logweir_verify::Error::Verify`. So an algorithm that simply loops the
-//! roster's keys calling `verify_detached` reports *the same refusal* for a
-//! substituted document, for an attacker's key, and for a genuinely broken
-//! signature — three findings an operator must be able to tell apart, flattened
-//! into one. [`evaluate`] therefore makes its own distinctions BEFORE it
-//! reaches the crypto, and the checks are numbered in the code so a reviewer
-//! can read the order off the source.
+//! [`logweir_verify::verify_detached`] refuses a `payloadType` mismatch first
+//! and returns "no signature by key <want> in the sidecar" for a key not in
+//! the sidecar at all, both as `logweir_verify::Error::Verify`. A loop over the
+//! roster calling `verify_detached` would report the same refusal for a
+//! substituted document, an attacker's key and a broken signature, three
+//! findings an operator must tell apart. [`evaluate`] makes its own
+//! distinctions before it reaches the crypto, and the checks are numbered in
+//! the code.
 //!
 //! # `approvalBytes` is document text, never base64
 //!
-//! Interface **I18**, spec §3.2. The reconciler passes
+//! Interface **I18**. The reconciler passes
 //! `approval.spec.approvalBytes.as_bytes()` straight into [`evaluate`] with no
-//! decode step, and Task 20 hashes exactly those bytes. A base64 layer between
-//! the approver's file and the verified bytes is the class of transformation
-//! `planBytes` exists to forbid, and
-//! `approval_bytes_are_the_document_text_not_base64` asserts the two paths are
-//! DISTINGUISHABLE — the raw-text fixture verifies and a base64 of the same
-//! document does not — so a future decode step cannot be added silently.
+//! decode step, and the Restore admission hashes exactly those bytes. A base64
+//! layer is the class of transformation `planBytes` exists to forbid;
+//! `approval_bytes_are_the_document_text_not_base64` asserts the raw text
+//! verifies and its base64 does not, so a decode step cannot be added
+//! silently.
 //!
 //! # What this module does not claim
 //!
-//! It verifies. It holds no key material of its own, and this crate links
-//! [`logweir_verify`] and never the crate that holds the signing half (Global
-//! Constraint 27; `scripts/check-one-signer.sh`). That is a LINKAGE property
-//! and the narrowed position Global Constraint 27 records is the whole of it:
-//! the *capability* to sign is unbroken while this controller holds Job CRUD
-//! over the signing key's namespace, and nothing here changes that.
+//! It verifies. It holds no key material, and this crate links
+//! [`logweir_verify`] and never the signing crate
+//! (`scripts/check-one-signer.sh`). That is a linkage property only: the
+//! capability to sign is unbroken while this controller holds Job CRUD over the
+//! signing key's namespace.
 //!
 //! [`Approval`]: crate::crds::approval::Approval
 //! [`TrustRoster`]: crate::crds::trust_roster::TrustRoster
@@ -82,26 +72,17 @@ use crate::trust::{Resolution, ResolvedKey, ResolvedTrust, REASON_TRUST_POLICY_C
 
 /// The DSSE `payloadType` an approval document is signed under.
 ///
-/// BYTE-EQUAL to `crates/logweir/src/drill/phase1_approval.rs:12`, and it has
-/// to be: the same document is verified by the CLI at phase 1 and by this
-/// controller before a Job exists. `the_payload_type_is_byte_equal_to_the_cli`
-/// reads the other constant out of that file and compares, so the two cannot
-/// drift without a red test.
+/// Byte-equal to the CLI's constant in `crates/logweir/src/drill/phase1_approval.rs`:
+/// the same document is verified by the CLI at phase 1 and by this controller.
+/// `the_payload_type_is_byte_equal_to_the_cli` reads that file and compares.
 pub const PAYLOAD_TYPE_APPROVAL: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
 
-/// The name of the one cluster-scoped [`TrustRoster`] — interface **I16**.
+/// The name of the one cluster-scoped [`TrustRoster`] (interface **I16**).
 ///
-/// **A FACT, NOT A CONVENTION.** Both reconcilers in this directory and Task
-/// 24's evidence verification resolve `trustrosters/default` by this constant;
-/// the name is not read from an `Approval`, from a flag or from an
+/// A fact, not a convention: it is never read from an `Approval`, a flag or an
 /// environment variable, because a roster whose name the subject supplies is a
-/// roster the subject can choose. It is re-exported from the crate root as
-/// [`crate::ROSTER_NAME`], which is the ONE path Tasks 20, 21, 24, 27 and 28
-/// name.
-///
-/// An adopter who names their roster something else gets
-/// [`ROSTER_NOT_FOUND_MESSAGE`] — an explanation, not silence.
-///
+/// roster the subject can choose. Re-exported as [`crate::ROSTER_NAME`]. A
+/// roster named otherwise gets [`ROSTER_NOT_FOUND_MESSAGE`].
 /// [`TrustRoster`]: crate::crds::trust_roster::TrustRoster
 pub const ROSTER_NAME: &str = "default";
 
@@ -112,71 +93,57 @@ pub const CONDITION_VERIFIED: &str = "Verified";
 pub const REASON_VERIFIED: &str = "Verified";
 
 /// The condition type recording that the Restore this `Approval` authorises
-/// was ADMITTED under its verdict — defect P9 (poc-install, 2026-09-24).
+/// was admitted under its verdict.
 ///
-/// # Expiry bounds the time to admission, and nothing after it
+/// Expiry bounds the time to admission and nothing after it: once a Job is
+/// created, the run continues under its recorded policy snapshot. A document's
+/// `expiresAt`, the policy binding and the keys' windows are questions about a
+/// new use. Without this condition a consumed `Approval` was re-judged every
+/// pass: a succeeded Restore's `Approval` was rewritten
+/// `Verified=False/AuthorizationExpired`, its record nulled, and (the message
+/// carrying the clock) a new status written every ~2 s for ever.
 ///
-/// D0: "Policy changes affect not-yet-admitted requests … Once the controller
-/// has … materialized an immutable v2 bundle and created the Job, that run
-/// continues under its recorded policy snapshot." A document's `expiresAt`,
-/// the policy binding and the keys' windows are questions about a NEW use; an
-/// admitted Restore is not one. Before this condition the controller kept
-/// re-judging a consumed `Approval` on every pass, so 900 s after an Ordinary
-/// confirmation a SUCCEEDED Restore's `Approval` was rewritten
-/// `Verified=False/AuthorizationExpired`, its `status.authorization`, key id
-/// and approver were nulled, and — because the expiry message carried the
-/// clock — every pass wrote a new status, woke its own watch and logged
-/// `approval refused` again, every ~2 s, for ever.
-///
-/// Once `Consumed=True` is on the object the verdict beside it is the AUDIT
-/// RECORD of that admission: it is never re-evaluated, never rewritten, and
-/// binds only the Restore UID `status.verifiedSubjectRef` names — the replay
-/// fence that already refuses every other object.
+/// Once `Consumed=True` is on the object the verdict beside it is the audit
+/// record of that admission: never re-evaluated or rewritten, and binding only
+/// the Restore UID `status.verifiedSubjectRef` names, the replay fence that
+/// refuses every other object.
 pub const CONDITION_CONSUMED: &str = "Consumed";
 
 /// The `reason` on [`CONDITION_CONSUMED`].
 pub const REASON_RESTORE_ADMITTED: &str = "RestoreAdmitted";
 
 /// The `Verified` reason on a consumed `Approval` one of whose keys was
-/// revoked for `KeyCompromise` AFTER this controller recorded the admission
-/// (review M1; D3 §7.4's compromise row with an independent observation).
+/// revoked for `KeyCompromise` after this controller recorded the admission.
 ///
-/// **NEVER GREEN.** `status.verified` is `false` beside it. What the row
-/// preserves is the ORDER of two recorded facts — the admission was observed
-/// before the revocation took effect — which an investigation needs and a
-/// badge must not turn into a pass. The record (authorization, key id,
-/// approver, `Consumed`) is kept.
+/// Never green: `status.verified` is `false` beside it. It preserves the order
+/// of two recorded facts (the admission was observed before the revocation
+/// took effect), which an investigation needs and a badge must not turn into
+/// a pass. The record (authorization, key id, approver, `Consumed`) is kept.
 pub const REASON_RECORDED_BEFORE_REVOCATION: &str = "RecordedBeforeRevocation";
 
 /// The `Verified` reason on a consumed `Approval` whose key was revoked for
-/// `KeyCompromise` with an effective instant AT OR BEFORE the recorded
-/// admission — D3 §7.4's compromise row with no usable observation. The same
-/// spelling [`ApprovalRefusal::KeyRevoked`] writes for a fresh approval.
+/// `KeyCompromise` effective at or before the recorded admission. The spelling
+/// [`ApprovalRefusal::KeyRevoked`] writes for a fresh approval.
 pub const REASON_KEY_REVOKED: &str = "KeyRevoked";
 
-/// The message a missing roster produces — interface **I16**, verbatim.
+/// The message a missing roster produces (interface **I16**), verbatim.
 ///
-/// NEVER A SILENT REFUSAL. The single most likely way to reach this is an
-/// install that skipped step 1, and "Verified=False, reason RosterNotFound"
-/// with no message would send the operator looking at their key instead of at
-/// their install. `the_missing_roster_message_names_the_roster` asserts this
-/// string contains [`ROSTER_NAME`], so the two cannot drift apart.
+/// Never a silent refusal: the likeliest cause is an install that skipped a
+/// step, and a bare `RosterNotFound` would send the operator to their key.
+/// `the_missing_roster_message_names_the_roster` asserts it contains
+/// [`ROSTER_NAME`].
 pub const ROSTER_NOT_FOUND_MESSAGE: &str =
     "no cluster-scoped TrustRoster named 'default'; see docs/kubernetes.md install step 1";
 
 /// Why an `Approval` was refused.
 ///
-/// THE SET IS CLOSED. Tasks 20, 24 and 27 read
-/// [`Self::reason`] off `status.conditions[type=Verified].reason` and route on
-/// it, so a variant is an interface and not an implementation detail.
+/// The set is closed: the Restore admission, verification and the console
+/// route on [`Self::reason`], so a variant is an interface.
 ///
-/// `key_id` ON THE TWO ROSTER VARIANTS IS AN IDENTIFICATION STRING, NOT
-/// ALWAYS ONE ID. Check 3 has two ids to name (the declared one and the sha256
-/// of the key material it claims to describe) and check 4 has two LISTS to
-/// name (the sidecar's and the roster's). Both are refusals about *which key
-/// ids are involved*, and the brief requires each to name every id it
-/// compared; a single `String` that says so is what
-/// `approval_refuses_a_key_outside_the_roster` reads.
+/// `key_id` on the two roster variants is an identification string, not
+/// always one id: check 3 names the declared id and the hash of the key
+/// material it claims, and check 4 the sidecar's and the trust's lists. Each
+/// must name every id it compared (`approval_refuses_a_key_outside_the_roster`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalRefusal {
     /// The signature did not verify, the sidecar did not parse, or the roster
@@ -195,26 +162,23 @@ pub enum ApprovalRefusal {
         /// That entry's `notAfter`, RFC 3339.
         not_after: String,
     },
-    /// The matched key is declared `Retired` — PLAT-19.1, D3 §7.4.
+    /// The matched key is declared `Retired`.
     ///
-    /// **NOT [`Self::KeyIdExpired`], although §7.4 says a retired key "refuses
-    /// a fresh approval exactly as `KeyIdExpired` does today".** It refuses the
-    /// same way; it does not refuse for the same reason, and `KeyIdExpired`
-    /// carries a `notAfter` a retired key has not reached. Reporting a
-    /// deliberate retirement as an expiry would send an operator to extend a
-    /// window that is not the problem.
+    /// Not [`Self::KeyIdExpired`]: it refuses the same way but not for the
+    /// same reason, and a retired key has not reached its `notAfter`.
+    /// Reporting a deliberate retirement as an expiry would send an operator to
+    /// extend a window that is not the problem.
     KeyRetired {
         /// The matched key's `keyId`.
         key_id: String,
         /// Its `retiredAt`, RFC 3339, when the policy records one.
         retired_at: Option<String>,
     },
-    /// The matched key is declared `Revoked` — PLAT-19.1, D3 §7.4.
+    /// The matched key is declared `Revoked`.
     ///
-    /// ITS OWN REASON, AND THAT IS THE POINT. A revocation is the one key
-    /// event an operator must never read as an expiry: `KeyCompromise` means
-    /// the private half is believed to be in someone else's hands, and the
-    /// remedy is an investigation, not a longer `notAfter`.
+    /// Its own reason, because a revocation must never read as an expiry:
+    /// `KeyCompromise` means the private half may be in someone else's hands,
+    /// and the remedy is an investigation, not a longer `notAfter`.
     KeyRevoked {
         /// The matched key's `keyId`.
         key_id: String,
@@ -223,13 +187,11 @@ pub enum ApprovalRefusal {
         /// `revocationEffectiveFrom`, RFC 3339, when the policy records one.
         effective_from: Option<String>,
     },
-    /// The matched key's validity window has not opened yet — PLAT-19.1.
+    /// The matched key's validity window has not opened yet.
     ///
-    /// REACHABLE ONLY UNDER A REAL `TrustPolicy`: §7.6 step 1 stages a
-    /// successor key before the cutover, and a future `notBefore` is the
-    /// natural way to do that. The synthesised `legacy-roster-v1` gives every
-    /// key a `notBefore` at the Unix epoch, so no roster-only cluster can reach
-    /// this.
+    /// Reachable only under a real `TrustPolicy`, where a successor key is
+    /// staged with a future `notBefore`; the synthesised `legacy-roster-v1`
+    /// gives every key a `notBefore` at the Unix epoch.
     KeyNotYetValid {
         /// The matched key's `keyId`.
         key_id: String,
@@ -237,12 +199,11 @@ pub enum ApprovalRefusal {
         not_before: String,
     },
     /// Two or more `TrustPolicy` objects claim this namespace, so it resolves
-    /// to **nothing** — PLAT-19.1, D3 §7.1.
+    /// to nothing.
     ///
-    /// NOT A VERDICT ABOUT THE APPROVER. Picking one of two contesting
-    /// policies would be a trust decision made by a sort order, and the safe
-    /// reading of a disagreement about authority is that there is none. The
-    /// same word appears on both policies' `status.conflicts`.
+    /// Not a verdict about the approver: picking one of two contesting policies
+    /// would be a trust decision made by a sort order. The same word appears on
+    /// both policies' `status.conflicts`.
     TrustPolicyConflict {
         /// The contested namespace.
         namespace: String,
@@ -272,63 +233,61 @@ pub enum ApprovalRefusal {
         referent_is: String,
     },
     /// `spec.subjectRef.kind` is `RehearsalSchedule`: a standing rehearsal
-    /// authorization. Standing authorizations are withdrawn in v1 (OD-12), so
-    /// such an `Approval` is refused by name before its trust, signature or
-    /// referent is read, and authorises nothing.
+    /// authorization, withdrawn in v1, so such an `Approval` is refused by name
+    /// before its trust, signature or referent is read, and authorises nothing.
     StandingAuthorizationRefused {
         /// The name `spec.subjectRef.name` gives.
         name: String,
     },
-    /// PLAT-19.2: the authentic bytes are not a well-formed authorization
-    /// document v2, or name no requester.
+    /// The authentic bytes are not a well-formed authorization document v2, or
+    /// name no requester.
     AuthorizationDocumentInvalid {
         /// The parse, format or requester failure.
         detail: String,
     },
-    /// PLAT-19.2: a v2 document names another object than this referent —
-    /// another namespace, name or UID.
+    /// A v2 document names another object than this referent: another
+    /// namespace, name or UID.
     AuthorizationSubjectMismatch {
         /// The signed and observed identities.
         detail: String,
     },
-    /// PLAT-19.2: the document's policy, digest or mode is not the namespace's
-    /// current binding — including a v1 document under an explicit binding
-    /// and a v2 document in an unbound namespace. THE DOWNGRADE REFUSAL: an
-    /// ordinary confirmation presented in a governed namespace lands here.
+    /// The document's policy, digest or mode is not the namespace's current
+    /// binding, including a v1 document under an explicit binding and a v2
+    /// document in an unbound namespace. The downgrade refusal: an ordinary
+    /// confirmation presented in a governed namespace lands here.
     ApprovalPolicyMismatch {
         /// Both policies, named.
         detail: String,
     },
-    /// PLAT-19.2: the document's validity window is malformed, longer than the
-    /// policy allows, or issued in the future.
+    /// The document's validity window is malformed, longer than the policy
+    /// allows, or issued in the future.
     AuthorizationWindowInvalid {
         /// The exact boundary.
         detail: String,
     },
-    /// PLAT-19.2: the document's `expiresAt` has passed.
+    /// The document's `expiresAt` has passed.
     AuthorizationExpired {
         /// The instant and the clock.
         detail: String,
     },
-    /// PLAT-19.2: a `Governed` document carries the console's confirmation
-    /// and no approver countersignature yet. NOT A BAD SIGNATURE: it is the
-    /// pending state of a governed request, and the one a console-only
-    /// document written directly to the API server stays in for ever.
+    /// A `Governed` document carries the console's confirmation and no
+    /// approver countersignature yet. Not a bad signature: the pending state of
+    /// a governed request, in which a console-only document written directly
+    /// to the API server stays for ever.
     GovernedApprovalRequired {
         /// The requester and policy the confirmation names.
         detail: String,
     },
-    /// PLAT-19.2: the governed approver's principal is the requester's —
-    /// self-approval, refused where the policy requires independence.
+    /// The governed approver's principal is the requester's: self-approval,
+    /// refused where the policy requires independence.
     SelfApprovalRefused {
         /// Both principals.
         detail: String,
     },
     /// There is no cluster-scoped [`TrustRoster`] named [`ROSTER_NAME`].
     ///
-    /// The one variant [`evaluate`] can never return — it takes a
-    /// [`TrustRosterSpec`] by reference, so by the time it runs a roster
-    /// exists. The reconciler produces it, which is why it lives in the same
+    /// [`evaluate`] never returns it (it takes a [`TrustRosterSpec`], so a
+    /// roster exists); the reconciler produces it, so it lives in the same
     /// closed set the condition reasons come from.
     ///
     /// [`TrustRoster`]: crate::crds::trust_roster::TrustRoster
@@ -338,8 +297,8 @@ pub enum ApprovalRefusal {
 impl ApprovalRefusal {
     /// The condition `reason` for this refusal: the variant's own name.
     ///
-    /// NO WILDCARD ARM, DELIBERATELY. An eighth variant must fail to compile
-    /// here rather than reach the cluster as a `reason` nobody chose.
+    /// No wildcard arm: a new variant must fail to compile here rather than
+    /// reach the cluster as a `reason` nobody chose.
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
@@ -460,9 +419,9 @@ impl fmt::Display for ApprovalRefusal {
 
 impl From<AuthorizationRefusal> for ApprovalRefusal {
     /// The shared v2 refusal classes onto this controller's closed set. The
-    /// REASON strings are the same on both sides
-    /// (`AuthorizationRefusal::reason`), so a condition written here and a
-    /// Restore admission refusal written from the same check read alike.
+    /// reason strings are the same on both sides
+    /// (`AuthorizationRefusal::reason`), so this condition and a Restore
+    /// admission refusal from the same check read alike.
     fn from(refusal: AuthorizationRefusal) -> Self {
         let detail = refusal.to_string();
         match refusal {
@@ -478,10 +437,10 @@ impl From<AuthorizationRefusal> for ApprovalRefusal {
             AuthorizationRefusal::PolicyMismatch(_) => Self::ApprovalPolicyMismatch { detail },
             AuthorizationRefusal::WindowInvalid(_) => Self::AuthorizationWindowInvalid { detail },
             AuthorizationRefusal::Expired(_) => Self::AuthorizationExpired { detail },
-            // PROD-16.2: a two-person request nobody has approved is the same
-            // pending state a strict request without its countersignature is
-            // in, and an approver who is not a second person is the same
-            // refusal a self-signed countersignature earns.
+            // A two-person request nobody has approved is the same pending
+            // state as a strict request without its countersignature, and an
+            // approver who is not a second person earns the self-approval
+            // refusal.
             AuthorizationRefusal::ApprovalRequired(_) => Self::GovernedApprovalRequired { detail },
             AuthorizationRefusal::SelfApproval(_) => Self::SelfApprovalRefused { detail },
         }
@@ -491,32 +450,23 @@ impl From<AuthorizationRefusal> for ApprovalRefusal {
 /// The whole verdict, when every check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verified {
-    /// The `keyId` of the roster entry whose key actually verified the
-    /// signature — the value [`verify_detached`] RETURNED, never
+    /// The `keyId` of the trust entry whose key actually verified the
+    /// signature: the value [`verify_detached`] returned, never
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
-    /// The policy usage under which the matched signature was admitted.
     /// The policy usage under which this build admitted the signature. A v1
     /// approval document requires `GovernedApproval`, and
     /// `ConsoleConfirmation` fails closed.
     pub authorization_usage: KeyUsage,
-    /// **The matched key's declared validity window** — `None` only when the
-    /// resolved trust does not carry the matched id at all, which check 6 has
-    /// already made unreachable.
+    /// The matched key's declared validity window; `None` only when the
+    /// resolved trust does not carry the matched id, which check 6 makes
+    /// unreachable.
     ///
-    /// TWO CONSUMERS, ONE FACT. [`Self::valid_until`] reads `notAfter` off it
-    /// to requeue AT the key's boundary instead of at the next heartbeat
-    /// (defect `TRUST-EXPIRY-LAG`: on lab-refresh-4 an approval read
-    /// `Verified=True` across 22 samples over 2 m 35 s after its approver key
-    /// expired, at one unchanged `resourceVersion`), and [`status_for`]
-    /// publishes the whole of it so the restore preflight can compare a
-    /// deadline against it (defect `APPROVAL-KEY-WINDOW-UNPUBLISHED`).
-    ///
-    /// **IT WAS A BARE `valid_until` UNTIL THE SECOND CONSUMER ARRIVED**, and
-    /// keeping one field rather than adding a second is the point: a published
-    /// window and a requeue deadline that could disagree is a status saying the
-    /// key is good until 12:00 while the controller sleeps until 13:00. They
-    /// are the same value read twice.
+    /// One fact, two consumers: [`Self::valid_until`] requeues at the key's
+    /// boundary rather than the next heartbeat (or an expired key's approval
+    /// keeps reading `Verified=True`), and [`status_for`] publishes it so the
+    /// restore preflight can compare a deadline against it. One field, so the
+    /// published window and the requeue deadline cannot disagree.
     pub key_window: Option<ApproverKeyWindow>,
     /// The authenticated document's own expiry, when this document kind has
     /// one (an authorization document v2). The verdict is valid only until the
@@ -534,15 +484,13 @@ pub struct Verified {
     /// refused.
     pub self_attested_risk: bool,
     /// Which trust answered: a `TrustPolicy`'s `metadata.name`, or
-    /// `legacy-roster-v1` for the synthesised roster (D3 §7.5).
-    ///
-    /// IT REACHES THE CONDITION MESSAGE AS `trustSource=<name>`, which is what
-    /// D3 §15's L10 asserts on an unmigrated cluster and what tells an operator
-    /// looking at one `Approval` whether their migration is live.
+    /// `legacy-roster-v1` for the synthesised roster. It reaches the condition
+    /// message as `trustSource=<name>`, which tells an operator looking at one
+    /// `Approval` whether their migration is live.
     pub trust_source: String,
-    /// PLAT-19.2: the policy, mode and console-attested requester a v2
-    /// authorization was verified under; `None` for a v1 approval document.
-    /// Boxed so `ApprovalOutcome`'s variants stay comparable in size.
+    /// The policy, mode and console-attested requester a v2 authorization was
+    /// verified under; `None` for a v1 approval document. Boxed so
+    /// `ApprovalOutcome`'s variants stay comparable in size.
     pub authorization: Option<Box<AuthorizationProvenance>>,
     /// Filled by [`decide`] with the API object whose bytes were checked.
     /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
@@ -551,16 +499,13 @@ pub struct Verified {
 }
 
 impl Verified {
-    /// **The instant this verdict stops being true on its own** — the earlier
-    /// of the authenticated document's expiry and the matched key's
-    /// `notAfter`.
+    /// The instant this verdict stops being true on its own: the earlier of
+    /// the authenticated document's expiry and the matched key's `notAfter`.
     ///
-    /// THE FALLBACK IS A DEADLINE THAT NEVER FIRES RATHER THAN A PANIC. A
-    /// `None` window means the resolved trust does not carry the id check 6
-    /// resolved through `may_sign_new_for`, which cannot happen; an admission
-    /// path may not abort on an invariant it merely believes, so the timer
-    /// falls back to the heartbeat and the STATUS publishes nothing at all —
-    /// unknown, never valid.
+    /// A `None` window cannot happen (check 6 resolved the id), but an
+    /// admission path may not abort on an invariant it merely believes: the
+    /// timer falls back to the heartbeat and the status publishes no window,
+    /// which is unknown, never valid.
     #[must_use]
     pub fn valid_until(&self) -> DateTime<Utc> {
         let key = self
@@ -576,17 +521,14 @@ impl Verified {
 
 /// The approval document, as this controller reads it.
 ///
-/// EVERY FIELD DEFAULTS, AND THAT IS FAIL-CLOSED, NOT LENIENT. `plan_hash` and
-/// `subject_kind` are compared against values the controller computes itself,
-/// so an absent field yields `""`, which matches no real hash and no real
-/// kind: the approval is refused by check 7 or check 8 with a message naming
-/// what it did and did not carry. Making them `required` instead would route
-/// the same document to a *parse* error, which reads as "the file is corrupt"
-/// rather than "this approval does not bind a plan".
+/// Every field defaults, which is fail-closed: `plan_hash` and `subject_kind`
+/// are compared with values the controller computes, so an absent field is
+/// `""`, which matches nothing, and check 7 or 8 refuses naming what the
+/// document carried. `required` fields would turn that into a parse error that
+/// reads as "the file is corrupt".
 ///
-/// `subject_kind` is written by `logweir drill approve` (Task 22 extends it)
-/// and is therefore INSIDE the signed bytes — which is the only reason check 8
-/// is worth anything.
+/// `subject_kind` is written by `logweir drill approve` inside the signed
+/// bytes, which is the only reason check 8 is worth anything.
 #[derive(Debug, Deserialize)]
 struct ApprovalDocument {
     #[serde(default)]
@@ -601,56 +543,39 @@ struct ApprovalDocument {
 
 /// The whole verdict, as a pure function of bytes. No cluster access.
 ///
-/// # The order, and why each step is where it is
+/// In order:
 ///
 /// 0. Parse `sidecar_bytes` as a [`Sidecar`]; a parse failure is
 ///    [`ApprovalRefusal::SignatureInvalid`] naming the parse error.
 /// 1. `sidecar.payload_type != PAYLOAD_TYPE_APPROVAL` →
-///    [`ApprovalRefusal::PayloadTypeMismatch`] with both strings **in full**,
-///    **before any key is tried**. [`verify_detached`] also refuses a
-///    mismatch, so checking it here is what makes the refusal
-///    DISTINGUISHABLE from a bad signature.
-/// 2. Parse **every** `approverKeys[]` entry. If any fails,
-///    [`ApprovalRefusal::SignatureInvalid`] naming that `keyId` — a partially
-///    loaded roster is not a roster, and no approval is accepted against one.
-/// 3. For each parsed entry, `entry.keyId == key.key_id()`; a disagreement is
+///    [`ApprovalRefusal::PayloadTypeMismatch`] with both strings in full,
+///    before any key is tried, so it is distinguishable from a bad signature.
+/// 2. Every approver key parses, or [`ApprovalRefusal::SignatureInvalid`]
+///    naming the failing `keyId`: a partially loaded roster is not a roster.
+/// 3. Each entry's `keyId == key.key_id()`, or
 ///    [`ApprovalRefusal::KeyIdNotInRoster`] naming both, before any signature
-///    is checked. An entry whose declared id is not the hash of its own key
-///    material is not a roster entry a signature can be looked up in.
-/// 4. If no `sidecar.signatures[].keyid` equals any roster entry's key id,
-///    [`ApprovalRefusal::KeyIdNotInRoster`] naming the sidecar's key ids —
-///    **this, and not a signature failure, is the verdict for a key outside
-///    the roster.**
+///    is checked: an entry whose id is not the hash of its own key material is
+///    not one a signature can be looked up in.
+/// 4. If no `sidecar.signatures[].keyid` equals any entry's key id,
+///    [`ApprovalRefusal::KeyIdNotInRoster`] naming the sidecar's key ids: this,
+///    not a signature failure, is the verdict for a key outside the trust.
 /// 5. [`verify_detached`] for each entry whose key id matched; the first `Ok`
 ///    wins, otherwise [`ApprovalRefusal::SignatureInvalid`] with the last
 ///    error's `Display`.
-/// 6. The matched entry's `notAfter` must be in the future relative to `now`.
-/// 7. The document's `plan_hash` must equal
-///    `sha256_prefixed(referent_plan_bytes)`, **recomputed here** and never
-///    read from the referent's status.
-/// 8. The document's `subject_kind` must equal `referent_kind`.
+/// 6. The matched key may sign something new at `now`.
+/// 7. The document's `plan_hash` equals `sha256_prefixed(referent_plan_bytes)`,
+///    recomputed here and never read from the referent's status.
+/// 8. The document's `subject_kind` equals `referent_kind`.
 ///
-/// # Why the document is parsed between 6 and 7
+/// Steps 1 to 6 are answerable from the sidecar and the trust alone, so each
+/// has a test that cannot pass by accident
+/// (`approval_refuses_a_wrong_payload_type` passes a deliberately unparseable
+/// key, so reaching step 2 would change the verdict). By step 7 the bytes are
+/// authentic, so a parse failure means "this authentic document is not an
+/// approval document", which its message says.
 ///
-/// Steps 1 through 6 are answerable from the SIDECAR and the ROSTER alone, and
-/// keeping them that way is what lets each of them have a test that cannot be
-/// satisfied by accident: `approval_refuses_a_wrong_payload_type` passes a
-/// roster whose only entry is deliberately unparseable, so reaching step 2
-/// would change the verdict. Parsing the payload earlier would add a *ninth*
-/// way to reach `SignatureInvalid` ahead of checks whose whole point is not to
-/// be `SignatureInvalid`. By step 7 the bytes are known-authentic, so a parse
-/// failure there means "this authentic document is not an approval document",
-/// which is what its message says.
-///
-/// # Why the fifth check exists at all
-///
-/// Without it the second approval degenerates. An `Approval` whose `planHash`
-/// matches a `Restore` would be accepted for a `Switchover`, and "a valid
-/// signature by a rostered key exists in this namespace" is a property any
-/// approved restore in that namespace already produced. Tag 1 has no
-/// `Switchover`, so the check is cheap now and expensive to retrofit — and its
-/// absence would be invisible until tag 2.
-///
+/// Check 8 keeps an `Approval` whose plan hash matches one kind of subject from
+/// authorising another kind.
 /// # Errors
 ///
 /// Every refusal is an [`ApprovalRefusal`]; see the order above for which
@@ -681,18 +606,16 @@ fn evaluate_inner(
     referent_kind: &str,
     referent_plan_bytes: &[u8],
 ) -> Result<Verified, ApprovalRefusal> {
-    // ---- 0. the sidecar is a document before it is a signature -----------
+    // 0. The sidecar is a document before it is a signature.
     let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|e| {
         ApprovalRefusal::SignatureInvalid(format!(
             "spec.sidecarBytes is not a DSSE sidecar document: {e}"
         ))
     })?;
 
-    // ---- 1. the payload type, BEFORE ANY KEY IS TRIED --------------------
-    //
-    // The payload type is part of what `verify_detached` covers, so a
-    // genuinely signed document of another kind is refused by the SIGNATURE
-    // layer rather than by a field comparison somebody could forget to write.
+    // 1. The payload type, before any key is tried. `verify_detached` covers
+    // it too, so a genuinely signed document of another kind is refused by the
+    // signature layer even if this comparison were forgotten.
     let want_payload = PAYLOAD_TYPE_APPROVAL;
     if sidecar.payload_type != want_payload {
         return Err(ApprovalRefusal::PayloadTypeMismatch {
@@ -701,19 +624,15 @@ fn evaluate_inner(
         });
     }
 
-    // ---- 2. the WHOLE approver key set parses, or nothing is accepted ----
+    // 2. The whole approver key set parses, or nothing is accepted. Carried as
+    // data by the resolution layer: the rule is the roster's ("a partially
+    // loaded roster is not a roster"); a real `TrustPolicy` reports one
+    // unparseable key and keeps the others working. `blocked_for` carries the
+    // legacy message verbatim.
     //
-    // CARRIED AS DATA BY THE RESOLUTION LAYER, not re-derived here. The rule
-    // is the ROSTER's ("a partially loaded roster is not a roster") and it
-    // stops at the roster: a real `TrustPolicy` reports one unparseable key as
-    // one `Unparseable` key and keeps the other 63 working, because it has
-    // somewhere to record which entry failed. `blocked_for` carries the
-    // legacy message byte-for-byte, so the sentence an operator reads did not
-    // change on the day this path replaced the roster walk.
-    // A v1 approval document carries no ordinary/governed policy mode.
-    // Admitting a ConsoleConfirmation key merely because one exists would let
-    // an ordinary confirmation authorize governed work. Fail closed: a v1
-    // document requires GovernedApproval.
+    // A v1 approval document carries no ordinary/governed mode, and admitting
+    // a ConsoleConfirmation key would let an ordinary confirmation authorize
+    // governed work, so a v1 document requires GovernedApproval.
     let allowed_usages: &[KeyUsage] = &[KeyUsage::GovernedApproval];
     if let Some(message) = allowed_usages
         .iter()
@@ -728,7 +647,7 @@ fn evaluate_inner(
         .collect();
     let usage_names = join(allowed_usages.iter().map(|usage| usage.as_str()));
 
-    // ---- 3. an entry must agree with its own key material ----------------
+    // 3. An entry must agree with its own key material.
     for entry in &declared {
         if let Err(computed) = &entry.declared_id_matches {
             return Err(ApprovalRefusal::KeyIdNotInRoster {
@@ -741,7 +660,7 @@ fn evaluate_inner(
         }
     }
 
-    // ---- 4. a key outside the resolved trust is NOT a signature failure ---
+    // 4. A key outside the resolved trust is not a signature failure.
     let matching: Vec<&&ResolvedKey> = declared
         .iter()
         .filter(|k| k.is_usable() && sidecar.signatures.iter().any(|s| s.keyid == k.trust.key_id))
@@ -758,21 +677,16 @@ fn evaluate_inner(
         });
     }
 
-    // ---- 5. the crypto, and only now --------------------------------------
-    //
-    // `verify_detached` returns the MATCHED keyid, never `signatures[0]`
-    // (`crates/logweir-verify/src/verify.rs:60`). A sidecar carrying two
-    // signatures — one by a rostered key, one by an attacker's — verifies
-    // under exactly one of them, and only that one may be reported. This
-    // binding is the whole reason the return value is used instead of being
-    // discarded in favour of an id already in hand.
+    // 5. The crypto, and only now. `verify_detached` returns the matched keyid,
+    // never `signatures[0]`: a sidecar carrying one trusted and one attacker's
+    // signature verifies under exactly one, and only that one may be reported.
     let mut last_error: Option<String> = None;
     let mut hit: Option<String> = None;
     for entry in matching {
         let Ok(key) = VerifyingKey::from_pem_str(&entry.spki_pem) else {
-            // Unreachable: `is_usable()` already required a parsed PEM. Named
-            // rather than unwrapped, because a panic in an admission path is a
-            // denial of service.
+            // Unreachable: `is_usable()` already required a parsed PEM. Not
+            // unwrapped, because a panic in an admission path is a denial of
+            // service.
             continue;
         };
         match verify_detached(&key, want_payload, approval_bytes, &sidecar) {
@@ -794,17 +708,10 @@ fn evaluate_inner(
         }
     };
 
-    // ---- 6. THE MATCHED KEY MUST BE ABLE TO SIGN SOMETHING NEW ------------
-    //
-    // D3 §7.4's first question, and this is the call site that makes it a
-    // question at all: *admission is a new use*. An `Approval` object that
-    // arrives today carrying a signature by a key retired last week is asking
-    // whether that key may authorise something now — not whether an archive it
-    // signed last year still verifies, which is `decide`'s question and has a
-    // different answer.
-    //
-    // The MATCHED key's lifecycle, not the first key's: a policy may hold
-    // several approver keys and only one of them signed this.
+    // 6. The matched key must be able to sign something new: admission is a
+    // new use. A signature by a key retired last week asks whether that key may
+    // authorise something now, not whether an archive it signed still
+    // verifies. The matched key's lifecycle, not the first key's.
     let matched_usage = allowed_usages
         .iter()
         .copied()
@@ -829,7 +736,7 @@ fn evaluate_inner(
         ));
     }
 
-    // ---- the bytes are authentic; now read the document -------------------
+    // The bytes are authentic; now read the document.
     let (approver, ticket, document_expires_at) = {
         let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
             ApprovalRefusal::SignatureInvalid(format!(
@@ -838,7 +745,7 @@ fn evaluate_inner(
             ))
         })?;
 
-        // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
+        // 7. The plan hash, recomputed from the referent's own bytes.
         let want = sha256_prefixed(referent_plan_bytes);
         if doc.plan_hash != want {
             return Err(ApprovalRefusal::PlanHashMismatch {
@@ -847,7 +754,7 @@ fn evaluate_inner(
             });
         }
 
-        // ---- 8. the subject kind, from inside the signed bytes ------------
+        // 8. The subject kind, from inside the signed bytes.
         if doc.subject_kind != referent_kind {
             return Err(ApprovalRefusal::SubjectKindMismatch {
                 approval_says: doc.subject_kind,
@@ -857,23 +764,17 @@ fn evaluate_inner(
         (doc.approver, doc.ticket, None)
     };
 
-    // LABELLED, NEVER REFUSED — and under a real `TrustPolicy` it is
-    // STRUCTURALLY IMPOSSIBLE rather than merely absent. D3 §7.3's CEL rule G8
-    // makes a policy key declare exactly one usage, so `has_usage` here can
-    // only be true for the synthesised `legacy-roster-v1`, whose two lists may
-    // name the same key id. That is precisely §7.3's "the label remains for
-    // legacy-roster namespaces": the label goes on where the separation cannot
-    // be enforced, and the enforcement replaces it where it can.
+    // Labelled, never refused. Under a real `TrustPolicy` it is impossible: a
+    // CEL rule makes a policy key declare exactly one usage, so only the
+    // synthesised `legacy-roster-v1`, whose two lists may name the same key,
+    // can set it.
     let self_attested_risk = trust
         .key(&matched_key_id)
         .is_some_and(|k| k.trust.has_usage(KeyUsage::EvidenceSigning));
 
-    // THE MATCHED KEY'S OWN WINDOW, and it is present by construction: check 6
-    // above resolved this id through `may_sign_new_for`, which refuses
-    // `UntrustedSigner` when the resolved trust does not carry it. THE MATCHED
-    // key's, never the first key's — a policy may hold several approver keys
-    // and only one of them signed this, and publishing another one's window
-    // would be a deadline about a key that authorised nothing.
+    // The matched key's own window, present because check 6 resolved this id.
+    // Never another key's: that would be a deadline about a key that
+    // authorised nothing.
     let key_window = trust.key(&matched_key_id).map(|k| ApproverKeyWindow {
         key_id: matched_key_id.clone(),
         not_before: k.trust.not_before,
@@ -894,10 +795,10 @@ fn evaluate_inner(
     })
 }
 
-/// One required signature, found and verified under a key of `usage` from
-/// the resolved trust — the v2 twin of [`evaluate_inner`]'s checks 2-6. Only
-/// keys DECLARING `usage` are offered, so a key of another usage can never
-/// satisfy it (D3 §7.3; G8 makes every policy key carry exactly one).
+/// One required signature, found and verified under a key of `usage` from the
+/// resolved trust: the v2 twin of [`evaluate_inner`]'s checks 2-6. Only keys
+/// declaring `usage` are offered, so a key of another usage can never satisfy
+/// it.
 fn verify_signature_under(
     trust: &ResolvedTrust,
     usage: KeyUsage,
@@ -971,45 +872,38 @@ fn verify_signature_under(
     Ok(key_id)
 }
 
-/// **Authorization document v2** (PLAT-19.2, decision D0), as a pure function
-/// of bytes, the namespace's resolved trust, its BOUND approval policy and the
-/// referent — the ordinary and the governed mode in one order.
-///
-/// # The order
+/// Authorization document v2, as a pure function of bytes, the namespace's
+/// resolved trust, its bound approval policy and the referent: the ordinary
+/// and the governed mode in one order.
 ///
 /// 0. The sidecar parses.
 /// 1. Its `payloadType` is [`PAYLOAD_TYPE_RESTORE_AUTHORIZATION`], before any
 ///    key is tried.
 /// 2. A `ConsoleConfirmation` signature by a usable key of this namespace's
-///    trust verifies, and that key may sign something new. **Both modes.**
-///    Without it nothing attests who the requester was.
+///    trust verifies, and that key may sign something new. Both modes: without
+///    it nothing attests who the requester was.
 /// 3. The authentic bytes parse as the v2 document.
 /// 4. [`policy::check_restore_authorization`]: format, the exact subject
-///    INCLUDING UID, the plan hash recomputed from the referent's own bytes,
-///    the policy name AND snapshot digest AND mode against the namespace's
+///    including UID, the plan hash recomputed from the referent's own bytes,
+///    the policy name, snapshot digest and mode against the namespace's
 ///    current binding, a non-blank requester, and the window at `now`.
-/// 5. `Governed` only: a second signature, by a usable `GovernedApproval` key
-///    — absent is [`ApprovalRefusal::GovernedApprovalRequired`], the pending
-///    state — and then separation of duties: that key's `principal.id` must
-///    not be the requester's `<issuer>#<subject>`.
+/// 5. `Governed` only: a second signature by a usable `GovernedApproval` key
+///    (absent is [`ApprovalRefusal::GovernedApprovalRequired`], the pending
+///    state), and separation of duties: that key's `principal.id` must not be
+///    the requester's `<issuer>#<subject>`.
 ///
-///    **PROD-16.2, a `Governed` policy whose `approverSignature` is
-///    `Console`:** there is no second KEY. The second PERSON is inside the
-///    bytes the console signed — `approver {issuer, subject}` and
-///    `approvedAt` — and step 4 has already held them to the rule every
-///    reader applies ([`policy::check_console_approval`]): present (absent is
-///    the pending state, as above), a second person of the requester's own
-///    issuer, never the local administrator or a service account, approved
-///    inside the request's window. The console's signature of step 2 is then
-///    the whole authorisation, under its `ConsoleConfirmation` usage; a
-///    `GovernedApproval` countersignature is neither asked for nor accepted
-///    in its place.
+///    A `Governed` policy whose `approverSignature` is `Console` has no second
+///    key: the second person (`approver {issuer, subject}`, `approvedAt`) is
+///    inside the bytes the console signed, and step 4 held them to
+///    [`policy::check_console_approval`] (present, a second person of the
+///    requester's issuer, never the local administrator or a service account,
+///    inside the request's window). The console's signature is then the whole
+///    authorisation; a `GovernedApproval` countersignature is neither asked for
+///    nor accepted in its place.
 ///
-/// # What it never does
-///
-/// Accept a `GovernedApproval` signature in place of the console's, or the
-/// console's in place of the approver's under `Governed`: the two usages are
-/// checked by name, one each.
+/// It never accepts a `GovernedApproval` signature in place of the console's,
+/// or the console's in place of the approver's under `Governed`: each usage is
+/// checked by name.
 ///
 /// # Errors
 ///
@@ -1022,7 +916,7 @@ pub fn evaluate_authorization_v2(
     expected: &ExpectedSubject,
     bound: &ApprovalPolicy,
 ) -> Result<Verified, ApprovalRefusal> {
-    // ---- 0 / 1 ------------------------------------------------------------
+    // 0 / 1.
     let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|e| {
         ApprovalRefusal::SignatureInvalid(format!(
             "spec.sidecarBytes is not a DSSE sidecar document: {e}"
@@ -1035,7 +929,7 @@ pub fn evaluate_authorization_v2(
         });
     }
 
-    // ---- 2. the console's confirmation, in BOTH modes ----------------------
+    // 2. The console's confirmation, in both modes.
     let confirmation_key_id = verify_signature_under(
         trust,
         KeyUsage::ConsoleConfirmation,
@@ -1044,17 +938,15 @@ pub fn evaluate_authorization_v2(
         now,
     )?;
 
-    // ---- 3 / 4. the authentic bytes, against the referent and the policy ---
+    // 3 / 4. The authentic bytes, against the referent and the policy.
     let doc = RestoreAuthorization::from_bytes(approval_bytes)?;
     policy::check_restore_authorization(&doc, expected, bound, now)?;
     let requester = doc.requester.principal_id();
 
-    // ---- 5. the governed approver, and separation of duties ----------------
-    //
-    // BY THE TABLE (PROD-16.2). `ApprovalPolicy::route` reads the policy's
-    // `(mode, approverSignature)` pair once; each row says whose signature
-    // authorises and whose name the verdict records, and the pair that is not
-    // a row is refused here, by name, whatever step 4 already said of it.
+    // 5. The governed approver, and separation of duties, by the table:
+    // `ApprovalPolicy::route` reads `(mode, approverSignature)` once; each row
+    // says whose signature authorises and whose name the verdict records, and
+    // a pair that is not a row is refused by name.
     let route = bound.route()?;
     let (matched_key_id, usage, approver) = match route {
         policy::ApprovalRoute::RequesterConfirms => (
@@ -1062,12 +954,10 @@ pub fn evaluate_authorization_v2(
             route.authorising_usage(),
             requester.clone(),
         ),
-        // THE CONSOLE SIGNS THE APPROVAL. Step 4 required the approver and
-        // judged it; what is left is to say whose approval the verdict
-        // records, taken from the document by the one function that takes it
-        // (`console_approval_of`) — which refuses, by name, a document with no
-        // approver or no `approvedAt`, so nothing here is ever made up. An
-        // admission path never aborts on an invariant it merely believes.
+        // The console signs the approval. Step 4 judged the approver; the
+        // verdict records whose approval it is, taken from the document by
+        // `console_approval_of`, which refuses a document with no approver or
+        // no `approvedAt` by name, so nothing is made up.
         policy::ApprovalRoute::SecondPersonInConsole => (
             confirmation_key_id.clone(),
             route.authorising_usage(),
@@ -1102,9 +992,9 @@ pub fn evaluate_authorization_v2(
                 .key(&approver_key_id)
                 .map(|k| k.trust.principal_id.clone())
                 .unwrap_or_default();
-            // FAIL CLOSED ON A PRINCIPAL THAT CANNOT BE COMPARED (review M4):
-            // `alice@example.com` differs from `https://idp#alice` as a string
-            // and may still be Alice. Only `<issuer>#<subject>` is comparable.
+            // Fail closed on a principal that cannot be compared:
+            // `alice@example.com` and `https://idp#alice` differ as strings and
+            // may be the same person. Only `<issuer>#<subject>` is comparable.
             if bound.require_distinct_principal && !policy::is_issuer_subject_principal(&principal)
             {
                 return Err(ApprovalRefusal::SelfApprovalRefused {
@@ -1140,9 +1030,9 @@ pub fn evaluate_authorization_v2(
         not_before: k.trust.not_before,
         not_after: k.trust.not_after,
     });
-    // THE VERDICT STOPS BEING TRUE at the earliest of the document's expiry
-    // and the console key's notAfter; the authorising key's notAfter is the
-    // window's own and `Verified::valid_until` takes the minimum with it.
+    // The verdict stops being true at the earliest of the document's expiry
+    // and the console key's `notAfter`; `Verified::valid_until` also takes the
+    // authorising key's.
     let console_not_after = trust
         .key(&confirmation_key_id)
         .map_or(DateTime::<Utc>::MAX_UTC, |k| k.trust.not_after);
@@ -1172,10 +1062,8 @@ pub fn evaluate_authorization_v2(
 /// The object an operator would edit to change this refusal — the roster when
 /// trust came from the synthesised `legacy-roster-v1`, the policy otherwise.
 ///
-/// THE REFUSAL NAMES THE THING TO EDIT. "no key on the TrustRoster 'default'
-/// authorises this" is the wrong sentence for a namespace governed by
-/// `org-default`, and sending an operator to an object that no longer decides
-/// anything for their namespace is worse than saying nothing.
+/// The refusal names the thing to edit: "no key on the TrustRoster 'default'"
+/// is the wrong sentence for a namespace governed by `org-default`.
 fn trust_object(trust: &ResolvedTrust) -> String {
     if trust.source.is_legacy() {
         format!("TrustRoster '{ROSTER_NAME}'")
@@ -1186,18 +1074,12 @@ fn trust_object(trust: &ResolvedTrust) -> String {
 
 /// One [`SigningRefusal`] as the refusal an operator reads.
 ///
-/// # No wildcard arm
+/// No wildcard arm: a new [`SigningRefusal`] must fail to compile here.
 ///
-/// A seventh [`SigningRefusal`] must fail to compile here rather than reach the
-/// cluster as a reason nobody chose — the same rule
-/// [`ApprovalRefusal::reason`] follows.
-///
-/// `UntrustedSigner` and `KeyUsageMismatch` are UNREACHABLE from check 6: the
-/// key came out of the resolved trust's own allowed-usage set for this
-/// document kind, so it exists and it carries the selected usage. They map to
-/// [`ApprovalRefusal::KeyIdNotInRoster`] because that is what they would mean
-/// if a future refactor made them reachable — the key the signature named is
-/// not one this namespace's trust offers for approvals.
+/// `UntrustedSigner` and `KeyUsageMismatch` are unreachable from check 6 (the
+/// key came from the trust's own allowed-usage set for this document kind);
+/// they map to [`ApprovalRefusal::KeyIdNotInRoster`], which is what they would
+/// mean if a refactor made them reachable.
 fn signing_refusal(
     trust: &ResolvedTrust,
     key_id: &str,
@@ -1229,16 +1111,11 @@ fn signing_refusal(
         },
         SigningRefusal::KeyRevoked => ApprovalRefusal::KeyRevoked {
             key_id: key_id.to_string(),
-            // `{:?}` on the pure enum, whose variant names ARE the CRD's
-            // `revocationReason` values (`KeyCompromise`, `Superseded`,
-            // `Unspecified`) — the same string an operator reads off the
-            // policy they would go and edit.
-            //
-            // …AND THE OBJECT THAT RECORDS IT, when that is not the resolved
-            // trust itself (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a KeyCompromise
-            // revocation on any TrustPolicy applies to every namespace, and
-            // "the resolved trust policy records it" would send an operator to
-            // a `legacy-roster-v1` that cannot express a revocation at all.
+            // `{:?}` on the pure enum, whose variant names are the CRD's
+            // `revocationReason` values, and the object that records it when
+            // that is not the resolved trust itself: a `KeyCompromise`
+            // revocation on any `TrustPolicy` applies to every namespace, and
+            // `legacy-roster-v1` cannot express a revocation.
             reason: match key.filter(|k| !k.compromise_inherited_from.is_empty()) {
                 Some(k) => format!(
                     "{:?}, recorded by TrustPolicy/{}",
@@ -1259,28 +1136,22 @@ fn signing_refusal(
     }
 }
 
-/// `a, b, c` — used only inside refusal messages.
+/// `a, b, c`, used only inside refusal messages.
 fn join<'a>(ids: impl Iterator<Item = &'a str>) -> String {
     ids.collect::<Vec<_>>().join(", ")
 }
 
 /// What the API server said when the roster was asked for.
 ///
-/// A THREE-STATE ANSWER AND NOT A `Result<TrustRoster, ApprovalRefusal>`,
-/// because a 404 and a connection reset must not become the same thing. A 404
-/// is a VERDICT — the install skipped step 1 — and is written to
-/// `status.conditions` as [`ApprovalRefusal::RosterNotFound`]. A transport
-/// error is not a verdict about anybody's approval and must requeue instead of
-/// stamping a refusal onto an object that may well be fine.
+/// Three states, not a `Result`, because a 404 and a connection reset must not
+/// become the same thing: a 404 is a verdict (written as
+/// [`ApprovalRefusal::RosterNotFound`]); a transport error is not a verdict
+/// about anybody's approval and requeues.
 #[derive(Debug)]
 pub enum RosterLoad {
     /// The roster exists.
-    ///
-    /// BOXED. A `TrustRoster` is ~464 bytes and `NotFound` is empty, so an
-    /// unboxed variant makes every `Ok(NotFound)` carry the larger one's
-    /// footprint (`clippy::large_enum_variant`). `Box` keeps the two states
-    /// named — which is the whole point of this type — at one allocation per
-    /// reconcile.
+    /// The roster exists. Boxed (`clippy::large_enum_variant`): a
+    /// `TrustRoster` is ~464 bytes and `NotFound` is empty.
     Found(Box<TrustRoster>),
     /// The API server answered 404 for `trustrosters/default`.
     NotFound,
@@ -1288,10 +1159,8 @@ pub enum RosterLoad {
 
 /// Resolve the one cluster-scoped [`TrustRoster`] named [`ROSTER_NAME`].
 ///
-/// THE ROSTER-LOADING PATH every consumer in chain O shares — Task 24's
-/// evidence verification calls exactly this. The name comes from
-/// [`ROSTER_NAME`] and from nowhere else: not from the `Approval`, not from a
-/// flag, not from the environment.
+/// The name comes from [`ROSTER_NAME`] and nowhere else: not the `Approval`, a
+/// flag or the environment.
 ///
 /// # Errors
 ///
@@ -1309,11 +1178,10 @@ pub async fn load_roster(client: &kube::Client) -> Result<RosterLoad, kube::Erro
 
 /// A problem with the object an `Approval` points at.
 ///
-/// NOT AN EIGHTH [`ApprovalRefusal`] VARIANT. That set is an interface Tasks
-/// 20, 24 and 27 route on; these two are properties of the REFERENT, not
-/// verdicts about the signature, and conflating them would put "your cluster
-/// is missing an object" in the same vocabulary as "your approval does not
-/// authorise this plan".
+/// Not an [`ApprovalRefusal`] variant: that set is an interface others route
+/// on, and these are properties of the referent, not verdicts about the
+/// signature. "Your cluster is missing an object" is not "your approval does
+/// not authorise this plan".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferentProblem {
     /// `spec.subjectRef` names an object that does not exist in this
@@ -1326,16 +1194,12 @@ pub enum ReferentProblem {
     },
     /// The referent exists and carries no `spec.planBytes` to hash.
     ///
-    /// REACHABLE IN TAG 1, FOR TWO KINDS AND FOR DIFFERENT REASONS.
-    /// `Backup.spec` has no
-    /// `planBytes` field (`crates/weirkeeper/src/crds/backup.rs`), and check 7
-    /// recomputes the plan hash from the referent's own bytes. So an
-    /// `Approval` whose `subjectRef.kind` is `Backup` is refused here, with a
-    /// message that says which field is missing — rather than silently hashing
-    /// something nobody signed, or degrading check 7 to a no-op for one kind.
-    /// Tag 1's approval flow is the restore wizard (interface **I19**);
-    /// `Backup` is in [`SubjectKind`] because the CRD's CEL seal admits it and
-    /// check 8 must be able to tell the kinds apart.
+    /// `Backup.spec` has no `planBytes` field, and check 7 recomputes the plan
+    /// hash from the referent's own bytes, so an `Approval` whose
+    /// `subjectRef.kind` is `Backup` is refused here naming the missing field,
+    /// rather than hashing something nobody signed. `Backup` is in
+    /// [`SubjectKind`] because the CRD admits it and check 8 must tell the
+    /// kinds apart.
     ReferentHasNoPlanBytes {
         /// `Backup`.
         kind: String,
@@ -1343,7 +1207,7 @@ pub enum ReferentProblem {
         name: String,
     },
     /// This immutable Approval was already verified for an older incarnation
-    /// of the same-named object.  Re-verification must not rebind it.
+    /// of the same-named object. Re-verification must not rebind it.
     ReferentUidChanged {
         /// `Restore` or `Backup`.
         kind: String,
@@ -1398,8 +1262,7 @@ impl fmt::Display for ReferentProblem {
 
 /// What one reconcile decided, before it was patched onto `/status`.
 ///
-/// Returned so a test can assert over the VERDICT as well as over the route
-/// table — the same reason [`evaluate`] is a pure function.
+/// Returned so a test can assert over the verdict as well as the route table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     /// Every check passed.
@@ -1408,38 +1271,36 @@ pub enum ApprovalOutcome {
     Refused(ApprovalRefusal),
     /// The referent could not supply the bytes check 7 hashes.
     Referent(ReferentProblem),
-    /// The referent Restore was ADMITTED under this verdict (P9): the verdict
-    /// is a record now, and it is kept rather than judged again. See
-    /// [`CONDITION_CONSUMED`].
+    /// The referent Restore was admitted under this verdict: the verdict is a
+    /// record now, kept rather than judged again. See [`CONDITION_CONSUMED`].
     Consumed(Consumption),
 }
 
-/// The admission that consumed a verified `Approval` — defect P9.
+/// The admission that consumed a verified `Approval`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Consumption {
-    /// The exact Restore admitted: the `status.verifiedSubjectRef` the
-    /// verdict was recorded for, matched against the object the API server
-    /// returned (name, namespace AND UID).
+    /// The exact Restore admitted: the `status.verifiedSubjectRef` the verdict
+    /// was recorded for, matched against the object the API server returned
+    /// (name, namespace and UID).
     pub subject: VerifiedSubjectRef,
     /// When the Restore controller recorded `Admitted=True`, when the Restore
     /// says (the condition's `lastTransitionTime`).
     pub admitted_at: Option<DateTime<Utc>>,
-    /// `None` when the stored `Verified=True` status is KEPT VERBATIM — the
-    /// ordinary case. `Some` only when the stored verdict had already been
-    /// withdrawn by an earlier build (the P9 objects themselves) and this pass
-    /// re-established it by verifying AT THE ADMISSION INSTANT, which is the
-    /// one clock an admitted run's authorization was ever about.
+    /// `None` when the stored `Verified=True` status is kept verbatim, the
+    /// ordinary case. `Some` only when an earlier build had already withdrawn
+    /// the verdict and this pass re-established it by verifying at the
+    /// admission instant, the one clock an admitted run's authorization was
+    /// ever about.
     pub reverified: Option<Box<Verified>>,
-    /// What the record's verdict is now — review M1. The one key event that
-    /// reaches a consumed record is a `KeyCompromise` revocation: expiry,
-    /// `notAfter`, retirement and a `Superseded`/`Unspecified` revocation are
-    /// time-based boundaries on NEW uses and leave the record as it was; a
-    /// compromise says the signature itself may not be the key holder's, and
-    /// D3 §7.4 makes that "never green" for every document the key signed.
+    /// What the record's verdict is now. The one key event that reaches a
+    /// consumed record is a `KeyCompromise` revocation: expiry, `notAfter`,
+    /// retirement and a `Superseded`/`Unspecified` revocation bound new uses
+    /// and leave the record; a compromise says the signature itself may not be
+    /// the key holder's, which is never green for any document the key signed.
     pub standing: Standing,
 }
 
-/// The verdict a consumed record carries — review M1.
+/// The verdict a consumed record carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Standing {
     /// No key the record names is revoked for compromise in the resolved
@@ -1449,18 +1310,17 @@ pub enum Standing {
     /// False, never green; the record itself is kept.
     Compromised(Compromise),
     /// An earlier pass withdrew the verdict for a compromise, and today's
-    /// resolution no longer shows the revocation — a `TrustPolicy` deleted, or
-    /// the namespace re-bound. **STICKY, deliberately.** The CRD makes a
-    /// revocation monotonic (G3: `Active|Retired → Revoked` and nowhere else),
-    /// so the only way it "disappears" is that the object recording it did,
-    /// which exonerates nothing. The withdrawal is kept verbatim.
+    /// resolution no longer shows the revocation (a `TrustPolicy` deleted, or
+    /// the namespace re-bound). Sticky: a revocation is monotonic in the CRD,
+    /// so it only "disappears" when the object recording it did, which
+    /// exonerates nothing.
     StillWithdrawn {
         /// The stored `Verified` reason.
         reason: &'static str,
     },
 }
 
-/// A `KeyCompromise` revocation of a key a consumed verdict names — review M1.
+/// A `KeyCompromise` revocation of a key a consumed verdict names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compromise {
     /// The revoked key's id.
@@ -1468,14 +1328,14 @@ pub struct Compromise {
     /// Which recorded field names it: `status.matchedKeyId` or
     /// `status.authorization.confirmationKeyId`.
     pub field: &'static str,
-    /// `revocationEffectiveFrom`, else `revokedAt` — the instant D3 compares
-    /// an observation against.
+    /// `revocationEffectiveFrom`, else `revokedAt`: the instant an observation
+    /// is compared against.
     pub effective_from: Option<DateTime<Utc>>,
     /// The independent, controller-written observation: the admission instant
     /// the Restore controller recorded (`Consumed`'s `lastTransitionTime`).
     pub observed_at: Option<DateTime<Utc>>,
-    /// D3 §7.4, decided by `logweir_core::trust::decide` itself: the
-    /// observation precedes the effective instant.
+    /// Decided by `logweir_core::trust::decide` itself: the observation
+    /// precedes the effective instant.
     pub recorded_before: bool,
 }
 
@@ -1521,9 +1381,9 @@ impl Compromise {
 }
 
 impl Consumption {
-    /// The [`CONDITION_CONSUMED`] message. A function of the recorded facts
-    /// and nothing else — no clock — so a second pass computes the same bytes
-    /// and writes nothing.
+    /// The [`CONDITION_CONSUMED`] message: a function of the recorded facts
+    /// and no clock, so a second pass computes the same bytes and writes
+    /// nothing.
     #[must_use]
     pub fn message(&self) -> String {
         format!(
@@ -1559,8 +1419,8 @@ impl ApprovalOutcome {
         }
     }
 
-    /// Whether `status.verified` is `true` — never for a consumed record whose
-    /// key was revoked for compromise (review M1).
+    /// Whether `status.verified` is `true`: never for a consumed record whose
+    /// key was revoked for compromise.
     #[must_use]
     pub const fn is_verified(&self) -> bool {
         matches!(
@@ -1573,28 +1433,20 @@ impl ApprovalOutcome {
         )
     }
 
-    /// Whether this outcome is a consumed verdict, kept as a record (P9).
+    /// Whether this outcome is a consumed verdict, kept as a record.
     #[must_use]
     pub const fn is_consumed(&self) -> bool {
         matches!(self, Self::Consumed(_))
     }
 
-    /// **The instant this outcome stops being true on its own** — `None` for an
+    /// The instant this outcome stops being true on its own; `None` for an
     /// outcome no clock can withdraw.
     ///
-    /// ONLY A `Verified` HAS ONE, and that asymmetry is the point. A refusal
-    /// can only become a pass through an EDIT — a roster installed, a key
-    /// added, a referent created — and an edit wakes this controller through
-    /// its watch or through the heartbeat, which is what the five-minute
-    /// interval is for. A pass, on the other hand, becomes a refusal with
-    /// nobody touching anything, and that is the direction that must never be
-    /// late: `KeyNotYetValid` reading refused for a few minutes too long is a
-    /// closed door left closed; `KeyIdExpired` reading verified for a few
-    /// minutes too long is an expired key authorising a restore.
-    ///
-    /// A CONSUMED verdict has none either, and for the opposite reason: no
-    /// clock can withdraw it, because the only use it ever authorised has
-    /// already happened (P9).
+    /// Only a `Verified` has one. A refusal becomes a pass only through an edit,
+    /// which wakes this controller through its watch or the heartbeat. A pass
+    /// becomes a refusal with nobody touching anything, and that direction
+    /// must never be late: an expired key would authorise a restore. A consumed
+    /// verdict has none either: the one use it authorised has happened.
     #[must_use]
     pub fn valid_until(&self) -> Option<DateTime<Utc>> {
         match self {
@@ -1664,17 +1516,10 @@ impl ApprovalOutcome {
 
 /// Anything that made a reconcile impossible rather than negative.
 ///
-/// TWO VARIANTS, AND NEITHER IS A VERDICT. Every refusal an operator could act
-/// on is an [`ApprovalRefusal`] or a [`ReferentProblem`] and reaches the
-/// cluster as a condition; this type is only for "the reconcile could not be
-/// completed", which requeues and writes nothing.
-///
-/// HAND-WRITTEN `Display`/`Error` RATHER THAN A `thiserror` DERIVE, so this
-/// task adds no manifest entry at all beyond the two it must
-/// (`logweir-core`, `futures`). Global Constraint 38 closes the workspace
-/// graph; `thiserror` would add no *package*, but twenty lines that already
-/// exist in the standard library are not worth a dependency edge whose only
-/// job is to write them.
+/// Neither variant is a verdict: every refusal an operator can act on is an
+/// [`ApprovalRefusal`] or a [`ReferentProblem`] and reaches the cluster as a
+/// condition. This is only "the reconcile could not be completed", which
+/// requeues and writes nothing.
 #[derive(Debug)]
 pub enum ReconcileError {
     /// The `Approval` carries no namespace. Unreachable for an object that
@@ -1685,12 +1530,9 @@ pub enum ReconcileError {
     /// A referent's sealed spec could not be rendered as the canonical bytes
     /// its digest is taken over, or those bytes were not UTF-8.
     ///
-    /// ITS OWN VARIANT, AND NOT `NoUid` CARRYING A MESSAGE ABOUT SOMETHING
-    /// ELSE (review finding F7). `to_deterministic_json` always emits UTF-8, so
-    /// this is unreachable — which is precisely why it must not be a silent
-    /// default: an empty string here would make check 7 compare `sha256("")`
-    /// against the signed `plan_hash`, and that comparison would be fail-closed
-    /// by arithmetic luck rather than by construction, in an admission path.
+    /// Unreachable (`to_deterministic_json` always emits UTF-8), which is why
+    /// it must not be a silent default: an empty string would make check 7
+    /// compare `sha256("")`, fail-closed by luck rather than construction.
     Canonicalization(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
@@ -1726,10 +1568,9 @@ impl From<kube::Error> for ReconcileError {
 
 /// Decide one `Approval`, without writing anything.
 ///
-/// SPLIT FROM THE PATCH ON PURPOSE. The decision needs the cluster (a roster
-/// and a referent); the patch needs the decision. Keeping them apart is what
-/// lets `a_missing_roster_names_itself` assert the decision AND assert that
-/// the referent was never fetched, off one route table.
+/// Split from the patch: the decision needs the cluster and the patch needs
+/// the decision, so `a_missing_roster_names_itself` can assert the decision
+/// and that the referent was never fetched, off one route table.
 ///
 /// # Errors
 ///
@@ -1741,13 +1582,13 @@ pub async fn decide(
     decide_with_policy(approval, client, &ApprovalPolicySet::default()).await
 }
 
-/// The v1 / v2 choice for a `Restore` referent, made on the NAMESPACE'S
-/// BINDING and never on what the document claims to be (PLAT-19.2).
+/// The v1 / v2 choice for a `Restore` referent, made on the namespace's
+/// binding, never on what the document claims to be.
 ///
-/// An unbound namespace accepts exactly today's v1 approval; a bound one
-/// accepts exactly authorization document v2 naming its policy. The sidecar's
-/// payload type is read only to choose which refusal names the mismatch —
-/// every path to `Verified` still verifies a signature over those bytes.
+/// An unbound namespace accepts the v1 approval; a bound one accepts exactly
+/// authorization document v2 naming its policy. The sidecar's payload type
+/// only chooses which refusal names the mismatch; every path to `Verified`
+/// verifies a signature over those bytes.
 #[allow(clippy::too_many_arguments)]
 fn evaluate_restore_referent(
     approval: &Approval,
@@ -1798,14 +1639,14 @@ fn evaluate_restore_referent(
 }
 
 /// The refusal an `Approval` naming a `RehearsalSchedule` gets: standing
-/// authorizations are withdrawn in v1 (OD-12).
+/// authorizations are withdrawn in v1.
 fn standing_withdrawn(approval: &Approval) -> ApprovalOutcome {
     ApprovalOutcome::Refused(ApprovalRefusal::StandingAuthorizationRefused {
         name: approval.spec.subject_ref.name.clone(),
     })
 }
 
-/// [`decide`], under the installation's approval policies — PLAT-19.2.
+/// [`decide`], under the installation's approval policies.
 ///
 /// # Errors
 ///
@@ -1835,39 +1676,31 @@ pub async fn decide_with_policy_at(
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
 
-    // ---- A STANDING AUTHORIZATION IS WITHDRAWN (OD-12) --------------------
-    //
-    // FIRST, before a stored record, the trust or the referent is read: an
-    // `Approval` naming a `RehearsalSchedule` is refused by name and is never
-    // recorded `Verified` or `Consumed`. The kind stays in the CRD's enum so
-    // objects written before v1 still decode.
+    // A standing authorization is withdrawn: refused by name first, before a
+    // stored record, the trust or the referent is read, and never recorded
+    // `Verified` or `Consumed`. The kind stays in the CRD's enum so older
+    // objects still decode.
     if approval.spec.subject_ref.kind == SubjectKind::RehearsalSchedule {
         return Ok(standing_withdrawn(approval));
     }
 
-    // ---- P9: A CONSUMED VERDICT IS A RECORD, NOT A GATE -------------------
+    // A consumed verdict is a record, not a gate. An `Approval` whose Restore
+    // was admitted under it has authorised the one thing it ever will; a
+    // document expiry, a key's `notAfter`, a retirement or a policy edit after
+    // that is about new uses. Two ways in:
     //
-    // An `Approval` whose Restore was admitted under it has authorised the one
-    // thing it will ever authorise; a document expiry, a key's `notAfter`, a
-    // retirement or a policy edit after that moment is about NEW uses, and
-    // re-judging the record against them is what rewrote a succeeded
-    // Restore's Approval `AuthorizationExpired` 900 s after its confirmation.
-    // Two ways in:
+    // 1. This build already recorded `Consumed=True`: the stored status alone.
+    // 2. The stored verdict is still `Verified=True` and the Restore says it
+    //    was admitted under this Approval object (`admitted_under`, bound by
+    //    UID through the Restore's own approval bundle). Checked ahead of the
+    //    full evaluation, so the pass that first sees the admission cannot be
+    //    the one that withdraws the verdict.
     //
-    // 1. This build already recorded `Consumed=True` — the stored status alone.
-    // 2. The stored verdict is still `Verified=True` and the Restore now says
-    //    it was admitted under THIS Approval object (`admitted_under`, bound by
-    //    UID through the Restore's own approval bundle — review L3). Checked
-    //    AHEAD of the full evaluation, so that the pass which first sees the
-    //    admission cannot be the pass that withdraws the verdict.
-    //
-    // ...AND ONE KEY EVENT STILL REACHES IT (review M1). A `KeyCompromise`
-    // revocation says the signature may not be the key holder's, and D3 §7.4
-    // makes every document such a key signed "never green". So a consumed
-    // record reads the namespace's trust on every pass — one read, which is
-    // what every pass cost before P9 — and a compromise of a key it names
-    // turns `Verified` False (`RecordedBeforeRevocation`, or `KeyRevoked`)
-    // while the record itself is kept.
+    // One key event still reaches it: a `KeyCompromise` revocation, which
+    // makes every document the key signed never green. So a consumed record
+    // reads the namespace's trust on every pass, and a compromise of a key it
+    // names turns `Verified` false (`RecordedBeforeRevocation`, or
+    // `KeyRevoked`) while the record is kept.
     let subject = &approval.spec.subject_ref;
     let stored = approval.status.as_ref();
     let mut prefetched: Option<Option<Restore>> = None;
@@ -1903,11 +1736,10 @@ pub async fn decide_with_policy_at(
         };
         match crate::trust::resolve(client, &namespace).await? {
             Resolution::Trust(trust) => {
-                // REVIEW I1's GUARD: a record is kept only while the signature
-                // it records still verifies under the key it names (when the
-                // resolved trust carries that key at all). A `Consumed` planted
-                // on an Approval whose bytes were never signed by that key is
-                // not a record of anything, and is judged from scratch below.
+                // A record is kept only while the signature it records still
+                // verifies under the key it names (when the trust carries
+                // that key): a `Consumed` planted on bytes that key never
+                // signed is judged from scratch below.
                 if record_signature_holds(approval, &trust) {
                     consumption.standing =
                         match compromise_of(approval, &trust, consumption.admitted_at, now) {
@@ -1917,8 +1749,8 @@ pub async fn decide_with_policy_at(
                     return Ok(ApprovalOutcome::Consumed(consumption));
                 }
             }
-            // A CONTESTED OR ABSENT TRUST IS NOT A REVOCATION. It says nothing
-            // about the keys this record names, so the record stands as stored.
+            // A contested or absent trust is not a revocation: it says nothing
+            // about the keys this record names, so the record stands.
             Resolution::Conflict { .. } | Resolution::Unconfigured => {
                 consumption.standing = unchanged(withdrawn);
                 return Ok(ApprovalOutcome::Consumed(consumption));
@@ -1926,16 +1758,12 @@ pub async fn decide_with_policy_at(
         }
     }
 
-    // THE NAMESPACE'S TRUST FIRST, and an absent or contested one
-    // short-circuits everything: without a resolved key set there is no set of
-    // keys any signature could be checked against, so fetching the referent
-    // would be work performed to reach a conclusion already known.
-    //
-    // PLAT-19.1 REPLACES `load_roster` HERE. `trust::resolve` reads every
-    // `TrustPolicy` and falls back to the synthesised `legacy-roster-v1`, so a
-    // cluster that has never seen a policy resolves to exactly the key set
-    // `TrustRoster/default` gave it — and `Unconfigured` is today's
-    // `RosterNotFound`, the same refusal with the same message.
+    // The namespace's trust first; an absent or contested one short-circuits,
+    // because without a key set fetching the referent would only reach a
+    // known conclusion. `trust::resolve` falls back to the synthesised
+    // `legacy-roster-v1`, so an unmigrated cluster gets exactly
+    // `TrustRoster/default`'s key set, and `Unconfigured` is `RosterNotFound`
+    // with the same message.
     let trust = match crate::trust::resolve(client, &namespace).await? {
         Resolution::Trust(trust) => trust,
         Resolution::Conflict {
@@ -1955,11 +1783,10 @@ pub async fn decide_with_policy_at(
     };
 
     let referent_kind = subject.kind.as_str();
-    // P9's repair: the instant the referent Restore was admitted under this
-    // Approval, when it was and the stored verdict no longer says Verified —
-    // an object an earlier build rewrote after the admission. The verdict is
-    // then asked at THAT instant, the only one an admitted run's
-    // authorization was ever about.
+    // When the referent Restore was admitted under this Approval but the
+    // stored verdict no longer says Verified (rewritten by an earlier build),
+    // the verdict is asked at the admission instant, the only one an admitted
+    // run's authorization was ever about.
     let mut consumed_at: Option<DateTime<Utc>> = None;
     let (plan_bytes, verified_subject_ref) = match subject.kind {
         SubjectKind::Restore => {
@@ -1985,9 +1812,8 @@ pub async fn decide_with_policy_at(
                                 },
                             ));
                         }
-                        // ONLY A VERDICT THAT WAS RECORDED FOR THIS UID can
-                        // have been consumed by its admission: the Restore
-                        // controller admits nothing without that binding.
+                        // Only a verdict recorded for this UID can have been
+                        // consumed by its admission.
                         let bundle = admission_bundle(client, &namespace, &restore).await?;
                         consumed_at = admitted_under(&restore, approval, bundle.as_ref()).flatten();
                     }
@@ -2006,9 +1832,9 @@ pub async fn decide_with_policy_at(
         SubjectKind::Backup => {
             let api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
             match api.get(&subject.name).await {
-                // The object exists; the KIND has no planBytes. Both facts are
-                // reported, in that order, so an operator is not told their
-                // Backup is missing when it is not.
+                // The object exists and the kind has no planBytes; both facts
+                // are reported, so the operator is not told the Backup is
+                // missing.
                 Ok(_) => {
                     return Ok(ApprovalOutcome::Referent(
                         ReferentProblem::ReferentHasNoPlanBytes {
@@ -2028,17 +1854,17 @@ pub async fn decide_with_policy_at(
                 Err(e) => return Err(e.into()),
             }
         }
-        // Refused at the top of this function; matched here because the
-        // enum is closed.
+        // Refused at the top of this function; matched here because the enum
+        // is closed.
         SubjectKind::RehearsalSchedule => return Ok(standing_withdrawn(approval)),
     };
 
-    // `.as_bytes()`, WITH NO DECODE STEP. Interface **I18**: `approvalBytes`
-    // and `sidecarBytes` are the UTF-8 document text, verbatim, never base64.
+    // `.as_bytes()`, with no decode step (interface **I18**): `approvalBytes`
+    // and `sidecarBytes` are the UTF-8 document text, never base64.
     let want = sha256_prefixed(plan_bytes.as_bytes());
     let evaluated = if subject.kind == SubjectKind::Restore {
-        // PLAT-19.2: THE ONE KIND AN APPROVAL POLICY GOVERNS. A `Backup`
-        // referent was refused before this point.
+        // The one kind an approval policy governs; a `Backup` referent was
+        // refused before this point.
         evaluate_restore_referent(
             approval,
             &trust,
@@ -2060,24 +1886,14 @@ pub async fn decide_with_policy_at(
     };
     Ok(match evaluated {
         Ok(mut verified) => {
-            // ---- THE UNSIGNED CLAIM MUST AGREE WITH THE SIGNED ONE -----
-            //
-            // `spec.planHash` is a plain CRD field beside the documents: a
-            // create form fills it in so an operator can compare it, and
-            // `kubectl get approval -o yaml`, `kubectl get approval` and
-            // the UI all SHOW it. Checks 1-8 never read it -- check 7
-            // recomputes the hash and compares it with the one INSIDE the
-            // signed bytes, which is what authorisation must rest on. So
-            // without this an `Approval` could be `Verified=True` while
-            // displaying a plan hash that is not the plan it authorises,
-            // and the one thing this field exists for -- letting a reader
-            // compare -- would be the one thing it could not be trusted
-            // for. The CRD has always said a wrong `planHash` is a refusal
-            // (`crds/approval.rs`); this is where that becomes true.
-            //
-            // THE VERDICT IS CHECK 7's, because the FACT is check 7's: this
-            // approval names a plan the referent does not carry. The
-            // message names both hashes and says both places must agree.
+            // The unsigned claim must agree with the signed one.
+            // `spec.planHash` is a plain CRD field that `kubectl` and the UI
+            // show so a reader can compare; checks 1-8 never read it (check 7
+            // compares the hash inside the signed bytes). Without this an
+            // `Approval` could be `Verified=True` while displaying a hash that
+            // is not the plan it authorises. The verdict is check 7's, because
+            // the fact is: this approval names a plan the referent does not
+            // carry. The message names both hashes.
             if approval.spec.plan_hash != want {
                 return Ok(ApprovalOutcome::Refused(
                     ApprovalRefusal::PlanHashMismatch {
@@ -2092,9 +1908,9 @@ pub async fn decide_with_policy_at(
                     subject,
                     admitted_at: Some(at),
                     reverified: Some(Box::new(verified)),
-                    // UNREACHABLE WITH A COMPROMISED KEY: `may_sign_new` refuses
-                    // a revoked key at every instant, so the re-evaluation above
-                    // has already refused. Stated, not assumed.
+                    // Unreachable with a compromised key: `may_sign_new`
+                    // refuses a revoked key at every instant, so the
+                    // re-evaluation above has already refused.
                     standing: Standing::Clean,
                 }),
                 _ => ApprovalOutcome::Verified(verified),
@@ -2133,17 +1949,14 @@ pub fn status_for(
             v.authorization.as_deref().cloned(),
             v.verified_subject_ref.clone(),
         ),
-        // A refused approval reports NO approver, NO key id AND NO KEY
-        // WINDOW. An approver name lifted out of bytes whose signature did
-        // not verify is an attacker-controlled string on a status field a
-        // UI renders; a window left over from a verdict that has since been
-        // withdrawn is worse, because a reader compares a deadline against
-        // it and finds it open. No key matched, so there is no window —
-        // which the preflight reads as `unknown`, never as valid.
+        // A refused approval reports no approver, key id or key window: an
+        // approver lifted from bytes whose signature did not verify is an
+        // attacker-controlled string, and a window left from a withdrawn
+        // verdict would let a reader compare a deadline against it and find it
+        // open. No window reads as `unknown`, never valid.
         //
         // Subject provenance is different: once established it is a replay
-        // fence and must survive every later failure, including referent
-        // deletion.
+        // fence and survives every later failure, including referent deletion.
         _ => (
             None,
             None,
@@ -2183,24 +1996,20 @@ pub fn status_for(
     }
 }
 
-/// [`status_for`] for a verdict the referent's admission consumed — P9.
+/// [`status_for`] for a verdict the referent's admission consumed.
 ///
-/// # Kept verbatim, plus one condition
+/// `reverified: None`, the ordinary case: the stored `Verified=True` status
+/// (`authorization`, `matchedKeyId`, `approver`, the key window, the
+/// `Verified` condition with its original `lastTransitionTime`) is copied as
+/// it stands, and [`CONDITION_CONSUMED`] is added. Nothing is recomputed, so
+/// no later clock, key event or policy edit reaches the record.
 ///
-/// `reverified: None` is the ordinary case: the stored `Verified=True` status —
-/// `authorization` (mode, policy, requester, confirmation key), `matchedKeyId`,
-/// `approver`, the key window, the `Verified` condition with its ORIGINAL
-/// `lastTransitionTime` — is copied as it stands, and [`CONDITION_CONSUMED`] is
-/// added beside it. Nothing is recomputed, so nothing a later clock, key event
-/// or policy edit does can reach the record.
+/// `reverified: Some` repairs an object an earlier build rewrote: the fields
+/// come from the verdict re-established at the admission instant, and its
+/// `Verified` message names that instant.
 ///
-/// `reverified: Some` is the repair of an object an earlier build had already
-/// rewritten: the fields come from the verdict re-established at the
-/// admission instant, and its `Verified` message names that instant.
-///
-/// An existing `Consumed=True` condition is carried VERBATIM rather than
-/// recomputed, so the pass after the one that wrote it computes the same
-/// status byte for byte and the no-write guard sends nothing.
+/// An existing `Consumed=True` condition is carried verbatim, so the next pass
+/// computes the same status and the no-write guard sends nothing.
 fn consumed_status(
     approval: &Approval,
     consumption: &Consumption,
@@ -2208,10 +2017,9 @@ fn consumed_status(
 ) -> ApprovalStatus {
     let stored = approval.status.as_ref();
     let stored_conditions = stored.and_then(|s| s.conditions.as_ref());
-    // `lastTransitionTime` IS THE ADMISSION INSTANT the Restore controller
-    // recorded — the moment the verdict was consumed, not the moment this
-    // controller noticed — and it is the independent observation a later
-    // compromise is compared against (review M1). Carried verbatim once set.
+    // `lastTransitionTime` is the admission instant the Restore controller
+    // recorded, not when this controller noticed: the independent observation
+    // a later compromise is compared against. Carried verbatim once set.
     let consumed = match current_condition(stored_conditions, CONDITION_CONSUMED) {
         Some(existing) if existing.status == "True" => existing.clone(),
         existing => merge_condition(
@@ -2252,9 +2060,9 @@ fn consumed_status(
         }
     };
     let mut conditions = status.conditions.take().unwrap_or_default();
-    // A COMPROMISE WITHDRAWS THE VERDICT AND NOTHING ELSE (review M1): the
-    // authorization, key ids, approver, ticket, window and subject binding are
-    // the record an investigation starts from, and they stay.
+    // A compromise withdraws the verdict and nothing else: the authorization,
+    // key ids, approver, ticket, window and subject binding are the record an
+    // investigation starts from.
     if let Standing::Compromised(compromise) = &consumption.standing {
         let next = merge_condition(
             current_condition(Some(&conditions), CONDITION_VERIFIED),
@@ -2276,7 +2084,7 @@ fn consumed_status(
 }
 
 /// The stored `Verified` reason when an earlier pass withdrew a consumed
-/// verdict for a compromise — [`Standing::StillWithdrawn`]'s input.
+/// verdict for a compromise: [`Standing::StillWithdrawn`]'s input.
 fn stored_withdrawal(approval: &Approval) -> Option<&'static str> {
     let status = approval.status.as_ref()?;
     if status.verified != Some(false) {
@@ -2291,17 +2099,15 @@ fn stored_withdrawal(approval: &Approval) -> Option<&'static str> {
 }
 
 /// The consumption the stored status already records: `Consumed=True`, a
-/// subject binding and a matched key — the facts an earlier pass of this build
-/// wrote together. Read before any other API call.
+/// subject binding and a matched key, written together by an earlier pass.
+/// Read before any other API call.
 ///
-/// NOT CONDITIONED ON `verified == true` (review M1): a consumed record whose
-/// key was later revoked for compromise carries `verified: false` and is STILL
-/// a consumed record — its `Consumed` condition and its authorization must
-/// survive the next pass, which is only possible if this still recognises it.
+/// Not conditioned on `verified == true`: a consumed record whose key was later
+/// revoked for compromise carries `verified: false` and is still a consumed
+/// record whose `Consumed` condition and authorization must survive.
 ///
-/// `admitted_at` is `Consumed`'s `lastTransitionTime`, which [`consumed_status`]
-/// stamps with the ADMISSION instant the Restore controller recorded — the
-/// independent observation D3 §7.4's compromise row compares against.
+/// `admitted_at` is `Consumed`'s `lastTransitionTime`, the admission instant
+/// (see [`consumed_status`]).
 fn recorded_consumption(approval: &Approval) -> Option<Consumption> {
     let status = approval.status.as_ref()?;
     let subject = status.verified_subject_ref.clone()?;
@@ -2316,7 +2122,7 @@ fn recorded_consumption(approval: &Approval) -> Option<Consumption> {
 }
 
 /// The per-Restore approval bundle the Restore controller materialised before
-/// the runner Job — the one object that records WHICH `Approval` (by UID) the
+/// the runner Job: the one object that records which `Approval` (by UID) the
 /// Restore was admitted under. `None` when the Restore is not admitted (no
 /// read is made), or when the bundle is absent.
 async fn admission_bundle(
@@ -2345,8 +2151,8 @@ async fn admission_bundle(
 /// controlled by exactly this Restore UID, and annotated with it.
 ///
 /// A ConfigMap is a namespace tenant's object as much as the controller's, so
-/// one that is not demonstrably the Restore controller's bundle for THIS
-/// Restore answers nothing — never "admitted under whatever it names".
+/// one that is not demonstrably the Restore controller's bundle for this
+/// Restore answers nothing.
 #[must_use]
 pub fn admitted_approval_uid(
     bundle: &k8s_openapi::api::core::v1::ConfigMap,
@@ -2371,30 +2177,23 @@ pub fn admitted_approval_uid(
         .cloned()
 }
 
-/// When `restore` records that it was ADMITTED under `approval` — this
-/// OBJECT, not merely this name (review L3).
+/// When `restore` records that it was admitted under `approval`: this object,
+/// not merely this name.
 ///
-/// * The Restore names this `Approval` in `spec.approvalRef` (an ordinary
-///   Restore) and carries
-///   `Admitted=True`, which the Restore controller writes on the pass that
-///   creates the runner Job and carries on every later one. An
-///   `Admitted=False` HOLD is exactly the not-yet-admitted request an expiry
+/// * The Restore names this `Approval` in `spec.approvalRef` and carries
+///   `Admitted=True`, written on the pass that creates the runner Job. An
+///   `Admitted=False` hold is exactly the not-yet-admitted request an expiry
 ///   must still refuse.
-/// * **The object.** The Restore's own approval bundle (`bundle`, see
-///   [`admitted_approval_uid`]) records the `Approval` UID the Restore
-///   controller admitted under; it must be this object's UID. A Restore
-///   admitted before per-Restore bundles existed has none, and then the object
-///   must have EXISTED at the admission (`creationTimestamp` at or before it):
-///   an `Approval` deleted and re-created under the same name after the
-///   admission is another object, and its verdict was consumed by nothing.
+/// * The Restore's own approval bundle ([`admitted_approval_uid`]) records this
+///   object's UID. A Restore admitted before per-Restore bundles has none, and
+///   then the object must have existed at the admission (`creationTimestamp`
+///   at or before it): an `Approval` re-created under the same name later is
+///   another object.
 ///
-/// `Some(None)` is unreachable in practice (the Restore controller always
-/// stamps the condition), and without an instant the creation-time fallback
-/// cannot bind, so it answers `None`.
-///
-/// `Restore.status` is written only by this controller's service account (the
-/// chart grants `restores/status` to nobody else), which is the same trust the
-/// Restore controller already places in `Approval.status.verified`.
+/// `Some(None)` (no instant on the condition) cannot bind the fallback, so it
+/// answers `None`. `Restore.status` is written only by this controller's
+/// service account, the same trust the Restore controller places in
+/// `Approval.status.verified`.
 #[must_use]
 pub fn admitted_under(
     restore: &Restore,
@@ -2427,16 +2226,14 @@ pub fn admitted_under(
     bound.then_some(admitted.last_transition_time)
 }
 
-/// Review I1's guard: whether the signature the stored verdict records still
-/// verifies over `spec.approvalBytes` under the key `status.matchedKeyId`
-/// names. Cryptography only — no clock, no lifecycle — so an expired, retired
-/// or revoked key still answers `true` here (the compromise question is
-/// [`compromise_of`]'s).
+/// Whether the signature the stored verdict records still verifies over
+/// `spec.approvalBytes` under the key `status.matchedKeyId` names.
+/// Cryptography only, no clock or lifecycle: an expired, retired or revoked key
+/// still answers `true` ([`compromise_of`] asks the compromise question).
 ///
-/// A key the resolved trust no longer carries cannot be checked, and the
-/// record then stands: the absence of a key from TODAY'S resolution (a policy
-/// deleted, a namespace re-bound) says nothing about the signature, and a
-/// compromise is an affirmative revocation, not an absence.
+/// A key today's resolution no longer carries cannot be checked, and the record
+/// stands: an absence (a policy deleted, a namespace re-bound) says nothing
+/// about the signature, and a compromise is an affirmative revocation.
 fn record_signature_holds(approval: &Approval, trust: &ResolvedTrust) -> bool {
     let Some(key_id) = approval
         .status
@@ -2469,13 +2266,12 @@ fn record_signature_holds(approval: &Approval, trust: &ResolvedTrust) -> bool {
     .is_ok_and(|matched| matched == key_id)
 }
 
-/// A `KeyCompromise` revocation of a key the stored verdict names — review M1.
+/// A `KeyCompromise` revocation of a key the stored verdict names.
 ///
-/// THE RULE IS `logweir_core::trust::decide`'s, CALLED, NOT RE-WRITTEN: its
+/// The rule is `logweir_core::trust::decide`'s, called, not rewritten: its
 /// compromise rows compare the independent observation with
 /// `revocationEffectiveFrom` (else `revokedAt`) and never read the document's
-/// claim, which is exactly this question. Only a `Revoked`/`KeyCompromise` key
-/// is asked; every other key state leaves the record as it was.
+/// claim. Only a `Revoked`/`KeyCompromise` key is asked.
 fn compromise_of(
     approval: &Approval,
     trust: &ResolvedTrust,
@@ -2508,8 +2304,8 @@ fn compromise_of(
             continue;
         }
         // A usage the key declares, so `decide` reaches its compromise rows
-        // rather than stopping at the usage row. A key with no usage cannot
-        // have produced the verdict; it fails closed below.
+        // rather than the usage row. A key with no usage cannot have produced
+        // the verdict; it fails closed below.
         let recorded_before = key.usages.first().is_some_and(|usage| {
             core::decide(
                 Some(key),
@@ -2565,37 +2361,25 @@ async fn get_restore(
 }
 
 /// The `status` keys this reconciler computes as `Option` and must be able to
-/// CLEAR — defect `STATUS-PATCH-NO-RV`'s neighbour, and the reason
-/// [`status_patch_body`] exists.
+/// clear, which is why [`status_patch_body`] exists.
 ///
-/// # A merge patch that omits a key leaves it
+/// [`status_for`] sets them to `None` for a refused `Approval`, and each is
+/// `skip_serializing_if = "Option::is_none"`, so the patch body would have no
+/// such key and RFC 7386 would leave the old value: a verdict withdrawn after
+/// a pass would keep its approver, key id and key window beside
+/// `Verified=False`. A stranded window is the urgent one: the restore
+/// preflight would find an open window for a key that authorises nothing.
 ///
-/// [`status_for`] already says a refused `Approval` reports no approver, no key
-/// id, no self-attestation label and no key window. It said so by setting each
-/// to `None`, and every one of them is `skip_serializing_if = "Option::is_none"`
-/// — so the patch body simply had no such key and RFC 7386 left the old value
-/// on the object. An `Approval` verified at 09:00 and refused at 09:05 kept
-/// `status.approver`, `status.matchedKeyId` and (from this task on) the
-/// approver key's window beside a `Verified=False` condition.
-///
-/// The window is what makes it urgent rather than untidy. The restore
-/// preflight compares a restore's deadline against it and caps its re-check at
-/// its `notAfter`; a window stranded by a withdrawn verdict is a reader finding
-/// an OPEN window for a key that authorises nothing, which is precisely the
-/// "treat absent as valid" failure the whole field exists to avoid. The other
-/// three are swept with it because they are the same bug in the same body.
-///
-/// `verifiedSubjectRef` is DELIBERATELY NOT HERE. It is a replay fence, not a
-/// verdict: once established it must survive every later failure, and
-/// [`status_for`] carries it forward for exactly that reason.
+/// `verifiedSubjectRef` is not here: it is a replay fence, not a verdict, and
+/// must survive every later failure.
 pub const CLEARABLE_STATUS_FIELDS: [&str; 6] = [
     "matchedKeyId",
     "approver",
     "ticket",
     "selfAttestedRisk",
     "approverKeyWindow",
-    // PLAT-19.2: a policy and requester left behind by a withdrawn verdict is
-    // the same "absent read as valid" shape the window is.
+    // A policy and requester left behind by a withdrawn verdict is the same
+    // "absent read as valid" shape the window is.
     "authorization",
 ];
 
@@ -2619,10 +2403,9 @@ pub fn status_patch_body(status: &ApprovalStatus) -> serde_json::Value {
 
 /// Decide one `Approval` and patch **only** its `/status`.
 ///
-/// NOTHING ELSE IS TOUCHED. Not the `spec` — sealed by CEL, and an approval
-/// whose bytes a controller could edit is not an approval — and never a
-/// `DELETE`: a refused `Approval` STAYS in the cluster as the audit trail of a
-/// rejected attempt.
+/// Nothing else is touched: not the `spec` (sealed by CEL; an approval whose
+/// bytes a controller could edit is not an approval), and never a `DELETE`: a
+/// refused `Approval` stays as the audit trail of a rejected attempt.
 ///
 /// # Errors
 ///
@@ -2672,23 +2455,15 @@ pub async fn reconcile_approval_with_policy_at(
         .status
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok());
-    // P9: THE LOG LINE FOLLOWS THE WRITE. A verdict that did not change is
-    // logged at debug; `WARN approval refused` once per ~2 s per object, for
-    // ever, was half of the defect.
+    // The log line follows the write: an unchanged verdict is logged at
+    // debug, not as a warning on every pass.
     let changed = !crate::conditions::status_unchanged(current.as_ref(), &patch);
-    // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-2.
-    // An `Approval` is the most steady object this controller holds: its spec
-    // is sealed by CEL and its verdict is a function of that spec, the roster
-    // and the referent. Before this guard the unconditional
-    // `lastTransitionTime: Some(now)` in [`status_for`] made every pass a
-    // change, its own status patch woke the watch, and one steady `Approval`
-    // ran 7,114 reconciles in 90.4 s. The outcome is still logged below.
-    //
-    // AND UNDER SEAM S7's PRECONDITION — defect STATUS-PATCH-NO-RV's sweep.
-    // This write was unconditional while the chart's README said every status
-    // write in this crate is preconditioned; a verdict computed from a stale
-    // watch-cache copy is exactly what `min(10 m, notAfter)` re-checks make
-    // likely here, because two passes over one `Approval` can overlap.
+    // No write when nothing changed: an `Approval`'s verdict is a function of
+    // its sealed spec, the trust and the referent, and a write on every pass
+    // would wake its own watch (7,114 reconciles in 90 s for one steady
+    // object). Under seam S7's precondition, because two passes over one
+    // `Approval` can overlap and a verdict from a stale watch-cache copy must
+    // not overwrite a newer one.
     crate::conditions::patch_status_preconditioned(
         &api,
         "Approval",
@@ -2722,9 +2497,8 @@ pub async fn reconcile_approval_with_policy_at(
             "approval verified"
         );
     } else {
-        // WARN AND NOT ERROR: a refused approval is a correct, expected
-        // outcome of this controller doing its job, and an operator whose log
-        // filter is `error` should not be paged for one.
+        // Warn, not error: a refused approval is an expected outcome of this
+        // controller doing its job.
         warn!(
             approval = %name,
             namespace = %namespace,
@@ -2741,35 +2515,26 @@ async fn reconcile(
     ctx: Arc<Context>,
     policies: crate::approval_policy::PolicySource,
 ) -> Result<Action, ReconcileError> {
-    // PROD-16.1: the document with the fresh-install marker as last read.
+    // The document with the fresh-install marker as last read.
     let policies = policies.effective();
     let outcome = reconcile_approval_with_policy(&approval, &ctx.client, &policies).await?;
-    // NOT `Action::await_change()`. `TrustRoster` is a different kind and this
-    // controller does not watch it, so a roster that arrives after the
-    // approval would otherwise never be noticed: an `Approval` refused with
-    // `RosterNotFound` at 09:00 would still say so at 17:00 with the roster
-    // installed at 09:05. Five minutes is the interval at which "install the
-    // roster, then look again" is self-healing.
-    //
-    // …AND FIVE MINUTES IS THE WRONG ANSWER IN THE OTHER DIRECTION (defect
-    // `TRUST-EXPIRY-LAG`). "Install the roster, then look again" may wait; "the
-    // approver key expired thirty seconds ago" may not, and the heartbeat made
-    // an expired key read `Verified=True` for 2 m 35 s on lab-refresh-4. A
-    // verified outcome therefore requeues at its own `notAfter`, and everything
-    // else keeps the heartbeat — see `ApprovalOutcome::valid_until` for why the
-    // asymmetry is the safe one.
+    // Not `Action::await_change()`: this controller does not watch
+    // `TrustRoster`, so a roster installed after the approval would never be
+    // noticed; the five-minute heartbeat makes that self-healing. But an
+    // expired key must not wait five minutes, so a verified outcome requeues
+    // at its own `notAfter` (see `ApprovalOutcome::valid_until` for why the
+    // asymmetry is the safe one).
     Ok(requeue_for(&outcome, Utc::now()).map_or_else(Action::await_change, Action::requeue))
 }
 
-/// When this outcome is looked at again — `None` is "only when something
+/// When this outcome is looked at again; `None` is "only when something
 /// changes" (`Action::await_change`).
 ///
-/// A CONSUMED verdict (P9) waits for a change: nothing a clock, a key or a
-/// policy does can alter a record of an admission that already happened, and
-/// the heartbeat would only re-read it. Everything else keeps the rule above:
-/// a pass at its own `notAfter`/expiry when verified, the heartbeat otherwise
-/// — never a hot loop, because a refusal's message carries no clock and an
-/// unchanged status is never written (so no write wakes the watch).
+/// A consumed verdict waits for a change: nothing can alter a record of an
+/// admission that already happened. Otherwise a verified outcome requeues at
+/// its own `notAfter`/expiry and everything else at the heartbeat; never a hot
+/// loop, because a refusal's message carries no clock and an unchanged status
+/// is never written.
 #[must_use]
 pub fn requeue_for(outcome: &ApprovalOutcome, now: DateTime<Utc>) -> Option<std::time::Duration> {
     if outcome.is_consumed() {
@@ -2791,63 +2556,51 @@ fn error_policy(approval: Arc<Approval>, err: &ReconcileError, _ctx: Arc<Context
     Action::requeue(std::time::Duration::from_secs(30))
 }
 
-/// The `Approval`s a `TrustPolicy` event should enqueue — the same re-trust
-/// trigger `controllers::backup` and `controllers::restore` carry (D3 W10).
+/// The `Approval`s a `TrustPolicy` event should enqueue: the re-trust trigger
+/// `controllers::backup` and `controllers::restore` carry too.
 ///
-/// # Why this controller needs one at all
-///
-/// Its verdict is a function of the namespace's RESOLVED TRUST, and this
-/// reconciler does not watch `TrustPolicy`: before this, a policy edit reached
-/// an `Approval` only at the five-minute heartbeat (or sooner, at the matched
-/// key's `notAfter`, which defect `TRUST-EXPIRY-LAG` armed). Five minutes is
-/// the right pace for "install the roster, then look again"; it is the wrong
-/// pace for "this key was revoked thirty seconds ago", and it is the wrong pace
-/// for the WINDOW this task publishes — a narrowed `notAfter` that an operator
-/// can see on the `TrustPolicy` but not yet on the `Approval` is exactly the
-/// lag the published window exists to remove.
-///
-/// It costs nothing to fix: `objects` is this controller's OWN store, so the
-/// mapping is zero API calls, and it over-approximates on the safe side — see
-/// [`crate::verification::targets_in_scope`].
+/// The verdict is a function of the namespace's resolved trust, and without
+/// this a policy edit (a revoked key, a narrowed `notAfter`) would reach an
+/// `Approval` only at the five-minute heartbeat. `objects` is this controller's
+/// own store, so the mapping costs no API calls and over-approximates on the
+/// safe side ([`crate::verification::targets_in_scope`]).
 fn policy_targets(
     objects: &reflector::Store<Approval>,
     scopes: &crate::trust::PolicyScopeMemory,
     policy: &crate::crds::trust_policy::TrustPolicy,
 ) -> Vec<ObjectRef<Approval>> {
-    // THE UNION OF BEFORE AND AFTER. A `watches` mapper is handed only the NEW
-    // object, so an edit that NARROWS — a namespace removed, `default` cleared
-    // — would otherwise enqueue nothing in the namespace it just stopped
-    // governing, which is the one edit that certainly changed that namespace's
-    // resolution. See `trust::PolicyScopeMemory`.
+    // The union of before and after: a `watches` mapper sees only the new
+    // object, so an edit that narrows the scope would otherwise enqueue
+    // nothing in the namespace it stopped governing. See
+    // `trust::PolicyScopeMemory`.
     let scope = scopes.observe(policy);
     crate::verification::targets_in_scope(objects.state(), &scope)
 }
 
 /// Run the `Approval` controller until the process ends.
 ///
-/// `Api::all`: this controller reconciles approvals in every namespace, which
-/// is what a cluster-scoped install means (Global Constraint 30 — one
-/// controller per cluster, no fleet).
+/// `Api::all`: this controller reconciles approvals in every namespace, one
+/// controller per cluster.
 ///
 /// `policies` is the installation's approval-policy document, read once by
-/// `main` (PLAT-19.2), with the fresh-install marker as last read (PROD-16.1);
-/// an empty, unmarked set is every namespace on `legacy-governed-v1`.
+/// `main` with the fresh-install marker as last read; an empty, unmarked set is
+/// every namespace on `legacy-governed-v1`.
 pub fn controller(
     client: kube::Client,
     policies: crate::approval_policy::PolicySource,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit. Every copy shares the one policy set (PLAT-19.2).
+    // One watch per watched namespace: `crate::scope` is the whole cluster
+    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
+    // then this reconciler runs once per namespace with an `Api::namespaced`
+    // watch, the only shape the scoped chart's RoleBindings permit. Every copy
+    // shares the one policy set.
     crate::scope::run_everywhere(move |namespace| {
         controller_in(client.clone(), namespace, policies.clone())
     })
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     namespace: Option<String>,
@@ -2855,31 +2608,25 @@ fn controller_in(
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Approval> = crate::scope::api(&client, namespace.as_deref());
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
-    // ONE memory of what each policy bound last, owned by the mapper — the
-    // same object `controllers::backup` and `controllers::restore` give theirs.
+    // One memory of what each policy bound last, owned by the mapper.
     let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
-    // Task 19: this reconciler holds NO archive handle. Spelled out
-    // rather than defaulted, so the one context field that is a
-    // capability is visible at every construction site.
+    // This reconciler holds no archive handle, spelled out so the one context
+    // field that is a capability is visible at every construction site.
     let ctx = Arc::new(Context {
         client,
         archive: None,
-        // Task 33 (and Task 37's pull policy beside it): this reconciler
-        // creates no runner Job, so the image and policy this process was
-        // handed would be carried and never read. The default here is
-        // "unused", never "no override is configured" — see
-        // `super::Context::runner_image`.
+        // This reconciler creates no runner Job, so the image is "unused",
+        // never "no override is configured" (see `super::Context::runner_image`).
         runner_image: crate::job::RunnerImage::default(),
     });
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
         controller
-            // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the
-            // `Approval`s this controller already holds in the namespaces that
-            // policy could govern — see [`policy_targets`]. No reflector of its
-            // own: `decide` resolves trust live on every pass, so the trigger
-            // only has to say WHEN.
+            // The re-trust trigger: a `TrustPolicy` event maps to the
+            // `Approval`s in the namespaces that policy could govern (see
+            // [`policy_targets`]). `decide` resolves trust live on every pass,
+            // so the trigger only has to say when.
             .watches(policy_api, watcher::Config::default(), move |policy| {
                 policy_targets(&objects, &scopes, &policy)
             })
@@ -2888,9 +2635,8 @@ fn controller_in(
                 error_policy,
                 ctx,
             )
-            // Every item is already logged by `reconcile_approval` or by
-            // `error_policy`; the stream exists to be DRIVEN, and a second log
-            // line per event would double every one of them.
+            // Every item is already logged by `reconcile_approval` or
+            // `error_policy`; the stream exists to be driven.
             .for_each(|_| std::future::ready(()))
             .await;
     }
