@@ -284,10 +284,9 @@ a connected managed-identity install; it is not an offline exception.
 The [chart reference](../charts/logweir/README.md) documents all values and
 optional components, including MinIO, demo brokers, existing Kafka clusters
 and the UI. The controller, runner and optional UI images default to `latest`,
-with `Always` pull policies for all three (`ui.imagePullPolicy` controls the UI). Base manifests remain digest-pinned. For reproducibility,
+with `Always` pull policies for all three (`ui.imagePullPolicy` controls the UI). For reproducibility,
 override enabled images with published digests and set controller and runner
-pull policies explicitly. `just chart-check` checks rendered resources and
-copied CRDs. The UI ships in `logweir-ui`, built by `Dockerfile.ui`, rather
+pull policies explicitly. `just chart-check` checks rendered resources. The UI ships in `logweir-ui`, built by `Dockerfile.ui`, rather
 than a chart ConfigMap; `just smoke-ui` compares its assets with `ui/`.
 
 A running pod does not restart when a tag changes; roll out the deployment or upgrade its image reference. For local images use

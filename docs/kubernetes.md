@@ -9252,17 +9252,17 @@ reference, including all values, registry overrides, optional Kafka resources,
 MinIO, demo brokers and the in-cluster UI. [install.md](install.md) path (c)
 connects it to the key, Secret and roster prerequisites.
 
-The chart copies its CRDs from `config/`. The UI is packaged separately by
+The UI is packaged separately by
 `Dockerfile.ui`, which copies `ui/` into `/ui` over a pinned kubectl base.
 The chart carries no duplicate UI files or asset ConfigMap. `just smoke-ui`
 compares the image’s served assets with `ui/`.
-`just chart-check` checks CRD parity, rendered manifests, schema and Helm lint;
+`just chart-check` checks rendered manifests, schema and Helm lint;
 `chart_lint.rs` checks the control-plane contract. Helm installs CRDs from
 `crds/` but does not upgrade or delete them; manage CRD changes separately.
 
 The controller, runner and optional UI images default to mutable `latest`
 tags. All three pull policies default to `Always`; `ui.imagePullPolicy` can
-be overridden for local images. The base manifests and compiled runner default remain digest-pinned;
+be overridden for local images. The compiled runner default remains digest-pinned;
 third-party chart images remain pinned too. The author-only values use locally
 loaded tags with `Never`. Runner pull policy reaches Jobs through
 `LOGWEIR_RUNNER_PULL_POLICY` (§14).
@@ -11207,7 +11207,7 @@ surface, as though it did not.
 
 Turn it on with `admissionPolicy.enabled=true` (Helm) or apply
 `config/samples/console-credential-admission-policy.yaml` after editing the
-principal (kustomize). **It is off by default for one reason and it is not a
+principal (by hand). **It is off by default for one reason and it is not a
 security opinion:** `admissionregistration.k8s.io/v1`
 `ValidatingAdmissionPolicy` is Kubernetes 1.30+ and Logweir's floor is 1.29,
 where the document is rejected with `no matches for kind`.
