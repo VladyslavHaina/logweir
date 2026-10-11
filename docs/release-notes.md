@@ -61,7 +61,7 @@ engine binary with 0.23.3 (the digest in
 4; `examples/cronjob-drill.yaml`). A spec that names an `http://` endpoint must
 say `allow_http: true`; a saved destination already cannot combine the two
 (rule R3).
-**Scope:** source review of every change from 0.21.0 ([decision record](to-do/decisions/PROD-00-engine-route.md) §12), CI's e2e suite on Kafka 3.7.1 and 4.3.1, archives drilled across both engines, guard rows with mutants, and `engine-matrix` run 37736333362.
+**Scope:** source review of every change from 0.21.0 ([decision record](to-do/decisions/PROD-00-engine-route.md) §12), CI's e2e suite on Kafka 3.7.1 and 4.3.1, archives drilled across both engines, guard rows with mutants, and `engine-matrix` run 37736333362; the controller's `LOGWEIR_ENGINE_VERSION` reaches a live runner Job only at the PoC upgrade.
 **Rollback:** an older runner and controller run 0.21.0 again; `doctor` from
 that build refuses 0.23.3. Measured: an archive 0.23.3 wrote restores and
 verifies `pass` under the 0.21.0 engine. Reasoned from source, not run: an
@@ -148,7 +148,7 @@ complete coverage, or a bound of `0`.
 verify every record, add `coverage: complete` to the plan's `sample` block and
 re-approve it; budget about a minute per GiB of one-KiB records, against about
 five seconds sampled, and set `complete_max_records` if a run must stop.
-**Scope:** the fault matrix over real segments (`crates/logweir/tests/complete_verify.rs`), phase rows, the seven arms in both readers with the corpus and parity gate, mutants, and live compose rows in `e2e/tests/record_semantics.rs`.
+**Scope:** the fault matrix over real segments (`crates/logweir/tests/complete_verify.rs`), phase rows, the seven arms in both readers with the corpus and parity gate, mutants, and live compose rows in `e2e/tests/record_semantics.rs`; the PoC upgrade runs its sampled rows unchanged.
 **Rollback:** an older runner ignores `sample.coverage`, runs a sampled check
 and signs format 1.3.0 again; the 1.4.0 scorecards already written stay valid
 under both readers.
@@ -214,7 +214,7 @@ records `owner_detection: []` (the controller passes no owners yet).
 **Do:** nothing for existing plans. Pass `--kafka-topic-resources`, or declare
 `source.topic_owners`, for topics an operator such as Strimzi or Terraform
 manages.
-**Scope:** one row per receipt arm, the corpus and parity gate, catalog, view, API and console rows, and live compose rows (`e2e/tests/topic_configuration.rs`) on 3.9.2 and 4.3.1.
+**Scope:** one row per receipt arm, the corpus and parity gate, catalog, view, API and console rows, and live compose rows (`e2e/tests/topic_configuration.rs`) on 3.9.2 and 4.3.1; the catalog and console rows are the PoC upgrade's.
 **Rollback:** an older runner writes 1.1.0 or 1.2.0 receipts again with no
 model; the 1.3.0 documents already written stay valid. A catalog synced by an
 older runner lists no topics, and the console then defaults as before and says
@@ -249,7 +249,7 @@ changes only the value replays the first create ([api.md](api.md)). A
 `BackupDestination` created with `secret.new` by an earlier build: remove its
 `api.logweir.dev/request-sha256` annotation, or rotate the key. The chart's
 admission policy also admits `logweir.dev/kafka-client-certificate`.
-**Scope:** compose rows per listener shape, both readers VALID and every refusal (`e2e/tests/auth_modes.rs`, 8/8), the binding refusal on the shipped binaries against a never-dialled sentinel, and API rows; no managed provider was dialled, so Confluent Cloud and Event Hubs are `untested` ([support-matrix.md](support-matrix.md)).
+**Scope:** compose rows per listener shape, both readers VALID and every refusal (`e2e/tests/auth_modes.rs`, 8/8), the binding refusal on the shipped binaries against a never-dialled sentinel, and API rows; no managed provider was dialled, so Confluent Cloud and Event Hubs are `untested` ([support-matrix.md](support-matrix.md)); the live `KafkaCluster` journey is the PoC upgrade's.
 **Rollback:** an older controller and runner ignore the binding pair and the
 new fields; a bound Secret keeps working. An older build cannot parse a spec
 naming a new mode, and an older reader refuses a 1.4.0/1.5.0 document that
@@ -316,7 +316,7 @@ Logweir's build (copy it out of the runner image, or
 [quickstart.md](quickstart.md), step 4). On arm64 nodes, runner
 Jobs run natively. The identity bootstrap image stays amd64-only until it is
 re-pinned.
-**Scope:** parity drills of OSO's binary against both builds with a negative control that flips one byte ([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5), `scripts/check-image.sh` check 8 on both platforms, guard rows and fourteen mutants; keyless signing first runs on `main`.
+**Scope:** parity drills of OSO's binary against both builds with a negative control that flips one byte ([decision record](to-do/decisions/PROD-00-engine-route.md) §13.5), `scripts/check-image.sh` check 8 on both platforms, guard rows and fourteen mutants; keyless signing first runs on `main`; the runner's signed engine identity is the PoC upgrade's.
 **Rollback:** for one release OSO's released binary stays buildable: `docker
 build --platform linux/amd64 --build-arg ENGINE_SOURCE=oso` produces a runner
 that carries it and declares OSO's identity
@@ -349,7 +349,7 @@ accept `1.6.0`. A sampled `pass` from an earlier build over a plan with
 An archive whose timestamps run backwards within a segment can now fail the
 per-partition bound
 ([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
-**Scope:** a live compose restore whose engine got SIGTERM mid-topic (`e2e/tests/stopped_restore.rs`: `pass` before, `fail-integrity` now, both readers accepting), and unit rows with 25 mutants (`crates/logweir/tests/stopped_restore.rs`).
+**Scope:** a live compose restore whose engine got SIGTERM mid-topic (`e2e/tests/stopped_restore.rs`: `pass` before, `fail-integrity` now, both readers accepting), and unit rows with 25 mutants (`crates/logweir/tests/stopped_restore.rs`); the sampled restore rows are the PoC upgrade's.
 **Rollback:** an older runner samples the first N partitions again and ignores
 the engine report; the 1.6.0 scorecards already written stay valid under both
 readers.
@@ -413,7 +413,7 @@ object, and one already bound elsewhere. Remove the pre-PROD-01.3
 `api.logweir.dev/request-sha256` from a console-made destination, and rotate a
 guessable key. Resume the schedules. Until a Secret is bound its runs are
 refused, closed.
-**Scope:** per-site controller and API rows with negative controls, the shipped binaries against a never-dialled sentinel, one binding fixture read by the product and the tool (`e2e/fixtures/credential-binding/bindings.json`), and the tool's offline rows.
+**Scope:** per-site controller and API rows with negative controls, the shipped binaries against a never-dialled sentinel, one binding fixture read by the product and the tool (`e2e/fixtures/credential-binding/bindings.json`), and the tool's offline rows; binding the `primary` destination's Secrets and the refusal rows against a sentinel are the PoC upgrade's.
 **Rollback:** an older controller and runner ignore every binding variable and
 the new status fields; bound Secrets keep working. Roll the console with the
 controller (an older console offers `existing` again, which this API refuses).
@@ -429,7 +429,7 @@ topic still not served at the bound is exit 1 naming it, never a pass. The
 whose target never serves a created topic leaves those topics for an operator
 to remove.
 **Do:** nothing.
-**Scope:** pure classification rows, phase rows (a topic never served, exit 1), a guard over every e2e helper that creates a topic, and the compose suite (the race gone; 3 of 13 runs without the wait).
+**Scope:** pure classification rows, phase rows (a topic never served, exit 1), a guard over every e2e helper that creates a topic, and the compose suite (the race gone; 3 of 13 runs without the wait); the restore rows are the PoC upgrade's.
 **Rollback:** an older runner uses the topics at once again. Nothing stored
 changes.
 
@@ -478,7 +478,7 @@ reader tells them apart by `engine.version` (`0.23.3+logweir.2` or a later
 any other `engine.version`, or one a standalone CLI signed, a topic whose
 `topics[].source_replication_factor` the manifest lacks has no
 replication-factor finding, whatever the scorecard lists.
-**Scope:** rule, phase-7 and reader rows (arm NR-5) with ten mutants, and live compose rows on `cluster3` over three engines (OSO's and build 1 recording one factor, build 2 all three), with parity drills between builds.
+**Scope:** rule, phase-7 and reader rows (arm NR-5) with ten mutants, and live compose rows on `cluster3` over three engines (OSO's and build 1 recording one factor, build 2 all three), with parity drills between builds; a multi-topic backup and restore and the new engine identity are the PoC upgrade's.
 **Rollback:** an older `logweir` writes the old silence again; documents this
 build wrote stay valid. An engine rollback (`+logweir.1`, or OSO's 0.23.3 with
 `ENGINE_SOURCE=oso`) records one factor per backup again, which this build then
@@ -613,7 +613,7 @@ registries' framing are not detected
 **Do:** nothing is required. A `Backup` with a tight `spec.deadlineSeconds`
 should allow up to 120 s more after the engine. Points recorded before this
 item read not assessed.
-**Scope:** detector, bound and memory rows, arms 22–29 in both readers with the corpus and parity gate, one fixture read by runner, API and console rows, and a live compose row through Karapace with the registry stopped.
+**Scope:** detector, bound and memory rows, arms 22–29 in both readers with the corpus and parity gate, one fixture read by runner, API and console rows, and a live compose row through Karapace with the registry stopped; a backup's `schema_dependency` and the catalog's `topics[].schemaDependency` are the PoC upgrade's.
 **Rollback:** an older runner writes 1.3.0/1.4.0 receipts with no block (read
 not assessed); the 1.5.0 documents stay valid. An older controller or console
 ignores the field.
@@ -685,7 +685,7 @@ Both verifiers check arms 36–40 and print one `generations` line per topic;
 `verify_scorecard.py` is 1.25.0. Nothing compares two points yet.
 **Do:** nothing. The read needs `Describe` on each topic, which the engine
 already needs; a refused or failed read is recorded and never fails the backup.
-**Scope:** FFI rows with a soak and leak checks, mapping and generation rows with mutants, arms 36–40 with twelve corpus cases, and `e2e/tests/topic_ids.rs` against the broker CLI on 3.7.1, 3.9.2 and 4.3.1.
+**Scope:** FFI rows with a soak and leak checks, mapping and generation rows with mutants, arms 36–40 with twelve corpus cases, and `e2e/tests/topic_ids.rs` against the broker CLI on 3.7.1, 3.9.2 and 4.3.1; one scheduled backup's `generations` against the source's topic IDs is the PoC upgrade's.
 **Rollback:** an older runner writes receipts with no IDs, read "not
 established" against newer ones. The 1.6.0 documents stay valid under every
 major-1 reader; readers before 1.25.0 ignore the IDs.
@@ -722,7 +722,7 @@ nothing in the block
 receipt it wrote before. Apply the CRDs before setting `spec.consumerGroups`,
 and give the backup principal Describe on each selected group (and on the
 cluster, for a complete listing).
-**Scope:** core, builder, seam, corpus, parity, catalog, API, console and controller rows, and live compose rows through the shipped binary (`e2e/tests/position_evidence.rs`), each verified by both readers and refused with one byte changed.
+**Scope:** core, builder, seam, corpus, parity, catalog, API, console and controller rows, and live compose rows through the shipped binary (`e2e/tests/position_evidence.rs`), each verified by both readers and refused with one byte changed; a schedule selecting a group is the PoC upgrade's.
 **Rollback:** an older runner ignores `source.consumer_groups`, refuses
 `--consumer-group` and records no positions; the 1.7.0 documents stay valid. An
 older controller refuses a run whose frozen inputs carry `consumerGroups`
@@ -757,7 +757,7 @@ partitions), shown by a `SELECTION` printer column after `AGE`; the API serves
 **Do:** upgrade every verifier that will read a subset restore's scorecard
 (older ones refuse it), and roll the runner forward before submitting a subset
 plan (an older runner refuses one). Nothing for a plan without a subset.
-**Scope:** unit, phase, preview, reader, parity, corpus, controller, API and console rows beside unnarrowed controls, and compose rows with their own oracle (two subsets, a faulty engine, older runners and every older verifier refusing 2.0.0).
+**Scope:** unit, phase, preview, reader, parity, corpus, controller, API and console rows beside unnarrowed controls, and compose rows with their own oracle (two subsets, a faulty engine, older runners and every older verifier refusing 2.0.0); a subset `Restore` read by both verifiers and on every surface is the PoC upgrade's.
 **Rollback:** an older runner refuses subset plans and an older reader refuses
 2.0.0 scorecards, so roll the verifiers back last; read the subset restores'
 2.0.0 scorecards with this release's verifiers. An older CRD, API and console
@@ -785,7 +785,7 @@ overCap`. The CLI and runner fail operationally, naming the cap.
 run of more than about **250–300 topics** wrote a receipt no path verified
 until **item 65 lifted this limit** (its own cap, 5,131,072 bytes, and at most
 1,000 topics a backup).
-**Scope:** store rows (`crates/logweir-store/tests/capped.rs`), controller rows with child-process peak-RSS measurements (`crates/weirkeeper/tests/read_caps.rs`), check rows, and a live compose row against MinIO.
+**Scope:** store rows (`crates/logweir-store/tests/capped.rs`), controller rows with child-process peak-RSS measurements (`crates/weirkeeper/tests/read_caps.rs`), check rows, and a live compose row against MinIO; an oversized object at a receipt key is the PoC upgrade's.
 **Rollback:** an older build reads whole objects again; nothing is stored
 differently. An older controller treats this build's final `NotAttempted` as
 any final `NotAttempted`.
@@ -988,7 +988,7 @@ you restore catalog points with an `archiveRead` grant narrower than the
 catalog-sync row, add `s3:GetObject` on `<bucket>/logweir/backups/*` and, on a
 versioned bucket, `s3:GetObjectVersion` on `<bucket>/<prefix>/*`
 ([kubernetes.md](kubernetes.md) §7a, *The read of a pinned version*; §21.8).
-**Scope:** the preflight and the runner's binding held to agree over one archive each, read-counting store rows for every refused key, the key-segment rule, 35 mutants, and live compose rows on a versioned MinIO bucket.
+**Scope:** the preflight and the runner's binding held to agree over one archive each, read-counting store rows for every refused key, the key-segment rule, 35 mutants, and live compose rows on a versioned MinIO bucket; a catalog restore's preflight is the PoC upgrade's.
 **Rollback:** an older runner reads the current manifest alone again; an older
 controller reports a newer runner's refusal as `ResultUnreadable`. Nothing is
 stored.
@@ -1312,7 +1312,7 @@ start, and another marker encoding version
 **Do:** nothing, unless you restore transactional topics (Kafka Streams or
 Connect exactly-once, Flink): add `restore.allow_transaction_markers: true` to
 the plan and approve the changed plan.
-**Scope:** shape-predicate rows, the whole run over doubles in both target modes, and live compose rows with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`: 7 markers refused, the non-transactional twin and the override `pass`).
+**Scope:** shape-predicate rows, the whole run over doubles in both target modes, and live compose rows with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`: 7 markers refused, the non-transactional twin and the override `pass`); one ordinary point restored unchanged is the PoC upgrade's.
 **Rollback:** an older runner ignores the plan field and restores such an
 archive without the check. An older controller's status says "the runner gave
 no readable reason" (item 61) while `exitReason` names the refusal: roll the
@@ -2459,7 +2459,7 @@ it); to give a slow cluster longer, name `timeoutSeconds` (30–600) on the
 `Preflight`. An install that had set either key to another value gets a changed
 policy digest once, and every retained `ready` `Preflight` reads `unknown`
 (`policyChanged`): run the check again.
-**Scope:** `chart_policy.rs`, `chart_lint.rs`, `scripts/check-chart.sh`, `scripts/check-chart-values.sh`, the retention worker's cap rows and the mutants in the FX-10 report.
+**Scope:** `chart_policy.rs`, `chart_lint.rs`, `scripts/check-chart.sh`, `scripts/check-chart-values.sh`, the retention worker's cap rows and the mutants in the FX-10 report; the PoC upgrade checks its policy document and digest are unchanged.
 **Rollback:** `helm rollback` restores the previous chart's values; rolling back
 only the controller image is also safe.
 
@@ -2583,7 +2583,7 @@ kafka-configs.sh --bootstrap-server <source> --describe --entity-type topics --a
 
 For each, decide whether a restore by the producers' clocks is acceptable; if
 it is, add `restore.time_basis: producerTime` to the plan and re-approve it.
-**Scope:** `crates/logweir-core/src/time_basis.rs`, phase rows, the four arms in both readers with the corpus and parity gate, console rows and mutants, and live compose rows in `record_semantics.rs` and `config_coverage.rs`.
+**Scope:** `crates/logweir-core/src/time_basis.rs`, phase rows, the four arms in both readers with the corpus and parity gate, console rows and mutants, and live compose rows in `record_semantics.rs` and `config_coverage.rs`; its refusal and opt-in rows are the PoC upgrade's.
 **Rollback:** an older runner ignores `restore.time_basis` and runs the
 selections this build refuses, unlabelled, signing format 1.1.0 again; 1.3.0
 scorecards stay valid.
