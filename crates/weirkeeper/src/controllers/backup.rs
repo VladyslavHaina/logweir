@@ -5549,8 +5549,9 @@ async fn reconcile_backup_inner(
     // Exit 3 wrote no artifact (GC11), so all its log owes is the two refusal
     // lines at its end: `crate::refusal::read` asks for a bounded tail, never
     // fails the pass, and says why when there is nothing to read. THIS `if` IS
-    // THE ONLY GATE: every other exit code takes the read it always took and
-    // carries no runner reason at all.
+    // THE ONLY GATE: every other exit code takes `runner_log::TERMINAL` (the
+    // last 256 lines, whose failure is still a reconcile error) and carries no
+    // runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
         // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
         // is the runner's only when it carries it; a Job with none (an older

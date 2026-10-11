@@ -57,7 +57,8 @@
 //!
 //! The reconcilers call [`read`] for exit 3 and for nothing else, and pass
 //! the result to their patch builders as `Some`. Every other exit code takes
-//! the read it always took and builds the message it always built.
+//! [`crate::runner_log::TERMINAL`] (the last 256 lines) and builds the
+//! message it always built.
 
 use futures::io::AsyncRead;
 use k8s_openapi::api::core::v1::Pod;
