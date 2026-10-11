@@ -13,7 +13,6 @@ pub mod namespaces;
 pub mod operations;
 pub mod preflights;
 pub mod protection;
-pub mod rehearsals;
 pub mod restores;
 pub mod retention;
 pub mod schedules;

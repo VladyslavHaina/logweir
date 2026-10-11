@@ -7879,17 +7879,15 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
-  # D3 W11 — the four NAMESPACED kinds Amendment G added. READ ONLY.
+  # D3 W11 — the NAMESPACED kinds Amendment G added. READ ONLY.
   - apiGroups: ["logweir.dev"]
     resources:
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
       - retentionpolicies
     verbs: ["get", "list"]
   # …and D3's ONE write: `catalog.connect`, PLAT-15.2's "connect existing
-  # archive". No `patch`: `catalogs/{name}:sync` and
-  # `rehearsal-schedules/{name}:set-suspension` have no route in this build,
+  # archive". No `patch`: `catalogs/{name}:sync` has no route in this build,
   # and `retention-policies/{name}:approve-plan` is an administrator path D3
   # §10 leaves to `kubectl`.
   - apiGroups: ["logweir.dev"]

@@ -890,30 +890,6 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/rehearsal-schedules",
-            vec![Op {
-                method: "get",
-                operation_id: "listRehearsalSchedules",
-                summary: "Recurring recovery rehearsals: the last pass, the last failure and the last SKIP with its reason, plus the leftover topics that block the next slot. The signed standing authorization is named, never carried.",
-                parameters: list_params(),
-                request: None,
-                success: vec![("200", "One page of rehearsal schedules.", "RehearsalScheduleList")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
-            }],
-        ),
-        (
-            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
-            vec![Op {
-                method: "get",
-                operation_id: "getRehearsalSchedule",
-                summary: "One rehearsal schedule.",
-                parameters: vec![ns(), name()],
-                request: None,
-                success: vec![("200", "The schedule.", "RehearsalScheduleResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
-            }],
-        ),
-        (
             "/api/v1/namespaces/{ns}/catalogs",
             vec![
                 Op {
@@ -928,7 +904,7 @@ fn paths() -> Value {
                 Op {
                     method: "post",
                     operation_id: "connectArchive",
-                    summary: "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection, rehearsal and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
+                    summary: "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
                     parameters: vec![ns(), idempotency_key(), origin()],
                     request: Some("ConnectArchiveRequest"),
                     success: vec![
@@ -1092,8 +1068,6 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<crate::routes::operations::OperationViewResponse>();
     let _ = generator.subschema_for::<crate::routes::protection::ProtectionPolicyList>();
     let _ = generator.subschema_for::<crate::routes::protection::ProtectionPolicyResponse>();
-    let _ = generator.subschema_for::<crate::routes::rehearsals::RehearsalScheduleList>();
-    let _ = generator.subschema_for::<crate::routes::rehearsals::RehearsalScheduleResponse>();
     let _ = generator.subschema_for::<crate::routes::catalogs::ConnectArchiveRequest>();
     let _ = generator.subschema_for::<crate::routes::catalogs::CatalogList>();
     let _ = generator.subschema_for::<crate::routes::catalogs::CatalogResponse>();

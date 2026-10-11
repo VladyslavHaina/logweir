@@ -47,7 +47,7 @@ pub const CLIENT_ID: &str = "logweir-console";
 pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
-pub const PLURALS: [&str; 12] = [
+pub const PLURALS: [&str; 11] = [
     "kafkaclusters",
     "backupschedules",
     "backups",
@@ -57,7 +57,6 @@ pub const PLURALS: [&str; 12] = [
     "topicdiscoveries",
     "preflights",
     "protectionpolicies",
-    "rehearsalschedules",
     "recoverycatalogs",
     "retentionpolicies",
 ];
@@ -164,7 +163,6 @@ fn kind_of(plural: &str) -> &'static str {
         "topicdiscoveries" => "TopicDiscovery",
         "preflights" => "Preflight",
         "protectionpolicies" => "ProtectionPolicy",
-        "rehearsalschedules" => "RehearsalSchedule",
         "recoverycatalogs" => "RecoveryCatalog",
         "retentionpolicies" => "RetentionPolicy",
         "trustpolicies" => "TrustPolicy",

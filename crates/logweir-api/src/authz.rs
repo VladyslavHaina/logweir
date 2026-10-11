@@ -110,8 +110,6 @@ pub enum Action {
     /// List/get `ProtectionPolicy` projections: health, the alert ledger and
     /// the delivery state (PLAT-14.2).
     ReadProtectionPolicies,
-    /// List/get `RehearsalSchedule` projections (PLAT-14.3).
-    ReadRehearsalSchedules,
     /// List/get `RecoveryCatalog` projections, the point view and the signer
     /// panel (PLAT-15.1).
     ReadCatalogs,
@@ -162,7 +160,6 @@ impl Action {
             Action::ReadOperations => "operation.read",
             Action::StreamOperationEvents => "operation.stream",
             Action::ReadProtectionPolicies => "protection.read",
-            Action::ReadRehearsalSchedules => "rehearsal.read",
             Action::ReadCatalogs => "catalog.read",
             Action::ConnectCatalog => "catalog.connect",
             Action::ReadRetentionPolicies => "retention.read",
@@ -302,7 +299,6 @@ impl Role {
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
                     | Action::ReadProtectionPolicies
-                    | Action::ReadRehearsalSchedules
                     | Action::ReadCatalogs
                     | Action::ReadRetentionPolicies
             ),
@@ -335,7 +331,6 @@ impl Role {
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
                     | Action::ReadProtectionPolicies
-                    | Action::ReadRehearsalSchedules
                     | Action::ReadCatalogs
                     | Action::ConnectCatalog
                     | Action::ReadRetentionPolicies
@@ -391,7 +386,6 @@ impl Role {
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
                     | Action::ReadProtectionPolicies
-                    | Action::ReadRehearsalSchedules
                     | Action::ReadCatalogs
                     | Action::ConnectCatalog
                     | Action::ReadRetentionPolicies
@@ -794,8 +788,6 @@ pub struct Capabilities {
     pub operation_events: bool,
     /// The protection domain (PLAT-14.2) is served AND readable here.
     pub protection: bool,
-    /// The rehearsal domain (PLAT-14.3) is served AND readable here.
-    pub rehearsals: bool,
     /// The recovery-catalog domain (PLAT-15.1) is served AND readable here.
     pub catalogs: bool,
     /// `POST .../catalogs` — connect an existing archive (PLAT-15.2).
@@ -843,7 +835,6 @@ impl Capabilities {
             operations_read: can(Action::ReadOperations),
             operation_events: can(Action::StreamOperationEvents),
             protection: can(Action::ReadProtectionPolicies),
-            rehearsals: can(Action::ReadRehearsalSchedules),
             catalogs: can(Action::ReadCatalogs),
             catalog_connect: can(Action::ConnectCatalog),
             retention: can(Action::ReadRetentionPolicies),
@@ -878,7 +869,6 @@ impl Capabilities {
             out.operations_read |= c.operations_read;
             out.operation_events |= c.operation_events;
             out.protection |= c.protection;
-            out.rehearsals |= c.rehearsals;
             out.catalogs |= c.catalogs;
             out.catalog_connect |= c.catalog_connect;
             out.retention |= c.retention;
@@ -911,7 +901,6 @@ impl Capabilities {
             operations_read: false,
             operation_events: false,
             protection: false,
-            rehearsals: false,
             catalogs: false,
             catalog_connect: false,
             retention: false,
@@ -950,8 +939,8 @@ mod tests {
         // D1 W6: `POST .../backups` has a route, so the flag is no longer a
         // permanent `false`.
         assert!(c.manual_backup_create);
-        // D3 W11: the five read families and the event stream have routes.
-        assert!(c.protection && c.rehearsals && c.catalogs && c.retention);
+        // D3 W11: the read families and the event stream have routes.
+        assert!(c.protection && c.catalogs && c.retention);
         assert!(c.catalog_connect && c.operation_events);
         // localAdmin holds every action, so the cluster-scoped read is on too.
         assert!(c.trust_policies_read);

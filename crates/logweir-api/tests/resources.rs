@@ -888,11 +888,10 @@ async fn session_and_namespaces_come_from_configuration_only() {
         // `PUT .../schedules/{name}`: the same authority, one flag, and
         // `role_matrix` pins that the two actions have the same role row.
         "manualBackupCreate",
-        // D3 W11: the five read families, the catalog create and the event
+        // D3 W11: the read families, the catalog create and the event
         // stream have routes; the local administrator holds every implemented
         // action, so every one of them is on.
         "protection",
-        "rehearsals",
         "catalogs",
         "catalogConnect",
         "retention",

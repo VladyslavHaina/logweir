@@ -67,11 +67,6 @@ fn seeded() -> FakeKube {
         fixture("retention-policy-enforce.json"),
     );
     fake.seed("recoverycatalogs", NS_A, fixture("recovery-catalog.json"));
-    fake.seed(
-        "rehearsalschedules",
-        NS_A,
-        fixture("rehearsal-schedule.json"),
-    );
     let mut policy = fixture("trust-policy-fresh.json");
     for key in policy["spec"]["keys"].as_array_mut().expect("keys") {
         key["spkiPem"] = json!(spki_pem());
@@ -1033,7 +1028,6 @@ async fn the_read_families_are_narrowed_by_role_and_trust_needs_an_administrator
 
     let reads = [
         "/api/v1/namespaces/team-a/protection-policies",
-        "/api/v1/namespaces/team-a/rehearsal-schedules",
         "/api/v1/namespaces/team-a/catalogs",
         "/api/v1/namespaces/team-a/retention-policies",
     ];
@@ -1118,69 +1112,6 @@ async fn connecting_an_archive_is_refused_to_a_viewer_and_an_approver() {
     }
     assert_eq!(shared.app.fake.count("recoverycatalogs", NS_A), 1);
     assert_eq!(shared.app.fake.count("recoverycatalogs", NS_B), 0);
-}
-
-// ======================================================================
-// Rehearsals
-// ======================================================================
-
-/// **A skip is a result, and the thing that blocks the next slot is visible.**
-///
-/// A rehearsal that quietly stops running looks exactly like a rehearsal that
-/// keeps passing if the surface shows only the last success. So `lastSkipped`
-/// and `cleanup.pendingTopics` are published beside `lastSucceeded`: while
-/// those topics are there every further slot is skipped, and an operator who
-/// cannot see them cannot clear them.
-///
-/// THE FIXTURE'S SHAPE IS THE CRD'S, NOT A LIVE OBJECT'S. D3 W7 (the rehearsal
-/// controller) has not landed, so no `RehearsalSchedule` exists in the live
-/// evidence; this row deserializes through `weirkeeper::crds`, so a field that
-/// drifts from the CRD fails it.
-#[tokio::test]
-async fn a_rehearsal_publishes_its_skip_its_leftovers_and_a_named_authorization() {
-    let app = app();
-    let v = app
-        .get("/api/v1/namespaces/team-a/rehearsal-schedules/weekly-orders")
-        .await
-        .json();
-    let item = &v["item"];
-    assert_eq!(item["schedule"], "0 3 * * 0");
-    assert_eq!(item["suspend"], false);
-    assert_eq!(item["point"]["requireVerifiedEvidence"], true);
-    assert_eq!(item["point"]["selection"], "NewestAvailable");
-    assert_eq!(item["bounds"]["concurrencyPolicy"], "Forbid");
-
-    assert_eq!(item["lastSucceeded"]["evidence"], "Valid");
-    assert_eq!(item["lastSucceeded"]["rtoSeconds"], 465);
-    assert_eq!(item["lastSkipped"]["reason"], "LeftoverTopics");
-    assert_eq!(item["lastFailed"]["reason"], "TeardownIncomplete");
-    assert_eq!(
-        item["cleanup"]["pendingTopics"][0],
-        "rehearsal-3f2a91c7-orders"
-    );
-    assert_eq!(item["cleanup"]["pendingTopicsTruncated"], false);
-
-    // The standing authorization is a NAME. The signed document, its
-    // signatures and the trusted public keys live on the `Approval` and reach
-    // a caller only through the explicit approval-packet route.
-    assert_eq!(
-        item["standingApprovalRef"]["name"],
-        "weekly-orders-standing"
-    );
-    let text = v.to_string();
-    for word in ["planBytes", "signature", "spkiPem", "approvalBytes"] {
-        assert!(
-            !text.contains(word),
-            "{word} reached the rehearsal projection"
-        );
-    }
-
-    let list = app
-        .get("/api/v1/namespaces/team-a/rehearsal-schedules")
-        .await
-        .json();
-    assert_eq!(list["items"].as_array().unwrap().len(), 1);
-    app.fake.assert_strict();
 }
 
 // ======================================================================

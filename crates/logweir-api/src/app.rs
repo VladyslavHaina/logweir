@@ -271,8 +271,8 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
         approvals, backups, cadence_previews, catalogs, connections, console_approval,
-        destinations, health, namespaces, operations, preflights, protection, rehearsals, restores,
-        retention, schedules, session, topic_discoveries, trust,
+        destinations, health, namespaces, operations, preflights, protection, restores, retention,
+        schedules, session, topic_discoveries, trust,
     };
 
     let api = Router::new()
@@ -408,14 +408,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{ns}/protection-policies/{name}",
             get(protection::get_one),
-        )
-        .route(
-            "/api/v1/namespaces/{ns}/rehearsal-schedules",
-            get(rehearsals::list),
-        )
-        .route(
-            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
-            get(rehearsals::get_one),
         )
         .route(
             "/api/v1/namespaces/{ns}/catalogs",

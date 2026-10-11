@@ -68,11 +68,11 @@ serves a byte. No `list`: a console that could page through every ConfigMap in
 a namespace is an inventory of somebody else's configuration.
 
 ---------------------------------------------------------------------------
-D3 W11's SIX NEW ACTIONS, AND WHAT THEY COST IN VERBS
+D3 W11's FIVE NEW ACTIONS, AND WHAT THEY COST IN VERBS
 ---------------------------------------------------------------------------
-`protection.read`, `rehearsal.read`, `catalog.read`, `catalog.connect`,
-`retention.read` and `trustPolicy.read`. Five of the six are reads, so the D3
-rules below are `get`/`list` on the four namespaced kinds plus the
+`protection.read`, `catalog.read`, `catalog.connect`, `retention.read` and
+`trustPolicy.read` (`rehearsal.read` was withdrawn in v1). Four of the five are
+reads, so the D3 rules below are `get`/`list` on the three namespaced kinds plus the
 cluster-scoped `TrustPolicy`, and there is exactly ONE D3 write: `create` on
 `recoverycatalogs`, which is PLAT-15.2's "connect existing archive".
 
@@ -194,17 +194,15 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
-  # D3 W11 — the four NAMESPACED kinds Amendment G added. READ ONLY.
+  # D3 W11 — the NAMESPACED kinds Amendment G added. READ ONLY.
   - apiGroups: ["logweir.dev"]
     resources:
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
       - retentionpolicies
     verbs: ["get", "list"]
   # …and D3's ONE write: `catalog.connect`, PLAT-15.2's "connect existing
-  # archive". No `patch`: `catalogs/{name}:sync` and
-  # `rehearsal-schedules/{name}:set-suspension` have no route in this build,
+  # archive". No `patch`: `catalogs/{name}:sync` has no route in this build,
   # and `retention-policies/{name}:approve-plan` is an administrator path D3
   # §10 leaves to `kubectl`.
   - apiGroups: ["logweir.dev"]

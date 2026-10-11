@@ -2163,7 +2163,6 @@ fn console_plural(ty: &str) -> &'static str {
         "TopicDiscovery" => "topicdiscoveries",
         "Preflight" => "preflights",
         "ProtectionPolicy" => "protectionpolicies",
-        "RehearsalSchedule" => "rehearsalschedules",
         "RecoveryCatalog" => "recoverycatalogs",
         "RetentionPolicy" => "retentionpolicies",
         "TrustPolicy" => "trustpolicies",
@@ -2291,7 +2290,6 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             [
                 "protectionpolicies",
                 "recoverycatalogs",
-                "rehearsalschedules",
                 "retentionpolicies",
             ]
             .iter()
@@ -2745,7 +2743,7 @@ const RENDER_NAMESPACE: &str = "logweir-system";
 /// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
 /// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
 /// derives them from `kube.rs`; this list pins what is REACHABLE.
-const API_NAMESPACED_GRANTS: [&str; 39] = [
+const API_NAMESPACED_GRANTS: [&str; 37] = [
     "get logweir.dev/approvals",
     "list logweir.dev/approvals",
     "create logweir.dev/approvals",
@@ -2779,8 +2777,6 @@ const API_NAMESPACED_GRANTS: [&str; 39] = [
     "get logweir.dev/recoverycatalogs",
     "list logweir.dev/recoverycatalogs",
     "create logweir.dev/recoverycatalogs",
-    "get logweir.dev/rehearsalschedules",
-    "list logweir.dev/rehearsalschedules",
     "get logweir.dev/retentionpolicies",
     "list logweir.dev/retentionpolicies",
     "get core/configmaps",

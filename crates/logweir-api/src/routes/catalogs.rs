@@ -928,9 +928,9 @@ pub struct CatalogResponse {
 /// `POST .../catalogs` — connect an archive.
 ///
 /// THE NAME IS THE CALLER'S, like a destination's and for the same reason: a
-/// `ProtectionPolicy`, a `RehearsalSchedule` and a `RetentionPolicy` all
-/// reference a catalog by name, and a hashed name would make every one of
-/// those references unreadable.
+/// `ProtectionPolicy` and a `RetentionPolicy` both reference a catalog by
+/// name, and a hashed name would make every one of those references
+/// unreadable.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectArchiveRequest {

@@ -396,16 +396,6 @@ pub const ROUTES: &[RouteAccess] = &[
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/rehearsal-schedules",
-        ns(&[Action::ReadRehearsalSchedules]),
-    ),
-    route(
-        "GET",
-        "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
-        ns(&[Action::ReadRehearsalSchedules]),
-    ),
-    route(
-        "GET",
         "/api/v1/namespaces/{ns}/catalogs",
         ns(&[Action::ReadCatalogs]),
     ),

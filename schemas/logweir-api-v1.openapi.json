@@ -3905,155 +3905,6 @@
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/rehearsal-schedules": {
-      "get": {
-        "operationId": "listRehearsalSchedules",
-        "summary": "Recurring recovery rehearsals: the last pass, the last failure and the last SKIP with its reason, plus the leftover topics that block the next slot. The signed standing authorization is named, never carried.",
-        "parameters": [
-          {
-            "name": "ns",
-            "in": "path",
-            "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "description": "Page size, 1 to 200. Default 50.",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "labelSelector",
-            "in": "query",
-            "required": false,
-            "description": "Equality-only label selector, key=value terms separated by commas.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One page of rehearsal schedules.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RehearsalScheduleList"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "x-logweir-problem-codes": [
-          "cursor_expired",
-          "cursor_invalid",
-          "forbidden",
-          "header_not_allowed",
-          "internal_error",
-          "kubernetes_unavailable",
-          "malformed_request",
-          "method_not_allowed",
-          "misdirected_request",
-          "namespace_forbidden",
-          "rate_limited",
-          "session_expired",
-          "unauthenticated",
-          "upstream_timeout",
-          "validation_failed"
-        ]
-      }
-    },
-    "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}": {
-      "get": {
-        "operationId": "getRehearsalSchedule",
-        "summary": "One rehearsal schedule.",
-        "parameters": [
-          {
-            "name": "ns",
-            "in": "path",
-            "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "description": "The object name.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The schedule.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RehearsalScheduleResponse"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "x-logweir-problem-codes": [
-          "forbidden",
-          "header_not_allowed",
-          "internal_error",
-          "kubernetes_unavailable",
-          "malformed_request",
-          "method_not_allowed",
-          "misdirected_request",
-          "namespace_forbidden",
-          "not_found",
-          "rate_limited",
-          "session_expired",
-          "unauthenticated",
-          "upstream_timeout"
-        ]
-      }
-    },
     "/api/v1/namespaces/{ns}/catalogs": {
       "get": {
         "operationId": "listCatalogs",
@@ -4141,7 +3992,7 @@
       },
       "post": {
         "operationId": "connectArchive",
-        "summary": "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection, rehearsal and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
+        "summary": "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
         "parameters": [
           {
             "name": "ns",
@@ -6605,7 +6456,6 @@
           "operationsRead",
           "preflight",
           "protection",
-          "rehearsals",
           "restoreCreate",
           "restoresRead",
           "retention",
@@ -6683,10 +6533,6 @@
           },
           "protection": {
             "description": "The protection domain (PLAT-14.2) is served AND readable here.",
-            "type": "boolean"
-          },
-          "rehearsals": {
-            "description": "The rehearsal domain (PLAT-14.3) is served AND readable here.",
             "type": "boolean"
           },
           "restoreCreate": {
@@ -7383,32 +7229,6 @@
           }
         ]
       },
-      "CleanupStateView": {
-        "description": "Topics a previous teardown could not remove. While this is non-empty the next slot is SKIPPED rather than allowed to adopt topics it did not create.",
-        "type": "object",
-        "required": [
-          "pendingTopicsTruncated"
-        ],
-        "properties": {
-          "pendingTopics": {
-            "description": "The topics still there.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "pendingTopicsTruncated": {
-            "description": "Whether the list was cut short.",
-            "type": "boolean"
-          },
-          "since": {
-            "description": "Since when.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          }
-        }
-      },
       "CompleteVerificationView": {
         "description": "**PROD-08.1a.** A complete verification's result, copied from `Restore.status.integrity.complete` (itself copied from the signed scorecard) and never recomputed.",
         "type": "object",
@@ -7589,7 +7409,7 @@
         }
       },
       "ConnectArchiveRequest": {
-        "description": "`POST .../catalogs` — connect an archive.\n\nTHE NAME IS THE CALLER'S, like a destination's and for the same reason: a `ProtectionPolicy`, a `RehearsalSchedule` and a `RetentionPolicy` all reference a catalog by name, and a hashed name would make every one of those references unreadable.",
+        "description": "`POST .../catalogs` — connect an archive.\n\nTHE NAME IS THE CALLER'S, like a destination's and for the same reason: a `ProtectionPolicy` and a `RetentionPolicy` both reference a catalog by name, and a hashed name would make every one of those references unreadable.",
         "type": "object",
         "required": [
           "name",
@@ -10938,50 +10758,6 @@
           }
         }
       },
-      "PointSelectorView": {
-        "description": "Which point a rehearsal takes.",
-        "type": "object",
-        "required": [
-          "minAgeSeconds",
-          "requireVerifiedEvidence",
-          "selection"
-        ],
-        "properties": {
-          "catalogRef": {
-            "description": "The catalog candidates come from.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "minAgeSeconds": {
-            "description": "How old a point must be before it qualifies.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "requireVerifiedEvidence": {
-            "description": "Whether unverified evidence disqualifies a point. CEL pins it `true` in v1: a rehearsal over unverified evidence proves the archive is readable and nothing about whether it is trustworthy.",
-            "type": "boolean"
-          },
-          "scheduleRefs": {
-            "description": "Candidate schedules.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NameRef"
-            }
-          },
-          "selection": {
-            "description": "`NewestAvailable` — the only strategy in v1.",
-            "type": "string"
-          },
-          "topics": {
-            "description": "The topics the rehearsal restores.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "nullable": true
-          }
-        }
-      },
       "PointTopicView": {
         "description": "**PROD-05.1.** One topic of a recovery point, as the catalog's view lists it: what the archive records of its layout and how its configuration is held. Never a configuration value — the settings themselves are in the signed receipt and the point record, not in a listing.",
         "type": "object",
@@ -12256,322 +12032,6 @@
             "description": "The UID at the time of the check.",
             "type": "string",
             "nullable": true
-          }
-        }
-      },
-      "RehearsalBoundsView": {
-        "description": "The bounds a rehearsal runs inside.",
-        "type": "object",
-        "required": [
-          "concurrencyPolicy",
-          "coverage",
-          "deadlineSeconds",
-          "maxPartitions",
-          "recordsPerPartition",
-          "startingDeadlineSeconds"
-        ],
-        "properties": {
-          "completeMaxRecords": {
-            "description": "*PROD-08.1a.** The bound on each complete verification.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "concurrencyPolicy": {
-            "description": "`Forbid` — the only policy in v1.",
-            "type": "string"
-          },
-          "coverage": {
-            "description": "**PROD-08.1a.** How much of each rehearsal is verified: `sampled` (the schedule states none) or `complete`. Inside the standing authorization, whose scope must itself say `complete`.",
-            "$ref": "#/components/schemas/RestoreCoverage"
-          },
-          "deadlineSeconds": {
-            "description": "The run deadline.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "maxPartitions": {
-            "description": "The partition ceiling, enforced when the catalog knows the count.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "recordsPerPartition": {
-            "description": "How many records per partition the canary writes.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "startingDeadlineSeconds": {
-            "description": "The missed-slot horizon.",
-            "type": "integer",
-            "format": "int32"
-          }
-        }
-      },
-      "RehearsalFailureView": {
-        "description": "The last rehearsal that failed.",
-        "type": "object",
-        "properties": {
-          "at": {
-            "description": "When.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "reason": {
-            "description": "Why.",
-            "type": "string",
-            "nullable": true
-          },
-          "restoreRef": {
-            "description": "The `Restore`.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          }
-        }
-      },
-      "RehearsalScheduleList": {
-        "description": "A page of rehearsal schedules.",
-        "type": "object",
-        "required": [
-          "items",
-          "page",
-          "requestId"
-        ],
-        "properties": {
-          "items": {
-            "description": "The items on this page.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RehearsalScheduleView"
-            }
-          },
-          "page": {
-            "description": "Paging.",
-            "$ref": "#/components/schemas/Page"
-          },
-          "requestId": {
-            "description": "The request ID.",
-            "type": "string"
-          }
-        }
-      },
-      "RehearsalScheduleResponse": {
-        "description": "One rehearsal schedule.",
-        "type": "object",
-        "required": [
-          "item",
-          "requestId"
-        ],
-        "properties": {
-          "item": {
-            "description": "The item.",
-            "$ref": "#/components/schemas/RehearsalScheduleView"
-          },
-          "requestId": {
-            "description": "The request ID.",
-            "type": "string"
-          }
-        }
-      },
-      "RehearsalScheduleView": {
-        "description": "A `RehearsalSchedule`, projected.",
-        "type": "object",
-        "required": [
-          "bounds",
-          "name",
-          "namespace",
-          "point",
-          "resourceVersion",
-          "schedule",
-          "standingApprovalRef",
-          "suspend",
-          "target",
-          "uid"
-        ],
-        "properties": {
-          "activeRestoreRef": {
-            "description": "The rehearsal running now.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "approvalPolicyRef": {
-            "description": "The approval policy, when one is named.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "bounds": {
-            "description": "The bounds.",
-            "$ref": "#/components/schemas/RehearsalBoundsView"
-          },
-          "cleanup": {
-            "description": "Leftover topics, which block the next slot.",
-            "$ref": "#/components/schemas/CleanupStateView",
-            "nullable": true
-          },
-          "conditions": {
-            "description": "`Ready`, `Authorized` and `RehearsalHealthy`.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ConditionView"
-            }
-          },
-          "createdAt": {
-            "description": "When the object was created.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "generation": {
-            "description": "`metadata.generation`.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "lastFailed": {
-            "description": "The last failure.",
-            "$ref": "#/components/schemas/RehearsalFailureView",
-            "nullable": true
-          },
-          "lastScheduledSlot": {
-            "description": "The last slot the controller decided: fired, or skipped with `lastSkipped.slot` naming the same slot.",
-            "type": "string",
-            "nullable": true
-          },
-          "lastSkipped": {
-            "description": "The last skip. **A skip is not a pass and is never rendered as one.**",
-            "$ref": "#/components/schemas/SkippedSlotView",
-            "nullable": true
-          },
-          "lastSucceeded": {
-            "description": "The last pass.",
-            "$ref": "#/components/schemas/RehearsalSuccessView",
-            "nullable": true
-          },
-          "name": {
-            "description": "The object name.",
-            "type": "string"
-          },
-          "namespace": {
-            "description": "The namespace.",
-            "type": "string"
-          },
-          "nextFireTime": {
-            "description": "When it fires next.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "observedGeneration": {
-            "description": "The generation the status was computed from.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "pendingRestoreRef": {
-            "description": "The reservation a slot took before it created its child.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "point": {
-            "description": "Which point.",
-            "$ref": "#/components/schemas/PointSelectorView"
-          },
-          "protectionPolicyRef": {
-            "description": "The protection policy the results surface on.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "resourceVersion": {
-            "description": "The resourceVersion this projection was read at.",
-            "type": "string"
-          },
-          "rtoSeconds": {
-            "description": "The requested recovery time objective.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "schedule": {
-            "description": "The five-field UTC cron expression.",
-            "type": "string"
-          },
-          "standingApprovalRef": {
-            "description": "The `Approval` carrying the signed standing authorization. A NAME: the document and its signatures are reachable only through the approval packet route.",
-            "$ref": "#/components/schemas/NameRef"
-          },
-          "suspend": {
-            "description": "Whether it is suspended — the only mutable field of a sealed spec.",
-            "type": "boolean"
-          },
-          "target": {
-            "description": "Where it writes.",
-            "$ref": "#/components/schemas/RehearsalTargetView"
-          },
-          "uid": {
-            "description": "The Kubernetes UID.",
-            "type": "string"
-          }
-        }
-      },
-      "RehearsalSuccessView": {
-        "description": "The last rehearsal that passed.",
-        "type": "object",
-        "properties": {
-          "at": {
-            "description": "When.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "evidence": {
-            "description": "The verification verdict the run recorded.",
-            "type": "string",
-            "nullable": true
-          },
-          "pointId": {
-            "description": "Which point.",
-            "type": "string",
-            "nullable": true
-          },
-          "restoreRef": {
-            "description": "The `Restore` it ran as.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "rtoSeconds": {
-            "description": "The measured recovery time.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          }
-        }
-      },
-      "RehearsalTargetView": {
-        "description": "Where a rehearsal writes.",
-        "type": "object",
-        "required": [
-          "clusterRef",
-          "markerTopic",
-          "replicationFactor",
-          "topicPrefix"
-        ],
-        "properties": {
-          "clusterRef": {
-            "description": "The target connection.",
-            "$ref": "#/components/schemas/NameRef"
-          },
-          "markerTopic": {
-            "description": "The marker topic phase 0 checks.",
-            "type": "string"
-          },
-          "replicationFactor": {
-            "description": "The replication factor for created topics.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "topicPrefix": {
-            "description": "The prefix as WRITTEN in the spec. The controller renders `<prefix><uid-first-8>-` per schedule, which is what teardown's deletion guard matches.",
-            "type": "string"
           }
         }
       },
@@ -14623,22 +14083,6 @@
           }
         }
       },
-      "SkippedSlotView": {
-        "description": "A slot that did not run, and why.",
-        "type": "object",
-        "properties": {
-          "reason": {
-            "description": "The reason, from the closed list.",
-            "type": "string",
-            "nullable": true
-          },
-          "slot": {
-            "description": "The DUE slot that was refused — never the instant the controller looked. A skipped slot is consumed and is not fired late.",
-            "type": "string",
-            "nullable": true
-          }
-        }
-      },
       "SourceConnectionPreflightRequest": {
         "description": "The source-connection half of a preflight request.",
         "type": "object",
@@ -14922,7 +14366,7 @@
             "type": "boolean"
           },
           "failed": {
-            "description": "The ones that could not be removed. A non-empty list is what makes the next rehearsal slot SKIP rather than adopt topics it did not create.",
+            "description": "The ones that could not be removed.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TeardownFailureView"

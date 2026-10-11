@@ -390,7 +390,7 @@ What it holds: `get`/`list` on the eight product kinds; `create` on all eight
 governed request's confirmation object and the approver's countersigned
 Approval); `patch` on `backupschedules`, `backupdestinations`,
 `topicdiscoveries` and `preflights`; `get`/`list` on `protectionpolicies`,
-`recoverycatalogs`, `rehearsalschedules` and `retentionpolicies`; `create` on
+`recoverycatalogs` and `retentionpolicies`; `create` on
 `recoverycatalogs` for "connect existing archive"; `get`/`list` on the
 cluster-scoped `trustpolicies`; `get` on the one cluster-scoped `trustrosters/default`
 (`resourceNames: ["default"]`, so a readiness verdict's roster referent can be

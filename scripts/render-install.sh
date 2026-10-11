@@ -355,7 +355,7 @@ check_console_grants() {
   # Approval its ordinary confirmation IS, the governed confirmation object and
   # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
   # the two named merge patches plus the two `CancellableCheck`
-  # kinds, D3 W11's four namespaced reads and its ONE write, the cluster-scoped
+  # kinds, D3 W11's three namespaced reads and its ONE write, the cluster-scoped
   # `TrustPolicy` read, the ONE roster read (`get trustrosters@default`: the
   # rule's `resourceNames` is part of the pair, so the name list cannot be
   # dropped — PREFLIGHT-TRUSTROSTER-STALE), and the two core objects with one
@@ -371,7 +371,6 @@ check_console_grants() {
     'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
     'get protectionpolicies' 'list protectionpolicies' \
     'get recoverycatalogs'   'list recoverycatalogs'   'create recoverycatalogs' \
-    'get rehearsalschedules' 'list rehearsalschedules' \
     'get retentionpolicies'  'list retentionpolicies' \
     'get trustpolicies'      'list trustpolicies' \
     'get trustrosters@default' \
