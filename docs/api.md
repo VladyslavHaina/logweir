@@ -1,82 +1,44 @@
 # The product API (`logweir-api`)
 
-`logweir-api` is a small HTTP service that serves the static UI at `/ui/` and a
-typed JSON API at `/api/v1` on one origin, and that reads and creates the
-existing `logweir.dev/v1alpha1` resources through one Kubernetes adapter.
+`logweir-api` serves the console page at `/ui/` and a typed JSON API at
+`/api/v1` on one origin. It reads and creates the `logweir.dev/v1alpha1`
+resources through one Kubernetes adapter.
 
 **It is not a Kubernetes proxy.** There is no generic
 `{group}/{version}/{resource}` route, no request-supplied Kubernetes path, no
-Secret, Pod, log, exec or Job access, no delete, and no arbitrary patch. It
-creates custom resources; `weirkeeper` remains the only execution authority and
-isolated runner Jobs remain the data-plane boundary. The service dials no Kafka
-broker and no object store.
+Secret, Pod, log, exec or Job access, no delete, and no arbitrary patch.
+`weirkeeper` stays the only execution authority, and runner Jobs stay the
+data-plane boundary. The service dials no Kafka broker and no object store.
 
-## What ships today, and what does not
+**The reference is this page's route table and the generated OpenAPI
+document**, [`schemas/logweir-api-v1.openapi.json`](../schemas/logweir-api-v1.openapi.json).
 
-**Two modes, and the configuration file must name one.** There is no default:
-a file that forgets to say which mode it wants is refused rather than read as
-the more permissive one.
+- The OpenAPI document carries each route's **idempotency rule** (the
+  `Idempotency-Key` parameter on a durable create, or a description saying the
+  route refuses or does not use it) and its **problem codes**
+  (`x-logweir-problem-codes`). The table below does not repeat them.
+- Every schema member has a description there: what an absent member means,
+  every enum value and every bound. This page states the rules that cross
+  routes, the field refusal codes, and how to run the service.
+- `just schema` rewrites the document. `just schema-check` and
+  `crates/logweir-api/tests/contract.rs` fail on drift.
 
-* `mode: localAdmin` — a loopback-only listener, the configured administrator
-  as the actor, and namespaces from configuration alone. Not SSO, not a shared
-  console. Run in the cluster it is the **in-cluster administrator mode**: the
-  chart renders no Service, no Ingress and no ingress NetworkPolicy rule beside
-  it, the identity is the `<release>-api` ServiceAccount, readiness is not gated
-  on OIDC, and `kubectl port-forward deploy/<release>-api` is the only way in.
-  It is for isolated labs and break-glass administration, and it is not a
-  shared console. Its one actor is still a requester: with an approval policy
-  configured it signs ordinary confirmations for its own requests and is
-  refused a governed approval of them (*Approval policy* below).
-* `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
-  encrypted session cookie, a synchronizer CSRF token on every unsafe method,
-  exact role and namespace bindings, and one audit record per request. It
-  refuses a non-HTTPS `publicBaseUrl` before it binds anything.
+## Modes
 
-`logweir-api` **is packaged and deployable** as of D0 stage 7, and the two
-sentences that used to stand here — "no image builds it", "the API runs with
-whatever Kubernetes identity its kubeconfig carries, which may be cluster-admin"
-— are no longer true. `Dockerfile.console` builds the `logweir-console` image
-(this binary plus the static page files); `charts/logweir` runs it under
-`api.console.enabled` as the `<release>-api` ServiceAccount that `api.enabled`
-renders, with per-namespace RoleBindings, an optional TLS Ingress and an
-optional NetworkPolicy. See *Deployment* below and `charts/logweir/README.md`.
-`publish = false` still keeps the binary out of the release **archives**: it
-ships as an image, not as a tarball.
+The configuration file must name a mode. There is no default: a file that names
+none is refused rather than read as the more permissive one.
 
-**Nothing about an existing installation changes when it is not enabled.**
-`api.console.enabled` defaults to false, `api.enabled` keeps meaning exactly
-what it meant (an account and its grants, no pod), and the chart's default and
-demo renders are unchanged. Turning the console off again removes a ConfigMap,
-a Deployment and a Service and leaves every custom resource, every grant and
-every piece of evidence untouched — this service creates and reads objects and
-executes nothing.
-
-**Shared mode is a supported deployment shape, and since PLAT-17.2's
-completion the chart renders it only outside the controller's Job-create
-authority.** The image, the chart templates, the ingress, the NetworkPolicy,
-the ServiceAccount and its RoleBindings exist and refuse the configurations that
-would publish a console over plain HTTP; D0 stage 5 is met by
-`controller.watchNamespaces` (the controller holds Job-create authority only in
-the execution namespaces, never in the release namespace that holds the
-console's keys — *Deployment* below), and the chart refuses shared mode without
-it. What D0 still lists beyond this service's own boundary is the browser
-journey against a real provider and TLS ingress (stage 8), the production-CNI
-evidence for the NetworkPolicy (Docker Desktop's acceptance of a policy proves
-nothing about deny behaviour). The trust-read narrowing that
-`charts/logweir/templates/ui/api-rbac.yaml`'s comment still calls open (D3 W11
-F2) has landed: `GET /api/v1/trust-policies` is Administrator-only and filters
-namespace lists to the actor's (*Protection, rehearsals, catalogs, retention
-and trust* below). Read those before calling an installation a production
-shared console.
-
-A domain whose routes do not exist yet has **no route at all** — no stub and no
-`501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
-so a client learns what is unavailable instead of discovering it from an error.
-Today that is: connection tests. (Manual backup creation, operation event
-streams and — since PLAT-19.2 — governed approval submission have routes.) Saved destinations, topic discovery, preflight
-checks and write-only credential input **do** have routes now (D2 W12); their
-three capability flags are the domain's READ floor, and whether the actor may
-also start or cancel is the role table each grant publishes in `roles`.
+- **`mode: localAdmin`.** A loopback-only listener, the configured
+  administrator as the only actor, and namespaces from the file. Not SSO and not
+  a shared console. In the cluster it is the **in-cluster administrator mode**:
+  no Service, no Ingress and no ingress NetworkPolicy rule, the `<release>-api`
+  ServiceAccount as identity, readiness not gated on OIDC, and
+  `kubectl port-forward deploy/<release>-api` as the only way in. Use it for
+  isolated labs and break-glass administration.
+- **`mode: shared`.** The SSO console: OpenID Connect identity, a short-lived
+  encrypted session cookie, a CSRF token on every unsafe method, exact role and
+  namespace bindings, and one audit record per request. It refuses a non-HTTPS
+  `publicBaseUrl` before it binds anything.
 
 ## Running it
 
@@ -101,1598 +63,99 @@ $ head -c 32 /dev/urandom > cursor.key && chmod 600 cursor.key
 $ cargo run -p logweir-api -- --config config.yaml
 ```
 
-**Paths in this file are taken literally.** A relative one — `./ui`,
-`./cursor.key` above — resolves against the **configuration file's own
-directory**, not the working directory, so moving the file moves what it names.
-A leading `~` is **not** expanded: `kubeconfig: ~/.kube/config` would look for a
-directory actually named `~`, and the service would exit 2 saying it cannot read
-that file. Write an absolute path, or omit `kubernetes.kubeconfig` entirely as
-the example does — with the key absent the usual `KUBECONFIG`-then-`~/.kube/config`
-lookup applies, performed by the Kubernetes client library and by the shell
-conventions it implements, which is the only place that expansion belongs.
-`kubernetes.context` is required either way.
-
-Exit codes: `0` after a clean `SIGTERM`/`SIGINT`, `2` when the configuration is
-refused — before any Kubernetes client or socket exists — and `1` for any other
-startup or runtime failure.
-
-The configuration is validated first, and that order is the security property.
-`listen` must parse as a loopback IP literal: `localhost` is refused even though
-it usually resolves to loopback, because resolution is an input this process
-does not control. `0.0.0.0`, `[::]` and any routable address are refused by
-name. So is a kubeconfig context whose user impersonates another identity, a
-`mode` this release does not implement, and a cursor key shorter than 32 bytes.
-
-`/healthz` answers whenever the process is alive and consults nothing.
-`/readyz` additionally requires that Kubernetes answers for this service's
-identity; its body never says which endpoint or why.
+- **Paths are taken literally.** A relative path resolves against the
+  configuration file's own directory. A leading `~` is **not** expanded:
+  `kubeconfig: ~/.kube/config` looks for a directory named `~` and the service
+  exits 2. Write an absolute path, or omit `kubernetes.kubeconfig` to get the
+  client's `KUBECONFIG`-then-`~/.kube/config` lookup. `kubernetes.context` is
+  required either way.
+- **Exit codes:** `0` after a clean `SIGTERM` or `SIGINT` (open connections
+  get ten seconds); `2` when the configuration is refused, before any
+  Kubernetes client or socket exists; `1` for any other failure.
+- **Refused at start** (exit 2, field named): a `listen` that is not a loopback
+  IP literal (`localhost`, `0.0.0.0`, `[::]` and routable addresses by name), a
+  kubeconfig context that impersonates another identity, an unknown `mode`, a
+  cursor key under 32 bytes. Shared mode adds *What startup refuses*.
+- `/healthz` answers whenever the process is alive. `/readyz` also needs
+  Kubernetes to answer for this identity (and, in shared mode, the provider).
+  Neither body names an endpoint or a reason.
 
 ## Routes
 
-All product routes are under `/api/v1`. The route table is the boundary:
-anything not listed is `404`.
+`…` is `/api/v1/namespaces/{ns}`. Anything not listed is `404`. A domain with
+no route has no stub: `GET /api/v1/session` reports it `false` under
+`capabilities` (today: connection tests; `trustAdministration` and
+`catalogWindowQuery` are `false` for everybody).
 
-| Route | What it does |
-|---|---|
-| `GET /api/v1/session` | The actor, the explicit namespace grants and the capability flags. |
-| `GET /api/v1/namespaces` | The configured grants. It never lists core `Namespace` objects. |
-| `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode (`plaintext`, `scramSha512`, `scramSha256`, `plain`, `mtls`), username, TLS, the credential and mTLS client-certificate Secrets' **names**, the CA reference, and the controller's reachability observation. Never a password or a key. |
-| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster`. A SASL password, or an mTLS client certificate and key, is entered ONCE in `auth.credential` and becomes a Secret this service creates — owned by and bound to the connection — and never reads back; an existing Secret is never named (`auth.credentialRef` is refused, `existing_credential_refused`). The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
-| `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
-| `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
-| `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule` from the whole policy: cadence and zone, a named or dynamic selection, an inline archive **or** a saved destination, deadlines, catch-up and retries. `retention` is withdrawn: it is stored as `spec.retention` and ignored (use `.../retention-policies`), and a schedule no longer carries `status.retentionReport`. |
-| `PUT /api/v1/namespaces/{ns}/schedules/{name}` | Replace the schedule's **future** policy under `expectedGeneration`. It cannot name `spec.sourceRef` and it never reaches a run that already exists. |
-| `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension` | Suspend or resume, under `expectedResourceVersion`. |
-| `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections, with the trigger and the schedule revision the run copied. |
-| `POST /api/v1/namespaces/{ns}/backups` | "Back up now" from a schedule, or "Run first backup now" from a cluster. |
-| `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. Saved-destination restores carry the stored optional `sourceDestinationRef` and `evidenceDestinationRef`; legacy inline-archive restores omit both. |
-| `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
-| `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
-| `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation (Approver role; never the requester); in an unbound namespace an approver records the two `logweir drill approve` files. See *Approval policy*. |
-| `GET /api/v1/namespaces/{ns}/restores/{name}/approval-request` | PROD-16.2: a two-person request as the approver is shown it — every field from bytes the console verified its own signature on — and whether this session may approve. Reader of approvals. See *Two-person approval in the console*. |
-| `POST /api/v1/namespaces/{ns}/restores/{name}/console-approval` | PROD-16.2: the second person's click. Body `{"confirmationSha256": "sha256:…"}` and nothing else (Approver role; never the requester; shared mode only). |
-| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. PROD-16.1: `operatorMode` (`confirm` \| `two-person` \| `strict`) and `basis` (`binding` \| `configured` \| `freshInstall` \| `legacy`) — why an unbound namespace resolves as it does; the create's `authorization` carries `operatorMode` too. |
-| `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
-| `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
-| `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. A credential is entered once (`secret.new`) and becomes a Secret owned by and bound to the destination; an existing Secret is never named (`existing_credential_refused`, FX-20). |
-| `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
-| `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. A new value is written to a new bound Secret; `secret.existing` may name only a Secret the destination already names (FX-20). |
-| `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. `destination.credentialBound` (FX-20c, blocking) compares the `logweir-binding` of every `SecretKeys` grant the destination declares, whichever roles are exercised and `archiveWrite` included, with no request: a grant whose Secret is unbound or bound to another object is `notReady`/`CredentialBindingMismatch`, named in the message by its `spec.access` field, destination and Secret, so the verdict is never `ready` for a destination a backup would refuse ([kubernetes.md](kubernetes.md) §20.10). |
-| `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
-| `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
-| `POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | Start a bounded inventory: `202`, or `200` with `reused: true` for a fresh identical result. |
-| `GET /api/v1/namespaces/{ns}/topic-discoveries/{id}` | One discovery, with `visibility`, `counts`, `truncated` and a `stale` recomputed per read. |
-| `GET /api/v1/namespaces/{ns}/topic-discoveries/{id}/topics` | One page of the stored inventory: `limit`, `cursor`, `q`, `prefix`, `internal`, `errored`. |
-| `POST /api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel` | Ask an unfinished discovery **of one's own** to stop. |
-| `POST /api/v1/namespaces/{ns}/preflights` | Start a readiness check for a `Backup`, a `Restore` or a destination's grants. |
-| `GET /api/v1/namespaces/{ns}/preflights/{id}` | One result; `?planHash=` is the plan the caller is looking at now. |
-| `GET /api/v1/namespaces/{ns}/preflights/{id}/details` | One page of the check's detail document. |
-| `POST /api/v1/namespaces/{ns}/preflights/{id}:cancel` | Ask an unfinished preflight **of one's own** to stop. |
-| `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized status; `kind` is the closed set `backup\|restore\|discovery\|preflight`. |
-| `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}/events` | The same thing as a bounded `text/event-stream`; `kind` is `backup\|restore`. |
-| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger (alert delivery is withdrawn, release notes item 74: the view carries no notification routes and no delivery state). |
-| `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
-| `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection and retention policy references it by that name. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns, and, for an `Available` point recorded from receipt format 1.3.0 or later, its topics' recorded partition count, replication factor, configuration coverage, owner kind and apply route (`topics[]`; absent is not published, never "no topics"), beside `ownerDetection`, where the backup run looked for declarative owners: an un-owned topic's `applyRoute` is `adminApi` only where it looked, and `unknown` where it did not (every controller-run `Backup` today). From receipt format 1.5.0 each topic also carries `schemaDependency` (PROD-03.0): `verdict` (`schemaDependent`, `notDetected`, `notAssessed`), `basis` or `reason`, the dependent `sides` and the `schemaIds` they name (at most 16, `schemaIdsOmitted` when more were seen); absent is not assessed, never "not schema-dependent". For a point whose backup selected consumer groups (receipt and record format 1.7.0), `consumerPositions`: when the positions were observed, `observedBeforeRecoveryPointMs` (the snapshot's freshness), the listing word and, per group (at most 32, else `groupsOmitted`), its outcome, reason, type, whether it was active and its positions counted by what they say about archived data (`related`, `notRelated`, `neverCommitted`, `beyondEnd`, `failed`, `notObserved`); absent is not published, never "no positions". These are COUNTS: each position's own relation is in the positions document the point's receipt binds, which no route serves. The API neither sets nor shows a `Backup`'s or `BackupSchedule`'s `spec.consumerGroups`: the create bodies refuse the field (an unknown field, never silently dropped), and a selection is set with `kubectl` ([kubernetes.md](kubernetes.md#consumer-position-evidence-specconsumergroups)). |
-| `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
-| `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
-| `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
-
-### Approval policy: routing a submission, and the governed submission (PLAT-19.2)
-
-The console reads the installation's approval-policy document —
-`approvalPolicyFile`, **the same file the controller mounts** — and its own
-`ConsoleConfirmation` private key — `confirmationKeyFile`, from a Secret. Both
-are optional; a served namespace bound to a policy without the key is a startup
-refusal (exit 2), because both modes carry the console's signature. A
-configured key file that does not exist is a startup refusal too, unless
-`confirmationKeyManaged: true` says it is the key the identity hook generates
-(PROD-16.1), which the kubelet projects only after the post-install hook ran:
-then it is read on first use, and a confirm request before it exists is
-refused `409 policy_mismatch` before anything is created.
-`confirmationKeyManaged` without `confirmationKeyFile` is a configuration
-error. `installationIdentity: {namespace, publicConfigMap}` names where the
-fresh-install marker is read (the chart sets both only with the managed key). The full
-contract, the four enforcement points and upgrade/rollback are in
-`docs/kubernetes.md` §8, *Approval policy*.
-
-**A manual restore is limited and may queue** (P10): one person may create
-`rateLimits.manualRestoresPerMinute` (default `5`) per namespace per minute
-(then `429 rate_limited` with `Retry-After`), and once admitted — approved,
-target and destinations resolved — at most
-`runs.maxManualRestoresActivePerNamespace` (default `2`) run at once in a
-namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit,
-authorizationExpiresAt?}` and nothing created. The queue does not extend an
-approval's maximum age: the authorization is re-checked when a restore leaves
-the queue, and one that expired meanwhile is refused `AuthorizationExpired`
-with a message saying it expired while queued.
-
-**`POST .../restores` answers where the submission goes next.** After the
-Restore exists (so it has a UID) the response carries `authorization`:
-
-| namespace | what the console does | `authorization.state` | the console routes to |
-|---|---|---|---|
-| unbound (`legacy-governed-v1`) | signs nothing | `awaitingApproval`, `legacy: true` | the approval page (today's flow) |
-| bound `Ordinary` | signs authorization document v2 for this Restore's UID, plan hash, the authenticated requester and the policy digest, and stores it as the `Approval` `spec.approvalRef` names | `confirmed` | the operation view: weirkeeper admits the run once it verifies the confirmation |
-| bound `Governed` | signs the same document and stores it as `<approvalRef>-confirmation`, which authorises nothing | `awaitingApproval`, `confirmationName` | the approval page, where an approver countersigns |
-
-`authorization` also names `mode`, `policy`, `policyDigest`, `requester` and
-`expiresAt`. A replay of the same request completes an interrupted sequence by
-reading what exists, never signs twice, and never adopts an `Approval` this
-Restore did not produce (`409 state_conflict`). In a Governed-bound namespace
-`approvalRef.name` is at most 240 characters, so its confirmation name is still
-an object name, and may not end in `-confirmation` (`422`, `reserved_suffix`),
-which is where another Restore's confirmation lives.
-
-Refused **before anything is created** (no Restore, no Approval):
-
-| request | answer |
-|---|---|
-| a `confirm` namespace (an `Ordinary` policy, or `default-confirm-v1`) while the console's confirmation key is not there yet — PROD-16.1: the identity hook writes the managed key after the console starts | `409 policy_mismatch`, naming the key; `GET .../approval-policy` says `ordinaryConfirmationAvailable: false`. Since PROD-16.1 a **`localAdmin`** console confirms too, as `urn:logweir:local-admin#admin`; only `two-person` (PROD-16.2) is refused there |
-| the fresh-install marker cannot be read (the public identity ConfigMap or the `TrustPolicy` it names answers an error other than `404`) | the read's own error (`kubernetes_unavailable`, `upstream_timeout`, …); nothing is created rather than a fresh install's Restore parked on the legacy path |
-| a `Governed`-bound namespace without `ticket`, or a blank / padded / over-128-character one (D0: the ticket is "required in Governed") | `422`, field `ticket` (`required` / `invalid`) |
-| `ticket` in an unbound namespace, which signs nothing (`logweir drill approve --ticket` carries it there) | `422`, field `ticket`, `not_accepted` |
-
-`ticket` is optional under `Ordinary`; when given it is signed into the
-document. `GET .../approval-policy` also answers `ticketRequired`.
-
-**`POST .../restores/{name}/approval`** takes `{"sidecarBytes": "…"}` — the file
-`logweir drill countersign --document <approvalBytes> --confirmation
-<sidecarBytes> --key <privkey> --out approval.sig` wrote over the confirmation's
-packet (`GET .../approvals/<approvalRef>-confirmation/packet`). No
-`Idempotency-Key`: the Approval it creates is named by the Restore's own
-immutable `approvalRef`, so a replay returns `200` with the same object.
-
-**In an unbound namespace** (`legacy-governed-v1`, today's flow) the same route
-takes `{"approvalBytes": "…", "sidecarBytes": "…"}` — `approval.json` and
-`approval.sig` exactly as `logweir drill approve` wrote them over the Restore's
-plan — and stores them byte-for-byte as the Approval `spec.approvalRef` names.
-It verifies no signature (the Approval controller does, against the
-namespace's `GovernedApproval` keys, and the runner again), but refuses early
-what could never verify for this Restore: a sidecar whose payload type is not
-the v1 approval's (`409 policy_mismatch`), a document whose `plan_hash` is not
-the Restore's (`422 validation_failed`, `plan_mismatch`), or no document
-(`422`, `required`). A v1 document names no requester, so the route's authority
-is the Approver role plus the approver key's custody — exactly what `kubectl
-create` required before. Under an explicit Governed policy `approvalBytes` is
-refused (`422`, `not_accepted`): the confirmation's bytes are the ones signed.
-An Ordinary namespace has nothing to approve (`409 policy_mismatch`).
-
-| refusal | when |
-|---|---|
-| `403 forbidden` | not an Approver in this namespace (the role table), **or the submitting actor is the requester the console attested** — whatever other roles it holds; an administrator is not a bypass |
-| `409 policy_mismatch` | the namespace is bound to an Ordinary policy, or the confirmation names another UID, plan or policy digest (the policy changed since: submit the Restore again), or — unbound — the sidecar is not a v1 approval's |
-| `404 not_found` | no such Restore, or no console confirmation for it |
-| `409 state_conflict` | the request has expired, or an Approval with other contents holds the name |
-| `422 validation_failed` | not a sidecar, or it adds no signature beside the console's; or either field carries private-key text (`private_key` — refused on the server as well as by the page, and never echoed; D0 forbids a private key in any custom resource) |
-
-The Approval it creates carries the confirmation's **exact** document bytes and
-the console's signatures plus the approver's. The controller then verifies both
-signatures, the approver key's `GovernedApproval` usage and that its
-`principal.id` is not the requester's before any Job exists.
-
-`backup` and `restore` answer an `OperationViewResponse` — a result, evidence
-references and a verification verdict. `discovery` and `preflight` answer a
-`CheckOperationResponse`, which carries **none** of those fields: a transient
-check has no archive result and no signed evidence, and publishing an empty
-`verification` for one would invite a console to render a verdict that can never
-arrive.
-
-#### Two-person approval in the console (PROD-16.2)
-
-A namespace bound to a `two-person` policy (`mode: Governed` with
-`approverSignature: Console`; `GET .../approval-policy` answers `operatorMode:
-"two-person"`, and `consoleApprovalAvailable` says whether THIS console can
-take part) takes its approval from a second signed-in person, and from nothing
-else: `POST .../restores/{name}/approval` refuses a countersignature there
-(`409 policy_mismatch`, `countersignature_not_accepted`).
-
-**The request.** `POST .../restores` is the route it always was. The create's
-`authorization` answers `state: "awaitingApproval"`, `operatorMode:
-"two-person"` and `confirmationName`. Refused before anything is created, in
-addition to the rows above:
-
-| request | answer |
-|---|---|
-| through the administrator (`localAdmin`) console, whose one identity cannot be two people | `409 policy_mismatch` |
-| a requester whose identity a console approval cannot compare — an issuer or a subject that is empty, longer than 255 characters or not visible ASCII, an issuer containing `#`, a Kubernetes system identity | `409 policy_mismatch`; the sentence carries the identity bounded and escaped, never raw |
-| no change ticket (the policy is `Governed`) | `422`, field `ticket`, `required` |
-| a ticket the approver could not be shown faithfully (not printable ASCII, or over 1024 characters) | `422`, field `ticket`, `not_showable` (not echoed) |
-| a plan whose approval scope cannot be shown in full — more than 1024 topics, more than 8192 listed partitions, a topic that is not a Kafka name before or after its mapping, a value that is not printable ASCII of at most 1024 characters, a plan that does not parse, a plan that names a notification sink (a webhook, Slack or PagerDuty; the wizard names none) | `422`, field `planBytes`, `scope_incomplete` |
-
-**`GET .../restores/{name}/approval-request`** (`getApprovalRequest`) answers
-`ApprovalRequestResponse`. The console reads the stored request, **verifies its
-own signature over the stored bytes**, checks that they name this Restore, its
-UID, its plan and the namespace's current policy digest, and only then projects
-anything. `state` is:
-
-| `state` | meaning | fields beside it |
+| Route | Action | What it does |
 |---|---|---|
-| `pending` | this console's request for exactly this Restore, plan and policy, inside its window, not approved | `requester`, `planHash`, `approvalSubject`, `ticket`, `issuedAt`, `expiresAt`, `confirmationSha256`, `scopeComplete` and `scope` (below) |
-| `approved` | an `Approval` exists under the Restore's `approvalRef` (whoever wrote it; the controller judges it) | the same; `approver` and `approvedAt` only when this console signed it |
-| `expired` | the window closed; submit the Restore again | the same |
-| `notConfirmed` | none stored, or the stored object does not carry this console's signature, or it names another Restore, plan or policy | **none**: nothing of such an object is shown |
-
-**`scope`** is everything the approver approves, from the plan the request
-names by hash (never from the Restore object's other fields): `source`
-(archive location, endpoint, region, plain HTTP, backup set, bound point),
-`recovery` (point in time, window start, time basis), `target` (bootstrap
-servers, auth mode and principal, mode, topic prefix, replication factor,
-teardown, and for an original-name restore `ownerStatement`: the requester's
-`owners` — absent when the plan states nothing, `[]` when it states none — and
-`ownerPath`, and `allowTransactionMarkers: true` only when the plan restores
-transaction markers as data, `restore.allow_transaction_markers`), **`topics` — every one, `{source,
-target, originalName, partitions?}`, never a slice** — `topicsCount`,
-`verification` and `evidence`. It is present exactly when `scopeComplete` is
-`true`; otherwise `scopeIncomplete` (`tooManyTopics`, `planUnreadable`,
-`valueNotShowable`, …) and `scopeSentence` say why and what to do, and nobody
-is offered the click.
-
-`approve {offered, refusal?, sentence}` says whether this session is offered
-the click and, when not, why (`notPending`, `localAdmin`, `notApprover`,
-`requester`, `notSecondPerson`, `scopeIncomplete`), decided with the rules the
-click is held to.
-It is advisory: the click is checked again. `409 policy_mismatch` in a
-namespace that is not two-person.
-
-**`POST .../restores/{name}/console-approval`** (`approveInConsole`) takes
-`{"confirmationSha256": "sha256:<64 hex>"}` — the value the view showed — and
-no other field: a body carrying anything else, or a malformed hash, is refused
-(`400` or `422`) and nothing is read from it. It names the request that was
-reviewed; it supplies nothing of the approval. No `Idempotency-Key`: the
-`Approval` is named by the Restore's own immutable `approvalRef`. `201` with
-the `Approval` (`replayed: false`); the same approver's second click is `200`,
-`replayed: true`, and stores nothing. The checks, in order, and what each
-answers:
-
-| check | refusal |
-|---|---|
-| the session, and the Approver role in this namespace, read from the binding table on this request; an Administrator is not an Approver unless bound as one | `401`; `403 forbidden` (or `404` for a namespace the actor holds nothing in) |
-| the request's `Origin` (exact; absent is refused), the session's synchroniser token, and `application/json` | `403 origin_mismatch`, `403 forbidden`, `415`; a `GET` approves nothing |
-| this is the shared console | `409 policy_mismatch` (`local_admin_cannot_approve`) |
-| the namespace's policy is two-person | `409 policy_mismatch` (`not_a_console_approval_policy`) |
-| **the console's own signature on the stored request**; then that it names this Restore, UID, plan and the current policy digest | `409 policy_mismatch` (`confirmation_not_verified`, `confirmation_not_bound`); `404` (`confirmation_absent`) |
-| the request has not expired | `409 state_conflict` (`request_expired`) |
-| `confirmationSha256` is the stored request's | `409 state_conflict` (`request_changed`): open it again and review it |
-| the approval scope, re-derived now from the request and its plan, is complete | `409 state_conflict` (`scope_incomplete`) |
-| **the approver is not the requester** — the same issuer once lower-cased and without a trailing `/`, another subject once lower-cased; an identity that cannot be compared is never a second person | `403 forbidden` (`self_approval_forbidden`) |
-| the approval lies inside the request's window by the console's clock | `409 state_conflict` (`approval_outside_window`) |
-| nothing else holds the `Approval`'s name | `409 state_conflict` (`already_approved`); never replaced |
-
-The stored `Approval` is the request's document with `approver {issuer,
-subject}` and `approvedAt` added, as `formatVersion` `2.2.0`, signed again by
-the console's `ConsoleConfirmation` key: one signature, no second key. The
-controller verifies it at the `Approval` verdict and at `Restore` admission, and
-the runner again, each from the signed bytes (`docs/kubernetes.md` §8).
-
-**The audit record** of a click carries, in its notes, `requester` and
-`approverPrincipal`, and for each of the two the issuer, the subject and the
-SHA-256 of the whole `<issuer>#<subject>` (`requesterIssuer`,
-`requesterSubject`, `requesterSha256`, `approverIssuer`, `approverSubject`,
-`approverSha256`) — a note is bounded at 200 bytes, so the digest is what tells
-two long identities apart — with `planHash`, `policyDigest`, `scope`
-(`complete`, or `incomplete:<reason>`), `scopeTopicsShown` and
-`scopeTopicsInPlan`, `separation` (`distinct` or `refused`), `approvedAt`,
-`expiresAt`, the stored `approval`, and on a refusal the `failureCode` in the
-parentheses above.
-
-`schemas/logweir-api-v1.openapi.json` is the generated contract. `just schema`
-rewrites it and `just schema-check` fails on drift, as does
-`crates/logweir-api/tests/contract.rs`, which compares the checked-in bytes with
-the generator in-process.
-
-`Backup` projections identify a saved archive with
-`destinationRef: {name, uid?}` and publish the run's frozen
-`locationDigest` copied from `Backup.status.destination`. The `name` is the
-destination the immutable spec requested; the optional `uid` and digest are
-facts recorded when the controller froze that destination, and are never
-recomputed from the live `BackupDestination`. `destinationRef` is absent only
-for a legacy inline-archive run. `locationDigest` is also absent when an older
-controller (or a run not frozen yet) has not recorded the frozen destination;
-that absence means "not recorded", not a location match.
-
-### The normalized operation, and what is absent
-
-`OperationView` is PLAT-17.1's `Operation` plus D3 §2.5's additions, flattened
-into one object: the sixteen frozen fields keep their spellings and the new keys
-sit beside them, so a client written against either shape reads the one it
-knows.
-
-**An absent field means "not observed", never a default that flatters the
-object.** The rules, exactly:
-
-- `progress` is absent on anything an older controller reconciled, and that
-  absence is why `queued` and `preparing` are **never inferred**. They are
-  distinctions only the progress channel can draw — a Job with no pod, against
-  a pod whose container has not started — and guessing them from
-  `phase: Pending` would publish an observation nobody made.
-- `stage` is absent when no stage was written and the phase is one this build
-  does not recognise. A `Resolving` backup (D1's dynamic discovery) is
-  `preparing`; anything unrecognised is `unknown/UnrecognizedPhase`.
-- **`phase: Queued` is `queued` with reason `ConcurrencyLimited`, and it IS
-  observed** (P10): the controller writes that phase on a manual run waiting for
-  a slot in its namespace's manual-run pool. Its stage is `admission` — no Job
-  exists — never the progress channel's `queued` stage (a Job with no pod yet).
-  The `Backup` and `Restore` items then carry `queue: {limit}`, the ceiling the
-  run waits behind, copied from `status.queue`; the block is published only
-  while the run is queued. A queued `Restore`'s block also carries
-  `authorizationExpiresAt`, its approval's signed deadline: the queue does not
-  extend it. An API older than this reads the same object as
-  `unknown/UnrecognizedPhase`.
-- A stage **never overrides a terminal phase.** `phase`, `exitCode` and
-  `outcome` own the outcome; the progress channel answers "what is happening
-  and why is it taking so long".
-- **A list row carries the result too** (added by console-ux-1, MCP-17). The
-  `operation` summary on every `Backup` and `Restore` LIST item carries
-  `exitCode` and `outcome` beside `verificationState` and `verifiedSuccess` —
-  the same values as the operation's own `result`, absent when none was
-  recovered (never `0`). An `outcome` is the run's scorecard CLAIM and is
-  shown as unverified unless `verifiedSuccess`; it grants nothing a reader of
-  the list could not already read from the operation route. Additive.
-- `trust.basis` is `None` when the status carries no `trust` block: nothing has
-  been compared with anything. The spelling is the CRD's own
-  (`Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified`, `None`),
-  which is D3 §12's sentence word for word, and an unrecognised value is passed
-  through rather than rounded to the nearest word this build knows. A basis
-  refines an already-safe result and never rescues an unsafe one — no basis
-  string turns a result that is not `Valid` into a verified state, and `Valid`
-  beside `basis: Unverified` is `notAttempted`.
-- `trust.state` is `verified`/`verifiedHistorical` exactly where the
-  controller's badge may be green: `Valid` with no `trust` block (the
-  pre-existing rule), `Valid` on `basis: Current` (`verified`) or
-  `basis: Historical` (`verifiedHistorical`), and nothing else. `Valid` on
-  `basis: RecordedBeforeRevocation` is **`untrusted`** — D3 §7.4: a verdict
-  recorded before its key's compromise revocation is "never green" — and so is
-  `Valid` beside a `trust` block whose basis is `None`, absent, or a word this
-  build does not know. A recorded `result: Untrusted` is `untrusted` whatever
-  the key state beside it; `NotAttempted` beside `basis: Unverified` is
-  `notAttempted` (no verdict has been reached). Builds before
-  `TRUST-STATE-RBR-VERIFIED` published `verified` for
-  `RecordedBeforeRevocation`; a client that must read older servers checks
-  `trust.basis` as well.
-- `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
-  (`consume-only`) or `none`: HOW records were compared. **`complete` is not a
-  level.** HOW MUCH was compared is `verificationScope.coverage` (PROD-08.1a,
-  [below](#the-restores-coverage-prod-081a)), so a complete verification
-  compared byte for byte reads `level: sampled` beside `coverage: complete`. A
-  Backup is always `none` with the three counts **absent** rather than zero: a
-  receipt attests counts and a window, not a restore, and `0 of 0 sampled
-  records matched` reads as a failed comparison.
-- `stale` is `true`, and the state is `unknown/StatusStale`, when an active run
-  has not been observed for 300 s or an object has carried no status for 120 s
-  after creation. A **terminal** object never goes stale: nothing is going to
-  observe it again.
-- `readiness` is always `{state: "unknown", basis: "notImplemented"}` on an
-  operation in this build: readiness is served by the `Preflight` routes
-  ([Readiness that is a result about something](#readiness-that-is-a-result-about-something)),
-  and the operation projection does not join one. It is a separate object and
-  never overwrites `state`.
-- `targetMode` (`scratch` or `newTopic`) is on the operation and not on the
-  completion panel: D3 §3.5 keys its two fixed guidance blocks on
-  `spec.target.mode`, which is a fact about the run from the moment it is
-  created. It is absent on a Backup.
-- `progress.runnerPhase` is the CRD's own name for the runner's
-  `progress-phase=` lines. `teardown.deleted` and
-  `lastEnforcement.deleted` are **lists of names**, not counts: the incident
-  question is which topics or points went, and a count cannot be reconciled
-  against the plan or against the names the run created.
-- **A property the projection can omit is never `required` in the schema.** A
-  list that is absent when empty must not be declared required, or a client
-  validating against the document refuses a body the server considers correct;
-  `a_required_property_is_never_omitted_by_its_own_projection` round-trips each
-  view through its own schema to keep the two honest.
-
-The Job name, the pod name and the container state are **not** published.
-D0's "remains visible in bounded form" list is reason, message, exit code, last
-phase, timestamps and evidence references, and a Job name is on none of them; a
-diagnostic's `object {kind, name}` **is** published, because PLAT-14.1 asks for
-pod mount and scheduling failures as resource-scoped errors. The server authors
-no prose: `verificationScope` carries the level and the counts, and the fixed
-sentences are the console's.
-
-### The event stream
-
-`GET .../operations/{kind}/{name}/events` is `text/event-stream` on the same
-origin. Event types are `operation` (the whole view), `reset` (the whole view,
-after a resume this service cannot replay), `heartbeat` and `end`.
-
-**Every bound is the server's.**
-
-- **No query parameter is accepted.** `EventSource` cannot set headers and the
-  standard workaround is `?access_token=`; a URL is the one place a credential
-  survives in a proxy log, a browser history and a `Referer`, so this route
-  answers `malformed_request` to any parameter at all. The stream is
-  authenticated by the same session cookie as every other route.
-- Authorization is decided **once, at subscribe**, before the first Kubernetes
-  call: the namespace grant, `operation.read` and `operation.stream`. The audit
-  record is written then, which is when the decision was made.
-- The first read is **synchronous**: a missing object is `404`, not a stream
-  that opens and says nothing.
-- The event id is the object's `resourceVersion` — the same number the read
-  route publishes. A `Last-Event-ID` that is not a bounded decimal is
-  `malformed_request`.
-- **Resuming is either silence or one `reset`.** This service keeps no history
-  of resourceVersions, so it cannot replay what happened between two of them. A
-  client already at the current version is sent nothing; any other value gets
-  one `reset` carrying the whole current state.
-- The connection closes after 300 s (`end`, `reason: maxDuration`); reconnect.
-  A silent stream sends a `heartbeat` every 15 s. A terminal operation **whose
-  verification has settled** ends immediately (`reason: settled`) — a run that
-  exited 0 with its verdict still pending keeps the connection, because the
-  verdict is what the console is waiting for. A deleted object ends the stream
-  with `reason: vanished`.
-- Concurrent streams are capped per principal per namespace; past the ceiling
-  the answer is `rate_limited` with `Retry-After`, and the advice is to fall
-  back to polling the read route. A slot is released when the connection drops.
-- The object is **polled**, not watched: this service has no `watch` verb and
-  its RBAC does not gain one.
-
-### Protection, rehearsals, catalogs, retention and trust
-
-Four bounded read families, the same cursor as every other list, and one write
-among them. The rehearsal-schedule read is withdrawn in v1, with scheduled
-rehearsals.
-
-**No response carries a credential, and that shapes the projections.** Alert
-sinks are withdrawn (release notes, item 74): `notifications` is always absent.
-A `RetentionPolicy`'s enforcement block names the one delete-capable credential in
-the installation; the projection publishes `credentialConfigured: true` and not
-the Secret's name.
-
-**Two rules, and which applies where.** An *archive's* credential Secret is
-published by NAME — `legacyArchive.credentialRef` on a catalog and on a
-protection policy, exactly as `destinations` has published `credentialRef` since
-PLAT-08 — because the name is part of the adoption contract: an operator types
-it into the connect form and the console echoes back the reference it stored. An
-*alert sink's* and a *deletion credential's* names are not published at all,
-because nothing echoes them back and naming them only tells a reader which
-Secret to try next. Every archive URL is published with its userinfo redacted,
-wherever it appears. A `TrustPolicy`'s keys carry `spkiPem`; the projection
-publishes the **key id** — the SHA-256 of the DER SPKI, the number `openssl`
-prints — so an operator compares fingerprints out of band, which is the
-supported path.
-
-**Retention says what is actually enforcing.** `enforcement` is
-`RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared`, and
-`guarantees` says per guarantee whether Logweir enforces it, a provider is
-*declared* to (unverified), or nothing does. `approvedPlanState` is the
-two-step gate in one value — `notApplicable`, `notRequired`, `noPlan`,
-`awaitingApproval`, `approved`, `expired` or `unknown` — and it is **`unknown`
-whenever an input is absent**, never `approved`. Nothing in `lastEvaluation`
-was deleted, and its `at` is when those findings were first reached, not when
-the controller last looked (FX-29). The enforcement record is create-only and **unsigned**, verified by
-the digest beside it; no surface calls it signed.
-
-**A retention evaluation's four counts add up, and a point the per-run ceiling
-held back is never published as kept** (FX-22). `lastEvaluation.pointsEvaluated`
-= `keptCount` + `candidateCount` + `truncatedByCap` + the skipped points.
-`candidateCount` is **this plan**, at most `maxDeletionsPerRun`;
-`truncatedByCap` is how many more points the rules would remove and the ceiling
-left out of it, and those points are in none of the lists. The counts are the
-`RetentionPolicy` status's own and not the number of rows: each list is still
-cut at 200 rows, with `truncated: true`.
-
-**`lastEvaluation.accounting` says whether those counts are published, and it
-is on every answer**: `Recorded` or `NotRecorded`. Read it before `kept`. The
-schema declares the member optional, with the default `NotRecorded`: this
-build always writes it, and an answer without it comes from a build that
-predates the member and reads as `NotRecorded`.
-
-| `accounting` | `keptCount`, `truncatedByCap`, `maxDeletionsPerRun` | `kept` |
-|---|---|---|
-| `Recorded` | the status's own; `0` is an answer | the points that stay (at most 200 rows). Absent means none is kept, and `keptCount` is `0` |
-| `NotRecorded` | absent, never `0` | absent, and it says **nothing**: not "nothing is kept" |
-
-It is `NotRecorded` when the status does not record an accounting that closes:
-an evaluation an older controller wrote, one whose members an older CRD pruned,
-or one where two controllers' numbers stand in one block after a rollback of
-the controller image alone (the counts do not add up, or the status's `kept`
-list is not `keptCount` long, up to the status's bound of 500). That controller's `kept` list holds the points
-the ceiling held back, so the API does not pass it on as kept and derives no
-count from it. `candidateCount` and `candidates` are this plan in both cases.
-
-`viewIncomplete: true` says the catalog view the evaluation read was not the
-whole archive (the catalog cut its view, or its walk had not finished), so
-points outside it were not evaluated and are in none of the counts. One rule,
-the console's too: **`true` is published whether or not the accounting is
-recorded**, because a warning is never withheld; `false` (the catalog said its
-view is the whole archive) is published only with `accounting: Recorded`; and
-an absent member means not recorded, never `false`. A run's
-`lastEnforcement.failed` is cut at 200 rows like `deleted`, and
-`failedTruncated: true` is present when it was; `deleted` has always carried
-`deletedTruncated`.
-
-**A catalog's view is a window, and the response says so.** The durable truth is
-in object storage; Kubernetes holds the newest `sync.viewLimit` points in
-immutable `ConfigMap` pages owned by the sync Job, and when that Job's TTL
-collects it the pages go with it. So `/points` publishes `truncated`,
-`viewExpired` and `viewExpiresAt`, and an empty list with `viewExpired: true`
-means the window aged out and **not** that the archive is empty. If a named
-page has already disappeared before the status is refreshed, `/points` returns
-`incomplete: true` (and may retain rows read before that page); callers must
-not report an absent row as "not in the catalog". Page
-`ConfigMap`s are read by the names the catalog's own status records — never from
-a caller — at most eight per request, and each one is refused with
-`result_integrity_failed` unless it is immutable and its bytes match the
-recorded digest. The point cursor binds the **view generation**: a re-sync under
-a paging client is `cursor_invalid` with "restart the list", never half of one
-view and half of another. `availability` and `verification` are separate
-columns — one is an outage and one is a stranger's signature — with the
-controller's own `selectable` conjunction beside them.
-
-**A verdict the controller reached outranks the row.** Each `/points` request
-also lists the namespace's `Backup` objects (at most 2 000) and joins their
-`status.evidence.verification.result` to the rows — by the full
-`receiptSha256`, or by `backupId` for a `Backup` that carries no digest. A point
-whose `Backup` the controller refused (`Invalid`, `Untrusted`, a result this
-build does not recognise, or a `Valid` on a trust basis the badge refuses) is
-published `selectable: false` with the refusal in the additive `backupVerdict`
-field, and `?selectable=true` does not list it — however `Available`/`Verified`
-its row reads, because a view is served until `viewExpiresAt` and the row may
-predate the refusal. A `Valid` counts as a pass only beside no `trust` block (or
-`trust: null`) or a `Current`/`Historical` basis, the controller badge's own
-rule (D3 §7.4, §12); a `Valid` on any other basis — `RecordedBeforeRevocation`,
-`None`, a block with no basis, a word this build does not know — is a refusal
-and is published as `backupVerdict: "Untrusted"`, even though the `Backup`
-itself still reads `result: Valid`. `NotAttempted`, `Pending` (the evidence
-fetch is still running), an absent result, a passing `Valid`, and a `Valid` on
-`trust.basis: Unverified` (nothing has been compared yet) leave the row in
-charge; `backupVerdict` is absent then, and absent never means "verified".
-
-**A point whose catalog record could not be read is listed too (FX-33)**: a
-record over the bound Logweir reads (a backup of more than 1,000 topics an
-older runner wrote), one that is not a record, or a missing one. Such a row
-carries its `pointId`, `availability`, `selectable: false` and a `remedy` that
-says why; `backupId`, `runId` and `receiptKey` are empty and there is no
-`recoveryPointAt`, window, location or topic list.
-
-**The join degrades per object, never per page.** `Backup` objects are read
-through a lenient projection of the three fields the rule needs, so one object
-this build cannot type (a newer trigger kind, an older stored schema) does not
-fail the list. A `Backup` whose verdict field is present but unreadable refuses
-its own point with `backupVerdict: "Unreadable"`. When the verdicts could not
-all be read the page is still served and carries the additive
-`backupVerdictsIncomplete`: `Truncated` when the namespace holds more `Backup`s
-than the bound, `Unavailable` when the `Backup` list failed (transport, RBAC, a
-missing CRD) or a refusal named neither a digest nor a set id and so could be
-tied to no row. Rows then reflect only the verdicts that were read. The page is
-served either way because the point list is what an operator reads to choose a
-point; the Restore reconciler and the runner re-verify the point before any
-data-plane work. Both fields are optional additions: a client that ignores
-them still reads the corrected `selectable`. The `?selectable=true` cursor is
-bound to the view generation and not to the refusal set, so a refusal recorded
-between two page requests can shift that filtered list by one point; restart
-the list to see it exactly.
-
-**`/signers` offers no button.** It publishes the key id, the point count and
-whether the bound policy accepts it, with the fingerprint command. There is no
-"trust this key" route in v1: a key found beside an archive is never trusted by
-proximity, and one-click trust is proximity with a confirmation dialog on it.
-An administrator adds the key with `kubectl apply`.
-
-**Trust: `unknown` is not `valid`.** A key's `effectiveState` is the
-controller's verdict only when the evaluation is **fresh** — the object has a
-status, that status was computed from the current `metadata.generation`, and
-`evaluatedAt` is younger than fifteen minutes. Otherwise it is `unknown` with no
-usability verdict. Freshness is measured against **this server's** clock, and
-the response publishes `evaluation.serverTime` beside `evaluatedAt` so a reader
-can check the arithmetic instead of redoing it against a clock the cluster never
-saw. **The cluster-scoped read is narrowed, and the narrowing is a deviation that is
-written down.** D0's matrix row for installation trust is "installation-admin
-only, cluster scope", and this authorization model has no installation-scoped
-role: every binding is `(role, namespace)`. So `GET /api/v1/trust-policies`
-requires the administrator role in at least one bound namespace **and** serves
-only policies that govern a namespace the reader administers or are the
-installation `default` — anything else is `404`, the same answer a policy that
-does not exist gives, because "it exists and you may not see it" is the
-enumeration being closed. Inside a policy that is served, `namespaces`,
-`boundNamespaces` and `conflicts[]` are filtered to the namespaces the reader
-administers, and `namespacesFiltered` says when a list is partial. Without that
-filter an administrator of one namespace reads the name of every other
-namespace in the installation off the one object that has no `404` to hide
-behind. The keys view §7.7 needs is unaffected.
-
-`capabilities.trustPoliciesRead` is computed per namespace like every other
-flag, but the route it names is cluster-scoped: **a console must read it from
-the union of the grants, not from the namespace it happens to be showing.** An
-actor who administers `team-b` and only views `team-a` would otherwise be shown
-`false` for a page the server serves. Trust **writes** stay off the API in v1
-(`capabilities.trustAdministration` is `false` for everybody, including the
-local administrator); the supported path is `kubectl apply` plus the
-`logweir trust` helpers. `capabilities.catalogWindowQuery` is `false` for the
-same reason: an absent capability, never a fake stub.
-
-There is no cancel and no delete for `Backup` or `Restore`: their external side
-effects and cleanup semantics are not defined yet. Aborting a read cancels only
-that HTTP and Kubernetes read; it never retracts an accepted mutation.
-
-**A transient check is the one thing that can be cancelled.** A discovery and a
-preflight own nothing but a Job, so `:cancel` raises `spec.cancelRequested` from
-`false` to `true` — the single transition the CRD permits — under a
-`resourceVersion` precondition, and the controller verifies the exact owned Job
-and UID before stopping anything. Cancellation deletes no archive byte, no Kafka
-topic, no durable run and no signed evidence. Repeating it is `200` with nothing
-written; cancelling a finished check is `200` with `alreadyTerminal: true`. An
-operator may cancel only the checks **it started**: the comparison is the
-`issuer#subject` recorded on the object when it was created, so two operators
-holding the same role in the same namespace still cannot stop each other's work.
-**An administrator of the namespace may cancel any check in it.** That is the
-one place a role overrides ownership, and it is deliberately narrow: D0's
-"cancel own checks" is written in the operator row, cancelling destroys nothing,
-and an administrator who could not stop a twenty-thousand-topic discovery an
-operator started before going home would have to wait out `timeoutSeconds` or
-reach for `kubectl`. The audit line records `cancelledAnotherActorsCheck` when
-that path is taken, so the two events are never confused.
-
-### Cadence, time zones and previews
-
-`spec.schedule` — five cron fields, the controller's own parser — stays the
-single source of truth. `spec.timeZone` is an IANA name and **absent means UTC
-and reproduces, instant for instant, the slots a controller without the field
-computed**. A slot's identity is always the UTC instant, so names stay unique,
-monotonic and DNS-1123 whatever the zone.
-
-`GET /api/v1/cadence-previews` answers what an expression will do, and the
-browser never evaluates cron: a second implementation is a second answer, and
-the one that matters is the controller's. This route calls the same
-`weirkeeper::cadence` module the scheduler calls.
-
-* `?schedule=<cron>` **or** `?preset=<kind>` with that preset's parameters —
-  exactly one. With a preset the answer carries the canonical expression it
-  compiled to, which is the string a form saves; with an expression it carries
-  the preset the expression **is**, or nothing at all for "Advanced cron".
-* `?timeZone=`, `?count=` (1 to 20, default 10) and `?after=` (RFC 3339,
-  default the server's now).
-* `200 {schedule, preset?, timeZone, tzdb, after, runs:[{at, localTime,
-  adjustment?}]}`. `timeZone` is the **effective** zone, so `UTC` comes back
-  when nothing was sent. `tzdb` names the compiled-in database, because two
-  releases can disagree about a slot after a tzdata update.
-* `422 validation_failed` with `schedule: schedule_invalid` or `timeZone:
-  timezone_unknown` — the field the person typed, not a single code for both.
-
-**`adjustment` is the part to render.** `NonexistentLocalTimeShifted` means the
-matched local time does not exist and the run was moved to the end of the gap;
-`RepeatedLocalTimeFirst` / `RepeatedLocalTimeSecond` mean the matched local time
-happens twice and **both instants fire**. A fixed-time schedule inside a
-repeated hour therefore runs twice that night — deliberately, because the rule
-never loses a real interval and never skips a fixed-time day, and the preview is
-where that becomes predictable. `localTime` carries its offset for exactly this
-reason: `02:30:00+02:00` and `02:30:00+01:00` are one clock face and two
-instants.
-
-A **shorter list than `count` is a real answer**, not a failure: `0 0 29 2 *`
-runs out of firings inside the engine's walk, and an empty list means "it does
-not fire again".
-
-A saved schedule's own previews are `status.nextRuns`, written by the controller
-from the same function and published in the same shape by
-`GET .../schedules/{name}`. **`status.nextRuns[0].at` in the past is the
-staleness signal**; `status.policy.evaluatedAt` is *when the status last moved*
-and not a liveness probe — the controller re-examines every schedule every 30 s
-and deliberately writes nothing when nothing changed, so comparing that instant
-with the requeue interval would report a healthy schedule as stale. An absent
-`status.activeRuns` means "not yet computed", never "none are running".
-
-**What the last slot did, and how many were skipped** (added by console-ux-1,
-MCP-13). `status.lastSlot` is the controller's own record of the most recent
-slot it decided about — `slot`, `dueAt`, `attempt`, `disposition` (`Admitted`,
-`CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`,
-`Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it, `decidedAt`
-(when that decision was reached: a later reconcile that reaches the same
-decision keeps it) and, when there is one, `backupRef` — and `status.missedSlots` is the running
-`count` of slots that came due and were not run, `countCapped` when an
-evaluation stopped at its enumeration cap (the count is then a floor),
-`lastEvaluatedSlot`, and the most `recent` skips, each with its `reason`
-(`ControllerUnavailable`, `ConcurrencyBlocked`, `PastStartingDeadline`,
-`BeforeRevision`, `NameUnavailable`, verbatim). Both are copied, never
-recomputed, and both are **additive**: absent means the controller has
-recorded nothing yet, and a client written before them reads the schedule
-exactly as before. The `Backup` names in them are names in the same namespace,
-which every role that may read the schedule may already list.
-
-### Creating a schedule
-
-`POST .../schedules` takes the whole policy, and has since PLAT-10.1: the same
-field set `PUT .../schedules/{name}` takes, minus `expectedGeneration` and plus
-`sourceRef`, which is settable exactly once. Before that it took seven fields —
-`schedule`, `sourceRef`, `topics`, an inline `archive`, `concurrencyPolicy`,
-`retention` and `suspended` — so a
-console could *edit* a schedule into a shape it could not *create*, and the only
-way to a saved destination, a dynamic selection, a zone, a catch-up policy or
-retries was a second request against an object that was already admitting slots
-under a policy nobody had asked for.
-
-* **`archive` xor `destinationRef`.** Exactly one, as on the edit route, and the
-  sentinel `archive.url` (`logweir-destination://<name>`, no `secretRef`) is
-  built by the route and never accepted from a body.
-* **`topics` xor `allUserTopics`**, spelled flat rather than under a
-  `topicSelection` object: this route has carried a top-level `topics` since
-  PLAT-17.1 and moving it would break every existing caller to gain a nesting.
-  Both routes validate through one function, so an empty selection, a glob, a
-  duplicate and an exclusion pattern are refused here with the codes and
-  messages the edit route uses, on `topics`, `topics[i]` and
-  `allUserTopics.exclude.prefixes[i]`.
-* **`timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry`,
-  `activeDeadlineSeconds`, `retention` and `concurrencyPolicy`** are all
-  optional, and absent each means exactly what the edit route's documentation
-  says it means: UTC, 3600, `None`, no retries, 3600, no evaluation, `Forbid`.
-* **The cadence is parsed in the zone it will be stored with**, by the
-  controller's own parser and tz database, so an unknown zone is `timeZone:
-  timezone_unknown` here rather than `Ready=False`/`UnknownTimeZone` on an
-  object this route said was fine.
-* **A pre-PLAT-10.1 body creates exactly what it created before.** Every added
-  field is optional and an absent one is written absent — never a default this
-  route invented — so an existing caller's stored spec, and therefore its run
-  policy digest, is byte for byte what it was. **Its idempotency request hash
-  is unchanged too:** the added members are omitted from the canonical
-  request when absent, so an old-shape create retried under its old
-  `Idempotency-Key` after an upgrade replays onto its object rather than
-  answering `409 idempotency_conflict`.
-* **One refusal code changed for old callers.** An empty `topics` (with no
-  `allUserTopics`) was `topics: count_out_of_range` ("between 1 and 256 named
-  topics are required") and is now `topics: selection_invalid` ("a run needs
-  either named topics or allUserTopics"), the edit route's code for the same
-  condition. More than 256 named topics is still `count_out_of_range`.
-* The object's name is minted from the idempotency scope (`sch-<26 base32>`), as
-  it always was, and `Idempotency-Key` is what makes a double click, a lost
-  response and a reload one schedule rather than three.
-
-### Editing a schedule's future policy
-
-Every `BackupSchedule.spec` field is editable **except `sourceRef`**: a
-schedule's identity is the cluster it protects, and one schedule's history must
-not mix two clusters.
-
-**`generation` is always emitted and declared optional.** `GET
-.../schedules[/{name}]` returns `generation` on every schedule this build
-serves — the API server sets `metadata.generation` on every object — but the
-published schema marks it optional, because `ui/contract.js`'s decoder drift
-test compares the schema's `required` set with a frozen console-side list, and
-moving a field into that set is a change that must land in the same commit as
-`ui/contract.js` and the console fixtures. **That commit is D1 W7's**, and it
-should make the field required. Until then: **a console that somehow sees
-`generation` absent must ask the person to reload, never default it.** Sending
-`expectedGeneration: 0` is a `412` nobody can explain.
-
-`PUT .../schedules/{name}` takes the **whole** policy — `expectedGeneration`,
-`schedule`, `timeZone?`, `topicSelection`, `archive` xor `destinationRef`,
-`concurrencyPolicy?`, `startingDeadlineSeconds?`, `catchUpPolicy?`, `retry?`,
-`activeDeadlineSeconds?`, `retention?`, `suspended` — and a field omitted is
-**removed**. That is what makes "absent means the documented default" reachable
-from a form: a schedule edited back to no retries really has no `spec.retry`,
-rather than a stale one nobody can see and the scheduler still obeys.
-
-* **It changes the future and nothing else.** A `Backup` that already exists
-  keeps its copied policy, its frozen execution inputs and its Job. The edit's
-  entire footprint is one merge patch on one `BackupSchedule`.
-* **"Omitted is removed" covers the spec fields THIS BUILD knows.** The patch
-  names every mutable key of `BackupScheduleSpec` as this binary declares it,
-  so a key a *newer* CRD added is not in the patch and a merge patch leaves it
-  in place. That window is real and documented: the upgrade order is CRD →
-  controller → API (D1 §5.7), so between the CRD rollout and the API rollout an
-  operator editing through the old console **preserves** a newer CRD's fields
-  rather than removing them. This is deliberate — removing keys a build cannot
-  name would be far worse than keeping them — and the response reads the
-  patched object back, so a preserved field is *visible* rather than silently
-  retained. Finish the API rollout before relying on replace semantics for a
-  field the CRD has just gained.
-* **`expectedGeneration`, not `expectedResourceVersion`.** `metadata.generation`
-  is what a person can see and reason about ("revision g7"), it moves only when
-  the spec changes, and it is what a manual run records. A different current
-  generation is `412 precondition_failed`. The write itself still carries the
-  `resourceVersion` of the read it was decided on, so an edit that lands *between*
-  the read and the write is refused by the API server and answered `412` as well
-  — the two preconditions are one promise: nobody's edit is silently overwritten.
-  *(D1 §5.6 specified `Api::replace` with `expectedResourceVersion`; a typed
-  merge patch was chosen instead. It keeps the Kubernetes verb at `patch`, which
-  the console ServiceAccount already holds for `:set-suspension`, so the edit
-  needs no new RBAC at all.)*
-* **`sourceRef` is refused before anything is read**, as `422
-  validation_failed` with `sourceRef: field_immutable` and the CRD's own
-  sentence. It is on the request DTO *only* so that the refusal is a field error:
-  a console that writes back everything it read sends `sourceRef`, and "unknown
-  field" would not tell the person that the answer is "create a new schedule".
-* **The CRD's own rules are not copied here.** `allUserTopics` together with a
-  non-empty `topics`, and retries on a schedule name longer than 29 characters,
-  are the API server's to refuse — a second copy of a CEL rule drifts from the
-  schema, and a stored object can break a rule this build has never heard of. The
-  refusal comes back as `422 validation_failed` carrying the CRD's published
-  message — never the API server's text — on one of three field codes:
-  `topicSelection: selection_invalid`, `retry.maxRetries: schedule_invalid`, or
-  `destinationRef: destination_sentinel_mismatch` when `archive.url` and
-  `destinationRef` disagree. **The sentinel code is deliberately not
-  `field_immutable`**: it is a shape rule, and telling a person their
-  destination cannot be changed would contradict the line above. A refusal
-  whose message this build does not recognise stays a generic `422` whose
-  reason is in the service log — naming a rule it cannot identify would be a
-  guess.
-* **What *is* checked before the write** is what no rule can catch: an
-  unparseable expression, an unknown zone, an empty selection, a glob in a topic
-  name, a range. The cron parser and the zone table are the controller's own, so
-  an expression this route accepts cannot leave `Ready=False` on an object the
-  console said was fine.
-* **`Idempotency-Key` is refused.** An edit is not a durable create and cannot
-  replay: the same body sent twice under the same `expectedGeneration` is `412`
-  the second time, because the first one moved the generation. That *is* the
-  idempotence.
-* `destinationRef` is mutable. The sentinel `archive.url` the CRD requires
-  (`logweir-destination://<name>`, with no `secretRef`) is **built here and never
-  accepted from a body**: a client that could type that URL could also type it
-  without a `destinationRef`, which is the reserved-scheme case the rule exists
-  to refuse.
-
-**Who may edit.** D0's role matrix gives an operator "create and set suspension"
-on schedules and says nothing about editing, because PLAT-05.1 had not made a
-schedule editable when it was written. **This build's decision: editing a
-schedule's future policy is the same authority as creating one** — an operator
-(and an administrator) may do it in a bound namespace, a viewer and an approver
-may not. It reaches exactly the fields `POST .../schedules` already sets, it
-cannot reach `spec.sourceRef`, and it cannot touch a run that already exists, so
-it grants nothing a create did not. The audit record says `schedule.editPolicy`
-rather than `schedule.create`, and the capability flag a console reads for both
-buttons is `scheduleCreate`; `tests/role_matrix.rs` pins that the two actions
-have the same role row, so splitting the flag and splitting the authority have
-to happen together.
-
-### Back up now
-
-`POST .../backups` creates the canonical manual `Backup` — the same object
-`kubectl create -f config/samples/backup-manual.yaml` creates. `trigger.kind:
-Manual`, `triggeredBy: manual`, no slot, attempt 0, and an execution id that is
-the object's own UID, so it can never collide with a scheduled run's
-`<scheduleUID>-<slot>` and can never append into a partial archive.
-
-**Two bodies.**
-
-* **From a schedule** — `{scheduleRef: {name, expectedGeneration?},
-  readinessAcknowledgement?}`. The API reads the schedule and copies its current
-  revision with the *scheduler's own* policy builder, recording `scheduleRef
-  {name, uid, generation, runPolicySha256}`. A policy field sent beside
-  `scheduleRef` is `422`: "Back up now on this schedule" promises the run the
-  schedule describes, and a run whose receipt named the schedule and whose
-  contents were something else would be the wrong thing written down.
-* **Ad hoc** — `{sourceRef, topicSelection, legacyArchive xor destinationRef,
-  deadlineSeconds?, readinessAcknowledgement?}`, for a cluster with no schedule
-  yet. It reads nothing and records no `scheduleRef`.
-
-**Idempotence is the name.** `Idempotency-Key` is required; the object is named
-`logweir-manual-` plus 26 base32 characters of `sha256(issuer, subject,
-namespace, route, key)`. A double click, a lost `201` and an API restart all
-target the same name, so the API server's own `AlreadyExists` is what makes a
-second run impossible. Same key and same body is `200` with `replayed: true` and
-the same UID — **including after the schedule has been edited in between**,
-because the request hash covers the body as sent and the replay returns the run
-that was created rather than a fresh copy of today's policy. Same key and a
-different body is `409 idempotency_conflict`. A new key is a new, deliberate run.
-
-**The answer names the run.** `201` (or `200` with `replayed: true`) carries
-`{requestId, replayed, item, schedule?}` — the same `{requestId, replayed,
-item}` envelope every create route answers with, plus `schedule` for a
-from-schedule run. `item` is the created `Backup`'s projection, so the run's
-identity is `item.name`, `item.namespace`, `item.uid` and
-`item.resourceVersion`, read from the object the API server stored (on a
-replay, the stored object — never a rebuild). A console names and links the run
-from `item`; there is no second, top-level copy of the name. The idempotency
-record hashes the request as sent, never the response, so the answer's shape is
-not part of what makes a replay a replay.
-
-**The schedule's state never blocks the run** (and the response says so instead
-of hiding it). A suspended schedule stops future *slots*, not people: the run is
-created, `spec.suspend` is untouched, and `schedule.suspended` comes back `true`.
-A scheduled run already going under `concurrencyPolicy: Forbid` neither blocks
-the manual run nor counts it — `concurrencyPolicy` is about slots, and this is
-the CronJob "run now" precedent — and the active runs come back as a
-non-blocking notice. A schedule deleted between the request and the freeze still
-produces a run, because the controller does not read a `BackupSchedule` for a
-manual run at all.
-
-**An accepted run may queue** (P10). `201` means the `Backup` exists, not that
-its Job does: the controller lets at most
-`runs.maxManualBackupsActivePerNamespace` (default `4`) manual runs of a
-namespace hold a runner slot at once, and the rest wait with
-`operation.state: queued`, reason `ConcurrencyLimited`, `queue: {limit}` and
-nothing created — no plan, no Job, no execution claim — starting in creation
-order as slots free. Scheduled runs are neither counted nor queued, so this is
-not `concurrencyPolicy` either. And one person may start at most
-`rateLimits.manualBackupsPerMinute` (default `10`) runs per namespace per minute:
-past it the answer is `429 rate_limited` with `Retry-After`, and nothing is
-created (see *Rate limits*).
-
-**`409 policy_changed`** is the one refusal that is about the schedule:
-`expectedGeneration` named a revision that has been superseded. The problem
-document carries a `policy` extension member — `{currentGeneration,
-currentRunPolicySha256?}` — so the console can show what changed; confirming
-starts a new idempotency intent, because running a policy the person did not see
-is not what the button promised.
-
-**Readiness is recorded and never obeyed.** This API does not call a preflight,
-does not wait for one and does not refuse on one; execution-time guards stay the
-authority and the direct `kubectl` path exists regardless. A
-`readinessAcknowledgement {preflight, state}` becomes the annotation
-`logweir.dev/readiness-ack` and nothing more. **A console must not render this
-route's acceptance as a readiness verdict**: if it wants a "Run anyway"
-confirmation it implements one against `POST .../preflights`, whose result is a
-real check — and a `ready` verdict still does not mean the execution-only checks
-passed. There is no preflight this route consults and none it can fake.
-
-### The restore's declared topic mapping
-
-The create response and both restore reads preserve the optional saved
-destination references stored on the `Restore`. They are metadata, not access
-material: the response publishes destination names only, never Secret contents.
-Their absence remains the legacy inline-archive shape.
-
-`POST .../restores` takes an optional `topicMapping`: the exact source/target
-rows the caller previewed.
-
-```json
-{"topicMapping": [{"source": "orders",   "target": "restore-20260907T140500Z-orders"},
-                  {"source": "payments", "target": "restore-20260907T140500Z-payments"}]}
-```
-
-**It is a declaration and it is never stored.** `Restore.spec` has no topic
-list — the subset lives in the opaque plan bytes
-(`logweir_core::spec::SourceSpec::topics`) — so nothing here is persisted and
-the created object is byte-for-byte what it was before the field existed.
-
-**It is defined for `target.mode: newTopic` only.** `logweir_core::spec::target_topic_prefix`
-reads `target.topic_naming.prefix` for `newTopic` and the **plan's own**
-`topic_mapping_prefix` for `scratch` — and this route never parses the plan, so
-in `scratch` mode it does not hold the string the run would map through. A check
-against `topicNaming.prefix` there would be a verdict about a value the runner
-does not read: it would pass a declaration that disagrees with the run and fail
-one that agrees with it. This service does not check a value it does not have,
-so a declaration with `mode: scratch` is refused `topicMapping` /
-`unsupported_for_mode`. In that mode the rails are the console's own preview and
-the runner's phase 0.
-
-**For `newTopic`, what it buys is a rail this service can check without parsing
-the plan**, and the service still parses nothing. The mapping rule is prefix
-concatenation and nothing else — there is no per-topic rename in the grammar —
-and `target.topicNaming.prefix` **is** a stored field. So `prefix + source` is a
-pure function of the object about to be created, and a request whose preview and
-whose submission disagree is refused here rather than discovered in phase 0,
-after an approver has signed.
-
-| `errors[].field` | `errors[].code` | when |
-|---|---|---|
-| `topicMapping` | `unsupported_for_mode` | `target.mode` is `scratch`. The declaration is defined for `newTopic` only — see above. |
-| `topicMapping` | `empty` | the field is present with no rows. Omit it to declare none. |
-| `topicMapping` | `too_many` | more than 1000 rows. |
-| `topicMapping[i].source` | `invalid_topic` | the source is not a name a broker accepts (`^[a-zA-Z0-9._-]{1,249}$`). |
-| `topicMapping[i].target` | `mapped_name_illegal` | the mapped name is not one a broker accepts. The message names the source. |
-| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from — and the request does not set `target.topicNaming.originalName` (below). |
-| `topicMapping[i].target` | `mapping_mismatch` | the target is not `prefix + source`. The message names the target that prefix produces. |
-| `topicMapping[i].target` | `duplicate_mapping` | two rows map to one target name. With an injective prefix map that is a repeated SOURCE, so the message names **both** rows and the target they share. |
-
-The mapping is checked only when `target.topicNaming.prefix` is itself legal:
-a mismatch computed from a refused prefix would name an expected target nobody
-could produce, and would send the operator to the wrong field.
-
-**Absent is exactly the behaviour this route had before the field existed**, and
-an absent declaration is left out of the idempotency request hash, so a client
-that predates it replays onto the same object it always did.
-
-### A restore under the original topic names (PROD-15.1)
-
-`POST .../restores` takes an optional `target.topicNaming.originalName`:
-
-```json
-{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
- "coverage": "complete"}
-```
-
-`true` asks for a restore under the source's ORIGINAL topic names, into
-topics that do not exist (the owner's decision OD-2;
-[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
-It is stored as `Restore.spec.target.topicNaming.originalName`; the plan must
-say the same (`target.topic_naming.original_name`), which the controller
-holds before any Job. Absent means `false`, is stored as absent, and leaves
-the idempotency request hash unchanged. A declared `topicMapping` maps every
-row onto itself. **It requires `coverage: complete`**
-([below](#the-restores-coverage-prod-081a)): a restore under the original
-topic names is verified completely, never by sample, and the controller and
-the runner refuse a plan that does not ask for it.
-
-| `errors[].field` | `errors[].code` | when |
-|---|---|---|
-| `target.topicNaming.originalName` | `requires_new_topic` | `target.mode` is `scratch`: a scratch drill never restores under the original names. |
-| `target.topicNaming.prefix` | `prefix_with_original_name` | `originalName` is `true` and the prefix is not empty. |
-| `coverage` | `original_name_requires_complete` | `originalName` is `true` and `coverage` is absent or `sampled`: an original-name restore is verified completely, every restored record compared with the archive. |
-| `target.topicNaming.prefix` | `invalid_prefix` | without `originalName`, the prefix is empty, longer than 128 characters or not a legal topic name: every other restore writes NEW topics. |
-| `approvalBytes` | `approval_subject_mismatch` | the legacy approval route (`legacy-governed-v1`): the signed document's `approval_subject` is not the one the Restore needs — `originalName` for a Restore that declares it, absent for every other. |
-| `originalNameConfirmation.typedTopics` | `typed_topics_required` | OD-10: a Restore declaring `originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`) without the typed topic names. |
-| `originalNameConfirmation.typedTopics` | `typed_topics_mismatch` | the typed names are not exactly the plan's `source.topics` — each once, nothing else, byte for byte; the message names what is missing, extra or repeated. |
-| `originalNameConfirmation` | `not_accepted` | typed names on any other request: an ordinary restore, a `strict` (Governed) namespace, whose second person they never replace, or an unbound one, which signs nothing. |
-
-**One person confirms only with the names typed (OD-10).** In a namespace
-confirmed by one person, the request carries the original topic names the
-requester re-typed:
-
-```json
-{"target": {"mode": "newTopic", "topicNaming": {"prefix": "", "originalName": true}},
- "coverage": "complete",
- "originalNameConfirmation": {"typedTopics": ["orders", "payments"]}}
-```
-
-The console signs them into the authorization document beside the subject
-(`originalNameConfirmation`). The controller and the runner hold them to the
-plan again. Holding them to the plan is the one read this route makes of the
-plan bytes, and it reads only `source.topics`; a plan that does not parse is
-refused (`planBytes` / `invalid`). Absent, the field leaves the idempotency hash unchanged. In a
-`strict` namespace the requester's submission is only the console's
-confirmation (`awaitingApproval`), and the Restore runs once an approver
-countersigns it.
-
-**Its own approval subject.** Both restore reads carry `approvalSubject`
-(`ordinary` or `originalName`), the subject the Restore needs, and
-`target.originalName`. The approvals list carries `approvalSubject` read from
-the SIGNED approval document (`approval_subject` in v1, `approvalSubject` in
-an authorization document v2): `ordinary`, `originalName`, or `unknown` when
-this service cannot read the document (the controller refuses such an
-approval). The console signs `approvalSubject: originalName` into the
-authorization document only for a Restore that declares it, and shows the
-subject on the review step and the approvals page. The controller refuses an
-approval whose subject is not the Restore's (`ApprovalSubjectMismatch`,
-terminal). An
-authorization document that carries `approvalSubject` or
-`originalNameConfirmation` is written as `formatVersion` **2.1.0**; every
-other document stays 2.0.0, byte for byte
-([stability.md](stability.md#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)).
-
-**Topics a stopped creation step left.** Both restore reads carry an optional
-**`targetTopicsAppeared`**, present only when the run's creation step stopped
-(the operation's `result.exitReason` is `TargetTopicAppeared` or
-`CreatedTopicsLeft`):
-
-```json
-{"targetTopicsAppeared": {
-  "appeared": ["payments"], "left": ["orders"], "unconfirmed": ["ledger"],
-  "appearedCount": 1, "leftCount": 1, "unconfirmedCount": 1, "unconfirmedSeen": true,
-  "leftInstruction": "created by this restore and left empty; remove it yourself once you have checked nothing writes to it",
-  "unconfirmedInstruction": "exists now; this restore asked the cluster to create it and got no definite answer, so it may be this restore's or someone else's: check what it holds and who writes to it before you remove it"}}
-```
-
-- `appeared` are mapped target names someone else created after the restore
-  was admitted; the restore wrote nothing into them.
-- `left` are topics THIS restore created before it stopped and left in place,
-  empty: Logweir never deletes a topic under a name it may not own, so the
-  operator removes each one, and `leftInstruction` is the one sentence that
-  says so (the runner, the Restore's status and the console say the same
-  words).
-- `unconfirmed` are names the restore ASKED the cluster to create and cannot
-  account for: it got no definite answer (the whole request failed, or the
-  name was answered with an error that is not "already exists"). They are
-  never in `left`, which claims ownership, nor in `appeared`.
-  `unconfirmedSeen: true` says the runner listed the cluster after the stop
-  and saw each one; `false` says it could not list the cluster, and
-  `unconfirmedInstruction` then reads "may exist now … look for it". Both are
-  present only beside an `unconfirmed` name.
-- `appearedCount`, `leftCount` and `unconfirmedCount` say how many names each
-  list has in all. A list holds at most 100 topic names; a count above its
-  length means the bound cut it, and every further name is one of the
-  restore's mapped target topics.
-
-The names are what the runner's log gave the controller, held to the
-restore's own mapped target names
-([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)
-says what that is worth with an older runner image). Additive; absent on
-every other Restore. Beside it, **`newTopics`** is exactly `left` for such a
-Restore: what the run's own answers say it created, never a name someone else
-created or one it cannot account for (and empty when the lists could not be
-read). On a run that reached its restore `newTopics` is the topics it
-created; on one refused or failed before the creation step it is the names
-its plan maps, none of which it created.
-
-**The approvals view reads an authorization document v2 through the typed
-parser.** `approvalSubject` on an `Approval` is `originalName` or `ordinary`
-only for a document every enforcing reader accepts; a v2 document they refuse
-— `approvalSubject` under `formatVersion` 2.0.0, an unknown subject, an
-unknown field — is shown as `unknown`.
-
-### The restore's signed time basis (FX-8)
-
-Both restore reads carry an optional **`timeBasis`**: the signed scorecard's
-`source.time_basis` (format 1.3.0) as the controller copied it onto
-`Restore.status.timeBasis` when it read the document.
-
-```json
-{"timeBasis": {"plan": "producerTime", "producerTime": ["lat"], "notRecorded": ["old"]}}
-```
-
-`producerTime` names the source topics the restore selected by the PRODUCERS'
-clocks — recorded as `LogAppendTime`, accepted by the plan's
-`restore.time_basis: producerTime`; `notRecorded` names the topics it selected
-by time while nothing recorded their timestamp type, so the clock their point in
-time was read on is unknown; `plan` is the approved plan's value, absent when it
-stated none. It is a **claim until the evidence verifies**, like
-`operation.result.outcome`. **Absent means not recorded** — a scorecard before
-format 1.3.0, a refused run (`PointInTimeByProducerTime` signs nothing), or one
-whose scorecard was not read yet — and never "every selection used the topics'
-own clocks". A list longer than this view's bound of 100 omits the whole field
-rather than truncating it, because a partial list would be a claim the signed
-document does not make. The field is additive: a client that predates it
-ignores it.
-
-### The restore's coverage (PROD-08.1a)
-
-**Asking for it.** `POST .../restores` takes two optional fields beside the plan:
-
-```json
-{"coverage": "complete", "completeMaxRecords": 1000000}
-```
-
-They **declare** what `planBytes` says (`sample.coverage`,
-`sample.complete_max_records`) and are stored on `Restore.spec.coverage` and
-`spec.completeMaxRecords`. This route never parses the plan, so it cannot
-compare the two; the controller does, before an approval is waited for, and
-ends a `Restore` whose plan says otherwise `Failed` / `ExecutionSpecInvalid`
-([kubernetes.md](kubernetes.md) §12). Absent means `sampled`, stores nothing,
-and is left out of the idempotency request hash, so a client that predates the
-fields creates the object it always did. Complete coverage reads every archived
-record of the restored topics and the whole restored output: about a minute
-per GiB of one-KiB records with an optimised build on a laptop, against about
-five seconds for the sampled check.
-
-| `errors[].field` | `errors[].code` | when |
-|---|---|---|
-| `completeMaxRecords` | `out_of_range` | below 1: a complete verification that may decode no record compares nothing. |
-| `completeMaxRecords` | `requires_complete_coverage` | set without `coverage: complete`: it bounds a complete verification and nothing else. |
-
-**Reading it.** Both restore reads, the list included, carry a required
-`coverage` block:
-
-```json
-{"coverage": {"requested": "complete", "completeMaxRecords": 300,
-              "recorded": "complete", "covered": false,
-              "incompleteReason": "sample.complete_max_records is 300: orders/1 and every later partition were not compared"}}
-```
-
-`requested` is what the `Restore` asks for (`spec.coverage`, absent read as
-`sampled`). `recorded` is what its signed scorecard says it verified, copied by
-the controller onto `status.integrity.coverage` — a claim until the evidence
-verifies, and **absent means not recorded** (a scorecard before format 1.4.0, a
-refused run, or one not read yet), never complete. `covered` and
-`incompleteReason` belong to a recorded complete verification. **`covered:
-false` is never a pass**: `operation.verifiedSuccess` is computed with the
-controller's badge rule, which refuses green beside it (`CompleteNotCovered`),
-even beside an `outcome` that says pass.
-
-The operation route's `verificationScope` (`GET .../operations/restore/{name}`)
-adds `coverage` (the same `recorded` value), `complete` — `covered`,
-`incompleteReason`, `maxRecords`, the archive counts (`segments`,
-`segmentsVerified`, `segmentsFailed`, `segmentsUnverified`, `recordsDecoded`,
-`offsetHoles`), the totals under `replay` (`expected`, `restored`, `matching`,
-`missing`, `unexpected`, `duplicates`, `outOfOrder`, `mismatched`),
-`partitionCount` and, up to 256 partitions, `partitions[]` with each one's own
-`replay` and `compared` (absent past 256; the rows stay in the scorecard) — and
-FX-23's `unsampledTopics` for a sampled check: the restored topics the
-partition cap left without a sampled partition. `complete` is served only beside
-a recorded `coverage: complete`. All three are additive.
-
-**A narrowed restore says so (PROD-11.1b).** Both restore reads and the
-operation route's `verificationScope` carry an optional `selection` when the
-signed scorecard records one — a partition subset (format 2.0.0) or a window
-from a stated start (format 1.7.0):
-
-```json
-{"selection": {"scope": "partial", "windowEndMs": 1788789900000, "narrowedTopics": 1,
-               "partitions": [{"topic": "orders", "partitions": [0, 2]}], "engineRuns": 2}}
-```
-
-`scope` is always `partial`: a client that reads no further still never takes
-the restore for one of every partition of every topic. `narrowedTopics` counts
-the topics narrowed to a partition subset; `partitions` lists them (a restored
-topic not listed restored every partition), absent past 256 topics or 1024
-partitions in one (the count stays; the rows are in the scorecard).
-`windowStartMs` is present only for a stated start. Every verdict beside it —
-`coverage.covered`, `complete.covered`, the result — is the SELECTION's: a
-covered complete check over a subset compared every record of every *selected*
-partition, not of the topic. **Absent `selection` is an unnarrowed restore,
-exactly as before.** A selection the controller could not read is still served
-(`{"scope": "partial"}`), never omitted. Additive.
-
-### Saved destinations
-
-`spec.storage` and `spec.transport.security` are immutable — a different
-location or transport is a different destination — so the create route
-evaluates D2 §3.2's rules *before* the object exists and answers `422
-destination_invalid` with one field error per rule broken (`bucket_invalid`,
-`endpoint_not_origin`, `transport_scheme_mismatch`,
-`insecure_http_requires_http_endpoint`, `ca_bundle_requires_tls`,
-`prefix_reserved`, `addressing_unsupported_by_engine`, `grant_mode_fields`).
-**Addressing is never a transport choice** in either direction: path-style and
-virtual-hosted say how a request names the bucket, and only the endpoint's
-scheme has to agree with `transport.security`.
-
-The namespace's **default** destination is marked with both the annotation D2
-§3.1 names and a label, and the at-most-one check is a single bounded label
-read; a second `default: true` is `409 state_conflict`. A default set by hand
-with only the annotation is still honoured on read, but is not seen by that
-check.
-
-`:update-access` carries `expectedGeneration`; a stale value is `412
-precondition_failed`, and a rotation the API server rejects as invalid is `409
-destination_location_immutable`. A CA bundle on a plaintext destination is `409
-transport_downgrade_forbidden`, because the transport can never be changed and a
-CA means nothing without TLS.
-
-`POST .../destinations:from-legacy`, which could only refuse, was withdrawn in
-v1 (release-notes item 75): create the destination explicitly.
-
-**Connection credentials are entered, never named (PROD-01.3).** A connection
-create carries its credential in `auth.credential` — `password` for
-`scramSha512`, `scramSha256` and `plain` (which needs `tls: true`; otherwise
-`422 plain_requires_tls`, `PlainWithoutTls`), or `certificatePem` and
-`privateKeyPem` (unencrypted) for `mtls` (`tls: true`). It needs
-`credential.write` as well as `connection.create`. The service checks the
-deterministic Secret name `<connection>-credential` free with a dry-run create,
-creates the `KafkaCluster` naming it, then creates the Secret — type
-`logweir.dev/kafka-sasl-password` or `logweir.dev/kafka-client-certificate`,
-owned by the connection, carrying its `logweir-binding` — and never reads it
-back. Naming an existing Secret (`auth.credentialRef`) is refused,
-`422 existing_credential_refused`: a connection that could name any Secret
-could make Logweir present another team's credential to brokers of its
-author's choosing, and the runner enforces the same rule on every
-`KafkaCluster` however it was written ([kubernetes.md](kubernetes.md) §20.9).
-A private CA is a reference to a **ConfigMap** key (`auth.tlsCa.configMapKeyRef`):
-a CA certificate is public and is only ever a local trust anchor.
-
-**Destination credentials are entered, never named (FX-20).** A create
-refuses `access.<role>.secret.existing` with `422 destination_invalid`, code
-`existing_credential_refused` on `access.<role>.secret.existing`: no existing Secret can carry the binding of a destination that
-does not exist yet, and a destination that could name any Secret could make
-Logweir sign requests with another team's key and send them — the access key
-id, a replayable signature and any session token — to an endpoint of its
-author's choosing. `:update-access` accepts `secret.existing` only for a Secret
-the stored destination **already names** (keeping a grant, or moving one of its
-own Secrets to another role), and refuses any other name the same way. Every
-runner enforces the same rule on every `BackupDestination` however it was
-written: a grant's Secret must carry the destination's `logweir-binding`
-(`status.credentialBinding`; [kubernetes.md](kubernetes.md) §20.10).
-
-**Write-only credential entry.** A grant may carry a value once, in
-`access.<role>.secret.new`. It becomes a Secret named
-`lwd-<destination>-<role>` (on a create) or `lwd-<destination>-<role>-<8 hex>`
-(on `:update-access`, below), of type `logweir.dev/object-store-credential`,
-labelled `logweir.dev/credential-for`, owned by the destination, carrying the
-destination's `logweir-binding` — and it is never read back. This service has no Secret read verb at all; the create
-response's `data` is dropped by the parser before anything can see it, and every
-response, log line and stored projection carries the Secret's **name** and the
-**key names** inside it, both of which are public references.
-
-**A rotation writes the new value under a NEW name (FX-20).** On
-`:update-access` a `secret.new` becomes `lwd-<destination>-<role>-<suffix>`,
-the suffix eight hex characters of a digest of the request id, so the value
-being rotated (which holds the create's deterministic name) neither blocks the
-rotation nor is overwritten: this service holds `create` on Secrets and nothing
-else. The grant then names the new Secret. The superseded Secret is left in
-place — owned by the destination, so it is collected with it — for you to
-delete once nothing runs with it.
-
-**A name that is taken is `409 state_conflict`, and nothing at all is
-written.** This service cannot read the existing value to compare it, and it
-cannot overwrite it. Answering `200` there would let an operator responding to
-a leaked key record a rotation that did not happen while the leaked value
-stayed live.
-
-So **every credential name a request would write is checked before anything is
-written** — before the Secrets, and before the `BackupDestination` itself. The
-check needs no read verb: a `dryRun: All` create is still the `create` verb,
-and it answers `AlreadyExists` for a taken name while telling the caller
-nothing about the object holding it. The probe carries an empty `data`, so the
-value you typed does not travel to the API server before the decision to write
-it has been made. The refusal names **every** taken name, not the first, and
-nothing is created: not the destination, and not the credential of some other
-role that happened to come earlier. To rotate, use `:update-access` with
-`secret.new`, or change the Secret's content out of band with `kubectl` or your
-secret manager, keeping its `logweir-binding` key.
-
-That ordering is what makes the retry below safe. A first attempt that refuses
-leaves no destination behind, so the retry cannot look like a replay of one —
-and a Secret sitting under a deterministic name is never, in any path, taken as
-evidence that *this* request wrote it. Only this service's own idempotency
-record (the scope and request hashes it stamps on the object it creates) marks
-a request as its own earlier attempt.
-
-**The retry contract.** Once the names are known to be free, a create writes the
-`BackupDestination` first and its credential Secrets second, because the Secrets
-are owned by the destination and an owner reference needs a UID. If a Secret
-write then fails (a timeout, a refusal, Kubernetes unavailable) the destination
-exists and names a Secret that does not. **Repeat the request with the same
-`Idempotency-Key`**: the replay is recognised from that record, returns the same
-destination and finishes the credential writes. Repeating with a *new* key does
-not — it is a different request against an existing name, and is refused. The
-audit line reports `credentialSecretsCreated` and `credentialSecretsReplayed`
-separately, so "written now" and "already there from my earlier attempt" are
-never the same entry.
-
-There is one window this cannot close: a name taken by someone else *between*
-the check and the write. The write then refuses, and because an earlier role may
-already be live the message names the Secrets that **were** created and says
-they must be deleted before a retry, rather than claiming nothing changed.
-
-**No digest covers a credential value.** Every durable create records
-`api.logweir.dev/request-sha256` and `api.logweir.dev/idempotency-scope-sha256`
-on the object, and the same two hashes in its audit record and its `created`
-log line. Both are readable by anyone who may `get` the object — the chart's
-`logweir-viewer` included — and the scope digest is one of them, so it is no
-salt: a hash taken over an entered credential would let such a reader confirm a
-guessed password or secret key offline. So the request is hashed **without**
-its credential values: every write-only field (`auth.credential.*` on a
-connection, `access.<role>.secret.new.*` on a destination) is replaced by the
-constant `<write-only>` before hashing, and two requests that differ only in a
-credential value have identical digests
-(`crates/logweir-api/tests/credential_digests.rs`).
-
-The consequence for retries: **a credential value is not part of a create's
-identity.** A retry under the same `Idempotency-Key` that changes only the
-value replays the first create, with the credential the first attempt wrote; a
-different credential is a new connection or destination, under a new key. An
-object created by an older API build carries a request hash taken over the
-value and replays as `409 idempotency_conflict` (retry with a new key). For a
-destination created with `secret.new` before this build, the old
-`api.logweir.dev/request-sha256` is still a verifier of its secret access key:
-remove it (`kubectl annotate backupdestination <name>
-api.logweir.dev/request-sha256-`), which costs nothing but the replay of that one
-create, or rotate the key.
-
-### Bounded, honest topic inventory
-
-The API reads the immutable `ConfigMap` chunks the controller committed; it
-never opens a broker connection and it never lists `ConfigMap`s — chunk names
-come from the discovery's own status, and the adapter has no list verb for them.
-Every chunk is verified before a row is served: owned by this discovery,
-`immutable: true`, and its annotated digest equal both to the digest the status
-indexes and to the SHA-256 of the bytes. Any mismatch is `409
-result_integrity_failed`, and the page is refused rather than served from bytes
-whose provenance did not hold.
-
-At most eight chunks are read per request, so a sparse `q` returns a short page
-with `scan.complete: false` and a cursor instead of reading the whole result.
-`page.snapshot` is `<uid>@<topicsSha256>`, so a continued page cannot land on a
-different inventory. **A successful list is never called complete**:
-`visibility.state` is `unknown` unless an authorization omission was observed
-(`limited`) or an administrator-governed attestation says otherwise
-(`attestedComplete`).
-
-`stale` is recomputed on every read — freshness expiry, a replaced or edited
-connection, a changed principal — and a failed attempt never hides the last
-successful inventory: `?latest=true` returns both slots separately.
-
-A discovery also carries **`brokerCount`**: how many brokers the cluster's
-metadata response listed when the inventory was read, which is its live brokers
-at `observedAt` (`status.result.brokerCount`, beside `clusterId`). One broker
-answers a metadata request; the count is the brokers its answer names, so a
-broker that is down then is not counted. It is **additive**: absent means the result recorded none — a
-failed or unfinished attempt — and is never sent as `0`, and a client written
-before it reads the discovery exactly as before. The console's restore wizard
-reads it from the target connection's newest successful discovery (FX-5): when
-that discovery is not `stale`, to set its default replication factor and to
-refuse a factor above it; when its ONLY stale reason is `expired`, to set the
-default alone, said with the discovery's `observedAt`, because a broker count
-rarely changes and an old one must not refuse a factor a grown cluster would
-hold. Any other stale reason means another connection or another identity,
-and the count is not used. The readiness check's `target.topicCreate` row
-stays the check of the factor against the target as it is when the check runs.
-
-A claim of completeness is checked before it is published: a controller that
-writes `visibility.state: attestedComplete` **without** an `attestation` is
-answered `unknown`, with `attestationMissing` recorded in `basis`. `limited` is
-passed through as the controller wrote it, because it is a claim about an
-authorization failure observed inside the check Job and the API has nothing to
-verify it against.
-
-### Readiness that is a result about something
-
-Every preflight carries a `binding`: the plan hash and the digest over the
-objects it resolved. `applicable` and `stale` are recomputed on **every** read
-against the `?planHash=` the caller sends, so editing the plan, choosing another
-target or destination, or letting the result expire all make it inapplicable
-rather than quietly current. The aggregate is advisory: `ready` authorizes
-nothing, execution-time guards remain the authority, and `executionOnly` names
-the checks that can only be answered while the run executes. A blocking check
-that was skipped keeps the aggregate `unknown` — skipping a question is not
-answering it — and a `Completed` check with no recorded aggregate reads
-`unknown`, never `ready`.
-
-**Four operations, and exactly one block.** `operation` is `backup`,
-`restore`, `destinationAccess` or `sourceConnection`, and the body carries the
-matching block and no other; anything else is `422 validation_failed` naming
-both fields. The fourth is the narrowest:
-
-```http
-POST /api/v1/namespaces/team-a/preflights
-Idempotency-Key: <one per deliberate test>
-
-{"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}}
-```
-
-It asks "does this connection answer, as this principal, right now" and takes
-nothing else: no destination, no plan, no topic list. `connectionRef` is
-REQUIRED — an omitted block is `422 sourceConnection required` and an omitted
-reference is `422 connectionRef required`, because a connectivity check with no
-connection is not a smaller check. Every request body on this API is
-`deny_unknown_fields`, so a destination or a topic list added to that block is
-`422 unknown_field` rather than a wider check nobody asked for.
-
-**A restore check names ONE recovery point** (PLAT-15.2). `restore.recoveryPoint
-{backupName, backupUid}` names a `Backup`; `restore.catalogPoint {catalog,
-pointId}` names a point in a `RecoveryCatalog`'s view instead — a point with no
-`Backup` object behind it, or a run the controller could not verify itself.
-Both at once is `422 exactly_one` on `restore.catalogPoint`; a `pointId` that is
-not `lwp1-` plus 32 lowercase hex is `422 invalid_point_id`. The controller
-re-reads that row when the check runs — availability, verification, any
-reached `Backup` verdict on the same receipt, and whether the plan's
-`source.point` is the row's binding — and reports `recoveryPoint.state` from it
-(`docs/kubernetes.md` §21.8):
-
-```http
-POST /api/v1/namespaces/team-a/preflights
-Idempotency-Key: <one per deliberate check>
-
-{"operation": "restore", "restore": {
-  "planBytes": "<the exact plan bytes>", "planHash": "sha256:…", "target": "target",
-  "sourceDestination": "archive", "evidenceDestination": "archive",
-  "catalogPoint": {"catalog": "archive", "pointId": "lwp1-0123456789abcdef0123456789abcdef"}}}
-```
-
-**The idempotency key of a connectivity test is per deliberate test, not per
-subject.** For a readiness check over an unchanged plan the subject IS the
-question, so a retry after a lost response replays. A connectivity test's
-subject is a broker that may answer differently a minute later, so a client that
-composed its key from the connection name alone would replay its first verdict
-for ever — and a control that did that would be a re-read wearing a dial's
-label. Mint a fresh key per click and let the in-flight guard, not the key,
-collapse a double click.
-
-**A readiness key replays only while its check can still be the answer.** One
-key names one `Preflight` for ever — this API never answers a used key with a
-second object — so a key composed from the question alone also replays that
-check *after* its validity has passed. The replay answer says so itself:
-`staleReasons` carries `expired` (computed from the recorded `expiresAt`, which
-needs no read) beside the `unverifiable` "this response did not recompute
-staleness", and `staleBasis` is `["expiry"]`. A client asking again once the
-check is spent — expired, inapplicable on a read, `failed` or `cancelled` —
-sends a new key; the console keeps one intent token per form in the key and
-renews it exactly then, so a retry after a lost response, or a second click
-inside the validity, still replays (`ui/README.md`, *Asking a check again is
-not replaying its last answer*). A topic discovery follows the same rule, with
-`reuseFresh` answering a fresh identical inventory before any key is read.
-
-**`staleReasons` is typed and closed, and it is RECOMPUTED, not reported.**
-On every read of a preflight this service reads back each object
-`status.binding.referents[]` names — `kind`, `name`, `uid`, `generation` are
-all structured there — and compares them with the recorded revisions using
-`logweir-core`'s own `stale_reasons`, so the API and the controller cannot each
-implement half of the rule. Nothing parses a message. `staleBasis` lists what
-the comparison covered, in order, so an empty `staleReasons` cannot be confused
-with a check that was skipped.
-
-Each entry is `{reason, kind?, name?, basis?}`, and `reason` is one of seven:
-
-| reason | what moved |
-|---|---|
-| `expired` | the verdict is past `expiresAt`, or recorded no expiry at all |
-| `planHashChanged` | the plan you are looking at is not the plan the check was bound to |
-| `referentChanged` | a named object's UID or generation moved, or it appeared or vanished — a recreated destination, an edited access block, a re-created recovery point, a re-created `RecoveryCatalog`, an edited or re-created `TrustRoster/default` or governing `TrustPolicy`, or a re-created `Approval`. `kind` and `name` say **which**; `name` is the name the binding recorded (`default` for the cluster's `TrustRoster`). On a re-read this service compares a referent the binding records **without** a generation (the recovery-point `Backup`, the `Approval` and a catalog point's `RecoveryCatalog`, bound by identity) by UID alone -- the binding records no resourceVersion to compare -- so an unchanged recovery point or catalog is not `referentChanged`; before PLAT-08.2 a recovery point was reported on every re-read, and before the catalog-referent fix a catalog point's catalog was `unverifiable` on every re-read. Any other kind recorded without a generation is `unverifiable`, never compared by UID alone. An `Approval` whose resourceVersion moved when verification landed is **not** seen by this GET: the controller's `inputsDigest` revalidation catches it and downgrades the stored verdict (`ready` → `unknown`) on its own requeue cadence |
-| `caBundleChanged` | a destination's CA bundle now digests differently. **RESERVED — nothing emits it.** `status.binding` does not record the CA bundle list, so neither the controller nor this service can compare it; CA drift surfaces through the destination's own `referentChanged`, because editing its `caBundle` reference bumps its generation. Do not branch on it |
-| `policyChanged` | the installation policy `ConfigMap` digests differently, which can change the concurrency ceilings, the engine CA rule, the `ControllerIdentity` allowlist and the visibility attestations the verdict was computed under |
-| `inputsDigestChanged` | the recomputed digest differs and none of the named reasons explains it. **RESERVED on the same grounds:** the recorded digest was taken over a wider document than this service can rebuild, so comparing the two would report an artefact of the narrower recomputation rather than a change in the world |
-| `unverifiable` | **this service could not compare something, so it will not call the verdict applicable.** `basis` says what: a referent whose read failed (a refused `get` on `trustrosters/default` or `trustpolicies/<name>` included), a `TrustRoster` referent named anything but `default` (the one roster this service may read), a referent of a kind this build does not know, a referent of a generation-bearing kind recorded without a generation, or a result that recorded no binding at all |
-
-**Who compares what.** This service compares the expiry, the `?planHash=` you
-sent, and every referent the binding records — the seven namespaced kinds
-(`KafkaCluster`, `BackupDestination`, `Backup`, `Restore`, `Approval`,
-`BackupSchedule`, `RecoveryCatalog`) and the two cluster-scoped trust referents,
-`TrustRoster/default` and the namespace's governing `TrustPolicy`, each by UID and
-generation (by UID alone for the three kinds bound by identity, above). The
-`RecoveryCatalog` read is the `get` on `recoverycatalogs` the API's namespaced
-role already carries for `catalog.read`; no new verb. Before
-PREFLIGHT-TRUSTROSTER-STALE the two trust kinds were `unverifiable`, so every
-verdict on a cluster with a roster was served stale and the restore wizard could
-not submit after any readiness check; the chart's `<release>-api-trustroster`
-(`get`, `resourceNames: ["default"]`) and the existing `<release>-api-trustpolicies`
-`get` are what let it compare them. The
-installation policy it cannot read: that digest is `CheckPolicy::digest()` over
-the parsed `LOGWEIR_POLICY_CONFIGMAP` document (default `weirkeeper-policy`,
-key `policy.json`) in the installation namespace, and this service reads a
-`ConfigMap` only when a check owns it. The **controller** compares it on every
-reconcile and downgrades `result.state` to `unknown` when it moves, so
-`staleBasis` records `policyDigest:byController` rather than pretending either
-that it was checked here or that nobody checked it. Reaching that document from
-the API is D2 W11's to grant.
-
-**It never fails open.** Anything that could not be compared is `unverifiable`
-with a cause, and `applicable` is false — because "I did not check" and "I
-checked and it matches" are different answers and only one of them may look
-like a green badge. An earlier build recovered the reasons from the
-controller's prose instead; that prose is redacted and capped at 512
-characters, so a long referent list lost its closing bracket, the parse
-returned nothing, and a downgraded verdict was reported as applicable.
-
-There is no `cancelRequested` reason. A cancelled check ends with no result at
-all, so its verdict is not out of date — it is **absent**, and `state:
-cancelled` with `terminal: true` is what says so.
-
-**One asymmetry to know about.** The controller only rewrites `result.state`
-for verdicts that were `ready`: a `notReady` or `unknown` result that later
-stops applying keeps its recorded state. The API's recomputation has no such
-limit — `stale`, `staleReasons` and `applicable` are computed the same way for
-every completed verdict — so the two can disagree about a non-green result, and
-the API's is the current one.
-
-An actor bound **only** as Approver reads `Restore` readiness, because that is
-what an approval packet needs, and gets the nonexistent-resource answer for
-anything else.
-
-## The Kubernetes boundary
-
-Every Kubernetes call is a method on one adapter, typed over a **sealed** set of
-eight custom resources — `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore`,
-`Approval`, `BackupDestination`, `TopicDiscovery` and `Preflight`. No method
-takes a group, a version, a plural or a path, so no request can name a ninth
-kind, and no method can reach a Pod, a log, an exec stream, a Job or a core
-`Namespace` at all. There is no delete, anywhere.
-
-**Two core objects are reached, each through exactly one verb and one
-hand-written type.** `ConfigMap` is a `get` and nothing else, used only for the
-chunk and detail documents a check owns, and every read is verified by owner
-UID, immutability and digest before a row is served. `Secret` is a `create` and
-nothing else — **there is no Secret read verb in this service**, so a stored
-credential cannot be read back by any route, any projection or any future
-refactor of one. Asking whether a name is free is the same `create` verb with
-`dryRun: All`, which is why establishing that costs no extra permission and
-still reveals nothing about the object occupying the name. `k8s-openapi`'s own `Secret` and `ConfigMap` types are
-deliberately not imported: a type that can hold a Secret's data is a type that
-can leak one. The credential type's `data` field is `skip_deserializing`, so the
-API server's create response — which echoes `data` — is parsed into a value
-whose `data` is empty.
-
-**`create` on Secrets is the widest grant this service asks for, and it is not
-yet fenced.** In a namespace it could in principle mint a
-`kubernetes.io/service-account-token` Secret for any ServiceAccount there. The
-credentials this API creates carry the distinct, immutable-after-create type
-`logweir.dev/object-store-credential` (and PLAT-07.1's carry
-`logweir.dev/kafka-sasl-password`) precisely so a ValidatingAdmissionPolicy
-scoped to the console ServiceAccount can require one of those two values.
-**That policy does not ship yet.** Until it does, the grant is wider than the
-route that uses it, and that is the single most important thing the RBAC stage
-owes.
-
-**There are four updates, and each is a merge patch built here from typed
-arguments**: `BackupSchedule.spec.suspend`, a `BackupSchedule`'s editable policy
-(`PUT .../schedules/{name}`), a destination's four grants and CA reference
-(`:update-access`), and a check's `spec.cancelRequested` (`:cancel`). Each
-carries `metadata.resourceVersion`, so each is a conditional write the API
-server refuses on a stale read, and none of them accepts a caller-supplied path
-or patch document. A destination's location and transport have no key in any of
-them, and **`spec.sourceRef` has no key in the schedule edit**: the policy patch
-is built from a struct whose fields *are* the mutable set, so the immutable one
-is unreachable rather than merely refused.
-
-**A merge patch merges nested objects key by key**, so every optional key inside
-one is spelled out — `null` included. A policy patch that sent `archive: {url}`
-alone would leave a `secretRef` from the previous archive in place: a credential
-reference nothing reads, on an object that then breaks the CRD's own sentinel
-rule. Absent is written as `null`, which the API server removes.
-
-**The two routes D1 W6 added ask for no new Kubernetes permission.** `create
-backups` and `patch backupschedules` are already in the console
-ServiceAccount's Role; the policy edit uses the same `patch` verb
-`:set-suspension` uses, and the manual run uses the same `create` the RBAC stage
-already owes for `backups`. `tests/linkage.rs` pins the whole `(verb, resource)`
-set from the adapter's source, so this claim fails a test rather than a review
-if it stops being true.
-
-Every call carries a **10-second deadline**, and the client's own connect, read
-and write timeouts are set to the same bound. A timeout is `504
-upstream_timeout`. No Kubernetes message is returned verbatim: the status code
-and reason class decide the problem, and the message is redacted — bearer
-tokens, URL userinfo and anything past 512 bytes removed — before it reaches the
-log. Nothing from an inbound request reaches an outbound Kubernetes request but
-validated names.
+| `GET /healthz`, `GET /readyz` | public | liveness, readiness |
+| `GET /ui/…` | public | the page (*The static UI*) |
+| `GET /auth/login`, `GET /auth/callback` | public | shared-mode sign-in (*Sign-in*) |
+| `GET /api/v1/session` | signed in | the actor, roles, grants, CSRF token, capability flags |
+| `POST /api/v1/session/logout` | signed in | clears the session cookie (shared mode) |
+| `GET /api/v1/namespaces` | signed in | the configured grants, never core `Namespace` objects |
+| `GET /api/v1/cadence-previews` | `schedule.read`, any namespace | the next runs of a cron line or preset |
+| `GET …/connections[/{name}]` | `connection.read` | `KafkaCluster` projections; Secret names, never a credential |
+| `POST …/connections` | `connection.create` and `credential.write` | creates a `KafkaCluster` named `conn-<26 base32>` (*Credentials*) |
+| `GET …/connections/{name}/topic-discoveries` | `topicDiscovery.read` | a page of discoveries, or `?latest=true` |
+| `POST …/connections/{name}/topic-discoveries` | `topicDiscovery.start` | starts a bounded inventory |
+| `GET …/topic-discoveries/{id}[/topics]` | `topicDiscovery.read` | one discovery; a page of its inventory |
+| `POST …/topic-discoveries/{id}:cancel` | `topicDiscovery.cancel` | stops an unfinished discovery |
+| `GET …/destinations[/{name}]`, `…/destinations/{name}/usage` | `destination.read` | destinations, grants as references, the last access test, what uses one |
+| `POST …/destinations` | `destination.manage` | creates a destination under the `name` in the body |
+| `POST …/destinations/{name}:update-access` | `destination.manage` | rotates the grants and the CA reference |
+| `POST …/destinations/{name}:test` | `destination.manage` | starts a `DestinationAccess` `Preflight` (*Destination access test*) |
+| `POST …/preflights` | `preflight.start` | starts a readiness check (*Readiness checks*) |
+| `GET …/preflights/{id}[/details]` | `preflight.read` | one result (`?planHash=`); its detail pages |
+| `POST …/preflights/{id}:cancel` | `preflight.cancel` | stops an unfinished preflight |
+| `GET …/schedules[/{name}]` | `schedule.read` | `BackupSchedule` projections |
+| `POST …/schedules` | `schedule.create` | creates a schedule (*Schedules*) |
+| `PUT …/schedules/{name}` | `schedule.editPolicy` | replaces the future policy |
+| `POST …/schedules/{name}:set-suspension` | `schedule.setSuspension` | suspends or resumes |
+| `GET …/backups[/{name}]` | `backup.read` | `Backup` projections |
+| `POST …/backups` | `backup.create` | Back up now |
+| `GET …/restores[/{name}]` | `restore.read` | `Restore` projections; `planBytes` on one restore only |
+| `POST …/restores` | `restore.create` | creates a `Restore` (*Restores*) |
+| `POST …/restores/{name}/approval` | `approval.submit` | a governed countersignature, or the two `drill approve` files |
+| `GET …/restores/{name}/approval-request` | `approval.read` | a two-person request, as the approver is shown it |
+| `POST …/restores/{name}/console-approval` | `approval.submit` | the second person's click |
+| `GET …/approval-policy` | `approval.read` | the namespace's effective approval policy |
+| `GET …/approvals[/{name}]` | `approval.read` | Approval metadata, no documents |
+| `GET …/approvals/{name}/packet` | `approval.readPacket` | the approval and sidecar documents, verbatim |
+| `GET …/operations/{kind}/{name}` | `operation.read` | the normalized status of a backup, restore, discovery or preflight |
+| `GET …/operations/{kind}/{name}/events` | `operation.read` and `operation.stream` | the same as a bounded event stream (backup or restore) |
+| `GET …/protection-policies[/{name}]` | `protection.read` | protection health; alert delivery is withdrawn in v1 (release-notes item 74) |
+| `GET …/catalogs[/{name}[/points\|/signers]]` | `catalog.read` | catalogs, their point view, their signers |
+| `POST …/catalogs` | `catalog.connect` | connects an existing archive under the `name` in the body |
+| `GET …/retention-policies[/{name}]` | `retention.read` | retention policies and their last evaluation |
+| `GET /api/v1/trust-policies[/{name}]` | `trustPolicy.read`, any namespace | the installation's trust policies (*Trust*) |
+
+**Who holds an action.** Roles are bound per namespace in shared mode. In
+localAdmin mode the one actor holds every action in its namespaces, and the
+approval routes still refuse it its own requests.
+
+| action | viewer | operator | approver | administrator |
+|---|:--:|:--:|:--:|:--:|
+| `connection.read`, `destination.read`, `topicDiscovery.read`, `schedule.read`, `protection.read`, `catalog.read`, `retention.read` | ✓ | ✓ | | ✓ |
+| `preflight.read` | ✓ | ✓ | restore checks only | ✓ |
+| `backup.read`, `restore.read`, `approval.read`, `operation.read`, `operation.stream` | ✓ | ✓ | ✓ | ✓ |
+| `connection.create`, `connection.test`, `credential.write`, `destination.manage`, `topicDiscovery.start`, `topicDiscovery.cancel`, `preflight.start`, `preflight.cancel`, `schedule.create`, `schedule.editPolicy`, `schedule.setSuspension`, `backup.create`, `restore.create`, `catalog.connect` | | ✓ | | ✓ |
+| `approval.readPacket` | | ✓ | ✓ | ✓ |
+| `approval.submit` | | | ✓ | |
+| `trustPolicy.read` | | | | ✓ |
+
+- **An administrator is not an approver.** One who must approve is bound as an
+  Approver too, and separation of duties still compares `(issuer, sub)`.
+- **Editing a schedule's policy is the authority to create one.** The console
+  reads one flag, `scheduleCreate`, for both; `tests/role_matrix.rs` pins the
+  two rows together. The audit record says `schedule.editPolicy`.
+- **An approver reads only `Restore` readiness**; any other preflight answers
+  as if it did not exist.
+- **An operator cancels only the checks it started**, by the `issuer#subject`
+  recorded at creation. An administrator of the namespace may cancel any; the
+  audit line then records `cancelledAnotherActorsCheck`. Cancelling deletes no
+  archive byte, topic, run or evidence.
 
 ## Conventions
 
@@ -1700,210 +163,432 @@ validated names.
 `requestId`:
 
 ```json
-{
-  "type": "https://logweir.dev/problems/validation-failed",
-  "title": "Request validation failed",
-  "status": 422,
-  "code": "validation_failed",
-  "detail": "One or more fields are invalid.",
-  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
-  "retryable": false,
-  "errors": [
-    {"field": "bootstrapServers[0]", "code": "invalid_port",
-     "message": "must be host:port with no scheme or userinfo"}
-  ]
-}
+{"type": "https://logweir.dev/problems/validation-failed", "title": "Request validation failed",
+ "status": 422, "code": "validation_failed", "detail": "One or more fields are invalid.",
+ "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W", "retryable": false,
+ "errors": [{"field": "bootstrapServers[0]", "code": "invalid_port",
+             "message": "must be host:port with no scheme or userinfo"}]}
 ```
 
-Mutation bodies are strict: an unknown field is `422 validation_failed` naming
-the field, not a silently ignored key. So is an unknown or repeated query
-parameter (`400 malformed_request`). Bodies are capped at 1 MiB, and must
-arrive in time (below).
+- **`errors[].field` is a path and nothing else** (`topics[2]`,
+  `access.archiveWrite.mode`, a header or query name). `message` is a sentence.
+  A console may match `field` exactly.
+- **One condition has one `errors[].code` on every route**: an unreadable
+  cadence is `schedule: schedule_invalid` and an unknown zone `timeZone:
+  timezone_unknown` from the schedule create, the edit and the cadence preview.
+- **Bodies are strict and capped at 1 MiB.** An unknown field is
+  `422 validation_failed`; an unknown or repeated query parameter is
+  `400 malformed_request`.
+- **Three guards run before any handler.** `Impersonate-*` is
+  `400 header_not_allowed`. A `Host` this listener does not serve is
+  `421 misdirected_request` (the DNS-rebinding guard). An unsafe method needs an
+  `Origin` exactly equal to the public origin (`403 origin_mismatch`) and
+  `Content-Type: application/json` (`415`); shared mode adds the CSRF token.
+- **Every response** carries a fresh `X-Request-ID` (a client's is ignored), a
+  Content-Security-Policy, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, a Permissions-Policy,
+  both Cross-Origin-*-Policy headers and `Cache-Control: no-store`. There is no
+  CORS layer. One log line per request: method, path, status, latency.
+- **Nothing credential-shaped is in a response**: no Secret data, token,
+  kubeconfig, raw pod log or unredacted upstream error.
 
-**The listener speaks HTTP/1.1 only, and a connection is on a clock from its
-accept to its close.**
+**Durable `POST`s require `Idempotency-Key`** (8 to 128 visible ASCII
+characters). The object's name is a per-route prefix plus 130 bits of
+`SHA-256(issuer, subject, namespace, route, key)`, so a lost response, a double
+click, a restart or a second replica all target one name. The same key and
+request replays as `200` with the same UID; the same key with a different
+request is `409 idempotency_conflict`; an object this scope did not create is
+`409 state_conflict` and is never adopted. The raw key is never stored or
+logged. A new operation uses a new key. A member added to a create body later
+is left out of the request hash when absent, so an old-shape retry replays.
 
-- **The head.** A connection has ten seconds from the moment it is accepted to
-  send a complete request head, and ten seconds again after each answer on a
-  keep-alive connection; past that the server closes it, whether it sent part
-  of a head or nothing at all (R4; FX-24 extended it to a connection that
-  sends no byte). A head larger than 32 KiB is refused.
-- **A stall, on the answer (FX-24b).** A connection may wait on its client
-  for thirty seconds with no progress at all on an answer the client has
-  stopped reading. Past that the write fails and the connection ends. The
-  clock runs only while the server is waiting on the client and restarts on
-  every byte the kernel takes, so a slow but steady reader keeps its
-  connection for as long as its answer takes, and an operation event stream
-  that is being read is never cut by it: between heartbeats it has nothing to
-  write. It also ends a client that reads a byte at a time: the kernel stops
-  taking bytes for a client that takes almost none, so one that reads a byte,
-  or 16 KiB, every twenty seconds is ended at 35.1 s on macOS, the same as one
-  that reads nothing (measured on the built binary, FX-24c).
-- **A window, on a request body (FX-24b; its floor, FX-24c).** A body the
-  server is reading must bring at least 32 KiB in every thirty-second window
-  while it is still arriving: one that stops, or trickles below that (a byte
-  every twenty seconds, say), is answered `400 malformed_request` ("stopped
-  arriving, or arrived too slowly") at the end of the window and the
-  connection closes after the answer. A body that ends inside its window is
-  never cut, however small.
-- **A JSON body's total (FX-24b).** A mutation body must also arrive whole
-  within sixty seconds of the server starting to read it, so one that keeps
-  just above the floor cannot hold a connection either: it is answered
-  `400 malformed_request` ("not received within 60 seconds") and the
-  connection is closed after the answer.
-- **The ceiling.** At most 256 connections are served at once, and further
-  ones wait in the kernel's listen queue until one closes. Silent sockets
-  cannot hold that ceiling for longer than the ten-second head deadline, nor
-  clients that stop reading an ordinary answer for much longer than the
-  thirty-second stall: the kernel still accepts a stopped reader's bytes for a
-  few seconds, so a connection is held until the stall clock, which starts at
-  the last byte the kernel took, runs out (about 35 s measured on macOS).
-- **One peer's share (FX-24c).** In shared mode with a trusted proxy
-  configured (`trustedProxyService` or `trustedProxyCidrs`), a peer outside it
-  — a pod dialling the pod IP, a kubelet probe, a `kubectl port-forward` — may
-  hold at most 32 connections at once. Its next one is closed as soon as it is
-  accepted, before anything is read, and the console logs `closed a
-  connection at once` (at most once every ten seconds). The trusted proxy is
-  never capped, because every browser behind the ingress arrives from its
-  address; and **with no trusted proxy configured nobody is capped**, because
-  the console cannot then tell its ingress from any other peer. Trust is
-  decided when a connection is accepted: while a `trustedProxyService` set is
-  stale (*The ingress controller by its Service*, below) it trusts nobody, so
-  the ingress is capped like any peer — and `/readyz` is false then, which
-  takes the pod out of its Service. localAdmin mode has no cap: every peer it
-  serves is the administrator's own machine. The start line `logweir-api
-  started` carries `per_peer_cap` (32, or 0 when off), and a shared console
-  with no trusted proxy also warns at start that the cap is off. The chart
-  refuses to publish a shared console through its Ingress without
-  `trustedProxyService` or `trustedProxyCidrs`, unless `api.console.trustedProxy:
-  none` opts out by name ([chart README](../charts/logweir/README.md)).
-  Who shares one share, or escapes it:
-  - **A service-mesh sidecar** that re-originates inbound connections (Istio's
-    from `127.0.0.6`, Linkerd's from `127.0.0.1`) makes every client, the
-    ingress included, one peer at that address, and the console is then capped
-    at 32 connections in all — the refusal warning names that address. Either
-    name it in `trustedProxyCidrs` (a `/32`), which turns the cap off for every
-    client behind the sidecar and leaves the mesh's own policy as the bound, or
-    opt out with `trustedProxy: none`.
-  - **A wide `trustedProxyCidrs` range** trusts, and so never caps, every
-    address in it. Without `requireTrustedProxy` the ranges have no width floor,
-    so a pod range turns the cap off for every pod in it: keep the range to the
-    ingress controller's own pods, or name its Service instead.
-  - **Kubelet probes** come from the node's address, which hostNetwork pods
-    and node processes on that node share: one of them holding 32 connections
-    would fail the console's probes on that node. That needs node-level access
-    already.
-- **An event stream whose client stops reading** is the exception. Its
-  heartbeats are too small to fill the kernel's buffers, so no write is ever
-  pending and the stall clock never starts: the stream is held to its own
-  300-second ceiling, then the ten-second idle deadline, up to 310 s. An actor
-  may hold at most four streams per namespace.
+**Writes to an existing object take a precondition instead**:
+`expectedGeneration` (`PUT …/schedules/{name}`, `:update-access`) or
+`expectedResourceVersion` (`:set-suspension`, on the whole object, so a
+controller status write in between is `412 precondition_failed`: read and
+resend).
 
-**What these bounds do not stop.** A client that reads fast enough to keep
-the kernel taking its answer keeps each connection for as long as its
-pipelined requests last: on macOS one reading a steady 16 KiB/s kept its
-connection for the whole 82 s of its answers, while one reading 16 KiB every
-twenty seconds was ended at 35.1 s. No window on the answer can tell such a
-client from an honest slow reader: the server sees a reader's progress only
-when the kernel lets it write again, in bursts the size of a send buffer, and
-a 32 KiB window on the answer cut that steady 16 KiB/s reader at 32.5 s
-(FX-24c measured both). What bounds it is the per-peer share above: one
-address outside the trusted proxy holds 32 connections at most, so holding all
-256 takes eight addresses. With no trusted proxy configured, or in localAdmin
-mode (where every peer is the local machine), one client can still hold every
-connection that way. In shared mode only an enforcing NetworkPolicy keeps such
-peers away from the API pod, and `api.console.networkPolicy.enabled` is off by
-default (Docker Desktop accepts a NetworkPolicy without enforcing it). A
-client that comes through the ingress can do far less, because the ingress
-does not relay pipelined requests to the pod (the FX-24b review).
-HTTP/2 is not served: a client that opens with the HTTP/2 preface (prior
-knowledge, `h2c`) is closed at its first line. A shutdown signal gives open
-connections ten seconds to finish, then drops them and exits 0.
+**Lists** default to `limit=50`, at most 200: `{items, page: {limit,
+nextCursor, snapshot}}`. A cursor is MAC-authenticated with the cursor key and
+binds the actor, route, namespace, filters, a fifteen-minute expiry and the
+Kubernetes continue token. Tampered or replayed elsewhere is
+`400 cursor_invalid`; expired is `410 cursor_expired` (restart the list).
+Filters are exact names and label selectors.
 
-**`errors[].field` is a path and nothing else** — `topics[2]`,
-`scheduleRef.name`, `access.archiveWrite.mode`, or a header or query-parameter
-name. It never carries a parenthetical or any other note a client would have to
-parse; what went wrong is `message`, which is a sentence. A console may match
-on it exactly.
+**Connections.** HTTP/1.1 only; an HTTP/2 preface is closed at its first line.
 
-**One condition has one `errors[].code`, on every route that can produce it.**
-An expression the cadence engine cannot read is `schedule: schedule_invalid`
-from `POST .../schedules`, `PUT .../schedules/{name}` and
-`GET /api/v1/cadence-previews` alike; a zone it cannot resolve is `timeZone:
-timezone_unknown` — from all three of them, since PLAT-10.1 gave the create
-route a `timeZone` as well. (`POST .../schedules` answered `invalid_cron` before
-D1 W6, which meant a console highlighting the cadence input worked on the edit
-form and the preview and silently did not on the create form, for the same typo.)
+| bound | value | past it |
+|---|---|---|
+| request head | 10 s from accept, and after each answer on keep-alive; 32 KiB | closed |
+| a stalled answer | 30 s with no progress (about 35 s on macOS) | the connection ends; a steady reader and a read event stream are never cut |
+| a request body | 32 KiB per 30-second window | `400 malformed_request` ("stopped arriving, or arrived too slowly") |
+| a JSON body's total | 60 s | `400 malformed_request` ("not received within 60 seconds") |
+| connections | 256 at once | wait in the listen queue |
+| one peer | 32 at once, in shared mode with a trusted proxy configured | closed at accept; the log says `closed a connection at once` |
+| event streams | 4 per actor per namespace; a stopped reader holds one up to 310 s | `429 rate_limited`, `Retry-After` |
 
-**Every response** carries `X-Request-ID` — freshly minted; a client-supplied ID
-is ignored — a Content-Security-Policy, `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, a restrictive
-Permissions-Policy, both Cross-Origin-*-Policy headers, and `Cache-Control:
-no-store` unless a static asset set its own. One log line per request records
-the method, path, status and latency — never a query string, a header value or a
-body.
+**The per-peer cap.** The trusted proxy (`trustedProxyService` or
+`trustedProxyCidrs`) is never capped. With none configured nobody is capped: the
+start line `logweir-api started` shows `per_peer_cap` 0 and a warning. While a
+`trustedProxyService` set is stale the console trusts nobody, so the ingress is
+capped and `/readyz` is false. localAdmin mode has no cap. The chart refuses a
+shared console behind its Ingress with no trusted proxy, unless
+`api.console.trustedProxy: none` opts out
+([chart README](../charts/logweir/README.md)).
 
-**Three guards run before any handler.** Any `Impersonate-*` header is refused
-with `400 header_not_allowed` naming it; this service never impersonates, under
-any configuration. A `Host` this listener does not serve is `421`, which is what
-stops DNS rebinding against a loopback listener. And an unsafe method must carry
-an `Origin` exactly equal to `publicOrigin` (`403`) and `Content-Type:
-application/json` (`415`). The identity stage adds its CSRF check at the same
-seam.
+- A **service-mesh sidecar** that re-originates connections (Istio `127.0.0.6`,
+  Linkerd `127.0.0.1`) makes every client one peer: name it as a `/32`, or opt
+  out.
+- A **wide `trustedProxyCidrs` range** caps nothing inside it. Keep it to the
+  ingress controller's pods. **Kubelet probes** share their node's address.
+- **What the bounds do not stop:** a fast-reading client keeps a connection
+  while its pipelined answers last. The per-peer cap bounds that to 32 per
+  address; with no trusted proxy, or in localAdmin mode, one client can hold
+  all 256. Only an enforcing NetworkPolicy keeps such peers away, and
+  `api.console.networkPolicy.enabled` is off by default.
 
-**Durable `POST`s require `Idempotency-Key`**, 8–128 visible ASCII characters,
-and Kubernetes is the only store. The object's name is a per-route prefix plus
-130 bits of `SHA-256(issuer, subject, namespace, route, key)`, so a lost
-response, a double click, a restart or a second replica all target the same
-name and the API server's `AlreadyExists` is what makes a second object
-impossible. The object records the scope hash and the canonical request hash:
-the same key with the same request replays as `200` with the same UID, the same
-key with a different request is `409 idempotency_conflict`, and an object that
-this scope did not create is `409 state_conflict` and is never adopted. The raw
-key is never stored or logged — only hashes derived from it. A deliberately new
-operation uses a new key.
+## Operations
 
-`:set-suspension` is the exception: it takes no `Idempotency-Key` and instead
-requires `expectedResourceVersion`, which is the value last read. That
-precondition is on the **whole object**, so a controller status write between
-your read and your write makes it `412 precondition_failed`: read the schedule
-again and resend. That is the contract working, not a fault.
+A backup or restore answers an `OperationViewResponse`; a discovery or a
+preflight a `CheckOperationResponse`, with no result, evidence or verification.
+**An absent member means "not observed", never a flattering default**; each
+member's rule is in its schema description. Beyond those:
 
-**Lists** default to `limit=50`, maximum 200, and answer `{items, page:{limit,
-nextCursor, snapshot}}`. A cursor is opaque and authenticated with the
-persistent key from `cursorKeyFile`; it binds the actor, route, namespace,
-filters, a fifteen-minute expiry and the Kubernetes continue token. The MAC is
-checked first and in constant time, so a tampered cursor is `400 cursor_invalid`
-whatever else it claims, and a valid cursor replayed on another route or
-namespace is `cursor_invalid` too. Expiry, and a Kubernetes `410`, are `410
-cursor_expired` with an instruction to restart the list. Filters are exact name
-and label selectors; there is no substring search, because implementing one
-would mean collecting an unbounded list.
+- An unrecognised phase is `unknown/UnrecognizedPhase`. An active run not
+  observed for 300 s, or an object with no status 120 s after creation, is
+  `stale: true` and `unknown/StatusStale`; a terminal object never goes stale.
+- A stage never overrides a terminal phase: `phase`, `exitCode` and `outcome`
+  own the outcome. An `outcome` is the scorecard's claim until
+  `verifiedSuccess`.
+- `teardown.deleted` and `lastEnforcement.deleted` are lists of names.
+- The Job name, pod name and container state are not published.
 
-**Nothing credential-shaped is in a response.** No Secret data, no
-service-account token, no kubeconfig, no raw pod log and no unredacted upstream
-error. A connection projection carries the credential Secret's *name* and
-nothing from inside it.
+**The event stream** accepts no query parameter (`malformed_request`), so no
+token rides in the URL. It is authorized once, at subscribe. A malformed
+`Last-Event-ID` is `malformed_request`. It ends with `end` and a reason:
+`maxDuration` after 300 s (reconnect), `settled` once a terminal operation's
+verification settled, `vanished` when the object is deleted. Past the stream
+ceiling, fall back to polling the read route.
+
+## Schedules
+
+`GET /api/v1/cadence-previews` runs the scheduler's own `weirkeeper::cadence`
+module; the browser never evaluates cron. A repeated local time fires **both
+instants**. A shorter list than `count` is a real answer. On a saved schedule,
+**`status.nextRuns[0].at` in the past is the staleness signal**, and an absent
+`status.activeRuns` means not computed yet.
+
+**`POST …/schedules`** takes the whole policy: `schedule`, `timeZone?`,
+`sourceRef` (set once), `topics` xor `allUserTopics`, `archive` xor
+`destinationRef`, `concurrencyPolicy?`, `startingDeadlineSeconds?`,
+`catchUpPolicy?`, `retry?`, `activeDeadlineSeconds?` and `suspended`. Absent
+means UTC, 3600, `None`, no retries, 3600 and `Forbid`. The name is
+`sch-<26 base32>`. An empty selection is `topics: selection_invalid`; more than
+256 named topics is `count_out_of_range`. `retention` is withdrawn in v1
+(release-notes item 78): it is stored as `spec.retention`, reports nothing, and
+the schedule carries `RetentionReportWithdrawn`. Use a `RetentionPolicy`.
+
+**`PUT …/schedules/{name}`** takes the same policy with `expectedGeneration`
+and `topicSelection`, and **a field omitted is removed**. It changes the future
+only: an existing `Backup` keeps its copied policy and its Job.
+
+- `sourceRef` is refused before anything is read: `422`,
+  `sourceRef: field_immutable`. A different cluster is a different schedule.
+- A different current generation, or an edit landing between read and write, is
+  `412 precondition_failed`. A console that sees `generation` absent asks for a
+  reload and never sends `expectedGeneration: 0`.
+- The CRD's own rules come back as `422` with the CRD's message:
+  `topicSelection: selection_invalid`, `retry.maxRetries: schedule_invalid`
+  (retries on a name over 29 characters), `destinationRef:
+  destination_sentinel_mismatch` (a shape rule, not `field_immutable`). An
+  unrecognised refusal is a generic `422`, its reason in the service log.
+- The sentinel `archive.url` (`logweir-destination://<name>`, no `secretRef`)
+  is built by the route and never accepted from a body.
+- "Omitted is removed" covers the fields this build knows. Upgrade CRD, then
+  controller, then API; an older API preserves a newer CRD's field and the
+  response shows it.
+
+**`POST …/backups`** (Back up now) creates the manual `Backup` that
+`kubectl create -f config/samples/backup-manual.yaml` creates, named
+`logweir-manual-<26 base32>`. From a schedule, `{scheduleRef: {name,
+expectedGeneration?}}` copies its current revision; a policy field beside it is
+`422`. Ad hoc, `{sourceRef, topicSelection, legacyArchive xor destinationRef,
+deadlineSeconds?}` needs no schedule. Either may carry `readinessAcknowledgement
+{preflight, state}`, which becomes the annotation `logweir.dev/readiness-ack`
+and nothing more: readiness is recorded, never obeyed.
+
+- A suspended schedule, an active `Forbid` run or a schedule deleted meanwhile
+  never blocks the run.
+- `409 policy_changed`: `expectedGeneration` names a superseded revision. The
+  problem's `policy` member carries `currentGeneration` and
+  `currentRunPolicySha256`; confirming again is a new intent.
+- `201` means the `Backup` exists. At most
+  `runs.maxManualBackupsActivePerNamespace` (default 4) manual runs hold a
+  runner slot; the rest wait `queued` / `ConcurrencyLimited` with nothing
+  created, in creation order.
+
+## Restores
+
+`POST …/restores` stores `planBytes` unchanged, checked against `planHash`.
+There is no cancel and no delete for a `Backup` or a `Restore`. At most
+`runs.maxManualRestoresActivePerNamespace` (default 2) admitted manual restores
+run at once per namespace; the rest wait `queued`, and an authorization that
+expires while queued is refused `AuthorizationExpired`.
+
+### Approval policy
+
+The console reads the installation's approval-policy document
+(`approvalPolicyFile`, the file the controller mounts) and its
+`ConsoleConfirmation` key (`confirmationKeyFile`). Exit 2: a served namespace
+bound to a policy without the key; a key file that does not exist, unless
+`confirmationKeyManaged: true` says the identity hook writes it (then a confirm
+request before it exists is `409 policy_mismatch`, nothing created);
+`confirmationKeyManaged` without `confirmationKeyFile`.
+`installationIdentity: {namespace, publicConfigMap}` names where the
+fresh-install marker is read. The modes are in [kubernetes.md](kubernetes.md).
+
+**The create's `authorization` says where the submission goes next:**
+
+| namespace | the console | `authorization.state` | next |
+|---|---|---|---|
+| unbound (`legacy-governed-v1`) | signs nothing | `awaitingApproval`, `legacy: true` | the approval page |
+| `confirm` (`Ordinary`) | signs authorization document v2 (UID, plan hash, requester, policy digest) as the `Approval` `spec.approvalRef` names | `confirmed` | the operation view |
+| `strict` (`Governed`) | signs the same as `<approvalRef>-confirmation`, which authorises nothing | `awaitingApproval`, `confirmationName` | the approval page, where an approver countersigns |
+| `two-person` | as `strict` | `awaitingApproval`, `operatorMode: two-person` | the console approval below |
+
+A replay completes an interrupted sequence, never signs twice and never adopts
+an `Approval` this Restore did not produce (`409 state_conflict`). A localAdmin
+console confirms as `urn:logweir:local-admin#admin`. Refused before anything is
+created:
+
+| request | answer |
+|---|---|
+| a `confirm` namespace before the console's key exists | `409 policy_mismatch` |
+| the fresh-install marker cannot be read (not a `404`) | that read's error |
+| `strict` or `two-person` without `ticket`, or a blank, padded or over-128-character one | `422`, `ticket` (`required` / `invalid`) |
+| `ticket` in an unbound namespace | `422`, `ticket`, `not_accepted` |
+| `strict` or `two-person` with `approvalRef.name` over 240 characters, or ending in `-confirmation` | `422`; the suffix is `reserved_suffix` |
+
+**`POST …/restores/{name}/approval`** takes `{"sidecarBytes": "…"}`, the file
+`logweir drill countersign --document <approvalBytes> --confirmation
+<sidecarBytes> --key <privkey> --out approval.sig` wrote over
+`GET …/approvals/<approvalRef>-confirmation/packet`. In an unbound namespace it
+takes `{"approvalBytes", "sidecarBytes"}` from `logweir drill approve`, stored
+byte for byte; it verifies no signature, but refuses a sidecar that is not a v1
+approval's (`409 policy_mismatch`), a `plan_hash` that is not the Restore's
+(`422`, `plan_mismatch`) and a missing document (`422`, `required`). The
+controller verifies every signature, the key's usage and that the approver is
+not the requester before any Job.
+
+| refusal | when |
+|---|---|
+| `403 forbidden` | not an Approver here, or the submitter is the requester, whatever other roles it holds |
+| `409 policy_mismatch` | a `confirm` namespace; a confirmation for another UID, plan or policy digest (submit the Restore again); a `two-person` namespace (`countersignature_not_accepted`) |
+| `404 not_found` | no such Restore, or no console confirmation |
+| `409 state_conflict` | expired, or another Approval holds the name |
+| `422 validation_failed` | not a sidecar or no added signature; `approvalBytes` under `strict` (`not_accepted`); private-key text in either field (`private_key`, never echoed) |
+
+#### Two-person approval in the console (PROD-16.2)
+
+A `two-person` namespace takes its approval from a second signed-in person.
+More refusals at `POST …/restores`:
+
+| request | answer |
+|---|---|
+| through a localAdmin console | `409 policy_mismatch` |
+| a requester identity that cannot be compared (empty, over 255 characters or non-ASCII; an issuer with `#`; a Kubernetes system identity) | `409 policy_mismatch` |
+| a ticket that is not printable ASCII, or over 1024 characters | `422`, `ticket`, `not_showable` |
+| a scope that cannot be shown whole: over 1024 topics or 8192 partitions, a non-Kafka name, an unshowable value, an unparseable plan, a notification sink | `422`, `planBytes`, `scope_incomplete` |
+
+`GET …/approval-request` verifies the console's own signature on the stored
+request before projecting anything, and `approve.offered` is advisory.
+`POST …/console-approval` takes `{"confirmationSha256": "sha256:<64 hex>"}` and
+nothing else: `201` with the `Approval`, or `200 replayed: true` for the same
+approver's second click. Checked in order:
+
+| check | refusal |
+|---|---|
+| session; Approver role here (an Administrator is not one unless bound) | `401`; `403`, or `404` with no grant |
+| exact `Origin`, CSRF token, JSON | `403 origin_mismatch`, `403`, `415` |
+| a shared console | `409 policy_mismatch` (`local_admin_cannot_approve`) |
+| a two-person policy | `409 policy_mismatch` (`not_a_console_approval_policy`) |
+| the console's signature, naming this Restore, UID, plan and policy | `409 policy_mismatch` (`confirmation_not_verified`, `confirmation_not_bound`); `404` (`confirmation_absent`) |
+| not expired; hash matches; scope complete now | `409 state_conflict` (`request_expired`, `request_changed`, `scope_incomplete`) |
+| not the requester (issuer lower-cased without a trailing `/`; subject lower-cased) | `403` (`self_approval_forbidden`) |
+| inside the window; nothing holds the name | `409 state_conflict` (`approval_outside_window`, `already_approved`) |
+
+The stored `Approval` is the request with `approver` and `approvedAt` added, as
+`formatVersion` 2.2.0, signed by the console's key. The audit notes of a click
+are `requester`, `approverPrincipal`, `requesterIssuer`, `requesterSubject`,
+`requesterSha256`, `approverIssuer`, `approverSubject`, `approverSha256`
+(a note is cut at 200 bytes, so the digest tells long identities apart),
+`planHash`, `policyDigest`, `scope` (`complete` or `incomplete:<reason>`),
+`scopeTopicsShown`, `scopeTopicsInPlan`, `separation` (`distinct` or
+`refused`), `approvedAt`, `expiresAt`, `approval`, and on a refusal the
+`failureCode` above.
+
+### Topic mapping and original names
+
+`topicMapping` declares the previewed rows; it is never stored, is defined for
+`newTopic` mode only, and is checked against `target.topicNaming.prefix` when
+that prefix is legal. `target.topicNaming.originalName: true` restores under
+the source names into topics that do not exist; it needs `coverage: complete`.
+In a `confirm` namespace the request also carries
+`originalNameConfirmation: {typedTopics: […]}`, the names re-typed, which the
+console signs; the route reads only `source.topics` from the plan for this.
+Such a document is `formatVersion` 2.1.0.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `topicMapping` | `unsupported_for_mode`, `empty`, `too_many` | `scratch` mode; no rows; over 1000 rows |
+| `topicMapping[i].source` | `invalid_topic` | not `^[a-zA-Z0-9._-]{1,249}$` |
+| `topicMapping[i].target` | `mapped_name_illegal`, `mapping_identity`, `mapping_mismatch`, `duplicate_mapping` | illegal name; target equals source without `originalName`; not `prefix + source`; two rows, one target |
+| `target.topicNaming.originalName` | `requires_new_topic` | `scratch` mode |
+| `target.topicNaming.prefix` | `prefix_with_original_name`, `invalid_prefix` | a prefix with `originalName`; otherwise empty, over 128 characters or illegal |
+| `coverage` | `original_name_requires_complete` | `originalName` without `coverage: complete` |
+| `approvalBytes` | `approval_subject_mismatch` | the signed `approval_subject` is not the Restore's |
+| `originalNameConfirmation.typedTopics` | `typed_topics_required`, `typed_topics_mismatch` | missing; not exactly the plan's `source.topics` |
+| `originalNameConfirmation` | `not_accepted` | on any other request |
+| `planBytes` | `invalid` | a plan that does not parse, where the route reads it |
+
+### The restore's coverage (PROD-08.1a)
+
+`coverage: complete` and `completeMaxRecords` declare what the plan says; the
+controller ends a mismatch `Failed` / `ExecutionSpecInvalid`.
+`completeMaxRecords` below 1 is `out_of_range`, and without complete coverage
+`requires_complete_coverage`. Complete coverage costs about a minute per GiB of
+one-KiB records, against about five seconds sampled. **`covered: false` is
+never a pass** (`CompleteNotCovered`). `coverage`, `timeBasis`, `selection` and
+`targetTopicsAppeared` are claims of the signed scorecard, described in the
+OpenAPI document.
+
+## Destinations and credentials
+
+The create checks the location rules first: `422 destination_invalid`, one
+field error per rule (`bucket_invalid`, `endpoint_not_origin`,
+`transport_scheme_mismatch`, `insecure_http_requires_http_endpoint`,
+`ca_bundle_requires_tls`, `prefix_reserved`, `addressing_unsupported_by_engine`,
+`grant_mode_fields`). Location and transport are immutable. A second
+`default: true` is `409 state_conflict`; a default set by hand with only the
+annotation is honoured on read but not seen by that check. `:update-access`:
+a stale generation is `412`, a rejected rotation
+`409 destination_location_immutable`, a CA on plaintext
+`409 transport_downgrade_forbidden`. `POST …/destinations:from-legacy` is
+withdrawn in v1 (release-notes item 75).
+
+### Credentials
+
+**A credential is entered once and never named.**
+
+- **Connections:** `auth.credential` carries `password` (`scramSha512`,
+  `scramSha256`, or `plain`, which needs TLS: else `422 plain_requires_tls`) or
+  unencrypted `certificatePem` and `privateKeyPem` (`mtls`). It becomes the
+  Secret `<connection>-credential`, owned by the connection and carrying its
+  `logweir-binding`. A private CA is a ConfigMap key.
+- **Destinations:** `access.<role>.secret.new` becomes `lwd-<destination>-<role>`
+  (type `logweir.dev/object-store-credential`), owned and bound the same way.
+  `:update-access` writes a new value under `lwd-<destination>-<role>-<8 hex>`
+  and leaves the superseded Secret for you to delete; it accepts
+  `secret.existing` only for a Secret the destination already names.
+- Naming any other existing Secret (`auth.credentialRef`, `secret.existing` on a
+  create) is `422 existing_credential_refused`. Every runner enforces the
+  binding however the object was written.
+- **A taken name is `409 state_conflict` and nothing is written.** Every name is
+  checked first with a `dryRun: All` create carrying no data, and the refusal
+  names each one. To rotate, use `:update-access`, or change the Secret out of
+  band keeping its `logweir-binding` key.
+- **The retry contract.** The destination is written before its Secrets. If a
+  Secret write fails, **repeat with the same `Idempotency-Key`**; a new key is
+  refused. The audit line separates `credentialSecretsCreated` from
+  `credentialSecretsReplayed`. A name taken by someone else in between is
+  refused with the Secrets already created, which you delete before retrying.
+- **No digest covers a value.** Write-only fields hash as `<write-only>`, so a
+  value is not part of a create's identity. An object an older build created
+  replays as `409 idempotency_conflict`; on such a destination remove the old
+  hash (`kubectl annotate backupdestination <name>
+  api.logweir.dev/request-sha256-`) or rotate the key.
+
+### Destination access test
+
+`:test` probes every configured grant. With `writeProbe: createOnlyMarker` it
+creates `logweir/readiness/<uid>.json` as the `evidenceWrite` grant, which
+answers `destination.evidenceWritable`; with `disabled` the row is
+`WriteNotProbed`. `destination.evidenceReadable` is the `evidenceRead` grant's
+answer, and `destination.archivePrefixWritable` is never probed.
+`destination.credentialBound` (blocking) is `notReady` /
+`CredentialBindingMismatch` for a grant whose Secret is unbound or bound to
+another object, naming the field, destination and Secret.
+
+## Checks
+
+**Topic inventory.** The API reads the controller's immutable chunks by the
+names the status records and verifies each (owner, immutability, digest), or
+answers `409 result_integrity_failed`. A successful list is never called
+complete: `attestedComplete` without an `attestation` is served as `unknown`,
+with `attestationMissing` in `basis`.
+
+**Readiness checks.** A body names one `operation` (`backup`, `restore`,
+`destinationAccess`, `sourceConnection`) and that block only, else `422`
+naming both. A restore check names `recoveryPoint` or `catalogPoint`, not both
+(`422 exactly_one`); a `pointId` that is not `lwp1-` plus 32 lowercase hex is
+`422 invalid_point_id`. `applicable`, `stale` and `staleReasons` are recomputed
+on every read against the `?planHash=` you send; the verdict is advisory.
+`caBundleChanged` and `inputsDigestChanged` are reserved: nothing emits them,
+so do not branch on them. Anything the API could not compare is
+`unverifiable`, never applicable. The installation policy digest is compared
+by the controller (`staleBasis` `policyDigest:byController`). A readiness key
+replays only while its check can still be the answer; send a new key once it
+is expired, inapplicable, `failed` or `cancelled`, and one per click for a
+connectivity test.
+
+## Catalogs, retention, trust
+
+No response carries a credential. An archive credential is published by name
+(`legacyArchive.credentialRef`), a deletion credential as
+`credentialConfigured: true`, and every archive URL without userinfo.
+`/signers` offers no trust button: an administrator adds a key with
+`kubectl apply`. The API neither sets nor shows `spec.consumerGroups`; set it
+with `kubectl`. Retention and catalog members are described in the OpenAPI
+document; nothing in a retention evaluation was deleted.
+
+### Trust
+
+A key's state is the controller's verdict only while its evaluation is fresh;
+otherwise it is `unknown`, which is not `valid`. `GET /api/v1/trust-policies`
+needs the administrator role in at least one namespace and serves only the
+policies governing a namespace the reader administers, plus the installation
+`default`; anything else is `404`. A console reads
+`capabilities.trustPoliciesRead` from the union of its grants. Trust writes are
+`kubectl apply` and the `logweir trust` helpers.
+
+## The Kubernetes boundary
+
+Every call is a method on one adapter typed over a sealed set: `KafkaCluster`,
+`BackupSchedule`, `Backup`, `Restore`, `Approval`, `BackupDestination`,
+`TopicDiscovery`, `Preflight`, `ProtectionPolicy`, `RecoveryCatalog`,
+`RetentionPolicy`, the cluster-scoped `TrustPolicy` (read only) and a `get` of
+`TrustRoster/default`. No method takes a group, version, plural or path, or
+reaches a Pod, log, exec stream, Job or core `Namespace`. There is no delete.
+
+- `ConfigMap` is `get` only, for documents a check owns. `Secret` is `create`
+  only: no read verb exists, so a credential cannot be read back.
+- `create` on Secrets is wider than the routes until the chart's
+  `admissionPolicy.enabled` fences it to the Logweir credential types.
+- Four updates, each a merge patch with `metadata.resourceVersion`:
+  `spec.suspend`, a schedule's policy, a destination's grants, a check's
+  `spec.cancelRequested`. `spec.sourceRef` and a destination's location have no
+  key in any of them. `tests/linkage.rs` pins the `(verb, resource)` set.
+- Every call has a 10-second deadline (`504 upstream_timeout`). Kubernetes
+  messages are redacted before they are logged and never returned.
 
 ## The static UI
 
-`/ui/` serves an allowlist built once at startup: the top-level `*.html`,
-`*.js` and `*.css` files of the configured directory and the same three
-extensions directly inside `pages/` — the selection `Dockerfile.console` copies,
-and nothing else. `README.md`, the `tests/` directory and its throwaway keypair, any
-other subdirectory, any other extension, dotfiles and symbolic links are never
-in the map. A request path is looked up **exactly**, with no decoding,
-normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
-a traversal to defeat. The bytes a browser receives are the bytes the process
-read at startup; no request performs file-system I/O.
-
-Two entries are the service's own and not files: the page icon
-(`favicon.svg`), and **`runtime.js`**, served compiled in
-(`assets.rs` `CONSOLE_RUNTIME_JS`) in place of the file under `ui/`. It sets the
-empty namespace context the page reads and `window.LOGWEIR_CONSOLE = {servedBy:
-"logweir-api"}`. A failed first `GET /api/v1/session` reads "can't reach the
-service; retry" (console-ux-1 review L1). It carries no credential and nothing
-per request.
+`/ui/` serves an allowlist built at startup: the top-level `*.html`, `*.js` and
+`*.css` files of `uiDirectory` and the same directly inside `pages/`.
+`README.md`, `tests/`, other files, dotfiles and symbolic links are never
+served. Paths are matched exactly, so `/ui/../Cargo.toml` is `404`. The
+service adds `favicon.svg` and its own `runtime.js` (`CONSOLE_RUNTIME_JS`),
+which sets `window.LOGWEIR_CONSOLE = {servedBy: "logweir-api"}`.
 
 ## Shared mode
 
@@ -1954,671 +639,216 @@ kubernetes:
   principal: system:serviceaccount:logweir-system:logweir-api  # recorded on every object
 ```
 
-**`allowedHosts` widens a security guard, so it is not a convenience.** The
-`Host` allowlist is the DNS-rebinding defence: a request arriving under a name
-this listener does not serve is `421`, which is what stops a page on an
-attacker's domain that resolves to the console's address from driving it. The
-allowlist is `publicBaseUrl`'s own authority **plus** whatever `allowedHosts`
-adds, so each entry is one more name a rebinding page may use. Add one only for
-a second name that genuinely reaches this service — a Service DNS name a
-sidecar uses, say — and never a wildcard, which the field does not support.
-`/healthz` and `/readyz` are exempt from the allowlist regardless, because a
-kubelet addresses the Pod by IP; neither reads a header, a cookie or a body.
-
-**The ingress controller by its Service (`trustedProxyService`).** A
-`trustedProxyCidrs` entry for the ingress pod is a `/32` that is wrong the
-moment the pod is recreated, and a range wide enough to survive that trusts
-every other pod the node schedules. Instead of (or beside) the list, name the
-ingress controller's Service:
-
-```yaml
-trustedProxyService: {namespace: traefik, name: traefik}   # its SERVING endpoints are the trusted peers
-```
-
-The console reads that Service's `EndpointSlice`s every five seconds and trusts
-each **serving** endpoint address as a single host — the ingress pods of the
-moment, narrower than any range the width floors admit. A refresh that fails
-keeps the last complete set for at most thirty seconds; after that the Service
-source trusts nobody, browsers get `421` and `/readyz` reports not ready, so a
-stale grant is never silent. Before the first read `/readyz` is not ready
-either. The read is one `list` of `endpointslices` in that one namespace (the
-chart grants exactly that). Whoever can edit that Service, write an
-`EndpointSlice` there, or create or relabel a Pod matching the Service's
-selector there could add an address — the ingress namespace's own
-administrators, who already terminate the console's TLS. An ingress controller
-on `hostNetwork` publishes the node's address, so the console then trusts every
-hostNetwork pod and node process on that node and anything masqueraded to its
-address; accept that knowingly, or decide a `trustedProxyCidrs` `/32` instead.
-
-**A private CA for the issuer (`caBundleFile`, `systemRoots`).** An issuer
-whose certificate a private CA issued — a Dex behind an ingress with an
-internal certificate, an IdP on a corporate PKI — is trusted by naming a PEM
-bundle of that CA's **public** certificates. Its certificates are trust anchors
-*in addition to* the operating system's; `systemRoots: false` drops the system
-roots and is refused without a bundle. The bundle widens who may issue the
-provider's certificate and nothing else: the chain, its validity and the host
-name in the URL are verified exactly as for a public CA, and `iss` is still
-compared for exact equality with `issuer`. The bundle is read before the socket
-binds; a file that cannot be read, holds no certificate, holds a malformed
-block or holds anything but `CERTIFICATE` blocks (a private key mounted by
-mistake) is exit 2. The chart mounts it from a ConfigMap or Secret
-(`api.console.oidc.caBundle`, [charts/logweir/README.md](../charts/logweir/README.md)).
-While the provider has not initialised, the console logs why at `warn` with the
-transport cause — `invalid peer certificate: UnknownIssuer` is a missing
-bundle, a name that does not resolve is a missing `hostAliases` entry. A
-`hostAliases` entry for the issuer must point at an endpoint only the IdP's
-owner can route — its own Service, with TLS terminated by the IdP — never at a
-shared ingress, where an Ingress from any namespace could answer for the
-issuer behind its real certificate ([charts/logweir/README.md](../charts/logweir/README.md)).
-
 A key file is two lines:
+`printf 'version: 1\nkey: "%s"\n' "$(openssl rand -base64 32)" > session.key.yaml`.
 
-```console
-$ printf 'version: 1\nkey: "%s"\n' "$(openssl rand -base64 32)" > session.key.yaml
-```
+- **`allowedHosts` widens the DNS-rebinding guard**: each entry is one more name
+  a rebinding page may use. Add only a second name that reaches this service;
+  there is no wildcard. The probes are exempt.
+- **`trustedProxyService: {namespace, name}`** trusts the serving endpoints of
+  the ingress controller's Service, re-read every five seconds, each as a
+  single host. A failed refresh keeps the last set for thirty seconds, then
+  trusts nobody (`421`, `/readyz` false). Whoever can edit that Service, its
+  `EndpointSlice`s or a matching Pod can add an address. A `hostNetwork`
+  ingress publishes its node's address.
+- **`caBundleFile`** adds a private issuer CA to the system roots;
+  `systemRoots: false` needs a bundle. Chain, host name and exact `iss` are
+  still verified. The console logs why the provider is not usable:
+  `invalid peer certificate: UnknownIssuer` is a missing bundle, an
+  unresolvable name a missing `hostAliases` entry. Point a `hostAliases` entry
+  only at an endpoint the IdP's owner alone can route, never a shared ingress.
 
-### What startup refuses, before it binds a socket
+### What startup refuses
 
-Every one of these is exit 2 with the field named. A console that comes up on
-plain HTTP, or with a key someone rewrote underneath it, is worse than one that
-does not come up at all, because the first two look like they are working.
+Each is exit 2 with the field named.
 
 | refusal | why |
 |---|---|
-| `publicBaseUrl` is not `https://` | TLS at the shared entry point is required, not recommended |
-| `publicBaseUrl` has a path, a trailing slash, userinfo or no host | the redirect URI is this value plus `/auth/callback`; a mismatch is a login that cannot complete |
-| `publicOrigin` is present | shared mode derives the origin from `publicBaseUrl`, so the origin checked and the redirect URI registered cannot disagree |
-| a key file is missing, malformed, or under 32 bytes | there is no default key and no generated one |
-| a key file's `version` is not `expectedVersion` | an **unexpected rotation**. Bumping both is a deliberate act that ends every live session; bumping neither means the file changed behind the service's back |
-| the client-secret file is missing or empty | |
-| an `allowedAlgorithms` entry is not `RS256` or `ES256` | `none` cannot be on the list, so an `alg: none` token has no matching entry |
-| `oidc.issuer` ends in `/`, or carries a query, fragment or userinfo | the issuer is compared for exact equality with the token's `iss` |
-| a plain-HTTP issuer without `oidc.insecureLoopbackIssuer` | and that flag is accepted only for a loopback host, for a local mock provider in development |
-| `oidc.systemRoots: false` without `oidc.caBundleFile` | a client with no trust anchor trusts no provider at all |
-| `oidc.caBundleFile` cannot be read, holds no `CERTIFICATE` block, a malformed one, or any other section | a bundle that adds nothing is never what naming one means, and a private key there is a secret in the wrong place |
-| a role binding names a role that is not one of the four | |
-| a role binding names a namespace outside `namespaces` | |
-| a role binding has neither `groups` nor `subjects` | |
-| a binding string contains `*` or `?` | bindings are EXACT: a `*` would match nothing, so it is refused by name rather than silently granting nothing |
-| `roles.revision` is empty | it is the provenance of every decision in the audit log |
-| `sessionMaxAgeSeconds` outside 60…900 | a stateless session cannot be revoked before it expires |
-| `requireTrustedProxy: true` with neither `trustedProxyCidrs` nor `trustedProxyService` | the entry point would refuse every request and look like an outage |
-| `trustedProxyService` whose namespace or name is not a DNS-1123 label, or in `localAdmin` mode | |
-| `requireTrustedProxy` in `localAdmin` mode | there is no proxy in front of a loopback listener |
-| an in-cluster `kubernetes.principal` that is not `system:serviceaccount:<namespace>:<name>` | the value goes onto every created object; a pod's token can only be a ServiceAccount |
+| `publicBaseUrl` not `https://`, or with a path, trailing slash, userinfo or no host | the redirect URI is this value plus `/auth/callback` |
+| `publicOrigin` present | it is derived from `publicBaseUrl` |
+| missing `oidc`, `roles`, `sessionKey` or `cursorKey`; `localAdmin` or `cursorKeyFile` present | the field is named |
+| a key file missing, malformed or under 32 bytes, or its `version` not `expectedVersion` | no default key; an unexpected rotation. Bumping both ends every session |
+| the client-secret file missing or empty | |
+| an `allowedAlgorithms` entry other than `RS256`, `ES256` | `none` cannot be listed |
+| `oidc.issuer` ending in `/`, or with a query, fragment or userinfo | `iss` is compared exactly |
+| a plain-HTTP issuer, unless `oidc.insecureLoopbackIssuer` with a loopback host | |
+| `oidc.systemRoots: false` without a bundle; a bundle that is unreadable, empty, malformed or holds anything but `CERTIFICATE` blocks | |
+| an unknown role; a binding namespace outside `namespaces`; a binding with neither `groups` nor `subjects`; `*` or `?` in a binding | bindings are exact |
+| `roles.revision` empty | it is in every audit record |
+| `sessionMaxAgeSeconds` outside 60…900 | |
+| `requireTrustedProxy` with no proxy named, or a range wider than `/16` (IPv4) or `/48` (IPv6) | |
+| `trustedProxyService` not two DNS-1123 labels; it or `requireTrustedProxy` in localAdmin mode | |
+| `kubernetes.principal` not `system:serviceaccount:<namespace>:<name>` | it is stamped on every object |
 
-### Every route declares who may reach it
+### Access, identity and readiness
 
-`crates/logweir-api/src/access.rs` holds one declaration per `(method, path)`
-the router serves — `Public` (the probes, the page, the two sign-in steps),
-`Authenticated` (`/session`, `/namespaces`, logout), `Namespaced(actions)`,
-`Command{floor, verbs}` for the `:verb` command routes, or `AnyNamespace(action)`
-for the two routes with no `{ns}` — and one route layer on every route group
-enforces it **before any handler runs**: it authenticates (the CSRF token
-included on unsafe methods), decides the declared actions against the role table
-below, namespace first and before any Kubernetes call, and records the decision.
-The event stream is declared as both `operation.read` and `operation.stream`, so
-it is refused without an identity before any slot is taken or any watch opens.
-
-**A route with no declaration is not served.** A path the router matches but the
-table does not name answers `500 internal_error` (audit code
-`route_access_undeclared`) and its handler never runs; a method registered on a
-declared path without its own declaration is answered `405` by the layer.
-`tests/route_access.rs` holds the table to `src/app.rs` in both directions and
-sweeps every declared route for all four roles, so a route added by any later
-stage inherits the enforcement or fails the build. Handlers keep their own
-checks as defence in depth and for the object-level rules (an operator cancels
-only its own checks; an approver reads only restore preflights).
-
-### The trusted entry point
-
-Identity is the OIDC session and nothing else; see *What can never be an
-identity* below. What the proxy in front of the console may contribute is
-transport facts, and `requireTrustedProxy: true` (with `trustedProxyCidrs`)
-turns that into a refusal:
-
-* a request whose **socket peer** is outside every `trustedProxyCidrs` range is
-  `421 misdirected_request`, audit code `untrusted_entry_point`, note
-  `peerNotTrusted`, whatever headers it carries;
-* a request from a trusted peer that does not carry exactly one
-  `X-Forwarded-Proto: https` — the proxy did not vouch for TLS — is refused the
-  same way, note `forwardedProtoNotHttps`;
-* `/healthz` and `/readyz` are exempt, because the kubelet dials the Pod IP.
-
-The header is read only from a peer the administrator named, and it can only
-refuse: nothing derives an identity, a callback URL or a grant from it, which is
-D0's rule. Without the flag the entry point is exactly what it was.
-
-**What it distinguishes depends on the range, so the range must be the ingress
-controller's own.** kube-proxy keeps the source pod IP through a ClusterIP, so a
-pod that dials the console Service directly arrives with its own address. The
-gate refuses it only if that address is outside `trustedProxyCidrs` — that is,
-only if the range covers the ingress controller's pods and no other pod. A range
-like `10.0.0.0/8` contains the whole pod network of a typical cluster and would
-let any pod through with a forged `X-Forwarded-Proto`, so with
-`requireTrustedProxy` the service (and the chart) refuses any range wider than
-`/16` (IPv4) or `/48` (IPv6) by name; the example ships the documentation range
-`192.0.2.0/24` as a placeholder. Even with a tight range this is defence in
-depth: on a cluster whose CNI enforces NetworkPolicy, the console's ingress
-policy remains the network boundary, and on one that does not (Docker Desktop
-among them), this gate is the only thing that tells the ingress from a pod.
-
-### Readiness
-
-In shared mode `/readyz` **starts** not ready: it becomes ready once Kubernetes
-answers for the service's own identity **and** the provider has initialised —
-its discovery document (naming the configured issuer, with https endpoints) and
-a non-empty key set have been read. After that the provider half stays ready for
-the life of the process. D0 says the API *starts* NotReady if the provider cannot
-initialise, and that a valid session continues to its signed expiry: an IdP
-outage later must not take every replica out of rotation and cut sessions that
-need nothing from the provider. During such an outage sign-in fails closed on
-its own path, and existing sessions keep working until they expire. The body
-still names no endpoint and no reason. Until the provider has initialised, a
-readiness check reads discovery and the key set under the provider deadline
-(*Sign-in*, below), so a provider that stalls adds at most twenty seconds to
-it.
+- **Every route declares who may reach it** in
+  `crates/logweir-api/src/access.rs`: `Public`, `Authenticated`,
+  `Namespaced(actions)`, `Command {verbs}` or `AnyNamespace(action)`. One layer
+  enforces it before any handler, namespace first, and records the decision. An
+  undeclared route is `500 internal_error` (`route_access_undeclared`), an
+  undeclared method `405`; `tests/route_access.rs` holds the table to the
+  router.
+- **Actor identity is exactly `(issuer, sub)`.** Groups and subjects match
+  bindings by exact string; bindings union (the action table is under
+  *Routes*). `X-Remote-User`, `X-Remote-Group(s)`, `X-Remote-Extra-*`,
+  `X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-Groups`,
+  `X-Forwarded-Preferred-Username` and `X-Auth-Request-*` are stripped before
+  routing and named in the audit line. Nothing derives from `Host`,
+  `Forwarded` or `X-Forwarded-*` except the audit field `forwardedFor` and the
+  sign-in rate-limit key, and only from a trusted proxy.
+- **Enumeration resistance.** An ungranted namespace answers what a nonexistent
+  object answers (`404 not_found`), decided before any Kubernetes call.
+  localAdmin mode answers `403 namespace_forbidden`. The audit record has the
+  real reason.
+- **The trusted entry point.** With `requireTrustedProxy: true`, a socket peer
+  that is not a trusted proxy is `421` (audit `untrusted_entry_point`, note
+  `peerNotTrusted`), and so is a trusted peer without exactly one
+  `X-Forwarded-Proto: https` (`forwardedProtoNotHttps`). The probes are exempt.
+  The range must be the ingress controller's own pods: kube-proxy keeps a pod's
+  source address through a ClusterIP.
+- **Readiness** starts false and turns true once Kubernetes answers and the
+  provider initialises (discovery naming the issuer with https endpoints, a
+  non-empty key set). After that a provider outage fails sign-in closed and
+  leaves sessions working until they expire.
 
 ### Sign-in
 
-`GET /auth/login` starts an Authorization Code flow with PKCE S256, `state` and
-`nonce`, and answers `303` to the provider's authorization endpoint. The three
-per-login secrets travel in a sealed, `HttpOnly`, ten-minute
-`__Host-logweir_login` cookie rather than in process memory, so a login begun on
-one replica finishes on another.
+`GET /auth/login` starts Authorization Code with PKCE S256, `state` and `nonce`,
+and answers `303`. The per-login secrets travel in a sealed, ten-minute
+`__Host-logweir_login` cookie, so a login can finish on another replica. `next`
+is accepted only as a path under `/ui/`.
 
-`GET /auth/callback` compares `state` in constant time, redeems it on this
-replica (below), exchanges the code with the verifier, and validates the ID
-token: allowed `alg`, JWKS key by exact `kid`, signature, exact `iss`, exact
-audience (`azp` required when there is more than one), `exp`, `iat` (bounded
-skew, bounded age) and this login's `nonce`. **The browser never receives a
-provider token**: the token response is deserialised into a struct with one
-field, `id_token`, so no access or refresh token exists in the process to
-leak. Every `401` refusal clears the login cookie, and the clear reaches the
-browser (FX-32: the problem rendering keeps the handler's `Set-Cookie`;
-before it, only `Allow` survived); a `429` from the sign-in limit and a `405`
-do not, and should not, because neither ends the attempt. That clear can be
-forced: a `GET /auth/callback` that carries the login cookie with no query,
-or from a cross-site top-level navigation (the cookie is `SameSite=Lax`), is
-refused and clears it, so a page the operator has open can abort a sign-in in
-flight; no sign-in state is burned (such a request cannot name the `state`,
-so none is redeemed; like any callback it counts against that client's
-sign-in limit), and starting again at `/auth/login` works.
+`GET /auth/callback` validates the ID token: allowed `alg`, JWKS key by exact
+`kid`, signature, exact `iss` and audience (`azp` with more than one), `exp`,
+`iat` and `nonce`. **The browser never receives a provider token**; the process
+holds no access or refresh token. Every `401` clears the login cookie. A
+callback with no query, or from a cross-site navigation, is refused and clears
+it.
 
-**A sign-in state is single-use on each replica, and the provider's
-single-use code is the backstop across replicas (FX-13a).** A sealed cookie
-cannot remember being used, so before FX-13a anyone who kept a copy of a
-login cookie could drive the callback with it for its whole 600 seconds, and
-every callback was a token request to the provider authenticated as this
-console's client. Now, once the cookie has opened and its `state` matched,
-**and before the code is exchanged**, the callback redeems the state in the
-console process's own record (in memory, keyed by a digest of the state, one
-lock). Nothing is written anywhere else — no Kubernetes object and no shared
-store — so the console's RBAC is unchanged.
-
-| the callback | the answer | audit `failureCode` | token request |
-|---|---|---|---|
-| the first on this replica to present the state | the sign-in proceeds as before | — | one |
-| any later one on the same replica, at any time in the 600 s, or the loser of two at once | `401 unauthenticated`, "This sign-in was already used. Start again at /auth/login.", login cookie cleared | `login_state_replayed` | none |
-| the first replay on **another** replica, or on this one after a restart or after its entry was forgotten (below) | `401 unauthenticated`, "The sign-in could not be completed.", login cookie cleared: the provider refuses the code it already exchanged (RFC 6749 §4.1.2: an authorization code is single-use) | `code_exchange_failed` | one, refused |
-
-So a replay costs **one token request per replica, and again after that
-replica restarts or evicts the entry**, and it **cannot obtain a second
-sign-in from a code the provider has exchanged**: on the replica that
-redeemed the state it is refused before the provider, and anywhere else the
-provider's single-use code refuses it (that callback then records the state
-there too). Two callbacks at once on two replicas both reach the provider,
-and the provider lets one of them sign in. A replay logs the warning `a
-sign-in state was presented again after this replica redeemed it`, never the
-state.
-
-A callback that reached the exchange has used its state on that replica even
-when the exchange then fails (a stalled or refusing provider, a session too
-large): starting again at `/auth/login` is the retry. A code the provider has
-not consumed is not covered: when the first callback's exchange fails without
-the provider consuming the code, the same cookie and URL still sign in on
-another replica, exactly as before this change.
-
-**The record is bounded and never refuses a sign-in.** It holds at most
-65,536 states per process (a 128-bit digest and an expiry each, about 4 MiB),
-and an entry is forgotten once its login state could no longer open (`iat`
-plus 600 s) and the entries redeemed before it have gone, or earlier when the
-record is full. When it is full, the **oldest is forgotten** to make room —
-never is a new sign-in refused, because a full record that refused would let
-anyone who can mint login cookies (one unauthenticated `/auth/login` each)
-lock every operator out. A replay of a forgotten state is the cross-replica
-case above: one token request, which the provider refuses for a code it has
-exchanged. The audit line of a sign-in that forgot an entry whose login state
-could still open carries the note `usedSignInStates: full`, and the console
-logs `this console's record of redeemed sign-in states is full` once a minute
-while it lasts. The record is per process: a restart forgets it, and the
-provider's code is again the backstop.
-
-JWKS are cached. An unknown `kid` provokes at most one refetch per minute —
-that is what makes a provider's key rotation work without a restart, and what
-stops an attacker-chosen `kid` from becoming a request amplifier. While the
-provider is unreachable the cached keys keep working for a day, then validation
-fails closed.
-
-**Every provider request has a ten-second deadline, its body included
-(FX-28).** Discovery, the key set and the token exchange must each complete —
-connection, request, response head and the whole body — within ten seconds,
-and a document over 512 KiB is refused. A provider, or a path to it, that
-answers a head and then stops sending no longer holds a sign-in, or the
-browser's connection to the console, open: at the deadline the console drops
-its own connection to the provider and answers.
-
-| the request that stalled | the answer | audit `failureCode` |
+| the callback | answer | audit `failureCode` |
 |---|---|---|
-| discovery, at `GET /auth/login` (fetched whenever the hour-long cache is stale; a failed fetch is not cached) | `503 kubernetes_unavailable`, "The identity provider could not be reached. Try again shortly." | `provider_timeout` |
-| the token or the key set, at `GET /auth/callback` | `401 unauthenticated`, "The sign-in could not be completed." | `provider_timeout` |
+| a state already redeemed on this replica (within 600 s) | `401`, "This sign-in was already used. Start again at /auth/login." | `login_state_replayed` |
+| the first replay on another replica, or after a restart | `401`, "The sign-in could not be completed." (the provider refuses a used code) | `code_exchange_failed` |
+| the token or key-set request stalled | `401`, "The sign-in could not be completed." | `provider_timeout` |
+| discovery stalled, at `GET /auth/login` | `503 kubernetes_unavailable`, "The identity provider could not be reached. Try again shortly." | `provider_timeout` |
 
-The console's warning — `the identity provider is not usable` at login, `a
-sign-in was refused` at the callback — says "did not complete a request within
-the 10-second provider deadline". A provider that refused or failed the
-request (a transport cause, a non-2xx status, a document over the cap) is
-still `provider_unreachable` for discovery and the key set and
-`code_exchange_failed` for the token, and the same warning names the cause. The bound is per
-request, not per sign-in: `/auth/login` makes at most one request, so it
-answers within ten seconds; a callback makes at most four (discovery when
-stale, the token, the key set, and one refetch for an unknown `kid`), and one
-that stalls ends the callback, so only a provider that answers every request
-just inside the bound can take a callback to about forty seconds. A key-set
-request that stalls while cached keys are less than a day old is an outage
-like any other: the cached keys are used. A dial (the TCP connect and the TLS
-handshake) has a twelve-second bound of its own, for the dial that outlives
-its sign-in when the client's pool hands the request a connection that freed
-up meanwhile; inside a request the request's ten seconds always end first.
-
-Provider connections carry TCP keepalive (30 s idle, then three probes ten
-seconds apart), so a pooled connection to a provider that has gone silently is
-dropped after about a minute of idleness. A sign-in inside that minute can
-still pick the dead connection up and meet the deadline once.
-
-**What the deadline does not stop.** A failed discovery is not cached, and
-concurrent sign-ins do not share one fetch. While a provider stalls, every
-`/auth/login` whose discovery cache is stale dials the provider and holds its
-browser connection for the full ten seconds. At the sign-in limit (20 requests
-a minute per client, *Rate limits* below) one client holds about three of the
-console's 256 connections on average (20 × 10 s a minute), so about 77 client
-addresses can keep them all busy for as long as the provider stalls. Signed-in sessions are
-not affected by the provider, but they need a connection too. The bound is
-real (ten seconds per sign-in) and it needs a stalled provider first; a
-short negative cache or a single shared fetch is the follow-up.
+- A state is redeemed before the code is exchanged; a failed exchange still used
+  it. Start again at `/auth/login`. The record holds 65,536 states per process
+  and forgets the oldest when full (audit `usedSignInStates: full`; log `this
+  console's record of redeemed sign-in states is full`).
+- Every provider request has a ten-second deadline, body included, and a
+  document over 512 KiB is refused. A refusal is `provider_unreachable`
+  (discovery, key set) or `code_exchange_failed` (token); the warnings `the
+  identity provider is not usable` and `a sign-in was refused` name the cause.
+- JWKS are cached; an unknown `kid` refetches at most once a minute; cached keys
+  outlive a provider outage by a day. Discovery is cached for an hour, failures
+  not at all, so a stalled provider holds each stale-cache login for ten
+  seconds.
 
 ### The session and the CSRF token
 
 | | |
 |---|---|
-| cookie | `__Host-logweir_session`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, **no `Domain`** |
-| contents | session id, issuer, subject, display claim, the group claims that appear in some role binding (unbound groups are not carried), issued/expiry/auth times, key version — **never** a provider token |
-| size | the sealed `Set-Cookie` is measured at sign-in; a session that would exceed the browser cookie limit is refused by name (`session_too_large`) rather than truncated, because dropping a group silently drops a grant |
-| protection | ChaCha20-Poly1305, with the cookie's own name and the key version as associated data |
-| lifetime | at most 15 minutes; there is no refresh token and no server-side session table |
-| CSRF token | `HMAC-SHA-256(session key, session id)`, returned by `GET /api/v1/session`, required in `X-CSRF-Token` on every unsafe method |
-| logout | `POST /api/v1/session/logout` — an unsafe method, so it needs the exact `Origin`, `application/json` and the token like any other mutation |
+| cookie | `__Host-logweir_session`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain` |
+| contents | session id, issuer, subject, display claim, the bindable groups, times, key version; never a provider token |
+| size | too large is refused (`session_too_large`), never truncated |
+| protection | ChaCha20-Poly1305, with the cookie name and key version as associated data |
+| lifetime | at most 15 minutes; no refresh, no server-side table |
+| CSRF token | `HMAC-SHA-256(session key, session id)`, from `GET /api/v1/session`, required in `X-CSRF-Token` on every unsafe method |
+| logout | `POST /api/v1/session/logout`: it needs the exact `Origin`, `application/json` and the token |
 
-Because the session is stateless, a restart or a second replica does not log
-anyone out and nothing has to be replicated. What that costs is that revocation
-before expiry is bounded by the expiry: removing an identity at the provider
-takes effect within fifteen minutes. **Roles are not in the cookie** — they are
-re-derived per request from the carried claims plus the current binding table —
-so removing a role binding takes effect on the *next request*. Because only the
-groups that were bindable at sign-in are carried, a binding *added* for a group
-the session does not carry takes effect at the next sign-in, not the next
-request.
-
-### What can never be an identity
-
-`X-Remote-User`, `X-Remote-Group(s)`, `X-Remote-Extra-*`, `X-Forwarded-User`,
-`X-Forwarded-Email`, `X-Forwarded-Groups`, `X-Forwarded-Preferred-Username` and
-`X-Auth-Request-*` are **stripped from the request before routing** and recorded
-in the audit line by name only. Stripping rather than ignoring is deliberate:
-ignoring is a property of every reader and a future route can lose it, removing
-is a property of the request. `Impersonate-*` is not ignored — it is refused
-outright with `400 header_not_allowed` naming the header.
-
-No callback URL and no authorization decision derives from `Host`, `Forwarded`
-or `X-Forwarded-*`. A forwarded client address reaches two places, and only
-when the immediate socket peer is a trusted proxy (`trustedProxyCidrs` or
-`trustedProxyService`): the audit field `forwardedFor`, and the bucket of the
-sign-in rate limit (*Rate limits* below). Both take the rightmost
-`X-Forwarded-For` hop none of those proxies added, because everything to its
-left was sent by the client. A bucket can only refuse; it is never an
-identity, a grant or an audit actor.
-
-There is no CORS layer: no response carries `Access-Control-Allow-Origin` or
-`Access-Control-Allow-Credentials`.
-
-### Roles
-
-Actor identity is exactly `(issuer, sub)`. Group claims and subjects map by
-**exact string** to bindings; multiple bindings union.
-
-| action | viewer | operator | approver | administrator |
-|---|:--:|:--:|:--:|:--:|
-| read connections / schedules | ✓ | ✓ | | ✓ |
-| create connection, test, credentials | | ✓ | | ✓ |
-| read destinations / topic discoveries | ✓ | ✓ | | ✓ |
-| create destination, rotate access, test, adopt a legacy location | | ✓ | | ✓ |
-| start / cancel a discovery or a preflight | | ✓ | | ✓ |
-| read preflights | ✓ | ✓ | restore only | ✓ |
-| create schedule, set suspension | | ✓ | | ✓ |
-| read backups / restores / approvals / operations | ✓ | ✓ | ✓ | ✓ |
-| create manual backup, create restore | | ✓ | | ✓ |
-| read the approval packet | | ✓ | ✓ | ✓ |
-| submit a governed approval | | | ✓ | |
-
-**Administrator is deliberately absent from the last row.** An administrator who
-must approve is bound as an Approver as well, and the separation-of-duties check
-then still compares `(issuer, sub)` — not display names, not email claims, not
-key ids. Administrator is not a self-approval bypass.
-
-The governed-approval route is `POST .../restores/{name}/approval`
-(PLAT-19.2); `capabilities.approvalSubmit` follows this row. The route adds the
-separation-of-duties refusal the table cannot express: the console-attested
-requester is refused its own request.
-
-### Enumeration resistance
-
-In shared mode an ungranted namespace answers exactly what a nonexistent object
-answers — `404 not_found`, byte for byte apart from the request id — and the
-namespace is checked **before** any Kubernetes call, so the answer never depends
-on cluster state the actor may not see. In localAdmin mode the more informative
-`403 namespace_forbidden` is kept: there is one actor, it is the administrator,
-and there is nothing to enumerate.
-
-The audit record carries the real reason either way. Hiding a namespace from a
-caller must not also hide an authorization problem from the operator reading the
-log.
+A `401` from `GET /api/v1/session` is `unauthenticated` or `session_expired`.
+Removing an identity at the provider takes effect within fifteen minutes.
+Roles are re-derived per request, so removing a binding takes effect at once; a
+binding added for a group the session does not carry takes effect at the next
+sign-in.
 
 ### The audit record
 
-One JSON object per request on the `logweir_api::audit` tracing target, emitted
-by the middleware so no handler can forget one:
+One JSON object per request on the `logweir_api::audit` target: `auditId`
+(`X-Request-ID`), `method`, `path`, `authenticationMode`, `actorId`,
+`displayClaim`, `sessionIdHash`, `bindingRevision`, `roles`, `namespace`,
+`action`, `resource`, `decision` (default `deny`), `policyDigest`,
+`idempotencyKeyHash`, `requestHash`, `planHash`, `recoveryPoint`,
+`kubernetesPrincipal`, `objectName`, `objectUid`, `objectResourceVersion`,
+`httpStatus`, `latencyMs`, `failureCode`, `peer`, `forwardedFor`,
+`ignoredIdentityHeaders`.
 
-`auditId` (= `X-Request-ID`), `method`, `path`, `authenticationMode`,
-`actorId`, `displayClaim` (kept separate because it is never an authorization
-input), `sessionIdHash`, `bindingRevision`, `roles`, `namespace`, `action`,
-`resource`, `decision`, `policyDigest`, `idempotencyKeyHash`, `requestHash`,
-`planHash`, `recoveryPoint`, `kubernetesPrincipal`, `objectName`, `objectUid`,
-`objectResourceVersion`, `httpStatus`, `latencyMs`, `failureCode`, `peer`,
-`forwardedFor`, `ignoredIdentityHeaders`.
+Every object the API creates carries `api.logweir.dev/actor`
+(`<issuer>#<subject>`), `authentication-mode` (`oidc` or `localAdmin`),
+`action`, `binding-revision`, `kubernetes-principal`, `recovery-point` (for a
+restore), `request-id`, `request-sha256` and `idempotency-scope-sha256`.
 
-**Every durable object the API creates carries its attribution** — CRs and the
-write-only credential Secrets alike — in reserved annotations, stamped by the
-Kubernetes adapter from the request's own audit record so no route passes them
-and none can forget them:
-
-| annotation | value |
-|---|---|
-| `api.logweir.dev/actor` | `<issuer>#<subject>` — never a display name |
-| `api.logweir.dev/authentication-mode` | `oidc` or `localAdmin` |
-| `api.logweir.dev/action` | the product action that authorized the write, e.g. `restore.create` |
-| `api.logweir.dev/binding-revision` | the role-binding revision that decided it (shared mode) |
-| `api.logweir.dev/kubernetes-principal` | the identity the write was made as — what Kubernetes audit records for the same call (`kubernetes.principal`; the chart sets `system:serviceaccount:<namespace>:<release>-api`) |
-| `api.logweir.dev/recovery-point` | for a restore-shaped create: `backupSet=… pointInTime=… source=destination/<name>` (or the archive location with userinfo, query and fragment removed) |
-| `api.logweir.dev/request-id` | the audit ID, `X-Request-ID` |
-| `api.logweir.dev/request-sha256`, `api.logweir.dev/idempotency-scope-sha256` | D0's correlation hashes, unchanged |
-
-A create with no authenticated actor or no decided action behind it is refused
-before anything is sent. Objects created before this change keep their older
-annotation set and still replay: replay compares only the two hashes. None of
-these values is a credential; the recovery point names a destination, never its
-access.
-
-A record that reaches no decision point defaults to `deny`. Never logged:
-cookies, bearer/authorization-code/refresh tokens, CSRF tokens, the raw
-`Idempotency-Key`, Secret values, kubeconfig, approval or sidecar bytes, plan
-bytes, raw pod logs, and object-store URLs carrying userinfo.
-
-This is **attribution, not proof.** Annotations on a created object and lines on
-stdout are correlation; the tamper-evident requester/approver record is the DSSE
-document PLAT-19 owns, and Kubernetes audit supplies the complementary fact that
-the `logweir-api` ServiceAccount made the API call. Retaining these lines is a
-deployment responsibility: stdout alone is not durable evidence.
-
-Dependency log targets (`kube_client`, `kube`, `hyper`, `hyper_util`, `rustls`,
-`tower`, `h2`) are pinned at `warn` **regardless of `RUST_LOG`**, because
-`kube_client` logs the upstream error body verbatim at `debug` — the exact text
-this service redacts before logging it.
+Never logged: cookies, tokens, CSRF tokens, the raw `Idempotency-Key`, Secret
+values, kubeconfig, approval, sidecar or plan bytes, raw pod logs, URLs with
+userinfo. Dependency log targets (`kube_client`, `kube`, `hyper`, `hyper_util`,
+`rustls`, `tower`, `h2`) stay at `warn` whatever `RUST_LOG` says. This is
+attribution, not proof, and keeping stdout is the deployment's job.
 
 ### Rate limits
 
-`/auth/login` and `/auth/callback` are the only routes an unauthenticated caller
-can reach that do work, so they carry a limit of 20 requests a minute **per
-client** (`429 rate_limited` with `Retry-After`; a sign-in is two requests).
-The client is:
+| what | limit per minute | key |
+|---|---|---|
+| `GET /auth/login`, `GET /auth/callback` | 20 | the client (below) |
+| starting a topic discovery / a preflight | 6 / 20 | actor and namespace |
+| `POST …/backups` | `rateLimits.manualBackupsPerMinute`, default 10 | actor, namespace, route |
+| `POST …/restores` | `rateLimits.manualRestoresPerMinute`, default 5 | actor, namespace, route |
 
-* **behind a trusted proxy** — the socket peer is in `trustedProxyCidrs` or is
-  a serving endpoint of `trustedProxyService`, under the same check as the
-  entry point, so a Service set that is not read yet or is stale trusts nobody
-  — the rightmost `X-Forwarded-For` hop that is not itself a trusted proxy:
-  the address the ingress received the request from;
-* **otherwise** the socket peer, and also when that header is absent, ends in a
-  hop that is not an address, or names only trusted proxies. A hop may be a
-  bare address or `address:port` / `[address]:port` (the port is dropped).
+Past a limit the answer is `429 rate_limited` with `Retry-After` and nothing is
+created. Windows are per console process, so two replicas allow twice the rate.
+A run limit of `0` or above `600` is refused at start. A run counts after
+authorization and validation, so a `422` spends nothing and a replay counts.
 
-Only `X-Forwarded-For` is read. Traefik deletes a client's `X-Forwarded-*` and
-appends the client's socket address, but copies an RFC 7239 `Forwarded` header
-through as the client wrote it, so `Forwarded` is never read. An IPv6 client is
-counted by its `/64` (a host may use any address in it); an IPv4 one by its
-address, including an IPv4-mapped address and one in the well-known NAT64
-prefix `64:ff9b::/96`. Hosts behind one NAT address or one `/64` share a
-budget. The audit line notes which key was used, `loginRateKey:
-forwardedClient` or `peer`, never as an actor.
+**The sign-in client** is, behind a trusted proxy, the rightmost
+`X-Forwarded-For` hop that is not a trusted proxy, and otherwise the socket
+peer (audit `loginRateKey`). `Forwarded` is never read. IPv6 clients count by
+`/64`. Past 65,536 tracked clients a new one is served without a window
+(`loginRateUntracked: tableFull`). There is no global budget.
 
-**Per client needs the client's address at the ingress, and trust only in the
-ingress.** Two conditions, both the operator's:
-
-* If kube-proxy or a cloud load balancer replaces the client's address before
-  the ingress sees it (the Traefik chart's default Service with
-  `externalTrafficPolicy: Cluster` on a multi-node cluster, or a load balancer
-  in instance mode), the ingress appends a node address and every client
-  through that node shares one budget. Keep the address with
-  `externalTrafficPolicy: Local`, the PROXY protocol, or an L7 hop in front
-  that both Traefik (`forwardedHeaders.trustedIPs`) and the console trust.
-* A `trustedProxyCidrs` range wider than the ingress's own pods, or an ingress
-  that passes a client's `X-Forwarded-For` through unchanged, lets a client
-  choose its budget — **including another client's**, which lets it spend
-  that client's sign-ins. Without `requireTrustedProxy` the ranges have no
-  width floor, so a range set wide "for logging" took on this meaning with
-  FX-13. Keep the ranges as tight as the gate needs them.
-
-Before FX-13 the key was always the socket peer, which behind an ingress made
-the limit one global budget: about ten sign-ins a minute for everyone, and one
-client could block every sign-in for a minute.
-
-**What the limit bounds, and what it leaves.** It bounds load, not
-credentials: there is no password here, and authorization codes are
-single-use at the provider and bound to the login's PKCE verifier. Each
-sign-in request costs the identity provider at most one request, so nothing
-is amplified. But those requests reach the provider **authenticated as this
-console's client and from its address**, not as the unauthenticated requests
-from many addresses an attacker could send the provider directly. The login
-state is single-use on each replica (FX-13a, *Sign-in* above), so one
-`/auth/login` arms one token request per replica, and one more after that
-replica restarts or evicts the entry, where one cookie used to arm a token
-request on every callback in its 600 s. Still, an
-attacker with many addresses can spend whatever per-client or per-source
-quota the provider gives this console, and the provider then refuses
-everyone's sign-ins for as long as the attack lasts.
-
-A distributed attacker can cause a sign-in outage either way. There is **no
-budget over all clients**, deliberately: a global cap here would guarantee
-the outage at a far lower volume than the provider's quota (the old peer key
-was one client; a 600-a-minute ceiling is 30 addresses, or one IPv6 `/56`).
-Being able to sign in during an incident outranks a tighter bound. What an
-operator does about the residual:
-
-* **Set the provider's per-client limits** for this console's client
-  generously, and know what they are.
-* **Alert** on the audit note `loginRateUntracked` (below), and on refused
-  exchanges: the callback's audit failure is `code_exchange_failed`, and the
-  console's warning `a sign-in was refused` carries the provider's status,
-  e.g. `the provider answered HTTP 429`. A provider that stalls is
-  `provider_timeout` instead (*Sign-in* above). Watch the provider's own
-  throttling metrics for this client too. A burst of `login_state_replayed`
-  is someone driving callbacks with copied login cookies (it costs the
-  provider nothing), and the note `usedSignInStates: full` says a flood of
-  logins has filled a console's record of redeemed states.
-* **Keep a break-glass path** that does not sign in through the provider: the
-  in-cluster administrator mode (`api.console.mode: localAdmin`, reached only
-  by `kubectl port-forward deploy/<release>-api`; *What ships today, and what
-  does not* above, and the chart README).
-
-The counters are **per console process** (two replicas: up to twice the
-allowance) and track at most 65,536 clients per process (about 6 MiB, briefly
-9 MiB as the table grows). Past that, while every tracked window is still
-live, a new client is served **without** a window rather than refused: its
-audit line notes `loginRateUntracked: tableFull`, and the console logs at most
-one warning a minute while it lasts. Only expired windows are ever dropped, so
-no amount of traffic resets another client's count. The threat model is
-written out in `crates/logweir-api/src/auth/ratelimit.rs`.
-
-Starting a transient check is bounded per actor and namespace: six discoveries
-and twenty preflights a minute, `429` with `Retry-After`. The window is **per
-process**, so two console replicas each permit the configured rate; it is a
-politeness bound on how fast one operator can queue check Jobs, not a security
-control. The real ceiling on concurrent checks is the controller's
-`checks.maxActivePerNamespace`, which no API can talk past.
-
-Starting a **manual run** is bounded the same way (P10), keyed by the same
-`(actor, namespace, route)` — the actor being the authenticated
-`issuer#subject`, never a session or a display name, so a second session or a
-re-login shares the window: `POST …/backups` ("Back up now") at
-`rateLimits.manualBackupsPerMinute` (default `10`) and `POST …/restores` at
-`rateLimits.manualRestoresPerMinute` (default `5`) per actor, per namespace, per
-minute — both set in the configuration file (`api.console.rateLimits.*` in the
-chart, which renders the key only when a value differs from those defaults;
-`logweir-api` refuses `0` and anything above `600` at start). Past it the
-answer is `429 rate_limited` with `Retry-After` (the seconds left in the window)
-and no object is created. The count is taken after authorization and after the
-request's own validation — a `422` does not spend the window — and before the
-create, so an idempotent **replay counts too**: it is answered `200` with the
-original run once the window resets, and can never create a second one. The
-window is per process, as above. How many runs RUN at once is the controller's
-manual-run pool (`runs.maxManual…ActivePerNamespace`), which holds whatever this
-lets through; before P10 one operator's hundred accepted requests became a
-hundred runner pods.
-
-The operation event stream (`…/operations/{kind}/{name}/events`) is declared
-`operation.read` + `operation.stream`, so it answers `401` without a session
-before anything else happens, and each principal holds a bounded number of
-concurrent streams per namespace (`429` beyond it); a stream closes at its
-maximum duration with a terminal `end` event.
+- If kube-proxy or a load balancer replaces the client address before the
+  ingress (`externalTrafficPolicy: Cluster`, an instance-mode load balancer),
+  clients through one node share a budget. Keep the address with
+  `externalTrafficPolicy: Local`, the PROXY protocol, or an L7 hop both Traefik
+  (`forwardedHeaders.trustedIPs`) and the console trust.
+- A range wider than the ingress pods, or an ingress that passes
+  `X-Forwarded-For` through, lets a client spend another client's budget.
+- **The residual:** a distributed attacker can spend this console's quota at
+  the provider. Set the provider's per-client limits generously; alert on
+  `loginRateUntracked`, `code_exchange_failed`, `provider_timeout`, bursts of
+  `login_state_replayed` and `usedSignInStates: full`; keep the break-glass path
+  `api.console.mode: localAdmin`, reached by `kubectl port-forward
+  deploy/<release>-api`.
 
 ## Deployment
 
-The service ships as one image and one optional Helm component.
-
-**The image is `logweir-console`, built by `Dockerfile.console`.** It carries
-`/usr/local/bin/logweir-api` and, at `/ui`, the twenty-six static files of the
-one `ui/` directory in the source tree. `scripts/check-image-api.sh` hashes every
-file the image will serve against that directory, requires all three licence
-files, requires the CA bundle, and refuses an image carrying any key-shaped path
-anywhere outside the system trust store: this is the one image in the tree that
-*mounts* key material at runtime, and none of it is ever built into a layer.
-The image declares `USER 65532:65532`, no `CMD`, and
-`ENTRYPOINT ["/usr/local/bin/logweir-api"]` — every argument is the chart's, so
-the MODE cannot come from a layer no chart test can see.
-
-**The chart runs it under two switches.** `api.enabled` renders the principal —
-a ServiceAccount, three ClusterRoles and one RoleBinding per configured namespace
-— and starts nothing, which is a state you can interrogate with
-`kubectl auth can-i` before anything runs as it. `api.console.enabled` runs the
-workload as that principal and requires the first; the render refuses the pair
-by name rather than producing nothing.
-
-**`api.console.mode` has no chart default either**, for the reason this file
-gives above: a mode read by fall-through is the more permissive one nobody
-chose. Enabling the console without naming a mode is a render-time refusal
-naming the field.
-
-| object | rendered when |
-|---|---|
-| immutable, content-addressed `ConfigMap` holding `config.yaml` | `api.console.enabled` |
-| `Deployment` `<release>-api` | `api.console.enabled` |
-| ClusterIP `Service` `<release>-api` | `api.console.mode: shared` — **only**. The in-cluster administrator mode binds loopback, so a Service there would advertise a ready endpoint and refuse every connection. It speaks plain HTTP/1.1, every ingress controller's default for an HTTP backend; a controller configured to dial it with HTTP/2 (an `h2c` or gRPC backend) is refused (FX-24) |
-| `PodDisruptionBudget` | `api.console.replicas` > 1 |
-| `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required, host must be `publicBaseUrl`'s authority |
-| `NetworkPolicy` | `api.console.networkPolicy.enabled` — an allow rule for the configured ingress controller in shared mode, `ingress: []` (deny) in the administrator mode |
-
-**The configuration file is that ConfigMap and it holds no credential.** Every
-one of the three — the OIDC client secret, the session key, the cursor MAC key —
-appears as a *path* into a read-only Secret volume under `/var/run/logweir/`,
-never as a value. The Secrets are the operator's: the chart generates no key
-material, because a Helm-generated key changes on every render and is
-unrecoverable on upgrade. **Those Secrets live in the release namespace, and
-shared mode renders only when that namespace is outside `weirkeeper`'s
-Job-create authority (D0 stage 5).** A Job can mount any Secret in its
-namespace, so Job-create authority there would be holding the keys — residual
-O1 (`docs/kubernetes.md` §15.4). `controller.watchNamespaces` replaces the
-controller's cluster-wide binding with one RoleBinding per execution namespace
-plus a ClusterRole for the two cluster-scoped trust kinds only, and the
-controller watches exactly those namespaces; the chart refuses shared mode
-without the list, with a list that includes the release namespace, and with a
-product binding in a namespace no controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
-has the `kubectl auth can-i` matrix and the migration. `kubernetes.source` is always `inCluster` and there is
-no chart value for the other source — a pod that read a kubeconfig would act
-with whatever identity that file carried, and the RBAC argument above would be
-about an account nothing runs as. The token is the projected, time-bound kind
-the kubelet mounts.
-
-**The pod is non-root (65532), read-only-root, drops every capability and
-mounts one writable path (`/tmp`) that holds no state** — the page is read into
-memory once at startup and every audit record goes to stdout.
-
-**Probes exist only in `shared` mode**, and their absence in `localAdmin` mode
-is a consequence of the loopback rule rather than an omission: a kubelet HTTP
-probe is made against the Pod IP from the node's network namespace, and a
-loopback listener refuses it, so a readiness probe would hold a working console
-NotReady forever and a liveness probe would restart it. In that mode a refused
-configuration surfaces as `CrashLoopBackOff` with exit code 2 and a log line
-naming the field, which is what to look for.
-
-**What the chart refuses at render time**, each with the field named, because a
-console that comes up on plain HTTP or with a key someone rewrote underneath it
-looks like it is working: a `publicBaseUrl` that is not `https://` or that
-carries a path, trailing slash or userinfo; an Ingress with no TLS Secret; an
-Ingress in front of `localAdmin` mode at all; a role binding naming a namespace
-the ServiceAccount is not bound in; `*` or `?` in a binding; a NetworkPolicy
-with no ingress-controller selector; a missing key Secret. `values.schema.json`
-types the HTTPS rule as well, so `--set` is refused before a template runs, and
-`config.rs` refuses the same things again at startup with exit 2.
-
-`charts/logweir/README.md` §`api.console.enabled` and
-[install.md](install.md) §5e carry the commands, including the key Secret you
-must create first and the `kubectl port-forward deploy/<release>-api` the
-in-cluster administrator mode is reached with.
+The image is `logweir-console` (`Dockerfile.console`): `logweir-api` and the
+twenty-six files of `ui/` at `/ui`, as `USER 65532:65532` with no `CMD`.
+`scripts/check-image-api.sh` holds the served files to `ui/` and refuses a
+key-shaped path. The chart renders the principal under `api.enabled` (a
+ServiceAccount, three ClusterRoles, a RoleBinding per namespace) and the
+workload under `api.console.enabled`, which needs the first; its chart README
+lists every object. A Service, an Ingress (TLS required, host
+`publicBaseUrl`'s authority) and the ingress allow rule exist only in shared
+mode. The configuration is an immutable, content-addressed ConfigMap that holds paths, never a credential, into read-only Secret volumes
+under `/var/run/logweir/`. The chart generates no key. Shared mode renders only
+with `controller.watchNamespaces`, so the controller cannot create a Job in the
+release namespace that holds those keys. The pod runs as 65532, read-only root,
+all capabilities dropped, one writable `/tmp`. Probes exist only in shared
+mode; in localAdmin mode a refused configuration shows as `CrashLoopBackOff`,
+exit code 2 and a log line naming the field. Values and commands are in
+[charts/logweir/README.md](../charts/logweir/README.md) and
+[install.md](install.md).
 
 ## Local administrator mode is not a shared console
 
-**Where it runs decides whose authority it carries, and the two are not the
-same.** Run from a laptop, `mode: localAdmin` uses the selected kubeconfig
-identity and **may be cluster-admin** — that is the manual administrator path
-D0 describes, and the closed adapter is a source-level bound on what it reaches,
-not an RBAC one. Run in the cluster under `api.console.enabled` it is the
-**in-cluster administrator mode**: `kubernetes.source: inCluster`, with no chart
-value for a kubeconfig at all, so it carries the `<release>-api` ServiceAccount
-and nothing else — the narrow grant in
-`charts/logweir/templates/ui/api-rbac.yaml`, which `kubectl auth can-i` can be
-asked about before anything runs as it. In that shape the chart also renders no
-Service, no Ingress and no ingress NetworkPolicy rule, and `create
-pods/portforward` in the namespace is the whole authorization boundary.
-
-**What is the same in both.** It is an explicit administrator mode, not SSO and
-not per-user authorization: the namespace grants come from the configuration
-file, and every actor of this process is the same actor. It must not bind a
-routable address, must not get an Ingress, and adding a login in front of it
-would not create per-user authorization. Shared operation uses `mode: shared`, which is a different
-listener, a different authenticator and a different authorizer — never this one
-with a login bolted in front. An approval policy applies the same way in both
-modes (PLAT-19.2): with a namespace bound Ordinary the console signs the
-configured administrator's confirmation, which is an authorization only
-because the installation chose that policy; under Governed the administrator
-is the requester of everything it submits, so it can never approve one of its
-own requests.
+From a laptop `mode: localAdmin` uses the kubeconfig identity, which **may be
+cluster-admin**. In the cluster it carries only the `<release>-api`
+ServiceAccount, and `create pods/portforward` in the namespace is its whole
+authorization boundary. It is one actor either way. It must not bind a routable
+address or get an Ingress, and a login in front would not add per-user
+authorization. Under a `strict` policy it is the requester of everything it
+submits, so it never approves its own request.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

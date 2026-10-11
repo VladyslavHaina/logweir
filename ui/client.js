@@ -2489,7 +2489,7 @@ function requestBody(plural, object) {
     }
     for (const field of [
       "timeZone", "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
-      "retry", "activeDeadlineSeconds", "retention",
+      "retry", "activeDeadlineSeconds",
     ]) {
       if (spec[field] !== undefined && spec[field] !== null) {
         body[field] = spec[field];

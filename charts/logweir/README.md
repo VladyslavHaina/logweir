@@ -9,1467 +9,534 @@ repository, write a short values file, and install:
 helm upgrade --install logweir . -n <namespace> --create-namespace -f my-values.yaml
 ```
 
-That is the whole command. The chart has no subchart or dependency lock; its
-CRDs are carried under `crds/`, while Kubernetes pulls the configured runtime
-images (including the UI image when enabled). The only things you must supply are
+The chart has no subchart and no dependency lock; its CRDs are under `crds/`.
+It is the only install: the static `logweir.yaml` bundle is withdrawn in v1
+(release-notes item 76). [`docs/install.md`](../../docs/install.md) is the
+install guide; this file is the values reference, and
+[`values.yaml`](values.yaml) lists every key with its default. You supply:
 
-1. **compatible published images** — `controllerImage`, `runnerImage`, and the
-   separately digest-pinned `identity.bootstrapImage`. The chart already pins
-   the last one to a reviewed runner digest (see *Runtime tags and the
-   privileged bootstrap digest*); override all three together only for your own
-   registry (*Bring your own registry* in
-   [`docs/install.md`](../../docs/install.md)). `controllerImage` and
-   `runnerImage` come from ONE publication: since PROD-00.2 the runner image
-   states its own engine and the controller states none, so a runner published
-   before PROD-00.2 under a newer controller has its runs refused rather than
-   mislabelled. The only engine rollback is the `ENGINE_SOURCE=oso` runner
-   image or the older controller and runner together (*Rolling the engine
-   back* in `docs/install.md`);
-2. **an archive** — `archive.url` and, for anything S3-compatible,
-   `archive.s3.endpoint` and `archive.s3.region`; or `minio.enabled: true` to
-   get one in the cluster;
-3. **the `kafka:` block** — the cluster Logweir backs up, and optionally the
-   scratch cluster it restores into.
+1. **compatible published images**: `controllerImage`, `runnerImage` and the
+   digest-pinned `identity.bootstrapImage` (*Images*). Override all three
+   together only for your own registry (install.md, *(d) Bring your own
+   registry*); the engine rollback is install.md, *Rolling the engine back*;
+2. **an archive**: `archive.url` and, for anything S3-compatible,
+   `archive.s3.endpoint` and `archive.s3.region`, or `minio.enabled: true`;
+3. **the `kafka:` block**: the cluster to back up, and optionally the scratch
+   cluster to restore into.
 
-Everything else has a default. For images you built and loaded yourself, use
-the explicit `author-only.values.yaml` local override; the chart refuses to give
-a mutable image signing-key access.
-[`examples/msk.values.yaml`](examples/msk.values.yaml) is a complete one for a
-real cluster: Amazon MSK over SASL/SCRAM, a tainted nodepool, a private
-registry. [`values.yaml`](values.yaml) lists **every** option with its default,
-one line each — it is deliberately short, and every explanation lives in this
-file.
-
-One chart that installs Logweir's control plane — the only install since the
-static `logweir.yaml` bundle was withdrawn
-([release notes](../../docs/release-notes.md), item 76) — and, optionally, its own
-object-store backend, two throwaway Kafka clusters and the console. `just
-crds-check` holds its CRDs to the Rust emitter, `scripts/check-image-api.sh`
-holds the page's bytes to `ui/` (against the console image that serves them), and
-`manifest_lint.rs` holds the rendered controller role to the code's calls. [`docs/install.md`](../../docs/install.md) is still the single
-install document; this README is the chart's own.
+`examples/` holds a values file per shape: `minimal` (the shipped images and
+the three archive values), [`msk`](examples/msk.values.yaml) (Amazon MSK,
+SASL/SCRAM, a tainted node pool, a private registry), `demo`, the `console*`
+and `approval-policy` shapes, `identity-*`, `admission-policy` and `tuned`.
+`author-only.values.yaml` is for images you built and loaded yourself: **an
+author-only install is not evidence of publication.**
 
 ## What it installs
 
-| object | when | why |
+| object | when |
+|---|---|
+| the thirteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always, from `crds/`, once (*Upgrading the CRDs by hand*) |
+| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always; RoleBindings instead with `controller.watchNamespaces` |
+| `Deployment` `weirkeeper` | always; probed by `weirkeeper --probe live` / `--probe ready` against `127.0.0.1:8081` (`LOGWEIR_HEALTH_ADDR`), restarted after three misses 20 s apart |
+| `ConfigMap` `weirkeeper-policy` | always: the installation policy |
+| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound**: you bind the human roles |
+| retained `Secret` `logweir-signing-key` and `ConfigMap` `logweir-signing-trust`, `ClusterRole` `logweir-identity-singleton`, scoped Roles, hook Jobs | `identity.enabled` |
+| `ServiceAccount` `logweir-runner`, `NetworkPolicy`s `logweir-runner-egress` and `logweir-identity-kubernetes-api-egress` | the release namespace and each `identity.authorizedRunnerNamespaces` entry |
+| `ValidatingAdmissionPolicy` and binding `logweir-console-credentials-only` | `admissionPolicy.enabled` |
+| MinIO with a PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, a seed `Job` | `minio.enabled` |
+| two KRaft brokers, `<release>-kafka-source` and `-target`, a seed `Job` | `demoKafka.enabled` |
+| `KafkaCluster`s `source` (and `target`) | `kafka.enabled` |
+| `ServiceAccount` `logweir-retention`, with no Role or binding | `retention.enabled` |
+| `ServiceAccount`, ClusterRoles and bindings `<release>-api` | `api.enabled` (RBAC only) |
+| `ConfigMap` `<release>-api-config-<digest>`, `Deployment` `<release>-api` | `api.console.enabled` |
+| `Service` `<release>-api`, plain HTTP/1.1 (an `h2c` or gRPC backend is refused) | `api.console.mode: shared` |
+| `Ingress`, `NetworkPolicy`, `PodDisruptionBudget` `<release>-api` | `api.console.ingress.enabled`, `.networkPolicy.enabled`, `.replicas` above 1 |
+| `Role` and `RoleBinding` `<release>-api-trusted-proxy` (`list` on `endpointslices` in the ingress namespace) | `api.console.trustedProxyService` |
+| immutable `ConfigMap` `<release>-approval-policy-<digest>` | any `approvalPolicy.*` value |
+
+Nothing optional is on by default. `manifest_lint.rs` holds the controller's
+role to its calls: no verb on `secrets`, no `update`, and `delete` only on
+`topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
+carrying a `metadata.resourceVersion` precondition.
+
+## Values
+
+### Images, placement and identity
+
+| key | default | meaning |
 |---|---|---|
-| the thirteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
-| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below. **Probed**: `weirkeeper --probe live` / `--probe ready` by exec against the controller's own loopback health listener (`127.0.0.1:8081`, `LOGWEIR_HEALTH_ADDR`; no port is exposed). Liveness fails when the runtime is wedged — the listener shares the reconcilers' thread — or a controller task has ended, and three misses 20 s apart restart the pod; readiness waits for the client and every controller |
-| `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
-| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound** | the five human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding`; `logweir-retention-admin` is namespaced and is the only holder of a write verb on `retentionpolicies` — see *`retention.enabled`* below |
-| `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
-| retained Secret `logweir-signing-key`, retained ConfigMap `logweir-signing-trust`, authority-free singleton `ClusterRole`, scoped Role/Binding, short-lived Job | `identity.enabled` | atomically provision/adopt one cluster installation signer without Helm ever carrying private bytes; validate on install, upgrade and supported rollback |
-| `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | release namespace and every `identity.authorizedRunnerNamespaces` entry | runner prerequisites; additional namespaces receive the same retained signer through scoped short-lived distribution, never an independently minted key |
-| `NetworkPolicy` `logweir-identity-kubernetes-api-egress` | every identity-enabled runner namespace | excludes bootstrap from runner arbitrary-443 egress; permits DNS plus discovered/configured Kubernetes API destinations only |
-| `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
-| `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
-| `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
-| `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
-| `ConfigMap` `<release>-api-config-<digest>` + `Deployment` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. `api.console.mode` is **required** — see *`api.console.mode`* below |
-| `Service` `<release>-api` | `api.console.mode: shared` | the Ingress's backend, plain HTTP/1.1 only: leave the controller's backend protocol at its HTTP/1.1 default, since an `h2c` or gRPC backend is refused (FX-24). The in-cluster administrator mode binds loopback and renders **no Service at all** |
-| `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required, host must be `publicBaseUrl`'s authority**; refused in front of the in-cluster administrator mode |
-| `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | in shared mode, ingress from the configured ingress-controller pods only; in the in-cluster administrator mode, `ingress: []` — deny. Egress in both: DNS, the Kubernetes API and the configured IdP CIDRs, and **never** a broker or object-store port |
-| `Role` + `RoleBinding` `<release>-api-trusted-proxy`, in the ingress controller's namespace | `api.console.trustedProxyService` (shared mode) | `list` on `discovery.k8s.io/endpointslices` there and nothing else: the console trusts the serving endpoints of the ingress controller's Service (see *`shared` mode* below) |
+| `controllerImage` | `docker.io/vladyslavhaina/weirkeeper:latest` | the controller |
+| `runnerImage` | `docker.io/vladyslavhaina/logweir:latest` | every Job, retention included (there is no `retentionImage`) |
+| `imagePullPolicy` | `Always` | the controller: `Always`, `IfNotPresent` or `Never` |
+| `runnerImagePullPolicy` | `Always` | runner Jobs (`LOGWEIR_RUNNER_PULL_POLICY`; unset, the controller uses `Never`); another value stops the controller |
+| `imagePullSecrets` | `[]` | `[{name: regcred}]` on both ServiceAccounts and every pod |
+| `environment` | `""` | the label `logweir.dev/environment` on every object but the CRDs; switches nothing |
+| `kubernetes.namespace` | `""` | the name `api.namespaces` defaults to; `-n` decides the install |
+| `kubernetes.connectionsNamespace` | `""` (release) | where `kafka.enabled`'s objects and MinIO's `logweir-s3` go; must be watched |
+| `kubernetes.nodeSelector`, `.tolerations`, `.affinity` | empty | every chart pod; a component's own block replaces them |
+| `identity.enabled` | `true` | the managed signer; `false` only for an external lifecycle |
+| `identity.bootstrapImage` | a reviewed runner digest (rev `2fe8d907`, amd64) | must be `@sha256`; an emptied value refuses to render |
+| `identity.bootstrapImagePullPolicy` | `IfNotPresent` | |
+| `identity.allowMutableBootstrapImageForDevelopment` | `false` | only the author-only override, with `Never` |
+| `identity.bootstrapFeatures.consoleKey` | `true` | `false` only with a bootstrap image older than the console-key flags |
+| `identity.publicConfigMapName` | `logweir-signing-trust` | public key, key id, algorithm, trust reference |
+| `identity.authorizedRunnerNamespaces` | `[]` | existing namespaces given the same signer and runner prerequisites |
+| `identity.kubernetesApiCIDRs` | `[]` | exact API `/32` or `/128` endpoints, TCP 443 or 6443 |
+| `identity.externalSecret.name`, `.key` | `""`, `signing.pem` | adopt a P-256 or Ed25519 PKCS#8 Secret; never marked fresh |
+| `identity.installationTrust.enabled`, `.policyName` | `true`, `logweir-installation` | the fresh install's `TrustPolicy` (*`approvalPolicy`*) |
+| `identity.installationTrust.allowedTargetClusterIds` | `[]` | written into it once; `demoKafka.enabled` adds its target |
+| `identity.resources` | 10m / 32Mi, limit 128Mi | |
 
-Nothing optional is on by default. The release gate renders the snapshots with
-the pinned bootstrap digest exactly as shipped; the rest of the default render
-is held to
-the controller's calls by `manifest_lint.rs`.
+### Controller and the installation policy
 
-## The installation policy (`checks.*`, `runs.*`, `engine.*`, `evidence.*`)
-
-The chart renders one administrator-owned `ConfigMap`, `weirkeeper-policy`, in
-the release namespace. It is what tunes the check framework —
-`TopicDiscovery`, `Preflight` and evidence fetches — and it is the **only**
-place an operator cannot reach: writing it needs `create`/`update` on a
-ConfigMap in this namespace, and `logweir-operator` names no `configmaps` at
-all. [`docs/kubernetes.md`](../../docs/kubernetes.md) §22.2 is the field
-reference; this is what the values do.
-
-| value | default | what it decides |
+| key | default | meaning |
 |---|---|---|
-| `checks.maxActivePerNamespace` | `4` | check Jobs running at once in one namespace. Over it a request is `Queued`, not failed |
-| `checks.maxActiveTotal` | `20` | and across the installation |
-| `checks.maxActiveDiscoveriesPerConnection` | `1` | concurrent inventories against one connection |
-| `checks.maxEvidenceFetchActivePerNamespace` | `4` | a **separate** pool, so verification is never starved by interactive checks |
-| `checks.discovery.freshSeconds` | `900` | after this an inventory reads *stale*, never *wrong* |
-| `checks.discovery.retentionSeconds` | `86400` | a terminal `TopicDiscovery` is collected after this |
-| `checks.discovery.keepPerConnection` | `5` | and never more than this many are kept per connection |
-| `checks.discovery.hardMaxTopics` | `50000` | the ceiling a request's `maxTopics` is clamped to. It only ever LOWERS a request |
-| `checks.discovery.visibilityAttestations` | `[]` | the **only** route to `visibility.state: attestedComplete` |
+| `controller.logLevel` | `info` | `RUST_LOG`; below `info` the per-object lines are lost |
+| `controller.failFastSeconds` | `""` (300 s) | patience for a stuck run; `0` is never (for a Secret materialised late); under 60 is clamped up; unparseable is the default |
+| `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job stays; under 3600 is clamped up |
+| `controller.watchNamespaces` | `[]` (all) | the execution namespaces (below) |
+| `controller.resources` | 50m / 128Mi, limit 512Mi | also `nodeSelector`, `tolerations`, `affinity` |
+| `checks.maxActivePerNamespace`, `.maxActiveTotal` | `4`, `20` | check Jobs at once; the total must be at least the per-namespace value |
+| `checks.maxActiveDiscoveriesPerConnection` | `1` | |
+| `checks.maxEvidenceFetchActivePerNamespace` | `4` | its own pool, so verification is never starved |
+| `checks.discovery.freshSeconds` | `900` | after this an inventory reads stale |
+| `checks.discovery.retentionSeconds`, `.keepPerConnection` | `86400`, `5` | when, and beyond how many, terminal discoveries are collected |
+| `checks.discovery.hardMaxTopics` | `50000` | every request's `maxTopics` (1 to 50 000) is clamped to it |
+| `checks.discovery.visibilityAttestations` | `[]` | the only route to `attestedComplete` |
 | `checks.preflight.retentionSeconds` | `3600` | a terminal `Preflight` is collected after this |
-| `runs.maxManualBackupsActivePerNamespace` | `4` | P10: manual `Backup` runs ("Back up now") holding a runner slot at once in one namespace. Over it a run is `phase: Queued` with nothing created, and starts in creation order as slots free |
-| `runs.maxManualRestoresActivePerNamespace` | `2` | P10: admitted manual `Restore` runs at once in one namespace; the rest wait `Queued`, approval intact |
-| `engine.allowUnverifiedCustomCa` | `false` | whether a destination may carry a CA the archive engine cannot verify |
-| `evidence.controllerIdentityLocations` | `[]` | where the controller's own identity may read evidence from. An unlisted location is refused |
+| `runs.maxManualBackupsActivePerNamespace`, `runs.maxManualRestoresActivePerNamespace` | `4`, `2` | manual runs at once per namespace; the rest wait `Queued` with nothing created |
+| `engine.allowUnverifiedCustomCa` | `false` | a destination CA the engine cannot verify |
+| `evidence.controllerIdentityLocations` | `[]` | `[{endpoint, region, bucket}]` the controller may read evidence from; others are `ControllerIdentityNotAllowlisted` |
 
-**`helm install` refuses what the controller would refuse.** Every per-field
-bound in `values.schema.json` is pinned to the constant the parser uses —
-`hardMaxTopics` to `check_contract::MAX_TOPICS_CEILING` (50 000) — and
-`templates/policy.yaml` fails the render, naming both values, for the one rule
-JSON Schema cannot express:
-`checks.maxActiveTotal >= checks.maxActivePerNamespace`. That
-matters because a document the controller refuses fails **closed and almost
-silently**: every attestation and every evidence location is discarded, the
-ceilings revert to the compiled-in defaults, and the only signals are one
-advisory row on a `Preflight` and one `WARN` line in the controller log.
+`weirkeeper-policy` is the one place an operator cannot reach. **The chart
+refuses what the controller would refuse** (the schema pins every bound;
+`templates/policy.yaml` refuses a total below the per-namespace ceiling),
+because a refused document fails closed almost silently: attestations and
+evidence locations are dropped and the ceilings revert, with one advisory
+`Preflight` row and one `WARN` line. The `runs` block renders only when a value
+differs from its default; an install that set it rolls the controller back with
+the chart. `legacyArchiveAddressing` is rendered from `archive.s3.*`, and empty
+without an endpoint. An attestation has nine required fields: `id`, `namespace`,
+`kafkaCluster`, `clusterId`, `principal`, `attestedBy`, `attestedAt`,
+`expiresAt`, `statement`. It applies on an exact match of the four identifiers,
+before `expiresAt`, to an untruncated listing, and **Logweir never verifies the
+statement**.
 
-### Withdrawn values: `checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
+### Archive, Kafka and the demo components
 
-**They never changed anything, and since FX-10 (2026-10-05) the chart does not
-read them.** Both were documented as the default a request that names none
-gets. No request ever names none: the `TopicDiscovery` and `Preflight` CRDs
-default `spec.request.maxTopics` (20 000) and `spec.request.timeoutSeconds`
-(120) when the object is created, and the console API writes both explicitly.
-An administrator who raised `defaultTimeoutSeconds` for a slow cluster still
-got 120-second preflights.
+| key | default | meaning |
+|---|---|---|
+| `archive.url` | `""` | `s3://bucket/prefix`; empty with `minio.enabled` uses the chart's MinIO. A point with no saved destination is verified only in this bucket (elsewhere `NotAttempted`) |
+| `archive.s3.endpoint`, `.region` | `""` | empty endpoint for Amazon S3 |
+| `archive.s3.allowHttp`, `.virtualHostedStyle` | `false` | rendered only with an endpoint; `false` is path-style |
+| `kafka.enabled` | `false` | render `KafkaCluster`s; not with `demoKafka.enabled` |
+| `kafka.name`, `.bootstrapServers`, `.username` | `source`, `""`, `""` | servers as `"h1:9096,h2:9096"` or a list |
+| `kafka.security.protocol`, `.mechanism` | `PLAINTEXT`, `""` | the mapping in *`kafka:`* |
+| `kafka.secretRef`, `.secretKey` | `""`, `password` | the only accepted key |
+| `kafka.target.*` | `name: target`, same keys | the optional restore target; `markerTopic: logweir.scratch` proves it scratch |
+| `minio.enabled` | `false` | a demo archive (`kafka-backups`, `logweir-evidence`); its root user also mints `logweir-s3` |
+| `minio.image`, `.mcImage` | mirror digests | *Third-party images* |
+| `minio.rootUser`, `.rootPassword` | `minioadmin` | |
+| `minio.persistence.enabled`, `.size`, `.storageClassName` | `true`, `5Gi`, `""` | `false` is an emptyDir: the archive dies with the pod |
+| `minio.resources` | 50m / 256Mi | also placement |
+| `demoKafka.enabled` | `false` | two PLAINTEXT brokers on emptyDir, `orders` and `payments` seeded |
+| `demoKafka.image`, `.clusterIds.source`, `.clusterIds.target` | digests, two ids | the ids must differ: equal ids are one cluster to phase 0 |
+| `demoKafka.seed.recordsPerTopic`, `.resources` | `200`; 100m / 512Mi, limit 1Gi | also placement |
 
-The bounds that do work are unchanged: a discovery's own `maxTopics`
-(1–50 000), clamped by `checks.discovery.hardMaxTopics`, and a preflight's own
-`timeoutSeconds` (30–600).
+### Retention, the admission fence and approvals
 
-**Why withdrawn and not wired up.** Wiring them would mean dropping both CRD
-defaults, making the fields optional through the controller and the console
-API, and changing how the console recognises a repeated request (its
-idempotency and `reuseFresh` keys treat an omitted field as the default). It
-would also do nothing on most upgrades: Helm never upgrades this chart's
-`crds/`, so a CRD that still defaults the field leaves the knob as inert as
-before.
+| key | default | meaning |
+|---|---|---|
+| `retention.enabled` | `false` | the `logweir-retention` identity (below) |
+| `admissionPolicy.enabled` | `false` | fence the console's `create secrets`; Kubernetes 1.30+ |
+| `admissionPolicy.consoleServiceAccountName` | `logweir-api` | must be `<release>-api` with `api.enabled`; the render refuses another or empty |
+| `admissionPolicy.extraPrincipals` | `[]` | more `system:serviceaccount:<ns>:<name>` subjects |
+| `approvalPolicy.default` | `""` | unbound namespaces: `""` (confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` or `strict` |
+| `approvalPolicy.allowOrdinaryConfirmation` | `false` | needed by a `confirm` policy and `default: confirm` |
+| `approvalPolicy.policies` | `[]` | `[{name, mode: confirm\|two-person\|strict, maxAgeSeconds, requireDistinctPrincipal}]` |
+| `approvalPolicy.namespaces` | `{}` | `{<namespace>: <policy>}`; a binding wins over the default |
+| `approvalPolicy.confirmationKeySecret` | `""` | the hook's managed key; or your Secret with key `confirmation.key` |
 
-**Upgrading with either key still set is safe.**
+### The console (`api.*`)
 
-- `values.schema.json` still **accepts** both keys. Without that, Helm would
-  refuse the upgrade, because the schema rejects an unknown key
-  (`additional properties '…' not allowed`).
-- The rendered objects are byte-identical to an install that does not set
-  them.
-- `NOTES.txt` prints `WITHDRAWN VALUES ARE SET AND IGNORED`, naming each one.
-- **The policy document changes once if you had set either key to another
-  value.** The chart now renders a fixed value in its place (below), so an
-  install that had set, say, `defaultTimeoutSeconds: 300` gets a different
-  document and a different policy digest. Every retained `Preflight` whose
-  `ready` verdict has not expired yet then reads `unknown`, its message naming
-  `policyChanged`: run the check again. An install that never set either key,
-  or set exactly the value now rendered, keeps a byte-identical document and
-  digest.
+| key | default | meaning |
+|---|---|---|
+| `api.enabled` | `false` | the console's principal, RBAC only |
+| `api.namespaces` | `[]` | where it is bound; defaults to `kubernetes.namespace` |
+| `api.console.enabled` | `false` | run the console; needs `api.enabled` |
+| `api.console.image`, `.imagePullPolicy` | `…/logweir-console:latest`, `Always` | `Never` for a loaded image |
+| `api.console.mode` | `""`, required | `localAdmin` or `shared` |
+| `api.console.replicas`, `.port` | `1`, `8484` | above 1 adds a `PodDisruptionBudget` |
+| `api.console.localAdminSubject` | `admin` | localAdmin's one actor |
+| `api.console.keySecret`, `.keyVersion` | `""` (required), `1` | *The key Secret* |
+| `api.console.publicBaseUrl` | `""` | shared: exact `https://` URL, no path, no trailing slash |
+| `api.console.sessionMaxAgeSeconds` | `900` | shared: 60 to 900 |
+| `api.console.trustedProxyCidrs`, `.trustedProxyService` | `[]`, empty | shared: the ingress pods, or its Service |
+| `api.console.requireTrustedProxy` | `false` | shared: `421` for a request not from a trusted proxy over HTTPS |
+| `api.console.trustedProxy` | `""` | `none` opts out of naming a proxy behind the chart's Ingress |
+| `api.console.rateLimits.manualBackupsPerMinute`, `.manualRestoresPerMinute` | `10`, `5` | runs one person may start per namespace per minute |
+| `api.console.hostAliases` | `[]` | `[{ip, hostnames}]` pod `/etc/hosts` entries |
+| `api.console.oidc.issuer`, `.clientId` | `""` | exact |
+| `api.console.oidc.clientSecret` | `""` | the name of a Secret with key `clientSecret` |
+| `api.console.oidc.caBundle`, `.systemRoots` | `{configMap, secret, key: ca.crt}`, `true` | a private issuer CA added to the system roots |
+| `api.console.roles.revision`, `.bindings` | `""`, `[]` | `[{role, namespace, groups, subjects}]`, exact strings |
+| `api.console.ingress.*` | off | shared only: `className`, `host`, `tlsSecretName` (required), `annotations` (HSTS) |
+| `api.console.networkPolicy.*` | off | `ingressNamespace` and `ingressPodLabels` (both required), `oidcCIDRs`, `oidcPeers` |
+| `api.console.resources` | 25m / 64Mi, limit 256Mi | also placement |
 
-**If you never set them**, an upgrade with `--reuse-values` may still carry
-them forward. That flag reuses the previous release's computed values, which
-include the older chart's defaults. Upgrade once with
-`--reset-then-reuse-values`, and remove the keys from your own values file.
+## Withdrawn values
 
-**The policy document still carries both keys,** at fixed values:
-`discovery.defaultMaxTopics` is 20 000, or `hardMaxTopics` if that is lower,
-and `preflight.defaultTimeoutSeconds` is 120.
+| value | since | what to do |
+|---|---|---|
+| `checks.discovery.defaultMaxTopics`, `checks.preflight.defaultTimeoutSeconds` | FX-10 | nothing: they never changed a request. Remove them |
+| `notify`, `notify.allowInsecureSinks` | v1, release-notes item 74 | refused at render: remove the block, or `--set notify=null` with `--reuse-values` |
+| `ui.*` and the `logweir-ui` image | v1, release-notes item 75 | refused at render: use `api.console.*`; the legacy page is gone |
 
-- A controller older than FX-10 requires both keys and refuses a document
-  without them. A refused document fails closed. Keeping the keys lets such a
-  controller read a default install's document, which covers an image-only
-  rollback and the old pod during a rolling upgrade.
-- The current controller accepts the keys, with or without them present, and
-  never reads them. It applies no range rule, only the type: any whole number
-  from 0 to 4 294 967 295. A hand-written document that puts `null`, a
-  negative, a fraction, a quoted number or a larger number there is refused
-  whole and fails closed, as it was before FX-10. The chart never renders a
-  configured value there, so a chart install cannot meet that refusal.
+The two FX-10 keys are accepted and ignored, and `NOTES.txt` prints `WITHDRAWN
+VALUES ARE SET AND IGNORED`. The CRDs default `maxTopics` (20 000) and
+`timeoutSeconds` (120), and a request sets its own (`maxTopics` 1 to 50 000,
+clamped by `hardMaxTopics`; `timeoutSeconds` 30 to 600). The policy document
+keeps both keys at fixed values (20 000 or `hardMaxTopics` if lower, and 120)
+for an older controller during a rolling upgrade or an image-only rollback. If
+you had set either to another value, the digest changes once and retained
+`ready` `Preflight`s read `unknown` (`policyChanged`): run them again.
+`--reuse-values` can carry old defaults forward; upgrade once with
+`--reset-then-reuse-values`.
 
-**Rollback.** `helm rollback` to a chart from before FX-10 restores that
-revision's own values and document, so nothing changes. Rolling back only the
-controller image is also safe, for the reason above.
+## `retention.enabled`
 
-Read [docs/kubernetes.md](../../docs/kubernetes.md) §22.2 for the document
-itself.
-
-**The two empty lists are the safe direction, not an oversight.** With no
-attestation nothing can ever be `attestedComplete`; with no allowlist an
-unlisted evidence location is refused with
-`ControllerIdentityNotAllowlisted`.
-
-**An attestation is nine fields and every one is required**, because a blank
-`clusterId` or `principal` matches nothing while *looking* like an attestation
-somebody can rely on. `values.schema.json` refuses a partial one at install
-time:
-
-```yaml
-checks:
-  discovery:
-    visibilityAttestations:
-      - id: att-orders-prod
-        namespace: team-a
-        kafkaCluster: source
-        clusterId: M29I2S7FQPyHBEX12Vx7XA   # the id the runner reads from the broker
-        principal: User:backup               # the principal Logweir presents
-        attestedBy: platform-admin@example.invalid
-        attestedAt: "2026-09-15T00:00:00Z"
-        expiresAt: "2026-12-15T00:00:00Z"
-        statement: >-
-          User:backup has DESCRIBE on literal Topic:* with no DENY;
-          reviewed ACL export 2026-09-14
-```
-
-It applies only on an exact match of all four identifiers, only before
-`expiresAt`, and only to a listing that was not truncated. **Logweir never
-verifies the statement** — the UI renders "attested by *X* at *T*; not verified
-by Logweir".
-
-**`runs.*` bounds MANUAL runs only (P10).** Before it, nothing bounded "Back up
-now": one operator's hundred accepted requests became a hundred runner pods on
-one node, which hit its 110-pod limit and went `NotReady`. Scheduled, catch-up
-and retry `Backup`s keep their own `concurrencyPolicy`/`maxActiveRuns` and are
-neither counted nor queued. A
-queued run has no plan, no Job and no execution claim; it is
-`Admitted=False/ConcurrencyLimited` with `status.queue.limit`, and the console
-shows "Queued (limit N active)". A queued `Restore` still re-checks its
-approval when it leaves the queue, so an authorization with a maximum age can
-expire while it waits (`AuthorizationExpired`) — the deadline is shown on the
-queued object. **Upgrade and rollback:** the chart renders the `runs` block
-**only when a value differs from the defaults above**, because a controller
-that predates it refuses the whole `policy.json` (`deny_unknown_fields`) and
-fails closed. A default install therefore carries no block and survives an
-image-only rollback; an install that set `runs.*` rolls the controller back
-together with the chart (`helm rollback`), never on its own. A newer controller
-reading a document without the block uses the defaults.
-`api.console.rateLimits` is the console's half: how many runs one person may
-START per namespace per minute (`10` backups, `5` restores; then `429` with
-`Retry-After`).
-
-`legacyArchiveAddressing` is not a value of its own: it is rendered from
-`archive.s3.*`, the same values the Deployment's `AWS_*` env comes from and
-behind the same "only when an endpoint is set" guard. An install with no
-endpoint publishes an empty block rather than `allowHttp: true`. A restore
-readiness check over a recovery point with no saved destination fills a region
-or endpoint its plan leaves out from this block, exactly as the legacy restore
-Job fills them from that env.
-
-**`archive.url` is also where a point with no saved destination is verified.**
-The controller reads an inline-archive run's evidence only through its handle
-over `archive.url` (`LOGWEIR_ARCHIVE_URL`), and only in that URL's bucket; a
-legacy schedule writing to another bucket, or a legacy restore plan writing its
-evidence elsewhere, reads `NotAttempted` ([docs/kubernetes.md](../../docs/kubernetes.md)
-§15.1a).
-
-## `admissionPolicy.enabled` — fencing the console's `create secrets`
-
-Off by default, for **one** reason: `admissionregistration.k8s.io/v1`
-`ValidatingAdmissionPolicy` is Kubernetes **1.30+** and this chart's floor is
-1.29, where the document is rejected with `no matches for kind`. It is not a
-security opinion — turn it on wherever the API server has the kind.
-
-```yaml
-admissionPolicy:
-  enabled: true
-  consoleServiceAccountName: logweir-api          # in the release namespace
-  extraPrincipals:                                 # full subjects, for other namespaces
-    - system:serviceaccount:team-a:logweir-api
-```
-
-**It fences the console this chart renders.** With `api.enabled` the chart
-renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
-release named `logweir`), and it refuses a
-`admissionPolicy.consoleServiceAccountName` that is not that account — a
-subject naming nobody would install, look enabled and fence nothing. The value
-is REQUIRED and non-empty: an absent, empty or null one renders a subject that
-matches nobody, so the schema and the template both refuse it. (Earlier
-revisions called the policy inert until D0 stage 7 landed the console; it has.)
-
-It requires that a Secret the console creates carries one of the three Logweir
-credential types (`logweir.dev/object-store-credential`,
-`logweir.dev/kafka-sasl-password`, and since PROD-01.3
-`logweir.dev/kafka-client-certificate` for an mTLS connection) and the
-`app.kubernetes.io/managed-by: logweir` label — which closes the one thing an
-unfenced `create secrets` could otherwise do, minting a
-`kubernetes.io/service-account-token` for another ServiceAccount. Every other
-principal in the cluster is skipped by the policy's `matchConditions`, which is
-what makes `failurePolicy: Fail` safe. A cluster administrator can still delete
-the policy; see [`docs/kubernetes.md`](../../docs/kubernetes.md) §22.4 for what
-it does and does not prove, including the live check that has **not** been run.
-
-## The three flags, in plain words
-
-* **`minio.enabled`** — *bring a backend.* A MinIO with the two buckets the
-  runner writes and the controller reads, and the `logweir-s3` Secret minted
-  from its root credential. Demo-only: the root user is not a read-only
-  principal, and a production install brings its own archive and its own
-  Secrets and leaves this off. With it on and `archive.*` empty, the
-  controller is pointed at it automatically.
-* **`demoKafka.enabled`** — *bring two clusters to back up from and restore
-  into.* PLAINTEXT, emptyDir, one broker each. The demo's transport, not a
-  recommendation.
-* **`ui.*`** — withdrawn in v1 (release-notes item 75): the legacy
-  `kubectl proxy` page and its `logweir-ui` image. The chart refuses the block
-  by name; the console is `api.console.*`.
-
-Two more flags render RBAC and nothing else, so neither starts a pod and
-neither is in the list above:
-
-* **`retention.enabled`** — *let a retention enforcement Job be admitted.*
-* **`api.enabled`** — *give the console/API service a reviewed identity.*
-
-And one more starts the console itself, and needs `api.enabled`:
-
-* **`api.console.enabled`** — *run the console in this cluster.* It needs
-  `api.console.mode`, which has **no default**. Read *`api.console.enabled`*
-  before turning it on, and read it before assuming the word "console" means the
-  same thing as "reachable".
-
-## `retention.enabled` — the identity a deletion needs, and the three gates it is not
-
-It renders exactly one kind of object: the `ServiceAccount` `logweir-retention`,
-with `automountServiceAccountToken: false` and **no Role, no RoleBinding and no
-ClusterRole**. The controller compiles that name into every `mode: Enforce`
-Job, so without it the Job's pod is admitted by nobody — fail-closed, but by
-accident rather than by decision, which is why the account exists as an
-explicit switch.
-
-**In the release namespace and in every `identity.authorizedRunnerNamespaces`
-entry**, because that is where the Jobs are: the controller creates an
-enforcement Job in the namespace of the `RetentionPolicy` that produced it, and
-a `RetentionPolicy` lives with the workload it protects. It reads that list even
-when `identity.enabled` is off — the list is about where Jobs run, and only the
-signer distribution beside it is about identity. For a namespace the chart
-does not list there is a fragment,
-`config/samples/retention-serviceaccount.yaml`, applied once per namespace exactly
-as the runner's is (`docs/install.md` step 4).
-
-**Turning it on deletes nothing and authorises nobody to delete anything.** The
-account holds no Kubernetes verb. The deletion capability lives in an
-object-store credential scoped to the policy's own prefix, and the account
-exists so that the pod which mounts that credential has a name an audit trail,
-a NetworkPolicy selector and a `kubectl get pods` can use — separate from
-`logweir-runner`, which runs backups, restores, checks and catalog syncs.
-"What has run as the deleter" should have an answer.
-
-A deletion needs all four of these, and they are deliberately in four places:
+It renders `ServiceAccount` `logweir-retention` (no token automount, no Role,
+no binding) in the release namespace and each
+`identity.authorizedRunnerNamespaces` entry, where enforcement Jobs run; for
+another namespace apply `config/samples/retention-serviceaccount.yaml`. **It
+deletes nothing.** A deletion needs all four:
 
 1. `mode: Enforce` on a `RetentionPolicy`, which only `logweir-retention-admin`
    may write;
 2. this ServiceAccount in that namespace;
-3. an object-store credential whose scope is the policy's prefix and never
-   `logweir/` — **this is the hard boundary**;
-4. an administrator's `approve-plan` carrying the current `planSha256`, per run.
-
-There is no `retentionImage`: the enforcement binary ships in `runnerImage`
-beside the `logweir` entrypoint, and the controller overrides only the
-container's command.
-
-[`docs/stability.md`](../../docs/stability.md), "`RetentionPolicy` in `Enforce`
-is where the deletion boundary moves", states the residual plainly: enabling
-enforcement does not give the controller a delete verb, it turns the
-controller's existing authority to create a Job into a deletion capability in
-the namespace that holds the credential.
-
-## `api.enabled` — the console/API principal, RBAC only
-
-| object | name |
-|---|---|
-| `ServiceAccount` | `<release>-api`, in the release namespace |
-| `ClusterRole` + one `RoleBinding` per `api.namespaces` entry | `<release>-api` |
-| `ClusterRole` + `ClusterRoleBinding` | `<release>-api-trustpolicies` |
-| `ClusterRole` + `ClusterRoleBinding` | `<release>-api-trustroster` |
-
-**No Deployment, no image, no Service and no Ingress.** The console's image and
-its deployment are a separate piece of work; this flag exists so that an
-installation running the product API has a reviewed identity to run it as
-instead of inventing one, and so that the admission policy below has a subject
-that really exists.
-
-This account acts for a *service* that authenticates every request and
-resolves the actor's roles itself, so its role is the union of what every route
-may need and the per-actor narrowing happens above it.
-
-What it holds: `get`/`list` on the eight product kinds; `create` on all eight
-(`approvals` since PLAT-19.2 — the console's signed ordinary confirmation, a
-governed request's confirmation object and the approver's countersigned
-Approval); `patch` on `backupschedules`, `backupdestinations`,
-`topicdiscoveries` and `preflights`; `get`/`list` on `protectionpolicies`,
-`recoverycatalogs` and `retentionpolicies`; `create` on
-`recoverycatalogs` for "connect existing archive"; `get`/`list` on the
-cluster-scoped `trustpolicies`; `get` on the one cluster-scoped `trustrosters/default`
-(`resourceNames: ["default"]`, so a readiness verdict's roster referent can be
-compared rather than reported `unverifiable`); `get` on `configmaps`; `create` on
-`secrets`.
-
-What it does not, each for a reason: **no `watch`** (the service's adapter has
-no watch method, and the operation event stream is server-sent events over its
-own reads), **no `delete`**, **no read verb on `secrets`** — that missing verb
-is what makes a console-written credential write-only — **no `list` on
-`configmaps`**, **no write verb on `trustpolicies`**, and **no `list` on
-`trustrosters`** nor a `get` on any roster but `default`.
-
-Set `admissionPolicy.consoleServiceAccountName` to this account: the fence's
-whole effect is its subject list, and a subject that names nobody is a policy
-that installs, reads as enabled and fences nothing — leaving the console's
-`create` on Secrets, which RBAC cannot narrow by shape, with no bound at all.
-Both names now come from one template helper, and **the render REFUSES** when
-`api.enabled` is on and the two disagree, naming both strings. Under the default
-release name they are both `logweir-api`; under `helm install myrel …` they are
-both `myrel-api` once you set the value, and neither can be silently wrong.
-(An installation fencing a console deployed out of band leaves `api.enabled`
-off, and the refusal does not apply.)
-
-`bash scripts/check-chart.sh` answers the `kubectl auth can-i` question
-for every pair above, in both directions, against every checked-in render. It
-finds the console's roles through the bindings that name its ServiceAccount,
-whatever the roles are called, and refuses a binding that names anyone else
-beside the account.
-
-## `api.console.enabled` — the console itself, and the two names it goes by
-
-**The name, first, because two are in use and both are correct.** The decision
-document that specified this service (`docs/to-do/decisions/D0-product-api-and-identity.md`)
-calls it the *console* and gives its deployment worker `Dockerfile.console` and
-`console.*` values. The crate, the binary, the image's entrypoint and the
-already-shipped RBAC values block call it the *API*: `crates/logweir-api`,
-`logweir-api`, `api.enabled`. Rather than rename a landed values key, a landed
-RBAC template and `admissionPolicy.consoleServiceAccountName` for a word, the
-chart nests one inside the other:
-
-| what | called |
-|---|---|
-| the values block, the ServiceAccount, the Service, the Deployment | `api.*`, `<release>-api` |
-| the image and its Dockerfile | `logweir-console`, `Dockerfile.console` |
-| the workload's own values | `api.console.*` — D0's word, under the chart's |
-
-So `api.console.image` names `logweir-console` and the pod runs as
-`<release>-api`, and that is the whole of the discrepancy.
-
-### Two switches, because D0's rollout has two steps
-
-`api.enabled` renders the principal and **starts nothing**: an account you can
-interrogate with `kubectl auth can-i` before anything runs as it. That state is
-deliberate and is D0's own first step ("deploy console disabled; configure …
-OIDC, exact role/namespace bindings, TLS ingress … enable read-only console").
-`api.console.enabled` runs the workload as that principal, and **requires**
-`api.enabled` — the render refuses the pair, naming both flags, rather than
-quietly producing nothing.
-
-### `api.console.mode` has no default, and the two modes are two shapes
-
-**There is no default, here or in the binary.** `crates/logweir-api/src/config.rs`
-refuses a configuration file that forgets to name a mode rather than reading it
-as the more permissive one, and this chart refuses the same way:
-`api.console.enabled: true` with no `api.console.mode` is a render-time failure
-naming the field. Name one.
-
-#### `localAdmin` — the **in-cluster administrator mode**
-
-`logweir-api` **refuses any non-loopback listener** in this mode, so the pod
-binds `127.0.0.1`. The chart then renders nothing to go with it that anything in
-the cluster could dial:
-
-* **no Service.** `kubectl port-forward` takes a Deployment directly, so one is
-  not needed — and a Service in front of a loopback listener would advertise a
-  ready endpoint (there is no readiness probe; see below) while refusing every
-  connection: a security property to a reader of the template, and an outage to
-  every monitor in the cluster.
-* **no Ingress** — the render refuses one in front of this mode by name.
-* **no ingress rule in the NetworkPolicy**: `ingress: []`, which with `Ingress`
-  in `policyTypes` is deny.
-* the identity is the `<release>-api` ServiceAccount, narrowly bound by
-  `templates/ui/api-rbac.yaml`, and never a kubeconfig.
-* **readiness is not gated on OIDC**, because there is no OIDC.
-
-It exists for isolated labs and break-glass administration. It does not
-expose Ordinary confirmation and it is **not** a shared console.
-
-**`shared` is the only mode that may be exposed through a Service or an
-Ingress.**
-
-Turning `api.console.enabled` on cannot produce a Service anyone may drive
-unauthenticated, in either mode: the administrator mode has no Service to
-reach, and `shared` mode authenticates and authorizes every request before it
-reaches a route.
-
-```console
-$ head -c 32 /dev/urandom > cursor.key
-$ kubectl --context docker-desktop -n logweir-system \
-    create secret generic logweir-console-keys --from-file=cursor.key
-$ rm cursor.key
-$ helm install logweir charts/logweir -n logweir-system \
-    -f charts/logweir/examples/console.values.yaml
-$ kubectl --context docker-desktop -n logweir-system \
-    port-forward deploy/logweir-api 8484:8484
-$ open http://127.0.0.1:8484/ui/
-```
-
-The local port must be `8484` too: the configuration's `publicOrigin` carries
-the listen port and `logweir-api` refuses a mismatch, because an origin that
-does not match the one the browser sends is a CSRF check that cannot pass.
-
-**`create pods/portforward` in this namespace is equivalent to full console
-administrator authority over every bound namespace — grant it as you would grant
-that.** This mode has no identity provider and no product role check: every
-request is attributed to the one configured `localAdminSubject`, so that
-Kubernetes verb *is* the authorization boundary, and it is the whole of it.
-
-**There are no probes in this mode, and that is a consequence rather than an
-omission.** A kubelet HTTP probe is made from the node's network namespace
-against the *Pod IP*; a loopback-only listener refuses it, so a readiness probe
-would hold a working console permanently NotReady and a liveness probe would
-restart it forever. (`httpGet.host: 127.0.0.1` is not the escape it looks like —
-that is the node's loopback, not the pod's.) What you lose is the signal: a
-configuration the binary refuses shows up as `CrashLoopBackOff` with an exit
-code of 2 and a one-line message naming the field, rather than as a NotReady
-endpoint. `kubectl logs` is where you read it. In `shared` mode the listener is
-on the Pod IP and both probes are rendered: `/healthz` for liveness (process
-liveness only, consults nothing) and `/readyz` for readiness.
-
-### The key Secret is yours to create, and the chart will not invent one
-
-`api.console.keySecret` is required and names a Secret in the release namespace:
-
-| key | mode | what it is |
-|---|---|---|
-| `cursor.key` | both | the pagination-cursor MAC key, at least 32 bytes. In `localAdmin` mode it is raw bytes; in `shared` mode it is two lines, `version:` and `key:` |
-| `session.key` | `shared` | the session-cookie key, same two-line form |
-
-`api.console.keyVersion` must equal the `version:` those files declare. Bumping
-both is a deliberate rotation that ends every live session; a file that changes
-while the number does not is a key someone rewrote underneath the service, and
-startup refuses it (exit 2, naming the field).
-
-**This chart generates neither.** A Helm-generated key changes on every render —
-which would make the checked-in rendered files unstable — and is unrecoverable
-on upgrade, and D0 requires these to be persistent Secrets created or adopted
-explicitly. The same applies to `api.console.oidc.clientSecret`, which is the
-**name** of a Secret holding the client secret under the key `clientSecret`, and
-to `api.console.ingress.tlsSecretName`.
-
-**Where this Secret sits relative to the controller's authority.** It lives in
-the release namespace. Residual **O1** (`docs/kubernetes.md` §15.4: *"Job CRUD
-in a namespace that holds `logweir-signing-key` is equivalent to holding that
-key, because a Job the controller creates can mount it"*) applies to ANY Secret
-in a namespace where `weirkeeper` may create Jobs. Under the default
-`templates/clusterrolebinding.yaml` that is every namespace, the release
-namespace included — which is fine for the in-cluster administrator mode, whose
-authority is the port-forward permission anyway, and is why **`shared` mode
-renders only with `controller.watchNamespaces`** (D0 stage 5,
-§`controller.watchNamespaces` below): the controller then holds Job-create authority in the listed execution
-namespaces and nowhere else, and the chart refuses a list that includes the
-release namespace.
-
-**No credential is ever in the ConfigMap.** The rendered configuration carries
-*paths* — `oidc.clientSecretFile`, `sessionKey.file`, `cursorKey.file` — into
-read-only Secret mounts under `/var/run/logweir/`, and
-`chart_lint_the_console_config_map_carries_no_credential` walks every rendered
-console ConfigMap refusing a value under any credential-shaped key. A ConfigMap
-is readable by anything with `get configmaps` in the namespace, it is in
-`helm get manifest`, and it is checked into `charts/logweir/rendered/`.
-
-### `shared` mode, and what it refuses before it installs
-
-`examples/console-shared.values.yaml` is the whole shape. What the chart will
-not let you install, each refused at render time with the field named:
-
-| refused | why |
-|---|---|
-| `publicBaseUrl` that is not `https://` | TLS at the shared entry point is required, not recommended. `values.schema.json` types this too, so `--set` is refused before a template runs |
-| `publicBaseUrl` with a path, trailing slash or userinfo | the OIDC redirect URI is this value plus `/auth/callback` |
-| `ingress.enabled` with no `tlsSecretName` | a `__Host-`/`Secure` session cookie is never sent over plain HTTP, so it would be a console that cannot log anyone in — after publishing it |
-| `ingress.enabled` in `localAdmin` mode | an Ingress in front of a mode that authenticates nobody is an unauthenticated shared console |
-| a `roles.bindings` namespace outside the console's bound set | a product role for a namespace the ServiceAccount cannot read is a role that grants a 403 |
-| `*` or `?` in a binding | bindings are EXACT strings; a wildcard is refused by name rather than silently matching nothing |
-| `networkPolicy.enabled` without both ingress-controller selectors | an ingress rule with no `from` admits nothing; one with an empty pod selector admits the whole namespace |
-| `api.console.enabled` without `api.enabled` | a pod with no grants, which 403s on every route |
-| `api.console.enabled` with no `api.console.mode` | there is no default, here or in the binary; a mode read by fall-through is the more permissive one nobody chose |
-| `ingress.host` that is not `publicBaseUrl`'s authority | the redirect URI is `publicBaseUrl` + `/auth/callback` and the service answers `421 misdirected_request` to any other `Host`, so a mismatch publishes a console every browser is refused by |
-| `shared` without `controller.watchNamespaces` | D0 stage 5: with the cluster-wide binding the controller may create a Job in the release namespace that mounts the console's keys (O1) |
-| `controller.watchNamespaces` containing the release namespace | the same authority, put back by name |
-| any `ui.*` value | withdrawn in v1 (release-notes item 75); the console is `api.console.*` |
-| a `roles.bindings` namespace outside `controller.watchNamespaces` | the console would create objects no controller reconciles |
-| `requireTrustedProxy` with neither `trustedProxyService` nor `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
-| `trustedProxyService` with only one of `namespace`/`name`, or in `localAdmin` mode | half a Service names nothing; a loopback listener has no proxy, and no Role in the ingress namespace should be granted for one |
-| `oidc.caBundle` naming both a ConfigMap and a Secret, or with an empty `key` | the bundle is one object and one file |
-| `oidc.systemRoots: false` without `oidc.caBundle` | the console would trust no certificate and never reach its issuer |
-| a `hostAliases` entry without an `ip` and a hostname, or with a wildcard | `/etc/hosts` has no wildcard; an entry that resolves nothing is a typo |
-| a `networkPolicy.oidcPeers` entry without `namespace`, `podLabels` and `port` | an empty selector would allow egress to every pod in the namespace |
-| `requireTrustedProxy` with a `trustedProxyCidrs` range wider than `/16` (IPv4) or `/48` (IPv6) | a range that wide contains the pods the gate exists to refuse |
-| `ingress.enabled` in shared mode with neither `trustedProxyService` nor `trustedProxyCidrs`, and `trustedProxy` not `none` | the console cannot tell its ingress from a pod that dials it: the per-peer connection cap is off and every sign-in shares one budget (FX-24c). Name the proxy, or opt out with `trustedProxy: none` |
-| `trustedProxy: none` beside `trustedProxyService` or `trustedProxyCidrs`, any other `trustedProxy` value, or `trustedProxy` in `localAdmin` mode | an opt-out that also names a proxy says two things; a loopback listener has no proxy to opt out of |
-
-**`requireTrustedProxy: true`** makes the console answer `421` to every request
-(the two probes excepted) whose socket peer is not a trusted proxy, or that the
-ingress did not mark `X-Forwarded-Proto: https`. It can only refuse; identity
-stays the OIDC session. It is defence in depth; an enforcing NetworkPolicy
-remains the network boundary. There are two ways to say who the proxy is:
-
-- **`trustedProxyService: {namespace, name}` — the ingress controller's
-  Service, and the recommended one.** The console lists that Service's
-  `EndpointSlice`s every five seconds and trusts each **serving** endpoint
-  address as a single host: the ingress pods of the moment, and no other pod.
-  An ingress pod recreated on a new address is trusted after one refresh and
-  its old address distrusted at the same moment, so nothing has to be re-read
-  or patched after an ingress restart (chart gap G6). A refresh that fails keeps
-  the last complete set for at most thirty seconds; past that the console
-  trusts nobody through the Service, answers `421` and reports NotReady — a
-  visible outage, never a silent stale grant. The chart renders one `Role` and
-  `RoleBinding` in **that** namespace granting `list` on
-  `discovery.k8s.io/endpointslices` and nothing else. **Who can add an
-  address:** whoever can edit that Service (its selector) or write an
-  `EndpointSlice` there, and whoever can create or relabel a Pod — or a
-  Deployment — that matches the Service's selector in that namespace, because
-  the EndpointSlice controller then lists it. All of them are the ingress
-  namespace's own administrators, who already terminate the console's TLS.
-  **An ingress controller on `hostNetwork`** publishes the NODE's address as its
-  endpoint: the console then trusts every hostNetwork pod and node process on
-  that node, and anything the CNI masquerades to the node address — not "the
-  ingress pods and no other pod". For such a controller, either accept node
-  trust knowingly or decide a `trustedProxyCidrs` `/32` knowingly. The Service's
-  endpoints must be the ingress controller's own pods (the Traefik chart's
-  `traefik` Service is; an admission-webhook Service that selects the same pods
-  is equivalent).
-- **`trustedProxyCidrs`** — static ranges. It tells the ingress from a pod that
-  dialled the Service directly **only when the range is the ingress
-  controller's own pod range and contains no other pod** (kube-proxy keeps the
-  source pod IP through a ClusterIP), so the chart and the binary refuse a range
-  wider than `/16` (IPv4) or `/48` (IPv6) when the gate is on. A dedicated
-  ingress node pool's pod ranges satisfy it; a single-node cluster's pod range
-  does not (it contains every pod). The example ships the placeholder
-  `192.0.2.0/24` beside the Service.
-
-Both may be set; a peer trusted by either is trusted.
-
-**The trusted proxy also decides whose sign-in budget a request spends**
-(FX-13). `/auth/login` and `/auth/callback` allow 20 requests a minute per
-client, per console replica. From a trusted proxy, the client is the
-rightmost `X-Forwarded-For` hop that is not itself a trusted proxy — the
-address Traefik received the request from, which Traefik appends after
-deleting whatever `X-Forwarded-*` the client sent (`forwardedHeaders.trustedIPs:
-[]`, the default and the PoC profile's setting). From any other peer it is the
-peer, and an RFC 7239 `Forwarded` header is never read. This holds whether or
-not `requireTrustedProxy` is on, so three things follow.
-
-- Without a trusted proxy configured, every sign-in through the ingress shares
-  the ingress's one budget, about ten sign-ins a minute for everyone.
-- An ingress controller that passes a client's `X-Forwarded-For` through
-  unchanged (Traefik with `forwardedHeaders.insecure: true` or the client's
-  range in `trustedIPs`), or a `trustedProxyCidrs` range wider than the
-  ingress's own pods, lets a client choose its budget — **including another
-  client's**, so it can spend that client's sign-ins. Without
-  `requireTrustedProxy` the ranges have no width floor, so a range set wide
-  "for logging" took on this meaning with FX-13: keep both as tight as the
-  gate needs them.
-- Per-client budgets need the client's own address to reach Traefik. With the
-  Traefik chart's default Service (`externalTrafficPolicy: Cluster`) on a
-  multi-node cluster, or a cloud load balancer in instance mode, kube-proxy
-  replaces it with a node address and every client through that node shares
-  one budget. Keep it with `externalTrafficPolicy: Local`, the PROXY protocol,
-  or an L7 hop in front that both Traefik (`forwardedHeaders.trustedIPs`) and
-  the console trust.
-
-The whole rule, why there is no global sign-in budget, and what to do about
-the residual it leaves at the identity provider (generous per-client limits
-there, alerts, and the in-cluster administrator mode as the break-glass path)
-are in [docs/api.md](../../docs/api.md), *Rate limits*.
-
-**The trusted proxy also decides who is capped** (FX-24c). Once either
-`trustedProxyService` or `trustedProxyCidrs` names a proxy, every other peer —
-a pod that dials the console's pod IP, a kubelet probe, a `kubectl
-port-forward` — may hold at most 32 of the console's 256 connections at
-once; its 33rd is closed as soon as it is accepted, and the console logs
-`closed a connection at once` (at most once every ten seconds). The ingress
-itself is never capped: every browser behind it arrives from its address.
-**With neither value set, nobody is capped**, because the console cannot then
-tell its ingress from any other peer; the start line says `per_peer_cap: 0`
-and the console warns. So **with `api.console.ingress.enabled` the chart
-requires one of the two**, or `api.console.trustedProxy: none` to run without
-a named proxy deliberately — an existing shared install that publishes the
-console through the chart's Ingress must set one before `helm upgrade`.
-Without the chart's Ingress nothing is refused, but set `trustedProxyService`
-there too. If another proxy (an L7 load balancer, a second ingress) carries
-many clients to the console, name it too, or its clients share 32
-connections. Behind a service-mesh sidecar that re-originates inbound
-connections (Istio from `127.0.0.6`, Linkerd from `127.0.0.1`) every client is
-one peer: name the sidecar's address, which turns the cap off behind it, or
-opt out. A `trustedProxyCidrs` range never caps anything inside it, so keep it
-to the ingress controller's own pods. [docs/api.md](../../docs/api.md#conventions)
-has the full set of connection limits.
-
-### The identity provider inside the cluster: a private CA, a name, a path
-
-Three values exist for an issuer the console cannot reach with the defaults —
-an IdP whose certificate a private CA issued, or one whose public name does not
-resolve to a reachable address from inside the cluster (split-horizon DNS, a
-laptop cluster where `*.localtest.me` is `127.0.0.1`, a Dex behind the
-cluster's own ingress). None of them changes what the console validates.
-
-- **`oidc.caBundle: {configMap | secret, key}`** (chart gap G1) mounts the
-  issuer CA's **public** certificates from one ConfigMap or Secret in the
-  release namespace — never inline PEM, so no certificate text is in a values
-  file, a rendered manifest or Helm's release history — and the console trusts
-  them **in addition to** the system roots. `oidc.systemRoots: false` drops the
-  system roots and is refused without a bundle. The object must exist before the
-  pod starts (it is not `optional`); an unreadable or empty bundle, or one that
-  carries a private key, stops `logweir-api` at exit 2. The certificate chain,
-  its validity and the host name in the issuer URL are verified exactly as for a
-  public CA.
-- **`hostAliases: [{ip, hostnames}]`** (chart gap G2) adds pod `/etc/hosts`
-  entries, e.g. the issuer's public name mapped to the IdP's own in-cluster
-  Service. **Why this and not a separate back-channel URL.** A
-  back-channel discovery/JWKS URL would either have to rewrite every endpoint
-  the discovery document names — including the token endpoint, which receives
-  the client secret — onto another host, or verify the provider's TLS
-  certificate against a name the browser never uses: a second trust decision
-  the operator would have to get right. A host alias changes only where the
-  name resolves. The URL, the TLS name check, the discovery document's
-  `issuer` and the ID token's `iss` are all still compared with the one
-  configured `oidc.issuer`, exactly. **But that holds only when the alias
-  target is an endpoint that only the IdP's owner can route.** Map the name to
-  the IdP's OWN Service, with TLS terminated by the IdP itself — never to a
-  shared ingress controller. A shared ingress serves Ingresses from other
-  namespaces too: anyone who may create one there can claim the issuer's host
-  (longer path rules outrank the owner's) and answer discovery, JWKS and the
-  token request — which carries the client secret — behind the owner's own
-  certificate, and the console then believes tokens they signed. The CA in
-  `oidc.caBundle` must likewise not issue the issuer's name to anyone who could
-  be on that path. With both conditions met, an alias pointing somewhere wrong
-  is a handshake that fails; without them it is not. A host alias is for a
-  cluster whose DNS does not resolve the issuer (a laptop cluster, split-horizon
-  DNS); a production IdP is resolved through real DNS and needs none. A
-  ClusterIP is stable for the Service's lifetime; recreate the Service and the
-  alias must follow.
-- **`networkPolicy.oidcPeers: [{namespace, podLabels, port}]`** allows the
-  console's egress to an in-cluster provider path by selector. An enforcing CNI
-  matches egress **after** a Service's DNAT, against the backend pod and its
-  port, so an `oidcCIDRs` entry for a ClusterIP matches nothing there; name the
-  pods instead (for the PoC's Dex, which serves the console's TLS itself:
-  namespace `dex`, its pod labels, port `5554`).
-
-**Every object the console creates is attributed.** The rendered configuration
-names `kubernetes.principal: system:serviceaccount:<namespace>:<release>-api`,
-and the console stamps it — with the actor, how they authenticated, the product
-action, the binding revision and, for a restore, the selected recovery point —
-onto every CR and credential Secret it creates (`docs/api.md` §*The audit
-record*), so a Kubernetes audit entry for `<release>-api` and a Logweir audit
-line join on `api.logweir.dev/request-id`.
-`replicas` above 1 also renders a `PodDisruptionBudget` with
-`maxUnavailable: 1`. At one replica it renders none, deliberately: a budget over
-a single pod makes `kubectl drain` block forever on the node carrying it.
-
-### What the NetworkPolicy does and does not prove
-
-It allows ingress **only** from the configured ingress-controller pods on the
-console port, and egress to DNS, the Kubernetes API (the `kubernetes.default`
-ClusterIP, its visible endpoints and `identity.kubernetesApiCIDRs`) and the
-`networkPolicy.oidcCIDRs` on 443 and the `networkPolicy.oidcPeers` pods on
-their ports. It lists **no** broker port and **no**
-object-store port, which is the structural half of D0's "does not dial Kafka or
-object storage" — the other half is that `logweir-api` links no Kafka client and
-no object-store client at all.
-
-NetworkPolicy has no FQDN concept, so an identity provider behind a rotating
-address cannot be expressed: `oidcCIDRs` must be its actual endpoints. Left
-empty under an enforcing CNI, this policy blocks OIDC discovery and the console
-starts NotReady — the honest failure, and not a reason to widen the rule.
-
-And Docker Desktop commonly has **no enforcing CNI**, so a local install proves
-these objects are well-formed and nothing whatever about deny behaviour. D0 says
-so by name. Production support needs the chosen CNI's own evidence.
-
-### `api.console.rateLimits` — how fast one person can start runs (P10)
-
-| value | default | what it decides |
-|---|---|---|
-| `api.console.rateLimits.manualBackupsPerMinute` | `10` | `POST …/backups` ("Back up now") per person, per namespace, per minute; then `429 rate_limited` with `Retry-After` |
-| `api.console.rateLimits.manualRestoresPerMinute` | `5` | `POST …/restores`, the same way |
-
-Keyed by the stable `issuer#subject` id, so two people are two windows and one
-person in two namespaces is two windows. The window is per console **process**:
-`replicas: 2` permits twice the rate. It bounds how fast runs are QUEUED; how
-many RUN at once is the controller's `runs.*` pool, which holds whatever this
-lets through. `logweir-api` refuses `0` and anything above `600` at start. The
-chart renders `rateLimits` into the configuration **only when a value differs
-from these defaults**, because a console image that predates the key refuses
-the whole file at start (exit 2): a default install survives an image-only
-rollback, and one that set `api.console.rateLimits.*` rolls the console image
-back with the chart.
-
-### Upgrade, rollback, and what an existing installation sees
-
-An installation that is not setting `api.console.enabled` sees **no change at
-all**: the flag defaults to false, `api.enabled` keeps meaning exactly what it
-meant before (an account and its grants, no pod), and the default and demo
-renders are unchanged. Nothing converts.
-
-Turning it on is additive — a ConfigMap, a Deployment and a Service — and
-turning it off removes those three and leaves the principal, its grants and
-every Logweir custom resource untouched. The console creates and reads objects;
-it executes nothing, so removing it stops no backup, cancels no restore and
-loses no evidence. Rolling back to a chart version without these templates is
-the same operation performed by Helm.
-
-The configuration ConfigMap is **immutable and content-addressed**: its name
-carries the digest of the document, so an upgrade that changes one role binding
-creates a new object and rolls the pod onto it, and nobody with `patch
-configmaps` can change the role table under a running console. Going the other
-way — from `shared` back to `localAdmin` — ends every live session, because the
-listener moves to loopback and the session cookie's origin no longer exists;
-plan it as a withdrawal of access rather than as a setting change.
-
-## `controller.watchNamespaces` — the controller's authority, scoped (D0 stage 5)
-
-| value | default | what it decides |
-|---|---|---|
-| `controller.watchNamespaces` | `[]` | the execution namespaces the controller watches and creates Jobs in; `[]` is every namespace |
-
-**Why it exists.** `weirkeeper` creates Jobs, and a Job can mount any Secret in
-its namespace, so Job-create authority in a namespace is every Secret there —
-residual **O1**. The default install binds the `weirkeeper` ClusterRole with a
-cluster-wide `ClusterRoleBinding`, so that authority covers every namespace.
-Kubernetes RBAC is additive; nothing can subtract a namespace from a
-ClusterRoleBinding, so the only narrowing is not to grant it.
-
-**What a list renders instead** (`templates/controller-scope.yaml`):
-
-* no `ClusterRoleBinding/weirkeeper`;
-* one `RoleBinding/weirkeeper` per listed namespace, to the **unchanged**
-  `weirkeeper` ClusterRole — under a RoleBinding its namespaced rules apply in
-  that namespace only;
-* `ClusterRole/weirkeeper-cluster-scope`, bound cluster-wide, holding the two
-  cluster-scoped trust kinds (`trustrosters`, `trustpolicies` and their status)
-  and nothing namespaced;
-* `Role/weirkeeper-installation-policy` in the release namespace: `get` on the
-  `weirkeeper-policy` ConfigMap by name, and nothing else;
-* `LOGWEIR_WATCH_NAMESPACES` on the controller, from the same list, so every
-  namespaced reconciler runs one `Api::namespaced` watch per listed namespace
-  and every cross-object read (the retention protection set, the check ceiling)
-  reads those namespaces only. A name that is not a DNS label is refused by the
-  schema, by the template and by the controller at startup.
-
-**What an administrator can ask Kubernetes before anything runs** (`auth can-i`
-as `system:serviceaccount:<release-namespace>:weirkeeper`, scoped to `team-a`):
+3. an object-store credential scoped to the policy's prefix and never
+   `logweir/`: the hard boundary;
+4. an administrator's `approve-plan` with the current `planSha256`, per run.
+
+[`docs/stability.md`](../../docs/stability.md) states the residual: enforcement
+turns the controller's Job-create authority into a deletion capability in the
+namespace that holds the credential.
+
+## `controller.watchNamespaces`
+
+`[]` binds the controller cluster-wide, and Job-create authority in a namespace
+is every Secret there (residual O1). A list renders one `RoleBinding` per
+namespace to the unchanged `weirkeeper` ClusterRole,
+`ClusterRole/weirkeeper-cluster-scope` (only `trustrosters` and
+`trustpolicies`), `Role/weirkeeper-installation-policy` (`get` on
+`weirkeeper-policy`), and `LOGWEIR_WATCH_NAMESPACES`, so every watch and read
+covers those namespaces. A non-DNS-label name is refused by the schema, the
+template and the controller. `auth can-i` as the `weirkeeper` ServiceAccount
+with `team-a` listed:
 
 | question | answer |
 |---|---|
-| `create jobs -n team-a`, `list pods -n team-a`, `get pods/log -n team-a`, `create configmaps -n team-a` | yes |
-| `watch backups -n team-a` | yes |
-| `create jobs -n <release-namespace>`, `list jobs -n <release-namespace>` | **no** |
-| `create jobs -n team-z` (not listed), `watch backups --all-namespaces` | **no** |
-| `get configmaps/weirkeeper-policy -n <release-namespace>` | yes |
-| `get configmaps/<any other> -n <release-namespace>`, `get secrets` anywhere | **no** |
-| `list trustpolicies`, `get trustrosters` (cluster-scoped) | yes |
-| `patch trustpolicies` (cluster-scoped; the `logweir.dev/compromise-revocation` finalizer only, see `docs/keys.md`) | yes |
+| `create jobs`, `list pods`, `get pods/log`, `create configmaps`, `watch backups` in `team-a` | yes |
+| `create jobs` or `list jobs` in the release namespace; anything in an unlisted namespace; `watch backups --all-namespaces` | **no** |
+| `get configmaps/weirkeeper-policy` in the release namespace | yes; any other ConfigMap there, or `get secrets` anywhere: **no** |
+| `list trustpolicies`, `get trustrosters`, `patch trustpolicies` (the compromise-revocation finalizer, `docs/keys.md`) | yes |
 
-**Required for `api.console.mode: shared`**, which the chart refuses without a
-list or with one that names the release namespace: the console's session and
-cursor keys live there.
+**Shared mode requires it**, and the release namespace may not be in it.
 
-**Migration.** Existing installs that do not run a shared console see no
-change: the default is `[]` and renders byte-identically. **An existing
-`api.console.mode: shared` release does not render any more until it is scoped**
-— `helm upgrade` refuses at render time, naming the field, and applies nothing
-(the running console keeps serving). It meets, in order: no
-`controller.watchNamespaces`; the release namespace in that list; any `ui.*`;
-a `roles.bindings` namespace outside the list; and, with `requireTrustedProxy`,
-a `trustedProxyCidrs` range wider than `/16`. The why is residual O1 above, and
-`docs/install.md` §5e *Upgrading a shared console installed before this release*
-has the table of fixes and the rollback. To scope an existing install: list every namespace that holds
-Logweir objects (`kubectl get backups,restores,backupschedules,kafkaclusters -A`),
-make sure each has the runner ServiceAccount and the signing identity
-(`docs/install.md` step 4, `identity.authorizedRunnerNamespaces`), set the list
-and upgrade. Objects in a namespace left off the list are **not reconciled** —
-they keep their status and evidence, and resume when the namespace is added. If
-Backups or Restores currently run in the release namespace, move them before
-enabling a shared console there. Rollback is `watchNamespaces: []`, which
-restores the cluster-wide binding; the controller restarts either way because
-its environment changes. Adding a namespace later is an upgrade (a new
-RoleBinding and a controller restart), not a cluster-admin grant.
+**Migration.** Without a shared console nothing changes. A shared release stops
+rendering until scoped: `helm upgrade` refuses, naming the field, and the
+running console keeps serving. It meets, in order: no list; the release
+namespace listed; any `ui.*`; a binding namespace outside the list; with
+`requireTrustedProxy`, a range wider than `/16`. List every namespace with
+Logweir objects (`kubectl get backups,restores,backupschedules,kafkaclusters
+-A`), give each the runner ServiceAccount and the signer
+(`identity.authorizedRunnerNamespaces`), move runs out of the release
+namespace, set the list and upgrade. Unlisted namespaces are not reconciled
+until added. Rollback is `watchNamespaces: []`. Each change restarts the
+controller. install.md 5e has the table of fixes.
 
-**What it does not change.** The execution namespaces still carry O1 for their
-own signing key — moving the signer out of the controller's reach is not this
-setting. Each listed namespace costs one watch per namespaced kind (twelve, plus
-their owned Jobs), which is the price of not holding a cluster-wide list.
+## `approvalPolicy`
 
-## `approvalPolicy` — the three modes: confirm, two-person, strict (PLAT-19.2, PROD-16.1, PROD-16.2)
+**confirm**: one person clicks Create, no key (internal `Ordinary`).
+**two-person**: a second signed-in person approves in the shared console, no
+key (internal `Governed` with `approverSignature: Console`). **strict**: an
+approver's personal key (`Governed`, or `legacy-governed-v1`). A **fresh install
+with a console** (first `helm install` on Helm 3.19+ or 4.x, `api.console.enabled`,
+the managed identity, `consoleKey`) starts unbound namespaces in **confirm**:
+the hook creates the console key, a default `TrustPolicy` for it and the signer
+when the cluster has no trust of its own, and marks the install. An upgraded
+install keeps `legacy-governed-v1` until you opt in (install.md 5f). The
+default `TrustPolicy` is made only when the cluster has no `TrustPolicy` and no
+`TrustRoster/default`; on older Helm the chart refuses, naming
+`identity.installationTrust.enabled`. Its `create` grant is a `post-install`
+hook Helm deletes when the hooks finish. After a failed first install, run
+`kubectl delete clusterrolebinding,clusterrole <release>-identity-trust
+--ignore-not-found`.
 
-**confirm** — one person clicks Create in the console, no key (internal
-`Ordinary`); **two-person** — a second person signs in to the shared console
-and clicks Approve, no key (internal `Governed` with `approverSignature:
-Console`; per namespace, and only with `api.console.mode: shared`);
-**strict** — an approver's personal key (internal `Governed`, or
-`legacy-governed-v1`). A **fresh install with a console** (the first `helm
-install`, Helm 3.19+ or 4.x, with `api.console.enabled`, the managed identity
-and `identity.bootstrapFeatures.consoleKey: true`) starts every namespace
-without a binding in **confirm**: the identity hook generates the console key,
-creates the default `TrustPolicy` for exactly it and the installation signer
-when the cluster has no trust of its own, and marks the install
-(`identity.installationTrust`; `docs/kubernetes.md` §8, *The three modes*). An
-**upgraded** install keeps `legacy-governed-v1` until you opt in
-(`docs/install.md` §5f).
+- `Ordinary`, `Governed` and `approverSignature: Console` are older spellings.
+  `maxAgeSeconds` is 60 to 604800 (default 900 for confirm, 86400 otherwise);
+  `requireDistinctPrincipal` must be true for two-person and strict, and
+  compares the approver key's `principal.id`, which must be
+  `<issuer>#<subject>`; `default-confirm-v1` and `legacy-governed-v1` are
+  reserved.
+- One immutable ConfigMap is mounted into the controller
+  (`LOGWEIR_APPROVAL_POLICY_FILE`) and the console, and both refuse a bad
+  document at start, so **the chart refuses at render every document the binary
+  refuses** (cases in `scripts/approval-policy-refusals/`).
+- Editing a policy rolls both Deployments; a confirmed, unadmitted Restore is
+  refused `ApprovalPolicyMismatch` and is submitted again.
+- **two-person** needs `api.console.mode: shared` and cannot be the default.
+  The namespace's `TrustPolicy` needs the console key under
+  `ConsoleConfirmation` and no approver key. The mode is in the policy's
+  snapshot digest, so a request made under it is never approved with a personal
+  key, nor a strict request in the console. Roll the controller, runner and
+  console together (an older runner exits 3).
+- **Rollback:** rebind or remove the policies before rolling binaries back.
+- **The residual** (`SECURITY.md`): whoever controls the console pod, its key
+  Secret or the identity provider can approve alone under confirm and
+  two-person; use strict where that is not acceptable. `docs/keys.md` lists the
+  keys each `TrustPolicy` needs.
 
-| value | meaning |
-|---|---|
-| `approvalPolicy.default` | what an unbound namespace resolves to: `""` (the fresh-install marker: confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` (needs `allowOrdinaryConfirmation`), `strict`; rendered as `defaultMode`, which an older binary refuses at start |
-| `approvalPolicy.policies` | named policies: `name`, `mode: confirm\|two-person\|strict` (the canonical spelling; the older `Ordinary\|Governed` are aliases, and the chart renders the internal names either way), `maxAgeSeconds` (60..604800; default 900 confirm, 86400 two-person and strict), `requireDistinctPrincipal` (two-person and strict, must be true), `approverSignature: Console` (an alias: the older spelling of two-person, on a `Governed` policy; refused on a confirm policy and beside `mode: strict`); `default-confirm-v1` and `legacy-governed-v1` are reserved |
-| `approvalPolicy.namespaces` | `{<namespace>: <policy>}`; an explicit binding always wins over the default |
-| `approvalPolicy.allowOrdinaryConfirmation` | D0's installation floor, default `false`; a confirm policy and `default: confirm` are refused at render and at start without it (the fresh-install marker does not need it) |
-| `approvalPolicy.confirmationKeySecret` | `""`: with `identity.bootstrapFeatures.consoleKey`, the console key the identity hook generates and retains (`logweir-console-confirmation`, mounted `optional` and marked `confirmationKeyManaged` because the hook fills it after the console starts), and without it no key; another name (or the managed name with the feature off): a Secret you manage, key `confirmation.key`, mounted required, needed when a console-served namespace is bound |
+## The console
 
-**Nothing renders when nothing is set**, so an existing installation sees no
-change. When set, the chart renders one **immutable, content-addressed**
-ConfigMap `<release>-approval-policy-<digest>` and mounts the same object into
-the `weirkeeper` Deployment (`LOGWEIR_APPROVAL_POLICY_FILE`) and into the
-console (`approvalPolicyFile` in its config), and mounts the key Secret into the
-console only (`confirmationKeyFile`). Both processes log the document's digest
-at start and refuse to start on a document that does not validate — and a
-controller that refuses to start stops every reconciler, backups included — so
-**the chart refuses at render every document the binary refuses**: the
-`requireDistinctPrincipal` rules, the `maxAgeSeconds` range, unknown policy
-fields, namespace keys that are not DNS labels, and the rest. The cases are
-listed once in `scripts/approval-policy-refusals/`, which `scripts/check-chart.sh`
-renders and `crates/logweir/tests/chart_lint.rs` feeds to the binary's parser.
-`requireDistinctPrincipal` compares the approver key's `principal.id`, which must
-be `<issuer>#<subject>`; any other form is refused under Governed. Editing a
-policy renames the ConfigMap and rolls both Deployments — the installation-admin
-rollout D0 asks for; a Restore confirmed under the old policy and not yet
-admitted is refused `ApprovalPolicyMismatch` and is submitted again. Rolling
-back (removing the values) returns every namespace to legacy governed approval,
-and an older controller refuses every document the new console signed: both
-directions fail closed. The keys this needs on each namespace's `TrustPolicy`
-are in `docs/keys.md`; the example is `examples/approval-policy.values.yaml`,
-rendered to `rendered/approval-policy.yaml`.
+The values block, ServiceAccount, Service and Deployment are `api.*` and
+`<release>-api`; the image and its Dockerfile are `logweir-console`.
+**`api.enabled` starts nothing**, so you can ask `kubectl auth can-i` first. It
+grants `get`/`list` and `create` on the eight product kinds, `patch` on
+`backupschedules`, `backupdestinations`, `topicdiscoveries` and `preflights`,
+`get`/`list` on `protectionpolicies`, `recoverycatalogs`, `retentionpolicies`
+and `trustpolicies`, `create` on `recoverycatalogs`, `get` on
+`trustrosters/default` and `configmaps`, and `create` on `secrets`; no `watch`,
+no `delete`, no Secret read (so a console-written credential is write-only), no
+`list` on `configmaps`, no trust write. `scripts/check-chart.sh` answers each
+`can-i` against every render. **`admissionPolicy.enabled`** limits that
+`create secrets` to the types `logweir.dev/object-store-credential`,
+`logweir.dev/kafka-sasl-password` and `logweir.dev/kafka-client-certificate`
+with the `app.kubernetes.io/managed-by: logweir` label, so the console cannot
+mint a ServiceAccount token; other principals are skipped, which makes
+`failurePolicy: Fail` safe. On Kubernetes 1.29 the kind does not exist.
 
-**Two-person approval in the console (PROD-16.2).** A policy written `mode:
-two-person` is rendered as `mode: Governed` with `approverSignature: Console`,
-and a namespace bound to it takes its approval from a second person: someone
-with the `approver` role (`api.console.roles.bindings`; an administrator is not
-an approver unless bound as one) who is not the requester signs in to the
-console and clicks Approve. Nobody copies, signs or pastes anything. The
-console signs the approval with the confirmation key that signed the request,
-so the namespace's `TrustPolicy` needs that key under `ConsoleConfirmation` and
-no approver key. The setting is inside the policy's snapshot digest: a request
-made under it is never approved with a personal key, and a request made under a
-strict policy is never approved in the console.
+### localAdmin, the in-cluster administrator mode
 
-- **It renders only with the shared console.** With no console, or with
-  `api.console.mode: localAdmin`, the chart refuses a two-person policy by
-  name: the administrator console has one identity, which cannot be two
-  people. `approvalPolicy.default` cannot be `two-person`; bind each namespace.
-- **Roll the controller, the runner and the console together.** An older
-  controller or console refuses a policy document that carries
-  `approverSignature` and does not start; an older runner refuses the frozen
-  policy snapshot and the approval document, exit 3, before it dials anything.
-  The key is rendered only for a two-person policy, so an install that
-  declares none is unaffected.
-- **Rollback.** Rebind the namespaces (to `strict` or `confirm`) or remove the
-  policy BEFORE rolling the binaries back. A request waiting for its second
-  person is then for another policy and is submitted again.
-- **The residual** (`SECURITY.md`): whoever controls the console pod, its
-  confirmation-key Secret or the identity provider can approve alone, here as
-  under confirm. `strict` is for a namespace that cannot accept that.
+It binds `127.0.0.1` and is reached only with `kubectl port-forward
+deploy/<release>-api`: no Service, no Ingress (refused), `ingress: []`.
 
-The example is `examples/console-two-person.values.yaml`, rendered to
-`rendered/console-two-person.yaml`.
-
-## `controller.failFastSeconds` and `controller.jobTtlSeconds`
-
-| value | default | what it decides |
-|---|---|---|
-| `controller.failFastSeconds` | `""` (300 s) | how long a non-transient diagnostic may hold before the Job is cancelled |
-| `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job is kept |
-
-Both ship as the **empty string**, which means *this controller build's own
-default* and renders no environment variable at all — so a default install is
-byte-identical to what it was before these existed.
-
-`failFastSeconds: 0` is not "no patience", it is **never fail fast**: every Job
-runs to its own `activeDeadlineSeconds`. It is the lever for a cluster where an
-external controller materialises a Secret a few minutes behind the Job, where a
-healthy run would otherwise be cancelled at 300 s.
-
-Values below the build's floors (60 s and 3600 s) are clamped **up** by the
-controller, which logs what it used; an unparseable value is the default. The
-chart does not refuse either, because a typo should not fail the upgrade of a
-whole release. A job TTL below an hour would mean an operator cannot fetch the
-pod log of a run that failed overnight, which is why that floor is where it is.
-
-## `notify` — withdrawn
-
-Alert delivery is withdrawn (release notes, item 74), and with it
-`notify.allowInsecureSinks`. A values file that still sets `notify` is refused
-at render, naming it; remove the block, or pass `--set notify=null` with
-`helm upgrade --reuse-values`.
-
-## The five-minute path
-
-With published images, `demo.values.yaml` needs no image override because the
-reviewed bootstrap digest is pinned. To run images built from this checkout
-instead, build/load all three local images and add the explicit development
-override:
-
-```bash
-just image && just image-weirkeeper && just image-console
-kubectl create namespace logweir-system
-head -c 32 /dev/urandom > cursor.key  # the console's cursor key (localAdmin: raw bytes)
-kubectl -n logweir-system create secret generic logweir-console-keys --from-file=cursor.key
-rm cursor.key
-helm install logweir charts/logweir -n logweir-system \
-  -f charts/logweir/examples/demo.values.yaml \
-  -f charts/logweir/examples/author-only.values.yaml --wait --timeout 10m
-cargo build -p logweir                # the walk mints the approval with the shipped CLI
-bash scripts/helm-demo.sh             # or: just helm-demo
+```console
+$ head -c 32 /dev/urandom > cursor.key
+$ kubectl -n logweir-system create secret generic logweir-console-keys --from-file=cursor.key
+$ rm cursor.key
+$ helm install logweir charts/logweir -n logweir-system -f charts/logweir/examples/console.values.yaml
+$ kubectl -n logweir-system port-forward deploy/logweir-api 8484:8484
+$ open http://127.0.0.1:8484/ui/
 ```
 
-`--wait` returns when both brokers, MinIO, the console and the controller are
-Ready and the identity/seed Jobs have succeeded (they are Helm hooks; a
-succeeded one is deleted, a failed one stays for `kubectl logs`). The walk uses
-the chart-managed installation signer, mints only an approver key, creates the
-remaining demo credentials, applies the
-`TrustRoster`, probes two `KafkaCluster`s to `reachable: true`, fires a
-`BackupSchedule`, restores from its `Backup` with an approval minted on the
-host, verifies the scorecard with both readers, fetches the console's page and
-session through a port-forward, and tears everything down — the cluster ends with no
-`logweir-*` namespace. Every step prints its exit codes.
+The local port must be `8484`, because `publicOrigin` carries it. **`create
+pods/portforward` in the namespace is full console administrator authority**
+over every bound namespace. There are no probes (a kubelet cannot reach
+loopback), so a refused configuration shows as `CrashLoopBackOff`, exit code 2,
+and one line in `kubectl logs` naming the field.
 
-On a cluster that holds images you built yourself (`just image && just
-image-weirkeeper`), add `examples/author-only.values.yaml` — and read its
-header: **an author-only install is not evidence of publication.**
+### The key Secret
 
-## Pointing a real install at a real archive
+| key in `api.console.keySecret` | mode | content |
+|---|---|---|
+| `cursor.key` | both | at least 32 bytes: raw in localAdmin, `version:` and `key:` lines in shared |
+| `session.key` | shared | the same two-line form |
 
-[`examples/minimal.values.yaml`](examples/minimal.values.yaml) is the operator
-alone at the completed release's shipped image defaults with the three values a stranger sets:
-`archive.url`, `archive.s3.endpoint` (empty for Amazon S3 proper) and
-`archive.s3.region`. The chart creates the installation signer and public
-record; there is no local signing-key ceremony. Then, **before any custom
-resource**, create the archive/SCRAM/controller credentials in
-`docs/install.md`, create only the independent approver identity, and authorize
-the published signer in cluster-scoped `TrustRoster/default`. Additional runner
-namespaces must already exist and be listed in
-`identity.authorizedRunnerNamespaces`. Run `just check-secrets <namespace>`
-only after the Helm hooks succeed.
+**The chart generates no key**: a generated one changes on every render and is
+lost on upgrade. `keyVersion` must equal the files' `version:`; bumping both
+ends every session, and a file changed without it is refused at start. The
+OIDC client secret and the TLS Secret are yours too. The rendered ConfigMap
+holds only paths under `/var/run/logweir/`.
 
-**How small those archive credentials may be is measured, not guessed.**
-[`docs/kubernetes.md`](../../docs/kubernetes.md) §7a carries the per-role
-minimal S3 action set with its resource scope — one bisected row per action,
-each naming the live harness row that proved the role's own operation fails
-without it. A wider grant than that table is not required by anything this
-chart installs. On a VERSIONED archive bucket the table's `archiveRead` and
-catalog-sync rows include `s3:GetObjectVersion`: a restore of a catalog point,
-its preflight and the catalog's deep check read a receipt's pinned manifest
-version by id. MinIO serves that read under `s3:GetObject` (measured). That
-AWS S3 authorises it as an action of its own, `s3:GetObjectVersion`, is
-[UNVERIFIED — needs a real AWS S3 bucket and a credential source]
-(§7a, *The read of a pinned version*, says what was measured and on which
-store).
+### What the chart refuses in shared mode
 
-The controller's read-only evidence credential is the `logweir-evidence-ro`
-Secret in the release namespace. It is `optional: true` on the Deployment: the
-controller starts without it and every verification reads `NotAttempted`,
-which is a choice and not a bad document. It is read when the controller
-starts: after creating or rotating it, restart the controller, and every run
-whose read failed for want of it is read once more
-([`docs/kubernetes.md`](../../docs/kubernetes.md) §15.1b).
+`examples/console-shared.values.yaml` is the whole shape. Refused at render,
+naming the field:
 
-## Runtime tags and the privileged bootstrap digest
+| refused | why |
+|---|---|
+| `publicBaseUrl` not `https://`, or with a path, trailing slash or userinfo | the redirect URI is this plus `/auth/callback`; the schema refuses it for `--set` too |
+| `ingress.enabled` without `tlsSecretName`, or in localAdmin mode | a secure cookie never crosses plain HTTP; localAdmin authenticates nobody |
+| `ingress.host` not `publicBaseUrl`'s authority | every browser would get `421` |
+| a binding namespace outside the bound set or outside `controller.watchNamespaces`; `*` or `?` in a binding | |
+| `networkPolicy.enabled` without both ingress selectors | |
+| `api.console.enabled` without `api.enabled` or without `mode` | |
+| shared without `controller.watchNamespaces`, or with the release namespace in it | O1 |
+| any `ui.*` | withdrawn, release-notes item 75 |
+| `requireTrustedProxy` with no proxy, in localAdmin, or with a range wider than `/16` (IPv4) or `/48` (IPv6) | |
+| `trustedProxyService` with one of `namespace`/`name`, or in localAdmin | |
+| `ingress.enabled` in shared mode with no trusted proxy and `trustedProxy` not `none` | no per-peer cap and one sign-in budget for everybody |
+| `trustedProxy: none` beside a named proxy, another value, or in localAdmin | |
+| `oidc.caBundle` naming a ConfigMap and a Secret, or an empty `key`; `systemRoots: false` without a bundle | |
+| a `hostAliases` entry without `ip` and a hostname, or with a wildcard; an `oidcPeers` entry without `namespace`, `podLabels` and `port` | |
 
-**The chart's defaults name `controllerImage` and `runnerImage` by the `latest`
-TAG, not by a digest. That is the owner's decision of 2026-09-12**, taken after
-the trade-off below was put to them, and it is this chart's ruling alone:
-`weirkeeper::job::RUNNER_IMAGE` still pins a digest under Global Constraint 7, and
-so do the three third-party images this chart can bring (MinIO, `mc`,
-`apache/kafka`). The two repositories are the tree's own — the gate
-derives them from the runner pin's namespace rather than spelling them — so a
-namespace change propagates here on its own.
+**The trusted proxy** decides who reaches the console, whose sign-in budget a
+request spends, and who is capped at 32 connections
+([docs/api.md](../../docs/api.md#conventions), *Rate limits*).
+`trustedProxyService` (recommended) trusts the serving endpoints of the ingress
+controller's Service, re-read every five seconds: whoever can edit that Service,
+its EndpointSlices or a matching Pod or Deployment there can add an address,
+and a `hostNetwork` ingress publishes its node's address, so its node's other
+pods and processes are trusted too. `trustedProxyCidrs` works only when the
+range holds the ingress pods and no other pod (the example's `192.0.2.0/24` is
+a placeholder). Keep client addresses with `externalTrafficPolicy: Local`, the
+PROXY protocol or a trusted L7 hop; Traefik's `forwardedHeaders.insecure`
+would let a client choose its budget. A service mesh that re-originates
+connections (Istio `127.0.0.6`, Linkerd `127.0.0.1`) is one peer: name it, or
+opt out.
 
-`identity.bootstrapImage` is deliberately stricter. Its short-lived container
-can read and atomically patch the retained private signer, so the value must be
-an immutable `@sha256` reference even while ordinary controller/runner jobs use
-tags. The only exception is
-`identity.allowMutableBootstrapImageForDevelopment: true`, paired with a local
-image and `bootstrapImagePullPolicy: Never` in `author-only.values.yaml`.
-The shipped default is the runner image main CI published for revision
-`4956785` (Actions run 35019727967): the images job pulled that exact digest
-back on its native amd64 host and ran `scripts/check-image.sh`, including
-`identity bootstrap --help`, before any public tag moved, and the image config
-carries `org.opencontainers.image.revision` for that commit. Check it yourself
-with a manifest read and one run of the pinned reference from `values.yaml`:
+### The identity provider inside the cluster
+
+- **`oidc.caBundle: {configMap | secret, key}`** mounts a private issuer CA's
+  public certificates from one object in the release namespace, never inline
+  PEM. It must exist before the pod; an unusable bundle stops the console with
+  exit 2.
+- **`hostAliases`** maps the issuer's name to an in-cluster address; the URL,
+  the TLS name and `iss` are still checked against `oidc.issuer`. **Point it
+  only at the IdP's own Service, with TLS terminated by the IdP**, never at a
+  shared ingress, where an Ingress from any namespace can claim the issuer's
+  host behind the owner's certificate. Real DNS needs none. A recreated Service
+  gets a new ClusterIP, and the alias must follow.
+- **`networkPolicy.oidcPeers`** allows egress to in-cluster IdP pods by
+  selector, because an enforcing CNI matches after a Service's DNAT (the PoC's
+  Dex: namespace `dex`, its labels, port `5554`). `oidcCIDRs` must be the IdP's
+  real endpoints; empty under an enforcing CNI, the console starts NotReady.
+  The policy's egress is DNS, the Kubernetes API (with
+  `identity.kubernetesApiCIDRs`) and the IdP, and no broker or object-store
+  port. **Docker Desktop commonly
+  enforces nothing**: a local install proves nothing about deny behaviour.
+
+Turning the console off removes its ConfigMap, Deployment and Service and stops
+no backup, restore or evidence. The ConfigMap is immutable and
+content-addressed. `rateLimits` renders only when it differs from the default,
+so an install that set it rolls the console image back with the chart. Going
+from shared to localAdmin ends every session.
+
+## Images
+
+**`controllerImage` and `runnerImage` default to the `latest` tag**: the owner's
+decision of 2026-09-12. A tag names no fixed bytes, so the pull policies default
+to `Always`. Main CI publishes `sha-<commit>`, `main` and `latest` after its
+checks; a release tags the same digests and publishes a chart pinned by digest
+([docs/gates.md](../../docs/gates.md)). A new tag does not restart a Deployment.
+
+**`identity.bootstrapImage` is always a digest**, because its container can read
+and patch the retained signer. Check it, and re-pin only to a reviewed runner
+whose `identity bootstrap` and `identity distribute` match the templates, then
+run `just chart-check`:
 
 ```bash
 docker buildx imagetools inspect <identity.bootstrapImage from values.yaml>
-docker run --rm --platform linux/amd64 <identity.bootstrapImage from values.yaml> \
-  identity bootstrap --help
+docker run --rm --platform linux/amd64 <identity.bootstrapImage from values.yaml> identity bootstrap --help
 ```
 
-An emptied value still refuses to render rather than borrowing a tag. Re-pin
-only to a newer reviewed runner digest whose `identity bootstrap` and
-`identity distribute` arguments match these templates, then rerun
-`just chart-check`.
+**The pinned bootstrap image is amd64-only**: on arm64 without emulation the
+hook fails with `exec format error` and no identity is written (Docker Desktop
+on Apple silicon emulates it). On a mixed cluster set
+`kubernetes.nodeSelector: {kubernetes.io/arch: amd64}`.
 
-**The pinned bootstrap image is amd64-only.** It is a runner published before
-PROD-00.2, which made the runner multi-platform (linux/amd64 and linux/arm64).
-The hook Jobs execute the runner binary, so on an arm64 node without amd64
-emulation their container fails with `exec format error`, `helm install --wait`
-reports the failed post-install hook, and no identity is written. Docker
-Desktop on Apple silicon emulates amd64 and runs it. Until the pin moves to a
-runner published since PROD-00.2, schedule the hooks on a mixed-architecture
-cluster with `kubernetes.nodeSelector: {kubernetes.io/arch: amd64}` (set
-`controller.nodeSelector` explicitly if the controller should run elsewhere).
-Runner Jobs have no placement path yet (*Node placement* below); a runner image
-published since PROD-00.2 runs on either architecture.
-
-**What a mutable tag does not promise.** The bytes behind `:latest` can change
-under you: the same reference can resolve to different content tomorrow, on a
-different node, or mid-rollout. A digest named bytes, and those bytes carried
-the org-root anchor baked into the image (`/etc/logweir/org-root.fingerprint`);
-under a tag, an image can be replaced upstream without a single Kubernetes
-object changing. That is the guarantee this default trades away, and it is why
-the two pull policies below are what they are.
-
-**The pull policies follow the tag.** `imagePullPolicy` defaults to `Always` —
-Kubernetes' own default for a `:latest` reference; `IfNotPresent` under a
-mutable tag is a pod running whatever bytes its node happened to cache first.
-`runnerImagePullPolicy` is a separate value, rendered as
-`LOGWEIR_RUNNER_PULL_POLICY` on the Deployment and read once at startup by the
-controller, and it defaults to `Always` for the same reason. The compiled-in
-default the controller falls back to when that variable is unset is still
-`Never`, which is right for an image LOADED onto a node — the laptop path,
-`kind`, and `examples/author-only.values.yaml`, which sets
-`runnerImagePullPolicy: Never` explicitly. A value outside `Never` /
-`IfNotPresent` / `Always` makes the controller refuse to start, because the API
-server would otherwise reject every runner Job it created.
-
-Main CI publishes the three images under `sha-<commit>`, `main` and `latest`
-after quality, backup/restore and image checks pass. A version release gives
-the tagged commit's `sha-<commit>` images the version tag (the same digests,
-not a rebuild) and publishes a chart whose three images are pinned by digest.
-See [the workflow guide](../../docs/gates.md) and the exact
-[Actions run](https://github.com/VladyslavHaina/logweir/actions) for digests.
-The console also defaults to `api.console.imagePullPolicy: Always`; use
-`Never` for an image loaded locally. Publishing a tag does not restart an existing Deployment.
-
-**How to pin them back.** Resolve each tag to the bytes it names — a manifest
-read, not a pull:
+**To pin the tags back**, resolve each with a manifest read, then set all six
+values together:
 
 ```bash
 docker buildx imagetools inspect <repository>:latest
-```
-
-then install with all four values together, because a digest names bytes that
-cannot change and re-pulling them buys nothing:
-
-```bash
 helm install logweir charts/logweir -n logweir-system --create-namespace \
-  --set controllerImage=<repository>@sha256:… \
-  --set runnerImage=<repository>@sha256:… \
+  --set controllerImage=<repository>@sha256:… --set runnerImage=<repository>@sha256:… \
   --set-string identity.bootstrapImage=<runner-repository>@sha256:… \
-  --set imagePullPolicy=IfNotPresent \
-  --set runnerImagePullPolicy=IfNotPresent \
+  --set imagePullPolicy=IfNotPresent --set runnerImagePullPolicy=IfNotPresent \
   --set identity.bootstrapImagePullPolicy=IfNotPresent
 ```
 
-### Identity values
+### Third-party images
 
-| value | default / contract |
-|---|---|
-| `identity.enabled` | `true`; set `false` only for an explicitly external/low-level identity lifecycle |
-| `identity.bootstrapImage` | the reviewed runner digest main CI published for `4956785` (amd64); an emptied or mutable value refuses to render unless the development override below is set |
-| `identity.bootstrapImagePullPolicy` | `IfNotPresent`; immutable bytes do not need an `Always` pull |
-| `identity.allowMutableBootstrapImageForDevelopment` | `false`; only the local Docker Desktop/kind override sets it true with pull policy `Never` |
-| `identity.bootstrapFeatures.consoleKey` | `true` since the re-pin of `identity.bootstrapImage` to runner rev `2fe8d907`, which carries the PROD-16.1 identity CLI. Set it `false` only with a bootstrap image older than PROD-16.1: while `false` the chart passes the hook none of the PROD-16.1 flags (console key, installation trust, marker, revocation) and renders none of their objects; `chart_lint` holds every render to the pinned image's `--help` |
-| `identity.publicConfigMapName` | `logweir-signing-trust`; public SPKI, key id, algorithm and trust reference only |
-| `identity.externalSecret.{name,key}` | optional get-only P-256/Ed25519 PKCS#8 adoption source in the release namespace; an adopted identity is never marked fresh (PROD-16.1) |
-| `identity.installationTrust.enabled` | `true`: on a FIRST install only (`.Release.IsInstall` and no established signing Secret) with the managed console key (a console, `bootstrapFeatures.consoleKey`, no `externalSecret`), the hook creates one default `TrustPolicy` for exactly the installation signer and the console key it generated — only when the cluster has no `TrustPolicy` and no `TrustRoster/default` — and marks the install `confirm`. Its `create` grant is a `post-install` hook Helm deletes when the install's hooks finish, succeeded or failed, and the hook revokes on every exit path it controls; it renders only on **Helm 3.19+ or 4.x** (older Helm keeps a failed install's hooks; the chart refuses there, naming this value) and never on an upgrade. After a failed first install: `kubectl delete clusterrolebinding,clusterrole <release>-identity-trust --ignore-not-found` (`docs/install.md` §5f) |
-| `identity.installationTrust.policyName` | `logweir-installation` |
-| `identity.installationTrust.allowedTargetClusterIds` | `[]`; written into that policy once, at its creation (`demoKafka.enabled` adds the demo target); edit the policy afterwards |
-| `identity.authorizedRunnerNamespaces` | `[]`; release namespace is implicit, each listed existing namespace receives the same protected signer and runner prerequisites |
-| `identity.kubernetesApiCIDRs` | `[]`; additional exact API `/32` (IPv4) or `/128` (IPv6) endpoints for provider/CNI DNAT behavior, alongside Helm-discovered service/endpoint addresses; broad CIDRs are schema-rejected |
-
-Managed identity requires connected `helm install`, `helm upgrade`, and
-`helm rollback` with credentials able to perform every chart `lookup`. Offline
-`helm template`/GitOps output is unsupported and must not be applied with
-`identity.enabled=true`: it cannot observe retained identity objects or the
-cluster singleton and may render fresh empty placeholders. Use connected Helm,
-or set `identity.enabled=false` and follow the documented low-level/manual
-identity lifecycle. `identity.externalSecret` remains a connected adoption
-mode, not an offline exception.
-
-For managed control planes, list every real Kubernetes API endpoint as an exact
-IPv4 `/32` or IPv6 `/128`. The bootstrap policy supports only TCP 443 and 6443;
-other API ports are unsupported. Its kube-apiserver pod selector generally does
-not reach a provider-hosted endpoint. NetworkPolicy/DNAT behavior must be
-validated on the production CNI; Docker Desktop is only structural evidence.
-
-The bootstrap and distribution Jobs declare
-`post-install,post-upgrade,post-rollback`. Rollback validation therefore runs
-only when the rollback target itself contains these hooks; a pre-bootstrap
-target provides retention but no active validation.
-
-The retained empty Secret/ConfigMap/singleton objects are creation-only
-`pre-install,pre-upgrade` hooks and never `pre-rollback` hooks or ordinary
-release-manifest resources. This prevents Helm 3 as well as Helm 4 from
-reconciling an old empty placeholder over live identity during rollback. Helm
-stores only the empty hook definition; the bootstrap patch and all private bytes
-remain outside Helm release manifests/state.
-
-Only the hook processes and projected tokens are short-lived. Their
-resource-name-scoped ServiceAccounts, Roles, and RoleBindings persist as normal
-release resources for later hooks; Helm does not revoke them after success.
-Those ServiceAccounts default token automount off, and only hook Pods opt in.
-
-The fixed retained `ClusterRole/logweir-identity-singleton` grants no verbs; it
-prevents a second release in another namespace from independently claiming the
-same global `TrustRoster/default` contract. This v0.1 one-installation-per-cluster
-rule remains until PLAT-19.1 introduces explicit trust references.
-
-## The four third-party images, and where their digests came from
-
-None of them is part of the `latest` ruling: MinIO, `mc`, `apache/kafka` and
-`kubectl` are pinned by digest under Global Constraint 7, and this is the
-provenance of each, so nobody has to trust a bare hash.
-
-* **`minio.image` and `minio.mcImage`** are the references
-  `e2e/compose/docker-compose.yml` pins, copied byte for byte. They are the
-  project's **own rebuild mirror** of the releases the stack was measured on
-  (MinIO `RELEASE.2025-09-07T16-13-09Z`, mc `RELEASE.2025-08-13T08-35-41Z`),
-  `docker.io/vladyslavhaina/minio-mirror` and `docker.io/vladyslavhaina/mc-mirror`,
-  pinned by their multi-arch index digests. The chart first pinned upstream at
-  quay.io because Docker Hub refused anonymous pulls of the upstream name
-  (plan erratum E30(a)); MinIO then withdrew its public images altogether
-  (Docker Hub on 2026-09-11, anonymous quay.io pulls on 2026-09-24).
+- **`minio.image`, `minio.mcImage`**: the references
+  `e2e/compose/docker-compose.yml` pins, the project's rebuild mirror of MinIO
+  `RELEASE.2025-09-07T16-13-09Z` and mc `RELEASE.2025-08-13T08-35-41Z`, built on
+  2026-09-24 after MinIO withdrew its public images. A stopgap;
   [third_party/minio-mirror/README.md](../../third_party/minio-mirror/README.md)
-  carries the recipe, the provenance, the AGPL-3.0 licence notes and the
-  behaviour smoke; it is a stopgap until the demo MinIO is replaced by a
-  maintained S3 server. The digests are the ones `third_party/minio-mirror/build.sh`
-  printed for the images it built and published on 2026-09-24; both
-  repositories are public, and
-  `docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z`
-  (and the same for `mc-mirror:RELEASE.2025-08-13T08-35-41Z`) resolves them.
-* **`demoKafka.image`** — `apache/kafka:3.7.1`, the compose stack's broker
-  until PROD-01.5a moved its default line to 4.3.1, pinned by its **manifest-list** digest so the same reference resolves on an
-  amd64 CI runner and on an arm64 development host. Resolved once, on
-  **2026-09-12**, with the `kindest/node` provenance idiom:
+  has the recipe, provenance and AGPL-3.0 notes.
+- **`demoKafka.image`**: `apache/kafka:3.7.1` by manifest-list digest, resolved
+  on **2026-09-12** with `docker buildx imagetools inspect apache/kafka:3.7.1`.
+  The two `demoKafka.clusterIds` were minted that day with the image's own
+  `kafka-storage.sh random-uuid`.
 
-  ```bash
-  docker buildx imagetools inspect apache/kafka:3.7.1
-  ```
+### The identity lifecycle
 
-`demoKafka.clusterIds` are not images but were minted the same way and on the
-same day: the image's own `kafka-storage.sh random-uuid`, twice, because the
-image's built-in default is **one fixed id** and two brokers reporting the same
-id are one cluster to phase 0 — measured on 2026-09-12, on the second walk of
-`scripts/helm-demo.sh`. Keep them different from each other; the template
-refuses equal ids.
+Managed identity needs connected `helm install`, `upgrade` and `rollback` with
+credentials for every `lookup`; never apply offline `helm template` output with
+`identity.enabled=true`. The bootstrap and distribution Jobs are
+`post-install,post-upgrade,post-rollback` hooks, so a rollback validates only
+when its target has them. The retained Secret, ConfigMap and singleton are
+creation-only `pre-install,pre-upgrade` hooks: no rollback overwrites a live
+identity, and no private byte is in Helm's state. The hooks' ServiceAccounts,
+Roles and RoleBindings persist as release objects; their tokens are mounted
+only in hook pods. `logweir-identity-singleton` grants nothing and stops a
+second release claiming `TrustRoster/default`: one installation per cluster, so
+do not delete it to install a second signer. On a managed control plane list
+every API endpoint in `identity.kubernetesApiCIDRs`, and validate the egress
+policy on the production CNI.
 
-## `kafka:` — pointing the chart at a real cluster
-
-A Kafka connection is not a chart value in Logweir's design: it is a
-`KafkaCluster` custom resource the controller reconciles, probes, and reports
-`status.clusterId` for. `kafka.enabled: true` makes the chart render those
-objects from a flat block, so a stranger writes addresses and a Secret name
-rather than a custom resource:
-
-```yaml
-kafka:
-  enabled: true
-  bootstrapServers: "b-1.example…:9096,b-2.example…:9096"   # or a YAML list
-  security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
-  username: kafbat
-  secretRef: my-scram-secret
-  target:                       # optional — a restore needs one, a backup does not
-    bootstrapServers: "b-1.scratch…:9096"
-    security: { protocol: SASL_SSL, mechanism: SCRAM-SHA-512 }
-    username: kafbat
-    secretRef: my-scratch-secret
-```
-
-**The protocol/mechanism mapping is the chart's job, and it refuses what it
-cannot speak.** The CRD's `auth.mode` enum is `plaintext | scramSha512` and the
-client speaks SCRAM-SHA-512 only, so:
+## `kafka:`, pointing the chart at a real cluster
 
 | `security.protocol` | `security.mechanism` | renders |
 |---|---|---|
-| `PLAINTEXT` | (any) | `mode: plaintext`, `tls: false` |
+| `PLAINTEXT` | any | `mode: plaintext`, `tls: false` |
 | `SASL_SSL` | `SCRAM-SHA-512` | `mode: scramSha512`, `tls: true` |
 | `SASL_PLAINTEXT` | `SCRAM-SHA-512` | `mode: scramSha512`, `tls: false` |
-| anything else | | **`helm` fails at render time**, naming the supported set |
+| anything else | | refused at render, naming the supported set |
 
-A silently rendered `PLAIN` or `SCRAM-SHA-256` would be a chart that installs
-and cannot authenticate, which is why it is a refusal and not a warning.
-`kafka.enabled` and `demoKafka.enabled` together are a refusal too — `demoKafka`
-brings its own two brokers and its own cluster objects — with a message saying
-which one to turn off.
+The Secret is yours and Logweir never reads it; the password reaches the probe
+pod, which runs as `logweir-runner`, as a `secretKeyRef`. The objects go in `kubernetes.connectionsNamespace`,
+which must exist and, with `controller.watchNamespaces`, be watched. Changing it
+moves them, so move the Backups that name them too. A password key other than
+`password`, or a private broker CA, needs a `KafkaCluster` you write yourself
+([docs/kubernetes.md](../../docs/kubernetes.md)) with `kafka.enabled: false`.
 
-**The Secret is yours, and Logweir never reads it.** `secretRef` names a Secret
-**in the release namespace** holding the SASL password under the key
-`secretKey`. That key is `password` and can be nothing else: the operator
-projects exactly one name into the probe
-(`weirkeeper::controllers::restore::TARGET_PASSWORD_SECRET_KEY`), so the chart
-refuses any other value rather than render a `KafkaCluster` whose probe cannot
-read its credential. The password reaches the probe pod as a
-`valueFrom.secretKeyRef` and never enters a status field, a log line or a
-rendered document.
+## Node placement, pull secrets and Docker Hub
 
-The rendered objects go in **`kubernetes.connectionsNamespace`** (default: the
-release namespace) with the chart's labels, and the probe Job runs under the
-`logweir-runner` ServiceAccount there. `secretRef` must be in that same
-namespace. With `controller.watchNamespaces` set, the chart **refuses to
-render** unless `kubernetes.connectionsNamespace` is one of the watched
-namespaces (chart gap G3): the default, the release namespace, is one a shared
-console's scoped controller may not watch, and a `KafkaCluster` there would be
-one no controller reads and no Backup can use. The same value places
-`minio.enabled`'s `logweir-s3` archive credential, which a Backup's
-`secretRef` names in its own namespace. The namespace must exist before the
-install, like every execution namespace. Changing the value on an upgrade moves
-the objects: Helm deletes them from the old namespace and creates them in the
-new one, where it is probed afresh; Backups in the old namespace lose the
-objects they named, so move them before or with the value.
+**Runner Jobs are the operator's objects, not the chart's.** `imagePullSecrets`
+reach them through the `logweir-runner` ServiceAccount, because a pod inherits
+its ServiceAccount's pull secrets. Node placement **does not**: there is no
+`nodeSelector`, toleration or affinity path to a runner Job, so on a cluster
+whose Kafka-adjacent nodes are tainted they will not schedule there. Resources
+reach them per object (`Restore.spec.runnerResources`, at most 4 CPUs and 8Gi);
+other Jobs state none, so a quota that requires limits needs a `LimitRange`, or
+their pods are rejected (`PodCreateRejected`, `PodCreationForbidden`).
 
-**Two connection-contract fields have no `kafka:` value, deliberately.** The
-`KafkaCluster` CRD accepts `auth.secretRef.passwordKey` (a password under a key
-other than `password`) and `auth.tlsCa` (a private CA in a Secret or ConfigMap
-key, for brokers whose certificate the runner image does not already trust) —
-see `docs/kubernetes.md` §20. The flat `kafka:` block renders neither: it
-exists so a stranger can point the chart at a cluster without writing a custom
-resource, and both of those are choices an adopter with a private CA or a
-managed secret store makes on the object itself. Write the `KafkaCluster` by
-hand (leave `kafka.enabled: false`) when you need them; nothing else about the
-install changes, and no chart value or controller permission is involved,
-because both fields are references the kubelet resolves in the Job's own
-namespace.
-
-## Node placement, and where it does not reach
-
-`kubernetes.nodeSelector`, `kubernetes.tolerations` and `kubernetes.affinity`
-apply to **every pod this chart renders** — the controller, MinIO and its seed
-Job, both demo brokers and their seed Job, and the UI. Each optional component
-may override all three with its own block (`minio.nodeSelector`,
-`demoKafka.tolerations`, `controller.affinity`, …); an override replaces the
-top-level value for that component's pods rather than merging with it.
-
-**Runner Jobs are the operator's objects, not the chart's**, and the gap is
-named rather than silent:
-
-* `imagePullSecrets` **do** reach them — through the `logweir-runner`
-  ServiceAccount, because a pod inherits its ServiceAccount's pull secrets.
-* Node placement **does not**. There is no `nodeSelector`, toleration or
-  affinity path to a runner Job today. On a cluster whose only Kafka-adjacent
-  nodes are tainted, a runner Job will not schedule there. Implementing it is
-  an operator change and is out of this chart's scope.
-* Requests and limits reach them **per object, not from a chart value**:
-  `Restore.spec.runnerResources`. The
-  controller refuses a value above its compiled-in ceilings (4 CPUs, 8Gi) or
-  otherwise unrunnable, and never clamps one (`docs/kubernetes.md` §12).
-  `Backup`, check, probe, delivery and retention Jobs state no resources, so
-  in a namespace whose `ResourceQuota` requires limits they need a
-  `LimitRange` default, or their pods are rejected at creation. Every kind
-  then reports the rejection promptly, in the admission's own words, from the
-  Job's `FailedCreate` event: the check kinds (`Preflight`, `TopicDiscovery`,
-  a catalog sync, an evidence fetch) with `PodCreateRejected`, the runner
-  kinds (a `Backup` and its topic discovery, a `Restore`, a `KafkaCluster`
-  probe, a `ProtectionPolicy` delivery, a retention run) with
-  `PodCreationForbidden` — within 30 seconds of the Job for everything but a
-  `Backup`'s or `Restore`'s runner, which waits `failFastSeconds`.
-  `docs/kubernetes.md` §12 lists each one.
-
-`kubernetes.namespace` does **not** move the install. `helm -n` / `--namespace`
-decides that, and every object carries `Release.Namespace`; the key exists for
-the one place the chart needs a namespace *name* it cannot derive — the
-console's `RoleBinding` list, where it supplies `api.namespaces` when that is
-empty.
-
-## `imagePullSecrets`, and what Docker Hub does differently
-
-`imagePullSecrets: [{name: regcred}]` is rendered on the controller
-ServiceAccount, on the **runner** ServiceAccount (so every runner Job inherits
-it) and on the optional components' pods. It is how a private registry is
-pulled from — an ECR, or a Docker Hub repository that is not public.
-
-Three Docker Hub properties decide whether a pull works, and two of them are
-the opposite of GHCR's:
-
-* A Docker Hub repository **created by a push is public by default**; a GHCR
-  package starts **private**.
-* That default is the account's setting, and an auto-created repository takes
-  it. A private one answers an anonymous pull with `failed to fetch anonymous
-  token: … 403 Forbidden`. Make it public, or set `imagePullSecrets`.
-* Anonymous Docker Hub pulls are **rate-limited per source IP**, shared by
-  every node behind one NAT — so a pull secret carrying a Docker Hub login is
-  useful on a *public* image too.
-
-## `environment:`
-
-A label, and nothing else: `logweir.dev/environment: <value>` on every object
-the chart renders (the thirteen CRDs excepted — Helm copies `crds/` verbatim and
-never templates it). It switches no behaviour, changes no name and gates
-nothing. A key that silently did something would be worse than no key.
+A Docker Hub repository **created by a push is public by default**, where a GHCR
+package starts private; a private one answers an anonymous pull with `failed to
+fetch anonymous token: … 403 Forbidden`. Anonymous pulls are
+**rate-limited per source IP**, shared behind one NAT, so a pull secret helps on
+a public image too.
 
 ## Amazon MSK
 
-[`examples/msk.values.yaml`](examples/msk.values.yaml) is the shape; these are
-the facts it does not have room for, written down on 2026-09-12. **None of
-them was measured on an MSK cluster: MSK has not been run against.** Read the
-port, the mechanism and the Secrets Manager arrangement as what AWS documents,
-and the ACL list as what a compose broker required:
+[`examples/msk.values.yaml`](examples/msk.values.yaml) is the shape. These facts
+date from 2026-09-12 and **were never measured on MSK**
+([support-matrix.md](../../docs/support-matrix.md#managed-kafka-providers)):
 
-* SASL/SCRAM on MSK is port **9096** (not 9092), `SASL_SSL` +
-  `SCRAM-SHA-512`: `auth.mode: scramSha512` with `tls: true`. **MSK itself has
-  not been run against**, and that mode has no repeatable local row either
-  ([the compatibility contract](../../docs/support-matrix.md#managed-kafka-providers)).
-* The SCRAM credential lives in **AWS Secrets Manager**, associated with the
-  cluster. Kubernetes cannot read it directly: sync it into a Kubernetes Secret
-  in the release namespace (External Secrets Operator, the Secrets Store CSI
-  driver, or by hand) under the key `password`, and name that Secret in
-  `kafka.secretRef`.
-* **A password containing `"`, `'`, `$`, CR or LF is refused by the runner** —
-  `logweir_core::guard::UNRENDERABLE_CREDENTIAL_CHARACTERS`. Mint one without
-  them; a refusal at drill time is worse than a refusal at creation time.
-* The principal's Kafka ACLs (FX-4 corrected this list; Describe does not
-  imply DescribeConfigs, and a refused DescribeConfigs is never read as "no
-  configuration"). PROD-01.2 measured the minimum on the compose stack's ACL
-  broker (Apache Kafka 4.3.1, never on MSK), removing one grant at a time
-  ([support-matrix.md, *Minimum permissions*](../../docs/support-matrix.md#minimum-permissions)):
-  * **Source, for a backup:** Read on the source topics (Read implies
-    Describe). The compose measurement needed no cluster-level grant; this
-    list named DescribeCluster before it, and no MSK cluster has been run
-    against to say whether MSK's authorizer asks for it. Add **DescribeConfigs on the source topics** so the
-    backup receipt records each topic's configuration as `captured`. Without
-    it the backup still succeeds, the topic reads `captureDenied`, and a later
-    restore reports that topic's configuration parity as not assessed.
-  * **Target, for a restore:** Create, Write and **Read** on the target topics
-    (the verification reads the restored records back; without Read the
-    restore fails at phase 7), **Describe on the scratch marker topic** (a
-    marker the principal cannot describe is refused like one that does not
-    exist), and **DescribeConfigs on the Cluster** — required: phase 0 reads the
-    broker's timestamp settings and exits 1 without it, and readiness check
-    `target.timestampBound` reads `unknown`. **DescribeConfigs on the target
-    topics** too: phase 0's probe readback and phase 2 (an existing mapped
-    topic) exit 1 without it; so does phase 6 for a topic whose backup
-    recorded configuration overrides, because the engine's restore describes
-    that target topic itself; and phase 7 reports a topic without overrides
-    as `targetReadDenied` (measured on the compose stack, 2026-10-05).
-  * **Delete on the scratch prefix** (`target.topic_mapping_prefix`): phase 9
-    deletes the topics a `scratch` restore created, and on a broker whose
-    `log.message.timestamp.type` is `LogAppendTime` phase 0 creates one probe
-    topic there and deletes it again. A topic outside that prefix is never
-    deleted: the reader's `TopicDeleter` refuses every other name. **Without
-    Delete a scratch restore still exits 0 with a signed `pass`, and leaves
-    its topics behind** (measured, PROD-01.2). The run says so and why: a
-    warning names the topic and the grant (``teardown left 1 scratch topic
-    behind on the target cluster: …; the restore principal lacks `Delete` on
-    topic `…` ``), the summary line repeats the topic beside `outcome pass`,
-    the signed teardown attestation records it, and
-    `Restore.status.teardown.failed` names it. A restore that FAILS after
-    its creation step completed (from phase 6 onwards) removes its topics
-    the same way, or names what it could not remove (FX-44).
-* **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
-  refusal in the operator, not an oversight — SASL/SCRAM is the path.
-
-## The UI's authority
-
-The page is served by the console, `api.console.*`, under its own
-`<release>-api` identity (above). The legacy `kubectl proxy` page — `ui.*`, the
-`logweir-ui` image, and the laptop `kubectl proxy --www=./ui` path — was
-withdrawn in v1 (release-notes item 75), and the chart refuses `ui.*` by name.
-An upgrade that set `ui.enabled` loses that page; remove the `ui` block and use
-the console.
+- SASL/SCRAM on MSK is port **9096**, `SASL_SSL` with `SCRAM-SHA-512`.
+- The credential lives in **AWS Secrets Manager**: sync it into a Kubernetes
+  Secret under the key `password` and name it in `kafka.secretRef`.
+- **A password containing `"`, `'`, `$`, CR or LF is refused by the runner**
+  (`logweir_core::guard::UNRENDERABLE_CREDENTIAL_CHARACTERS`).
+- ACLs, measured one grant at a time on Apache Kafka 4.3.1
+  ([support-matrix.md](../../docs/support-matrix.md#minimum-permissions)):
+  source: Read, and DescribeConfigs so configurations read `captured`; the
+  compose broker needed no cluster grant, and this list once named
+  DescribeCluster, which nobody has checked on MSK. Target: Create, Write and
+  Read on the target topics, Describe on the marker topic, DescribeConfigs on
+  the Cluster and the target topics, and Delete on the scratch prefix, without
+  which a scratch restore passes and leaves its topics behind
+  (`Restore.status.teardown.failed`).
+- **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
+  refusal; SASL/SCRAM is the path.
 
 ## Upgrading the CRDs by hand
 
-Helm installs `crds/` once and, by its own rule, never upgrades or deletes it.
-When a release changes a CRD, apply the new definitions yourself before
-`helm upgrade`:
+Helm installs `crds/` once and never upgrades or deletes it. When a release
+changes a CRD, apply it before `helm upgrade`:
 
 ```bash
 kubectl apply --server-side --force-conflicts -f charts/logweir/crds/
@@ -1477,67 +544,29 @@ kubectl diff --server-side --force-conflicts -f charts/logweir/crds/   # prints 
 helm upgrade logweir charts/logweir -n logweir-system
 ```
 
-`--force-conflicts` because Helm created these CRDs and owns their fields:
-without it every CRD that already exists is refused (`conflicts with "helm"`)
-and keeps its old schema, while an `Established` wait still passes.
+Without `--force-conflicts` an existing CRD is refused (`conflicts with "helm"`)
+and keeps its old schema while an `Established` wait still passes.
 
-`charts/logweir/crds/*.yaml` is the one copy; `just crds-check` holds it to the
-Rust emitter.
+## Uninstall
 
-## Uninstall, and what it leaves behind
-
-```bash
-helm uninstall logweir -n logweir-system
-```
-
-removes everything the release created **except**: the thirteen CRDs (Helm never
-deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
-resource stored under it), the
-namespace `--create-namespace` made, the cluster-scoped `TrustRoster`, retained
-`Secret/logweir-signing-key` in the release and authorized runner namespaces,
-retained `ConfigMap/logweir-signing-trust`, the authority-free retained
-`ClusterRole/logweir-identity-singleton`, and any RoleBinding you created by
-hand. Preserve those identity objects for same-installation recovery and old
-archive verification; do not delete the singleton marker merely to install a
-second independent signer. **The demo MinIO's `PersistentVolumeClaim` is NOT
-kept:** it is an ordinary release object, so `helm uninstall` deletes it and,
-under a `Delete` reclaim policy (docker-desktop's `hostpath`), the demo archive
-with it — copy anything you need out of the bucket first (seen live by the PoC
-install, 2026-09-24). And no archive object and no evidence object is ever
-deleted by Logweir — Global Constraint 6.
+`helm uninstall logweir -n logweir-system` leaves the thirteen CRDs (`kubectl
+delete crd <name>` removes each with every object under it), the namespace,
+`TrustRoster`, the retained signing Secrets, `logweir-signing-trust`,
+`logweir-identity-singleton` and your RoleBindings. Keep the identity objects
+for recovery and old-archive verification. **The demo MinIO's PVC is deleted**,
+and under a `Delete` reclaim policy the demo archive with it. Logweir never
+deletes an archive or evidence object.
 
 ## The checks that hold the chart to the tree
 
-* `just crds-check` (in `just gate`): `crds/` is what the Rust emitter renders.
-* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): no copy of
-  `ui/` under the chart at all;
-  `identity.bootstrapImage` pinned as `<runner repository>@sha256:<64 hex>`
-  with the development override off, an emptied value still refused, plus
-  `helm lint` for the defaults and every example as shipped;
-  `helm template` regenerated into `rendered/` with no drift; every rendered
-  image a digest EXCEPT the three Logweir images, which must be exactly
-  `<repository>:latest` (and `:latest` on any other image is still refused),
-  with the author-only render exempt by name — its whole premise is a locally
-  built tag; the schema refusing `--set demoKafka.enabled=yes`; `values.yaml`
-  naming the tree's own repositories at `:latest` — `api.console.image` among
-  them — their namespace derived from the runner pin; `ui.*` refused by name;
-  the runner image ships `logweir-retention`, the console principal's grants
-  are the adapter's both ways, and only the two allowed holders may create a
-  `TrustPolicy`.
-* `scripts/check-image-api.sh` (`just smoke-console`; needs a Docker daemon, so
-  it is in `docs/gates.md`'s stack/cluster table rather than in `just gate`):
-  the twenty-six files the console image serves, sha256 for sha256 against
-  `ui/`, and nothing else under `/ui`.
-* The existing image publication path runs `scripts/check-image.sh` against the
-  exact pulled candidate digest and requires `identity bootstrap --help` before
-  any public tag moves. The emitted compatible runner digest is what
-  `identity.bootstrapImage` pins; no separate workflow or end-user hash step
-  exists.
-* `crates/logweir/tests/chart_lint.rs`: nothing optional renders under defaults; each flag renders
-  its named objects; the chart carries no copy of `ui/` — the page's bytes are
-  asserted against the console image instead, by `scripts/check-image-api.sh`.
-* `scripts/helm-demo.sh` (`just helm-demo`; `.github/workflows/helm-demo.yml`
-  on `kind`): the walk above, on a real cluster.
+`just crds-check` holds `crds/` to the Rust emitter. `scripts/check-chart.sh`
+(`just chart-check`) refuses a copy of `ui/` in the chart, checks the bootstrap
+pin, lints every example, regenerates `rendered/` with no drift, requires a
+digest on every image but the three Logweir images at `:latest`, refuses `ui.*`,
+and holds the console's grants to the adapter. `scripts/check-image-api.sh`
+(`just smoke-console`) compares the twenty-six files the console image serves
+with `ui/`. `chart_lint.rs` checks what each flag renders, and
+`scripts/helm-demo.sh` (`just helm-demo`) walks a real cluster.
 
 Documentation is licensed [CC-BY-4.0](../../docs/LICENSE-docs).
 
