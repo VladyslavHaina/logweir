@@ -2349,7 +2349,8 @@ A partition with no committed offset is counted, never offset 0.
 - **Nothing here resets a group.** To read positions with the source gone, see
   [the receipt format](formats/backup-receipt.md#recovering-positions-with-the-source-offline).
 - A schedule that names groups changes its `runPolicySha256`. An older
-  controller refuses a run whose frozen inputs carry `consumerGroups`
+  controller ignores `consumerGroups` on a run it has not frozen yet (it records
+  no positions) and refuses a run whose frozen inputs carry it
   (`PlanConfigMapConflict`): let such runs finish, or remove the field, before
   rolling back.
 
