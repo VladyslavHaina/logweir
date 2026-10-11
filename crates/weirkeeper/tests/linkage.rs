@@ -1,22 +1,15 @@
 //! The properties this half of `weirkeeper` exists to establish: the linkage
-//! boundary, the manifest, and the double.
-//!
-//! ONE FILE, BECAUSE THE PLAN NAMES ONE. Every `#[test]` this task lands lives
-//! here. They fall into four groups — the G-SIGN linkage half, the three
-//! manifest reads, the source-level Secret refusal, and the `mock_client`
-//! double — and each group's header says what it proves and what it does not.
-//! **Task 16b adds a fifth**: `conditions.rs`'s status-write contract, whose
-//! three functions are this crate's other piece of shared machinery and which
-//! belongs beside the double for the same reason — six reconcilers depend on
-//! it, so its own contract is not any one of their tests' business.
+//! boundary, the manifest, the double, the startup path, and the status-write
+//! contract (`conditions.rs`) the reconcilers share. Each group's header says
+//! what it proves and what it does not.
 //!
 //! WHY SO MANY OF THESE READ A FILE INSTEAD OF CALLING CODE. The properties
 //! are properties of a MANIFEST and of a dependency GRAPH, and a build failure
 //! is not a named property: when someone drops `features = ["util"]` the crate
-//! stops compiling, nothing records why, and the moment the compile error is
-//! made to go away by some other means the property is gone with no test to
-//! notice. Reading the manifest asserts the decision at assertion time,
-//! without a build.
+//! stops compiling, nothing records why, and once the compile error is made to
+//! go away by other means the property is gone with no test to notice.
+//! Reading the manifest asserts the decision at assertion time, without a
+//! build.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,9 +20,7 @@ use weirkeeper::testing::{
     answer, mock_client, mock_client_recording, recorder, Route, SeenRequest,
 };
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// The workspace root: this crate's manifest directory is
 /// `crates/weirkeeper`.
@@ -48,13 +39,11 @@ fn manifest_text() -> String {
 
 /// The value text of `key` inside `[section]`, comments skipped.
 ///
-/// A hand-rolled read of two TOML shapes rather than a `toml` dependency:
-/// Global Constraint 38 closes the workspace graph, and this crate's manifest
-/// is the only file it ever parses. Comment lines are dropped FIRST, and that
-/// matters — the manifest's own comments discuss `[dev-dependencies]`,
-/// `features = ["util"]` and `default-features = false` at length, and a
-/// parser that read them would pass while the real entries said something
-/// else.
+/// A hand-rolled read of two TOML shapes rather than a `toml` dependency: this
+/// crate's manifest is the only file it ever parses. Comment lines are dropped
+/// FIRST: the manifest's own comments discuss `[dev-dependencies]`,
+/// `features = ["util"]` and `default-features = false`, and a parser that
+/// read them would pass while the real entries said something else.
 fn manifest_entry(text: &str, section: &str, key: &str) -> Option<String> {
     let mut current = String::new();
     for raw in text.lines() {
@@ -83,12 +72,10 @@ fn manifest_entry(text: &str, section: &str, key: &str) -> Option<String> {
 /// name → names map restricted to workspace members.
 ///
 /// `--no-deps` deliberately: it resolves nothing, downloads nothing and takes
-/// no package-cache lock, which keeps this a millisecond-scale test that
-/// cannot hang behind a concurrent build (Global Constraint 22's 15 s bound).
-/// Restricting the graph to workspace members loses nothing for the question
-/// being asked: a registry crate cannot depend on a `path` dependency, so
-/// every route from `weirkeeper` to `logweir-evidence` runs through workspace
-/// members only.
+/// no package-cache lock, so this test cannot hang behind a concurrent build.
+/// Restricting the graph to workspace members loses nothing: a registry crate
+/// cannot depend on a `path` dependency, so every route from `weirkeeper` to
+/// `logweir-evidence` runs through workspace members only.
 fn workspace_dependency_graph() -> std::collections::BTreeMap<String, BTreeSet<String>> {
     let out = Command::new(env!("CARGO"))
         .args([
@@ -155,26 +142,21 @@ fn transitive(
     seen
 }
 
-// ---------------------------------------------------------------------------
-// G-SIGN, first half — the linkage boundary
-// ---------------------------------------------------------------------------
+// G-SIGN, first half: the linkage boundary
 
-/// Global Constraint 27, the half a test can reach.
+/// The half of the one-signer rule a test can reach.
 ///
 /// WHAT THIS PROVES: this crate reaches the VERIFYING crate and does not reach
-/// the SIGNING one, over every declared dependency kind — a dev edge onto the
-/// signer would link it just as hard as a normal one, which is why the walk
-/// counts all kinds.
+/// the SIGNING one, over every declared dependency kind: a dev edge onto the
+/// signer would link it just as hard as a normal one.
 ///
-/// WHAT THIS DOES NOT PROVE: anything at all about the CAPABILITY to sign.
-/// Global Constraint 27 is the position that holds: no control-plane crate
-/// LINKS the signer, and the capability is unbroken while this controller
-/// holds Job CRUD over the signing key's namespace — the key is a Kubernetes
-/// Secret, and a Job the controller creates can mount it with no Logweir crate
-/// involved. Residual O1, accepted, O0 default (a), stated on every surface.
-/// A stronger reading of this test was asserted once, was RED on the tree it
-/// was asserted about, and was withdrawn; `scripts/check-withdrawn-claim.sh`
-/// is what keeps it off every shipped surface, this file included.
+/// WHAT THIS DOES NOT PROVE: anything about the CAPABILITY to sign. No
+/// control-plane crate LINKS the signer, and the capability is unbroken while
+/// this controller holds Job CRUD over the signing key's namespace: the key is
+/// a Kubernetes Secret, and a Job the controller creates can mount it with no
+/// Logweir crate involved. That residual is accepted and stated on every
+/// surface; `scripts/check-withdrawn-claim.sh` keeps a stronger reading of
+/// this test off every shipped surface, this file included.
 #[test]
 fn weirkeeper_links_logweir_verify_and_never_logweir_evidence() {
     let graph = workspace_dependency_graph();
@@ -189,17 +171,14 @@ fn weirkeeper_links_logweir_verify_and_never_logweir_evidence() {
         // The two API names this refusal is about are deliberately NOT spelled
         // here: `scripts/check-one-signer.sh` check 3 greps every `crates/**/*.rs`
         // for them outside a comment, and `weirkeeper` is not on
-        // `ALLOWED_SOURCE`. Naming them in an assertion message would make this
-        // test's own text a violation of the gate the test corroborates —
-        // measured, on the first run of that gate against this crate.
+        // `ALLOWED_SOURCE`, so naming them in an assertion message would make this
+        // test's own text a violation of the gate it corroborates.
         "weirkeeper must NOT reach logweir-evidence — that crate holds the signing half of the \
          evidence machinery (Global Constraint 27, guard G-SIGN). It reaches {reach:?}"
     );
 }
 
-// ---------------------------------------------------------------------------
-// The manifest — three reads, three separate decisions
-// ---------------------------------------------------------------------------
+// The manifest: three reads, three separate decisions
 
 /// The three already-resolved entries, and the feature that makes one of them
 /// work.
@@ -236,9 +215,9 @@ fn kube_is_declared_without_default_features() {
          [client, rustls-tls, ring], and taking the defaults leaves the feature set free to \
          drift with the upstream crate. Got: {kube}"
     );
-    // `unstable-runtime` SINCE FX-29: three empty cfg features, no package
-    // (`no_new_package_enters_the_graph_for_the_mock` still measures that), for
-    // `Controller::for_stream` — the `BackupSchedule` watch filtered to spec
+    // `unstable-runtime`: three empty cfg features, no package
+    // (`no_new_package_enters_the_graph_for_the_mock` measures that), for
+    // `Controller::for_stream`: the `BackupSchedule` watch filtered to spec
     // revisions so its own status writes stop waking it.
     assert!(
         kube.contains(
@@ -256,36 +235,30 @@ fn kube_is_declared_without_default_features() {
     );
 }
 
-/// Global Constraint 38: the entries that claim to be declarations of packages
-/// the workspace already resolves add none.
+/// The entries that claim to be declarations of packages the workspace already
+/// resolves add none.
 ///
 /// TWO COUNTS, MEASURED, NOT ARGUED. The workspace is copied to a temp
 /// overlay, `cargo metadata` is counted there, those entries are commented out
-/// in the copy, and it is counted again. Equality is the property.
-///
-/// THE FOURTH ENTRY IS `rustls`, ADDED IN FIX ROUND 1, AND IT IS MEASURED
-/// HERE RATHER THAN ARGUED. The binary has to install a process-level
-/// `CryptoProvider` (review finding H1), which means naming `rustls` in this
-/// manifest; `ring 0.17.14` and `rustls 0.23.43` are both already in
-/// `Cargo.lock`, so the claim is the same claim the other three make and it is
-/// tested by the same measurement — comment the entry out and the resolved
-/// package count must not move.
+/// in the copy, and it is counted again. Equality is the property. `rustls` is
+/// one of them: the binary installs a process-level `CryptoProvider`, which
+/// means naming `rustls` here, and `ring` and `rustls` are both already in
+/// `Cargo.lock`.
 ///
 /// THE SET OF ENTRIES IS DISCOVERED, NOT HARD-CODED, AND THAT IS WHAT KILLS
-/// THE MUTANT. Written against a literal `["tower", "http",
-/// "http-body-util"]`, this test would PASS after someone adds a further
-/// manifest entry pulling a package that is not in `Cargo.lock`: that entry
-/// would be present in BOTH overlays, so both counts would rise together
-/// and equality would still hold. Discovering every plain third-party version
-/// requirement — everything under `[dependencies]` that is not `kube`, not
-/// `k8s-openapi`, not a `path` dependency and not `workspace = true` — puts
-/// that entry in the commented-out set, where it makes the two numbers
-/// differ. The set is asserted to be exactly the four AFTER the counts are
-/// compared, so the count difference is the failure a reviewer sees.
+/// THE MUTANT. Against a literal list, a further manifest entry pulling a
+/// package that is not in `Cargo.lock` would be present in BOTH overlays, both
+/// counts would rise together and equality would hold. Discovering every
+/// plain third-party version requirement (everything under `[dependencies]`
+/// that is not `kube`, not `k8s-openapi`, not a `path` dependency and not
+/// `workspace = true`) puts that entry in the commented-out set, where it makes
+/// the two numbers differ. The set is asserted to be exactly the four AFTER
+/// the counts are compared, so the count difference is the failure a reviewer
+/// sees.
 ///
-/// `--offline` throughout: a unit test never reaches the network (STANDING
-/// RULE 7), and the overlay carries the same `Cargo.lock`, so pruning edges
-/// resolves out of the local cache.
+/// `--offline` throughout: a unit test never reaches the network, and the
+/// overlay carries the same `Cargo.lock`, so pruning edges resolves out of the
+/// local cache.
 #[test]
 fn no_new_package_enters_the_graph_for_the_mock() {
     let root = workspace_root();
@@ -317,9 +290,8 @@ fn no_new_package_enters_the_graph_for_the_mock() {
 
     let without = package_count(overlay.path());
 
-    // Recorded, not merely compared: the two numbers are the measurement, and
-    // a report that says "equal" without saying equal to WHAT is not a
-    // measurement. Visible with `cargo test -- --nocapture`.
+    // Recorded, not merely compared: the two numbers are the measurement.
+    // Visible with `cargo test -- --nocapture`.
     println!(
         "no_new_package_enters_the_graph_for_the_mock: {claimed:?} present → {with} packages; \
          commented out → {without} packages"
@@ -342,13 +314,11 @@ fn no_new_package_enters_the_graph_for_the_mock() {
 /// Every `[dependencies]` key this manifest declares as a plain third-party
 /// version requirement, in manifest order.
 ///
-/// Excluded, each for a stated reason: `kube` and `k8s-openapi`, which are the
-/// packages this task deliberately ADDS; anything carrying `path =`, which is
-/// a workspace member and not a third-party package; anything carrying
+/// Excluded: `kube` and `k8s-openapi`, which this crate deliberately ADDS;
+/// anything carrying `path =`, a workspace member; anything carrying
 /// `workspace = true` or written in the dotted `name.workspace = true` form,
 /// which takes a requirement the root manifest already holds. What is left is
-/// precisely the set of entries whose justification is "already in
-/// `Cargo.lock`" — the claim this test measures.
+/// the set of entries whose justification is "already in `Cargo.lock`".
 fn claimed_already_resolved(text: &str) -> Vec<String> {
     let mut section = String::new();
     let mut out = Vec::new();
@@ -400,13 +370,10 @@ fn package_count(dir: &Path) -> usize {
         .len()
 }
 
-/// A throwaway copy of the workspace's manifests and sources.
-///
-/// `target/` is excluded — it is the one directory that would make this copy
-/// expensive, and `cargo metadata` never reads it. No `tempfile`
-/// dev-dependency: Global Constraint 38 fixes this crate's manifest additions,
-/// and a directory under `std::env::temp_dir()` plus a `Drop` is the whole
-/// requirement.
+/// A throwaway copy of the workspace's manifests and sources. `target/` is
+/// excluded: it is the one directory that would make this copy expensive, and
+/// `cargo metadata` never reads it. A directory under `std::env::temp_dir()`
+/// plus a `Drop` replaces a `tempfile` dependency.
 struct Overlay(PathBuf);
 
 impl Overlay {
@@ -451,18 +418,13 @@ impl Drop for Overlay {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The Secret refusal, landed here so every chain-O task inherits it
-// ---------------------------------------------------------------------------
+// The Secret refusal
 
-/// The controller never reads a Secret.
-///
-/// Not a permission and not a comment: a source-level refusal, landed in the
-/// FIRST `weirkeeper` commit so that every task from 15b onward inherits a
-/// test it has to argue with rather than a convention it can forget. A
-/// controller that reads a SCRAM password or a signing key directly is holding
-/// credential material it has no business holding — the credential goes to the
-/// Job, by reference, and the Job mounts it.
+/// The controller never reads a Secret: a source-level refusal, not a
+/// permission and not a comment. A controller that reads a SCRAM password or a
+/// signing key directly is holding credential material it has no business
+/// holding; the credential goes to the Job, by reference, and the Job mounts
+/// it.
 #[test]
 fn the_controller_never_reads_a_secret() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -496,9 +458,7 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The double
-// ---------------------------------------------------------------------------
 
 fn one_route() -> Vec<Route> {
     vec![Route {
@@ -603,17 +563,14 @@ async fn the_double_builds_the_recorded_body() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The binary
-// ---------------------------------------------------------------------------
 
 /// `weirkeeper --version` exits 0 and prints one line.
 ///
 /// Runs the binary cargo has ALREADY built for this test target, never `cargo
 /// run`, which would re-enter cargo while `cargo test --workspace` holds the
-/// build lock (the idiom is `crates/logweir/tests/guard_cli.rs:7`). Task 23's
-/// `scripts/check-image-weirkeeper.sh` check 2 runs exactly this argv against
-/// the built image.
+/// build lock. `scripts/check-image-weirkeeper.sh` check 2 runs exactly this
+/// argv against the built image.
 #[test]
 fn weirkeeper_version_exits_zero() {
     let out = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
@@ -670,36 +627,27 @@ fn weirkeeper_help_exits_zero_with_one_paragraph() {
     assert!(stdout.contains("weirkeeper"), "got {stdout:?}");
 }
 
-// ---------------------------------------------------------------------------
-// The no-argv startup path — review finding H1
-// ---------------------------------------------------------------------------
+// The no-argv startup path.
 //
-// WHAT WAS BROKEN. `weirkeeper` with no argv aborted at **exit 101** inside
-// rustls: "Could not automatically determine the process-level CryptoProvider
-// from Rustls crate features". rustls 0.23 auto-selects only when EXACTLY ONE
-// of `ring` / `aws-lc-rs` is enabled, and this workspace's unified graph
-// enables both — `aws-lc-rs` through `object_store` → `reqwest`, `ring`
-// through `ureq 2.12.1` — so two behaved as none. The abort happened INSIDE
-// `kube::Client::try_default()`, which is why `main`'s
-// `error!("no Kubernetes client…")` branch was unreachable and why eleven
-// tests and eight mutants missed it: nothing exercised the path.
+// rustls 0.23 auto-selects a process-level CryptoProvider only when EXACTLY
+// ONE of `ring` / `aws-lc-rs` is enabled, and this workspace's unified graph
+// enables both (`aws-lc-rs` through `object_store` → `reqwest`, `ring`
+// through `ureq 2.12.1`), so without an explicit install `weirkeeper` with
+// no argv aborts at exit 101 inside `kube::Client::try_default()`, before
+// `main`'s `error!("no Kubernetes client…")` branch.
 //
-// WHY THERE ARE TWO TESTS AND NOT ONE. The first drives the startup path
-// IN-PROCESS, so the provider install has an assertion of its own and the
-// failure is a named expectation rather than a stack trace. The second runs
-// the SHIPPED BINARY, because the property the brief states is a property of
-// a process — its exit code and its log lines — and an in-process test cannot
-// observe `main`'s `ExitCode` or the panic-versus-log distinction at all.
+// TWO TESTS: the first drives the startup path IN-PROCESS, so the provider
+// install has an assertion of its own; the second runs the SHIPPED BINARY,
+// because exit codes and log lines are properties of a process that an
+// in-process test cannot observe.
 //
 // NEITHER DIALS. Building a `kube::Client` constructs a connector; it opens no
 // socket, and no `Api` call is ever made. The fixture's apiserver is
-// `https://127.0.0.1:1`: privileged, unused, and never contacted — the address
-// exists so that a regression which DOES dial fails loudly and instantly
-// (connection refused) instead of hanging on a routable host. It is not one of
-// `crates/logweir/tests/no_network_in_unit_tests.rs`'s thirteen `DIAL_TOKENS`
-// (which name the two dialling constructors, the compose stack's 9092/9000
-// endpoints and ureq's agentless builders), so STANDING RULE 18 needs no new
-// `ALLOWED` entry — `the_default_suite_dials_nothing` is green unchanged.
+// `https://127.0.0.1:1`: privileged, unused, and never contacted, so a
+// regression which DOES dial fails loudly and instantly (connection refused)
+// instead of hanging on a routable host. It is not one of
+// `crates/logweir/tests/no_network_in_unit_tests.rs`'s `DIAL_TOKENS`, so this
+// file needs no `ALLOWED` entry there.
 
 /// The unreachable apiserver every fixture in this section points at.
 const FIXTURE_APISERVER: &str = "https://127.0.0.1:1";
@@ -731,10 +679,9 @@ fn good_kubeconfig() -> String {
 
 /// A kubeconfig whose current context names a cluster that is not there.
 ///
-/// Valid YAML, valid kubeconfig shape, unresolvable context — so
+/// Valid YAML, valid kubeconfig shape, unresolvable context, so
 /// `Config::infer()` returns a clean `Err` and `main`'s error branch is
-/// REACHED rather than merely written. Finding H1b was that this branch was
-/// unreachable; this fixture is what proves it no longer is.
+/// REACHED rather than merely written.
 fn unresolvable_kubeconfig() -> String {
     "apiVersion: v1\n\
      kind: Config\n\
@@ -745,11 +692,8 @@ fn unresolvable_kubeconfig() -> String {
         .to_string()
 }
 
-/// A kubeconfig written to a private temp directory, removed on drop.
-///
-/// The same `std::env::temp_dir()` + `Drop` shape as [`Overlay`], and for the
-/// same reason: Global Constraint 38 fixes this crate's manifest additions, so
-/// there is no `tempfile` dev-dependency to reach for.
+/// A kubeconfig written to a private temp directory, removed on drop: the
+/// same `std::env::temp_dir()` + `Drop` shape as [`Overlay`].
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -801,46 +745,36 @@ fn macos_platform_roots_unreadable(e: &kube::Error) -> bool {
 /// builds instead of panicking.
 ///
 /// WHAT THIS PROVES. `weirkeeper::install_default_crypto_provider()` leaves a
-/// process-level `CryptoProvider` installed, and with one installed the exact
-/// two calls `main` makes — a `Config` off a kubeconfig, then
-/// `kube::Client::try_from` — complete cleanly. `Client::try_from` is where the
-/// abort used to happen: it builds the rustls HTTPS connector through
-/// `ConfigExt`, and `ClientConfig::builder()` is the call that panicked.
+/// process-level `CryptoProvider` installed, and with one installed the two
+/// calls `main` makes (a `Config` off a kubeconfig, then
+/// `kube::Client::try_from`) complete cleanly. `Client::try_from` builds the
+/// rustls HTTPS connector through `ConfigExt`, and `ClientConfig::builder()` is
+/// the call that panics without a provider.
 ///
-/// WHAT THIS DOES NOT PROVE. Nothing about reaching an apiserver. Building a
-/// client is not a connection, and the measured outcome here is `Ok`, not
-/// `Err` — which is precisely why the brief's clause for the no-argv path is
-/// "logs one line and exits 0 on SIGTERM" and not "exits non-zero". The clean
-/// `Err` half of `main`'s branch is asserted in the second arm below, and the
-/// process-level behaviour in the test after this one.
+/// WHAT THIS DOES NOT PROVE. Nothing about reaching an apiserver: building a
+/// client is not a connection, and the outcome here is `Ok`. The clean `Err`
+/// half of `main`'s branch is the second arm below, and the process-level
+/// behaviour is the next test.
 ///
-/// WHY `install_default_crypto_provider` IS CALLED AND ITS EFFECT ASSERTED
-/// SEPARATELY. The assertion is the mutant's landing site: delete the install
-/// (or empty the function) and this fails at the `get_default().is_some()`
-/// line with a named message, rather than unwinding out of rustls with a
-/// stack trace a reader has to interpret.
+/// The install's effect is asserted separately so the mutant (delete the
+/// install, or empty the function) fails at the `get_default().is_some()` line
+/// with a named message rather than a rustls stack trace.
 ///
 /// ONE PLATFORM ERROR IS NAMED, ON macOS ONLY, AND IT IS NOT A SKIP. With no
 /// `certificate-authority-data` in the fixture, `Client::try_from` asks
-/// `rustls-native-certs` for the platform roots, and on macOS that is a
-/// Security-framework call which, on a loaded host, sometimes fails with
+/// `rustls-native-certs` for the platform roots, and on macOS that
+/// Security-framework call sometimes fails on a loaded host with
 /// `NoValidNativeRootCA(… "failed to load system trust settings" … Os { code:
-/// -36, "I/O error" })`. That is the OS failing to READ ITS TRUST STORE, not
-/// anything this test is about — and it is reached only AFTER
-/// `ClientConfig::builder()`, the provider-dependent call that used to abort,
-/// has already run (`kube-client-0.99.0/src/client/tls.rs`:
-/// `ClientConfig::builder().with_native_roots()`). So when exactly that error
-/// comes back on macOS, the test says so on stderr and then REQUIRES the same
-/// `Config` to build an `Ok` client with an explicit, empty trust set
-/// (`root_cert = Some(vec![])`), which takes kube's other branch —
-/// `ClientConfig::builder().with_root_certificates(..)` — and never touches
-/// the platform roots. Every assertion after that (the client, its namespace,
-/// the clean `Err` arm) is unchanged. What the fallback still cannot survive
-/// is the regression: without a provider, `ClientConfig::builder()` panics on
-/// BOTH branches, and the `get_default().is_some()` assertion above fails
-/// first anyway. Any other error, and this error on any other OS (Linux CI
-/// reads PEM files, not the Security framework), fails the test exactly as
-/// before.
+/// -36, "I/O error" })`: the OS failing to READ ITS TRUST STORE, reached only
+/// AFTER `ClientConfig::builder()` has run
+/// (`kube-client-0.99.0/src/client/tls.rs`:
+/// `ClientConfig::builder().with_native_roots()`). On exactly that error the
+/// test says so on stderr and REQUIRES the same `Config` to build an `Ok`
+/// client with an explicit, empty trust set (`root_cert = Some(vec![])`),
+/// which takes kube's other branch
+/// (`ClientConfig::builder().with_root_certificates(..)`) and never touches the
+/// platform roots. Without a provider, `ClientConfig::builder()` panics on BOTH
+/// branches. Any other error, and this error on any other OS, fails the test.
 #[tokio::test]
 async fn the_startup_path_builds_a_client_from_a_kubeconfig_without_panicking() {
     weirkeeper::install_default_crypto_provider();
@@ -868,7 +802,7 @@ async fn the_startup_path_builds_a_client_from_a_kubeconfig_without_panicking() 
         cfg.cluster_url
     );
 
-    // THE CALL THAT USED TO ABORT THE PROCESS.
+    // THE CALL THAT ABORTS THE PROCESS WITHOUT A PROVIDER.
     let client = match kube::Client::try_from(cfg.clone()) {
         Ok(client) => client,
         Err(e) if macos_platform_roots_unreadable(&e) => {
@@ -916,20 +850,18 @@ async fn the_startup_path_builds_a_client_from_a_kubeconfig_without_panicking() 
 }
 
 /// How long the OS may take to let the binary run `--version` once, before the
-/// timed arm starts. Separate from arm 1's 10 s product bound on purpose: the
-/// slowest first exec measured on the development host was 13.7 s (a fresh
-/// copy of this binary running `--version` while four other fresh copies were
-/// being assessed), and 30 s leaves room for that without ever being charged
-/// to the controller.
+/// timed arm starts. Separate from arm 1's 10 s product bound: a first exec
+/// on a loaded development host has taken 13.7 s, and 30 s leaves room for
+/// that without charging it to the controller.
 const EXEC_WARM_UP_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Exec `bin --version` once and wait, at most `bound`, for it to exit 0.
 ///
-/// This exercises nothing under test — `--version` precedes every client and
-/// every subscriber in `main` — and exists only so the OS's first-exec
+/// This exercises nothing under test (`--version` precedes every client and
+/// every subscriber in `main`) and exists only so the OS's first-exec
 /// assessment of a freshly uplifted executable is not measured as controller
-/// startup. The child is bounded and killed on expiry, never waited on
-/// forever, and its output goes to /dev/null so no pipe can fill.
+/// startup. The child is bounded and killed on expiry, and its output goes to
+/// /dev/null so no pipe can fill.
 fn warm_the_executable(bin: &str, bound: std::time::Duration) -> std::time::Duration {
     let started = std::time::Instant::now();
     let mut child = Command::new(bin)
@@ -960,53 +892,39 @@ fn warm_the_executable(bin: &str, bound: std::time::Duration) -> std::time::Dura
     }
 }
 
-/// The shipped binary, with no argv and a `KUBECONFIG`: the brief's clause,
-/// end to end.
+/// The shipped binary, with no argv and a `KUBECONFIG`, end to end.
 ///
-/// Runs the binary cargo has ALREADY built for this test target — never `cargo
-/// run`, which would re-enter cargo while `cargo test --workspace` holds the
-/// build lock (the idiom is `crates/logweir/tests/guard_cli.rs:7`).
+/// Runs the binary cargo has ALREADY built for this test target, never `cargo
+/// run`.
 ///
-/// ARM 1 — the brief's no-argv clause. With a kubeconfig it can build a client
-/// from, the binary installs its subscriber, logs ONE line naming the
-/// registered controller count, and exits **0** on SIGTERM. Before the fix this
-/// arm produced exit **101** and a rustls panic on stderr, so this is the
-/// assertion the provider-removal mutant lands on.
+/// ARM 1, the no-argv clause. With a kubeconfig it can build a client from,
+/// the binary installs its subscriber, logs ONE line naming the registered
+/// controller count, and exits **0** on SIGTERM; without a crypto provider it
+/// exits **101** with a rustls panic on stderr.
 ///
-/// ARM 2 — the error branch, named. With a kubeconfig whose context resolves to
+/// ARM 2, the error branch. With a kubeconfig whose context resolves to
 /// nothing, the binary exits **1** having logged `no Kubernetes client`.
 ///
-/// STDERR IS ASSERTED EMPTY IN BOTH ARMS, and that is the point rather than a
-/// detail: Global Constraint 11 puts every readable line on STDOUT as JSON
-/// (the pod log API has no stream selector), so on this binary a non-empty
-/// stderr means a panic or a subscriber that never installed. "Exit code plus
-/// the log line" is therefore spelled as "exit code, the line on stdout, and
-/// nothing at all on stderr".
+/// STDERR IS ASSERTED EMPTY IN BOTH ARMS: every readable line goes to STDOUT
+/// as JSON (the pod log API has no stream selector), so a non-empty stderr
+/// means a panic or a subscriber that never installed.
 ///
-/// NO SOCKET. Nothing is listening on `127.0.0.1:1`, no `Api` call is made and
-/// no reconciler is registered — `controllers` is 0 until Task 16 — so the
-/// process builds a client, logs, and waits for a signal.
+/// NO SOCKET. Nothing is listening on `127.0.0.1:1` and no `Api` call is made,
+/// so the process builds a client, logs, and waits for a signal.
 ///
-/// OUTPUT GOES TO FILES, NOT PIPES. A long-lived child whose stdout is a pipe
-/// nobody drains can block on a full pipe buffer, and the exit code is read
-/// from `Child::wait()` directly — never through a pipe (STANDING RULE 20).
+/// OUTPUT GOES TO FILES, NOT PIPES: a long-lived child whose stdout is a pipe
+/// nobody drains can block on a full buffer, and the exit code is read from
+/// `Child::wait()` directly, never through a pipe.
 ///
 /// THE OS'S FIRST EXEC IS PAID BEFORE THE CLOCK STARTS. cargo re-uplifts
-/// `CARGO_BIN_EXE_weirkeeper` with a NEW inode on every `cargo test`, and
-/// macOS assesses a never-seen executable on its first exec — measured on the
-/// development host at 8.1 s for a first run against 0.12 s after, with the
-/// child printing nothing while it waits. That is "the OS let the executable
-/// start", not "the controller's startup path is fast", and charging it to
-/// arm 1's 10 s bound made the test fail with EMPTY stdout and stderr under
-/// load. So [`warm_the_executable`] execs the exact same path once with
-/// `--version` — which builds no client, touches no cluster, and is asserted
-/// on its own by `weirkeeper_version_exits_zero` — and only then does arm 1
-/// start its 10 s clock. The warm-up has its OWN bound
+/// `CARGO_BIN_EXE_weirkeeper` with a NEW inode on every `cargo test`, and macOS
+/// assesses a never-seen executable on its first exec (8.1 s against 0.12 s
+/// after, with the child printing nothing while it waits). So
+/// [`warm_the_executable`] execs the same path once with `--version` (which
+/// builds no client and is asserted by `weirkeeper_version_exits_zero`), and
+/// only then does arm 1 start its 10 s clock. The warm-up has its OWN bound
 /// ([`EXEC_WARM_UP_BOUND`]); a host that cannot exec the binary even then
-/// fails with a message saying the timed arm never started. STANDING RULE 22's
-/// 15 s is a bound on the product's time, which is unchanged: arm 1 keeps 10 s,
-/// and on a warm executable (every run after the first, and every Linux run)
-/// the warm-up is milliseconds.
+/// fails with a message saying the timed arm never started.
 #[test]
 fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     let warm_up = warm_the_executable(env!("CARGO_BIN_EXE_weirkeeper"), EXEC_WARM_UP_BOUND);
@@ -1041,9 +959,8 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
 
     // Wait for the startup line, or for an early exit, whichever comes first.
     // 10 s is a generous ceiling on "install a subscriber and build a
-    // connector"; measured, it is milliseconds. STANDING RULE 22 bounds each
-    // test at 15 s. The executable is already warm (see the doc comment), so
-    // this clock measures the controller, not the OS's first-exec assessment.
+    // connector"; measured, it is milliseconds. The executable is already warm,
+    // so this clock measures the controller.
     let arm_1_started = std::time::Instant::now();
     let deadline = arm_1_started + std::time::Duration::from_secs(10);
     let mut early = None;
@@ -1100,15 +1017,14 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          Got: {stdout:?}"
     );
 
-    // CHART GAP G5, ON THE SHIPPED BINARY: the kubelet's exec probe is this
-    // same executable with `--probe`, against the running controller's
-    // loopback listener. Both answer ok once `weirkeeper started` is logged
-    // (the fixture's apiserver is unreachable and every controller rides that
-    // out with backoff, which is not a reason to restart). NEGATIVE CONTROLS:
-    // an unknown probe word, and a port nothing listens on, exit 1.
-    // Each probe is a subprocess with its OWN outer bound (the worker rule: no
-    // child without a timeout), independent of the binary's 2 s deadlines: a
-    // probe that hangs is killed at 10 s and fails the row.
+    // The kubelet's exec probe is this same executable with `--probe`, against
+    // the running controller's loopback listener. Both answer ok once
+    // `weirkeeper started` is logged (the fixture's apiserver is unreachable
+    // and every controller rides that out with backoff, which is not a reason
+    // to restart). NEGATIVE CONTROLS: an unknown probe word, and a port nothing
+    // listens on, exit 1. Each probe is a subprocess with its OWN outer bound,
+    // independent of the binary's 2 s deadlines: a probe that hangs is killed
+    // at 10 s and fails the row.
     let probe = |word: &str, addr: &str| {
         let out_path = fixture.path().with_file_name(format!("probe-{word}.out"));
         let err_path = fixture.path().with_file_name(format!("probe-{word}.err"));
@@ -1215,12 +1131,10 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     );
 }
 
-// ===========================================================================
-// GROUP 5 — THE STATUS-WRITE CONTRACT (Task 16b, plan erratum E11(d))
-// ===========================================================================
+// The status-write contract.
 //
 // `conditions::merge_condition`, `::apply_merge_patch` and `::status_unchanged`
-// are the ONE implementation of a rule six reconcilers obey. The reconciler
+// are the ONE implementation of a rule every reconciler obeys. The reconciler
 // suites assert what each reconciler DOES with them; these assert what they
 // are, so a change to the rule fails here by name instead of somewhere in a
 // route table.
@@ -1248,10 +1162,9 @@ fn cond(status: &str, reason: &str, message: &str, when: &str) -> Condition {
     }
 }
 
-/// `lastTransitionTime` moves on a transition and ONLY on a transition.
-///
-/// The `metav1.Condition` contract, and the rule whose absence from two
-/// reconcilers Task 15c measured at 12,107 and 7,114 reconciles per 90 s.
+/// `lastTransitionTime` moves on a transition and ONLY on a transition: the
+/// `metav1.Condition` contract, without which a reconciler rewrites its
+/// status on every pass.
 #[test]
 fn a_transition_time_moves_only_when_the_status_or_the_reason_moves() {
     let old = cond(

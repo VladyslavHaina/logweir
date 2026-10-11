@@ -1,8 +1,6 @@
-//! PLAT-19.2 — ordinary confirmation and governed approval at the `Approval`
-//! controller: both policies, self-approval, expiry, a changed plan, a policy
-//! downgrade and a directly written object.
-//!
-//! # Where the signed material comes from
+//! Ordinary confirmation and governed approval at the `Approval` controller:
+//! both policies, self-approval, expiry, a changed plan, a policy downgrade
+//! and a directly written object.
 //!
 //! This crate cannot sign (`scripts/check-one-signer.sh`, check 3), so, as in
 //! `approval_controller.rs`, the documents and signatures below were produced
@@ -11,9 +9,9 @@
 //! the base64 signatures were written down. Ed25519 because its signatures are
 //! deterministic, so the constants are reproducible.
 //!
-//! * `CONSOLE_*` — the console's `ConsoleConfirmation` key.
-//! * `BOB_*` — a governed approver, principal `https://idp.example#bob`.
-//! * `ALICE_*` — a governed-approver key held by the REQUESTER herself,
+//! * `CONSOLE_*`: the console's `ConsoleConfirmation` key.
+//! * `BOB_*`: a governed approver, principal `https://idp.example#bob`.
+//! * `ALICE_*`: a governed-approver key held by the REQUESTER herself,
 //!   principal `https://idp.example#alice`: the self-approval case.
 //!
 //! The two documents name policy digests computed from the snapshot bytes of
@@ -245,9 +243,7 @@ fn reason(result: Result<Verified, ApprovalRefusal>) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The fixtures are what they say
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_fixture_digests_are_the_policies() {
@@ -259,15 +255,13 @@ fn the_fixture_digests_are_the_policies() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Both policies
-// ---------------------------------------------------------------------------
 
 /// **The ordinary path.** One console signature over a v2 document naming the
 /// namespace's Ordinary policy is the whole authorization.
 ///
-/// KILLS: "`ConsoleConfirmation` fails closed for every mode" — the pre-19.2
-/// behaviour, which leaves ordinary mode unusable.
+/// KILLS: "`ConsoleConfirmation` fails closed for every mode", which would
+/// leave ordinary mode unusable.
 #[test]
 fn an_ordinary_confirmation_verifies_under_an_ordinary_binding() {
     let verified = ordinary(vec![console()]).expect("an ordinary confirmation verifies");
@@ -318,8 +312,8 @@ fn a_governed_request_verifies_when_a_distinct_principal_countersigns() {
 }
 
 /// A console confirmation under a Governed policy is the PENDING state of a
-/// governed request, never an authorization — and it is exactly what a
-/// directly written console-only object stays at.
+/// governed request, never an authorization, and it is what a directly
+/// written console-only object stays at.
 ///
 /// KILLS: "accept the console signature as sufficient in every mode", the
 /// downgrade the whole policy exists to prevent.
@@ -417,8 +411,8 @@ fn each_signature_needs_its_own_usage() {
     );
 }
 
-/// The legacy synthesis carries no `ConsoleConfirmation` key (D3 §7.3), so a
-/// v2 document can never verify against a roster-only namespace.
+/// The legacy synthesis carries no `ConsoleConfirmation` key, so a v2 document
+/// can never verify against a roster-only namespace.
 #[test]
 fn a_roster_only_namespace_offers_no_console_key() {
     let roster = weirkeeper::crds::trust_roster::TrustRosterSpec {
@@ -457,9 +451,9 @@ fn a_revoked_console_key_confirms_nothing() {
     assert_eq!(reason(ordinary(vec![revoked])), "KeyRevoked");
 }
 
-/// **A withdrawn GOVERNED APPROVER key authorises nothing new** (review M2):
-/// retired, revoked, or past its `notAfter`, bob's countersignature over a
-/// valid governed document leaves the Approval unverified, each with its own
+/// **A withdrawn GOVERNED APPROVER key authorises nothing new**: retired,
+/// revoked, or past its `notAfter`, bob's countersignature over a valid
+/// governed document leaves the Approval unverified, each with its own
 /// reason. The control is the same signatures under bob's active key.
 ///
 /// KILLS: "skip `may_sign_new_for` for the GovernedApproval usage".
@@ -501,11 +495,10 @@ fn a_withdrawn_approver_key_authorises_no_governed_request() {
     );
 }
 
-/// **Separation fails closed on a principal that cannot be compared**
-/// (review M4). bob's key recorded as `bob@example.com` — the "email" the
-/// TrustPolicy description once invited — could be the requester under
-/// another spelling, so it establishes nothing: `SelfApprovalRefused`, with
-/// the form named. The control is the same key as `https://idp.example#bob`.
+/// **Separation fails closed on a principal that cannot be compared.** bob's
+/// key recorded as `bob@example.com` could be the requester under another
+/// spelling, so it establishes nothing: `SelfApprovalRefused`, with the form
+/// named. The control is the same key as `https://idp.example#bob`.
 ///
 /// KILLS: "compare the strings and call any difference separation".
 #[test]
@@ -532,10 +525,10 @@ fn an_approver_principal_not_in_issuer_subject_form_is_refused() {
     );
 }
 
-/// **Governed requires a change ticket** (D0: "ticket (required in Governed,
-/// optional in Ordinary)"): the same governed document without one, signed by
-/// the console AND a distinct approver, does not verify. The Ordinary fixture
-/// carries none and verifies (`an_ordinary_confirmation_verifies_...`).
+/// **Governed requires a change ticket** (required in Governed, optional in
+/// Ordinary): the same governed document without one, signed by the console
+/// AND a distinct approver, does not verify. The Ordinary fixture carries none
+/// and verifies (`an_ordinary_confirmation_verifies_...`).
 #[test]
 fn a_governed_document_without_a_ticket_authorises_nothing() {
     let refused = v2(
@@ -558,9 +551,7 @@ fn a_governed_document_without_a_ticket_authorises_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Expiry, changed plan, changed subject
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_expired_document_authorises_nothing() {
@@ -642,13 +633,11 @@ fn a_recreated_subject_is_another_subject() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Unauthorized policy downgrade
-// ---------------------------------------------------------------------------
 
 /// **The downgrade.** A genuine ordinary confirmation presented in a namespace
-/// bound Governed is refused on the POLICY — it names another policy, digest
-/// and mode — before any approver signature is even looked for.
+/// bound Governed is refused on the POLICY (it names another policy, digest
+/// and mode) before any approver signature is even looked for.
 #[test]
 fn an_ordinary_confirmation_in_a_governed_namespace_is_refused() {
     assert_eq!(
@@ -703,12 +692,10 @@ fn a_v1_payload_type_is_not_a_v2_document() {
     assert_eq!(reason(refused), "PayloadTypeMismatch");
 }
 
-// ---------------------------------------------------------------------------
 // The reconciler: the binding decides, never the document
-// ---------------------------------------------------------------------------
 
-/// This Approval object's UID — what the Restore's approval bundle records
-/// when the Restore controller admits under it (review L3).
+/// This Approval object's UID: what the Restore's approval bundle records when
+/// the Restore controller admits under it.
 const APPROVAL_UID: &str = "approval-uid-1";
 
 fn approval_object(doc: &str, sidecar_bytes: &str) -> Approval {
@@ -785,9 +772,9 @@ fn outcome_reason(outcome: &ApprovalOutcome) -> &'static str {
     outcome.reason()
 }
 
-/// An unbound namespace is `legacy-governed-v1`: today's v1 approval still
-/// verifies (existing Approvals stay valid) and a v2 document is refused on the
-/// policy, never verified by accident.
+/// An unbound namespace is `legacy-governed-v1`: a v1 approval still verifies
+/// (existing Approvals stay valid) and a v2 document is refused on the policy,
+/// never verified by accident.
 #[tokio::test]
 async fn an_unbound_namespace_keeps_todays_approval_and_refuses_v2() {
     let legacy = ApprovalPolicySet::default();
@@ -875,16 +862,13 @@ async fn the_reconciler_verifies_by_the_binding_and_clears_provenance_on_refusal
     assert!(CLEARABLE_STATUS_FIELDS.contains(&"authorization"));
 }
 
-// ---------------------------------------------------------------------------
-// P9 — a verdict its Restore's admission consumed is a record, not a gate
-// ---------------------------------------------------------------------------
+// A verdict its Restore's admission consumed is a record, not a gate.
 //
-// poc-install, 2026-09-24: 900 s (`maxAgeSeconds`) after an Ordinary
-// confirmation the controller re-judged the Approval of an ALREADY-ADMITTED,
-// SUCCEEDED Restore, rewrote it `Verified=False/AuthorizationExpired`, nulled
-// the `authorization` it had recorded, and — because the expiry message named
-// the clock — wrote a new status every pass and logged `approval refused`
-// every ~2 s for ever. D0: expiry bounds the time to ADMISSION.
+// Expiry bounds the time to ADMISSION. Re-judging the Approval of an
+// already-admitted, succeeded Restore past `maxAgeSeconds` would rewrite it
+// `Verified=False/AuthorizationExpired`, null the `authorization` it had
+// recorded and, with an expiry message naming the clock, write a new status
+// every pass.
 
 /// Past the Ordinary document's `expiresAt` (13:10), so past `maxAgeSeconds`.
 fn after_expiry() -> DateTime<Utc> {
@@ -925,7 +909,7 @@ fn restore_held() -> String {
 
 /// The Restore's own approval bundle, as the Restore controller writes it
 /// before the Job: controlled by the Restore UID and naming the Approval UID it
-/// admitted under (review L3).
+/// admitted under.
 fn bundle_body(approval_uid: &str) -> String {
     serde_json::json!({
         "apiVersion": "v1", "kind": "ConfigMap",
@@ -1000,7 +984,7 @@ fn ordinary_object() -> Approval {
 }
 
 /// The Ordinary Approval carrying the status this controller wrote when it
-/// verified it at 13:00 — before the Restore was admitted.
+/// verified it at 13:00, before the Restore was admitted.
 async fn verified_ordinary() -> Approval {
     let mut object = ordinary_object();
     let outcome = decide(&object, &bind("team-ordinary")).await;
@@ -1061,9 +1045,9 @@ async fn an_admitted_restore_keeps_its_approval_verified_past_its_expiry() {
         "a Restore admitted at 13:01 consumed the verdict; at 13:20 it is kept, not re-judged: \
          {outcome:?}"
     );
-    // ONE TRUST READ (review M1): a compromise revocation is the one key event
-    // that still reaches a consumed record, so its keys are looked up — and
-    // nothing about the document's window or the binding is asked again.
+    // ONE TRUST READ: a compromise revocation is the one key event that still
+    // reaches a consumed record, so its keys are looked up, and nothing about
+    // the document's window or the binding is asked again.
     assert_eq!(
         seen.iter().filter(|r| r.contains("trustpolicies")).count(),
         1,
@@ -1222,9 +1206,9 @@ async fn an_expired_refusal_is_written_once_and_the_requeue_is_the_heartbeat() {
 
 #[tokio::test]
 async fn a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_instant() {
-    // THE P9 OBJECTS THEMSELVES: an earlier build rewrote the Approval of an
-    // admitted Restore `AuthorizationExpired` and nulled its provenance. This
-    // build asks the verdict at the instant the Restore was admitted.
+    // An older build's object: the Approval of an admitted Restore rewritten
+    // `AuthorizationExpired` with its provenance nulled. This build asks the
+    // verdict at the instant the Restore was admitted.
     let mut object = verified_ordinary().await;
     let original = object.status.clone().expect("verified");
     let (withdrawn, _) = decide_over(&object, restore_body(), after_expiry()).await;
@@ -1266,9 +1250,7 @@ async fn a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_
     assert_eq!(outside.reason(), "AuthorizationExpired", "{outside:?}");
 }
 
-// ---------------------------------------------------------------------------
-// Review round (poc-fixes-2): M1 compromise, I1, L3 and the R1-R5 fences
-// ---------------------------------------------------------------------------
+// Compromise, planted consumption, and the binding fences
 
 /// The console key, REVOKED with `reason` effective at `effective`.
 fn revoked_console(reason: RevocationReason, effective: &str) -> SpecKey {
@@ -1311,11 +1293,10 @@ async fn decide_trusting(object: &Approval, keys: Vec<SpecKey>) -> ApprovalOutco
     .expect("a verdict")
 }
 
-/// **M1.** A `KeyCompromise` revocation of the console key that confirmed an
-/// ADMITTED Restore, effective after the admission, turns the consumed
-/// verdict `RecordedBeforeRevocation` — never green — and keeps the record:
-/// the authorization, the key id, the approver and `Consumed`. Before this
-/// round the consumed record stayed `Verified=True` for ever.
+/// A `KeyCompromise` revocation of the console key that confirmed an ADMITTED
+/// Restore, effective after the admission, turns the consumed verdict
+/// `RecordedBeforeRevocation` (never green) and keeps the record: the
+/// authorization, the key id, the approver and `Consumed`.
 #[tokio::test]
 async fn a_compromise_after_the_admission_is_recorded_before_revocation_and_never_green() {
     let object = consumed_ordinary().await;
@@ -1449,11 +1430,11 @@ async fn a_compromise_after_the_admission_is_recorded_before_revocation_and_neve
     );
 }
 
-/// **M1, the other row.** A compromise effective AT or BEFORE the recorded
-/// admission leaves no observation that separates the signature from the
-/// compromise: `KeyRevoked`, never green. The boundary is D3's own (`observed
-/// < effective`), decided by `logweir_core::trust::decide` — the equality case
-/// pins that the approval side calls the same rule.
+/// A compromise effective AT or BEFORE the recorded admission leaves no
+/// observation that separates the signature from the compromise:
+/// `KeyRevoked`, never green. The boundary (`observed < effective`) is
+/// decided by `logweir_core::trust::decide`; the equality case pins that the
+/// approval side calls the same rule.
 #[tokio::test]
 async fn a_compromise_effective_before_the_admission_is_key_revoked() {
     let object = consumed_ordinary().await;
@@ -1486,9 +1467,9 @@ async fn a_compromise_effective_before_the_admission_is_key_revoked() {
     }
 }
 
-/// **M1, the freeze it keeps.** A `Superseded` revocation and a retirement are
-/// time-based boundaries on NEW uses: the consumed record stays green. Only a
-/// compromise reaches it.
+/// The freeze it keeps: a `Superseded` revocation and a retirement are
+/// time-based boundaries on NEW uses, so the consumed record stays green. Only
+/// a compromise reaches it.
 #[tokio::test]
 async fn a_superseded_or_retired_key_leaves_a_consumed_record_green() {
     let object = consumed_ordinary().await;
@@ -1512,9 +1493,9 @@ async fn a_superseded_or_retired_key_leaves_a_consumed_record_green() {
     }
 }
 
-/// **I1's guard.** A `Consumed=True` status planted on an Approval whose
-/// recorded key never signed its bytes is not a record of anything: it is
-/// judged from scratch, refused, and the planted `Consumed` is dropped.
+/// A `Consumed=True` status planted on an Approval whose recorded key never
+/// signed its bytes is not a record of anything: it is judged from scratch,
+/// refused, and the planted `Consumed` is dropped.
 #[tokio::test]
 async fn a_planted_consumption_over_a_signature_that_does_not_verify_is_judged_again() {
     let genuine = consumed_ordinary().await;
@@ -1544,11 +1525,11 @@ async fn a_planted_consumption_over_a_signature_that_does_not_verify_is_judged_a
     );
 }
 
-/// **L3.** The admission binds the Approval OBJECT. An Approval deleted and
-/// re-created under the same name is another object: the Restore's bundle
-/// names the old UID, so the new object's verdict was consumed by nothing and
-/// still expires. Without a bundle (a Restore admitted before per-Restore
-/// bundles), the object must have existed at the admission.
+/// The admission binds the Approval OBJECT. An Approval deleted and re-created
+/// under the same name is another object: the Restore's bundle names the old
+/// UID, so the new object's verdict was consumed by nothing and still
+/// expires. Without a bundle (a Restore admitted before per-Restore bundles),
+/// the object must have existed at the admission.
 #[tokio::test]
 async fn an_approval_recreated_under_the_same_name_was_admitted_under_nothing() {
     let mut recreated = verified_ordinary().await;
@@ -1602,8 +1583,8 @@ async fn an_approval_recreated_under_the_same_name_was_admitted_under_nothing() 
     assert!(outcome.is_consumed(), "{outcome:?}");
 }
 
-/// **R2 (pure).** A Restore that names ANOTHER Approval did not consume this
-/// one, whatever its bundle claims.
+/// A Restore that names ANOTHER Approval did not consume this one, whatever
+/// its bundle claims.
 #[tokio::test]
 async fn a_restore_naming_another_approval_did_not_consume_this_one() {
     let object = verified_ordinary().await;
@@ -1628,9 +1609,9 @@ async fn a_restore_naming_another_approval_did_not_consume_this_one() {
     assert_eq!(approval::admitted_approval_uid(&foreign, RESTORE_UID), None);
 }
 
-/// **R1.** The freeze is for the SAME Restore UID. The name now answers with
-/// another object that was admitted: the verdict was recorded for the old
-/// one, so it is `ReferentUidChanged`, never `Consumed`.
+/// The freeze is for the SAME Restore UID. The name now answers with another
+/// object that was admitted: the verdict was recorded for the old one, so it
+/// is `ReferentUidChanged`, never `Consumed`.
 #[tokio::test]
 async fn a_recreated_restore_does_not_consume_the_old_verdict() {
     let object = verified_ordinary().await;
@@ -1654,10 +1635,10 @@ async fn a_recreated_restore_does_not_consume_the_old_verdict() {
     assert_eq!(outcome.reason(), "ReferentUidChanged", "{outcome:?}");
 }
 
-/// **R3.** The repair (a verdict asked at the admission instant) is only for a
-/// verdict once BOUND to this Restore UID. A fresh Approval with no status —
-/// re-applied from captured JSON, say — whose document expired is refused at
-/// `now`, even though its Restore was admitted while it was valid.
+/// The repair (a verdict asked at the admission instant) is only for a verdict
+/// once BOUND to this Restore UID. A fresh Approval with no status (re-applied
+/// from captured JSON, say) whose document expired is refused at `now`, even
+/// though its Restore was admitted while it was valid.
 #[tokio::test]
 async fn a_never_bound_approval_is_not_repaired_at_the_admission_instant() {
     let fresh = ordinary_object();
@@ -1670,8 +1651,8 @@ async fn a_never_bound_approval_is_not_repaired_at_the_admission_instant() {
     assert_eq!(outcome.reason(), "AuthorizationExpired", "{outcome:?}");
 }
 
-/// **R4.** A verified, NOT-admitted Approval is re-read AT its own expiry
-/// (TRUST-EXPIRY-LAG's rule), never left to wait for a change.
+/// A verified, NOT-admitted Approval is re-read AT its own expiry, never left
+/// to wait for a change.
 #[tokio::test]
 async fn a_verified_unadmitted_approval_requeues_at_its_expiry() {
     let object = ordinary_object();
@@ -1691,8 +1672,8 @@ async fn a_verified_unadmitted_approval_requeues_at_its_expiry() {
     );
 }
 
-/// **R5.** A Restore that is gone is not an admission: the stored verdict is
-/// judged, and the referent is reported missing.
+/// A Restore that is gone is not an admission: the stored verdict is judged,
+/// and the referent is reported missing.
 #[tokio::test]
 async fn a_deleted_restore_is_not_an_admission() {
     let object = verified_ordinary().await;
@@ -1711,9 +1692,7 @@ async fn a_deleted_restore_is_not_an_admission() {
     assert_eq!(outcome.reason(), "ReferentNotFound", "{outcome:?}");
 }
 
-// ---------------------------------------------------------------------------
-// TRUSTPOLICY-DELETE-DROPS-REVOCATION: a compromise recorded on ANOTHER policy
-// ---------------------------------------------------------------------------
+// A compromise recorded on ANOTHER policy
 
 /// **A compromise is a fact about the key, not about the policy.** The
 /// namespace's own policy lists the console key `Active` (a successor applied
@@ -1780,9 +1759,7 @@ async fn a_compromise_recorded_on_another_policy_reaches_a_consumed_record() {
     assert!(clean.is_verified(), "{clean:?}");
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.1: the fresh install's unbound default, at the Approval controller
-// ---------------------------------------------------------------------------
+// A fresh install's unbound default, at the Approval controller
 
 /// A second throwaway console key (out of tree, as above): the one a fresh
 /// install's identity hook generated. Only the public half is here.

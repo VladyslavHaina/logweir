@@ -1,8 +1,8 @@
-//! D1 §3.1 and §3.2: what a `Backup` IS, and whether two runs were asked to do
-//! the same thing.
+//! What a `Backup` IS, and whether two runs were asked to do the same thing
+//! (decision D1).
 //!
-//! EVERY TEST HERE IS PURE. `run_identity` reads the object and nothing else —
-//! no clock, no status field, no annotation — so these are table tests over
+//! Every test here is pure. `run_identity` reads the object and nothing else
+//! (no clock, no status field, no annotation), so these are table tests over
 //! JSON fixtures with no API server, no Job and no subprocess.
 //!
 //! THE FIXTURES ARE MUTATED, NOT RE-TEMPLATED. One base object per shape, each
@@ -54,17 +54,14 @@ fn identity_of(value: &Value) -> Result<weirkeeper::identity::RunIdentity, Ident
     identity::run_identity(&backup(value))
 }
 
-// ---------------------------------------------------------------------------
 // Rule 4: the legacy reading, which is the whole upgrade story
-// ---------------------------------------------------------------------------
 
 /// A `Backup` created before `spec.trigger` existed resolves exactly as the
 /// controller that created it resolved it.
 ///
-/// THE UPGRADE IS A NO-OP, AND THIS IS WHERE THAT IS TRUE OR NOT. Every stored
-/// `Backup` in every cluster has no `trigger`; if rule 4 read one of them
-/// differently, upgrading the controller would change the execution id of a
-/// run that is mid-flight and point it at a different archive prefix.
+/// Every stored `Backup` from before has no `trigger`; if rule 4 read one of
+/// them differently, upgrading the controller would change the execution id
+/// of a run that is mid-flight and point it at a different archive prefix.
 #[test]
 fn a_backup_with_no_trigger_reads_as_the_earlier_controller_read_it() {
     let mut legacy = scheduled_json();
@@ -138,9 +135,7 @@ fn a_legacy_scheduled_backup_takes_its_uid_from_the_owner_reference() {
     ));
 }
 
-// ---------------------------------------------------------------------------
 // Rule 1: the name is a pure function of the trigger
-// ---------------------------------------------------------------------------
 
 /// A scheduled-kind object whose name is not the name its fields compose is
 /// refused, and is NEVER re-read as a manual run.
@@ -226,9 +221,9 @@ fn a_retry_is_a_new_execution_id_and_names_the_attempt_it_retries() {
 /// `CatchUp` is slot S started late: the SAME name and the SAME execution id
 /// as `Scheduled`.
 ///
-/// A CATCH-UP THAT MINTED ITS OWN IDENTITY WOULD BE A SECOND ARCHIVE OF ONE
-/// WINDOW. A controller restarted after an outage runs the slot it missed;
-/// giving that run a distinct id would let a second restart produce a third.
+/// A catch-up that minted its own identity would be a second archive of one
+/// window: a controller restarted after an outage runs the slot it missed,
+/// and a distinct id would let a second restart produce a third.
 #[test]
 fn a_catch_up_is_the_same_run_as_the_slot_it_is_catching_up() {
     let mut catch_up = scheduled_json();
@@ -243,9 +238,7 @@ fn a_catch_up_is_the_same_run_as_the_slot_it_is_catching_up() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Rule 3: the shapes that are refused
-// ---------------------------------------------------------------------------
 
 /// Every illegal `(kind, attempt, slot)` combination is a mismatch.
 #[test]
@@ -312,11 +305,10 @@ fn unreachable(case: &str, id: &weirkeeper::identity::RunIdentity) -> IdentityEr
     panic!("case `{case}` resolved to {id:?}; it must not resolve at all")
 }
 
-// ---------------------------------------------------------------------------
 // Membership, including the case the history migration creates
-// ---------------------------------------------------------------------------
 
-/// Membership has three sources, and the third is the one PLAT-05.2 needs.
+/// Membership has three sources, and the third is the one the history
+/// migration needs.
 #[test]
 fn membership_survives_the_history_migration_removing_the_owner_reference() {
     let modern = backup(&scheduled_json());
@@ -373,9 +365,7 @@ fn membership_survives_the_history_migration_removing_the_owner_reference() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// D1 §3.2 — the run policy digest
-// ---------------------------------------------------------------------------
+// The run policy digest
 
 /// The digest covers WHAT a run does and nothing about WHEN.
 #[test]
@@ -467,9 +457,7 @@ fn a_copied_policy_digest_that_disagrees_with_the_object_is_refused() {
     assert!(identity::check_run_policy_digest(&backup(&scheduled_json())).is_ok());
 }
 
-// ---------------------------------------------------------------------------
-// D1 §7.1 — the two legal selection shapes
-// ---------------------------------------------------------------------------
+// The two legal selection shapes
 
 /// Two shapes are accepted and the other two are named, each with the field
 /// that is wrong.
@@ -503,8 +491,8 @@ fn the_selection_shape_is_one_of_exactly_two() {
         "the error names the field: {errs:?}"
     );
 
-    // Neither: `topics: []` alone is the shape that used to mean "everything"
-    // to the engine, which is the defect guard G-GLOB exists for.
+    // Neither: `topics: []` alone is the shape that means "everything" to
+    // the engine, which is what guard G-GLOB exists for.
     let mut neither = scheduled_json();
     neither["spec"]["topics"] = json!([]);
     let errs = policy::validate_run_policy(&backup(&neither).spec).expect_err("neither is refused");
@@ -514,11 +502,10 @@ fn the_selection_shape_is_one_of_exactly_two() {
         "an empty allowlist with no dynamic block must name the guard it violates: {errs:?}"
     );
 
-    // THE TWO ENTRY POINTS AGREE ABOUT THE SHAPE, and differ only about
-    // `deadlineSeconds` — which belongs to PLAT-06.1's `ExecutionSpecInvalid`,
-    // not to D1's `InvalidTopicSelection`. The Backup reconciler calls the
-    // selection half so it does not take over a refusal that already has an
-    // owner.
+    // The two entry points agree about the shape, and differ only about
+    // `deadlineSeconds`, which is `ExecutionSpecInvalid`'s, not
+    // `InvalidTopicSelection`'s. The Backup reconciler calls the selection
+    // half so it does not take over a refusal that already has an owner.
     let mut zero_deadline = dynamic.clone();
     zero_deadline["spec"]["deadlineSeconds"] = json!(0);
     let zero_deadline = backup(&zero_deadline);
@@ -547,10 +534,10 @@ fn the_selection_shape_is_one_of_exactly_two() {
 
 /// A glob metacharacter is refused wherever a topic name can be written.
 ///
-/// GUARD **G-GLOB**, EXTENDED TO THE EXCLUSIONS. The allowlist rail has always
-/// existed; a dynamic policy adds two more places a pattern could be typed,
-/// and `orders*` excluding everything beginning with `orders` is exactly the
-/// misreading a literal-prefix field has to prevent.
+/// Guard **G-GLOB**, extended to the exclusions: a dynamic policy adds two
+/// more places a pattern could be typed, and `orders*` excluding everything
+/// beginning with `orders` is exactly the misreading a literal-prefix field
+/// has to prevent.
 #[test]
 fn a_glob_metacharacter_is_refused_in_every_place_a_topic_can_be_named() {
     for (field, mutate) in [
@@ -585,9 +572,7 @@ fn a_glob_metacharacter_is_refused_in_every_place_a_topic_can_be_named() {
     assert!(policy::validate_run_policy(&backup(&v).spec).is_ok());
 }
 
-// ---------------------------------------------------------------------------
 // The name budget
-// ---------------------------------------------------------------------------
 
 /// A schedule name that fits attempt 0 but not `-r1` is a name budget problem
 /// and is reported as one.
@@ -619,9 +604,7 @@ fn a_retry_name_that_does_not_fit_is_name_too_long_and_not_a_mismatch() {
     assert_eq!(err.terminal_state(), "NameTooLong");
 }
 
-// ---------------------------------------------------------------------------
 // The vocabulary is in one place
-// ---------------------------------------------------------------------------
 
 /// Every terminal state this module can produce is in
 /// `conditions::TERMINAL_STATES`, and the cadence retry classification names
@@ -666,21 +649,18 @@ fn the_identity_terminal_states_are_in_the_one_closed_list() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Rule 1, the other half: the slot is an INSTANT, and the legacy owner
 // reference has to name the schedule the run claims
-// ---------------------------------------------------------------------------
 
 /// **A SLOT THAT IS FIFTEEN DIGITS AND NOT A DATE IS REFUSED**, even when
 /// `metadata.name` composes from it perfectly.
 ///
-/// The shape check — fifteen bytes, digits, a hyphen at 8 — admits
+/// The shape check (fifteen bytes, digits, a hyphen at 8) admits
 /// `20261309-031700` (month 13), `20260230-000000` (30 February) and
-/// `20260915-256100` (hour 25). Each of those composes a name that rule 1
-/// accepts, so rule 1 does NOT catch them: the object is internally consistent
-/// and simply names an instant that never occurs. A slot is half of the archive
-/// prefix, so such a run takes a prefix no schedule can ever mint and no later
-/// run of that slot can collide with to reveal the mistake.
+/// `20260915-256100` (hour 25). Each composes a name rule 1 accepts: the
+/// object is internally consistent and names an instant that never occurs. A
+/// slot is half of the archive prefix, so such a run takes a prefix no
+/// schedule can ever mint and no later run of that slot can collide with.
 ///
 /// KILLS: replacing the `chrono` round-trip with a shape test; dropping the
 /// `format(...) == slot` comparison, which is what rejects the fields
@@ -735,10 +715,10 @@ fn a_slot_that_is_not_a_calendar_instant_is_refused_even_when_the_name_composes(
 ///
 /// The legacy identity IS the owner's UID. An object whose `spec.scheduleRef`
 /// says `nightly` while its controller ownerReference says `hourly` would, if
-/// the name were not part of the match, execute under `hourly`'s archive prefix
-/// — a run filed under a schedule that never asked for it, with two schedules'
-/// history mixed in one bucket. Rule 1 cannot catch it: the name composes from
-/// `scheduleRef.name`, which is the one this object states.
+/// the name were not part of the match, execute under `hourly`'s archive
+/// prefix, mixing two schedules' history in one bucket. Rule 1 cannot catch
+/// it: the name composes from `scheduleRef.name`, which is the one this object
+/// states.
 ///
 /// KILLS: matching the ownerReference on controller + kind + apiVersion alone;
 /// checking the name in a separate `any()` that could be satisfied by a

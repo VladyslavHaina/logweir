@@ -1,28 +1,21 @@
 //! The chart's rendered policy `ConfigMap`, parsed by the code that will parse
-//! it in a cluster — D2 §4.4, W11.
-//!
-//! # Why this file exists, and why it is HERE
+//! it in a cluster.
 //!
 //! `charts/logweir/templates/policy.yaml` renders a JSON document and
-//! `weirkeeper::check::policy::parse` consumes it. Between them sits
-//! `serde(deny_unknown_fields)` and a `validate()` with ten range rules, and
-//! the failure mode when they disagree is the worst kind: the install
-//! SUCCEEDS, the controller STARTS, and every policy read fails closed —
-//! `Policy::fail_closed()`, no attestations, no evidence allowlist — reporting
-//! itself only as one advisory `configuration.policy notReady PolicyUnreadable`
-//! row on a `Preflight` nobody is necessarily looking at. So
+//! `weirkeeper::check::policy::parse` consumes it, with
+//! `serde(deny_unknown_fields)` and a `validate()` of range rules between
+//! them. When they disagree, the install SUCCEEDS, the controller STARTS, and
+//! every policy read fails closed (`Policy::fail_closed()`: no attestations,
+//! no evidence allowlist), reporting itself only as one advisory
+//! `configuration.policy notReady PolicyUnreadable` row on a `Preflight`.
 //! `attestedComplete` silently becomes unreachable and every check runs on
-//! compiled-in defaults, and nothing anywhere is red.
+//! compiled-in defaults, and nothing is red.
 //!
-//! `crates/logweir/tests/chart_lint.rs` asserts the document's SHAPE — it is
-//! the crate that owns the chart gates — but `logweir` declares no
-//! `weirkeeper` edge, so it cannot call the parser. This file is the other
-//! half, and it is one integration test rather than a dependency edge: the
-//! rendered bytes in the tree, through the real `parse`, in the crate that
-//! owns it.
-//!
-//! **It reads files and calls a pure function.** No Kubernetes, no network, no
-//! subprocess.
+//! `crates/logweir/tests/chart_lint.rs` asserts the document's SHAPE, but
+//! `logweir` declares no `weirkeeper` edge, so it cannot call the parser. This
+//! file is the other half: the rendered bytes in the tree, through the real
+//! `parse`, in the crate that owns it. It reads files and calls a pure
+//! function.
 
 mod support;
 use support::repo;
@@ -60,15 +53,11 @@ fn rendered_policies(name: &str) -> BTreeMap<String, String> {
 use serde::Deserialize as _;
 
 /// **The default render's policy parses, validates, and is the compiled-in
-/// defaults.**
+/// defaults.** An install that changes no value must behave exactly as an
+/// install that renders no policy at all.
 ///
-/// The second half matters as much as the first: an install that changes no
-/// value must behave exactly as an install that renders no policy at all, or
-/// "the chart now renders a policy" would be a silent behaviour change on
-/// every upgrade.
-///
-/// MUTANT: change any number in `values.yaml` without meaning to — say
-/// `keepPerConnection: 4` — and this test names the field.
+/// MUTANT: change any number in `values.yaml` without meaning to (say
+/// `keepPerConnection: 4`) and this test names the field.
 #[test]
 fn the_default_render_parses_and_equals_the_compiled_in_defaults() {
     let policies = rendered_policies("default");
@@ -90,11 +79,10 @@ fn the_default_render_parses_and_equals_the_compiled_in_defaults() {
 }
 
 /// **A configured render parses too, and its attestation is a real one.**
-///
 /// `charts/logweir/examples/admission-policy.values.yaml` carries the
-/// administrator attestation and the evidence allowlist, which are the two
-/// collections `Policy::fail_closed()` clears — so they are exactly what a
-/// parse failure would silently remove.
+/// administrator attestation and the evidence allowlist, the two collections
+/// `Policy::fail_closed()` clears, so exactly what a parse failure would
+/// silently remove.
 #[test]
 fn a_configured_render_parses_and_keeps_its_attestation_and_allowlist() {
     let policies = rendered_policies("admission-policy");
@@ -156,9 +144,9 @@ fn every_rendered_policy_document_parses() {
     );
 }
 
-/// **A document with an unknown key is REFUSED, and that is why the key set is
-/// asserted exactly elsewhere.** The negative control for the three tests
-/// above: without it they could pass over a parser that ignored what it did not
+/// **A document with an unknown key is REFUSED**, which is why the key set is
+/// asserted exactly elsewhere: the negative control for the three tests above,
+/// without which they could pass over a parser that ignored what it did not
 /// recognise.
 #[test]
 fn an_unknown_key_is_refused_which_is_what_makes_the_shape_assertions_matter() {
@@ -182,29 +170,20 @@ fn an_unknown_key_is_refused_which_is_what_makes_the_shape_assertions_matter() {
     );
 }
 
-/// **The chart's schema bounds are the parser's own rules** — review finding
-/// **F1**, fix round 1.
+/// **The chart's schema bounds are the parser's own rules.**
 ///
-/// # The defect this closes
-///
-/// `values.schema.json` bounded `hardMaxTopics` at `maximum: 200000` while
-/// [`logweir_core::check_contract::MAX_TOPICS_CEILING`] — which
-/// `Policy::validate` enforces — is **50 000**. So
-/// `helm install --set checks.discovery.hardMaxTopics=100000` SUCCEEDED,
-/// rendered `weirkeeper-policy`, and every policy read afterwards was
-/// `PolicyLoad::Unreadable` → `Policy::fail_closed()`: every
-/// `visibilityAttestations` entry and every `controllerIdentityLocations`
-/// entry the administrator configured silently discarded, `attestedComplete`
-/// unreachable, retention back to the compiled-in defaults — with one advisory
-/// row on a `Preflight` as the only signal. Both operator docs tell the reader
-/// to validate a hand-written policy *against this schema*, so the documented
-/// remedy did not catch it either.
-///
-/// # What is asserted, and why a literal is not enough
+/// A schema maximum above [`logweir_core::check_contract::MAX_TOPICS_CEILING`]
+/// (which `Policy::validate` enforces) lets
+/// `helm install --set checks.discovery.hardMaxTopics=100000` SUCCEED and
+/// every later policy read fail closed: every `visibilityAttestations` and
+/// `controllerIdentityLocations` entry silently discarded, `attestedComplete`
+/// unreachable, retention back to the compiled-in defaults. The operator docs
+/// tell the reader to validate a hand-written policy against this schema, so
+/// the schema must be right.
 ///
 /// The bound is compared with the CONSTANT, not with `50000`: a schema that
-/// merely happens to agree today is a schema that drifts the next time the
-/// ceiling moves. The same for the preflight timeout's `1..=600`.
+/// merely happens to agree today drifts the next time the ceiling moves. The
+/// same for the preflight timeout's `1..=600`.
 ///
 /// MUTANT: set `"maximum": 200000` back on `hardMaxTopics`, or change
 /// `MAX_TOPICS_CEILING`, and this fails naming both numbers.
@@ -225,7 +204,7 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
          controller then refuses — and a refused policy fails CLOSED and silently.",
         logweir_core::check_contract::MAX_TOPICS_CEILING
     );
-    // FX-10: the two withdrawn keys are ALLOWED (so an older values file still
+    // The two withdrawn keys are ALLOWED (so an older values file still
     // installs), OPTIONAL, UNBOUNDED (a value nothing reads must not be able to
     // fail an install) and say so.
     let checks_schema = &schema["properties"]["checks"]["properties"];
@@ -313,11 +292,10 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
 
 /// **A document at every schema extreme is a document the parser accepts.**
 ///
-/// The other direction of [`the_schema_bounds_are_the_parsers_own_rules`]: the
-/// bounds above are compared one at a time, so a schema that is too STRICT —
-/// refusing an install the controller would have been happy with — would pass
-/// them. This builds the largest and the smallest document the schema admits
-/// and runs both through the real parser.
+/// The other direction of [`the_schema_bounds_are_the_parsers_own_rules`]: a
+/// schema that is too STRICT (refusing an install the controller would accept)
+/// passes bounds compared one at a time. This builds the largest and the
+/// smallest document the schema admits and runs both through the real parser.
 ///
 /// MUTANT: lower `hardMaxTopics`'s maximum below the ceiling and the maximal
 /// document still parses but the pin above fails; raise it above and this one
@@ -339,7 +317,7 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
                 "freshSeconds": n(1, 1_000_000),
                 "retentionSeconds": n(1, 1_000_000),
                 "keepPerConnection": n(1, 1_000_000),
-                // FX-10: withdrawn; the chart renders min(20 000, hardMaxTopics).
+                // Withdrawn; the chart renders min(20 000, hardMaxTopics).
                 "defaultMaxTopics": n(1, u64::from(policy::WITHDRAWN_DEFAULT_MAX_TOPICS)),
                 "hardMaxTopics": n(1, ceiling),
                 "visibilityAttestations": []
@@ -374,14 +352,13 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
 }
 
 /// **The cross-field rule `Policy::validate` enforces is real**, so the `fail`
-/// `charts/logweir/templates/policy.yaml` carries for it is not
-/// belt-and-braces over a rule that does not exist — and the rule FX-10
-/// withdrew with `defaultMaxTopics` is really gone, so a document an older
-/// chart rendered is never refused for it.
+/// `charts/logweir/templates/policy.yaml` carries for it is not belt-and-braces
+/// over a rule that does not exist, and the rule withdrawn with
+/// `defaultMaxTopics` is really gone, so a document an older chart rendered is
+/// never refused for it.
 ///
 /// JSON Schema draft-07 cannot compare two sibling values, which is why the
-/// rule is refused at render time instead. This is the half that proves the
-/// rule it mirrors.
+/// rule is refused at render time instead.
 #[test]
 fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
     let base: serde_json::Value = serde_json::from_str(
@@ -400,9 +377,9 @@ fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
          templates/policy.yaml fails the render for it"
     );
 
-    // FX-10: the withdrawn pair's rule is gone. An older chart's document with
+    // The withdrawn pair's rule is gone. An older chart's document with
     // `defaultMaxTopics` above `hardMaxTopics` (a value nothing reads) is
-    // accepted, where it used to fail closed.
+    // accepted.
     let mut inverted_topics = base;
     inverted_topics["discovery"]["defaultMaxTopics"] = serde_json::json!(50_000);
     inverted_topics["discovery"]["hardMaxTopics"] = serde_json::json!(100);
@@ -411,9 +388,9 @@ fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
     assert_eq!(parsed.discovery.hard_max_topics, 100);
 }
 
-/// **The chart's own template refuses the cross-field pair**, named, at
-/// render time — asserted over the template text because `chart_lint` is the
-/// crate that runs `helm` and this one does not.
+/// **The chart's own template refuses the cross-field pair**, named, at render
+/// time, asserted over the template text because `chart_lint` is the crate
+/// that runs `helm` and this one does not.
 #[test]
 fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
     let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
@@ -440,13 +417,11 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
          parser refuses discards every attestation and every evidence location silently"
     );
 
-    // AND THE CONDITIONS ARE LIVE. Pinning the MESSAGES alone was not enough
-    // and a mutant proved it: replacing `{{- if lt $maxTotal $maxNs -}}` with
-    // `{{- if false -}}` leaves both `fail`s and both message strings exactly
-    // where they were, so a text scan passes over a template that refuses
-    // nothing. `scripts/check-chart.sh` renders the two inverted pairs and is
-    // the live proof; this is the cheap half that says which comparison each
-    // `fail` hangs off.
+    // AND THE CONDITIONS ARE LIVE. Pinning the MESSAGES alone is not enough:
+    // replacing `{{- if lt $maxTotal $maxNs -}}` with `{{- if false -}}` leaves
+    // both `fail`s and both message strings where they were. `scripts/check-chart.sh`
+    // renders the two inverted pairs and is the live proof; this is the cheap
+    // half that says which comparison each `fail` hangs off.
     let condition = "{{- if lt $maxTotal $maxNs -}}";
     assert!(
         code.contains(condition),
@@ -459,12 +434,11 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
     );
 }
 
-/// **P10 review L2: the numbers the chart renders NOTHING for are the
-/// controller's own defaults.** `templates/policy.yaml` omits the `runs` block
-/// when `runs.*` equals `RunsPolicy::default()` (so an older controller, which
-/// refuses an unknown block, keeps reading a default install's policy), and
-/// the values file ships those same defaults. Three spellings of one pair,
-/// read together here.
+/// **The numbers the chart renders NOTHING for are the controller's own
+/// defaults.** `templates/policy.yaml` omits the `runs` block when `runs.*`
+/// equals `RunsPolicy::default()` (so an older controller, which refuses an
+/// unknown block, keeps reading a default install's policy), and the values
+/// file ships those same defaults. Three spellings of one pair, read together.
 #[test]
 fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
     let defaults = policy::RunsPolicy::default();
@@ -500,9 +474,7 @@ fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
     assert_eq!(parsed.runs, defaults);
 }
 
-// ======================================================================
-// FX-10 — configured values that reach nothing
-// ======================================================================
+// Configured values that reach nothing
 
 /// `values.yaml`, parsed.
 fn values() -> serde_yaml::Value {
@@ -591,20 +563,19 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// **FX-10: the two withdrawn fields are rendered at the parser's fixed
-/// compatibility values, never from a value, and nothing reads them.**
+/// **The two withdrawn fields are rendered at the parser's fixed compatibility
+/// values, never from a value, and nothing reads them.**
 ///
 /// * The template reads neither withdrawn value (its comments may name them).
 /// * It renders `defaultMaxTopics` as `min(WITHDRAWN_DEFAULT_MAX_TOPICS,
 ///   hardMaxTopics)` and `defaultTimeoutSeconds` as
-///   `WITHDRAWN_DEFAULT_TIMEOUT_SECONDS` — the two constants the parser's
-///   serde defaults use, so the digest of a document with and without them is
-///   one digest.
-/// * Every committed render carries both keys inside the range a controller
-///   older than FX-10 requires (`1 <= defaultMaxTopics <= hardMaxTopics`,
-///   `1..=600`): such a controller refuses a document without them, and a
-///   refused document fails CLOSED. That is what keeps an image-only rollback
-///   of an install safe.
+///   `WITHDRAWN_DEFAULT_TIMEOUT_SECONDS`, the two constants the parser's serde
+///   defaults use, so the digest of a document with and without them is one
+///   digest.
+/// * Every committed render carries both keys inside the range an older
+///   controller requires (`1 <= defaultMaxTopics <= hardMaxTopics`, `1..=600`):
+///   such a controller refuses a document without them, and a refused document
+///   fails CLOSED. That keeps an image-only rollback of an install safe.
 /// * No source in any crate outside the parser reads either field.
 ///
 /// MUTANTS: render `.Values.checks.discovery.defaultMaxTopics` again; drop
@@ -701,14 +672,14 @@ fn the_withdrawn_fields_are_rendered_at_the_parsers_compatibility_values_and_rea
 struct Site {
     /// The source under `crates/weirkeeper/src/`.
     file: &'static str,
-    /// Text that occurs EXACTLY ONCE in that file — compared with every
-    /// whitespace character removed, so rustfmt's line breaks do not matter —
-    /// and that contains one of the field's `access` spellings: it names this
-    /// site and no other.
+    /// Text that occurs EXACTLY ONCE in that file (compared with every whitespace
+    /// character removed, so rustfmt's line breaks do not matter) and that
+    /// contains one of the field's `access` spellings: it names this site and no
+    /// other.
     needle: &'static str,
-    /// The test file (under `crates/weirkeeper/tests/`) and the `fn` that
-    /// drives THIS site at a NON-default value and asserts the effect — or why
-    /// no row does, pointing at the FX-10 report.
+    /// The test file (under `crates/weirkeeper/tests/`) and the `fn` that drives
+    /// THIS site at a NON-default value and asserts the effect, or why no row
+    /// does, pointing at the FX-10 report.
     proof: Result<(&'static str, &'static str), &'static str>,
 }
 
@@ -719,11 +690,10 @@ struct Followed {
     /// The dotted path in the parsed `Policy`'s JSON (its wire names).
     field: &'static str,
     /// Every spelling a controller read of the parsed field takes. EVERY
-    /// occurrence of any of them in `crates/weirkeeper/src` (whitespace
-    /// removed, the parser itself excepted) must be one of `sites`, so a reader
-    /// nobody listed fails the guard. The FX-10 review's L1: three reads of
-    /// `hardMaxTopics` hid behind one needle, and the harvest's could be
-    /// replaced by its default with every test green.
+    /// occurrence of any of them in `crates/weirkeeper/src` (whitespace removed,
+    /// the parser itself excepted) must be one of `sites`, so a reader nobody
+    /// listed fails the guard: one needle could otherwise hide several reads of
+    /// the same field, and one of them could be replaced by its default unseen.
     access: &'static [&'static str],
     /// Every read site, or `Err` with the reason no reader exists yet.
     sites: Result<&'static [Site], &'static str>,
@@ -1000,12 +970,12 @@ const FOLLOWED: &[Followed] = &[
             )),
         }]),
     },
-    // PUBLISHED AND READ BY NOTHING, BY DECISION (FX-15) — listed, not hidden.
-    // Both values DO reach a reader through the Deployment's env
-    // (`AWS_ALLOW_HTTP`, `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` →
-    // `retention::storage_url_for`, `configured_values.rs`); it is their copy
-    // in this document that nothing reads, and nothing may: the access count
-    // holds them at zero readers, so a reader added later fails here by name.
+    // PUBLISHED AND READ BY NOTHING, BY DECISION: listed, not hidden. Both
+    // values reach a reader through the Deployment's env (`AWS_ALLOW_HTTP`,
+    // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` → `retention::storage_url_for`,
+    // `configured_values.rs`); it is their copy in this document that nothing
+    // reads, and the access count holds them at zero readers, so a reader added
+    // later fails here by name.
     Followed {
         value: "archive.s3.allowHttp",
         field: "legacyArchiveAddressing.allowHttp",
@@ -1036,26 +1006,23 @@ const FOLLOWED: &[Followed] = &[
     },
 ];
 
-/// **FX-10's guard: every installation-policy value reaches its own parsed
-/// field at a NON-default value, and a controller site reads that field —
-/// with the row that proves the reader acts on it named, and present.**
-///
-/// The defect this row exists for: `checks.discovery.defaultMaxTopics` and
-/// `checks.preflight.defaultTimeoutSeconds` were documented, typed, rendered,
-/// parsed and range-checked, and READ BY NOTHING — and every gate passed,
-/// because every gate rendered every value at its default. So:
+/// **Every installation-policy value reaches its own parsed field at a
+/// NON-default value, and a controller site reads that field, with the row
+/// that proves the reader acts on it named, and present.** A knob that is
+/// documented, typed, rendered, parsed and range-checked but READ BY NOTHING
+/// passes every gate that renders values at their defaults. So:
 ///
 /// 1. the table is complete both ways: its `value`s are exactly the
 ///    `values.yaml` leaves the policy document is rendered from (`checks`,
 ///    `runs`, `engine`, `evidence`, and the four `archive.s3` values behind
 ///    `legacyArchiveAddressing`), and its `field`s plus the two withdrawn ones
-///    and `version` are exactly the parser's fields — a new knob, or a new
+///    and `version` are exactly the parser's fields: a new knob, or a new
 ///    parsed field, fails here until it is followed;
 /// 2. `examples/tuned.values.yaml` sets every one OFF its default;
 /// 3. its committed render, through the REAL `check::policy::parse`, carries
 ///    each at that value in its own field (a swap of two values with equal
-///    defaults — `maxActivePerNamespace` and
-///    `maxEvidenceFetchActivePerNamespace` are both 4 — fails here, where the
+///    defaults, `maxActivePerNamespace` and
+///    `maxEvidenceFetchActivePerNamespace` both 4, fails here, where the
 ///    default renders could not tell);
 /// 4. EVERY place a controller reads the field is a listed site, and every
 ///    listed site is such a place: each site's needle occurs exactly once in
@@ -1063,14 +1030,11 @@ const FOLLOWED: &[Followed] = &[
 ///    the occurrences of the field's `access` spellings across
 ///    `crates/weirkeeper/src` (whitespace removed, the parser excepted). Each
 ///    site names the row that drives it at a non-default value, or says why
-///    none does and points at the FX-10 report.
+///    none does.
 ///
-/// Step 4 used to take one needle per field and test it with `contains`. The
-/// FX-10 review (L1, mutant M5) showed what that misses: the needle for
-/// `hardMaxTopics` occurred THREE times — the plan, a log line and the
-/// harvest's cut — so the harvest's read could be replaced by the compiled-in
-/// default with this row and all 1 719 weirkeeper tests green. Now that
-/// mutant fails here (two reads where the table lists three) and in
+/// MUTANT: replace one of `hardMaxTopics`'s three reads (the plan, a log line
+/// and the harvest's cut) with the compiled-in default. It fails here (two
+/// reads where the table lists three) and in
 /// `topic_discovery_controller::the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores`.
 ///
 /// **What it cannot see:** a read through a binding the `access` list does not

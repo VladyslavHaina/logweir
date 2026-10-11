@@ -1,35 +1,25 @@
-//! FX-10 — configured values reach the code that acts on them, at values their
-//! defaults cannot imitate.
+//! Configured values reach the code that acts on them, at values their
+//! defaults cannot imitate: a value rendered and parsed at its default is
+//! exactly what a template or a controller that ignored the value produces.
 //!
-//! # The defect class
-//!
-//! `checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
-//! were documented, rendered, parsed and range-checked, and changed nothing:
-//! every gate rendered every value at its default, which is also exactly what a
-//! template or a controller that ignored the value produces. The same shape hid
-//! in the retention worker's ceilings (`logweir-retention/tests/worker.rs`).
-//!
-//! # Why this is a test binary of its own
-//!
-//! These rows set the PROCESS ENVIRONMENT. The controller reads the installation
-//! policy's reference, its two diagnostic windows and its object-store
-//! addressing from its own environment — the `Preflight`, `Backup` and
-//! manual-run paths take no injectable reference — and `std::env::set_var` is
-//! process-global, so in a shared binary one row's values would leak into every
-//! row running beside it. Here every row that reads the environment calls
-//! [`tuned_environment`] first, and that sets the SAME values once: the literal `env` of the controller
+//! These rows set the PROCESS ENVIRONMENT. The controller reads the
+//! installation policy's reference, its two diagnostic windows and its
+//! object-store addressing from its own environment (the `Preflight`,
+//! `Backup` and manual-run paths take no injectable reference), and
+//! `std::env::set_var` is process-global, so they are a test binary of their
+//! own. Every row that reads the environment calls [`tuned_environment`]
+//! first, which sets the SAME values once: the literal `env` of the controller
 //! Deployment the chart renders from `examples/tuned.values.yaml`
 //! (`charts/logweir/rendered/tuned.yaml`), plus the release namespace the
-//! downward API would project. So a value is followed from the values file,
-//! through the rendered environment, into the reader — not from a string this
-//! file invented.
+//! downward API would project. A value is followed from the values file,
+//! through the rendered environment, into the reader.
 //!
 //! Each behavioural row also runs a CONTROL: the same objects with the chart's
-//! DEFAULT policy document (`rendered/default.yaml`) served instead — under a
-//! different `now` wherever the reader goes through a process-wide policy cache,
-//! so the cache cannot carry the tuned document across. A reader that ignored
-//! the loaded document fails the tuned half; a row whose premise was wrong fails
-//! the control.
+//! DEFAULT policy document (`rendered/default.yaml`) served instead, under a
+//! different `now` wherever the reader goes through a process-wide policy
+//! cache, so the cache cannot carry the tuned document across. A reader that
+//! ignored the loaded document fails the tuned half; a row whose premise was
+//! wrong fails the control.
 
 mod support;
 use support::{backup_request, leak, not_found, repo};
@@ -73,9 +63,7 @@ const CLUSTER_UID: &str = "7a2b9c1d-0000-4000-8000-0000000000c1";
 const PF_UID: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
 const DEST_A_UID: &str = "cafe0001-0000-4000-8000-0000000000a1";
 
-// ---------------------------------------------------------------------------
 // The chart's tuned render, and this process's environment
-// ---------------------------------------------------------------------------
 
 /// Every document of one committed render.
 fn render(name: &str) -> Vec<serde_yaml::Value> {
@@ -167,9 +155,7 @@ fn utc(h: u32, m: u32, s: u32) -> DateTime<Utc> {
         .expect("the instant exists")
 }
 
-// ---------------------------------------------------------------------------
 // The environment: controller.*, archive.s3.* and the policy reference
-// ---------------------------------------------------------------------------
 
 /// **The controller's environment is the chart's, and every reader of it
 /// reads the tuned value.**
@@ -188,9 +174,9 @@ fn utc(h: u32, m: u32, s: u32) -> DateTime<Utc> {
 /// | its `path_style`, `allow_http` | `false`, `true` | `true`, `false` |
 /// | `run_pool::policy_ref()` | `logweir-system/weirkeeper-policy` | none |
 ///
-/// MUTANTS (FX-10 report): read `FAIL_FAST_SECONDS_ENV` in `job_ttl_seconds`;
-/// misspell any one variable on either side (the render's name or the
-/// constant); drop the `!` from `path_style: !env_flag(…)`.
+/// MUTANTS: read `FAIL_FAST_SECONDS_ENV` in `job_ttl_seconds`; misspell any
+/// one variable on either side (the render's name or the constant); drop the
+/// `!` from `path_style: !env_flag(…)`.
 #[test]
 fn the_controllers_environment_is_the_charts_and_its_readers_read_the_tuned_values() {
     let env: std::collections::BTreeMap<String, String> =
@@ -363,12 +349,11 @@ async fn deletes_after_one_pass(document: String, delete: bool) -> Vec<String> {
     deletes
 }
 
-/// **FX-10: `checks.preflight.retentionSeconds` reaches the `Preflight`
-/// collector.**
+/// **`checks.preflight.retentionSeconds` reaches the `Preflight` collector.**
 ///
 /// A terminal `Preflight` whose verdict expired two minutes ago is collected
 /// under the chart's tuned 90 s window. CONTROL: served the DEFAULT render's
-/// document (3 600 s), the same pass deletes nothing — and its route table
+/// document (3 600 s), the same pass deletes nothing, and its route table
 /// holds no `DELETE`, so a deletion would panic the double.
 ///
 /// MUTANT: `collect_expired(&api, &namespace, 3600, now)` at the call site.
@@ -385,9 +370,7 @@ async fn the_installation_policys_preflight_window_reaches_the_preflight_collect
     );
 }
 
-// ---------------------------------------------------------------------------
-// runs.* — the manual-run ceilings
-// ---------------------------------------------------------------------------
+// runs.*: the manual-run ceilings
 
 fn cluster() -> KafkaCluster {
     serde_json::from_value(json!({
@@ -520,15 +503,13 @@ async fn pooled_pass(
     seen
 }
 
-/// **FX-10: `runs.maxManualBackupsActivePerNamespace` reaches the manual-run
-/// gate — environment, `ConfigMap`, ceiling, queue.**
+/// **`runs.maxManualBackupsActivePerNamespace` reaches the manual-run gate:
+/// environment, `ConfigMap`, ceiling, queue.**
 ///
 /// Five manual `Backup`s are running and a sixth arrives. The chart's tuned
 /// document RAISES the ceiling to six, so the sixth is admitted and its Job is
 /// created. CONTROL: served the default document (four), the same pass queues
-/// it — `queue.limit: 4`, nothing created. P10's live proof ran only at the
-/// defaults (release-notes item 15), so before this row a gate that ignored
-/// the policy and used four passed everything.
+/// it (`queue.limit: 4`, nothing created).
 ///
 /// MUTANT: `crate::run_pool::ceiling(PoolKind::Backup, &Policy::defaults())`
 /// at the gate, or `4` inside `ceiling`.
@@ -573,15 +554,14 @@ async fn the_installation_policys_manual_backup_ceiling_admits_the_sixth_run() {
     assert_eq!(statuses[0]["queue"], json!({"limit": 4}));
 }
 
-/// **FX-10: `runs.maxManualRestoresActivePerNamespace` is the ceiling the
-/// restore gate applies.**
+/// **`runs.maxManualRestoresActivePerNamespace` is the ceiling the restore
+/// gate applies.**
 ///
 /// The mapping both gates share (`run_pool::ceiling`): the tuned document's
 /// restores (8) and backups (6) differ from each other and from their defaults
 /// (2 and 4), so a crossed or constant mapping fails, and each gate is pinned
 /// to call it over the document it loaded. The restore gate's end-to-end pass
-/// is `the_installation_policys_manual_restore_ceiling_admits_the_third_restore`
-/// (FX-15).
+/// is `the_installation_policys_manual_restore_ceiling_admits_the_third_restore`.
 ///
 /// MUTANTS: swap the two arms of `ceiling`; pass `PoolKind::Backup` at the
 /// restore gate; pass `&Policy::defaults()` there.
@@ -621,9 +601,7 @@ fn the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies()
     }
 }
 
-// ---------------------------------------------------------------------------
-// runs.maxManualRestoresActivePerNamespace, end to end — FX-15
-// ---------------------------------------------------------------------------
+// runs.maxManualRestoresActivePerNamespace, end to end
 
 const RESTORE_PLAN: &str = "\
 source:
@@ -861,15 +839,15 @@ async fn pooled_restore_pass(
     seen
 }
 
-/// **FX-15: `runs.maxManualRestoresActivePerNamespace` reaches the restore
-/// gate — environment, `ConfigMap`, ceiling, admission.**
+/// **`runs.maxManualRestoresActivePerNamespace` reaches the restore gate:
+/// environment, `ConfigMap`, ceiling, admission.**
 ///
 /// Two manual `Restore`s are running and an approved third arrives. The
 /// chart's tuned document raises the ceiling to eight, so the third is
 /// admitted (`Admitted=True` naming `= 8`) and its Job is created. CONTROL:
-/// served the default document (two), the same pass queues it —
-/// `queue.limit: 2`, nothing created. FX-10 held only the ceiling's mapping and
-/// a source pin; this drives the gate's USE of it (FX-10 review M7).
+/// served the default document (two), the same pass queues it
+/// (`queue.limit: 2`, nothing created). This drives the gate's USE of the
+/// ceiling, not only its mapping.
 ///
 /// MUTANTS: `&Policy::defaults()` for the loaded policy at the restore gate;
 /// `limit` replaced by `2` in its `decide` call.
@@ -927,9 +905,7 @@ async fn the_installation_policys_manual_restore_ceiling_admits_the_third_restor
     assert_eq!(statuses[0]["queue"]["limit"], 2);
 }
 
-// ---------------------------------------------------------------------------
-// checks.maxEvidenceFetchActivePerNamespace, from the caller — FX-15
-// ---------------------------------------------------------------------------
+// checks.maxEvidenceFetchActivePerNamespace, from the caller
 
 const BACKUP_UID: &str = "00000000-0000-4000-8000-0000000000e1";
 
@@ -1066,15 +1042,15 @@ async fn fetch_step(document: String, now: DateTime<Utc>, active: u32) -> (Step,
     (step, seen)
 }
 
-/// **FX-15: `checks.maxEvidenceFetchActivePerNamespace` reaches the
-/// evidence-fetch pool FROM ITS CALLER** — the policy `evidence_source_for`
-/// loads is the one `advance` admits by.
+/// **`checks.maxEvidenceFetchActivePerNamespace` reaches the evidence-fetch
+/// pool FROM ITS CALLER**: the policy `evidence_source_for` loads is the one
+/// `advance` admits by.
 ///
 /// Four evidence-fetch Jobs run in the namespace. The tuned document's pool is
 /// five, so a fifth is created; beside five it waits, naming `= 5`. CONTROL:
 /// served the default document (four), the pass beside four waits, naming
-/// `= 4`, and creates nothing. FX-10 drove the consumer (`limits::admit`) at a
-/// non-default value but not this caller (`controllers/backup.rs`,
+/// `= 4`, and creates nothing. `limits::admit` is driven at a non-default
+/// value elsewhere; this drives the caller (`controllers/backup.rs`,
 /// `checks: load.policy().checks`).
 ///
 /// MUTANT: `checks: Policy::defaults().checks` in `evidence_source_for`.
@@ -1110,10 +1086,7 @@ async fn the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its
     assert_eq!(posts(&seen, "/jobs") + posts(&seen, "/configmaps"), 0);
 }
 
-// ---------------------------------------------------------------------------
-// checks.discovery.visibilityAttestations, at a Backup's run-time discovery —
-// FX-15
-// ---------------------------------------------------------------------------
+// checks.discovery.visibilityAttestations, at a Backup's run-time discovery
 
 /// A clean listing of the tuned attestation's cluster: no authorization error,
 /// not truncated.
@@ -1140,13 +1113,13 @@ fn clean_listing(cluster_id: &str) -> InventoryResult {
     }
 }
 
-/// **FX-15: `checks.discovery.visibilityAttestations` reaches a `Backup`'s
-/// run-time discovery** (`backup_selection::run_time_visibility`, the R6 read
-/// `resolve` makes), from the policy reference in this process's environment.
+/// **`checks.discovery.visibilityAttestations` reaches a `Backup`'s run-time
+/// discovery** (`backup_selection::run_time_visibility`, the read `resolve`
+/// makes), from the policy reference in this process's environment.
 ///
 /// The tuned document attests `team-a`'s `source` cluster
 /// (`M29I2S7FQPyHBEX12Vx7XA`) for `User:backup` until 2027, so a clean listing
-/// of it is `attestedComplete` — the one state a `Backup` with
+/// of it is `attestedComplete`, the one state a `Backup` with
 /// `incompleteDiscovery: Refuse` resolves under. CONTROL: served the default
 /// document (no attestation), the same listing is `unknown`, and a listing of
 /// another cluster id under the tuned document is `unknown` too.
@@ -1270,8 +1243,8 @@ async fn admit_with(document: String, now: DateTime<Utc>) -> Result<DestinationA
 
 /// A `Restore` reading from, and writing its evidence to, the CA-bundled
 /// destination. Its `planBytes` are not a plan: the CA gate runs BEFORE the
-/// plan is read (check 6), so a pass that clears the gate is refused at the
-/// plan instead — which is exactly what tells the two halves apart.
+/// plan is read, so a pass that clears the gate is refused at the plan
+/// instead, which is what tells the two halves apart.
 fn destination_backed_restore() -> Restore {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
@@ -1302,8 +1275,7 @@ async fn admit_restore_with(document: String, now: DateTime<Utc>) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-/// **FX-10: `engine.allowUnverifiedCustomCa` reaches backup AND restore
-/// admission.**
+/// **`engine.allowUnverifiedCustomCa` reaches backup AND restore admission.**
 ///
 /// A destination that declares a CA bundle is refused
 /// (`CaBundleUnsupportedByEngine`) for an engine-driven run unless the
@@ -1311,7 +1283,8 @@ async fn admit_restore_with(document: String, now: DateTime<Utc>) -> Result<(), 
 ///
 /// * the BACKUP gate (`admit_destination`) resolves the destination;
 /// * the RESTORE gate (`admit_restore_destinations`) lets it past the CA check
-///   to check 6, where this fixture's non-plan is refused `PlanUnparseable`.
+///   to the plan check, where this fixture's non-plan is refused
+///   `PlanUnparseable`.
 ///
 /// CONTROL: served the default document, both refuse at the gate with
 /// `CaBundleUnsupportedByEngine`. `backup_controller.rs`'s
@@ -1319,7 +1292,7 @@ async fn admit_restore_with(document: String, now: DateTime<Utc>) -> Result<(), 
 /// hand-built policy; this row drives the policy each gate LOADED.
 ///
 /// MUTANTS: `engine_custom_ca_allowed(&Policy::defaults())` in
-/// `admit_destination` (S14) or in `admit_restore_destinations` (S14b).
+/// `admit_destination` or in `admit_restore_destinations`.
 #[tokio::test]
 async fn the_installation_policys_custom_ca_switch_reaches_backup_and_restore_admission() {
     tuned_environment();
@@ -1352,17 +1325,15 @@ async fn the_installation_policys_custom_ca_switch_reaches_backup_and_restore_ad
     }
 }
 
-// ---------------------------------------------------------------------------
-// The retention Job's binding names — the controller's side
-// ---------------------------------------------------------------------------
+// The retention Job's binding names: the controller's side
 
 /// **The enforcement Job's binding variables are the ones the retention
 /// worker reads.**
 ///
 /// `weirkeeper` projects them from `controllers::retention_policy::env`; the
 /// worker reads its own `logweir_retention::env`; the two crates share no
-/// edge, on purpose (the worker is the deletion boundary). Before FX-10 a
-/// rename on either side was silent — the worker's ceilings fell back to 50
+/// edge, on purpose (the worker is the deletion boundary), so a rename on
+/// either side would be silent and the worker's ceilings would fall back to 50
 /// and 20 000. This row reads the WORKER's source and compares; its twin,
 /// `logweir-retention/tests/worker.rs`
 /// `the_binding_names_are_the_ones_the_controller_projects`, reads this

@@ -1,9 +1,10 @@
-//! **PROD-15.1 at the controller**: a `Restore` under the original topic names
-//! is admitted only with an approval signed for its own approval subject,
-//! `originalName`; its declaration (`spec.target.topicNaming.originalName`)
-//! must say what its plan says; and a standing rehearsal authorization never
-//! admits one. Pure functions over constructed objects — the same functions
-//! the reconciler runs before its first `POST`.
+//! **Original-name restores at the controller**: a `Restore` under the
+//! original topic names is admitted only with an approval signed for its own
+//! approval subject, `originalName`; its declaration
+//! (`spec.target.topicNaming.originalName`) must say what its plan says; and a
+//! standing rehearsal authorization never admits one. Pure functions over
+//! constructed objects, the same functions the reconciler runs before its
+//! first `POST`.
 
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::original_name::ApprovalSubject;
@@ -16,8 +17,8 @@ use weirkeeper::controllers::restore::{
 };
 use weirkeeper::crds::restore::Restore;
 
-/// The reconcile's order (PROD-17.1 B5): the one read of the plan, then the
-/// agreement check over it.
+/// The reconcile's order: the one read of the plan, then the agreement check
+/// over it.
 fn agrees(
     check: fn(&Restore, &logweir_core::spec::RestoreSpec) -> Result<(), RestoreError>,
     restore: &Restore,
@@ -300,8 +301,8 @@ fn the_declaration_must_say_what_the_plan_says() {
             other => panic!("{label}: expected ExecutionSpecInvalid, got {other:?}"),
         }
     }
-    // PROD-17.1 B5: an unparseable plan with nothing declared is no longer
-    // left to the runner; the one read of the plan refuses it by name.
+    // An unparseable plan with nothing declared is not left to the runner;
+    // the one read of the plan refuses it by name.
     match agrees(original_name_agrees, &restore("not: [a plan", None, "x-")) {
         Err(RestoreError::Refused(state, _)) => assert_eq!(state, "PlanUnparseable"),
         other => panic!("expected PlanUnparseable, got {other:?}"),
@@ -309,14 +310,13 @@ fn the_declaration_must_say_what_the_plan_says() {
 }
 
 /// **An original-name restore requires complete verification, and the
-/// controller says so before any Job** (the orchestrator's ruling of
-/// 2026-10-09). A Restore whose plan carries the block without
-/// `sample.coverage: complete` is refused terminally, `ExecutionSpecInvalid`,
-/// its message opening with the runner's own token; the same plan asking for
-/// complete coverage agrees. CONTROL: a sampled ORDINARY plan agrees as it
-/// always did. KILLS: an admission that leaves the sampled plan to the
-/// runner (a Job, an approval asked for, then exit 3); applying the rule to
-/// a prefixed restore.
+/// controller says so before any Job.** A Restore whose plan carries the
+/// block without `sample.coverage: complete` is refused terminally,
+/// `ExecutionSpecInvalid`, its message opening with the runner's own token;
+/// the same plan asking for complete coverage agrees. CONTROL: a sampled
+/// ORDINARY plan agrees as it always did. KILLS: an admission that leaves the
+/// sampled plan to the runner (a Job, an approval asked for, then exit 3);
+/// applying the rule to a prefixed restore.
 #[test]
 fn a_sampled_original_name_restore_is_refused_before_any_job() {
     use weirkeeper::controllers::restore::coverage_agrees;
@@ -345,8 +345,8 @@ fn a_sampled_original_name_restore_is_refused_before_any_job() {
     assert!(agrees(original_name_agrees, &ordinary).is_ok());
 }
 
-/// The original-name plan narrowed to a PARTITION SUBSET, in the one
-/// spelling PROD-11.1b's grammar accepts (the interval form).
+/// The original-name plan narrowed to a PARTITION SUBSET, in the one spelling
+/// the plan grammar accepts (the interval form).
 fn subset_original_plan() -> String {
     let narrowed = ORIGINAL_PLAN.replace(
         "restore:\n  point_in_time: \"2026-09-07T14:05:00Z\"\n",
@@ -357,15 +357,14 @@ fn subset_original_plan() -> String {
 }
 
 /// **An original-name restore restores whole topics, and the controller says
-/// so before any Job** (the orchestrator's ruling of 2026-10-09, once
-/// PROD-11.1b allowed partition subsets). A Restore whose plan carries the
-/// block and `restore.partitions` is refused terminally,
-/// `ExecutionSpecInvalid`, its message opening with the runner's own token.
-/// There is no CEL half (the CRD declares no partitions), so this is the
-/// Kubernetes boundary. CONTROLS: the same plan without the subset agrees;
-/// the same plan from a stated window start agrees; a subset under a PREFIX
-/// agrees, as on main. KILLS: an admission that leaves the subset plan to the
-/// runner; applying the rule to a window or to a prefixed restore.
+/// so before any Job.** A Restore whose plan carries the block and
+/// `restore.partitions` is refused terminally, `ExecutionSpecInvalid`, its
+/// message opening with the runner's own token. There is no CEL half (the CRD
+/// declares no partitions), so this is the Kubernetes boundary. CONTROLS: the
+/// same plan without the subset agrees; the same plan from a stated window
+/// start agrees; a subset under a PREFIX agrees. KILLS: an admission that
+/// leaves the subset plan to the runner; applying the rule to a window or to
+/// a prefixed restore.
 #[test]
 fn a_subset_original_name_restore_is_refused_before_any_job() {
     use weirkeeper::controllers::restore::coverage_agrees;
@@ -393,7 +392,7 @@ fn a_subset_original_name_restore_is_refused_before_any_job() {
     );
     assert_ne!(windowed, ORIGINAL_PLAN);
     assert!(agrees(original_name_agrees, &restore(&windowed, Some(true), "")).is_ok());
-    // CONTROL: the subset under a prefix is PROD-11.1b's, untouched.
+    // CONTROL: the subset under a prefix is untouched.
     let prefixed = subset_original_plan().replace(
         "    prefix: \"\"\n    original_name:\n      owners: []\n",
         "    prefix: \"restore-\"\n",

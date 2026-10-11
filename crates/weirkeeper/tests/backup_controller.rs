@@ -1,18 +1,13 @@
 //! The `Backup` reconciler, the Job shape that keeps an exit code readable,
 //! and the crashed-Job case.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST, A `mock_client` TEST OR A
-//! FIXTURE-PARSING TEST. Nothing dials a socket, nothing waits on a Job,
-//! nothing builds an image, nothing shells out, and nothing approaches Global
-//! Constraint 22's 15 s per-test bound — the transport is a `tower` closure
-//! and the clock is an argument.
+//! Every test here is a pure-function, `mock_client` or fixture-parsing test:
+//! the transport is a `tower` closure and the clock is an argument.
 //!
 //! READ `ttl_is_patched_only_after_status` FIRST. It is the one property that
 //! is an ORDERING rather than a value: pod garbage collection must never race
 //! the exit-code read, because the code lives on the pod and the TTL
-//! controller deletes the Job together with its pods. Everything else in this
-//! file makes that ordering meaningful (there IS an exit code to lose; it is
-//! read from the right container; it reaches the right field).
+//! controller deletes the Job together with its pods.
 
 mod support;
 use support::{
@@ -45,35 +40,27 @@ use weirkeeper::job::{self, RUNNER_IMAGE};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
-/// The task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-t17";
 
-/// The `Backup`'s name. Deliberately the shape Task 18's
-/// `scheduled_backup_name` produces — `logweir-backup-<schedule>-<slot>` —
-/// because the Job is named after this object VERBATIM and the 63-character
-/// `batch.kubernetes.io/job-name` cap is the whole reason that ruling exists.
+/// The `Backup`'s name, in the scheduled shape
+/// `logweir-backup-<schedule>-<slot>`: the Job is named after this object
+/// VERBATIM under the 63-character `batch.kubernetes.io/job-name` cap.
 const NAME: &str = "logweir-backup-nightly-20261109-031700";
 
 /// The pod the job controller made.
 const POD: &str = "logweir-backup-nightly-20261109-031700-abcde";
 
 /// The runner Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
-/// this run's pod — D-SEAMS **S6**, defect `SEC-PODLOG`. Named rather than
-/// spelled inline because it now has to appear in two places that must agree:
-/// the Job fixture the reconciler reads and the `ownerReferences` of the pod
-/// it is allowed to read back.
+/// this run's pod. The Job fixture and the pod's `ownerReferences` must agree
+/// on it.
 const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b1";
 
-/// The `metadata.resourceVersion` every fixture object carries — the thing a
-/// watch always delivers and a hand-built fixture used not to.
-///
-/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
-/// this value, so a fixture without one is not an object this controller could
-/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+/// The `metadata.resourceVersion` every fixture object carries, as a watch
+/// always delivers: every `/status` write is a merge PATCH preconditioned on
+/// this value.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
 /// A pod's `ownerReferences` naming `job_uid` as its **controller**.
@@ -85,12 +72,9 @@ fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
     pod_owner_json_in("batch/v1", kind, job_uid, controller)
 }
 
-/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
-///
-/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
-/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
-/// reference naming another group's `Job` must be refused like any other
-/// stranger.
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter. The group
+/// is part of the check: `volcano.sh/v1alpha1` also ships a `Job`, and a
+/// reference naming another group's `Job` must be refused.
 fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
         r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
@@ -136,21 +120,19 @@ const CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
 /// The `BackupSchedule`'s UID, for [`scheduled_backup`].
 const SCHEDULE_UID: &str = "9c4d2e6f-0000-4000-8000-0000000000d1";
 
-/// The two keys interface **I7** prints.
+/// The two keys the runner prints.
 const RECEIPT_KEY: &str = "logweir/backups/b1/r1.receipt.json";
 const RUNNER_RECEIPT_SHA256: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SIDECAR_KEY: &str = "logweir/backups/b1/r1.receipt.sig";
 
 /// A MANUAL `Backup` as the API server would hand it over: typed spec, the
-/// server-generated UID, and NO annotation. PLAT-06.1: this is the whole
-/// contract a person or a client has to meet — the run identity is the UID and
+/// server-generated UID, and NO annotation. The run identity is the UID and
 /// the argv is derived.
 ///
-/// The name keeps the shape Task 18's `scheduled_backup_name` produces —
-/// `logweir-backup-<schedule>-<slot>` — because the Job is named after this
-/// object VERBATIM and the 63-character `batch.kubernetes.io/job-name` cap is
-/// the whole reason that ruling exists; a manual Backup may carry any name.
+/// The name has the scheduled shape `logweir-backup-<schedule>-<slot>` because
+/// the Job is named after this object VERBATIM under the 63-character
+/// `batch.kubernetes.io/job-name` cap; a manual Backup may carry any name.
 fn backup_json() -> String {
     format!(
         r#"{{
@@ -178,16 +160,10 @@ fn backup() -> Backup {
     serde_json::from_str(&backup_json()).expect("the fixture is a Backup")
 }
 
-/// A `Backup` as **Task 18's reconciler** creates it: owned by its
+/// A `Backup` as the schedule reconciler creates it: owned by its
 /// `BackupSchedule` with `controller: true`, naming that schedule and the slot,
-/// and `triggeredBy: schedule` — the complete scheduled identity, and still no
-/// annotation.
-///
-/// A SECOND FIXTURE RATHER THAN AN EDIT TO THE FIRST. [`backup_json`] has no
-/// owner reference, which is the shape of a `Backup` created by hand or by
-/// Task 26's page, and both identities are worth asserting. Built by MUTATING
-/// the parsed fixture rather than by re-templating its text, so the two cannot
-/// drift.
+/// and `triggeredBy: schedule`, still with no annotation. Built by mutating the
+/// parsed [`backup_json`] so the two fixtures cannot drift.
 fn scheduled_backup() -> Backup {
     let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
     value["metadata"]["ownerReferences"] = serde_json::json!([{
@@ -274,15 +250,11 @@ fn backup_schedule_json(uid: &str) -> String {
 
 /// The routes a CREATE pass needs: the absent Job, the source `KafkaCluster`,
 /// the `BackupSchedule` a scheduled run's identity names, the plan ConfigMap
-/// `POST`, the Job `POST`, and the status patch.
+/// `POST`, the Job `POST`, and the status patch. `configmap_status` is the
+/// ConfigMap `POST`'s answer (201 or 409).
 ///
-/// `configmap_status` is the ConfigMap `POST`'s answer, so one helper serves
-/// the 201 case and the two 409 cases.
-///
-/// THE SCHEDULE ROUTE IS UNUSED BY EVERY MANUAL ROW, and that is the point: a
-/// manual `Backup` must not read a `BackupSchedule` at all (D1 §8.3), and
-/// `manual_runs_never_read_a_backup_schedule` asserts the absence against this
-/// very table — an answer that exists and is not asked for.
+/// Manual rows leave the schedule route unused: a manual `Backup` never reads
+/// a `BackupSchedule`.
 fn create_routes(configmap_status: u16, existing_configmap: String) -> Vec<Route> {
     vec![
         Route {
@@ -381,21 +353,16 @@ fn running_job_body() -> String {
 }
 
 /// A pod list holding one pod whose `runner` container terminated with
-/// `exit_code`, preceded by an unrelated sidecar at index 0.
-///
-/// THE SIDECAR IS AT INDEX 0 ON PURPOSE, IN EVERY FIXTURE. A test suite whose
-/// happy path has `runner` at index 0 cannot tell a by-name reader from a
-/// by-index one, so the by-index mutant would survive every test but the one
-/// written for it.
+/// `exit_code`, preceded by an unrelated sidecar at index 0. Every fixture puts
+/// the sidecar first so a by-index reader cannot pass for a by-name one.
 fn pod_list_terminated(exit_code: i32) -> String {
     pod_list_terminated_owned_by(exit_code, &owned_by_job())
 }
 
-/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
-///
-/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY. `"null"`
-/// gives an ownerless pod, `pod_owner_json(…)` gives a wrong one, and both
-/// must end at the same place as an empty list: no log read, no exit code.
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter,
+/// because the owner is the security boundary: `"null"` (ownerless) and a
+/// wrong owner must both end like an empty list, with no log read and no exit
+/// code.
 fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
@@ -412,12 +379,9 @@ fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     )
 }
 
-/// A pod list holding one owned pod whose `runner` container is RUNNING —
-/// what D3 §2.3's derivation sees on the ordinary in-flight pass.
-///
-/// The sidecar stays at index 0 for [`pod_list_terminated`]'s reason: a
-/// fixture whose `runner` is first cannot tell a by-name reader from a
-/// by-index one.
+/// A pod list holding one owned pod whose `runner` container is RUNNING (the
+/// ordinary in-flight pass), with the sidecar at index 0 as in
+/// [`pod_list_terminated`].
 fn pod_list_running() -> String {
     let owners = owned_by_job();
     format!(
@@ -544,12 +508,8 @@ fn finished_routes(pods: &str, log: String, status_code: u16, job_condition: &st
             status: 200,
             body: job_body(job_condition),
         },
-        // DELETE IS ROUTED SO THAT "IT DID NOT DELETE" IS AN ASSERTION AND NOT
-        // AN INABILITY. The double panics on an unrouted request, so with no
-        // DELETE route a reconciler that deleted something would fail inside
-        // `testing.rs` naming a missing route — a real failure, but not the
-        // one the zero-DELETE assertions are about, and not one that says
-        // "Global Constraint 6 gives no component a delete capability".
+        // DELETE is routed so that "it did not delete" is an assertion over the
+        // recorder, not a panic from the double on an unrouted request.
         Route {
             method: "DELETE",
             path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
@@ -566,10 +526,8 @@ fn finished_routes(pods: &str, log: String, status_code: u16, job_condition: &st
 }
 
 /// A condition array is a MAP KEYED BY `type`, so two entries sharing one
-/// `type` is a malformed status whatever their statuses say.
-///
-/// Asserted as a HELPER because it is a property of every status this
-/// controller writes, not of one arm — review finding HIGH-2.
+/// `type` is a malformed status whatever their statuses say. A helper because
+/// it holds for every status this controller writes.
 fn assert_no_duplicate_condition_types(status: &Value, what: &str) {
     let conditions = conditions_of(status);
     let mut types: Vec<&str> = conditions.iter().map(|(t, _, _)| t.as_str()).collect();
@@ -604,19 +562,10 @@ fn yaml(relative: &str) -> serde_yaml::Value {
         .unwrap_or_else(|e| panic!("{relative} is not YAML: {e}"))
 }
 
-/// The `Backup` CRD as the EMITTER renders it, in process.
-///
-/// MUTATION ROUND FINDING, AND THE REASON BOTH CRD ASSERTIONS BELOW READ TWO
-/// SOURCES. A test that reads only `charts/logweir/crds/backups.yaml` cannot see a
-/// change to `crds/backup.rs` until somebody runs `just crds` — so the brief's
-/// "add a `status.outcome`" and "rename a printer column" mutants both PASSED
-/// the tests they are filed against, and died only in Task 15b's drift gate.
-/// The drift gate catching them is correct and is not a substitute: it says
-/// "the checked-in file no longer matches the emitter", which is a different
-/// finding from "`Backup` has grown a second source of truth for the green
-/// badge". Reading both the emitter and the file makes each assertion true of
-/// the SOURCE and of the artefact the API server consumes, and keeps the drift
-/// gate's own job (they disagree) distinct.
+/// The `Backup` CRD as the EMITTER renders it, in process. The CRD assertions
+/// read both this and `charts/logweir/crds/backups.yaml`, so each holds of the
+/// source and of the artefact the API server consumes; the drift gate keeps
+/// its own job (the two disagree).
 fn emitted_backup_crd() -> serde_yaml::Value {
     let rendered = weirkeeper::crds::render_all();
     let backup = rendered
@@ -626,9 +575,7 @@ fn emitted_backup_crd() -> serde_yaml::Value {
     serde_yaml::from_str(&backup.yaml).expect("the emitted CRD is YAML")
 }
 
-// ---------------------------------------------------------------------------
 // The Job shape
-// ---------------------------------------------------------------------------
 
 /// One `POST …/jobs`, with the pinned failure policy IN ORDER.
 ///
@@ -659,10 +606,8 @@ async fn backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy
         1,
         "EXACTLY ONE Job is created per reconcile; got {job_posts:?}"
     );
-    // AND EXACTLY ONE PLAN CONFIGMAP, in the same pass. Filtered by path
-    // rather than counting every `POST`, because the create pass now writes
-    // two objects and a bare `POST` count would say nothing about which
-    // (errata E5a).
+    // AND EXACTLY ONE PLAN CONFIGMAP, in the same pass, filtered by path: the
+    // create pass writes two objects.
     let cm_posts: Vec<_> = seen
         .iter()
         .filter(|r| r.method == "POST" && path(&r.uri).ends_with("/configmaps"))
@@ -680,15 +625,9 @@ async fn backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy
         .expect("the Job POST body was recorded");
     let job: Value = serde_json::from_str(&post.body).expect("the POSTed Job is JSON");
 
-    // AN AFFORDANCE, NOT AN ASSERTION, and it is here rather than in a second
-    // test because the body this test already holds IS the Job the reconciler
-    // creates. `LOGWEIR_DUMP_RUNNER_JOB=<path> cargo test -p weirkeeper --test
-    // backup_controller backup_reconcile_creates` writes it out as YAML, which
-    // is how the live cluster acceptance for this task applied the REAL
-    // generated Job instead of a hand-transcribed lookalike — and how Task 21
-    // and Task 24 can see the shape they are granting RBAC for and demoing.
-    // Unset in every ordinary run, so nothing is printed and nothing is
-    // written.
+    // Not an assertion: `LOGWEIR_DUMP_RUNNER_JOB=<path>` writes the Job this
+    // reconciler creates as YAML, for applying the real generated Job on a live
+    // cluster. Unset in every ordinary run.
     if let Ok(path) = std::env::var("LOGWEIR_DUMP_RUNNER_JOB") {
         let yaml = serde_yaml::to_string(&job).expect("the Job serialises as YAML");
         std::fs::write(&path, yaml).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -849,17 +788,13 @@ fn the_failure_policy_has_no_ignore_on_one() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 33 — the runner image the operator was handed
-// ---------------------------------------------------------------------------
+// The runner image the operator was handed
 
 /// `job::configured_runner_image`: the four answers, one of which is a defect.
 ///
-/// **`Ok("")` IS UNSET** — plan erratum E19(e), the same ruling
-/// `retention::configured_archive_url` carries. A Kubernetes `env:` entry with
-/// an empty `value:` makes `env::var` return `Ok("")`, not `Err(NotPresent)`,
-/// and a controller that read that as a configured value would create every
-/// Job with `image: ""`. Whitespace trims to the same answer.
+/// **`Ok("")` IS UNSET.** A Kubernetes `env:` entry with an empty `value:`
+/// makes `env::var` return `Ok("")`, and reading that as configured would
+/// create every Job with `image: ""`. Whitespace trims to the same answer.
 ///
 /// KILLS: a predicate that tests `is_ok()` instead of the trimmed value.
 #[test]
@@ -893,12 +828,8 @@ fn an_empty_runner_image_override_is_unset() {
     );
 }
 
-/// With no override the Job carries the shipped pin — the DEFAULT is unchanged.
-///
-/// This is the same assertion
-/// `backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy`
-/// makes over the wire, restated over `job::build` so the default and the
-/// override are one pair of rows.
+/// With no override the Job carries the shipped pin: the default half of the
+/// override pair, over `job::build`.
 ///
 /// KILLS: a `build` that reaches for the override when there is none.
 #[test]
@@ -928,14 +859,12 @@ fn the_runner_image_defaults_to_the_shipped_pin() {
     );
 }
 
-/// With an override the Job carries it — and the pull policy does NOT move.
+/// With an override the Job carries it, and the pull policy does NOT move.
 ///
-/// KILLS (M1): a `build` that ignores `RunnerJobSpec::image`.
-/// KILLS (M5): a pull policy that follows the image, or that becomes
-/// overridable — the override exists for images LOADED onto the node, which is
-/// the one case `Never` is exactly right for, and `Never` is what makes a
-/// wrong reference fail as `ErrImageNeverPull` naming the whole reference
-/// rather than as a pull against a namespace that resolves to nothing.
+/// KILLS: a `build` that ignores `RunnerJobSpec::image`; a pull policy that
+/// follows the image or becomes overridable. The override is for images
+/// LOADED onto the node, where `Never` is right and makes a wrong reference
+/// fail as `ErrImageNeverPull` naming the whole reference.
 #[test]
 fn the_runner_image_override_does_not_touch_the_pull_policy() {
     let mut spec = runner_job_spec(
@@ -987,24 +916,16 @@ fn the_runner_image_override_does_not_touch_the_pull_policy() {
 }
 
 /// `job::configured_runner_pull_policy`: the eight answers, two of which are
-/// refusals — Task 37.
+/// refusals.
 ///
-/// THE EMPTY STRING IS UNSET, for plan erratum **E19(e)**'s reason: a
-/// Kubernetes `env:` entry with an empty `value:` makes `env::var` return
-/// `Ok("")`, and a controller that read that as a configured value would put
-/// `imagePullPolicy: ""` in every Job it created — which the API server
-/// rejects at CREATE.
+/// The empty string is unset: an `env:` entry with an empty `value:` makes
+/// `env::var` return `Ok("")`, and the API server rejects
+/// `imagePullPolicy: ""` at Job CREATE. Unlike `configured_runner_image`, a
+/// value that is not a policy is an `Err`: the legal set is closed and known
+/// here, and accepting `always` would create rejected Jobs forever.
 ///
-/// AND A VALUE THAT IS NOT A POLICY IS AN `Err`, WHICH IS THE ONE PLACE THIS
-/// PREDICATE DIFFERS FROM `configured_runner_image`. An image reference cannot
-/// be validated here (only a kubelet can say whether one resolves on a node);
-/// a pull policy's legal set is closed, is known here, and is validated by the
-/// API server at every Job CREATE. Accepting `always` would mean an install
-/// that silently created rejected Jobs forever.
-///
-/// KILLS: a predicate that lower-cases, title-cases or otherwise "helps" the
-/// value through; a predicate that falls back to the constant instead of
-/// refusing; an empty value read as configured.
+/// KILLS: a predicate that re-cases the value; one that falls back to the
+/// constant instead of refusing; an empty value read as configured.
 #[test]
 fn an_empty_runner_pull_policy_override_is_unset() {
     assert_eq!(
@@ -1063,19 +984,12 @@ fn an_empty_runner_pull_policy_override_is_unset() {
     );
 }
 
-/// With a pull-policy override the Job carries it — and **nothing else in the
-/// Job moves**, the image least of all.
+/// With a pull-policy override the Job carries it, and **nothing else in the
+/// Job moves**. The assertion is a whole-object diff after setting that one
+/// field equal on both Jobs, so any other difference names itself.
 ///
-/// THE ASSERTION IS A WHOLE-OBJECT DIFF, not a field read. The two Jobs are
-/// serialised and compared after the one field this override is allowed to
-/// change is set to the same value on both; anything else `build` did
-/// differently shows up as a JSON inequality naming itself. That is the
-/// property the ruling asks for — "otherwise byte-identical to the default
-/// Job" — rather than a spot check that a future edit could walk around.
-///
-/// KILLS: a `build` that ignores `RunnerJobSpec::image_pull_policy`; a `build`
-/// that lets the policy override move the image (or the argv, the volumes, the
-/// failure policy, the security context, the deadline …).
+/// KILLS: a `build` that ignores `RunnerJobSpec::image_pull_policy`; one that
+/// lets the policy override move anything else.
 #[test]
 fn a_runner_pull_policy_override_moves_only_the_policy() {
     let default_spec = runner_job_spec(
@@ -1161,16 +1075,14 @@ fn the_job_name_is_the_cr_name() {
     );
 }
 
-/// The argv is DERIVED — PLAT-06.1 — from `spec.triggeredBy` and the
-/// server-generated run identity, and no annotation contributes to it: not a
-/// missing one, not a malformed one, and not a hostile one naming another
-/// subcommand, spec path, signing key or backup id.
+/// The argv is DERIVED from `spec.triggeredBy` and the server-generated run
+/// identity; no annotation contributes to it, whether missing, malformed or
+/// hostile.
 ///
-/// KILLS: reading `logweir.dev/runner-argv` again (any arm); deriving the
-/// manual identity from anything but the object's UID; deriving the scheduled
-/// identity from anything but the schedule UID and the slot; dropping the
-/// backup id override flag, which is what makes a re-created Job reuse its
-/// run's backup id.
+/// KILLS: reading `logweir.dev/runner-argv` again; a manual identity from
+/// anything but the object's UID; a scheduled identity from anything but the
+/// schedule UID and the slot; dropping the backup id override flag, which is
+/// what makes a re-created Job reuse its run's backup id.
 #[test]
 fn the_argv_is_derived_and_no_annotation_contributes_to_it() {
     let cluster = serde_json::from_str(&kafka_cluster_json()).unwrap();
@@ -1259,12 +1171,10 @@ fn the_argv_is_derived_and_no_annotation_contributes_to_it() {
     }
 }
 
-/// PROD-00.2 review L3: no Job states the engine identity. The runner image
-/// declares its engine (`/etc/logweir/engine-identity`) and the runner refuses
-/// to sign a version its binary does not print, so a runner image that
-/// declares none — one published before PROD-00.2 — refuses its run rather
-/// than signing whatever a controller compiled for another engine said. A
-/// caller's `env_literal` cannot put the two variables back either.
+/// No Job states the engine identity. The runner image declares its engine
+/// (`/etc/logweir/engine-identity`) and the runner refuses to sign a version
+/// its binary does not print, so an image that declares none refuses its run.
+/// A caller's `env_literal` cannot put the two variables back either.
 #[test]
 fn no_job_states_the_engine_identity() {
     let mut spec = runner_job_spec(
@@ -1364,9 +1274,7 @@ fn no_job_states_the_engine_identity() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The exit code, and where it comes from
-// ---------------------------------------------------------------------------
 
 /// The code and the keys come from `pods/log`, and the pod is found by the
 /// job-name label — the prefixed one first, the legacy one as a fallback.
@@ -1374,14 +1282,9 @@ fn no_job_states_the_engine_identity() {
 /// KILLS: reading the log through `pods/exec`.
 #[tokio::test]
 async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
-    // THE TWO FORBIDDEN SUBRESOURCES ARE ROUTED, DELIBERATELY, AND THAT MAKES
-    // THIS TEST STRONGER RATHER THAN LOOSER. The double panics on a request it
-    // has no route for, so with `exec` and `attach` unrouted a reconciler that
-    // read the log through either would fail inside `testing.rs` — a real
-    // failure, but not the one this test is about, and not one that says
-    // "zero requests named pods/exec". Routing them means the reconciler CAN
-    // reach them and the assertion below is what refuses: the property is
-    // "it did not ask", asserted over the recorder, and not "it could not".
+    // `exec` and `attach` are routed on purpose: the reconciler CAN reach them,
+    // so the zero-requests assertion below is what refuses, not the double's
+    // panic on an unrouted request.
     let mut routes = finished_routes(
         &pod_list_terminated(0),
         log_body(&i7_tail()),
@@ -1414,14 +1317,9 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
         .map(|r| (r.method.clone(), r.uri.clone()))
         .collect();
 
-    // MATCHED AS A PATH SEGMENT, NOT AS THE RBAC RESOURCE STRING. The RBAC
-    // resource is `pods/exec`, but the REQUEST PATH is
-    // `/api/v1/namespaces/<ns>/pods/<name>/exec` — the pod's NAME sits between
-    // the two words, so `contains("pods/exec")` matches no real request and
-    // the assertion was true of everything. Found by applying this test's own
-    // `pods/exec` mutant: the substring form passed it and the log count
-    // caught the mutant instead, which is an assertion silently carrying the
-    // wrong property.
+    // Matched as a path segment: the request path is
+    // `/api/v1/namespaces/<ns>/pods/<name>/exec`, so `contains("pods/exec")`
+    // would match no real request.
     for forbidden in ["/exec", "/attach"] {
         let hits: Vec<_> = table
             .iter()
@@ -1511,16 +1409,11 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
     );
 }
 
-/// A Job with NO `metadata.uid` adopts nothing — and does not even list.
+/// A Job with NO `metadata.uid` adopts nothing and does not even list: nothing
+/// can be proved to belong to an object with no identity.
 ///
-/// A Job the API server returned always carries one; `metadata.uid` is
-/// `Option` in the type, not in reality. The point is what the absent case
-/// falls back to: nothing can be proved to belong to an object with no
-/// identity, so the answer is "no pod", not "the label will do".
-///
-/// THE ROUTE TABLE IS EMPTY, WHICH IS THE ASSERTION. The double refuses every
-/// request it has no route for, so an `Ok(None)` here is only reachable by a
-/// code path that made no request at all.
+/// THE ROUTE TABLE IS EMPTY, WHICH IS THE ASSERTION: the double refuses every
+/// unrouted request, so `Ok(None)` means no request was made.
 ///
 /// KILLS: falling back to the label when the UID is absent; listing first and
 /// deciding afterwards.
@@ -1542,13 +1435,13 @@ async fn a_job_with_no_uid_adopts_nothing_and_lists_nothing() {
     );
 }
 
-/// Defect WARNING-DIAGNOSTICS-NOEXITCODE through the `Backup` reconciler — the
-/// twin of the `Restore` row: the Job failed at 03:20 with its pod gone, and
-/// a WARNING still being observed when it ended is the terminal reason.
+/// Through the `Backup` reconciler, as the `Restore` row does: the Job failed
+/// at 03:20 with its pod gone, and a WARNING still observed when it ended is
+/// the terminal reason.
 ///
 /// MUTANT: restore the `Severity::Error`-only filter in
-/// `diagnostics::recorded_terminal_state`. The first two arms fail. MUTANT:
-/// pass the pass's `now` instead of `job_ended_at`. The same two arms fail.
+/// `diagnostics::recorded_terminal_state`, or pass the pass's `now` instead of
+/// `job_ended_at`; the first two arms fail.
 #[tokio::test]
 async fn a_warning_that_ended_the_backup_is_its_terminal_reason() {
     let diagnostic = |code: &str, severity: &str, last_seen: &str| {
@@ -1631,25 +1524,17 @@ async fn a_warning_that_ended_the_backup_is_its_terminal_reason() {
     }
 }
 
-/// A pod wearing this Job's name label but not owned by it is NEVER read —
-/// D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// A pod wearing this Job's name label but not owned by it is NEVER read.
 ///
-/// `batch.kubernetes.io/job-name` is a plain label. Anything that can create a
-/// pod in the namespace can set it, and the reconciler then lifts that pod's
-/// `state.terminated.exitCode` and the last two lines of its stdout onto the
-/// `Backup` — `status.exitCode`, the `Complete` condition, and interface
-/// **I7**'s two evidence keys, which is what the UI renders and what the
-/// retention and verification paths address the archive by. So the property is
-/// an ABSENCE: no `GET …/pods/<p>/log` at all, and a terminal `NoExitCode`
-/// rather than a borrowed success.
-///
-/// Every impostor here carries `exitCode: 0` on a `runner` container, so a
-/// reconciler that read it would report `phase: Succeeded` with a GREEN badge —
-/// the loudest possible difference from the expected `Failed`/`NoExitCode`.
+/// `batch.kubernetes.io/job-name` is a plain label anyone who can create a pod
+/// can set, and a reconciler that trusted it would lift that pod's exit code
+/// and evidence keys onto the `Backup`. So the property is an ABSENCE: no
+/// `GET …/pods/<p>/log`, and a terminal `NoExitCode`. Every impostor reports
+/// `exitCode: 0`, so a reader would show a green `Succeeded`.
 ///
 /// KILLS: the label-only `list.items.into_iter().next()`; the ownerless-pod
-/// fallback (`plat06` review L2); matching an owner reference without
-/// `controller: true`; matching an owner reference of any kind.
+/// fallback; an owner reference without `controller: true`; an owner reference
+/// of any kind.
 #[tokio::test]
 async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
     for (label, owners) in [
@@ -1731,17 +1616,14 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
 }
 
 /// The positive control, and the contest: an OWNED pod IS read, and two pods
-/// claiming one Job are BOTH refused under their own terminal state — review
-/// finding **R1**.
+/// claiming one Job are BOTH refused under their own terminal state.
 ///
-/// Without the first arm the guard is satisfiable by a reconciler that never
-/// reads any pod at all. Without the second, the residual the owner check
-/// leaves open — an `ownerReference` is author-written, so a tenant who can
-/// read the Job UID can mint a second claimant, and it is by construction the
-/// NEWER one — is decided in the planter's favour.
+/// Without the first arm a reconciler that reads no pod passes. Without the
+/// second, a forged claimant would win: an `ownerReference` is author-written,
+/// and the forged one is by construction the newer.
 ///
-/// KILLS: refusing every pod; newest-wins restored over a contested Job;
-/// oldest-wins; reporting a contest as an ordinary `NoExitCode`.
+/// KILLS: refusing every pod; newest-wins over a contested Job; oldest-wins;
+/// reporting a contest as an ordinary `NoExitCode`.
 #[tokio::test]
 async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     // ARM 1 — the ordinary case, end to end.
@@ -1783,12 +1665,9 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
         "from the owned pod, by name; got {logs:?}"
     );
 
-    // ARM 2 — a forged second claimant. It carries the Job's real UID, a real
-    // controller reference and the real `batch/v1` group, because that is all
-    // an `ownerReferences` entry is: metadata its author writes, which the API
-    // server does not validate. It reports SUCCESS and it is the NEWER pod, so
-    // a newest-wins rule would put its exit code and its evidence keys on this
-    // `Backup`.
+    // ARM 2: a forged second claimant with the Job's real UID, controller
+    // reference and `batch/v1` group (the API server does not validate them). It
+    // reports SUCCESS and is the NEWER pod, so newest-wins would adopt it.
     let owners = owned_by_job();
     let claimant = |suffix: &str, created: &str, exit: i32| {
         format!(
@@ -1966,10 +1845,8 @@ async fn ttl_is_patched_only_after_status() {
     .expect("the reconcile succeeds");
     assert!(outcome.ttl_patched, "the Job was patched with a TTL");
 
-    // THE GUARDS ARE SCOPED, so nothing is held across the second arm's
-    // `await`: a `std::sync::MutexGuard` alive across an await point is a
-    // deadlock waiting for a multi-threaded runtime, and clippy is right to
-    // refuse it even in a test.
+    // The guards are scoped so no `std::sync::MutexGuard` is held across the
+    // second arm's `await`.
     {
         let seen = seen.lock().expect("the recorder is readable");
         let status_index = seen
@@ -2009,17 +1886,8 @@ async fn ttl_is_patched_only_after_status() {
         );
     }
 
-    // SECOND ARM: THE JOB CARRIES NO TTL AT CREATION TIME.
-    //
-    // MUTATION ROUND FINDING. Without this arm the brief's "patch
-    // `ttlSecondsAfterFinished` at Job creation" mutant SURVIVED this test:
-    // the ordering assertion above is about two PATCHes and says nothing about
-    // the POST, so a Job created with a TTL already on it still produced a
-    // status patch before a Job patch and passed. The absence assertion lived
-    // only in `backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy`,
-    // which is a different test than the one the mutant is filed against — and
-    // "some other test catches it" is exactly how a named pair rots. The whole
-    // property is one property and now lives in one test.
+    // SECOND ARM: THE JOB CARRIES NO TTL AT CREATION TIME. The ordering assertion
+    // above is about two PATCHes and says nothing about the POST.
     let create_routes = create_routes(201, existing_plan_config_map(UID));
     let (client, _seen, bodies) = mock_client_recording_bodies(create_routes);
     reconcile_backup(
@@ -2202,13 +2070,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
     }
 }
 
-/// The CONDITION reason for each code — **CamelCase**, and a different
-/// function from the wire reason.
-///
-/// ERRATA **E5b**, review finding LOW-2. The brief mandated
-/// `reason_for_exit(code)` as the condition `reason` and its values were
-/// lowercase-hyphenated, so every failed `Backup` carried a `reason` the real
-/// `metav1.Condition` validation pattern forbids.
+/// The CONDITION reason for each code is **CamelCase**, and a different
+/// function from the wire reason: `metav1.Condition` validation forbids the
+/// lowercase-hyphenated wire strings.
 ///
 /// KILLS: `reason_for_exit` returning the wire string again.
 #[test]
@@ -2236,20 +2100,15 @@ fn every_exit_code_maps_to_a_camel_case_condition_reason() {
 }
 
 /// **Every** condition reason this crate can write matches the real
-/// `metav1.Condition` `reason` pattern.
-///
-/// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$` — upstream's own validation
+/// `metav1.Condition` `reason` pattern,
+/// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
 /// (`staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go`), which
-/// **forbids `-`**. Today's CRD hand-rolls the condition schema with no
-/// pattern, so a hyphenated reason is accepted by the API server and is still
-/// wrong: the day any task gives that schema the real pattern, or any consumer
-/// validates against it, every failed `Backup` becomes unwritable.
+/// **forbids `-`**. The CRD's condition schema carries no pattern, so a
+/// hyphenated reason is accepted today and still wrong for any consumer that
+/// validates against it.
 ///
-/// MATCHED BY HAND AND NOT BY `regex`. Global Constraint 38 closes the
-/// workspace graph and `regex` is not in `Cargo.lock`, so a dependency for one
-/// character-class walk would be a stop-and-report. The matcher below is the
-/// pattern read literally, and `a_hyphenated_reason_is_rejected_by_the_matcher`
-/// below it is what stops the matcher from being a function that returns true.
+/// Matched by hand rather than by `regex`, which is not a dependency; the body
+/// tests the matcher's refusals first.
 ///
 /// KILLS: a hyphenated reason constant anywhere in `conditions.rs`.
 #[test]
@@ -2275,9 +2134,8 @@ fn the_condition_reasons_are_valid_metav1_reasons() {
             .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    // THE MATCHER IS TESTED FIRST. A validator that cannot reject has not
-    // validated anything, and the value it has to reject is exactly the one
-    // this errata is about.
+    // THE MATCHER IS TESTED FIRST: a validator that cannot reject validates
+    // nothing.
     assert!(!is_valid_reason("guard-refused"), "a hyphen is forbidden");
     assert!(!is_valid_reason("drill-not-pass"), "a hyphen is forbidden");
     assert!(!is_valid_reason("signing-or-lock"), "a hyphen is forbidden");
@@ -2325,13 +2183,10 @@ fn the_condition_reasons_are_valid_metav1_reasons() {
     }
 }
 
-/// The two vocabularies never overlap, and each stays in its own field.
-///
-/// This is the property errata **E5b** actually asserts: `exitReason` keeps
-/// GC11's wire strings and the condition `reason` is CamelCase. If a future
-/// edit re-spelled the wire strings CamelCase "for consistency", `exitReason`
-/// would disagree with the shipped CRD's own field description and with
-/// `logweir drill`'s outcome strings — so the disjointness is the guard.
+/// The two vocabularies never overlap, and each stays in its own field:
+/// `exitReason` keeps the wire strings, which the CRD's field description and
+/// `logweir drill`'s outcome strings name, and the condition `reason` is
+/// CamelCase.
 #[test]
 fn the_two_reason_vocabularies_never_overlap() {
     let wire: Vec<&str> = (0..=4).map(wire_reason_for_exit).collect();
@@ -2365,30 +2220,12 @@ fn the_two_reason_vocabularies_never_overlap() {
     }
 }
 
-/// **Interface I13, enforced over THIS module's source text.** Every `Store`
-/// call in `controllers/backup.rs` is inside a `spawn_blocking(…)` closure.
-///
-/// # Why this exists beside Task 19's `no_store_call_is_made_outside_spawn_blocking`
-///
-/// Task 19's test names this file in its `I13_FILES` and is green — and it is
-/// **blind to most of this file's oracle wiring**, which I found by planting a
-/// mutant and watching it survive. Its `sanitize` treats a `'` as the start of
-/// a character literal and blanks everything up to the next `'`; Rust
-/// LIFETIMES are spelled with the same character, and `ArchiveOracle`'s own
-/// signature is `-> BoxFuture<'static, …>`, so the span from that tick to the
-/// next one in the file — which includes the whole `reconcile` closure that
-/// clones the handle — is blanked before its token scan runs. Measured: the
-/// planted `let store = store.clone();` inside `reconcile`'s async block was
-/// blanked to spaces and the guard passed, 1 passed / 0 failed.
-///
-/// So this is the same property, checked with a sanitizer that knows a
-/// lifetime from a character literal, over the one file this task owns. Task
-/// 19's guard keeps its wider file list; a fix to its sanitizer is that task's
-/// and is reported rather than made here.
+/// Every `Store` call in `controllers/backup.rs` is inside a
+/// `spawn_blocking(…)` closure, checked over the module's source text.
 ///
 /// KILLS: any `Store` touch in an async region of this module outside
-/// `spawn_blocking` — the shape that COMPILES CLEANLY and panics with *Cannot
-/// start a runtime from within a runtime* at the first reconcile.
+/// `spawn_blocking`, which compiles and panics with *Cannot start a runtime
+/// from within a runtime* at the first reconcile.
 #[test]
 fn no_store_call_in_this_module_is_made_outside_spawn_blocking() {
     /// Comments, strings and raw strings blanked; LIFETIMES LEFT ALONE.
@@ -2556,10 +2393,9 @@ fn no_store_call_in_this_module_is_made_outside_spawn_blocking() {
         "and at least one `spawn_blocking(…)` group"
     );
 
-    // `observe_archive(` IS IN THE TOKEN LIST, and Task 19's does not have it.
-    // It is the function that holds the two `Store` reads, so calling it
-    // outside `spawn_blocking` is the failure this property is about even
-    // though the call site names no `Store` at all.
+    // `observe_archive(` is in the token list: it holds the two `Store` reads, so
+    // calling it outside `spawn_blocking` is the failure this property is about
+    // although the call site names no `Store`.
     let mut offences = Vec::new();
     let mut checked = 0;
     for token in ["store.", "Store::", "observe_archive("] {
@@ -2591,9 +2427,7 @@ fn no_store_call_in_this_module_is_made_outside_spawn_blocking() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The plan ConfigMap — errata E5a, review finding HIGH-1
-// ---------------------------------------------------------------------------
+// The plan ConfigMap
 
 /// The ConfigMap body the reconciler `POST`s, as JSON.
 fn posted_config_map(bodies: &[SeenBody]) -> Value {
@@ -2732,9 +2566,9 @@ async fn plaintext_backups_do_not_project_an_incidental_source_secret() {
         .unwrap();
     let mut cluster: Value = serde_json::from_str(&route.body).unwrap();
     cluster["spec"]["auth"]["mode"] = serde_json::json!("plaintext");
-    // …and `tls: false` with it: PLAT-07.1 refuses `plaintext` with `tls: true`
-    // (TLS without SASL) rather than dialling it in the clear, so the leftover
-    // credential this row is about has to sit on a connection that resolves.
+    // …and `tls: false` with it: `plaintext` with `tls: true` is refused, so the
+    // leftover credential this row is about has to sit on a connection that
+    // resolves.
     cluster["spec"]["auth"]["tls"] = serde_json::json!(false);
     route.body = cluster.to_string();
     let (_, bodies) = create_pass(routes).await;
@@ -2787,18 +2621,12 @@ async fn scram_backup_without_a_source_secret_is_refused_before_creating_resourc
     }
 }
 
-/// `backup.yaml` **parses back as the type the CLI parses**, field by field.
+/// `backup.yaml` **parses back as the type the CLI parses**, field by field:
+/// the Job mounts this ConfigMap, and without it every pod stalls in
+/// `ContainerCreating` and ends as an unexplained `NoExitCode`.
 ///
-/// ERRATA **E5a**, review finding HIGH-1: nothing in the plan rendered this
-/// ConfigMap, and the Job mounts it. Measured live before the fix, the pod
-/// stalled in `ContainerCreating` on `MountVolume.SetUp failed for volume
-/// "plan": configmap "<name>-plan" not found` and every scheduled backup
-/// failed as an unexplained `NoExitCode`.
-///
-/// PARSED BACK RATHER THAN STRING-MATCHED. A golden string would pass for a
-/// document `logweir backup run` cannot load; `serde_yaml::from_str::<BackupSpec>`
-/// is the same call the CLI makes (`crates/logweir/src/backup/mod.rs:261`), so
-/// this asserts loadability and not resemblance.
+/// Parsed back with `serde_yaml::from_str::<BackupSpec>`, the call the CLI
+/// makes, so this asserts loadability and not resemblance.
 ///
 /// KILLS: rendering the bootstrap servers from `Backup.spec` (it has none);
 /// dropping the `storage` block's `backend` tag; putting the cluster id in
@@ -2821,8 +2649,7 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
 
     // EXACTLY THREE KEYS: the two documents the argv points `--spec` and
     // `--allowed-clusters` at, and the canonical snapshot both are rendered
-    // from (PLAT-06.1). A fourth would be a file nothing produces from the
-    // snapshot and a surface an auditor has to account for.
+    // from. A fourth would be a surface an auditor has to account for.
     let data = cm["data"].as_object().expect("the ConfigMap carries data");
     let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
     keys.sort_unstable();
@@ -2873,13 +2700,10 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
         "the auth block is the referent's `mode`, `username` and `tls` — and NO PASSWORD at any \
          variant: the credential reaches the runner through the engine's own `${{VAR}}` expansion"
     );
-    // ONE PARSER, AND THAT IS THE ASSERTION. `storage` is `spec.archive.url`
-    // through `retention::storage_url_for` — the SAME function the
-    // controller's own read-only archive handle is built with — so the runner
-    // and the controller cannot disagree about where the archive is. A
-    // stringly-typed renderer would emit `backend: filesystem` beside a
-    // `bucket:` key and the engine's config load would fail with a hard
-    // missing-field error the unknown-key readback cannot catch.
+    // ONE PARSER: `storage` is `spec.archive.url` through
+    // `retention::storage_url_for`, the function the controller's own read-only
+    // archive handle is built with, so the runner and the controller cannot
+    // disagree about where the archive is.
     assert_eq!(
         spec.storage,
         weirkeeper::retention::storage_url_for("s3://kafka-backups/logweir")
@@ -2908,23 +2732,18 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
     assert_eq!(spec.backup.segment_max_records, 1000);
     assert_eq!(spec.backup.max_concurrent_partitions, 3);
 
-    // `backup_id`, BOTH ARMS. The main fixture carries no owner reference —
-    // the shape of a `Backup` created by hand or by Task 26's page — so it
-    // takes the object's own UID, which is unique per object per cluster and
-    // is the argument `slot::backup_id_for` itself makes for using a UID.
+    // `backup_id`, BOTH ARMS. The main fixture has no owner reference (a manual
+    // `Backup`), so it takes the object's own UID.
     assert_eq!(
         spec.backup_id, UID,
         "a `Backup` with no controller owner takes its own UID as the archive's backup id"
     );
 
     // AND FOR A SCHEDULED `Backup` IT IS BYTE-IDENTICAL TO THE ARGV'S
-    // OVERRIDE, which is the coupling that matters: the override WINS at run
-    // time (`crates/logweir/src/backup/mod.rs:333-337`, interface I10), so a
-    // disagreement would be invisible until a `Backup` with no override wrote
-    // under a different archive prefix than the one an operator was told
-    // about. The flag is read out of the annotation HERE and not in `src/`:
-    // this crate's own guard
-    // (`tests/schedule_controller.rs::the_backup_id_override_is_passed_not_defined`)
+    // OVERRIDE: the override wins at run time, so a disagreement would put a run
+    // under a different archive prefix than the one an operator was told about.
+    // The flag is read out of the annotation here and not in `src/`, because
+    // `schedule_controller.rs::the_backup_id_override_is_passed_not_defined`
     // permits the token on code lines in `backup_schedule.rs` alone.
     let scheduled = scheduled_backup();
     let argv = runner_job_spec(
@@ -2989,28 +2808,17 @@ async fn the_rendered_plan_parses_back_as_a_backup_spec() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `status.backupId` — Task 28a, defect 1
-// ---------------------------------------------------------------------------
+// `status.backupId`
 
 /// **THE TERMINAL STATUS CARRIES THE BACKUP ID, AND NO OTHER PATCH DOES.**
 ///
-/// `BackupStatus.backup_id` was declared on the CRD from the first draft and
-/// NOTHING WROTE IT. The one producer, `plan_backup_id`, put the id into the
-/// runner's plan ConfigMap alone, so the archive prefix a run wrote under was
-/// readable from the runner's INPUT and from nowhere on the object it belongs
-/// to. Task 28 found it by walking the UI against a live cluster:
-/// `ui/pages/restore-wizard.js::initialState` sets `fields.backupSetRef =
-/// status.backupId`, `renderPlanBytes` refuses a document without one, and the
-/// restore wizard therefore threw before its first step rendered — the page
-/// was an error box on every real cluster, and the walkthrough had to
-/// `kubectl patch --subresource=status` the field in by hand to get past it.
+/// The restore wizard sets `fields.backupSetRef = status.backupId`, so a
+/// finished `Backup` without it cannot be restored from the console.
 ///
 /// KILLS: dropping the `backupId` line from `finished_status_patch` (arm 1);
 /// computing it from `metadata.name` instead of from `plan_backup_id` (arm 1's
-/// second assertion and arm 3, and `the_status_backup_id_is_the_plan_document_id`
-/// beside it); putting it on the running patch, where no archive exists yet
-/// (arm 2).
+/// second assertion and arm 3); putting it on the running patch, where no
+/// archive exists yet (arm 2).
 #[tokio::test]
 async fn the_finished_status_patch_carries_the_backup_id() {
     // ARM 1: the finished pass, through the reconciler, so this is the body
@@ -3124,21 +2932,14 @@ async fn the_finished_status_patch_carries_the_backup_id() {
 }
 
 /// **ONE VALUE, TWO CONSUMERS.** The id on the status is byte-identical to the
-/// `backup_id` in the plan document the runner is handed.
+/// `backup_id` in the plan document the runner is handed: the runner writes
+/// under the plan's id and the restore wizard resolves a set by the status's,
+/// so a difference would point an approved restore at an empty prefix.
 ///
-/// This is the coupling the field exists for. The runner writes its archive
-/// under the plan's `backup_id`; the restore wizard resolves a backup set by
-/// the status's `backupId`; if those two strings could differ, the page would
-/// point an approved restore at a prefix nothing was written to — and the
-/// disagreement would only surface at phase 0 of the drill, after an approver
-/// had signed.
+/// Both values are taken from the bytes the reconciler SENT: the `POST`ed
+/// ConfigMap of a create pass and the `PATCH`ed status of a finished pass.
 ///
-/// Both values are taken from the bytes the reconciler actually SENT: the
-/// `POST`ed ConfigMap of a create pass and the `PATCH`ed status of a finished
-/// pass, over the same fixture object.
-///
-/// KILLS: computing the status id from `metadata.name` (or from anything other
-/// than `plan_backup_id`) — the two sides part and this fails naming both.
+/// KILLS: computing the status id from anything other than `plan_backup_id`.
 #[tokio::test]
 async fn the_status_backup_id_is_the_plan_document_id() {
     // The runner's side: the plan ConfigMap, parsed with the CLI's own call.
@@ -3184,13 +2985,9 @@ async fn the_status_backup_id_is_the_plan_document_id() {
 }
 
 /// The plan ConfigMap `POST` **precedes** the Job `POST`, in the recorded
-/// route table.
-///
-/// THE ORDER IS THE WHOLE FIX. A Job created first mounts a ConfigMap that
-/// does not exist yet: the pod stalls in `ContainerCreating`, the
-/// `activeDeadlineSeconds` fires, the job controller DELETES the pod, and the
-/// reconciler writes a terminal `NoExitCode` with no exit code to read —
-/// measured live.
+/// route table. A Job created first mounts a ConfigMap that does not exist
+/// yet: the pod stalls in `ContainerCreating` until the deadline and the run
+/// ends `NoExitCode`.
 ///
 /// KILLS: swapping the two writes.
 #[tokio::test]
@@ -3437,11 +3234,8 @@ async fn an_owned_stale_backup_plan_is_refused_before_creating_a_job() {
 }
 
 /// `spec.sourceRef` naming a `KafkaCluster` that does not exist is
-/// **terminal**, not a requeue.
-///
-/// `Backup.spec` is CEL-immutable, so a referent that resolves to nothing
-/// resolves to nothing on every later pass; a requeue leaves the CR with an
-/// empty status and no explanation, which is review finding MEDIUM-1's shape.
+/// **terminal**, not a requeue: `Backup.spec` is CEL-immutable, so the referent
+/// resolves to nothing on every later pass.
 ///
 /// KILLS: requeueing on an absent referent; creating the Job anyway.
 #[tokio::test]
@@ -3501,16 +3295,10 @@ async fn a_missing_source_cluster_is_terminal_and_not_a_requeue() {
 /// A glob metacharacter in `spec.topics` is a **terminal refusal before any
 /// `POST`**.
 ///
-/// Global Constraint 18(c) rail 1 and guard **G-GLOB**: `topics` is a
-/// mandatory NAMED allowlist, and `orders*` handed to the engine's own
-/// selector means "every topic starting with orders" — the one shape a
-/// mandatory allowlist exists to make impossible. The rail is
-/// `logweir_core::guard`'s, shared and not reimplemented, so the controller and
-/// the runner refuse the same six characters.
-///
-/// KILSS nothing subtle and everything blunt: rendering a pattern into
-/// `backup.yaml` and letting the runner refuse it later would mean a Job, a
-/// pod, a broker connection and an exit 3 for a fact knowable from the spec.
+/// `topics` is a mandatory NAMED allowlist, and `orders*` handed to the
+/// engine's selector means every topic starting with `orders`. The rail is
+/// `logweir_core::guard`'s, shared, so the controller and the runner refuse the
+/// same six characters, and the refusal comes before any Job exists.
 #[tokio::test]
 async fn a_wildcard_topic_is_refused_before_any_post() {
     for bad in ["orders*", "orders?", "events[1]", "a]b", "x{1}", "y}z"] {
@@ -3579,28 +3367,15 @@ async fn a_wildcard_topic_is_refused_before_any_post() {
     );
 }
 
-/// The third selection shape — a named allowlist **and** a dynamic block — is a
+/// The third selection shape (a named allowlist **and** a dynamic block) is a
 /// **terminal refusal before any `POST`**, and so is an empty allowlist with no
 /// block.
 ///
-/// # Why the controller refuses this and not only the API server
-///
-/// `crds::backup::SELECTION_SHAPE_RULE` refuses it at admission, which handles
-/// every object created against this CRD revision. It does NOT handle an object
-/// admitted by an OLDER CRD and reconciled by this controller, which is the
-/// ordinary state of affairs during an upgrade — CRDs are applied before the
-/// controller, so the reverse (a newer controller reading objects admitted by
-/// an older schema) is the supported direction and the one that reaches here.
-///
-/// AND THE FAILURE MODE IS THE BAD KIND. Nothing in this build resolves
-/// `allUserTopics`, so without this rail an operator who asked for
-/// whole-cluster coverage would get a two-topic run, a signed receipt
-/// attesting two topics, and no signal anywhere. `topics: []` alone fails SAFE
-/// — the runner's empty-list rail exits 3 before contacting the engine — and is
-/// refused here too, earlier and by name.
-///
-/// TERMINAL, because `spec` is CEL-immutable: nothing about waiting changes a
-/// shape that cannot be edited.
+/// `crds::backup::SELECTION_SHAPE_RULE` refuses it at admission, but not for
+/// an object admitted by an OLDER CRD and reconciled by this controller, the
+/// ordinary state during an upgrade. Without this rail an operator who asked
+/// for whole-cluster coverage would get a signed two-topic run and no signal.
+/// Terminal, because `spec` is CEL-immutable.
 #[tokio::test]
 async fn a_selection_that_is_neither_shape_is_refused_before_any_post() {
     let both = {
@@ -3682,12 +3457,8 @@ async fn a_selection_that_is_neither_shape_is_refused_before_any_post() {
 }
 
 /// A `scramSha512` cluster with no `auth.username` cannot be rendered, and
-/// that is terminal too.
-///
-/// Spec §4 — "the approval binds the identity, not just the address" — is
-/// unsatisfiable with no identity to bind, and rendering `sasl_username: ""`
-/// would produce a run that authenticates as nobody and a SIGNED receipt
-/// saying so.
+/// that is terminal too: `sasl_username: ""` would authenticate as nobody and
+/// sign a receipt saying so.
 #[tokio::test]
 async fn a_scram_cluster_with_no_username_is_refused() {
     let mut routes = create_routes(201, existing_plan_config_map(UID));
@@ -3749,9 +3520,7 @@ async fn an_unreadable_archive_url_is_refused() {
     assert_eq!(statuses[0]["exitReason"].as_str(), Some("operational"));
 }
 
-// ---------------------------------------------------------------------------
 // The two evidence keys
-// ---------------------------------------------------------------------------
 
 /// The keys come off the final two stdout lines — read BY KEY NAME.
 ///
@@ -3905,17 +3674,11 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
 }
 
 /// A `Backup` whose own name is too long is refused **before any `POST`**,
-/// with a status.
-///
-/// REVIEW FINDING **MEDIUM-1**, plan errata **E5d**. Measured on the live
-/// cluster before this fix: the API server refuses the Job
-/// (`spec.template.labels: Invalid value: … must be no more than 63
-/// characters`), the reconciler turned that into `BackupError::Api` ->
-/// `error_policy` -> a 15-second requeue, and the `Backup` sat with
-/// `status: null` — no phase, no condition, an empty `PHASE` column — forever.
+/// with a status. The API server refuses the Job's 64-plus-character label, so
+/// a later check would leave a requeueing `Backup` with `status: null`.
 ///
 /// KILLS: doing the length check after the `POST`; returning a `BackupError`
-/// instead of writing a status; using a spelling other than Task 18's.
+/// instead of writing a status; using a spelling other than the scheduler's.
 #[tokio::test]
 async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
     // Sixty-four characters: one past the label limit, which is the only
@@ -3925,13 +3688,10 @@ async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
     let json = backup_json().replace(NAME, &long);
     let b: Backup = serde_json::from_str(&json).expect("the long-named fixture is a Backup");
 
-    // THE ROUTE TABLE CARRIES THE JOB ROUTES ANYWAY. The double panics on an
-    // unrouted request, so with no `POST /jobs` route a reconciler that
-    // created the Job would fail inside `testing.rs` naming a missing route —
-    // a real failure, but not the one "zero POSTs" is about. Routed, the
-    // zero-POST assertion is what refuses. The `GET` route's suffix is a run
-    // of the fixture name's own character because `Route::path_suffix` is
-    // `&'static str` and the name is built at run time.
+    // The table carries the Job routes anyway, so the zero-POST assertion is
+    // what refuses rather than the double's panic on an unrouted request. The
+    // `GET` route's suffix is a run of the fixture name's own character because
+    // `Route::path_suffix` is `&'static str` and the name is built at run time.
     let routes = vec![
         Route {
             method: "GET",
@@ -4099,22 +3859,16 @@ async fn a_backup_whose_name_is_too_long_is_refused_before_any_post() {
 }
 
 /// A failed run carries **exactly ONE `Failed` condition**, and the evidence
-/// fact is its own type raised only at exit 0.
+/// fact is its own type raised only at exit 0: exits 1, 3 and 4 write no
+/// artifact, and a condition array is a map keyed by `type`.
 ///
-/// REVIEW FINDING **HIGH-2**, plan errata **E5c**. Measured live before this
-/// fix, every refused `Backup` came back carrying
-/// `Failed/True/guard-refused` **and** `Failed/False/EvidenceKeysUnreadable`,
-/// because the evidence condition was appended whenever the two key lines were
-/// absent — which is ALWAYS for exits 1, 3 and 4, since GC11 says those runs
-/// write no artifact. A condition array is a map keyed by `type`.
-///
-/// KILLS: restoring the old append (arm 1 sees two `Failed` conditions);
-/// raising the evidence condition at a non-zero exit (arms 1 and 4); dropping
-/// the positive arm (arm 3).
+/// KILLS: appending an evidence `Failed` condition (arm 1 sees two); raising
+/// the evidence condition at a non-zero exit (arms 1 and 4); dropping the
+/// positive arm (arm 3).
 #[tokio::test]
 async fn a_failed_run_carries_exactly_one_failed_condition() {
-    // ARM 1 — EXIT 3, THE CASE THE DEFECT LANDED ON. A refusal, whose log
-    // carries a `refusal-reason=` line and NO key lines.
+    // ARM 1 — EXIT 3: a refusal, whose log carries a `refusal-reason=` line and
+    // NO key lines.
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(3),
         log_body("guard: refused\nrefusal-reason=TargetTopicConfigRefused\n"),
@@ -4285,17 +4039,16 @@ async fn a_failed_run_carries_exactly_one_failed_condition() {
 #[tokio::test]
 async fn window_covered_is_epoch_milliseconds_on_the_status() {
     // The fixture receipt's `covered` block, in the shape `BackupReceipt`
-    // writes it (Task 5): integers, with `to_ms` EXCLUSIVE.
+    // writes it: integers, with `to_ms` EXCLUSIVE.
     let receipt: Value = serde_json::from_str(
         r#"{"format_version":"1.0.0","backup_id":"b1",
             "covered":{"from_ms":1700000000000,"to_ms":1700000600000}}"#,
     )
     .expect("the fixture receipt is JSON");
     let covered = covered_from_receipt(&receipt).expect("the receipt names its window");
-    // The oracle is ASYNC (interface I13: the real one's two `Store` reads
-    // happen inside one `spawn_blocking`, and a synchronous `Fn` cannot
-    // `.await`). `ArchiveObservation` is `Copy`, so the closure hands the same
-    // observation to every call without borrowing anything.
+    // The oracle is async (the real one's two `Store` reads happen inside one
+    // `spawn_blocking`). `ArchiveObservation` is `Copy`, so the closure hands the
+    // same observation to every call.
     let oracle = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         Box::pin(async move {
             Some(ArchiveObservation {
@@ -4305,10 +4058,8 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
                     sidecar: true,
                 },
                 covered: Some(covered),
-                // D3 W2: two additive observation fields. This row is about
-                // `windowCovered`'s units, so both are `None` — and that is a
-                // negative control for STATUS-RECORDS: an unobserved count
-                // writes no `status.records`.
+                // Both `None`: a negative control that an unobserved count writes no
+                // `status.records`.
                 records: None,
                 capture: None,
                 empty_capture: false,
@@ -4411,12 +4162,9 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
 
 /// The REAL oracle, over a real `Store`: two `get`s, one observation.
 ///
-/// A PLAIN `#[test]`, DELIBERATELY. `Store::get` drives the store's own
-/// current-thread runtime, so calling it from inside a `#[tokio::test]` panics
-/// with *Cannot start a runtime from within a runtime* — which is the whole
-/// reason the production call is wrapped in `tokio::task::spawn_blocking`
-/// (interface **I13**), and why this test's shape mirrors the inside of that
-/// closure rather than the reconcile around it.
+/// A plain `#[test]`: `Store::get` drives the store's own current-thread
+/// runtime and panics inside `#[tokio::test]`, which is why production wraps
+/// it in `spawn_blocking` and this test mirrors the inside of that closure.
 ///
 /// KILLS: an oracle that derives the sidecar's presence from the receipt's, an
 /// oracle that reports `payload: true` for a key it never looked up, and one
@@ -4507,9 +4255,7 @@ fn the_real_oracle_reads_two_objects_and_the_window_off_one_get() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The crashed-Job case
-// ---------------------------------------------------------------------------
 
 /// A Job that finished with no terminated state gets a TERMINAL status —
 /// four sub-cases, each with `exitCode` ABSENT.
@@ -4547,15 +4293,9 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
     ];
 
     for (label, pods, expected) in arms {
-        // THE LOG AND THE DELETE ARE BOTH ROUTED, AND THE REASON IS THE SAME
-        // REASON THE FORBIDDEN SUBRESOURCES ARE (see
-        // `the_exit_code_and_the_keys_come_from_the_logs_subresource`). The
-        // double panics on an unrouted request, so with no `/log` route a
-        // reconciler that FABRICATED an exit code and then went to read the
-        // log would fail inside `testing.rs` naming a missing route — and the
-        // assertion this test exists for, "exitCode is absent", would never
-        // run. Routing them means the reconciler CAN do the wrong thing and
-        // the patched status is what refuses.
+        // The log and the DELETE are both routed, so a reconciler that fabricated an
+        // exit code and read the log reaches the `exitCode` assertion instead of the
+        // double's panic on an unrouted request.
         let routes = vec![
             Route {
                 method: "GET",
@@ -4607,10 +4347,8 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
             panic!("{label}: the reconcile writes a status rather than erroring: {e}")
         });
 
-        // THE ABSENCE FIRST, because it is the property this test is named
-        // for and the one the "fabricate exitCode 1" mutant is filed against:
-        // an earlier assertion firing first would hide it behind a message
-        // about a terminal state.
+        // The absence first: it is the property this test is named for, and an
+        // earlier assertion would hide it behind a message about a terminal state.
         assert_eq!(
             outcome.exit_code, None,
             "{label}: there is no exit code and none is invented"
@@ -4890,11 +4628,11 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
     assert_eq!(refusal_state("nothing\n"), None);
 }
 
-/// **RECEIPT-DUP (review F2).** An exit-1/4 backup run that names its
-/// execution-claim outcome on a final `failure-reason=` line gets that state on
-/// `status.exitReason` and in the terminal condition's message — not only in
-/// the pod log. Closed and paired with the code: the wrong code, an unknown
-/// value, and an older runner's log (no line) all keep the wire reason.
+/// An exit-1/4 backup run that names its execution-claim outcome on a final
+/// `failure-reason=` line gets that state on `status.exitReason` and in the
+/// terminal condition's message, not only in the pod log. Closed and paired
+/// with the code: the wrong code, an unknown value, and an older runner's log
+/// (no line) all keep the wire reason.
 #[tokio::test]
 async fn a_claim_outcome_is_lifted_onto_the_backup_status() {
     async fn terminal(code: i32, tail: &str) -> Value {
@@ -4983,16 +4721,10 @@ async fn a_claim_outcome_is_lifted_onto_the_backup_status() {
 /// The `Running` pass patches the status, observes the pod, and writes no
 /// outcome.
 ///
-/// # This row CHANGED at D3 W2 (PLAT-14.1), and the change is the point
-///
-/// It used to assert that an unfinished Job's pod is **not read at all**. D3
-/// §2.3 makes that exactly backwards: the pod is where every answer to "why
-/// has nothing happened for four minutes" lives, and a `Backup` whose runner
-/// sits in `ImagePullBackOff` was `phase: Running` by every field that existed
-/// before. What has NOT changed, and is asserted below, is everything the old
-/// row was really protecting: no exit code, no evidence, no outcome and no
-/// Job write while the run is in flight — and the pod is still reached only
-/// through the owner-UID-verified selectors (seam S6).
+/// The pod is where "why has nothing happened" lives (an `ImagePullBackOff`
+/// runner), so it is read. While the run is in flight there is no exit code,
+/// no evidence, no outcome and no Job write, and the pod is reached only
+/// through the owner-UID-verified selectors.
 #[tokio::test]
 async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
     let (client, seen, bodies) = mock_client_recording_bodies(running_routes());
@@ -5026,12 +4758,8 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
         "no exit code and no evidence while the run is in flight; got {:?}",
         statuses[0]
     );
-    // BY TYPE AND NOT BY POSITION. The running builder now owns two
-    // conditions — `Admitted=True` beside `JobCreated`, because
-    // `destination_hold_patch` is this kind's only other `Admitted` writer and
-    // it only ever writes `False` (defect RESTORE-ADMITTED-DROPPED's `Backup`
-    // half). A positional read of `conditions[0]` is exactly the mistake this
-    // file warns about one row over.
+    // BY TYPE AND NOT BY POSITION: the running builder owns two conditions,
+    // `Admitted=True` beside `JobCreated`.
     let by_type = |want: &str| -> Option<String> {
         statuses[0]["conditions"]
             .as_array()?
@@ -5050,8 +4778,8 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
         Some("Admitted"),
         "and a running `Backup` says it was admitted, rather than saying nothing at all"
     );
-    // D3 §2.2 — the progress block, and `RunnerReady` beside `JobCreated` in
-    // the SAME array, because a merge patch replaces arrays.
+    // The progress block, and `RunnerReady` beside `JobCreated` in the SAME
+    // array, because a merge patch replaces arrays.
     assert_eq!(
         statuses[0]["progress"]["stage"].as_str(),
         Some("Running"),
@@ -5128,18 +4856,15 @@ async fn a_finished_backup_whose_job_is_gone_is_not_re_run() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The contract in the shipped files
-// ---------------------------------------------------------------------------
 
 /// The printer columns of `Backup` are the contract, in order.
 ///
 /// KILLS: renaming a printer column.
 #[test]
 fn the_printer_columns_are_the_contract() {
-    // BOTH SOURCES: the emitter (so a `crds/backup.rs` edit is caught here and
-    // not only by the drift gate) and the checked-in file (so what the API
-    // server consumes is what was asserted). See `emitted_backup_crd`.
+    // BOTH SOURCES: the emitter (so a `crds/backup.rs` edit is caught here) and
+    // the checked-in file (what the API server consumes).
     for (source, doc) in [
         ("the emitter", emitted_backup_crd()),
         (
@@ -5282,9 +5007,7 @@ fn the_pod_selectors_are_the_prefixed_label_then_the_legacy_one() {
     );
 }
 
-// ===========================================================================
-// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
-// ===========================================================================
+// The steady-object row
 
 /// The routes a RUNNING pass needs: the Job exists and has not finished, and
 /// the status is patchable.
@@ -5292,14 +5015,10 @@ fn running_routes() -> Vec<Route> {
     running_routes_with(pod_list_running(), progress_log("-1:engine"))
 }
 
-/// [`running_routes`] with the pod list and the pod log as parameters.
-///
-/// **THE POD LIST AND THE LOG ROUTE ARE NEW IN D3 W2 (PLAT-14.1).** Before
-/// §2.3 the running pass read the Job and nothing else; it now derives the one
-/// diagnosis for every Job-backed run, which means finding the owned pod
-/// (owner-UID verified, seam S6) and — while the runner is running — reading
-/// the bounded progress tail. Both are parameters so a row can put a
-/// `CreateContainerConfigError` or an empty list in front of the reconciler.
+/// [`running_routes`] with the pod list and the pod log as parameters: the
+/// running pass finds the owned pod and, while the runner runs, reads the
+/// bounded progress tail, so a row can put a `CreateContainerConfigError` or
+/// an empty list in front of the reconciler.
 fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     vec![
         Route {
@@ -5341,20 +5060,13 @@ fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     ]
 }
 
-/// **Task 16b.** A steady `Backup` — one whose Job is still running — is
-/// patched once and then never again.
+/// A steady `Backup` (its Job still running) is patched once and then never
+/// again.
 ///
-/// # Why the RUNNING state and not the terminal one
-///
-/// The terminal state was never at risk: `reconcile_backup`'s `status_is_terminal`
-/// guard returns before any patch, so a finished `Backup` has always been
-/// silent. The running state is the one this reconciler spends its time in,
-/// and on a 15 s requeue it used to send `running_status_patch` on every
-/// single pass — an identical body, so the API server bumped nothing and Task
-/// 15c measured this reconciler QUIET, but a request all the same. Quiet is
-/// not silent; plan erratum E11(d)'s third rule is that a reconcile which
-/// computes the status the object already carries sends NOTHING, and a
-/// route-table count is what can see the difference.
+/// The running state is the one this reconciler spends its time in; the
+/// terminal state returns before any patch. A reconcile that computes the
+/// status the object already carries sends NOTHING, and only a route-table
+/// count can tell that from an identical patch the API server ignores.
 ///
 /// The second object is the first pass's own patch, applied as the API server
 /// would apply it (`conditions::apply_merge_patch`, RFC 7386).
@@ -5411,12 +5123,11 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         "the second pass over an unchanged object writes NOTHING. At REQUEUE_SECS = 15 that is \
          5,760 API writes a day per running Backup this reconciler no longer makes: {second:?}"
     );
-    // A RESTART WITH THE JOB PRESENT RE-READS NO INPUTS (PLAT-06.1): the
-    // frozen inputs are not re-read, re-rendered or re-created while a Job
-    // this Backup controls is running. The reads that DO happen are D3 §2.3's
-    // observation — the Job, its owned pod, and nothing else: the runner is
-    // running so no events are listed, and `lastObservedTime` is 15 s old so
-    // the progress read is throttled out.
+    // A RESTART WITH THE JOB PRESENT RE-READS NO INPUTS: nothing is re-read,
+    // re-rendered or re-created while a Job this Backup controls is running.
+    // The reads that happen are the observation: the Job and its owned pod. No
+    // events are listed (the runner is running), and `lastObservedTime` is 15 s
+    // old so the progress read is throttled out.
     assert_eq!(
         calls(&second),
         vec![
@@ -5430,13 +5141,9 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         calls(&second)
     );
 
-    // ---- D3 §13's regression row, second half: the heartbeat --------------
-    //
-    // `lastObservedTime` is rewritten AT MOST ONCE PER 60 s (E11(d)), which
-    // means it IS rewritten after 60 s — the field exists so a console can
-    // tell "still running" from "the controller stopped looking", and one that
-    // never moved could not. At +61 s exactly one patch is sent, and the only
-    // thing in it that moved is that field.
+    // The heartbeat: `lastObservedTime` is rewritten at most once per 60 s, so
+    // a console can tell "still running" from "the controller stopped looking".
+    // At +61 s exactly one patch is sent, and only that field moved.
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
         &steady,
@@ -5473,10 +5180,8 @@ async fn a_steady_backup_issues_no_second_status_patch() {
     );
 }
 
-// ===========================================================================
-// PLAT-06.1 — the execution contract: derived identity, frozen inputs, no
-// annotation ever executed
-// ===========================================================================
+// The execution contract: derived identity, frozen inputs, no annotation
+// ever executed
 
 use weirkeeper::backup_execution::{
     canonical_inputs, execution_identity, BackupExecutionInputs, FrozenInputs,
@@ -5542,18 +5247,16 @@ fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
 
 /// The first `POST …/jobs` body, as JSON, **with its line token taken off**.
 ///
-/// FX-34: every RUNNER Job this reconciler creates (`logweir backup run`)
-/// carries a fresh random token as the runner's last two arguments
-/// (`weirkeeper::job::add_line_token`), and two Jobs never share one, so a
-/// POSTed Job cannot be compared whole with a builder's. This helper CHECKS
-/// the pair (the flag, then forty lower-case hex digits, and nothing after
-/// them), removes it and returns the rest. So every row that compares what it
-/// returns with `runner_job(…)` or with a frozen argv is also a row proving
-/// that the token is the Job's only addition.
+/// Every RUNNER Job carries a fresh random token as the runner's last two
+/// arguments (`weirkeeper::job::add_line_token`), so a POSTed Job cannot be
+/// compared whole with a builder's. This helper checks the pair (the flag,
+/// then forty lower-case hex digits, nothing after), removes it and returns
+/// the rest, so every row comparing the result also proves the token is the
+/// Job's only addition.
 ///
-/// A CHECK Job (`logweir check run`, a topic discovery) is returned as it
-/// was POSTed, after asserting it carries NO token: the token is the refusal
-/// line's and that Job prints none.
+/// A CHECK Job (`logweir check run`, a topic discovery) is returned as
+/// POSTed, after asserting it carries NO token: that Job prints no refusal
+/// line.
 fn posted_job(seen: &[SeenBody]) -> Option<Value> {
     let job: Value = seen
         .iter()
@@ -5768,10 +5471,9 @@ async fn a_manual_backup_without_an_annotation_freezes_its_inputs_then_runs_them
         );
     }
 
-    // STATUS.EXECUTION AND STATUS.SELECTION, exactly, and in a patch of its own
-    // that replaces no array. D1 §7.6: the coverage label is written AT THE
-    // FREEZE, so it is on the object for the whole time a run is watched, not
-    // only once it finishes.
+    // STATUS.EXECUTION AND STATUS.SELECTION, exactly, in a patch of its own that
+    // replaces no array. The coverage label is written AT THE FREEZE, so it is on
+    // the object for the whole time a run is watched.
     let statuses = patched_statuses(&bodies);
     assert_eq!(
         statuses[0],
@@ -6470,18 +6172,14 @@ async fn a_concurrent_job_create_is_admitted_only_for_this_backups_job() {
     }
 }
 
-/// **THE `JobNameConflict` REFUSAL OF A FREEZE PASS LANDS** —
-/// REHEARSAL-FIRE-PASS-STATUS-LOST's class sweep. The freeze pass writes the
-/// execution record, then creates the runner Job; a foreign Job that won the
-/// name in between is refused, and that refusal is the pass's SECOND write.
-/// The row above runs over a sequenced double that answers every `PATCH` 200;
-/// here the `Backup` lives in a store that enforces seam S7, and a foreign Job
-/// appears (another writer) right after this pass's existence check. On
-/// `b4260960` the refusal carried the handed object's version, which the
-/// execution record had already moved, so the API server answered 409 and the
-/// reconcile failed with it; the terminal state waited for a second pass.
+/// **THE `JobNameConflict` REFUSAL OF A FREEZE PASS LANDS.** The freeze pass
+/// writes the execution record, then creates the runner Job; a foreign Job
+/// that won the name in between is refused, and that refusal is the pass's
+/// SECOND write. Here the `Backup` lives in a store that enforces the
+/// resourceVersion precondition, so the refusal must be written over the
+/// version the execution record produced.
 ///
-/// MUTANT: write the refusal over the handed object (drop `written`) — the
+/// MUTANT: write the refusal over the handed object (drop `written`): the
 /// reconcile returns the 409 as an error.
 #[tokio::test]
 async fn a_job_name_conflict_after_the_execution_record_is_stored() {
@@ -6822,23 +6520,18 @@ async fn a_job_that_does_not_carry_the_recorded_inputs_is_reported() {
 /// **THE TYPED SPEC STATES THE IDENTITY, OR NOTHING RUNS.** A hand-written
 /// Backup that claims a schedule it is not owned by, a manual Backup naming a
 /// slot, an unknown trigger, a scheduled object under the wrong name, and a
-/// non-positive deadline are refused before anything is created — and a
+/// non-positive deadline are refused before anything is created, and a
 /// hostile annotation on such a Backup is still surfaced.
 ///
-/// **THE TERMINAL STATE IS PER ROW, AND THE VOCABULARY MOVED (D1 §3.4).**
-/// PLAT-06.1 answered every one of these `ExecutionSpecInvalid`; D1 §3.1 gives
-/// a run's IDENTITY its own refusal, `ScheduledIdentityMismatch`, and keeps
-/// `ExecutionSpecInvalid` for what is wrong with the spec as an EXECUTION
-/// request — an unknown `triggeredBy`, a deadline a Job cannot carry. An
-/// operator reading `ScheduledIdentityMismatch` is told the object's own fields
-/// do not compose the run it claims to be; one reading `ExecutionSpecInvalid`
-/// is told a value is out of range. Every row is still terminal and still
-/// refused before any `POST`, which is the property that matters.
+/// The terminal state is per row: `ScheduledIdentityMismatch` when the
+/// object's own fields do not compose the run it claims to be,
+/// `ExecutionSpecInvalid` when a value is out of range (an unknown
+/// `triggeredBy`, a deadline a Job cannot carry).
 ///
 /// KILLS: silently running a false `schedule` claim as manual (its receipt
 /// would say `schedule`); a scheduled identity from a non-schedule owner;
 /// accepting a slot that is fifteen digits and not a date; letting an unknown
-/// `triggeredBy` through as manual now that the trigger kind is a field.
+/// `triggeredBy` through as manual.
 #[tokio::test]
 async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
     let mutations: Vec<SpecCase> = vec![
@@ -6957,11 +6650,10 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
     }
 }
 
-/// **THE MANUAL CONTRACT PLAT-06.2 BUILDS ON.** A manual run IS its object's
-/// UID: the same object always derives the same identity (so re-creating a
-/// name that exists is the API server's `AlreadyExists` and no second run),
-/// a deliberately new name — or a deleted-and-recreated name — is a new UID and
-/// therefore a new run.
+/// **THE MANUAL CONTRACT.** A manual run IS its object's UID: the same object
+/// always derives the same identity (so re-creating a name that exists is the
+/// API server's `AlreadyExists` and no second run), a deliberately new name,
+/// or a deleted-and-recreated name, is a new UID and therefore a new run.
 #[test]
 fn a_manual_identity_is_the_object_uid_and_nothing_else() {
     let first = execution_identity(&backup()).unwrap();
@@ -7003,18 +6695,16 @@ fn a_manual_identity_is_the_object_uid_and_nothing_else() {
 }
 
 /// A re-created Job must not read its predecessor's pod, and NOTHING the label
-/// alone selects is read — D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// alone selects is read.
 ///
-/// This is the pure half of the rule the three execution controllers now share
-/// with the check framework ([`weirkeeper::check::pod`]). The controller half,
-/// over the double and asserting the ABSENCE of a `pods/log` request, is
+/// The pure half of the rule the execution controllers share with the check
+/// framework ([`weirkeeper::check::pod`]); the controller half is
 /// [`a_labelled_pod_this_job_does_not_own_is_never_read`].
 ///
 /// KILLS: taking the first pod the selector returns; matching an owner
 /// reference of any kind; matching a non-controller owner reference; matching
 /// a `Job` in another API group; falling back to an ownerless pod when nothing
-/// is owned (the shape this file's previous version of this test ASSERTED,
-/// and which the `plat06` review recorded as L2).
+/// is owned.
 #[test]
 fn a_recreated_job_reads_only_its_own_pod() {
     let stale = owner_pod("old", Some(("batch/v1", "Job", "old-job-uid", true)), None);
@@ -7086,26 +6776,19 @@ fn a_recreated_job_reads_only_its_own_pod() {
     }
 }
 
-/// **Two pods claiming one Job is a REFUSAL, not a ranking** — review finding
-/// **R1**.
+/// **Two pods claiming one Job is a REFUSAL, not a ranking.**
 ///
-/// An `ownerReference` is ordinary metadata written by whoever creates the
-/// pod: the API server does not check that the owner exists, that the UID is
-/// right, or that the creator may claim it. So a tenant who can read the Job's
-/// `metadata.uid` can mint a pod that passes all four conditions — and, being
-/// created after the genuine runner pod, it is BY CONSTRUCTION the newer one.
-/// An earlier version of this module handed that case to `newest`, which
-/// handed the read to the planter every single time, silently, with no
-/// `ForeignPodIgnored` line because the pod passed.
+/// An `ownerReference` is ordinary metadata: the API server does not check
+/// that the owner exists, that the UID is right, or that the creator may claim
+/// it. So whoever can read the Job's `metadata.uid` can mint a pod that passes
+/// all four conditions, and it is by construction the newer one.
+/// `backoffLimit: 0` plus `restartPolicy: Never` means a Job never has two
+/// legitimate pods, so the only safe answer is to read neither.
 ///
-/// `backoffLimit: 0` plus `restartPolicy: Never` means the job controller
-/// cannot produce a second pod for one Job, so a second claimant is
-/// illegitimate by construction and the only safe answer is to read neither.
-///
-/// KILLS: newest-wins restored; oldest-wins (the mirror bug — a planter who
-/// creates their pod before the Job wins that one); returning one claimant and
-/// reporting the other as foreign; dropping the claimants from the report;
-/// letting a pod that FAILED the owner check contest the Job.
+/// KILLS: newest-wins; oldest-wins (a planter who creates their pod before the
+/// Job wins that one); returning one claimant and reporting the other as
+/// foreign; dropping the claimants from the report; letting a pod that FAILED
+/// the owner check contest the Job.
 #[test]
 fn two_pods_claiming_one_job_are_both_refused() {
     let owner = Some(("batch/v1", "Job", JOB_UID, true));
@@ -7162,10 +6845,9 @@ fn two_pods_claiming_one_job_are_both_refused() {
     assert_eq!(seen.foreign.len(), 2);
 }
 
-/// `newest` is still a total order, and still exercised — it is no longer what
-/// resolves a contested Job (see [`two_pods_claiming_one_job_are_both_refused`])
-/// but it is the documented answer for a caller whose Job legitimately owns
-/// several pods.
+/// `newest` is a total order: not what resolves a contested Job (see
+/// [`two_pods_claiming_one_job_are_both_refused`]), but the documented answer
+/// for a caller whose Job legitimately owns several pods.
 ///
 /// KILLS: picking the oldest; a same-second tie resolved the other way; a
 /// timestamp-less pod winning a tie-break.
@@ -7241,10 +6923,9 @@ async fn a_surfaced_annotation_on_a_running_backup_is_steady() {
     assert!(condition_named(&patch["status"], CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED).is_some());
     let steady = with_status_patch(&annotated, &patch);
 
-    // ONE REQUEUE LATER, and INSIDE the 60 s heartbeat window (D3 §2.2): a
-    // second pass at exactly +60 s would legitimately rewrite
-    // `progress.lastObservedTime`, which is a different rule and has its own
-    // row in `a_steady_backup_issues_no_second_status_patch`.
+    // ONE REQUEUE LATER, inside the 60 s heartbeat window: at +60 s the pass
+    // would legitimately rewrite `progress.lastObservedTime`
+    // (`a_steady_backup_issues_no_second_status_patch`).
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
         &steady,
@@ -7258,17 +6939,12 @@ async fn a_surfaced_annotation_on_a_running_backup_is_steady() {
     assert_eq!(status_patch_count(&bodies.lock().unwrap()), 0);
 }
 
-// ---------------------------------------------------------------------------
-// PLAT-06.1 × PLAT-07.1: the frozen inputs and the ONE connection resolver
-// ---------------------------------------------------------------------------
+// The frozen inputs and the one connection resolver
 
-/// The `execution-inputs.json` bytes the controller froze for [`backup`] and
-/// [`prod_cluster`] **before the saved-connection contract was merged**,
-/// captured from `main 10f6c28` (PLAT-06.1, pre-rebase) and stored as bytes.
-///
-/// A LITERAL, NOT A RE-DERIVATION. A fixture regenerated from the build it is
-/// supposed to constrain proves nothing about compatibility; these bytes are
-/// what the older controller actually wrote.
+/// The `execution-inputs.json` bytes an older controller froze for [`backup`]
+/// and [`prod_cluster`] before the saved-connection contract, stored as
+/// bytes: a fixture regenerated from the build it constrains would prove
+/// nothing about compatibility.
 const PRE_CONTRACT_INPUTS: &str =
     include_str!("fixtures/backup_execution/pre-connection-contract-inputs.json");
 
@@ -7333,24 +7009,16 @@ async fn reconcile_against(
 }
 
 /// **A PLAN FROZEN BEFORE THE SAVED-CONNECTION CONTRACT IS STILL ADMITTED,
-/// UNCHANGED** — grammar `…/backup-execution-inputs/v1` did not fork when
-/// PLAT-07.1 added the CA reference to the source block.
+/// UNCHANGED.** The CA reference is `skip_serializing_if = "Option::is_none"`,
+/// so a connection that names no CA freezes the same bytes it always did: the
+/// older snapshot parses, re-encodes to ITSELF, renders the same two runner
+/// documents, and the run continues into its Job.
 ///
-/// The CA reference is `skip_serializing_if = "Option::is_none"`, so a
-/// connection that names no CA freezes the same bytes it always did: the older
-/// controller's snapshot parses, re-encodes to ITSELF, renders the same two
-/// runner documents, and the run continues into its Job.
-///
-/// **AND IT IS THE `v1` GRAMMAR, WHICH `v2` DID NOT REPLACE** — D1 §3.3,
-/// D-SEAMS **S4**. The same fixture is the `v1` compatibility row: a document
-/// written under `logweir.dev/backup-execution-inputs/v1` loads, re-encodes to
-/// its own bytes, verifies against a fresh `v2` resolution through
-/// [`BackupExecutionInputs::as_version_v1`], and its run continues into its
-/// Job. THE MUTANT THIS KILLS IS THE CHEAP ONE: dropping `v1` from the
-/// accepted grammars, or comparing a stored `v1` document against an
-/// undowngraded `v2` resolution, turns every `Backup` in flight at the upgrade
-/// into a terminal `PlanConfigMapConflict` at its next pass — silently, and
-/// for the whole cluster at once.
+/// It is also the `v1` grammar row: a `logweir.dev/backup-execution-inputs/v1`
+/// document verifies against a fresh `v2` resolution through
+/// [`BackupExecutionInputs::as_version_v1`]. Dropping `v1` from the accepted
+/// grammars would turn every `Backup` in flight at the upgrade into a terminal
+/// `PlanConfigMapConflict` at once.
 ///
 /// KILLS: bumping the grammar version for an additive optional field;
 /// serialising `tlsCa: null` into a no-CA snapshot; reading only the grammar
@@ -7419,14 +7087,10 @@ async fn a_plan_frozen_before_the_connection_contract_is_still_admitted() {
 }
 
 /// **A SOURCE `KafkaCluster` WITH `auth.tlsCa` FREEZES THE CA REFERENCE THE
-/// RESOLVER DECIDED, AND A CHANGED REFERENCE IS A CONFLICT** — PLAT-07.1's
-/// projection is inside PLAT-06.1's comparison, not beside it.
-///
-/// The Job's CA mount is not an extra the Job builder adds after the fact: the
-/// object, the key and the kind are in the immutable snapshot, so a `tlsCa`
-/// edited after the freeze cannot be combined with approved plan bytes. Without
-/// this the controller would mount a CA nobody froze — the run would verify the
-/// broker against a root the plan was never approved for, silently.
+/// RESOLVER DECIDED, AND A CHANGED REFERENCE IS A CONFLICT.** The object, key
+/// and kind are in the immutable snapshot, so a `tlsCa` edited after the
+/// freeze cannot be combined with approved plan bytes and verify the broker
+/// against a root the plan was never approved for.
 ///
 /// KILLS: leaving `tls_ca` out of `SourceInputs`; clearing it in
 /// `BackupExecutionInputs::executable()`; comparing only the CA's name.
@@ -7579,10 +7243,8 @@ async fn a_source_cluster_with_a_private_ca_freezes_its_reference_and_a_change_i
     );
 }
 
-// ===========================================================================
-// D1 W3b — the run contract: identity for four trigger kinds, grammar v2, the
-// frozen revision, `status.selection`, and manual runs
-// ===========================================================================
+// The run contract: identity for four trigger kinds, grammar v2, the frozen
+// revision, `status.selection`, and manual runs
 
 use weirkeeper::backup_execution::{ResolvedSelection, ScheduleRefInputs};
 use weirkeeper::crds::backup::{ScheduleRef, Trigger, TriggerKind};
@@ -7595,8 +7257,8 @@ fn policy_digest_of(b: &Backup) -> String {
     weirkeeper::policy::run_policy_sha256(&b.spec)
 }
 
-/// [`scheduled_backup`] as **D1** creates one: no owner reference (PLAT-05.2
-/// keeps the history when the schedule is deleted), the full `scheduleRef`
+/// [`scheduled_backup`] as the schedule controller creates one now: no owner
+/// reference (the history outlives a deleted schedule), the full `scheduleRef`
 /// with the schedule's UID, generation and copied policy digest, and the
 /// explicit `spec.trigger`.
 fn d1_scheduled_backup() -> Backup {
@@ -7652,12 +7314,12 @@ fn posted_snapshot(bodies: &[SeenBody]) -> Value {
 }
 
 /// **GRAMMAR `v2` IS GRAMMAR `v1` PLUS FIVE OPTIONAL BLOCKS, AND THE `v1`
-/// FIELDS ARE UNTOUCHED** — D1 §3.3, D-SEAMS **S4**.
+/// FIELDS ARE UNTOUCHED.**
 ///
-/// The key set is asserted whole, in order, because `logweir_core::det_json`
-/// emits struct fields in DECLARATION order and this document's bytes are
-/// re-encoded and compared on every later pass: reordering a field is not a
-/// refactor, it is a cluster-wide `PlanConfigMapConflict`.
+/// The key set is asserted whole, in order: `logweir_core::det_json` emits
+/// struct fields in DECLARATION order and the document is re-encoded and
+/// compared on every later pass, so reordering a field is a cluster-wide
+/// `PlanConfigMapConflict`.
 ///
 /// KILLS: renaming or reordering a `v1` key; making a `v2` block required (a
 /// `v1` document would stop parsing); serialising a `v2` block as `null`
@@ -7742,16 +7404,15 @@ fn the_v2_grammar_is_v1_plus_five_optional_blocks() {
     );
 }
 
-/// **THE FROZEN DOCUMENT RECORDS WHICH SCHEDULE REVISION THE RUN COPIED** —
-/// D1 §5.3. `scheduleRef {name, uid, generation, runPolicySha256}` and the
-/// run's own `runPolicySha256`, in the immutable plan, so the revision
-/// survives the schedule's deletion.
+/// **THE FROZEN DOCUMENT RECORDS WHICH SCHEDULE REVISION THE RUN COPIED**:
+/// `scheduleRef {name, uid, generation, runPolicySha256}` and the run's own
+/// `runPolicySha256`, in the immutable plan, so the revision survives the
+/// schedule's deletion.
 ///
-/// KILLS: dropping `generation` or the copied digest from the freeze (the
-/// answer to "which policy did this archive run under?" would die with the
-/// schedule); recomputing the copied digest from the live schedule instead of
-/// copying what the object states (an edit between admission and freeze would
-/// rewrite history).
+/// KILLS: dropping `generation` or the copied digest from the freeze;
+/// recomputing the copied digest from the live schedule instead of copying
+/// what the object states (an edit between admission and freeze would rewrite
+/// history).
 #[tokio::test]
 async fn the_frozen_inputs_record_the_schedule_revision_the_run_copied() {
     let b = d1_scheduled_backup();
@@ -7796,15 +7457,12 @@ async fn the_frozen_inputs_record_the_schedule_revision_the_run_copied() {
     );
 }
 
-/// **A COPIED POLICY DIGEST THAT IS NOT THIS OBJECT'S OWN IS TERMINAL** — D1
-/// §3.1 rule 5, before any read and before any `POST`.
+/// **A COPIED POLICY DIGEST THAT IS NOT THIS OBJECT'S OWN IS TERMINAL**, before
+/// any read and before any `POST`. An integrity check against control-plane
+/// bugs, not a security boundary: the digest is recomputed from the same
+/// CEL-immutable spec, so a mismatch means the copy and the fields disagree.
 ///
-/// An integrity check against control-plane bugs, not a security boundary (D1
-/// §8.7): the digest is recomputed from the same CEL-immutable spec, so a
-/// mismatch means the copy and the fields disagree.
-///
-/// KILLS: trusting `scheduleRef.runPolicySha256` as the run's policy digest
-/// (a client-supplied field would then decide what the run claims to be); and
+/// KILLS: trusting `scheduleRef.runPolicySha256` as the run's policy digest;
 /// taking the digest from the schedule at freeze time rather than from the
 /// object.
 #[tokio::test]
@@ -7838,16 +7496,13 @@ async fn a_copied_policy_digest_that_is_not_this_objects_own_is_terminal() {
 }
 
 /// **A SCHEDULED RUN WHOSE SCHEDULE IS GONE IS `ScheduleNotFound`, BEFORE THE
-/// FREEZE** — D1 §3.1 rule 2, §12's PLAT-05.2 row.
+/// FREEZE.** Runs carry no ownerReference to their schedule, so deleting it
+/// keeps the history; an unfrozen run of a deleted schedule would otherwise
+/// start a Job under a policy nobody can look up.
 ///
-/// PLAT-05.2 removes the controller ownerReference so that deleting a schedule
-/// KEEPS its history instead of collecting it. The cost is that an unfrozen run
-/// of a deleted schedule would otherwise start a Job under a policy nobody can
-/// look up; "deleting a schedule stops future work" is said here instead.
-///
-/// KILLS: skipping the referent check once the ownerReference is gone;
-/// adopting a same-named schedule with a new UID (two schedules' runs would
-/// share an archive prefix); requeueing instead of refusing.
+/// KILLS: skipping the referent check; adopting a same-named schedule with a
+/// new UID (two schedules' runs would share an archive prefix); requeueing
+/// instead of refusing.
 #[tokio::test]
 async fn an_unfrozen_scheduled_run_whose_schedule_is_gone_is_schedule_not_found() {
     for (label, status, body) in [
@@ -7882,17 +7537,13 @@ async fn an_unfrozen_scheduled_run_whose_schedule_is_gone_is_schedule_not_found(
     }
 }
 
-/// **A FROZEN RUN IS NEVER RE-CHECKED AGAINST ITS SCHEDULE** — the other half
-/// of D1 §3.1 rule 2, and §12's `a_frozen_run_is_not_rechecked_after_schedule_deletion`.
-///
-/// A run whose inputs are frozen executes the policy it copied. Deleting the
-/// schedule while its Job runs must not turn a running archive into a terminal
-/// failure, and a Job that has to be re-created from those same frozen inputs
-/// must not start asking about an object the run no longer depends on.
+/// **A FROZEN RUN IS NEVER RE-CHECKED AGAINST ITS SCHEDULE.** It executes the
+/// policy it copied: deleting the schedule while its Job runs must not fail
+/// the run, and a Job re-created from the same frozen inputs must not ask
+/// about an object the run no longer depends on.
 ///
 /// KILLS: moving the referent check outside the `status.execution.is_none()`
-/// gate — every re-create pass after a schedule deletion would then refuse a
-/// run whose archive is half written.
+/// gate, which would refuse a run whose archive is half written.
 #[tokio::test]
 async fn a_frozen_run_is_not_rechecked_after_schedule_deletion() {
     let b = d1_scheduled_backup();
@@ -7935,12 +7586,12 @@ async fn a_frozen_run_is_not_rechecked_after_schedule_deletion() {
     );
 }
 
-/// The canonical manual `Backup` of D1 §8.1, named by the API from the
+/// The canonical manual `Backup`'s name, which the API derives from the
 /// idempotency scope.
 const MANUAL_NAME: &str = "logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea";
 
-/// [`backup`] as the PLAT-06.2 API route creates it: the deterministic name,
-/// `trigger.kind: Manual`, and the schedule revision it copied.
+/// [`backup`] as the API's manual-run route creates it: the deterministic
+/// name, `trigger.kind: Manual`, and the schedule revision it copied.
 fn canonical_manual_backup() -> Backup {
     let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
     value["metadata"]["name"] = serde_json::json!(MANUAL_NAME);
@@ -8016,18 +7667,16 @@ fn manual_running_job_body() -> String {
 }
 
 /// **THE CANONICAL MANUAL BACKUP RUNS, RECORDS THE REVISION IT COPIED, AND
-/// NEVER READS A `BackupSchedule`** — D1 §8.1 and §8.3.
+/// NEVER READS A `BackupSchedule`.**
 ///
-/// A manual run is "run this policy now". It is allowed while the schedule is
-/// suspended, it is allowed while a scheduled run is active, and it survives
-/// the schedule being deleted between the request and the freeze — so the
-/// controller must not make the schedule a precondition of it. The route table
-/// answers `404` for the schedule and the pass must never ask.
+/// A manual run is "run this policy now": allowed while the schedule is
+/// suspended or a scheduled run is active, and it survives the schedule being
+/// deleted between the request and the freeze. The route table answers `404`
+/// for the schedule and the pass must never ask.
 ///
-/// KILLS: applying D1 §3.1 rule 2 to a manual run (a "Back up now" pressed a
-/// second after a schedule delete would fail); dropping the copied revision
-/// from a manual run's frozen inputs (the console could no longer say which
-/// policy the button ran); taking a manual run's identity from its
+/// KILLS: requiring the schedule for a manual run; dropping the copied
+/// revision from a manual run's frozen inputs (the console could no longer say
+/// which policy the button ran); taking a manual run's identity from its
 /// `scheduleRef` rather than its own UID.
 #[tokio::test]
 async fn the_canonical_manual_backup_runs_and_records_its_schedules_revision() {
@@ -8074,19 +7723,15 @@ async fn the_canonical_manual_backup_runs_and_records_its_schedules_revision() {
     );
 }
 
-/// **A MANUAL RUN IS A MEMBER OF ITS SCHEDULE AND IS NOT ONE OF ITS RUNS** —
-/// D1 §2 and §8.3, stated here because the trap is one line away in the two
-/// files that will consume it.
+/// **A MANUAL RUN IS A MEMBER OF ITS SCHEDULE AND IS NOT ONE OF ITS RUNS.**
 ///
-/// PLAT-05.2 moves membership from the controller ownerReference to
-/// `identity::is_run_of_schedule`, which matches on `spec.scheduleRef.uid` —
-/// and a manual `Backup` created from a schedule carries exactly that. So the
-/// moment the schedule controller's `Forbid` accounting switches to the new
-/// membership test, **a manual run starts blocking scheduled slots** unless the
-/// filter also reads `spec.trigger.kind`. D1 §2 is explicit: only
-/// `Scheduled`, `CatchUp` and `Retry` participate in `concurrencyPolicy`.
+/// Membership is `identity::is_run_of_schedule`, which matches on
+/// `spec.scheduleRef.uid`, and a manual `Backup` created from a schedule
+/// carries exactly that. So a `Forbid` filter on membership alone would let a
+/// manual run block scheduled slots: only `Scheduled`, `CatchUp` and `Retry`
+/// participate in `concurrencyPolicy`.
 ///
-/// KILLS: a `concurrencyPolicy` filter written as membership alone (D1 W2/W4).
+/// KILLS: a `concurrencyPolicy` filter written as membership alone.
 #[test]
 fn a_manual_run_is_a_member_of_its_schedule_but_not_a_scheduled_run() {
     let manual = canonical_manual_backup();
@@ -8109,8 +7754,8 @@ fn a_manual_run_is_a_member_of_its_schedule_but_not_a_scheduled_run() {
     assert_eq!(declared_trigger(&scheduled).0, TriggerKind::Scheduled);
 }
 
-/// **A RETRY IS A NEW EXECUTION ID, AND A CATCH-UP IS THE SAME SLOT** — D1
-/// §3.1's identity table, through the freeze.
+/// **A RETRY IS A NEW EXECUTION ID, AND A CATCH-UP IS THE SAME SLOT**, through
+/// the freeze.
 ///
 /// KILLS: giving a catch-up an identity of its own (a restart would write a
 /// second archive of one window); reusing attempt 0's `backup_id` for a retry
@@ -8184,20 +7829,15 @@ fn a_retry_freezes_a_new_execution_id_and_a_catch_up_reuses_the_slots() {
 }
 
 /// **A DYNAMIC SELECTION STARTS A DISCOVERY, AND NO EMPTY ALLOWLIST EVER
-/// REACHES THE ENGINE** — D1 §7.1, §7.2 R2, guard **G-GLOB**.
+/// REACHES THE ENGINE.**
 ///
-/// `spec.allUserTopics` with `topics: []` is D1 §7.1's second shape. The only
-/// two things this controller may do with it are resolve it or refuse it; what
-/// it must never do is render `spec.topics` — empty, in this mode — into
-/// `backup.yaml`, which is precisely the "no allowlist means everything" shape
-/// the mandatory allowlist exists to make impossible.
-///
-/// Since PLAT-09.2 it RESOLVES it: one discovery Job owned by this `Backup`,
-/// its plan `ConfigMap` first, phase `Resolving`, and no runner Job until the
-/// exact names are frozen. The whole state machine lives in
-/// `tests/backup_selection.rs`; this row is the `backup_controller` half —
-/// that the shape reaches the resolver at all, and that the freeze boundary
-/// still refuses an empty or patterned list from ANY producer.
+/// `spec.allUserTopics` with `topics: []` must be resolved or refused, never
+/// rendered as an empty `backup.yaml` allowlist. It resolves: one discovery Job
+/// owned by this `Backup`, its plan `ConfigMap` first, phase `Resolving`, and
+/// no runner Job until the exact names are frozen. The state machine is in
+/// `tests/backup_selection.rs`; this row proves the shape reaches the resolver
+/// and that the freeze boundary still refuses an empty or patterned list from
+/// ANY producer.
 ///
 /// KILLS: falling through to the freeze with an empty list; creating the runner
 /// Job before the names exist; refusing the dynamic shape as the third
@@ -8208,8 +7848,8 @@ async fn a_dynamic_selection_starts_a_discovery_and_no_empty_allowlist_reaches_t
     value["spec"]["topics"] = serde_json::json!([]);
     value["spec"]["allUserTopics"] =
         serde_json::json!({ "incompleteDiscovery": "BackUpVisibleTopics" });
-    // EVERY STATUS WRITE ON THE DYNAMIC PATH IS A `resourceVersion`
-    // COMPARE-AND-SET (D-SEAMS S7), so the fixture carries one.
+    // Every status write on the dynamic path is a `resourceVersion`
+    // compare-and-set, so the fixture carries one.
     value["metadata"]["resourceVersion"] = serde_json::json!("4242");
     let b: Backup = serde_json::from_value(value).expect("a Backup");
 
@@ -8296,7 +7936,7 @@ async fn a_dynamic_selection_starts_a_discovery_and_no_empty_allowlist_reaches_t
 }
 
 /// **`status.selection` IS WRITTEN AT THE FREEZE, AND IT IS THE FROZEN
-/// DOCUMENT'S OWN PROJECTION** — D1 §7.6, §7.4.
+/// DOCUMENT'S OWN PROJECTION.**
 ///
 /// KILLS: writing the coverage label only when a run finishes; computing the
 /// status counts separately from the frozen ones; rendering a named allowlist
@@ -8362,13 +8002,10 @@ type BlockCase = (
     &'static str,
 );
 
-/// **A STORED `v2` PLAN IS COMPARED WHOLE: EVERY BLOCK D1 ADDED IS A
-/// CONFLICT WHEN IT DIFFERS** — and each refusal NAMES the block.
-///
-/// The generic "the inputs differ" message was enough while the document held
-/// a connection and a topic list. It is not enough now: an operator reading a
-/// terminal `PlanConfigMapConflict` needs to know whether the trigger, the
-/// revision, the policy, the selection or the destination moved.
+/// **A STORED `v2` PLAN IS COMPARED WHOLE: EVERY `v2` BLOCK IS A CONFLICT WHEN
+/// IT DIFFERS**, and each refusal NAMES the block, so an operator reading
+/// `PlanConfigMapConflict` knows whether the trigger, the revision, the
+/// policy, the selection or the destination moved.
 ///
 /// KILLS: leaving a `v2` block out of the comparison (a plan frozen for one
 /// revision could be executed for another); comparing a `v2` plan through the
@@ -8462,14 +8099,11 @@ async fn every_v2_block_is_compared_when_a_stored_plan_is_admitted() {
     }
 }
 
-/// **AN IDENTITY IS NEVER TAKEN FROM A CLIENT-SUPPLIED FIELD** — D1 §3.1
-/// rules 1, 2 and 5 together, from the reconciler's side.
-///
-/// The three fields a client controls that LOOK like identity are
-/// `spec.scheduleRef.uid`, `spec.scheduleRef.runPolicySha256` and
-/// `metadata.name`. Each is CHECKED against something the client does not
-/// control: the schedule object, the object's own policy fields, and the name
-/// the trigger composes.
+/// **AN IDENTITY IS NEVER TAKEN FROM A CLIENT-SUPPLIED FIELD.** The three
+/// client-controlled fields that look like identity, `spec.scheduleRef.uid`,
+/// `spec.scheduleRef.runPolicySha256` and `metadata.name`, are each CHECKED
+/// against something the client does not control: the schedule object, the
+/// object's own policy fields, and the name the trigger composes.
 ///
 /// KILLS: trusting `scheduleRef.uid` as the archive prefix without reading the
 /// schedule; re-labelling a failed scheduled claim as a manual run (its receipt
@@ -8513,17 +8147,12 @@ async fn an_identity_is_never_taken_from_a_client_supplied_field() {
     );
 }
 
-/// **THE TWO RULES THAT USED TO BE COMPENSATIONS, THROUGH THE RECONCILER** —
-/// a slot that is not a date, and a legacy ownerReference for another schedule.
-///
-/// Both now live in `identity.rs` (D1 §3.1 rules 1 and 3) and are guarded there
-/// by `tests/run_identity.rs`. These two rows exist because the rows that LOOK
-/// like they cover them do not: `a_spec_that_states_no_runnable_identity_…`
-/// leaves `metadata.name` at `logweir-backup-nightly-20261109-031700` while
-/// changing `scheduleRef.name` or `spec.slot`, so rule 1 refuses on the
-/// composed name before either rule is reached. Here the name **composes**, so
-/// the only thing that can refuse is the rule under test — and the refusal is
-/// asserted where an operator meets it, on the object, with nothing created.
+/// **A SLOT THAT IS NOT A DATE, AND A LEGACY OWNERREFERENCE FOR ANOTHER
+/// SCHEDULE, THROUGH THE RECONCILER.** Both rules live in `identity.rs`
+/// (guarded by `tests/run_identity.rs`). Here the name **composes**, unlike in
+/// `a_spec_that_states_no_runnable_identity_…` where the composed-name rule
+/// refuses first, so only the rule under test can refuse, and the refusal is
+/// asserted on the object with nothing created.
 ///
 /// KILLS: disabling the calendar round-trip in `identity::valid_slot`;
 /// dropping the name equality from `identity::legacy_owner_uid`.
@@ -8631,31 +8260,17 @@ async fn a_month_thirteen_slot_and_a_foreign_legacy_owner_are_refused_before_any
 }
 
 /// **A FROZEN RUN EXECUTES THE SELECTION IT WAS ADMITTED WITH, AND NEVER
-/// RESOLVES A SECOND ONE** — the NAMED-shape half of the post-freeze gate.
+/// RESOLVES A SECOND ONE**: the NAMED-shape half of the post-freeze gate.
 ///
-/// # Which half this is, and where the other one lives
+/// The fixture is [`backup`] (named topics, no `spec.allUserTopics`), with a
+/// `v2` plan whose frozen `topics` and `selection` are not what a fresh
+/// resolution would produce. A Job-recreate pass still executes it, because
+/// the gate reads the plan back rather than re-resolving from `spec`. The
+/// dynamic half, with no discovery route at all, is
+/// `tests/backup_selection.rs`'s test of the same name.
 ///
-/// The fixture is [`backup`] — `spec.topics: ["orders","payments"]` and **no**
-/// `spec.allUserTopics` — so its declared shape is `SelectedTopics` and the
-/// dynamic arm of the gate is never entered here. What it holds is the half
-/// that is true for every run: a `v2` plan whose frozen `topics` and
-/// `selection` are **not** what a fresh resolution would produce — here
-/// `AllUserTopics` coverage over a list the spec does not name — is still what
-/// a Job-recreate pass executes, because the gate reads the plan back rather
-/// than re-resolving from `spec`.
-///
-/// **The dynamic half — D1 §12's row of this name — is
-/// `tests/backup_selection.rs`'s `a_frozen_dynamic_backup_never_reruns_discovery`**,
-/// which freezes a real dynamic run and re-passes it over a route table with no
-/// discovery-Job route and no pod route at all, so a second discovery is a
-/// panic rather than an assertion. A gate bypass scoped to
-/// `SelectionShape::AllUserTopics` alone leaves THIS row passing and kills that
-/// one.
-///
-/// Without the gate, `desired` is built from `spec` (or, in dynamic mode, from
-/// a fresh discovery), the stored `topics`/`selection` no longer match it, and
-/// `verify_frozen_config_map` refuses the run terminally — on an archive that
-/// may be half written, for no reason but the passage of time.
+/// Without the gate, `verify_frozen_config_map` would refuse the run
+/// terminally, on an archive that may be half written.
 ///
 /// KILLS: removing the `status.execution` gate; building `desired` from `spec`
 /// when a plan exists; re-rendering the plan instead of verifying it.
@@ -8740,9 +8355,7 @@ async fn a_frozen_dynamic_backup_never_reruns_discovery() {
     );
 }
 
-// ===========================================================================
-// D3 §13 — PLAT-14.1's controller rows
-// ===========================================================================
+// The diagnosis rows
 
 use serde_json::json;
 use weirkeeper::controllers::backup::{
@@ -8754,8 +8367,8 @@ use weirkeeper::diagnostics::{
 };
 use weirkeeper::verification::{EvidenceRef, VerificationResult, VerificationVerdict};
 
-/// A verification oracle that answers `Valid` — the only verdict that lets
-/// `status.records` and `status.capture` be written (defect STATUS-RECORDS).
+/// A verification oracle that answers `Valid`, the only verdict that lets
+/// `status.records` and `status.capture` be written.
 fn valid_evidence(r: EvidenceRef) -> BoxFuture<'static, VerificationResult> {
     Box::pin(async move {
         VerificationResult {
@@ -8769,9 +8382,8 @@ fn valid_evidence(r: EvidenceRef) -> BoxFuture<'static, VerificationResult> {
     })
 }
 
-/// **D3 §13's "Mount failure" controller row, first half.** The reconcile
-/// WRITES the diagnostic, and it does it off the pod and the events and
-/// nothing else.
+/// **"Mount failure", first half.** The reconcile WRITES the diagnostic, off
+/// the pod and the events and nothing else.
 #[tokio::test]
 async fn a_credential_reference_that_is_not_there_reaches_the_status_within_one_requeue() {
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes_with(
@@ -8825,10 +8437,9 @@ async fn a_credential_reference_that_is_not_there_reaches_the_status_within_one_
     );
 }
 
-/// **D3 §13's "Mount failure" controller row, second half.** After
-/// `failFastSeconds` of the same non-transient diagnostic, the Job's deadline
-/// is collapsed — through **D2's `cancel.rs`**, and only after the status
-/// recording it has landed.
+/// **"Mount failure", second half.** After `failFastSeconds` of the same
+/// non-transient diagnostic, the Job's deadline is collapsed through
+/// `cancel.rs`, and only after the status recording it has landed.
 #[tokio::test]
 async fn a_run_that_cannot_start_has_its_job_deadline_collapsed_after_the_fail_fast_window() {
     // The object already carries the diagnostic, first seen five minutes ago.
@@ -8915,8 +8526,8 @@ async fn a_run_that_cannot_start_has_its_job_deadline_collapsed_after_the_fail_f
     );
 }
 
-/// **D3 §13's "Unschedulable pod" controller row.** The diagnostic is written
-/// and NO fail-fast patch is issued — D3 §15's L2.
+/// **"Unschedulable pod".** The diagnostic is written and NO fail-fast patch is
+/// issued.
 ///
 /// MUTANT: moving `PodUnschedulable` out of the transient class makes this row
 /// fail on the Job patch.
@@ -9007,9 +8618,9 @@ async fn an_unschedulable_run_is_reported_and_left_to_its_own_deadline() {
     );
 }
 
-/// The terminal state a fail-fast cancellation produces on the NEXT pass —
-/// D3 §2.2's "replaces `NoExitCode` only when the matching diagnostic was
-/// recorded before the Job ended".
+/// The terminal state a fail-fast cancellation produces on the NEXT pass: the
+/// diagnostic replaces `NoExitCode` only when it was recorded before the Job
+/// ended.
 #[tokio::test]
 async fn the_recorded_diagnostic_names_the_terminal_state_of_a_cancelled_run() {
     let mut stuck = frozen_backup();
@@ -9121,8 +8732,8 @@ async fn a_pod_that_answers_for_itself_is_not_overridden_by_a_recorded_diagnosti
     );
 }
 
-/// **D3 §13's "Completed Job cleanup" row, the repair half.** A terminal
-/// object whose finished Job has no TTL gets one on the next reconcile.
+/// **Completed Job cleanup, the repair half.** A terminal object whose
+/// finished Job has no TTL gets one on the next reconcile.
 #[tokio::test]
 async fn a_terminal_object_whose_job_lost_its_ttl_has_it_repaired() {
     let mut terminal = frozen_backup();
@@ -9261,9 +8872,7 @@ async fn the_ttl_repair_never_patches_a_job_that_has_one_or_that_is_not_ours() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Defect STATUS-RECORDS — `Backup.status.records`
-// ---------------------------------------------------------------------------
+// `Backup.status.records`
 
 /// The signed receipt this suite's archive oracle serves.
 fn receipt_document() -> Value {
@@ -9281,8 +8890,8 @@ fn receipt_document() -> Value {
     })
 }
 
-/// **Defect STATUS-RECORDS.** `status.records` is written, and it is the sum
-/// of the receipt's per-topic counts.
+/// `status.records` is written, and it is the sum of the receipt's per-topic
+/// counts.
 #[test]
 fn the_record_count_is_the_sum_of_the_receipts_own_per_topic_counts() {
     assert_eq!(
@@ -9535,8 +9144,8 @@ async fn old_runner_missing_or_unreadable_receipt_is_explicitly_legacy_unbound()
     assert!(final_status["capture"].is_null());
 }
 
-/// **Defect STATUS-RECORDS, through the reconciler.** The count reaches the
-/// status only on a VERIFIED receipt.
+/// Through the reconciler: the count reaches the status only on a VERIFIED
+/// receipt.
 #[tokio::test]
 async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_else() {
     let bytes = serde_json::to_vec(&receipt_document()).expect("the receipt serialises");
@@ -9622,19 +9231,16 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
     }
 }
 
-// ---------------------------------------------------------------------------
-// D3 W5 review finding F5 — the key-scan window's budget
-// ---------------------------------------------------------------------------
+// The key-scan window's budget
 
 /// The controller's key-scan window has room for everything a passing restore
 /// prints, and the budget is stated rather than assumed.
 ///
-/// **MIRRORED** from `crates/logweir/tests/progress_channel.rs`'s
+/// Mirrored from `crates/logweir/tests/progress_channel.rs`'s
 /// `the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window`,
-/// which measures the count by running the real runner. A `weirkeeper`
-/// dependency in that crate would invert the layering, so the number lives on
-/// both sides and each side names the other. This is the side that answers
-/// "does the window still fit"; that side answers "did the runner grow".
+/// which runs the real runner (a `weirkeeper` dependency there would invert the
+/// layering). This side answers "does the window still fit"; that side answers
+/// "did the runner grow".
 #[test]
 fn the_key_scan_window_has_room_for_the_runners_trailing_block() {
     assert_eq!(
@@ -9645,10 +9251,8 @@ fn the_key_scan_window_has_room_for_the_runners_trailing_block() {
          emits. If the runner grows a line, raise this — and then this row says whether the \
          window still fits"
     );
-    // `black_box` because both sides are compile-time constants and clippy
-    // folds a const comparison into `assert!(true)` and refuses it. The
-    // comparison is the whole point of the row, so it is kept opaque rather
-    // than dropped.
+    // `black_box`: both sides are constants, and clippy refuses a const
+    // comparison folded into `assert!(true)`.
     let budget = std::hint::black_box(BUDGETED_TRAILING_LINES);
     let window = std::hint::black_box(KEY_SCAN_TAIL_LINES);
     assert!(
@@ -9687,7 +9291,7 @@ fn the_key_scan_window_has_room_for_the_runners_trailing_block() {
             "`{prefix}` is inside the {KEY_SCAN_TAIL_LINES}-line window: {scanned:?}"
         );
     }
-    // The BACKUP tail too — I7's two keys plus D3 W3's conditional one.
+    // The BACKUP tail too: the two evidence keys plus the conditional one.
     let backup_tail = format!(
         "run r1 outcome=ok\n\
          catalog-key=logweir/catalog/v1/p.json\n\
@@ -9710,8 +9314,7 @@ fn the_key_scan_window_has_room_for_the_runners_trailing_block() {
     );
 }
 
-/// The progress read's own bounds are D3 §2.4's, and the two vocabularies are
-/// the runner's.
+/// The progress read's own bounds, and the two vocabularies are the runner's.
 #[test]
 fn the_progress_read_is_bounded_and_its_vocabularies_are_the_runners() {
     assert_eq!(PROGRESS_TAIL_LINES, 50, "D3 §2.4's `tail_lines`");
@@ -9736,18 +9339,12 @@ fn the_progress_read_is_bounded_and_its_vocabularies_are_the_runners() {
     }
 }
 
-// ===========================================================================
-// Review round 1 — F1, F4 and Q1
-// ===========================================================================
+// Terminal patches, the records guard and a diagnosing steady object
 
-/// **F1: every terminal builder carries `RunnerReady` forward.**
-///
-/// D3 §2.2: "Every terminal builder carries `RunnerReady` and `Verified`
-/// forward". It did not. A JSON merge patch REPLACES arrays, so the terminal
-/// patch that RECORDS a failure was deleting the one condition that says what
-/// the failure was — and a terminal object is never reconciled again, so no
-/// later pass rewrote it. D3 §15's L1 asserts that condition live, **after**
-/// the fail-fast terminal patch.
+/// **Every terminal builder carries `RunnerReady` forward.** A JSON merge patch
+/// REPLACES arrays, so a terminal patch without it would delete the condition
+/// that says what the failure was, and a terminal object is never reconciled
+/// again.
 ///
 /// MUTANT: dropping `CONDITION_RUNNER_READY` from `backup::carry_conditions`.
 #[tokio::test]
@@ -9869,15 +9466,12 @@ fn crate_name_limit() -> usize {
     weirkeeper::slot::NAME_LIMIT
 }
 
-/// **F4: the STATUS-RECORDS guard refuses every verdict that is not `Valid`.**
+/// **The `status.records` guard refuses every verdict that is not `Valid`.**
+/// `Invalid` and `Untrusted` (a receipt was presented and this installation
+/// refused it) are both exercised, not only `NotAttempted`.
 ///
-/// The shipped code was already correct; the GUARD was not. The reviewer's
-/// mutant widened `== Valid` to `!= NotAttempted` and survived, because the
-/// only negative arm used `unverified_evidence` — which answers `NotAttempted`
-/// — so `Invalid` and `Untrusted`, the two verdicts that mean *a receipt was
-/// presented and this installation refused it*, were never exercised.
-///
-/// MUTANT: any widening of the condition beyond `Valid`.
+/// MUTANT: any widening of the condition beyond `Valid`, such as
+/// `!= NotAttempted`.
 #[tokio::test]
 async fn a_receipt_this_installation_refuses_never_populates_the_records_column() {
     let bytes = serde_json::to_vec(&receipt_document()).expect("the receipt serialises");
@@ -9962,14 +9556,12 @@ async fn a_receipt_this_installation_refuses_never_populates_the_records_column(
     }
 }
 
-/// **Q1: a DIAGNOSING steady object is as quiet as a healthy one.**
+/// **A DIAGNOSING steady object is as quiet as a healthy one.**
 ///
-/// `merge_diagnostics` rewrites `message` and `severity` on every pass, outside
-/// the heartbeat. If a D2 `waiting` message ever embedded a moving token — a
-/// kubelet backoff duration, an event instant — every reconcile of a
-/// diagnosing object would become a status write and E11(d)'s "zero patches
-/// between heartbeats" would be lost for exactly the objects an operator is
-/// watching. No current message moves; this row is what notices if one starts.
+/// `merge_diagnostics` rewrites `message` and `severity` on every pass. If a
+/// `waiting` message ever embedded a moving token (a backoff duration, an
+/// event instant), every reconcile of a diagnosing object would write the
+/// status. No current message moves; this row notices if one starts.
 #[tokio::test]
 async fn a_steady_backup_that_is_diagnosing_also_issues_no_second_status_patch() {
     let pods = pod_list_waiting(
@@ -10024,15 +9616,13 @@ async fn a_steady_backup_that_is_diagnosing_also_issues_no_second_status_patch()
     );
 }
 
-/// **F2, the half a pure row cannot reach: a window with no phase line of its
-/// own does not retract the phase the object already carries.**
+/// **A window with no phase line of its own does not retract the phase the
+/// object already carries.**
 ///
-/// A run prints one `progress-phase=` line per phase. A phase that lasts two
-/// minutes therefore has eight reconciles whose fifty-line window holds only
-/// ordinary output — and because `apply` writes the WHOLE `progress` object,
-/// anything the read does not return is erased rather than left alone. So
-/// "no new phase line" has to mean "the phase has not changed", never "there
-/// is no phase".
+/// A run prints one `progress-phase=` line per phase, so most reconciles of a
+/// long phase see a window with none, and `apply` writes the WHOLE `progress`
+/// object. "No new phase line" has to mean "the phase has not changed", never
+/// "there is no phase".
 ///
 /// MUTANT: dropping the carry in `read_progress`.
 #[tokio::test]
@@ -10082,15 +9672,10 @@ async fn a_log_window_carrying_no_phase_line_does_not_blank_the_stored_phase() {
         "…which is the consequence: `readback` is one of D3 §2.5's three backup verifying steps"
     );
 }
-// ===========================================================================
-// D2 W10 — destination-backed execution (PLAT-08.1)
-//
-// The rows here are about ONE question: what does a run that names a saved
-// `BackupDestination` address, and what does the controller's own process
-// contribute to it. `tests/plan_addressing.rs` holds the two rows that need a
-// mutated PROCESS ENVIRONMENT (a separate binary, for its own reason); these
-// are the rows that do not.
-// ===========================================================================
+// Destination-backed execution: what a run that names a saved
+// `BackupDestination` addresses, and what the controller's own process
+// contributes. `tests/plan_addressing.rs` holds the rows that need a mutated
+// process environment.
 
 use weirkeeper::check::policy::{IdentityLocation, Policy};
 use weirkeeper::controllers::backup::{
@@ -10106,10 +9691,9 @@ use weirkeeper::destination::{
     STORE_CONTRACT_VERSION_ENV,
 };
 
-/// A minimal, PARSEABLE PEM: `30 06 aa 01 02 03 04 05 06`, a DER SEQUENCE of
-/// length six. `check_ca_bundle` refuses anything that is not a real PEM
-/// bundle, and a fixture that only LOOKS like one would have this row passing
-/// for the wrong reason.
+/// A minimal, PARSEABLE PEM (`30 06 aa 01 02 03 04 05 06`, a DER SEQUENCE of
+/// length six): `check_ca_bundle` refuses anything that is not a real PEM
+/// bundle, so a lookalike would pass this row for the wrong reason.
 const CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMAaqAQIDBAUG\n-----END CERTIFICATE-----\n";
 /// A DIFFERENT bundle, for the digest bind.
 const OTHER_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMAa7AQIDBAUG\n-----END CERTIFICATE-----\n";
@@ -10118,10 +9702,9 @@ const DEST_A_UID: &str = "d0000000-0000-4000-8000-00000000000a";
 const DEST_B_UID: &str = "d0000000-0000-4000-8000-00000000000b";
 
 /// `dest-a`: MinIO over TLS, path-style, a region, a separate read grant, and
-/// NO CA bundle — the U1 gate (`ENGINE_CUSTOM_CA_VERIFIED`) refuses a bundle
-/// for engine-driven runs by default, and these rows are about addressing
-/// rather than about that gate. `a_ca_bundle_is_refused_for_an_engine_driven_run`
-/// is the row that carries one.
+/// NO CA bundle (a bundle is refused for engine-driven runs by default, and
+/// these rows are about addressing).
+/// `a_ca_bundle_is_refused_for_an_engine_driven_run` carries one.
 fn dest_a_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
@@ -10161,8 +9744,7 @@ fn dest_a_value() -> Value {
 }
 
 /// `dest-b`: a DIFFERENT bucket on a DIFFERENT endpoint over EXPLICIT plaintext
-/// HTTP, with a different credential and a session token. The second half of
-/// the two-destination contract (D2 §3.13).
+/// HTTP, with a different credential and a session token.
 fn dest_b_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
@@ -10219,8 +9801,7 @@ fn both_roles(value: Value) -> BackupDestinations {
 fn destination_backed_backup(name: &str) -> Backup {
     let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
     // THE HOLD IS MEASURED FROM `creationTimestamp`, the one timestamp a
-    // `Backup` carries that no controller wrote. A fixture without one is not
-    // a fixture of anything an API server ever serves.
+    // `Backup` carries that no controller wrote, so the fixture carries one.
     value["metadata"]["creationTimestamp"] = serde_json::json!("2026-11-09T03:00:00Z");
     value["spec"]["archive"] = serde_json::json!({
         "url": format!("logweir-destination://{name}")
@@ -10232,20 +9813,16 @@ fn destination_backed_backup(name: &str) -> Backup {
 /// **THE FROZEN SNAPSHOT IS WHAT THE JOB IS RENDERED FROM, AND A LATER EDIT TO
 /// THE DESTINATION CANNOT REACH A RUN THAT ALREADY EXISTS.**
 ///
-/// # The defect this closes
-///
-/// D2 §3.7. A runner Job is created once and may be RE-created: garbage
-/// collected, a node lost, a controller restarted mid-run. If the second Job
-/// were rendered from the destination as it reads NOW, an access-key rotation
-/// or a re-pointed endpoint between the freeze and the re-creation would change
-/// what an approved, half-written run addresses — silently, with the plan
-/// document still saying the old thing.
+/// A runner Job may be RE-created (garbage collected, a node lost, a
+/// controller restarted). Rendered from the destination as it reads NOW, an
+/// access-key rotation or a re-pointed endpoint would change what an
+/// approved, half-written run addresses, with the plan document still saying
+/// the old thing.
 ///
 /// KILLS: rendering `runner_job_spec_from_inputs`' destination environment from
 /// a freshly resolved `ResolvedDestination` instead of from
-/// `inputs.destination`. The mutant passes every row that freezes and renders
-/// in one pass; this one freezes against `dest-a` and renders against a
-/// snapshot while `dest-b` is what the cluster now holds.
+/// `inputs.destination`. This row freezes against `dest-a` and renders while
+/// `dest-b` is what the cluster now holds.
 #[test]
 fn the_job_is_rendered_from_the_frozen_destination_and_not_from_the_object() {
     let backed = destination_backed_backup("dest-a");
@@ -10271,9 +9848,8 @@ fn the_job_is_rendered_from_the_frozen_destination_and_not_from_the_object() {
         "the digest a recovery point is indexed by comes from the resolution"
     );
 
-    // ONE RENDERER, TWO CALLERS. The snapshot's environment is the live
-    // resolution's environment, variable for variable — that equality is what
-    // makes "rendered from the snapshot" safe rather than a second answer.
+    // ONE RENDERER, TWO CALLERS: the snapshot's environment is the live
+    // resolution's, variable for variable.
     assert_eq!(
         snapshot.job_env().literals,
         a.job_env().literals,
@@ -10353,15 +9929,12 @@ fn the_job_is_rendered_from_the_frozen_destination_and_not_from_the_object() {
 }
 
 /// **TWO DESTINATIONS IN ONE NAMESPACE SHARE NO BUCKET, NO CREDENTIAL AND NO
-/// EVIDENCE LOCATION** — D2 §3.13's acceptance contract, at the unit layer.
-///
-/// W14 proves it live; this row proves the CONTROLLER never mixes them, which
-/// is the half a live test cannot isolate from a MinIO policy being wrong.
+/// EVIDENCE LOCATION**: the controller never mixes them, the half a live test
+/// cannot isolate from a wrong MinIO policy.
 ///
 /// KILLS: any `job_env` that reads a setting from a source other than the
-/// resolution it was called on — the mutant "take `allow_http` from the
-/// addressing style" (defect UI-HTTPDOWNGRADE's server-side twin) makes
-/// `dest-a` and `dest-b` agree, and this row separates them.
+/// resolution it was called on, such as taking `allow_http` from the
+/// addressing style.
 #[test]
 fn two_destinations_share_no_bucket_credential_or_evidence_location() {
     let a = resolved(dest_a_value(), DestinationRole::ArchiveWrite);
@@ -10391,19 +9964,14 @@ fn two_destinations_share_no_bucket_credential_or_evidence_location() {
         "dest-b declares InsecureHTTP EXPLICITLY, which is the only thing that may produce this"
     );
 
-    // AND NO CREDENTIAL VALUE IS ANYWHERE IN EITHER RESOLUTION. A resolution is
-    // serialised into a frozen plan `ConfigMap`, which has no encryption at
-    // rest and a much wider read surface than a Secret.
+    // AND NO CREDENTIAL VALUE IS ANYWHERE IN EITHER RESOLUTION: a resolution is
+    // serialised into a plan `ConfigMap`, which has no encryption at rest and a
+    // wider read surface than a Secret.
     //
-    // **THE ASSERTION IS STRUCTURAL, NOT A GREP.** The first version of this
-    // block searched the encoded snapshot for `AKIA` and `password` — strings
-    // no fixture in this file contains in any field, so it could not fail for
-    // the reason it named (the independent review's **L3**). What actually
-    // holds is that `ResolvedDestinationSnapshot` has NO VALUE-BEARING FIELD:
-    // a grant is a Secret NAME plus DATA KEY names, and the kubelet resolves
-    // the value in the pod. So the check is on the key set — every key the
-    // encoding emits is one of a closed list — which fails the moment somebody
-    // adds a field that could carry a value.
+    // The assertion is structural: `ResolvedDestinationSnapshot` has no
+    // value-bearing field (a grant is a Secret NAME plus DATA KEY names, and the
+    // kubelet resolves the value in the pod), so every key the encoding emits must
+    // be one of a closed list, which fails the moment a field could carry a value.
     for resolved in [&a, &b] {
         let encoded: Value = serde_json::from_slice(
             &resolved
@@ -10433,9 +10001,8 @@ fn two_destinations_share_no_bucket_credential_or_evidence_location() {
                 "and no key is a value: {key}"
             );
         }
-        // The one value-shaped thing a grant DOES carry is the name of a data
-        // key, which is public by construction — it is in the Secret's own
-        // `data` map, readable by anybody who can read the Secret at all.
+        // The one value-shaped thing a grant carries is the name of a data key,
+        // which is public to anybody who can read the Secret at all.
         assert_eq!(
             grant.get("mode").and_then(Value::as_str),
             Some("SecretKeys"),
@@ -10447,12 +10014,10 @@ fn two_destinations_share_no_bucket_credential_or_evidence_location() {
 
 /// **AN ABSENT DESTINATION HOLDS, AND THE HOLD ENDS.**
 ///
-/// D2 §3.6 step 1. The ref and the object are two `kubectl apply`s in one
-/// directory and the order is the server's, so a first-pass refusal would fail
-/// a correct manifest set on a race the operator cannot influence — and
-/// `Backup.spec` is CEL-immutable, so that refusal could never be repaired in
-/// place. It ends because a hold that never ends is an object at `Pending` for
-/// the life of the cluster with nothing watching it.
+/// The ref and the object are two `kubectl apply`s whose order is the
+/// server's, so a first-pass refusal would fail a correct manifest set, and
+/// `Backup.spec` is CEL-immutable so it could never be repaired in place. It
+/// ends because a hold that never ends is an object at `Pending` forever.
 ///
 /// KILLS: `is_hold()` widened to every refusal (a `DestinationRoleNotConfigured`
 /// would then requeue forever), and the expiry dropped (the hold would never
@@ -10520,12 +10085,9 @@ async fn an_absent_destination_holds_within_its_budget_and_then_fails() {
 }
 
 /// **A DESTINATION THAT DECLARES A CA BUNDLE IS REFUSED FOR AN ENGINE-DRIVEN
-/// RUN UNTIL SOMEBODY MEASURES THE ENGINE.**
-///
-/// D2 §3.5's `[UNVERIFIED — U1: whether the engine honours a custom CA file]`.
-/// The claim is that the engine honours `SSL_CERT_FILE`; it is plausible and undemonstrated, and if it is wrong the
-/// observable failure is a TLS handshake inside the engine child reported as
-/// an opaque operational error with no mention of certificates.
+/// RUN UNTIL SOMEBODY MEASURES THE ENGINE.** Whether the engine honours
+/// `SSL_CERT_FILE` is undemonstrated, and if it does not, the failure is a TLS
+/// handshake inside the engine child reported as an opaque operational error.
 ///
 /// KILLS: `ENGINE_CUSTOM_CA_VERIFIED = true` flipped without the measurement,
 /// and the gate dropped from `admit_destination`.
@@ -10576,16 +10138,14 @@ async fn a_ca_bundle_is_refused_for_an_engine_driven_run() {
     );
 }
 
-/// **`evidenceRead` ABSENT IS A DEFINED ANSWER AND NOT A SILENCE.**
-///
-/// D2 §3.9 step 2. A destination with no reader gets `NotAttempted` naming the
-/// field to add and the command that verifies the receipt without a
-/// controller-held credential — never a green badge, and never `Invalid`,
-/// which would be a claim about a document nobody fetched.
+/// **`evidenceRead` ABSENT IS A DEFINED ANSWER AND NOT A SILENCE.** A
+/// destination with no reader gets `NotAttempted` naming the field to add and
+/// the command that verifies the receipt without a controller-held credential:
+/// never a green badge, and never `Invalid`, which would be a claim about a
+/// document nobody fetched.
 ///
 /// KILLS: falling back to the controller's global handle when the grant is
-/// `NotConfigured` — the mutant reads a DIFFERENT bucket with a DIFFERENT
-/// principal and reports whatever it finds there.
+/// `NotConfigured`, which reads a DIFFERENT bucket with a DIFFERENT principal.
 #[test]
 fn an_unconfigured_evidence_read_is_not_configured_and_not_a_wider_grant() {
     // `dest-b` declares `archiveWrite` and nothing else.
@@ -10596,8 +10156,8 @@ fn an_unconfigured_evidence_read_is_not_configured_and_not_a_wider_grant() {
         "an absent evidenceRead is a defined answer and NEVER a fall-back to the write grant"
     );
 
-    // `dest-a` asks for the explicit read grant, which is rule R9: a write
-    // grant is never reused to read evidence back.
+    // `dest-a` asks for the explicit read grant: a write grant is never reused
+    // to read evidence back.
     let a = resolved(dest_a_value(), DestinationRole::EvidenceRead);
     match a.grant {
         ResolvedGrant::SecretKeys { ref secret, .. } => assert_eq!(secret, "lw-a-reader"),
@@ -10630,12 +10190,9 @@ fn an_unconfigured_evidence_read_is_not_configured_and_not_a_wider_grant() {
 }
 
 /// **THE CA BYTES AND THE DIGEST THAT NAMES THEM TRAVEL TOGETHER, OR NOTHING
-/// IS FROZEN.**
-///
-/// D2 §3.7: the bundle is copied into the same immutable plan `ConfigMap` and
-/// its digest is part of the canonical snapshot. A plan whose bytes are not the
-/// bytes its own snapshot commits to would let a rotated root be swapped into a
-/// run that already exists.
+/// IS FROZEN.** The bundle is copied into the immutable plan `ConfigMap` and
+/// its digest is part of the canonical snapshot, so a rotated root cannot be
+/// swapped into a run that already exists.
 ///
 /// KILLS: `freeze_with_ca` accepting any bytes, and the fourth `ConfigMap` key
 /// being written without the digest bind.
@@ -10698,9 +10255,7 @@ fn a_frozen_ca_bundle_is_bound_to_the_digest_in_its_own_snapshot() {
     );
 }
 
-// ===========================================================================
-// D2 W10 fix round 1 — the rows the independent review found missing
-// ===========================================================================
+// Evidence routing and the frozen destination on re-create
 
 use weirkeeper::backup_execution::stored_destination;
 use weirkeeper::controllers::backup::{
@@ -10731,22 +10286,14 @@ fn with_evidence_read(mode: Value) -> Value {
 /// **A DESTINATION-BACKED RUN'S EVIDENCE IS NEVER READ THROUGH THE
 /// CONTROLLER'S GLOBAL HANDLE.**
 ///
-/// # The sentence this row exists to make true
+/// `Context::archive` is only for objects without destination refs: it takes
+/// its bucket, region, endpoint and credential from the controller's own
+/// process, so reading another destination's receipt through it means the
+/// wrong bucket or the wrong principal, and a document found there would be
+/// reported as this run's verification.
 ///
-/// D2 §3.10: "`Context::archive` is used only for objects without destination
-/// refs." The controller's one global store takes its bucket, region, endpoint
-/// AND credential from the controller's own process (grounding **G2**), so
-/// reading a second destination's receipt through it means the wrong bucket or
-/// the wrong principal — and the `NotAttempted` that results reads as "no
-/// evidence" rather than "wrong bucket". Worse, a document that IS found there
-/// is reported as this run's verification.
-///
-/// # Every arm, because the routing is the whole property
-///
-/// The independent review measured that making the `SecretKeys` /
-/// `WorkloadIdentity` arm return `GlobalHandle` left all 91 rows of this file
-/// green. Asserting on the VARIANT and not on the detail text is deliberate:
-/// the detail is prose and will be edited, the variant is the routing.
+/// Every arm is asserted, on the VARIANT and not on the detail text: the
+/// routing is the whole property, and the detail is prose.
 #[tokio::test]
 async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle() {
     let now = utc(2026, 11, 9, 3, 17);
@@ -10784,13 +10331,11 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
 
     // ---- SecretKeys, WorkloadIdentity, ArchiveReadGrant: the FETCH JOB ----
     //
-    // THE ROW THE REVIEWER'S SURVIVING MUTANT NEEDED. These grants are read by
-    // an evidence-fetch Job in the object's own namespace (D2 §3.9, option C —
-    // the default), because the controller holds no verb on `secrets` and must
-    // not. The one answer that must never be given is the global handle's,
-    // which is a different principal over a different bucket. And the grant
-    // the Job will hold is the `evidenceRead` one: for `ArchiveReadGrant`,
-    // the destination's `archiveRead` Secret — never `archiveWrite`'s.
+    // These grants are read by an evidence-fetch Job in the object's own
+    // namespace, because the controller holds no verb on `secrets` and must
+    // not. The global handle's answer is never given, and the grant the Job
+    // holds is the `evidenceRead` one: for `ArchiveReadGrant`, the
+    // destination's `archiveRead` Secret, never `archiveWrite`'s.
     for (mode, archive_read, want_secret) in [
         (
             serde_json::json!({"mode": "SecretKeys", "secret": {
@@ -10853,10 +10398,9 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
 
     // ---- ControllerIdentity, UNLISTED: refused, and it says why ---------
     //
-    // AND IT SAYS WHICH CLOSED DOOR IT IS. With no policy `ConfigMap`
-    // configured on this installation, every key reads its closed default and
-    // NOBODY can list a location — a message blaming the administrator's
-    // allowlist would send an operator to edit an object that does not exist.
+    // With no policy `ConfigMap`, every key reads its closed default and
+    // NOBODY can list a location, so the message must not blame an allowlist
+    // that does not exist.
     let (client, _r, _b) = mock_client_recording_bodies(destination_route(
         "/backupdestinations/dest-b",
         with_evidence_read(serde_json::json!({"mode": "ControllerIdentity"})),
@@ -10883,8 +10427,8 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
 
     // ---- a destination that no longer resolves --------------------------
     //
-    // NOT a refusal: this runs AFTER a Job has finished, and a destination
-    // deleted or edited in the meantime must not turn an observed run into one.
+    // NOT a refusal: this runs after a Job has finished, and a destination
+    // deleted or edited since must not turn an observed run into one.
     let (client, _r, _b) = mock_client_recording_bodies(vec![Route {
         method: "GET",
         path_suffix: "/backupdestinations/dest-b",
@@ -10906,27 +10450,18 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
 }
 
 /// **A DESTINATION EDITED AFTER THE FREEZE CHANGES NOTHING FOR THE RUNNING
-/// RUN** — D2 §3.7, and the review's M1/M2.
+/// RUN.**
 ///
-/// # The defect, exactly
+/// Every edit bumps `metadata.generation`, the frozen block records the
+/// generation it resolved, and `verify_frozen_config_map` compares the block
+/// WHOLE. So a pass that re-created a garbage-collected Job by re-resolving
+/// the LIVE object would end the run in `PlanConfigMapConflict`.
+/// `stored_destination` reads the frozen block back, as `stored_selection`
+/// does for the selection.
 ///
-/// Every edit to a `BackupDestination` bumps `metadata.generation`, the frozen
-/// block records the generation it resolved, and `verify_frozen_config_map`
-/// compares that block WHOLE. So a pass that re-creates a garbage-collected Job
-/// by re-resolving the LIVE object terminates the run with a
-/// `PlanConfigMapConflict` — on an archive that may be half written — because
-/// somebody rotated a Secret name or added an `evidenceRead` grant while it
-/// ran. Fail-closed, and still exactly the thing D2 §3.7 says cannot happen.
-///
-/// `stored_destination` is the readback that fixes it, mirroring
-/// `stored_selection`, which has had one since D1 W5 for the same reason.
-///
-/// KILLS: dropping the readback (the re-created plan then differs from the
-/// stored one); `if false && frozen.inputs.destination != expected.destination`
-/// together with `view.destination = None` in `executable()` — the review's
-/// surviving mutant R3 — because this row asserts the plan the re-create
-/// renders is BYTE-IDENTICAL to the stored one, which no comparison-free
-/// controller can produce from an edited object.
+/// KILLS: dropping the readback; disabling the destination comparison and
+/// clearing `view.destination` in `executable()`, because this row asserts
+/// the re-created plan is BYTE-IDENTICAL to the stored one.
 #[test]
 fn a_destination_edited_after_the_freeze_does_not_change_a_created_run() {
     let backed = destination_backed_backup("dest-a");
@@ -10964,8 +10499,8 @@ fn a_destination_edited_after_the_freeze_does_not_change_a_created_run() {
          re-resolves would refuse the run"
     );
 
-    // THE READBACK PATH. The plan the Job-gone pass renders is byte-identical
-    // to the one the run was admitted with.
+    // THE READBACK PATH: the plan the Job-gone pass renders is byte-identical to
+    // the one the run was admitted with.
     let (snapshot, ca_pem) = stored_destination(&plan).expect("the plan carries its destination");
     assert_eq!(
         snapshot.generation, 3,
@@ -10986,8 +10521,7 @@ fn a_destination_edited_after_the_freeze_does_not_change_a_created_run() {
     );
     assert_eq!(recreated.sha256, frozen.sha256);
 
-    // …AND `verify_frozen_config_map` ADMITS IT. This is the comparison the
-    // review's mutant R3 disabled with no row noticing.
+    // …AND `verify_frozen_config_map` ADMITS IT.
     weirkeeper::backup_execution::verify_frozen_config_map(&plan, &backed, &recreated, None)
         .expect("the stored plan is admitted against the frozen re-render");
     let refused =
@@ -11002,23 +10536,14 @@ fn a_destination_edited_after_the_freeze_does_not_change_a_created_run() {
 }
 
 /// **A DESTINATION-BACKED BACKUP JOB CARRIES THE EVIDENCE CREDENTIAL ITS
-/// RUNNER REFUSES TO RUN WITHOUT** — the review's C1.
+/// RUNNER REFUSES TO RUN WITHOUT.**
 ///
-/// # What was broken, and how it hid
-///
-/// A backup writes TWO things: the archive through `archiveWrite`, and its
-/// signed receipt through `evidenceWrite` over Global Constraint 6's `logweir/`
-/// root. The runner builds two stores and refuses a run whose
-/// `LOGWEIR_EVIDENCE_CREDENTIALS` it does not recognise — including the empty
-/// string an unset variable produces. `render_job_env` never emitted it, so
-/// **every destination-backed run exited 3 at the store builder**, after the
-/// archive handles were opened and before a byte was archived. The erratum
-/// **E20** failure class, one layer further in.
-///
-/// It hid because the end-to-end row asserted the run stops at
-/// `$LOGWEIR_SOURCE_PASSWORD is unset`, which happens BEFORE any store is
-/// built. `schedule_controller::the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`
-/// is the row that closes that hole; this one is its unit half.
+/// A backup writes the archive through `archiveWrite` and its signed receipt
+/// through `evidenceWrite`. The runner builds two stores and refuses a run
+/// whose `LOGWEIR_EVIDENCE_CREDENTIALS` it does not recognise, including the
+/// empty string, so a Job without it exits 3 at the store builder.
+/// `schedule_controller::the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`
+/// is the end-to-end half.
 ///
 /// KILLS: dropping `evidence_job_env` from the rendered Job.
 #[test]
@@ -11125,24 +10650,12 @@ fn a_destination_backed_backup_job_names_its_evidence_credential() {
 }
 
 /// **A JOB RE-CREATED AFTER THE DESTINATION WAS EDITED READS THE PLAN AND NOT
-/// THE OBJECT** — the reconcile half of the review's M1/M2.
+/// THE OBJECT**: the reconcile half of
+/// `a_destination_edited_after_the_freeze_does_not_change_a_created_run`.
 ///
-/// # Why the pure row above is not enough
-///
-/// `a_destination_edited_after_the_freeze_does_not_change_a_created_run` proves
-/// `desired_execution_inputs_frozen` renders the stored block faithfully. It
-/// says nothing about whether the RECONCILER calls it — and a mutant replacing
-/// `stored_destination` with `None` survived that row while re-resolving the
-/// live object on every Job-gone pass, which is the defect itself.
-///
-/// # The route table is the assertion
-///
-/// **There is no `backupdestinations` route.** The double panics on a request
-/// it was not given a route for, so a pass that reads the destination at all
-/// fails here by construction — which is exactly the property D2 §3.7 states:
-/// a run that is already frozen does not consult the object again. The edited
-/// object is never even served, so the row cannot be satisfied by a
-/// coincidentally-equal resolution.
+/// **There is no `backupdestinations` route.** The double panics on an
+/// unrouted request, so a pass that reads the destination at all fails here:
+/// a run that is already frozen does not consult the object again.
 ///
 /// KILLS: `stored_destination` replaced by `None` in `reconcile_backup_inner`
 /// (the reconcile then GETs the destination and the double panics); and
@@ -11211,8 +10724,8 @@ async fn a_frozen_destination_backed_backup_recreates_its_job_without_reading_th
             status: 200,
             body: backup_json(),
         },
-        // …AND DELIBERATELY NO `/backupdestinations/dest-a`. See the doc
-        // comment: reading it at all is the defect, and the double panics.
+        // …AND DELIBERATELY NO `/backupdestinations/dest-a`: reading it at all is
+        // the defect, and the double panics.
     ];
     let (client, _seen, bodies) = mock_client_recording_bodies(routes);
     let outcome = reconcile_backup(
@@ -11267,13 +10780,10 @@ async fn a_frozen_destination_backed_backup_recreates_its_job_without_reading_th
     );
 }
 
-// ===========================================================================
-// Defect D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN — the honest verdict is published
-// ===========================================================================
+// The honest evidence verdict is published
 
-/// [`frozen_backup`], re-pointed at a saved destination: the run is already
-/// frozen (so the §3.6 admission is behind it) and its Job has finished, which
-/// is the only state in which evidence is read at all.
+/// [`frozen_backup`], re-pointed at a saved destination: frozen, with its Job
+/// finished, the only state in which evidence is read at all.
 fn frozen_destination_backed_backup(name: &str) -> Backup {
     let mut b = destination_backed_backup(name);
     b.status = Some(BackupStatus {
@@ -11307,39 +10817,26 @@ fn finished_routes_for_destination(
     routes
 }
 
-/// **A DESTINATION-BACKED RUN PUBLISHES ITS `NotAttempted` VERDICT** — defect
-/// `D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN`, measured live on 2026-09-18.
+/// **A DESTINATION-BACKED RUN PUBLISHES ITS `NotAttempted` VERDICT.**
 ///
-/// # The defect
+/// For a destination with no `evidenceRead`, `evidence_source` answers
+/// `NotAttempted` with a sentence naming why and that the operator can run
+/// `logweir drill verify`. Nothing was fetched, so `receipt_sha256` is `None`
+/// by construction; a block fenced on that digest would never be written and
+/// the sentence would reach nobody.
 ///
-/// `evidence_source` answers `NotAttempted` with a sentence naming exactly why
-/// there is no reader — at the time, for `SecretKeys` and `WorkloadIdentity`
-/// too, whose evidence-fetch Job did not exist yet; today for a destination
-/// with no `evidenceRead` at all — and that the operator can run
-/// `logweir drill verify`. Because
-/// nothing was fetched, `receipt_sha256` is `None` BY CONSTRUCTION — and the
-/// second patch used to be fenced on that digest, so the whole block was
-/// skipped and the operator saw **no** `status.evidence.verification` field at
-/// all. The sentence existed and reached nobody; `S1.statusVerification` read
-/// `null` on both live `Backup`s.
-///
-/// # What is asserted, and why it is not the digest
-///
-/// D2 §3.9 step 2: the mode is chosen once BOTH KEYS are present, and the
-/// `NotConfigured` arm writes its verdict with no fetch at all. So the guard is
-/// "was a receipt written" — which the runner's two key lines say — and never
-/// "was a receipt read", which is the question the verdict answers.
+/// The mode is chosen once BOTH KEYS are present, so the guard is "was a
+/// receipt written" (the runner's two key lines), never "was a receipt read",
+/// which is the question the verdict answers.
 ///
 /// KILLS: re-fencing the block on `receipt_sha256`; answering `Valid`,
 /// `Invalid` or `Untrusted` without bytes; dropping the detail sentence;
 /// writing `records`/`capture` off an unverified run.
 #[tokio::test]
 async fn a_destination_backed_run_with_no_evidence_reader_publishes_not_attempted() {
-    // NO `evidenceRead` AT ALL. Since the evidence-fetch Job landed a
-    // `SecretKeys`/`WorkloadIdentity` grant IS read (see
-    // `a_pod_only_grant_creates_an_evidence_fetch_job_holding_exactly_that_grant`);
-    // the verdict that has to be PUBLISHED rather than skipped is now the one
-    // for a destination that names no reader.
+    // NO `evidenceRead` AT ALL: a `SecretKeys`/`WorkloadIdentity` grant is read
+    // by a fetch Job
+    // (`a_pod_only_grant_creates_an_evidence_fetch_job_holding_exactly_that_grant`).
     let value = dest_b_value();
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
@@ -11351,9 +10848,9 @@ async fn a_destination_backed_run_with_no_evidence_reader_publishes_not_attempte
     reconcile_backup(
         &frozen_destination_backed_backup("dest-b"),
         &client,
-        // THE GLOBAL HANDLE IS NEVER CONSULTED for a destination-backed run
-        // (D2 §3.10), and this oracle would answer `None` anyway: the point is
-        // that a `None` observation no longer silences the verdict.
+        // The global handle is never consulted for a destination-backed run, and
+        // this oracle would answer `None` anyway: a `None` observation must not
+        // silence the verdict.
         &unobserved_archive,
         &unverified_evidence,
         utc(2026, 11, 9, 3, 20),
@@ -11421,17 +10918,14 @@ async fn a_destination_backed_run_with_no_evidence_reader_publishes_not_attempte
     );
 }
 
-/// The GC11 half of [`a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted`],
-/// and the decision it records: **"no artifact was written" still writes
-/// nothing.**
+/// The no-artifact half of
+/// [`a_destination_backed_run_with_no_evidence_reader_publishes_not_attempted`]:
+/// **"no artifact was written" still writes nothing.**
 ///
-/// D2 §3.9 step 2 gates the whole evidence flow on both keys being present,
-/// and Global Constraint 11 says exits 1, 3 and 4 wrote no artifact — so the
-/// runner prints no `receipt-key=`/`sidecar-key=` lines and there is no
-/// document to have an opinion about. A `NotAttempted` block here would be a
-/// verdict about a receipt that does not exist, which reads as "we could not
-/// check your backup" when the truth is "this run produced nothing to check".
-/// The absence is the distinction, and it is kept.
+/// Exits 1, 3 and 4 write no artifact, so the runner prints no
+/// `receipt-key=`/`sidecar-key=` lines. A `NotAttempted` block would read as
+/// "we could not check your backup" when the truth is "this run produced
+/// nothing to check".
 ///
 /// KILLS: hoisting the `NotAttempted` verdict out of the key guard as well as
 /// out of the digest guard.
@@ -11478,46 +10972,30 @@ async fn a_run_that_wrote_no_artifact_still_writes_no_verification_block() {
     );
 }
 
-// ===========================================================================
-// Fix round 1, R3 — the merge patch nulls the fields the verdict does not hold
-// ===========================================================================
+// The merge patch nulls the fields the verdict does not hold
 
 use weirkeeper::conditions::status_unchanged;
 use weirkeeper::verification::{backup_badge, verification_patch_value};
 
-/// **A VERDICT THAT HOLDS NO KEY CLEARS THE ONE THAT WAS THERE** — review
-/// finding **R3**, seam **S7** and the D3 W2 record's clause: *"every write a
-/// resourceVersion-preconditioned merge PATCH with explicit `null` for a field
-/// that no longer holds."*
+/// **A VERDICT THAT HOLDS NO KEY CLEARS THE ONE THAT WAS THERE**: every write
+/// is a resourceVersion-preconditioned merge PATCH with explicit `null` for a
+/// field that no longer holds.
 ///
-/// # The three properties, and why each one is separate
+/// 1. **The patch nulls.** `VerificationResult::to_status_value` OMITS
+///    `matchedKeyId`, `signedAt` and `trust` when the verdict has none, and
+///    RFC 7386 leaves an omitted key in place, so
+///    `controllers::backup::verification_patch_value` turns the omissions into
+///    explicit nulls.
+/// 2. **The nulls clear.** `verification::retrust` re-derives `Valid` or
+///    `Untrusted` from a stored `matchedKeyId`, so a stale key id left under a
+///    `NotAttempted` is a trust decision about a document never fetched.
+/// 3. **And they cost no write.** A key sent as `null` that is already absent
+///    changes nothing, so an unmoved verdict still compares equal and
+///    `patch_status_if_changed` sends nothing.
 ///
-/// 1. **The patch nulls.** `VerificationResult::to_status_value` builds a fresh
-///    block and OMITS `matchedKeyId`, `signedAt` and `trust` when the verdict
-///    has none. RFC 7386 leaves an omitted key in place, so an omission is not
-///    a clearing — `controllers::backup::verification_patch_value` turns the
-///    omissions into explicit nulls on the way into `second_patch`.
-/// 2. **The nulls actually clear.** Applied over a status carrying a stale
-///    `matchedKeyId` and `trust`, the patch must REMOVE them. That is the
-///    whole point: `verification::retrust` re-derives `Valid` or `Untrusted`
-///    from a stored `matchedKeyId` (guarded by `has_trust_verdict`), so a
-///    stale key id left under a `NotAttempted` is a trust decision about a
-///    document this controller never fetched.
-/// 3. **And they cost no write.** `conditions::apply_merge_patch` removes a
-///    key sent as `null` and does nothing when it was already absent, so a
-///    verdict that has not moved still compares equal and
-///    `patch_status_if_changed` still sends nothing. Erratum **E11(d)** —
-///    20 reconciles a second, each a real write — is what that guard exists to
-///    prevent, and nulling fields is exactly the change that could have
-///    reintroduced it.
-///
-/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK**, which is
-/// why `verification_patch_value` is a wrapper rather than an edit to
-/// `to_status_value`: the block the badge is computed over is the block the
-/// controller rendered. Since TRUST-VALID-BASIS-CLASS (review LOW-1) a
-/// `trust: null` reads as an ABSENT block (`ValidBasis::of_json`), so the
-/// nulled form and the rendered form give the same badge; arm 4 below pins
-/// that agreement.
+/// The nulls belong to the patch, not to the rendered block the badge is
+/// computed over. A `trust: null` reads as an absent block
+/// (`ValidBasis::of_json`), so both forms give the same badge; arm 4 pins it.
 ///
 /// KILLS: dropping `verification_patch_value` from either reconciler; nulling
 /// a field the verdict DOES hold; moving the nulls inside `to_status_value`.
@@ -11586,9 +11064,8 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 
     // ---- 3. AND THEY COST NO WRITE -----------------------------------
     //
-    // The object as it stands AFTER this patch, patched with the same patch:
-    // nothing moves, so `patch_status_if_changed` sends nothing. Erratum
-    // E11(d).
+    // The object as it stands after this patch, patched again: nothing moves,
+    // so `patch_status_if_changed` sends nothing.
     let settled = stale.clone();
     assert!(
         status_unchanged(Some(&settled), &json!({ "status": second })),
@@ -11598,12 +11075,9 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 
     // ---- 4. THE BADGE'S VALUE IS THE UN-NULLED ONE --------------------
     //
-    // A `Valid` verdict that carries no trust projection renders WITHOUT a
-    // `trust` key, and the patch form writes `trust: null`. Both are D3 §12's
-    // absent block (`ValidBasis::of_json`: a `null` field is no block), so the
-    // badge is green over either — the reading every typed reader already
-    // gives `null`. Before review LOW-1 of `trust-basis-class` the raw badge
-    // read `null` as a malformed block and refused it.
+    // A `Valid` verdict with no trust projection renders WITHOUT a `trust` key,
+    // and the patch form writes `trust: null`. Both are an absent block
+    // (`ValidBasis::of_json`), so the badge is green over either.
     let rendered = VerificationResult {
         result: VerificationVerdict::Valid,
         matched_key_id: Some("test-key".to_string()),
@@ -11644,11 +11118,10 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 
     // ---- 5. AND THE RECONCILER STILL GOES GREEN ----------------------
     //
-    // The same property THROUGH the controller, because arm 4 is a pure check
-    // and a misplaced wrapper is a call-site mistake. `valid_evidence` answers
-    // `Valid` with `trust: None` — the legacy shape — over an observation that
-    // carries a digest, so this run takes the `GlobalHandle` arm and must end
-    // `Verified=True`.
+    // Through the controller, because a misplaced wrapper is a call-site
+    // mistake. `valid_evidence` answers `Valid` with `trust: None` over an
+    // observation with a digest, so this run takes the `GlobalHandle` arm and
+    // must end `Verified=True`.
     let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         Box::pin(async move {
             Some(ArchiveObservation {
@@ -11690,27 +11163,14 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
     );
 }
 
-// ===========================================================================
-// D2 §3.7 — the frozen destination reaches `Backup.status` (PLAT-08.1 residue)
-// ===========================================================================
+// The frozen destination reaches `Backup.status`
 
 /// **THE RECOVERY POINT PUBLISHES WHERE IT IS, FROM THE SAME SNAPSHOT THE PLAN
-/// WAS RENDERED FROM.**
+/// WAS RENDERED FROM.** The `Preflight`'s `RecoveryPointLocationMismatch` and
+/// the catalog read `status.destination`.
 ///
-/// # The defect this closes
-///
-/// D2 W10 froze the resolved destination into `execution-inputs.json` and
-/// stopped there: `Backup.status` carried no field for it, so a recovery point
-/// published no location, the `Preflight`'s `RecoveryPointLocationMismatch` had
-/// nothing to compare (tracker row `D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN`'s
-/// neighbour in the W14 record) and PLAT-15.1's catalog could not index a point
-/// by its destination. The digest existed and nobody could read it.
-///
-/// # ONE PROJECTION
-///
-/// The block is `frozen_destination_status` of the snapshot, so the status and
-/// the frozen document cannot disagree: a reader comparing
-/// `status.destination.locationDigest` against the plan is comparing two
+/// The block is `frozen_destination_status` of the snapshot, so a reader
+/// comparing `status.destination.locationDigest` against the plan compares two
 /// renderings of one value.
 ///
 /// KILLS, one mutant each:
@@ -11718,9 +11178,8 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 ///   destination-backed run;
 /// * `frozen_destination_status` taking any of the four fields from somewhere
 ///   other than the snapshot (the name for the uid, a recomputed digest);
-/// * the block written from a FRESH resolution rather than the frozen one —
-///   the second half of this test freezes against `dest-a` and then resolves
-///   `dest-b`, and only a block read off the snapshot stays at `dest-a`.
+/// * the block written from a FRESH resolution rather than the frozen one:
+///   the second half freezes against `dest-a` and then resolves `dest-b`.
 #[test]
 fn the_freeze_publishes_the_frozen_destination_on_status() {
     let backed = destination_backed_backup("dest-a");
@@ -11755,9 +11214,8 @@ fn the_freeze_publishes_the_frozen_destination_on_status() {
         "four fields and no storage settings, no credential and no CA: {block}"
     );
 
-    // THE PATCH IS A PROJECTION OF THE SNAPSHOT, NOT OF THE CLUSTER. Freezing
-    // the same object against `dest-b` produces a different block, which is
-    // what makes the first assertion mean "read off the snapshot".
+    // THE PATCH IS A PROJECTION OF THE SNAPSHOT: freezing against `dest-b`
+    // produces a different block, which gives the first assertion its meaning.
     let other = desired_execution_inputs_for_destination(
         &destination_backed_backup("dest-b"),
         &prod_cluster(),
@@ -11773,14 +11231,10 @@ fn the_freeze_publishes_the_frozen_destination_on_status() {
     assert_eq!(other_block["uid"], DEST_B_UID);
 }
 
-/// **A LEGACY INLINE-`archive` RUN PUBLISHES NO BLOCK — AND NO `null`.**
-///
-/// Absent is a real value (`docs/kubernetes.md` §7's absent-field rule): it
-/// means "this recovery point publishes no frozen location", which is exactly
-/// what the `Preflight` answers `unknown` for. A merge patch carrying
-/// `"destination": null` would be this controller asserting the absence on
-/// every pass of every legacy object, and `Backup.spec` is immutable, so the
-/// key can never need clearing.
+/// **A LEGACY INLINE-`archive` RUN PUBLISHES NO BLOCK, AND NO `null`.** Absent
+/// means "this recovery point publishes no frozen location", which the
+/// `Preflight` answers `unknown` for. `Backup.spec` is immutable, so the key
+/// can never need clearing, and a `null` would be a write on every pass.
 ///
 /// KILLS: `execution_status_patch` writing `"destination": null` on the legacy
 /// path, and writing the block unconditionally.
@@ -11803,18 +11257,13 @@ fn a_legacy_run_publishes_no_destination_block_and_no_null() {
     );
 }
 
-/// **WRITTEN ONCE, AT THE FREEZE, AND NEVER REWRITTEN.**
-///
-/// A later pass re-reads the STORED snapshot and renders this same patch, so
-/// `patch_status_if_changed` sends nothing — which is the whole mechanism by
-/// which a destination edited after the freeze moves neither the plan nor the
-/// published location. The typed readback is the one a re-created Job is
-/// rendered from, so this is the same value on the first pass and the last.
+/// **WRITTEN ONCE, AT THE FREEZE, AND NEVER REWRITTEN.** A later pass renders
+/// the same patch from the STORED snapshot, so `patch_status_if_changed` sends
+/// nothing, and a destination edited after the freeze moves neither the plan
+/// nor the published location.
 ///
 /// KILLS: a `status.destination` rebuilt from a fresh `destination::resolve`
-/// on each pass — the mutant makes the re-rendered patch differ from the
-/// recorded one the moment the object moves, and the block a recovery point
-/// publishes then follows the live object instead of its own run.
+/// on each pass, which would follow the live object instead of its own run.
 #[test]
 fn the_status_destination_is_the_same_on_every_later_pass() {
     let backed = destination_backed_backup("dest-a");
@@ -11860,14 +11309,10 @@ fn the_status_destination_is_the_same_on_every_later_pass() {
     );
 }
 
-// ===========================================================================
-// SEAM S7 — every `/status` write is a resourceVersion-preconditioned merge
-// PATCH (defect STATUS-PATCH-NO-RV)
-// ===========================================================================
+// Every `/status` write is a resourceVersion-preconditioned merge PATCH
 
 /// An archive observation with a receipt digest, so the terminal pass reaches
-/// its SECOND write — the evidence verdict — which is the one this section is
-/// about.
+/// its SECOND write, the evidence verdict.
 fn observed_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>> {
     Box::pin(async move {
         Some(ArchiveObservation {
@@ -11916,17 +11361,12 @@ fn status_patch_bodies(bodies: &[SeenBody]) -> Vec<Value> {
         .collect()
 }
 
-/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**, defect
-/// STATUS-PATCH-NO-RV.
-///
-/// `Backup` has FOUR status writers — this reconciler, `backup_selection`,
-/// `backup_schedule`'s reservation and `schedule_history` — so "a concurrent
-/// writer" is the ordinary case here and not a race to imagine. Every write
-/// from this reconciler went out with no `metadata` at all.
-///
-/// Both branches are asserted, because the defect was one helper serving all
-/// eight sites: the create pass (the execution record, then the running patch)
-/// and the finished pass (the outcome, then the evidence verdict).
+/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION.** `Backup` has four status
+/// writers (this reconciler, `backup_selection`, `backup_schedule`'s
+/// reservation and `schedule_history`), so a concurrent writer is the ordinary
+/// case. Both branches are asserted: the create pass (the execution record,
+/// then the running patch) and the finished pass (the outcome, then the
+/// evidence verdict).
 ///
 /// KILLS: dropping the `metadata` insert in
 /// `conditions::patch_status_preconditioned`; sending an empty
@@ -11985,18 +11425,15 @@ async fn every_backup_status_write_is_a_resource_version_preconditioned_merge_pa
 
 /// **A LATER WRITE OF A PASS PRECONDITIONS ON WHAT THE EARLIER ONE ANSWERED.**
 ///
-/// The create pass writes the execution record and then the running patch; the
-/// terminal pass writes the outcome and then the evidence verdict. After the
-/// first PATCH returns, the object this pass was handed is stale by exactly one
-/// version — so a later write preconditioned on it is refused with a `409`
-/// FOREVER, not once. On the terminal pass that loses the verdict outright: a
-/// terminal `Backup` is never read again.
+/// After a pass's first PATCH returns, the object it was handed is stale by
+/// one version, so a later write preconditioned on it is refused with a `409`
+/// FOREVER. On the terminal pass that loses the verdict outright: a terminal
+/// `Backup` is never read again.
 ///
 /// KILLS: `with_status_written(backup, &recorded, &at)` rewritten as
 /// `with_status_patch(backup, &recorded)`; `patch_status_at(…, &at, …)`
-/// rewritten as `patch_status_if_changed(…)`. Neither mutation fails any other
-/// row in this file, because only this one moves the version the double
-/// answers with.
+/// rewritten as `patch_status_if_changed(…)`. Only this row moves the version
+/// the double answers with.
 #[tokio::test]
 async fn a_later_write_of_a_pass_preconditions_on_the_earlier_writes_answer() {
     // ---- the create pass -----------------------------------------------
@@ -12062,14 +11499,11 @@ async fn a_later_write_of_a_pass_preconditions_on_the_earlier_writes_answer() {
     );
 }
 
-/// **A `409` IS SURFACED, NOT SWALLOWED AND NOT RETRIED** — the row the D3 W2
-/// record implies.
-///
-/// The precondition working looks like this: the server answers `409`, the
-/// helper returns it as the API error it is, the pass stops, and `error_policy`
-/// requeues so the next pass reads what the OTHER writer stored. Nothing this
-/// pass computed reaches the object, and the Job's TTL is not armed — the pod
-/// whose log the next pass must read is still alive.
+/// **A `409` IS SURFACED, NOT SWALLOWED AND NOT RETRIED.** The helper returns
+/// it as the API error it is, the pass stops, and `error_policy` requeues so
+/// the next pass reads what the other writer stored. Nothing this pass
+/// computed reaches the object, and the Job's TTL is not armed: the pod whose
+/// log the next pass must read is still alive.
 ///
 /// KILLS: swallowing the 409 inside the helper and returning `Ok`; re-reading
 /// and retrying the same computed status inside the helper.
@@ -12124,22 +11558,13 @@ async fn a_conflicting_backup_status_write_stops_the_pass_and_arms_no_ttl() {
     );
 }
 
-// ===========================================================================
-// RESTORE-ADMITTED-DROPPED, the `Backup` twin — the base-plus-apply path
-// carries every stored condition it does not own
-// ===========================================================================
+// The running and terminal passes carry every stored condition they do not
+// own
 
-/// **A CONDITION NO BUILDER NAMES SURVIVES THE RUNNING PASS** — the `Backup`
-/// half of defect RESTORE-ADMITTED-DROPPED.
-///
-/// `diagnostics::apply` used to write the base builder's array plus its own
-/// `RunnerReady` and nothing else, so every stored condition outside
-/// `carry_conditions`' hard-coded allow-list was deleted by the merge PATCH.
-/// The list is the defect, not its contents: the next condition type anybody
-/// adds is dropped the same way until somebody remembers to extend it.
-///
-/// The stored condition here is a type NO builder in this crate carries by
-/// name, so it can only survive through the general rule.
+/// **A CONDITION NO BUILDER NAMES SURVIVES THE RUNNING PASS.** The stored
+/// condition here is a type no builder in this crate carries by name, so it
+/// survives only through the general rule, not through a list someone must
+/// remember to extend.
 ///
 /// KILLS: replacing `conditions::upsert_conditions(write.conditions, owned)`
 /// in `diagnostics::apply` with `owned`.
@@ -12196,8 +11621,7 @@ async fn the_running_pass_carries_every_stored_condition_it_does_not_own() {
     assert_eq!(carried["reason"].as_str(), Some("BucketRuleDeclared"));
 
     // AND A CONDITION THE RUNNING BUILDER *DOES* OWN IS REPLACED, not carried:
-    // the destination hold's `Admitted=False` is stale the moment a runner
-    // runs, and carrying it would be the opposite mistake.
+    // the destination hold's `Admitted=False` is stale the moment a runner runs.
     assert_eq!(
         find("Admitted").map(|c| c["status"].clone()),
         Some(serde_json::json!("True")),
@@ -12210,14 +11634,10 @@ async fn the_running_pass_carries_every_stored_condition_it_does_not_own() {
     );
 }
 
-/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION** — review finding
-/// MED-2, the `Backup` half.
-///
-/// Three passes, run for real, with the server's merge applied between them:
-/// the Job running, then the Job finished. The terminal builder owns the array,
-/// and it owes every condition it is not about — a finished `Backup` is the
-/// object an auditor inspects and it is never reconciled again, so a condition
-/// this patch drops is dropped for good.
+/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION.** Three passes with the
+/// server's merge applied between them: the Job running, then finished. A
+/// finished `Backup` is never reconciled again, so a condition its terminal
+/// patch drops is dropped for good.
 ///
 /// KILLS: `carry_conditions` delegating to
 /// `verification::carry_conditions(.., &[…])` again; carrying `Admitted` with a
@@ -12301,10 +11721,8 @@ async fn the_admission_condition_survives_the_backup_terminal_transition() {
     );
 }
 
-// ===========================================================================
-// EVIDENCE-FETCH-JOB-UNBUILT — D2 §3.8 option C, §3.9: the evidence-fetch
-// check Job for a destination whose `evidenceRead` grant only a pod may hold
-// ===========================================================================
+// The evidence-fetch check Job, for a destination whose `evidenceRead` grant
+// only a pod may hold
 
 mod evidence_fetch_job {
     use super::*;
@@ -12644,12 +12062,11 @@ mod evidence_fetch_job {
         value
     }
 
-    /// **THE JOB IS CREATED, AND IT HOLDS EXACTLY THE `evidenceRead` GRANT.**
-    ///
-    /// The lab-refresh-8 row's shape: `evidenceRead: ArchiveReadGrant` over a
-    /// separate `archiveRead` Secret. The finished pass writes the terminal
-    /// patch (no window — nothing has been read), patches the runner's TTL,
-    /// then posts the plan `ConfigMap`, then the Job, then `Pending` naming it.
+    /// **THE JOB IS CREATED, AND IT HOLDS EXACTLY THE `evidenceRead` GRANT**
+    /// (`evidenceRead: ArchiveReadGrant` over a separate `archiveRead` Secret).
+    /// The finished pass writes the terminal patch (no window: nothing has been
+    /// read), patches the runner's TTL, then posts the plan `ConfigMap`, then the
+    /// Job, then `Pending` naming it.
     ///
     /// KILLS: projecting `archiveWrite`'s Secret; adding the signing volume;
     /// automounting a token; a name that is not `lwc-ev-<sha256(uid:1)>`; a
@@ -12737,7 +12154,7 @@ mod evidence_fetch_job {
                         || [
                             "LOGWEIR_STORE_CONTRACT_VERSION",
                             "LOGWEIR_ARCHIVE_CREDENTIALS",
-                            // FX-20: the evidenceRead grant's expected binding.
+                            // The evidenceRead grant's expected binding.
                             "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
                             "TMPDIR"
                         ]
@@ -12764,7 +12181,7 @@ mod evidence_fetch_job {
                     "lw-b-archive-reader".to_string(),
                     "rkey".to_string()
                 ),
-                // FX-20: the same Secret's binding, beside it.
+                // The same Secret's binding, beside it.
                 (
                     "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
                     "lw-b-archive-reader".to_string(),
@@ -13058,8 +12475,8 @@ mod evidence_fetch_job {
             .rposition(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
             .expect("status");
         // The FIRST patch of the evidence Job, not the last: a TTL sent before
-        // the commit and again after it still lets garbage collection race
-        // the relay (mutant M12).
+        // the commit and again after it still lets garbage collection race the
+        // relay.
         let ttl_at = bodies
             .iter()
             .position(|b| b.method == "PATCH" && path(&b.uri).ends_with(&ev_name(1)))
@@ -13070,7 +12487,7 @@ mod evidence_fetch_job {
 
     /// **THE RUNNER'S DIGEST IS AUTHORITATIVE.** A relayed receipt that does
     /// not hash to `receiptSha256` is `Invalid`, and NOTHING is projected
-    /// from it — no window, no records, no capture (`9cda784`, `67aad4f`).
+    /// from it: no window, no records, no capture.
     ///
     /// KILLS: anchoring on the relay's own digest; writing the window before
     /// the digest check.
@@ -13144,19 +12561,16 @@ mod evidence_fetch_job {
         assert!(last["windowCovered"].is_null());
     }
 
-    /// **FX-33's acceptance, through the relay: the receipt of a backup of
-    /// 500 topics with full recorded configuration, read by an evidence-fetch
-    /// Job, is VERIFIED `Valid`** — and the window, the record count and the
-    /// capture it carries land in the status. Before FX-33 a relay carried at
-    /// most 1 MiB, this receipt is 1.6 MB, and the verdict was `NotAttempted`
-    /// for ever.
+    /// **The receipt of a backup of 500 topics with full recorded
+    /// configuration (1.6 MB), read by an evidence-fetch Job, is VERIFIED
+    /// `Valid`**, and its window, record count and capture land in the status.
     ///
     /// The receipt is `logweir_core::topic_budget`'s reference, and the
     /// sidecar is the committed one `crates/logweir/tests/topic_budget.rs`
     /// holds to the signer.
     ///
-    /// KILLS: the receipt relayed under the 1 MiB cap again; the relayed
-    /// receipt's facts taken from something other than its own bytes.
+    /// KILLS: the receipt relayed under a 1 MiB cap; the relayed receipt's
+    /// facts taken from something other than its own bytes.
     #[tokio::test]
     async fn fx33_a_relayed_receipt_of_500_topics_is_valid_with_its_window() {
         use logweir_core::topic_budget::{reference_receipt, ReferenceShape};
@@ -13349,8 +12763,8 @@ mod evidence_fetch_job {
             Some(o),
         );
         // ATTEMPT 1'S FAILED JOB IS STILL THERE (its TTL already set), routed
-        // FIRST: a name that ignored the attempt would find it and re-observe
-        // a finished failure instead of creating attempt 2 (review LOW-5).
+        // FIRST: a name that ignored the attempt would re-observe a finished
+        // failure instead of creating attempt 2.
         let mut failed = ev_job(&ev_name(1), Some("Failed"), UID);
         failed["spec"]["ttlSecondsAfterFinished"] = json!(600);
         let mut routes = vec![route(
@@ -13386,11 +12800,11 @@ mod evidence_fetch_job {
         assert!(last["evidence"]["observation"]["retryAfter"].is_null());
     }
 
-    /// **THE CONTROLLER ENFORCES THE PER-OBJECT CAPS ITSELF** (review
-    /// MEDIUM-1). A relay that carries more than 1 MiB of payload or 64 KiB of
-    /// sidecar WITHOUT flagging `truncated`, or whose declared length is not
-    /// what it relayed, is `NotAttempted` — never `Valid`, and never `Invalid`
-    /// over bytes the contract never allowed in.
+    /// **THE CONTROLLER ENFORCES THE PER-OBJECT CAPS ITSELF.** A relay that
+    /// carries more than 1 MiB of payload or 64 KiB of sidecar WITHOUT flagging
+    /// `truncated`, or whose declared length is not what it relayed, is
+    /// `NotAttempted`: never `Valid`, and never `Invalid` over bytes the contract
+    /// never allowed in.
     #[tokio::test]
     async fn an_oversized_relay_is_not_attempted_even_if_not_flagged_truncated() {
         use logweir_core::check_contract::{
@@ -13403,8 +12817,8 @@ mod evidence_fetch_job {
             vec![b'y'; usize::try_from(MAX_EVIDENCE_SIDECAR_BYTES).expect("fits") + 1];
         let mut lying = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
         lying.bytes = Some(1);
-        // The runner's own truncation flag (review L3): the second producer of
-        // the over-cap sentence.
+        // The runner's own truncation flag: the second producer of the over-cap
+        // sentence.
         let mut flagged = entry(RECEIPT_KEY, Stream::EvidencePayload, None, None);
         flagged.present = true;
         flagged.truncated = true;
@@ -13460,8 +12874,8 @@ mod evidence_fetch_job {
                 r.clone(),
                 s.clone(),
                 "declared",
-                // A relay whose declared length does not describe its bytes is
-                // D2 §3.9 step 5's "relay unreadable": a new Job is tried.
+                // A relay whose declared length does not describe its bytes is "relay
+                // unreadable": a new Job is tried.
                 true,
             ),
             (
@@ -13510,9 +12924,9 @@ mod evidence_fetch_job {
                 last["windowCovered"].is_null(),
                 "{label}: nothing projected"
             );
-            // REVIEW L3/R3: AN OBJECT OVER THE CAP IS A FACT ABOUT THE OBJECT,
-            // read through the REAL producer (`read_relay`) and the real
-            // scheduler: it is final — one Job, not four — and its class says so.
+            // AN OBJECT OVER THE CAP IS A FACT ABOUT THE OBJECT, read through the real
+            // producer (`read_relay`) and the real scheduler: it is final (one Job, not
+            // four) and its class says so.
             let detail = verification["detail"].as_str().unwrap_or_default();
             assert_eq!(
                 !last["evidence"]["observation"]["retryAfter"].is_null(),
@@ -13529,11 +12943,11 @@ mod evidence_fetch_job {
         }
     }
 
-    /// **A TTL LOST AFTER THE COMMIT IS REPAIRED** (review LOW-4). A verdict
-    /// is committed and the recorded Job is finished with no TTL — the
-    /// `set_ttl` failed, or the controller died between the two writes. The
-    /// next terminal pass inside the repair window patches the TTL, writes no
-    /// status, and sends nothing once the window has passed.
+    /// **A TTL LOST AFTER THE COMMIT IS REPAIRED.** A verdict is committed and
+    /// the recorded Job is finished with no TTL (the `set_ttl` failed, or the
+    /// controller died between the two writes). The next terminal pass inside
+    /// the repair window patches the TTL, writes no status, and sends nothing
+    /// once the window has passed.
     #[tokio::test]
     async fn a_ttl_lost_after_the_verdict_is_repaired_by_a_later_pass() {
         let v = json!({"result": "Valid", "matchedKeyId": FIXTURE_KEY_ID,
@@ -13579,9 +12993,9 @@ mod evidence_fetch_job {
         assert!(!later.iter().any(|b| path(&b.uri).ends_with(&ev_name(1))));
     }
 
-    /// **A STRANGER HOLDING THE RUNNER JOB'S NAME DOES NOT STALL THE FETCH**
-    /// (review LOW-3). The terminal run's runner Job name is taken by a Job
-    /// this Backup does not control; the evidence Job is still observed.
+    /// **A STRANGER HOLDING THE RUNNER JOB'S NAME DOES NOT STALL THE FETCH.** The
+    /// terminal run's runner Job name is taken by a Job this Backup does not
+    /// control; the evidence Job is still observed.
     #[tokio::test]
     async fn a_foreign_runner_job_does_not_stall_a_pending_fetch() {
         let (v, o) = pending(1, Some(&ev_name(1)));
@@ -13622,9 +13036,9 @@ mod evidence_fetch_job {
         );
     }
 
-    /// **SEC-PODLOG: A FOREIGN POD IS NOT READ.** A pod wearing the Job's
-    /// label whose controller owner is another UID is ignored: no `pods/log`
-    /// read, and no verdict other than `NotAttempted`.
+    /// **A FOREIGN POD IS NOT READ.** A pod wearing the Job's label whose
+    /// controller owner is another UID is ignored: no `pods/log` read, and no
+    /// verdict other than `NotAttempted`.
     #[tokio::test]
     async fn a_pod_this_job_does_not_own_is_never_read() {
         let (v, o) = pending(1, Some(&ev_name(1)));
@@ -13790,12 +13204,11 @@ mod evidence_fetch_job {
         }
     }
 
-    /// **PoC P12's CLASS SWEEP, THE JOB PATH: A DENIED RELAY IS RETRIED; AN
-    /// ABSENT DOCUMENT IS NOT.** A relay whose store answered the grant with
-    /// `AccessDenied` (a grant Secret an operator may yet fix) used to be final
-    /// after one Job; it now schedules attempt 2 at +1 m exactly like a Job that
-    /// did not finish. A relay that says the receipt is not there is a fact
-    /// about the archive and schedules nothing.
+    /// **A DENIED RELAY IS RETRIED; AN ABSENT DOCUMENT IS NOT.** A relay whose
+    /// store answered `AccessDenied` (a grant Secret an operator may yet fix)
+    /// schedules attempt 2 at +1 m like a Job that did not finish. A relay that
+    /// says the receipt is not there is a fact about the archive and schedules
+    /// nothing.
     ///
     /// KILLS: `relayed_schedule` scheduling nothing (the denial stays final);
     /// scheduling an absence.
@@ -13850,17 +13263,10 @@ mod evidence_fetch_job {
     }
 }
 
-// ===========================================================================
-// PoC P12 — the controller's own evidence read is retried, with a bounded
-// schedule, and read again by a new controller process
-// ===========================================================================
-//
-// The PoC upgrade round (`claude/artifacts/poc-upgrade-1/defects/
-// P12-legacy-notattempted-no-retry.txt`): three inline-archive `Backup`s whose
-// receipt read failed — the controller had no credential and the SDK fell back
-// to IMDS — stayed `NotAttempted` with no observation and no retry after
-// `logweir-evidence-ro` was created and the controller restarted twice, and
-// were therefore never recovery points.
+// The controller's own evidence read is retried on a bounded schedule, and
+// read again by a new controller process: an inline-archive `Backup` whose
+// receipt read failed for want of a credential must become a recovery point
+// once the credential exists.
 mod p12_controller_read_retry {
     use super::*;
     use serde_json::json;
@@ -13878,8 +13284,8 @@ mod p12_controller_read_retry {
     /// The controller's archive handle — the bucket the fixture's archive is in.
     const HANDLE: &str = "s3://kafka-backups/logweir";
 
-    /// What the PoC's controller wrote for want of a credential, verbatim in
-    /// shape (`defects/P12-…`): a store error that is not `NotFound`.
+    /// What a controller without a credential writes: a store error that is not
+    /// `NotFound` (the SDK fell back to IMDS).
     fn imds_detail() -> String {
         store_detail(&logweir_store::StoreError::Io(format!(
             "{RECEIPT_KEY}: Generic S3 error: Error after 0 retries: error sending request for \
@@ -14059,17 +13465,14 @@ mod p12_controller_read_retry {
         t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     }
 
-    /// **THE ROW THE PoC NEEDED.** The receipt read fails because the
+    /// **A FAILED RECEIPT READ IS RETRIED.** The read fails because the
     /// controller has no credential; the failure is attempt 1 of a schedule
     /// (`observation.{mode: ArchiveHandle, attempt: 1, retryAfter: +1 m}`, and
     /// the sentence names attempt 2). Before `retryAfter` a reconcile reads
     /// nothing and writes nothing. The credential appears; attempt 2 verifies
     /// the receipt and writes what the terminal pass would have written had
-    /// the read answered then — `Valid`, `windowCovered`, `records`,
-    /// `capture`, `Verified=True` — and the verdict is final after that.
-    ///
-    /// FAILS ON THE OLD CODE: pass 1 writes no observation and pass 3 reads
-    /// nothing, so the run stays `NotAttempted` for good.
+    /// the read answered then (`Valid`, `windowCovered`, `records`, `capture`,
+    /// `Verified=True`), and the verdict is final after that.
     #[tokio::test]
     async fn a_failed_receipt_read_is_retried_and_verifies_once_the_credential_exists() {
         let world = World::default();
@@ -14158,10 +13561,10 @@ mod p12_controller_read_retry {
 
     /// **THE BOUND ON THE RETRY RATE, over half an hour of a real requeue.** A
     /// credential that never appears: the terminal Backup is reconciled every
-    /// 15 s (`REQUEUE_SECS`) for 30 minutes and is read EXACTLY four times —
-    /// at +0, +1 m, +6 m and +21 m (D2 §3.9 step 5's schedule) — and after the
-    /// fourth the sentence says no attempt remains in this process and
-    /// `retryAfter` is absent. 121 passes, 4 reads, 4 writes: no hot loop.
+    /// 15 s (`REQUEUE_SECS`) for 30 minutes and is read EXACTLY four times, at
+    /// +0, +1 m, +6 m and +21 m, and after the fourth the sentence says no
+    /// attempt remains in this process and `retryAfter` is absent. 121 passes,
+    /// 4 reads, 4 writes: no hot loop.
     ///
     /// KILLS: reading on every pass (the deferral); a schedule with no end.
     #[tokio::test]
@@ -14216,13 +13619,12 @@ mod p12_controller_read_retry {
     /// **THE INPUT CHANGE: A NEW CONTROLLER PROCESS.** `logweir-evidence-ro` is
     /// projected into the controller's environment, so a created or rotated
     /// credential arrives with a new process. A run whose schedule was spent is
-    /// read once by the next process (a fresh [`ReadMemory`]) — and if the
+    /// read once by the next process (a fresh [`ReadMemory`]), and if the
     /// credential still fails, THAT read is attempt 1 of a new schedule, while a
     /// second pass in the same process reads nothing.
     ///
-    /// KILLS: a re-read that ignores the memory (every pass would read — the
-    /// hot loop); a re-read that never happens (the run stays unverified after
-    /// the credential exists, which is P12).
+    /// KILLS: a re-read that ignores the memory (the hot loop); a re-read that
+    /// never happens (the run stays unverified after the credential exists).
     #[tokio::test]
     async fn a_spent_schedule_is_read_again_by_the_next_process_and_only_once() {
         let world = World::default();
@@ -14261,9 +13663,8 @@ mod p12_controller_read_retry {
         );
     }
 
-    /// **THE UPGRADE: THE PoC'S THREE POINTS, EXACTLY.** A `NotAttempted`
-    /// written by a controller that predates this rule carries the IMDS
-    /// sentence and NO observation. The first process of the fixed controller
+    /// **THE UPGRADE.** A `NotAttempted` written by an older controller carries
+    /// the IMDS sentence and NO observation. The first process of this controller
     /// reads it once; with the credential in place it verifies.
     ///
     /// An entry point that holds no process memory (every row that is not
@@ -14437,9 +13838,8 @@ mod p12_controller_read_retry {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Review fix round (`claude/poc-fixes-3.review.md`)
-    // -----------------------------------------------------------------------
+    // A schedule whose handle leaves, the retry's digest fence, an owed window,
+    // and the throttled restart re-read
 
     /// A terminal-branch pass with the archive handle at `handle` and an
     /// archive oracle of the caller's choosing. Returns the object as the API
@@ -14471,13 +13871,13 @@ mod p12_controller_read_retry {
         (fold(backup, &bodies), patched_statuses(&bodies))
     }
 
-    /// **REVIEW M1, THE `Backup` TWIN: A SCHEDULE WHOSE HANDLE LEAVES SETTLES.**
-    /// Attempt 2 is scheduled; the archive handle is then removed, or
-    /// re-pointed at another bucket (a restart, so a new process). The run can
-    /// no longer be read, so the first pass records that — `NotAttempted` with
-    /// the handle's own sentence, the attempt count kept, `retryAfter` cleared
-    /// — instead of advertising an attempt at an instant that has passed. Every
-    /// later pass reads and writes nothing.
+    /// **A SCHEDULE WHOSE HANDLE LEAVES SETTLES.** Attempt 2 is scheduled; the
+    /// archive handle is then removed, or re-pointed at another bucket (a
+    /// restart, so a new process). The run can no longer be read, so the first
+    /// pass records that (`NotAttempted` with the handle's own sentence, the
+    /// attempt count kept, `retryAfter` cleared) instead of advertising an
+    /// attempt at an instant that has passed. Every later pass reads and writes
+    /// nothing.
     ///
     /// KILLS: planning with the handle check dropped (a read, or a `retryAfter`
     /// left in the past); a settle that keeps `retryAfter`.
@@ -14533,11 +13933,10 @@ mod p12_controller_read_retry {
         }
     }
 
-    /// **REVIEW T1/R2: THE RETRY'S DIGEST FENCE.** Attempt 2's archive
-    /// observation reads a receipt whose digest is NOT the runner's — a
-    /// replacement document at the reported key. The attempt is `Invalid`, and
-    /// nothing is copied out of those bytes: no `windowCovered`, no `records`,
-    /// no `capture`.
+    /// **THE RETRY'S DIGEST FENCE.** Attempt 2's archive observation reads a
+    /// receipt whose digest is NOT the runner's (a replacement document at the
+    /// reported key). The attempt is `Invalid`, and nothing is copied out of
+    /// those bytes: no `windowCovered`, no `records`, no `capture`.
     ///
     /// KILLS: the retry path writing the window from any receipt it read
     /// (`fetched.is_some()` in place of `fetched == Some(reported)`); a retry
@@ -14590,13 +13989,12 @@ mod p12_controller_read_retry {
         );
     }
 
-    /// **REVIEW L1: A PASS WITHOUT ITS WINDOW STAYS OWED.** On attempt 2 the
-    /// verifier's read answers and the archive observation that carries the
-    /// receipt's window does not (a flaky credential — the case P12 is about).
-    /// Writing `Valid` there would record a run with no `windowCovered` for
-    /// good: a `Valid` is never read again. The attempt is recorded as a
-    /// transient failure and attempt 3 is scheduled; when both reads answer,
-    /// the run is `Valid` WITH its window.
+    /// **A PASS WITHOUT ITS WINDOW STAYS OWED.** On attempt 2 the verifier's read
+    /// answers and the archive observation that carries the receipt's window
+    /// does not (a flaky credential). A `Valid` is never read again, so writing
+    /// it there would record a run with no `windowCovered` for good. The attempt
+    /// is recorded as a transient failure and attempt 3 is scheduled; when both
+    /// reads answer, the run is `Valid` WITH its window.
     ///
     /// KILLS: dropping the "pass with no observation" guard.
     #[tokio::test]
@@ -14639,10 +14037,9 @@ mod p12_controller_read_retry {
         );
     }
 
-    /// **REVIEW L2: THE RESTART RE-READ IS THROTTLED.** Twelve unverified runs
-    /// owe a re-read at once (a restart); at most `CONTROLLER_READ_CONCURRENCY`
-    /// of those reads are in flight together, and every one of them still
-    /// happens.
+    /// **THE RESTART RE-READ IS THROTTLED.** Twelve unverified runs owe a
+    /// re-read at once (a restart); at most `CONTROLLER_READ_CONCURRENCY` of
+    /// those reads are in flight together, and every one of them still happens.
     ///
     /// KILLS: reading without the permit (all twelve would be in flight).
     #[tokio::test]
@@ -14714,11 +14111,9 @@ mod p12_controller_read_retry {
     }
 }
 
-/// **FX-2's class sweep: `Backup.spec.deadlineSeconds`**, documented as "the
-/// Job's `activeDeadlineSeconds`". The Job-shape row above uses 3600, which
-/// is also the `BackupSchedule` default a scheduled run is given, so a
-/// projection that wrote that constant instead of the field passed it. A
-/// non-default value reaches the Job through the frozen inputs.
+/// **`Backup.spec.deadlineSeconds` reaches the Job's `activeDeadlineSeconds`.**
+/// 3600 is also the `BackupSchedule` default, so this row uses a non-default
+/// value, carried through the frozen inputs.
 ///
 /// MUTANTS: `deadline_seconds: 3600` where `backup_execution` freezes the
 /// run, or where `runner_job_spec_from_inputs` reads the frozen value.
@@ -14743,13 +14138,11 @@ fn a_backups_own_deadline_reaches_its_runner_job() {
     );
 }
 
-// ===========================================================================
-// FX-20: an inline archive's Secret is bound to the LOCATION it is used at
-// ===========================================================================
+// An inline archive's Secret is bound to the LOCATION it is used at
 
 /// **A Backup's inline `archive.secretRef` travels with its binding pair: the
 /// Secret's own `logweir-binding` (optional) beside an expectation over the
-/// frozen storage block's scheme, bucket and endpoint** — not over any object
+/// frozen storage block's scheme, bucket and endpoint**, not over any object
 /// UID (a `Backup` is one-shot and a schedule mints them), and not over the
 /// prefix (the key space, not where the credential goes).
 ///
@@ -14811,9 +14204,7 @@ fn fx20_an_inline_archive_secret_is_bound_to_the_location_the_backup_writes() {
         .all(|(n, _)| n != cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV));
 }
 
-// ---------------------------------------------------------------------------
-// PROD-04.1: `spec.consumerGroups` reaches the frozen plan, and nothing else
-// ---------------------------------------------------------------------------
+// `spec.consumerGroups` reaches the frozen plan, and nothing else
 
 mod prod_04_1 {
     use super::*;
@@ -14916,13 +14307,13 @@ mod prod_04_1 {
         assert!(desired_execution_inputs(&with_groups(Some(vec!["billing"])), &cluster()).is_ok());
     }
 
-    /// **PROD-04.1 review N1: the 80 KiB summary cap is the ENCODED size, at
-    /// and over it, in the controller.** 84 ids of 255 bytes made of `"` —
-    /// each byte two when the receipt encodes it — are the largest such
-    /// selection the cap admits: the plan renders. The 85th is refused before
-    /// any Job, by name (`ExecutionSpecInvalid`, `ConsumerGroupSelectionTooLarge`,
-    /// the encoded size in the message), never truncated. KILLS: a cap on the
-    /// ids' raw lengths (85 x 255 raw bytes are far under 80 KiB).
+    /// **The 80 KiB summary cap is the ENCODED size, at and over it, in the
+    /// controller.** 84 ids of 255 bytes made of `"` (each byte two when the
+    /// receipt encodes it) are the largest such selection the cap admits: the
+    /// plan renders. The 85th is refused before any Job, by name
+    /// (`ExecutionSpecInvalid`, `ConsumerGroupSelectionTooLarge`, the encoded
+    /// size in the message), never truncated. KILLS: a cap on the ids' raw
+    /// lengths (85 x 255 raw bytes are far under 80 KiB).
     #[test]
     fn an_escape_heavy_selection_is_refused_past_the_encoded_cap_and_admitted_at_it() {
         let ids: Vec<String> = (0..85)
@@ -14953,16 +14344,14 @@ mod prod_04_1 {
     }
 }
 
-// ===========================================================================
-// FX-34 — a guard-refused Backup says WHY, and a pod log is untrusted text
-// ===========================================================================
+// A guard-refused Backup says WHY, and a pod log is untrusted text.
 //
-// The `Backup` twins of `tests/restore_controller.rs`'s FX-34 rows. The line
-// format, its validation and its cleaning are one implementation
+// The `Backup` twins of `tests/restore_controller.rs`'s refusal-line rows.
+// The line format, its validation and its cleaning are one implementation
 // (`logweir_core::refusal_detail`, read through `weirkeeper::refusal`), so
-// the hostile-line table is carried in full on the `Restore` side and in the
-// arms that could differ here: the builder, the gate on exit 3, the read and
-// the two guards against a second read or write.
+// the hostile-line table is carried in full on the `Restore` side and here
+// only in the arms that could differ: the builder, the gate on exit 3, the
+// read and the two guards against a second read or write.
 
 use logweir_core::refusal_detail::{
     refusal_detail_line, LineToken, RefusingRun, BACKUP_REASON_CODES, LINE_TOKEN_ARG,
@@ -14970,8 +14359,8 @@ use logweir_core::refusal_detail::{
 };
 use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
 
-/// What a refused `Backup`'s terminal condition said before FX-34, and still
-/// says for a runner that prints no detail line.
+/// What a refused `Backup`'s terminal condition says for a runner that
+/// prints no detail line.
 const FX34_OLD_MESSAGE: &str = "the runner exited 3 (guard-refused); the code was read from \
      status.containerStatuses[name=runner].state.terminated.exitCode";
 
@@ -15237,12 +14626,12 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     }
 }
 
-/// The log tails of the passes FX-34 must not change, each carrying a VALID
-/// detail line: only an exit 3 may lift one.
+/// The log tails of the passes the refusal line must not change, each
+/// carrying a VALID detail line: only an exit 3 may lift one.
 ///
 /// An exit 0 whose runner printed the two keys and no `receipt-sha256=` is
-/// not a case: the reconciler itself answers that one `NotAttempted` with a
-/// clock read for `verifiedAt`, which a golden cannot hold.
+/// not a case: the reconciler answers it `NotAttempted` with a clock read for
+/// `verifiedAt`, which a golden cannot hold.
 fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
     // A line with THIS Job's token: at exit 3 it would be shown.
     let detail = refusal_detail_line(
@@ -15320,16 +14709,16 @@ const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
 
 /// **A successful run, an exit 1, an exit 2, an exit 4 (and 137) are
 /// unchanged, byte for byte**, and so is an exit 3 from a runner that prints
-/// no detail line — the `Restore` twin carries the reasoning.
+/// no detail line; the `Restore` twin carries the reasoning.
 ///
 /// The requests are compared with the log read's QUERY set aside, as the
-/// `Restore` twin's are: the golden predates both bounds on that read, FX-34's
-/// at exit 3 and PROD-17.1 B4's at every other exit (`tailLines=256`, the
-/// `Restore`'s read). The query each exit asks is then asserted by itself.
+/// `Restore` twin's are: the golden predates the bounded log reads
+/// (`tailLines=256` at every exit but 3). The query each exit asks is then
+/// asserted by itself.
 ///
 /// KILLS: the gate widened to exit 1 (`exit-1` and `exit-1-claimed` gain a
 /// suffix); the bounded read used for every exit code; a suffix for
-/// `NotStated`; the unbounded read at every exit but 3 (B4).
+/// `NotStated`; the unbounded read at every exit but 3.
 #[tokio::test]
 async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
     let golden: Value =
@@ -15400,8 +14789,8 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
 
 /// Hostile and forged lines on the `Backup` path. The full table of what a
 /// line may HOLD is the `Restore` twin's; this one holds the arms the kind
-/// decides (a `Backup` has its own closed set of codes) and the second
-/// review's two logs, through `reconcile_backup`.
+/// decides (a `Backup` has its own closed set of codes), through
+/// `reconcile_backup`.
 ///
 /// KILLS: one closed set for both kinds (the restore-only codes); the token
 /// comparison removed; "the pair that ends the log is the runner's".
@@ -15739,10 +15128,9 @@ async fn a_refusal_whose_pod_or_log_is_gone_is_recorded_once_and_says_so() {
 /// write.** Every route is present, so both are assertions over the request
 /// log.
 ///
-/// The one write a later pass may make is the Job's own TTL repair (D3 §2.7):
-/// this fixture's Job carries no `ttlSecondsAfterFinished`, and the
-/// already-terminal branch repairs that from the Job's spec alone, reading no
-/// pod and writing no status.
+/// The one write a later pass may make is the Job's own TTL repair: this
+/// fixture's Job carries no `ttlSecondsAfterFinished`, and the
+/// already-terminal branch repairs that from the Job's spec alone.
 ///
 /// KILLS: reading the log before the already-terminal guard, or removing it.
 #[tokio::test]
@@ -15792,14 +15180,12 @@ async fn a_second_pass_over_a_refused_backup_reads_and_writes_nothing() {
     }
 }
 
-// ===========================================================================
-// FX-19 CLASS SWEEP — the reaping of a finished runner Job flaps nothing here
-// ===========================================================================
+// The reaping of a finished runner Job flaps nothing here
 
 /// This run's finished runner Job as the TTL controller's FOREGROUND delete
 /// leaves it: the TTL the terminal pass set, a `deletionTimestamp` and the
-/// `foregroundDeletion` finalizer — with its pod already gone. PoC batch 2
-/// found the `KafkaCluster` probe reading exactly this shape as a crash.
+/// `foregroundDeletion` finalizer, with its pod already gone (a shape a probe
+/// once read as a crash).
 fn runner_job_being_collected() -> String {
     let mut job: Value = serde_json::from_str(&job_body("Complete")).expect("the fixture is JSON");
     job["spec"]["ttlSecondsAfterFinished"] = serde_json::json!(TTL_SECONDS_AFTER_FINISHED);
@@ -15808,17 +15194,14 @@ fn runner_job_being_collected() -> String {
     job.to_string()
 }
 
-/// **FX-19 CLASS SWEEP, `Backup`: THE REAPING OF A FINISHED RUNNER JOB
-/// CANNOT FLAP THE STATUS OR LOG A WARN.** The TTL is patched only after the
-/// terminal status write (`controllers/backup.rs`, "ONLY NOW" after the
-/// terminal `patch_status_if_changed`), so a Job the TTL controller collects
-/// belongs to a TERMINAL `Backup`, and step 2b's guard (`status_is_terminal`
-/// before `find_pod`) reads nothing from it: no pod list, no status write, no
-/// TTL patch (it has one), and nothing above debug.
+/// **THE REAPING OF A FINISHED RUNNER JOB CANNOT FLAP THE STATUS OR LOG A
+/// WARN.** The TTL is patched only after the terminal status write, so a Job
+/// the TTL controller collects belongs to a TERMINAL `Backup`, and the
+/// `status_is_terminal` guard before `find_pod` reads nothing from it: no pod
+/// list, no status write, no TTL patch (it has one), and nothing above debug.
 ///
-/// NEGATIVE CONTROL: the same Job and the same empty pod list under the
-/// NON-terminal copy of the object is judged — it writes — so the zero below
-/// is the guard's and can fail.
+/// NEGATIVE CONTROL: the same Job and empty pod list under the NON-terminal
+/// copy of the object is judged (it writes), so the zero below can fail.
 #[tokio::test]
 async fn fx19_a_terminal_backup_whose_job_is_being_collected_is_not_rejudged() {
     let no_pods = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
@@ -15897,9 +15280,7 @@ async fn fx19_a_terminal_backup_whose_job_is_being_collected_is_not_rejudged() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-33: a backup names at most `topic_budget::MAX_BACKUP_TOPICS` topics
-// ---------------------------------------------------------------------------
+// A backup names at most `topic_budget::MAX_BACKUP_TOPICS` topics
 
 mod fx_33 {
     use super::*;
@@ -15914,15 +15295,13 @@ mod fx_33 {
     }
 
     /// **A `Backup` naming more topics than one backup may is refused before
-    /// any Job, by name — and one naming exactly the maximum freezes.** The
+    /// any Job, by name, and one naming exactly the maximum freezes.** The
     /// freeze refuses `SelectionTooLarge` with the runner's own sentence
-    /// (both numbers, the reason, the remedy) and says that nothing is left
-    /// out; the run policy refuses `spec.topics`, which is what makes a
-    /// `BackupSchedule` `Ready=False` and the product API answer 422.
-    ///
-    /// This is what an object created BEFORE the upgrade does: it was
-    /// admitted when the controller's own bound was 5,000, and its next run
-    /// is refused here instead of writing a receipt nothing can read.
+    /// (both numbers, the reason, the remedy) and says nothing is left out;
+    /// the run policy refuses `spec.topics`, which makes a `BackupSchedule`
+    /// `Ready=False` and the product API answer 422. An object admitted under
+    /// an older, higher bound is refused here instead of writing a receipt
+    /// nothing can read.
     ///
     /// KILLS: the count refusal removed at the freeze boundary (a plan is
     /// frozen for 1,001 topics); removed from the run policy (a schedule
@@ -15975,7 +15354,7 @@ mod fx_33 {
     }
 }
 
-// ------------------------------------------------- PROD-02.1: the empty capture
+// The empty capture
 
 /// A whole 1.8.0 receipt that is an EMPTY CAPTURE: no record, every
 /// partition `low == high`, the empty window `[t, t)`.
@@ -16000,17 +15379,17 @@ fn empty_capture_document() -> Value {
     })
 }
 
-/// **PROD-02.1.** An empty window is never `windowCovered` (an empty capture
-/// is not a recovery point), and only a receipt whose arms hold is an empty
-/// capture: an empty window without the watermarks, or with a partition whose
-/// low and high differ, is not one.
+/// An empty window is never `windowCovered` (an empty capture is not a
+/// recovery point), and only a receipt whose arms hold is an empty capture:
+/// an empty window without the watermarks, or with a partition whose low and
+/// high differ, is not one.
 #[test]
 fn an_empty_capture_is_read_only_from_a_receipt_whose_arms_hold() {
     use weirkeeper::controllers::backup::receipt_is_empty_capture;
     let doc = empty_capture_document();
     assert_eq!(covered_from_receipt(&doc), None);
     assert!(receipt_is_empty_capture(&serde_json::to_vec(&doc).unwrap()));
-    // The controller's own read (FX-33's fold, integrate-10): the same rule.
+    // The controller's own read: the same rule.
     let store = Store::in_memory("logweir/");
     store
         .put_create_only(RECEIPT_KEY, &serde_json::to_vec(&doc).unwrap())
@@ -16046,11 +15425,10 @@ fn an_empty_capture_is_read_only_from_a_receipt_whose_arms_hold() {
     assert!(!receipt_is_empty_capture(b"not json"));
 }
 
-/// **PROD-02.1, R1's status half.** A run whose VERIFIED receipt is an empty
-/// capture completes `Complete=True` reason `EmptyCapture`, with no
-/// `windowCovered`; the same bytes beside a verdict that is not a pass leave
-/// the reason `Ok`, and the terminal patch (before any signature is checked)
-/// always says `Ok`.
+/// A run whose VERIFIED receipt is an empty capture completes `Complete=True`
+/// reason `EmptyCapture`, with no `windowCovered`; the same bytes beside a
+/// verdict that is not a pass leave the reason `Ok`, and the terminal patch
+/// (before any signature is checked) always says `Ok`.
 #[tokio::test]
 async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_receipt() {
     let bytes = serde_json::to_vec(&empty_capture_document()).unwrap();

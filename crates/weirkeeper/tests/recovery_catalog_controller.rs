@@ -1,47 +1,34 @@
-//! `CATALOG-RESYNC-NOT-HARVESTED` — the rows that make `spec.syncRequest` and
-//! `spec.sync.intervalSeconds` mean what `docs/kubernetes.md` §7d says they
-//! mean, and that make `Synced` usable as a completion signal.
+//! The rows that make `spec.syncRequest` and `spec.sync.intervalSeconds` mean
+//! what they say, and that make `Synced` usable as a completion signal.
 //!
-//! # What D3 W14 measured live, and what each row here holds
+//! Two rules, one row each, and a mutant for each:
 //!
-//! On docker-desktop (`claude/artifacts/d3-live/20260918t0316z/`) a second
-//! `spec.syncRequest` ran a sync Job to `Complete` — 19 of 19 of them — that
-//! the controller never harvested: after 480 s the object still read
-//! `Synced=Unknown/PodNotStarted` with the PREVIOUS view published, and an
-//! `intervalSeconds: 300` catalog behaved the same past its interval. A
-//! catalog's view could only be refreshed by deleting and re-creating the
-//! object. Two causes, one row each, and a mutant for each:
-//!
-//! 1. **`status.lastSyncJob` was MERGED, not replaced.** The `/status` write is
-//!    an RFC 7386 merge patch and a merge patch recurses into an object, so
-//!    `{"lastSyncJob": {"name": <new>}}` over a harvested record kept the
+//! 1. **`status.lastSyncJob` is REPLACED, not merged.** The `/status` write is
+//!    an RFC 7386 merge patch, which recurses into an object, so
+//!    `{"lastSyncJob": {"name": <new>}}` over a harvested record would keep the
 //!    PREVIOUS Job's `finishedAt`. `reconcile_catalog` decides "this Job has
-//!    been read" from exactly that field, so every sync after the first was
-//!    born already looking harvested.
+//!    been read" from exactly that field, so every later sync would be born
+//!    looking harvested and never be read.
 //!    Rows: `a_second_sync_request_is_harvested_and_publishes_a_new_view`,
 //!    `the_started_record_names_every_field_of_last_sync_job`.
-//! 2. **A completed sync did not serve its own interval slot.** A request that
-//!    finished at 11:55 was followed one reconcile later by the 12:00 slot's
-//!    Job, whose `report_running` pass wrote `Synced=Unknown/PodNotStarted`
-//!    over the `Synced=True/Succeeded` the publish had just written — the
-//!    write that flipped the condition, and why the live harness had to watch
-//!    `status.syncedAt` instead.
+//! 2. **A completed sync serves its own interval slot.** Otherwise the slot's
+//!    own Job starts one reconcile after a requested sync published, and its
+//!    `report_running` pass writes `Synced=Unknown/PodNotStarted` over the
+//!    `Synced=True/Succeeded` the publish had just written.
 //!    Rows: `a_completed_sync_serves_its_interval_slot_and_synced_stays_true`,
 //!    `the_next_slot_starts_one_sync_and_it_is_harvested`,
 //!    `a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass`.
 //!
-//! Both writes of a `lastSyncJob` record — `start`'s and the harvest's — are
+//! Both writes of a `lastSyncJob` record, `start`'s and the harvest's, are
 //! held to naming every field of the struct, by
 //! `the_started_record_names_every_field_of_last_sync_job` and
 //! `the_harvested_record_names_every_field_of_last_sync_job`. The harvest one
 //! is reachable only on the upgrade path, where a harvest is not preceded by
 //! this build's `start`.
 //!
-//! EVERY TEST HERE IS A `mock_client` TEST. Nothing dials a socket and nothing
-//! waits on a Job; the double PANICS on a request it holds no route for, which
-//! is what makes "no second Job was created" and "the pod log was never read"
-//! mean *the reconciler did not ask*. The live proof of the fixed behaviour is
-//! owed to the next lab run and is not claimed here.
+//! Every test here is a `mock_client` test; the double PANICS on an unrouted
+//! request, which makes "no second Job was created" and "the pod log was never
+//! read" mean *the reconciler did not ask*.
 
 mod support;
 use support::{empty_config_map, fixture, leak, no_trust_policies, route, spki, Fixture};
@@ -62,11 +49,9 @@ use weirkeeper::crds::recovery_catalog::{LastSyncJob, RecoveryCatalog};
 use weirkeeper::job::RunnerImage;
 use weirkeeper::testing::Route;
 
-// ===========================================================================
 // Fixtures
-// ===========================================================================
 
-/// This task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-catalog-resync";
 const NAME: &str = "primary";
 const UID: &str = "c47a1f00-0000-4000-8000-0000000000c1";
@@ -242,9 +227,7 @@ fn pod_list_body(owner_uid: &str) -> String {
     .to_string()
 }
 
-// ---------------------------------------------------------------------------
 // The `catalogSync` result body the controller reads
-// ---------------------------------------------------------------------------
 
 fn entry_value(point: &str, at_ms: i64) -> Value {
     json!({
@@ -335,9 +318,7 @@ fn framed(plan_sha: &str, body: &str) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
 // The route table
-// ---------------------------------------------------------------------------
 
 impl Fixture {
     fn seen(&self) -> Vec<(String, String)> {
@@ -381,11 +362,9 @@ impl Fixture {
             .collect()
     }
 
-    /// Whether this pass read a pod's log — the act of harvesting.
-    ///
-    /// The path is matched without its query string and against `/pods/…/log`
-    /// and not against `"/log"`, which is a substring of every
-    /// `/apis/logweir.dev/…` path there is.
+    /// Whether this pass read a pod's log, the act of harvesting. The path is
+    /// matched without its query string and against `/pods/…/log`, not against
+    /// `"/log"`, which is a substring of every `/apis/logweir.dev/…` path.
     fn read_a_pod_log(&self) -> bool {
         self.seen().iter().any(|(_, u)| {
             let path = u.split('?').next().unwrap_or(u);
@@ -393,7 +372,7 @@ impl Fixture {
         })
     }
 
-    /// Whether this pass listed pods — the act of finding a Job's result.
+    /// Whether this pass listed pods, the act of finding a Job's result.
     fn listed_pods(&self) -> bool {
         self.seen()
             .iter()
@@ -488,8 +467,8 @@ fn published_status(stem: &str, token: &str, finished: DateTime<Utc>) -> Value {
 }
 
 /// Feed one pass's status write back onto the object, exactly as the API
-/// server's RFC 7386 merge would — which is the whole mechanism this defect
-/// lived in, so the chain is simulated and never hand-written.
+/// server's RFC 7386 merge would: the merge is the mechanism under test, so
+/// the chain is simulated and never hand-written.
 fn merged(previous: &RecoveryCatalog, patch: &Value) -> Value {
     let mut status = previous
         .status
@@ -537,9 +516,9 @@ fn harvest_routes(
         route("GET", "/log", log),
         route("POST", "/configmaps", empty_config_map()),
         status_route(),
-        // The Job's own plan `ConfigMap`, read to learn whether its walk began
-        // at the start of the archive (FX-40 review D1). Gone here, so the
-        // view is published as a window: these rows are about the record.
+        // The Job's own plan `ConfigMap`, read to learn whether its walk began at
+        // the start of the archive. Gone here, so the view is published as a
+        // window: these rows are about the record.
         Route {
             method: "GET",
             path_suffix: leak(format!(
@@ -554,23 +533,17 @@ fn harvest_routes(
     ]
 }
 
-// ===========================================================================
-// 1. The second `syncRequest` — the defect's first half
-// ===========================================================================
+// 1. The second `syncRequest`
 
-/// **`CATALOG-RESYNC-NOT-HARVESTED`, the harvest half.** A catalog that has
-/// already published one view, asked for a second sync, RUNS it and READS it:
-/// the new Job is harvested, a new `syncedAt` is published and `Synced` is
-/// `True` again.
+/// **The harvest half.** A catalog that has already published one view, asked
+/// for a second sync, RUNS it and READS it: the new Job is harvested, a new
+/// `syncedAt` is published and `Synced` is `True` again.
 ///
-/// Live, this was two reconciles that never happened. The start pass recorded
-/// `lastSyncJob: {name: <new>}` as a merge patch over the first sync's
-/// harvested record, so `finishedAt` from the FIRST Job stayed on the record of
-/// the SECOND; `reconcile_catalog` reads that one field to decide a Job has
-/// been read, so the second Job — `Complete`, its result sitting in its pod's
-/// log — was never looked at. The chain here is the real one: pass 1's status
-/// write is applied to the object with `apply_merge_patch` and pass 2 runs on
-/// the result.
+/// A merge-patched `lastSyncJob: {name: <new>}` would keep the FIRST Job's
+/// `finishedAt` on the record of the SECOND, and the second Job (`Complete`,
+/// its result in its pod's log) would never be looked at. The chain here is
+/// the real one: pass 1's status write is applied to the object with
+/// `apply_merge_patch` and pass 2 runs on the result.
 #[tokio::test]
 async fn a_second_sync_request_is_harvested_and_publishes_a_new_view() {
     let first = leak(request_stem("token-1"));
@@ -672,11 +645,10 @@ async fn a_second_sync_request_is_harvested_and_publishes_a_new_view() {
     assert_no_delete(&f2);
 }
 
-/// **The meta-guard on the fix.** `start` replaces `status.lastSyncJob` by
-/// naming every one of its fields, and a field added to `LastSyncJob` without a
-/// line there would resurrect `CATALOG-RESYNC-NOT-HARVESTED` silently — the new
-/// field would carry the PREVIOUS Job's value forward. This reads the struct's
-/// own serialisation, so the failure arrives with the field that caused it.
+/// **The meta-guard.** `start` replaces `status.lastSyncJob` by naming every
+/// one of its fields, and a field added to `LastSyncJob` without a line there
+/// would carry the PREVIOUS Job's value forward. This reads the struct's own
+/// serialisation, so the failure arrives with the field that caused it.
 #[tokio::test]
 async fn the_started_record_names_every_field_of_last_sync_job() {
     let stem = leak(request_stem("token-1"));
@@ -699,15 +671,13 @@ async fn the_started_record_names_every_field_of_last_sync_job() {
     assert_names_every_last_sync_job_field("start", &f.patched_status()["lastSyncJob"]);
 }
 
-/// **The same guard on the HARVEST write — review finding L1.** `start` is not
-/// the only place a `lastSyncJob` record is written, and it is not the one that
-/// matters on the path this branch added: a harvest is normally preceded by
+/// **The same guard on the HARVEST write.** A harvest is normally preceded by
 /// this build's `start`, which has already cleared the record, but a catalog
-/// stuck by the defect is harvested with NO such `start` in front of it. A
-/// field the harvest closure does not name therefore survives from whatever the
-/// stuck record held — a `refusalReason` from the one sync that did refuse,
-/// republished beside `exitCode: 0` and `Synced=True/Succeeded`, describing two
-/// different Jobs as one record.
+/// left stuck by an older build is harvested with NO such `start` in front of
+/// it. A field the harvest closure does not name therefore survives from
+/// whatever the stuck record held: a `refusalReason` from the one sync that
+/// did refuse, republished beside `exitCode: 0` and `Synced=True/Succeeded`,
+/// describing two different Jobs as one record.
 #[tokio::test]
 async fn the_harvested_record_names_every_field_of_last_sync_job() {
     let stem = leak(request_stem("token-1"));
@@ -742,12 +712,11 @@ async fn the_harvested_record_names_every_field_of_last_sync_job() {
     // ---- and the harvest whose Job supplies NEITHER ----------------------
     //
     // A SUCCESSFUL harvest writes `startedAt` and `exitCode` from the Job and
-    // its pod, so the seeded nulls for those two are invisible on that path
-    // and a mutant that drops them survives the case above. They are not
-    // decoration: a Job with no `startTime`, whose pod is gone before the
-    // controller reads it, supplies neither — and on the upgrade path the
-    // stuck record's OWN `startedAt` and `exitCode`, from a different Job,
-    // are what would survive in their place. This is that Job.
+    // its pod, so the seeded nulls for those two are invisible on that path.
+    // A Job with no `startTime`, whose pod is gone before the controller reads
+    // it, supplies neither, and on the upgrade path the stuck record's OWN
+    // `startedAt` and `exitCode`, from a different Job, would survive in their
+    // place. This is that Job.
     let bare = leak(format!("{stem}-bare"));
     let f2 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
@@ -840,25 +809,18 @@ fn assert_names_every_last_sync_job_field(writer: &str, written: &Value) {
     }
 }
 
-// ===========================================================================
-// 2. The interval — the defect's second half, and the write that flipped
-//    `Synced`
-// ===========================================================================
+// 2. The interval, and the write that would flip `Synced`
 
-/// **`CATALOG-RESYNC-NOT-HARVESTED`, the `Synced` half.** A sync that finished
-/// inside an interval slot SERVES that slot: nothing new starts, and the
-/// `Synced=True/Succeeded` the publish wrote stays.
+/// **The `Synced` half.** A sync that finished inside an interval slot SERVES
+/// that slot: nothing new starts, and the `Synced=True/Succeeded` the publish
+/// wrote stays.
 ///
-/// THE WRITE THAT FLIPPED IT. `spec.syncRequest`'s Job is named after the
-/// token, the interval's Job after the slot, and the pass that compared the
-/// tracked name with the slot's name therefore matched nothing: one reconcile
-/// after a requested sync published, the current slot's own Job was created,
-/// and the NEXT pass — `report_running`, with no pod yet — patched
-/// `Synced=Unknown/PodNotStarted` over it (`check::classify`'s default reason
-/// for a Job that has not started). Live, that new Job was then never harvested
-/// (the half above), so the condition stayed `Unknown/PodNotStarted` for 480 s
-/// with a perfectly good view published, and the harness had to watch
-/// `status.syncedAt` instead.
+/// `spec.syncRequest`'s Job is named after the token and the interval's Job
+/// after the slot, so a pass that compared the tracked name with the slot's
+/// name would match nothing, create the current slot's own Job, and its
+/// `report_running` pass (with no pod yet) would patch
+/// `Synced=Unknown/PodNotStarted` (`check::classify`'s default reason for a Job
+/// that has not started) over a perfectly good published view.
 ///
 /// The route table holds NO `POST /jobs`: a pass that started one panics in the
 /// double, which is this row's strongest assertion.
@@ -928,21 +890,18 @@ async fn a_completed_sync_serves_its_interval_slot_and_synced_stays_true() {
     assert_no_delete(&f);
 }
 
-/// **A sync that ran and FAILED spends its slot too — review finding M1.**
+/// **A sync that ran and FAILED spends its slot too.**
 ///
-/// `slot_already_served` reads `lastSyncJob.finishedAt` and NOT `syncedAt`, and
-/// the difference is only visible here: a failed harvest records the Job but
-/// never writes `syncedAt`, so a slot guard sourced from `syncedAt` would leave
-/// a failed sync's slot unserved and re-create the Job on **every** reconcile
-/// until the slot rolled over — a 60-second requeue against a destination that
-/// just refused, with each Job's `ttlSecondsAfterFinished` piling the previous
-/// ones up. The failure belongs on `Synced`, for an operator to act on, and not
-/// in a retry loop this controller never bounds.
+/// `slot_already_served` reads `lastSyncJob.finishedAt` and NOT `syncedAt`: a
+/// failed harvest records the Job but never writes `syncedAt`, so a guard
+/// sourced from `syncedAt` would leave a failed sync's slot unserved and
+/// re-create the Job on **every** reconcile until the slot rolled over, a
+/// 60-second requeue against a destination that just refused, with each Job's
+/// `ttlSecondsAfterFinished` piling the previous ones up. The failure belongs
+/// on `Synced`, for an operator to act on, not in an unbounded retry loop.
 ///
-/// The catalog here has **no `syncedAt` at all** — its first sync is the one
-/// that failed — so a guard reading `syncedAt` finds nothing to be served by.
-/// The route table holds no `POST /jobs`: a pass that started one is refused by
-/// name in the double.
+/// The catalog here has **no `syncedAt` at all** (its first sync is the one
+/// that failed). The route table holds no `POST /jobs`.
 #[tokio::test]
 async fn a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass() {
     let stem = leak(request_stem("token-1"));
@@ -1051,11 +1010,8 @@ async fn a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass() {
 
 /// The other side of the same rule: when the slot DOES roll over, exactly one
 /// sync starts, `Synced` says so honestly, and the Job it created is harvested
-/// into a new view.
-///
-/// A guard that only suppressed syncs would pass the row above and ship a
-/// catalog that never re-syncs at all, which is the failure mode this defect
-/// already had.
+/// into a new view. A guard that only suppressed syncs would pass the row
+/// above and ship a catalog that never re-syncs at all.
 #[tokio::test]
 async fn the_next_slot_starts_one_sync_and_it_is_harvested() {
     let previous = leak(request_stem("token-1"));
@@ -1135,18 +1091,16 @@ async fn the_next_slot_starts_one_sync_and_it_is_harvested() {
     assert_eq!(outcome.entries, 2);
 }
 
-// ===========================================================================
 // 3. The stale Job
-// ===========================================================================
 
 /// **A Job that has already been harvested is never harvested twice.** The
-/// tracked Job is still present — its TTL has not fired — and finished, and its
-/// result is already published. A second harvest would re-POST the pages, write
-/// a `syncedAt` the archive did not move for, and (with the pages owned by the
-/// same Job) hide a genuine re-sync behind an unchanged status.
+/// tracked Job is still present (its TTL has not fired) and finished, and its
+/// result is already published. A second harvest would re-POST the pages,
+/// write a `syncedAt` the archive did not move for, and (with the pages owned
+/// by the same Job) hide a genuine re-sync behind an unchanged status.
 ///
 /// The route table holds no `/pods` and no `/log`: reading either is the
-/// reconciler asking to re-harvest, and the double refuses by name.
+/// reconciler asking to re-harvest.
 #[tokio::test]
 async fn a_stale_finished_job_is_never_harvested_twice() {
     let stem = leak(request_stem("token-1"));
@@ -1200,30 +1154,27 @@ async fn a_stale_finished_job_is_never_harvested_twice() {
     assert_no_delete(&f);
 }
 
-// ===========================================================================
-// 4. The objects the defect has already stuck, and the upgrade past it
-// ===========================================================================
+// 4. Records an older build left stuck, and the upgrade past them
 
-/// **Upgrade.** Every catalog this defect stuck is carrying, right now, a NEW
-/// Job's name beside an OLD Job's `finishedAt` — that is what the merge wrote.
-/// Replacing the record stops another one being created; it does not read the
-/// ones that exist, so the harvest arm asks the honest question instead: is
-/// this record the record of THIS Job's completion?
+/// **Upgrade.** A catalog an older build left stuck carries a NEW Job's name
+/// beside an OLD Job's `finishedAt`, which is what a merge wrote. Replacing
+/// the record stops another one being created; it does not read the ones that
+/// exist, so the harvest arm asks: is this record the record of THIS Job's
+/// completion?
 ///
-/// It matters most for a `intervalSeconds: 0` catalog, which has no next slot
-/// to recover on and would otherwise need a brand-new `syncRequest` token — but
-/// the shape is the same at every cadence, so this row drives the hourly one
-/// the rest of the module uses and a pass one reconcile after the upgrade.
+/// It matters most for an `intervalSeconds: 0` catalog, which has no next slot
+/// to recover on and would otherwise need a new `syncRequest` token; this row
+/// drives the hourly one the rest of the module uses and a pass one reconcile
+/// after the upgrade.
 #[tokio::test]
 async fn a_record_left_by_the_defect_is_harvested_after_the_upgrade() {
     let first_finished = at(2026, 9, 16, 12, 2, 0);
     let second_finished = at(2026, 9, 16, 12, 20, 0);
     let second = leak(request_stem("token-2"));
 
-    // Exactly what the live object looked like: the second request's Job name,
-    // the FIRST request's timestamps, the first view still published and
-    // `Synced` left on a waiting code by the running pass that never got a
-    // harvest after it.
+    // Such a record: the second request's Job name, the FIRST request's
+    // timestamps, the first view still published and `Synced` left on a waiting
+    // code by the running pass that never got a harvest after it.
     let mut status = published_status(second, "token-2", first_finished);
     status["conditions"][1] = json!({
         "type": "Synced", "status": "Unknown", "reason": "PodNotStarted",
@@ -1260,9 +1211,9 @@ async fn a_record_left_by_the_defect_is_harvested_after_the_upgrade() {
     assert_eq!(outcome.entries, 4);
 }
 
-/// The identity test itself, over its four cases — including the one that must
-/// answer `true` with nothing to compare, because answering `false` there would
-/// re-harvest a failed sync on every pass forever.
+/// The identity test itself, over its four cases, including the one that must
+/// answer `true` with nothing to compare: `false` there would re-harvest a
+/// failed sync on every pass forever.
 #[test]
 fn the_harvest_test_is_about_this_jobs_completion() {
     let completed = at(2026, 9, 16, 12, 20, 0);
@@ -1309,17 +1260,11 @@ fn the_harvest_test_is_about_this_jobs_completion() {
     );
 }
 
-// ===========================================================================
-// 5. One catalog per destination — D3 §5.5 item 1 (PoC defect P11)
-// ===========================================================================
+// 5. One catalog per destination.
 //
-// The PoC upgrade round found FIVE `RecoveryCatalog`s over one destination in
-// one namespace, every one `Ready=True/ViewReady` and each running its own sync
-// Job (`claude/artifacts/poc-upgrade-1/defects/P11-duplicate-catalogs.txt`),
-// although D3 §5.5 decides that "two catalogs for one destination in one
-// namespace are refused (`Ready=False/DuplicateCatalog` on the newer object)"
-// and the console's own connect flow relies on that refusal
-// (`ui/pages/catalog.js`, the comment after a durable connect).
+// Two catalogs for one destination in one namespace are refused
+// (`Ready=False/DuplicateCatalog` on the newer object), and the console's
+// connect flow relies on that refusal (`ui/pages/catalog.js`).
 
 /// A catalog named `name` over `destination`, created at `created`.
 fn peer(name: &str, uid: &str, destination: &str, created: DateTime<Utc>) -> RecoveryCatalog {
@@ -1369,7 +1314,7 @@ async fn run_with_peers(
 ///
 /// KILLS: dropping the `duplicate_of` arm in `run` (a sync Job is POSTed and
 /// the pass needs the destination route this table does not hold); deciding by
-/// `>` instead of `<` (the elder, not the newer one, would be refused — see
+/// `>` instead of `<` (the elder, not the newer one, would be refused; see
 /// `the_elder_of_a_destination_is_the_first_created_and_still_syncs`).
 #[tokio::test]
 async fn a_second_catalog_over_one_destination_is_refused_as_duplicate_catalog() {
@@ -1421,21 +1366,21 @@ async fn a_second_catalog_over_one_destination_is_refused_as_duplicate_catalog()
 
 /// **EXISTING DUPLICATES GET A DETERMINISTIC OUTCOME, AND A REFUSED ONE HANDS
 /// OUT NO POINTS.** The upgrade shape: `primary` is the newer of two catalogs
-/// that both synced under the old build — it has a PUBLISHED, unexpired view
-/// and an unharvested finished Job. The pass withdraws the view (`pages`,
+/// that both synced under an older build, with a PUBLISHED, unexpired view and
+/// an unharvested finished Job. The pass withdraws the view (`pages`,
 /// `indexConfigMap` and `truncated` sent as `null`, because the API's point
 /// listing and a catalog-point preflight read `status.pages[]` and never
 /// `Ready`), does not read the Job's pod, and writes nothing else of the view.
 ///
 /// KILLS: routing the duplicate through `publish_refusal` (which clears only an
-/// EXPIRED view — the pages would survive here); moving the check after the
+/// EXPIRED view, so the pages would survive here); moving the check after the
 /// harvest (the pod list and log routes are absent, so the double panics).
 #[tokio::test]
 async fn an_existing_duplicate_withdraws_its_view_and_harvests_nothing() {
     let finished = at(2026, 9, 16, 11, 58, 0);
     let stem = leak(request_stem("token-1"));
     let mut status = published_status(stem, "token-1", finished);
-    // Its last Job finished and has NOT been harvested — the harvest arm would
+    // Its last Job finished and has NOT been harvested: the harvest arm would
     // read the pod log if it were reached.
     status["lastSyncJob"]["finishedAt"] = Value::Null;
     let newer = primary_created(at(2026, 9, 16, 11, 0, 0), status);
@@ -1482,10 +1427,10 @@ async fn an_existing_duplicate_withdraws_its_view_and_harvests_nothing() {
         after.get("pages").is_none(),
         "the object lists no page after the write: {after}"
     );
-    // REVIEW L5: `viewExpiresAt` goes with the pages. A `ProtectionPolicy`
-    // gates on it FIRST (`protection_policy::read_catalog`): left behind, the
-    // withdrawn view read as a FRESH, EMPTY one and raised "no available
-    // point"; gone, it reads as `CatalogStale`, which is what it is
+    // `viewExpiresAt` goes with the pages. A `ProtectionPolicy` gates on it
+    // FIRST (`protection_policy::read_catalog`): left behind, the withdrawn view
+    // would read as a FRESH, EMPTY one and raise "no available point"; gone, it
+    // reads as `CatalogStale`
     // (`protection_controller.rs::a_withdrawn_duplicate_catalog_view_is_stale_not_empty`).
     assert!(
         patch.get("viewExpiresAt").is_some_and(Value::is_null),
@@ -1670,14 +1615,13 @@ fn the_duplicate_rule_is_total_and_filters_what_is_not_a_peer() {
     assert!(ctrl::duplicate_of(&me, &[renamed_self]).is_none());
 }
 
-/// **REVIEW L6 — THE REVIEWER'S PROBE C, INVERTED: A DUPLICATE THAT TAKES OVER
-/// SYNCS AT ONCE, even inside a slot its own last sync served.** The shape an
-/// upgrade over duplicates leaves: the ex-duplicate's view was withdrawn, its
-/// `Synced` reads `False/DuplicateCatalog`, and its last sync finished inside
-/// the current hour. Its elder is gone. Counting that sync as serving the slot
-/// left it with no view, `Ready=Unknown/NeverSynced` and a `Synced` naming an
-/// elder that no longer exists until the next slot — up to a day, or for ever
-/// at `intervalSeconds: 0`. It starts a sync on this pass instead.
+/// **A DUPLICATE THAT TAKES OVER SYNCS AT ONCE, even inside a slot its own
+/// last sync served.** The shape an upgrade over duplicates leaves: the
+/// ex-duplicate's view was withdrawn, its `Synced` reads
+/// `False/DuplicateCatalog`, its last sync finished inside the current hour,
+/// and its elder is gone. Counting that sync as serving the slot would leave
+/// it with no view until the next slot (up to a day, or forever at
+/// `intervalSeconds: 0`). It starts a sync on this pass instead.
 ///
 /// KILLS: `slot_already_served` counting a sync whose view was withdrawn as a
 /// duplicate.
@@ -1741,11 +1685,10 @@ async fn a_duplicate_that_takes_over_syncs_at_once_inside_a_served_slot() {
     );
 }
 
-/// **FX-2's class sweep: `RecoveryCatalog.spec.sync.maxObjectsPerRun` and
-/// `viewLimit`**, "the object budget for one Job" and the newest points the
-/// runner relays. Both reach the sync Job's plan; every row used the fields'
-/// own defaults (100,000 and 2,000), so a plan rendered from the defaults
-/// instead of the spec passed them all.
+/// **`RecoveryCatalog.spec.sync.maxObjectsPerRun` and `viewLimit`**, the
+/// object budget for one Job and the newest points the runner relays, reach
+/// the sync Job's plan, at non-default values (the defaults are 100,000 and
+/// 2,000).
 ///
 /// MUTANTS: `max_objects_per_run: 100_000` / `view_limit: 2000` where the
 /// sync request is built.
@@ -1791,11 +1734,10 @@ async fn a_catalogs_own_sync_budget_reaches_its_plan() {
     );
 }
 
-/// **FX-2's class sweep: `RecoveryCatalog.spec.sync.mode` and `deepCheck`**,
-/// how much of the archive one sync Job walks and how hard it checks each point.
-/// Both reach only the sync Job's plan, and every row used the fields' own
-/// defaults (`Index`, `ManifestDigest`), so a plan rendered from the defaults
-/// instead of the spec passed them all.
+/// **`RecoveryCatalog.spec.sync.mode` and `deepCheck`**, how much of the
+/// archive one sync Job walks and how hard it checks each point, reach the
+/// sync Job's plan, at non-default values (the defaults are `Index` and
+/// `ManifestDigest`).
 ///
 /// MUTANTS: `mode: SyncMode::Index.into()` / `deep_check:
 /// DeepCheck::ManifestDigest.into()` where the sync request is built.
@@ -1843,9 +1785,7 @@ async fn a_catalogs_own_sync_mode_and_deep_check_reach_its_plan() {
     );
 }
 
-// ===========================================================================
-// FX-11 — a sync pod the namespace refuses at creation
-// ===========================================================================
+// A sync pod the namespace refuses at creation
 
 /// The admission's words for a quota-refused sync pod.
 const QUOTA_REFUSAL: &str = "Error creating: pods \"sync-pod-q8z4m\" is forbidden: exceeded \
@@ -1935,16 +1875,14 @@ fn event_lists(f: &Fixture) -> Vec<String> {
         .collect()
 }
 
-/// **FX-11: A QUOTA-REFUSED SYNC POD IS `PodCreateRejected` 30 SECONDS AFTER
-/// THE JOB, NAMING THE QUOTA, AND THE HARVEST THAT FOLLOWS KEEPS THE CAUSE.**
+/// **A QUOTA-REFUSED SYNC POD IS `PodCreateRejected` 30 SECONDS AFTER THE JOB,
+/// NAMING THE QUOTA, AND THE HARVEST THAT FOLLOWS KEEPS THE CAUSE.**
 ///
-/// Pass 1: the sync Job is 45 s old with no pod and a `FailedCreate` Event —
+/// Pass 1: the sync Job is 45 s old with no pod and a `FailedCreate` Event:
 /// the Job is cancelled and `Synced` names `PodCreateRejected` with the
 /// admission's words. Pass 2: the cancelled Job has failed on its collapsed
-/// deadline — the harvest publishes `Synced=False/PodCreateRejected` and
-/// `lastSyncJob.refusalReason`, not `DeadlineExceeded`. Before FX-11 both
-/// passes read no Events: `PodNotStarted` for fifteen minutes, then
-/// `DeadlineExceeded`.
+/// deadline: the harvest publishes `Synced=False/PodCreateRejected` and
+/// `lastSyncJob.refusalReason`, not `DeadlineExceeded`.
 ///
 /// KILLS: the Events read dropped at either pass; the message not propagated;
 /// the early cancel dropped.
@@ -2009,9 +1947,9 @@ async fn fx11_a_sync_pod_the_quota_refuses_is_named_and_cancelled() {
     );
 }
 
-/// **FX-11 NEGATIVE CONTROL.** The same podless Job with no `FailedCreate`
-/// Event is `PodNotStarted` while it runs and `DeadlineExceeded` once it dies —
-/// the pre-FX-11 path, unchanged — and nothing is cancelled early.
+/// **NEGATIVE CONTROL.** The same podless Job with no `FailedCreate` Event is
+/// `PodNotStarted` while it runs and `DeadlineExceeded` once it dies, and
+/// nothing is cancelled early.
 #[tokio::test]
 async fn fx11_control_no_event_keeps_the_deadline_path() {
     let stem = leak(request_stem("token-2"));
@@ -2040,21 +1978,18 @@ async fn fx11_control_no_event_keeps_the_deadline_path() {
     );
 }
 
-// ===========================================================================
-// FX-19 CLASS SWEEP — the reaping of a finished sync Job flaps nothing here
-// ===========================================================================
+// The reaping of a finished sync Job flaps nothing here
 
-/// **FX-19 CLASS SWEEP, catalog sync: A HARVESTED SYNC JOB THE TTL CONTROLLER
-/// IS COLLECTING IS NOT RE-JUDGED.** The sync Job carries its TTL from
-/// creation (`catalog_view::ttl_seconds`, at least an hour), so its foreground
-/// delete — `deletionTimestamp` set, pod gone — reaches a catalog whose record
-/// already names THIS Job's completion (`recovery_catalog::harvested_record`,
-/// checked before `harvest` in `run`). No pod list, no log, no `Synced=False`,
-/// nothing above debug.
+/// **A HARVESTED SYNC JOB THE TTL CONTROLLER IS COLLECTING IS NOT RE-JUDGED.**
+/// The sync Job carries its TTL from creation (`catalog_view::ttl_seconds`, at
+/// least an hour), so its foreground delete (`deletionTimestamp` set, pod
+/// gone) reaches a catalog whose record already names THIS Job's completion
+/// (`recovery_catalog::harvested_record`, checked before `harvest` in `run`).
+/// No pod list, no log, no `Synced=False`, nothing above debug.
 ///
 /// NEGATIVE CONTROL: the same Job under a record that does NOT name its
-/// completion (`finishedAt` absent: never harvested) is harvested — pod-less,
-/// so `Synced=False` and a WARN — which is the read the gate prevents.
+/// completion (`finishedAt` absent: never harvested) is harvested (pod-less,
+/// so `Synced=False` and a WARN), which is the read the gate prevents.
 #[tokio::test]
 async fn fx19_a_harvested_sync_job_being_collected_is_not_rejudged() {
     let stem = leak(request_stem("token-1"));

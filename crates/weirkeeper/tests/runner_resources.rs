@@ -1,13 +1,11 @@
-//! FX-2 — `runnerResources` is applied or refused, never dropped and never
-//! clamped.
+//! `runnerResources` is applied or refused, never dropped and never clamped.
 //!
-//! PURE ROWS ONLY. The reconciler rows — the `Restore` Job's container — are
-//! in `restore_controller.rs`, over its route table.
+//! Pure rows only. The reconciler rows (the `Restore` Job's container) are in
+//! `restore_controller.rs`, over its route table.
 //!
-//! READ [`a_valid_block_reaches_the_container_verbatim_and_in_the_right_places`]
-//! FIRST: it is the defect's own row, one layer down. Before FX-2 there was no
-//! function to call — `job::build` rendered a container with no `resources`
-//! whatever the object said.
+//! Read [`a_valid_block_reaches_the_container_verbatim_and_in_the_right_places`]
+//! first: a block that never reaches `job::build`'s container is the failure
+//! this file exists for.
 
 use std::collections::BTreeMap;
 
@@ -44,13 +42,10 @@ fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-// ===========================================================================
 // What reaches the container
-// ===========================================================================
 
-/// **THE DEFECT'S OWN ROW, ONE LAYER DOWN.** A valid block comes back
-/// verbatim, requests as requests and limits as limits, and `job::build` puts
-/// exactly that on the one container.
+/// **A valid block comes back verbatim, requests as requests and limits as
+/// limits, and `job::build` puts exactly that on the one container.**
 ///
 /// Every request differs from its limit, so a swap anywhere between the object
 /// and the container is visible.
@@ -125,9 +120,8 @@ fn a_valid_block_reaches_the_container_verbatim_and_in_the_right_places() {
     );
 }
 
-/// Absent, empty, or a block with no quantity in it: NO `resources` key at all
-/// — the Job shape every runner had before FX-2, so the namespace's
-/// `LimitRange` defaults apply exactly as they did.
+/// Absent, empty, or a block with no quantity in it: NO `resources` key at
+/// all, so the namespace's `LimitRange` defaults apply.
 #[test]
 fn an_absent_or_empty_block_renders_no_resources_at_all() {
     assert_eq!(validate(None, RESTORE_PATH), Ok(None));
@@ -157,9 +151,7 @@ fn an_absent_or_empty_block_renders_no_resources_at_all() {
     );
 }
 
-// ===========================================================================
 // The rules
-// ===========================================================================
 
 /// **Rule 5.** A request above its limit is refused, per resource, naming the
 /// request's field and both values. Equal is fine.
@@ -203,8 +195,8 @@ fn a_request_above_its_limit_is_refused_per_resource() {
     assert!(check(json!({"requests": {"cpu": "2"}, "limits": {"memory": "1Gi"}})).is_ok());
 }
 
-/// **Rule 3.** Nothing above the ceiling is accepted — requests and limits
-/// alike — and nothing is clamped: the refusal names the value and the
+/// **Rule 3.** Nothing above the ceiling is accepted (requests and limits
+/// alike) and nothing is clamped: the refusal names the value and the
 /// ceiling, and no rendering comes back at all.
 ///
 /// MUTANT: removing the ceiling comparison; replacing the refusal with a
@@ -214,8 +206,8 @@ fn nothing_above_the_ceiling_is_accepted_and_nothing_is_clamped() {
     // At the ceiling: accepted.
     assert!(check(json!({"limits": {"cpu": "4", "memory": "8Gi"}})).is_ok());
     assert!(check(json!({"limits": {"cpu": "4000m", "memory": "8589934592"}})).is_ok());
-    // …in every binary spelling below `Gi` too (review L8: with `Ki` read as
-    // 1000, `8388609Ki` — one Ki over — was ACCEPTED and reached the Job).
+    // …in every binary spelling below `Gi` too: with `Ki` read as 1000,
+    // `8388609Ki` (one Ki over) would be accepted.
     assert!(check(json!({"limits": {"memory": "8388608Ki"}})).is_ok());
     assert!(check(json!({"limits": {"memory": "8192Mi"}})).is_ok());
     // One unit above it: refused.
@@ -284,8 +276,8 @@ fn nothing_above_the_ceiling_is_accepted_and_nothing_is_clamped() {
 }
 
 /// **Rule 2.** The unit fits the resource: memory is whole bytes, CPU whole
-/// millicores. `memory: 100m` — a tenth of a byte, the classic slip for
-/// `100Mi` — is refused with a hint.
+/// millicores. `memory: 100m` (a tenth of a byte, the classic slip for
+/// `100Mi`) is refused with a hint.
 ///
 /// MUTANT: dropping the unit check (every row below would then fail on the
 /// floor or pass, never on the unit).
@@ -352,7 +344,7 @@ fn a_limit_is_a_cap() {
     }
     assert!(check(json!({"limits": {"memory": MEMORY_LIMIT_FLOOR}})).is_ok());
     assert!(check(json!({"limits": {"memory": "33554432"}})).is_ok());
-    // The floor in `Ki` (review L8): exactly 32Mi is a cap, one Ki less is not.
+    // The floor in `Ki`: exactly 32Mi is a cap, one Ki less is not.
     assert!(check(json!({"limits": {"memory": "32768Ki"}})).is_ok());
     let text = refused(json!({"limits": {"memory": "32767Ki"}}));
     assert!(text.contains(MEMORY_LIMIT_FLOOR), "32767Ki: {text}");
@@ -412,9 +404,9 @@ fn quantities_compare_exactly_across_spellings() {
     same("1e-3", "1m");
     same("2.5e2", "250");
     same("0", "0Ei");
-    // EVERY SUFFIX, PINNED TO ITS EXACT VALUE IN PLAIN DIGITS (review L8). A
-    // pair of two suffixed spellings cannot catch a table entry that is wrong
-    // on both sides; digits can. `Ki` read as 1000 survived the whole suite.
+    // EVERY SUFFIX, PINNED TO ITS EXACT VALUE IN PLAIN DIGITS. A pair of two
+    // suffixed spellings cannot catch a table entry that is wrong on both
+    // sides; digits can.
     for (suffixed, digits) in [
         ("1Ki", "1024"),
         ("1Mi", "1048576"),
@@ -434,7 +426,7 @@ fn quantities_compare_exactly_across_spellings() {
     ] {
         same(suffixed, digits);
     }
-    // The two spellings review L8 named: the floor and the ceiling, in `Ki`.
+    // The floor and the ceiling, in `Ki`.
     same("32768Ki", "32Mi");
     same("8388608Ki", "8Gi");
     let less = |a: &str, b: &str| {
@@ -480,8 +472,8 @@ fn every_refusal_is_reported_under_its_own_field() {
 }
 
 /// **THE NUMBERS THE DOCUMENTATION STATES ARE THE NUMBERS THE CODE USES.**
-/// D3 §4.1's ceilings, the floor, and the two CRDs' descriptions that
-/// `kubectl explain` shows an operator — read from the generated files, so a
+/// The ceilings, the floor, and the two CRDs' descriptions that
+/// `kubectl explain` shows an operator, read from the generated files, so a
 /// ceiling moved in one place and not the other fails here.
 #[test]
 fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
@@ -502,7 +494,7 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
                 "{crd} must describe the bound the controller enforces: `{needle}`"
             );
         }
-        // THE PER-QUANTITY DESCRIPTIONS TOO (review nit): `kubectl explain
+        // The per-quantity descriptions too: `kubectl explain
         // …runnerResources.limits.memory` shows these, under `requests` and
         // under `limits`, so each sentence appears exactly twice per CRD.
         for needle in [

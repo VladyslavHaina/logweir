@@ -1,11 +1,11 @@
-//! D0 stage 5: the controller watches and acts in the execution namespaces it
-//! is given, and nowhere else (`weirkeeper::scope`).
+//! The controller watches and acts in the execution namespaces it is given,
+//! and nowhere else (`weirkeeper::scope`).
 //!
 //! THE CLASS THIS GUARDS. A namespaced kind reached through `Api::all` is a
 //! cluster-wide watch or list, which a controller bound by per-namespace
-//! RoleBindings is refused — so it silently stops reconciling — and which, in a
+//! RoleBindings is refused (so it silently stops reconciling) and which, in a
 //! cluster-wide install, reads every namespace. Every such site in this crate
-//! now goes through `scope::api` or `scope::list_everywhere`; the source scan
+//! goes through `scope::api` or `scope::list_everywhere`; the source scan
 //! below fails when a new one is written directly, and the behavioural rows
 //! prove what the two helpers actually ask the API server for.
 //!
@@ -37,10 +37,7 @@ fn src_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// one of the two cluster-scoped kinds. An untyped site cannot be checked and
 /// fails too.
 ///
-/// REGRESSION REASON. Before D0 stage 5 twenty-six sites built namespaced
-/// watches and lists with `Api::all`; under the scoped chart each of them is a
-/// reconciler the API server refuses. MUTANT: put
-/// `let api: Api<Backup> = Api::all(client.clone());` back in
+/// MUTANT: put `let api: Api<Backup> = Api::all(client.clone());` back in
 /// `controllers/backup.rs` and this row names the file and line.
 #[test]
 fn no_namespaced_kind_is_reached_through_api_all() {
@@ -110,8 +107,8 @@ fn every_namespaced_reconciler_runs_once_per_watched_namespace() {
     }
 }
 
-/// **The cluster-wide default is one watch over everything, exactly as
-/// before**, and a scoped list covers exactly its names.
+/// **The cluster-wide default is one watch over everything**, and a scoped
+/// list covers exactly its names.
 #[test]
 fn the_default_is_one_cluster_wide_watch() {
     assert_eq!(WatchScope::Cluster.watches(), vec![None]);
@@ -197,9 +194,9 @@ async fn a_scoped_reconciler_starts_once_per_namespace() {
 
 /// **No standalone watch stream spins on errors.** `Controller` backs off its
 /// own trigger watches; a `reflector(…, watcher(…))` this crate spawns itself
-/// must say `.default_backoff()` or a refused LIST — a 403 from a namespace
-/// bound without its grant, an API-server outage — becomes a tight retry
-/// loop. Found by the PLAT-17.2 live run (~175 retries a second per stream).
+/// must say `.default_backoff()` or a refused LIST (a 403 from a namespace
+/// bound without its grant, an API-server outage) becomes a tight retry loop,
+/// measured live at ~175 retries a second per stream.
 #[test]
 fn every_standalone_watch_stream_backs_off() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -232,8 +229,8 @@ fn every_standalone_watch_stream_backs_off() {
 }
 
 /// **The cluster-scoped `TrustPolicy` reflector is built once per reconciler,
-/// not once per watched namespace** (review L3): no `reflector::reflector(`
-/// inside a `controller_in`, and backup and restore take the shared store.
+/// not once per watched namespace**: no `reflector::reflector(` inside a
+/// `controller_in`, and backup and restore take the shared store.
 #[test]
 fn the_trust_policy_reflector_is_not_per_namespace() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers");

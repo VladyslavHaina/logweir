@@ -1,27 +1,23 @@
-//! **TRUST-VALID-BASIS-CLASS.** Every controller reader of a stored
-//! `verification.result: Valid` reads it WITH its `trust.basis`, through one
-//! rule: `weirkeeper::verification::ValidBasis`.
+//! Every controller reader of a stored `verification.result: Valid` reads it
+//! WITH its `trust.basis`, through one rule:
+//! `weirkeeper::verification::ValidBasis`.
 //!
-//! D3 §7.4: "the green rule becomes `Valid ∧ (basis Current|Historical) ∧ run
-//! success`". D3 §12: "`trust` absent → … the badge uses the pre-existing
+//! Decision D3: "the green rule becomes `Valid ∧ (basis Current|Historical) ∧
+//! run success`", and "`trust` absent → … the badge uses the pre-existing
 //! rule". So a `Valid` is a pass on `Current`, on `Historical`, and with no
-//! trust block at all — and on nothing else.
+//! trust block at all, and on nothing else.
 //!
-//! Four sites (one of them, the withdrawn rehearsal join, since removed) compared `result == "Valid"` alone (review of
-//! `claude/api-trust-state`, item 4):
-//!
-//! | site | what a non-pass `Valid` used to do |
+//! | site | what a plain `result == "Valid"` check does |
 //! |---|---|
-//! | `protection::Evidence::from_verification` | counted as protecting evidence |
-//! | `catalog_view::is_reached_refusal` | was never a refusal |
-//! | `catalog_view`'s `decide` mapping | a wildcard read as `VerifiedHistorical` |
+//! | `protection::Evidence::from_verification` | counts it as protecting evidence |
+//! | `catalog_view::is_reached_refusal` | never calls it a refusal |
+//! | `catalog_view`'s `decide` mapping | reads a wildcard as `VerifiedHistorical` |
 //!
-//! None misfired on a verdict a current controller writes (`decide` pairs
-//! `Valid` with `Current`/`Historical` only), but a lab object written between
-//! `03c2a85` and `e247cf9` carries `Valid` + `Unverified`. Each table below
-//! runs every shape against one site; each site's MUTANT (named on its test)
-//! reverts it to the plain `Valid` check and fails the rows marked "not a
-//! pass".
+//! A current controller pairs `Valid` with `Current`/`Historical` only, but an
+//! object written by an earlier build can carry `Valid` + `Unverified`. Each
+//! table below runs every shape against one site; each site's MUTANT (named on
+//! its test) reverts it to the plain `Valid` check and fails the rows marked
+//! "not a pass".
 
 use chrono::{TimeZone, Utc};
 use logweir_core::trust::{TrustBasis, TrustKeyState, TrustResult, UntrustReason, Verdict};
@@ -53,7 +49,7 @@ enum Expect {
 }
 
 /// Every shape of the `trust` block beside a `Valid`, with its reading.
-/// `None` is a `Valid` with NO `trust` key at all (D3 §12).
+/// `None` is a `Valid` with NO `trust` key at all.
 fn shapes() -> Vec<(&'static str, Option<Value>, Expect)> {
     vec![
         (
@@ -68,7 +64,7 @@ fn shapes() -> Vec<(&'static str, Option<Value>, Expect)> {
         ),
         ("no trust block (D3 §12)", None, Expect::Pass),
         // `nullable: true` in the CRD, so a stored object can carry it. It is
-        // the same absence as no key (review LOW-1; `ValidBasis::of_json`).
+        // the same absence as no key (`ValidBasis::of_json`).
         ("trust: null", Some(Value::Null), Expect::Pass),
         (
             "Unverified (the 03c2a85..e247cf9 lab shape)",
@@ -177,9 +173,7 @@ fn verified_row() -> view::ViewEntry {
     .expect("the catalog row parses")
 }
 
-// ===========================================================================
 // The rule itself
-// ===========================================================================
 
 /// `ValidBasis` over every shape, from the raw JSON and from the typed block.
 /// The two read paths agree on every shape a stored object can carry.
@@ -252,9 +246,7 @@ fn the_badge_and_the_rule_agree_on_every_shape() {
     }
 }
 
-// ===========================================================================
-// Site 1: protection — `Evidence::from_verification`
-// ===========================================================================
+// Site 1: protection, `Evidence::from_verification`
 
 /// MUTANT: revert `Evidence::from_verification`'s `Valid` arm to
 /// `(Some("Valid"), Some("Historical")) => ValidHistorical, (Some("Valid"), _)
@@ -287,15 +279,13 @@ fn protection_counts_a_valid_as_evidence_only_on_a_passing_basis() {
     }
 }
 
-// ===========================================================================
-// Site 2: catalog_view — the refusal check
-// ===========================================================================
+// Site 2: catalog_view, the refusal check
 
 /// MUTANT: revert `is_reached_refusal`'s `Valid` arm to `Some("Valid") =>
-/// false` (the old `!matches!(.., "Valid")`). The refused rows stop being
-/// refusals — in the function, and in the join built from BOTH read paths
+/// false` (a plain `!matches!(.., "Valid")`). The refused rows stop being
+/// refusals, in the function and in the join built from BOTH read paths
 /// (`from_json`, which retention, preflight, rehearsal and the API use, and
-/// `from_backup`) — and fail.
+/// `from_backup`), and fail.
 #[test]
 fn a_valid_on_a_refused_basis_is_a_reached_refusal_and_is_named_untrusted() {
     for (label, trust, expect) in shapes() {
@@ -341,9 +331,7 @@ fn a_valid_on_a_refused_basis_is_a_reached_refusal_and_is_named_untrusted() {
     }
 }
 
-// ===========================================================================
-// Site 4: catalog_view — `decide`'s verdict onto the view's vocabulary
-// ===========================================================================
+// Site 4: catalog_view, `decide`'s verdict onto the view's vocabulary
 
 fn valid_verdict(basis: TrustBasis, key_state: TrustKeyState) -> Verdict {
     Verdict {
@@ -358,8 +346,8 @@ fn valid_verdict(basis: TrustBasis, key_state: TrustKeyState) -> Verdict {
 /// (Valid, _) => VerifiedHistorical`. The `Unverified`,
 /// `RecordedBeforeRevocation` and `None` rows become selectable and fail.
 ///
-/// `decide`'s verdict always carries a basis, so D3 §12's "no block" row does
-/// not exist here; `ValidBasis::of_core` never answers `Absent`.
+/// `decide`'s verdict always carries a basis, so the "no block" row does not
+/// exist here; `ValidBasis::of_core` never answers `Absent`.
 #[test]
 fn the_catalog_view_maps_a_valid_verdict_by_an_allow_list() {
     let rows = [
@@ -419,12 +407,10 @@ fn the_catalog_view_maps_a_valid_verdict_by_an_allow_list() {
     );
 }
 
-// ===========================================================================
-// The sweep: the same rule on the catalog's §5.4 word and on a fresh verdict
-// ===========================================================================
+// The sweep: the same rule on the catalog's word and on a fresh verdict
 
-/// `verification::catalog_verification` read `Valid` as "Historical, else
-/// Verified" — the same catch-all. MUTANT: restore it; the `Unverified`,
+/// `verification::catalog_verification` must not read `Valid` as
+/// "Historical, else Verified". MUTANT: that catch-all; the `Unverified`,
 /// `RecordedBeforeRevocation` and `None` rows read `Verified` and fail.
 #[test]
 fn the_catalog_word_for_a_valid_verdict_is_an_allow_list() {
@@ -462,8 +448,8 @@ fn the_catalog_word_for_a_valid_verdict_is_an_allow_list() {
 }
 
 /// `VerificationResult::is_pass` gates the receipt facts the `Backup`
-/// reconciler copies onto a status. A result with no trust projection is D3
-/// §12's absent block; only `Valid` passes.
+/// reconciler copies onto a status. A result with no trust projection is the
+/// absent block; only `Valid` passes.
 #[test]
 fn a_fresh_verification_passes_only_as_valid() {
     let at = Utc.with_ymd_and_hms(2026, 9, 19, 2, 10, 0).unwrap();
@@ -487,15 +473,13 @@ fn a_fresh_verification_passes_only_as_valid() {
     }
 }
 
-// ===========================================================================
 // The fixture both sides read
-// ===========================================================================
 
-/// `ui/tests/fixtures/d3/backup-valid-basis-none.json` — a `Valid` whose
-/// `trust` block is PRESENT with `basis: "None"`. The console's legacy mode
-/// used to paint it green (review LOW-1 of `claude/api-trust-state`);
-/// `ui/tests/trust-basis-class.spec.js` and `ui/tests/d3.spec.js` read this
-/// same file and now say not green. Here every controller reader refuses it.
+/// `ui/tests/fixtures/d3/backup-valid-basis-none.json`: a `Valid` whose
+/// `trust` block is PRESENT with `basis: "None"`, which a legacy-mode console
+/// could paint green. `ui/tests/trust-basis-class.spec.js` and
+/// `ui/tests/d3.spec.js` read this same file and say not green; here every
+/// controller reader refuses it.
 #[test]
 fn the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader() {
     let path = concat!(
@@ -541,7 +525,7 @@ fn the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader() {
 /// that does not link `weirkeeper`) reads `decide`'s verdict with
 /// `Verdict::may_render_green`. This row holds that core rule and
 /// `ValidBasis::of_core(..).is_pass()` to ONE answer for every basis, so the
-/// CLI and the controller cannot drift apart (review LOW-2).
+/// CLI and the controller cannot drift apart.
 #[test]
 fn the_core_green_rule_and_the_shared_helper_agree_on_every_basis() {
     for basis in [
