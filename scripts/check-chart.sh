@@ -270,18 +270,20 @@ for target in "${render_targets[@]}"; do
 done
 
 echo "== 4. helm template into $RENDERED, then no drift =="
+# The renders carry no CRDs (PROD-17.1 A5): they are checked once, in
+# `$CHART/crds/`, by `just crds-check`.
 mkdir -p "$RENDERED"
 for target in "${render_targets[@]}"; do
   name="${target%%:*}"
   file="${target#*:}"
   if [ -z "$file" ]; then
-    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
+    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
     rc=$?
   else
-    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --include-crds -f "$file" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
+    helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$file" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} > "$tmp/$name.yaml" 2> "$tmp/render-$name.err"
     rc=$?
   fi
-  echo "   rc=$rc  (helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file}$bootstrap_render_note > $RENDERED/$name.yaml)"
+  echo "   rc=$rc  (helm template $RELEASE $CHART -n $NAMESPACE${file:+ -f $file}$bootstrap_render_note > $RENDERED/$name.yaml)"
   if [ "$rc" -ne 0 ]; then
     cat "$tmp/render-$name.err" >&2
     fail=1
@@ -290,7 +292,7 @@ for target in "${render_targets[@]}"; do
   {
     echo "# GENERATED FILE — do not edit by hand."
     echo "# Rendered by scripts/check-chart.sh (just chart-check):"
-    echo "#   helm template $RELEASE $CHART -n $NAMESPACE --include-crds${file:+ -f $file}$bootstrap_render_note"
+    echo "#   helm template $RELEASE $CHART -n $NAMESPACE${file:+ -f $file}$bootstrap_render_note"
     echo "# It is checked in so a template change lands as a diff a reviewer reads; the"
     echo "# gate compares a temporary render and fails on drift."
     cat "$tmp/$name.yaml"

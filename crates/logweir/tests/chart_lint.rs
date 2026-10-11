@@ -837,8 +837,9 @@ fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
 
 // ============================================ the three flags, off and on
 
-const SHIPPED_KINDS: [&str; 11] = [
-    "CustomResourceDefinition",
+/// The renders carry no CRDs (PROD-17.1 A5): `crds/` is checked once, by
+/// `just crds-check`.
+const SHIPPED_KINDS: [&str; 10] = [
     "ServiceAccount",
     "ClusterRole",
     "ClusterRoleBinding",
@@ -4751,7 +4752,7 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "scripts/check-image-ui.sh",
         "if [ -e \"$CHART/ui\" ]; then",
         "helm lint \"$CHART\"",
-        "helm template \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --include-crds",
+        "helm template \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" -f \"$file\"",
         "diff -u \"$RENDERED/$name.yaml\" \"$tmp/expected-$name.yaml\"",
         "@sha256:",
         "DIGEST_EXEMPT=\"author-only.yaml\"",
