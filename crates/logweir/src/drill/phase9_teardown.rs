@@ -10,27 +10,21 @@
 //! leaving scratch topics behind is an operational annoyance rather than a
 //! false claim.
 //!
-//! What is NOT allowed is silence, and until T0-11 was closed that is exactly
-//! what an operator got. The attestation was correct and nobody read it: a JSON
-//! blob in an object store nobody opens unless they already suspect something.
-//! The warning now travels on the THREE channels an operator actually watches,
-//! on the exact run that left the topics behind:
+//! What is not allowed is silence. The warning travels on the three channels
+//! an operator watches, on the run that left the topics behind:
 //!
-//! * the metric — `logweir_drill_teardown_topics_failed{cluster}`, emitted by
+//! * the metric, `logweir_drill_teardown_topics_failed{cluster}`, emitted by
 //!   `crate::metrics::write_textfile` on every scorecard-carrying path,
 //!   unconditionally, so `0` means "phase 9 cleaned up" and only the whole
 //!   file's absence means "no drill result";
-//! * the log — one `WARN` from `drill::teardown`, carrying the run id and the
-//!   failed topic NAMES both as a field and in the message; and
-//! * the console — a clause on `drill run`'s summary line, appended only when
-//!   the count is non-zero, so a clean run's line is byte-identical to before.
+//! * the log, one `WARN` from `drill::teardown`, carrying the run id and the
+//!   failed topic names both as a field and in the message; and
+//! * the console, a clause on `drill run`'s summary line, appended only when
+//!   the count is non-zero.
 //!
-//! On a CLEAN teardown none of the three says anything special, and that is
-//! deliberate: the gauge reads `0`, the summary line is unchanged, and the log
-//! carries phase 9's ordinary `phase started` / `phase finished` pair from
-//! `record` — which is what tells an operator phase 9 ran at all. (The engine
-//! child is spawned with `RUST_LOG=warn` pinned and contributes nothing to a
-//! clean run's stream, so those two lines are the whole of it.)
+//! A clean teardown says nothing special: the gauge reads `0`, the summary
+//! line is unchanged, and `record`'s `phase started` / `phase finished` pair
+//! shows phase 9 ran.
 use crate::drill::DrillError;
 use crate::signer::ValidatedSigner;
 use logweir_core::spec::TargetMode;
@@ -67,7 +61,7 @@ pub struct TeardownAttestation {
 }
 
 /// What phase 9 deletes, and what it could not: the deleting half of [`run`],
-/// apart so a run that FAILED after its creation step (FX-44) tears down by
+/// apart so a run that FAILED after its creation step tears down by
 /// the same rule. Returns `(deleted, failed)`.
 ///
 /// Teardown goes through `logweir_kafka::reader::TopicDeleter`, NOT through
@@ -83,27 +77,14 @@ pub fn remove(
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
-    // **PHASE 9 TEARS DOWN IN `scratch` MODE AND NOWHERE ELSE** (Global
-    // Constraint 19: "tag 1 deletes nothing but the scratch topics a
-    // `mode: scratch` restore created, in phase 9"; spec §6.1).
-    //
-    // The mode is checked BEFORE the policy, and it is not an `&&` inside the
-    // existing condition, because the two conditions mean different things and
-    // an operator reading this has to be able to tell them apart: `policy`
-    // is the adopter's choice for a scratch drill, while the mode is a
-    // structural fact about what phase 9 is even allowed to do. In `newTopic`
-    // mode the mapped topics ARE the recovery — deleting them at any value of
-    // `target.teardown` would delete the thing the restore was run to produce,
-    // on a real cluster, immediately after signing a document saying it
-    // succeeded.
-    //
-    // `deleter` is untouched on this path, which is what
-    // `crates/logweir/tests/restore_mode.rs::
-    // a_new_topic_restore_tears_nothing_down` asserts through a recording
-    // double: `calls` empty after a `newTopic` run, non-empty after a
-    // `scratch` one.
+    // Phase 9 tears down in `scratch` mode and nowhere else (Global
+    // Constraint 19; spec §6.1). The mode is a separate condition from the
+    // policy: `policy` is the adopter's choice for a scratch drill, the mode
+    // is what phase 9 may do at all, and in `newTopic` mode the mapped topics
+    // are the recovery. `deleter` is untouched on this path
+    // (`crates/logweir/tests/restore_mode.rs::a_new_topic_restore_tears_nothing_down`).
     if mode == TargetMode::Scratch && policy == "delete" {
-        // **PROD-15.1: NEVER AN ORIGINAL NAME.** A mapped target equal to its
+        // Never an original name. A mapped target equal to its
         // source is a topic under its original name; phase 0 refuses such a
         // mapping in scratch mode, and this rail keeps teardown from ever
         // reaching one if that refusal is bypassed. Such a name is attested
@@ -143,7 +124,7 @@ pub fn remove(
     (deleted, failed)
 }
 
-/// **FX-44: the teardown of a run that FAILED after its creation step.**
+/// The teardown of a run that FAILED after its creation step.
 ///
 /// Only the topics this run created (`created`, phase 0's `topics_created`)
 /// go to [`remove`], by phase 9's own rule: deleted in `scratch` mode under
@@ -300,11 +281,8 @@ pub fn failed_topic_names(att: &TeardownAttestation) -> Vec<String> {
 /// `None` when nothing failed. `Some(msg)` naming EVERY failed topic, in the
 /// exact wording the `warn!` emits.
 ///
-/// A pure function rather than a `format!` inlined at the call site, for one
-/// reason: the message is then testable without a subscriber and identical with
-/// one, and `teardown_failure_names_the_topics` asserts exactly that equality.
-/// A message built at the call site could drift from anything a test asserts on
-/// and nobody would find out.
+/// A pure function, so `teardown_failure_names_the_topics` can assert the
+/// message without a subscriber.
 ///
 /// The names are in the message and not merely counted, because an operator who
 /// reads "teardown failed for 1 topic" still has to go and discover WHICH one,
@@ -315,8 +293,8 @@ pub fn teardown_warning(att: &TeardownAttestation) -> Option<String> {
 }
 
 /// [`teardown_warning`] over `(topic, broker error)` pairs, for phase 9 and
-/// for the teardown of a run that failed (FX-44). When the broker refused a
-/// topic for authorization, the warning names the grant (FX-44).
+/// for the teardown of a run that failed. When the broker refused a topic
+/// for authorization, the warning names the grant.
 pub fn left_warning(failed: &[(String, String)]) -> Option<String> {
     if failed.is_empty() {
         return None;
@@ -339,7 +317,7 @@ pub fn left_warning(failed: &[(String, String)]) -> Option<String> {
     Some(msg)
 }
 
-/// **FX-44.** Whether the broker's answer for one topic was an authorization
+/// Whether the broker's answer for one topic was an authorization
 /// refusal: the restore principal lacks `Delete` on it.
 #[must_use]
 pub fn lacks_delete(error: &str) -> bool {
@@ -382,9 +360,6 @@ pub fn print_left(failed: &[(String, String)]) {
 }
 
 /// [`print_left`] through a writer seam, so the line is testable.
-///
-/// # Errors
-/// The writer's.
 pub fn print_left_to(
     out: &mut dyn std::io::Write,
     failed: &[(String, String)],
@@ -397,8 +372,7 @@ pub fn print_left_to(
 
 /// The notes phase 9 writes onto its own `PhaseRecord`, one per failed topic.
 ///
-/// Empty when nothing failed, so a clean drill's phase-9 record is byte-identical
-/// to the one this repository produced before T0-11 was closed.
+/// Empty when nothing failed.
 pub fn failure_notes(att: &TeardownAttestation) -> Vec<String> {
     att.topics_failed
         .iter()
@@ -410,28 +384,12 @@ pub fn failure_notes(att: &TeardownAttestation) -> Vec<String> {
 /// derived from the scorecard's own phase-9 record. `0` when phase 9 did not
 /// run at all.
 ///
-/// WHY THE COUNT TRAVELS ON `PhaseRecord.notes` AND NOT ON A NEW `Scorecard`
-/// FIELD — this is the load-bearing design note of T0-11, and it is three
-/// facts:
-///
-/// 1. **It costs no `format_version` event.** `notes: Vec<String>` already
-///    exists on `PhaseRecord`. Global Constraint 12 fixes `format_version` at
-///    `1.0.0` and lets a minor add optional fields only; a new `Scorecard`
-///    field would be a schema change, a golden regeneration and a corpus case,
-///    and this task does not own that dance.
-/// 2. **No signature has to change to deliver it.** Both terminal paths that
-///    reach `finish()` — `Ok(sc)` and `Err(DrillError::NotPass(sc))` — become
-///    `Some(&Scorecard)` in `report` and arrive at `finish` through `publish`'s
-///    `Some(sc) => finish(args, sc)` arm. The scorecard is already in hand at
-///    every point that needs the count, so `execute`, `execute_with`, `report`,
-///    `publish`, `finish` and `DrillError` are all untouched.
-/// 3. **Nothing written here can reach the signed artifact.** Phase 9's record
-///    is pushed AFTER phase 8 froze and signed the bytes;
-///    `write_scorecard_artifact` writes `signed.bytes` and never a
-///    re-serialisation; and `signed_last_phase_completed` filters `p.phase < 8`.
-///    So the notes are a fact about the run that the signed document is
-///    incapable of carrying, which is the same reason the teardown attestation
-///    is a separate signed document in the first place.
+/// The count travels on `PhaseRecord.notes`, not a new `Scorecard` field: a
+/// new field is a format change, the scorecard is already in hand wherever
+/// the count is needed, and phase 9's record is pushed after phase 8 signed
+/// (`write_scorecard_artifact` writes `signed.bytes`;
+/// `signed_last_phase_completed` filters `p.phase < 8`), so the notes can
+/// never reach the signed artifact.
 pub fn failed_count(sc: &logweir_core::scorecard::Scorecard) -> u64 {
     sc.phases
         .iter()
@@ -476,14 +434,10 @@ fn sig<E: std::fmt::Display>(e: E) -> DrillError {
 /// emits, and the segregation evidence — which scratch topics were actually
 /// deleted — would never be persisted.
 ///
-/// Signing precedes both puts here for the same reason it does in phase 8, and
-/// the same `SigningOrLock` variant carries the failure. It does **not** reach
-/// the process exit code: phase 8 has already signed and uploaded the drill
-/// result by the time this runs, so the call site (`drill::teardown`) logs a
-/// warning and the drill's exit code is unchanged. Whether a teardown that
-/// cannot be attested *should* also change the exit code is an open ruling,
-/// recorded under "Known limitations" in `docs/stability.md`; stage-2 ruling
-/// R-C forbids answering it here.
+/// Signing precedes both puts, as in phase 8, and `SigningOrLock` carries the
+/// failure. It does not reach the exit code: phase 8 already signed and
+/// uploaded the result, so `drill::teardown` logs a warning (whether it
+/// should is open, `docs/stability.md` "Known limitations").
 pub fn persist(
     att: &TeardownAttestation,
     signing_key: &std::path::Path,

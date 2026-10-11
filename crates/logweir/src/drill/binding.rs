@@ -15,13 +15,10 @@
 //!
 //! # Why the runner repeats what the controller already proved
 //!
-//! D3 §4.3 says the standing authorization is "checked twice", and §5.5 says
-//! the runner re-verifies the point "before any data-plane work". Both are the
-//! same argument PLAT-01.2 makes for the bundle digests: the controller's
-//! check is a statement about objects in the API server, and the runner's is a
-//! statement about the bytes in this pod. A substitution between the two —
-//! projected volume replaced, ConfigMap rewritten, archive object swapped — is
-//! invisible to the first check and fatal to the second.
+//! The controller's check (D3 §4.3, §5.5) is a statement about objects in the
+//! API server, and the runner's about the bytes in this pod: a substitution
+//! between the two (projected volume replaced, ConfigMap rewritten, archive
+//! object swapped) is invisible to the first check and fatal to the second.
 
 use crate::catalog::pin::{self, PinVerdict};
 use crate::drill::DrillError;
@@ -35,24 +32,21 @@ use logweir_evidence::{
 
 /// The prose a point-binding refusal opens with.
 ///
-/// `logweir_core::guard::TERMINAL_STATES` is a closed list owned elsewhere
-/// (three elements when this was written, four since FX-8), and D3 §5.5 names `PointBindingMismatch` as a state a controller
-/// should be able to read off `refusal-reason=`. Until that list grows (it is
-/// the status worker's to extend, not this one's) the refusal classifies as
-/// the general `GuardRefused` and carries this token in the message, so an
-/// operator and a log search can still find it by name.
+/// `logweir_core::guard::TERMINAL_STATES` does not list it, so the refusal
+/// classifies as the general `GuardRefused` and carries this token in the
+/// message, where an operator and a log search find it by name.
 pub const POINT_BINDING_MISMATCH: &str = "PointBindingMismatch";
 /// The same arrangement for D3 §4.3's scope refusal.
 pub const REHEARSAL_SCOPE_VIOLATION: &str = "RehearsalScopeViolation";
 /// The token a bound point whose receipt is not signed by a key this run
-/// trusts opens with (D3 §5.5 step 6, RUNNER-POINT-BINDING-SKIPS-SIGNATURE):
+/// trusts opens with (D3 §5.5 step 6):
 /// no evidence keyring mounted, no signature sidecar in the archive, a
 /// signature under no mounted key, or a key [`logweir_core::trust::decide`]
 /// refuses (revoked, used outside its validity, wrong usage). Exit 3, like
 /// [`POINT_BINDING_MISMATCH`]: it is a refusal of the PLAN's point, and no
 /// retry makes it trustworthy.
 pub const POINT_UNTRUSTED: &str = "PointUntrusted";
-/// **FX-7.** The token the runner's NOTE opens with when a bound point's
+/// The token the runner's NOTE opens with when a bound point's
 /// receipt pins a manifest version this bucket does not hold — a copy of the
 /// archive, a bucket without versioning, or a version that was expired or
 /// deleted. Never a refusal: the point is then proven by its digest, as a
@@ -60,7 +54,7 @@ pub const POINT_UNTRUSTED: &str = "PointUntrusted";
 /// rewritten under an identical manifest ([`crate::catalog::pin`], "The cost,
 /// stated").
 pub const POINT_PIN_UNCHECKED: &str = "PointPinUnchecked";
-/// **FX-16.** The token a refusal opens with when the bound point HOLDS — its
+/// The token a refusal opens with when the bound point HOLDS — its
 /// receipt, signature and manifest all verify — but the backup set this run
 /// would restore is not the set that receipt describes: a plan whose
 /// `source.backup` names another set (or `latestCompleted`), or a restored set
@@ -82,7 +76,7 @@ pub struct VerifiedPoint {
     /// The point this run proved, for the log line — re-derived from the
     /// receipt bytes.
     pub point_id: String,
-    /// **FX-4.** The bound receipt's per-topic configuration capture coverage,
+    /// The bound receipt's per-topic configuration capture coverage,
     /// read from bytes whose digest, identity, signature and manifest were all
     /// checked above it — so phases 3 and 7 may compare a restored topic's
     /// configuration against the manifest's record exactly where this says the
@@ -90,24 +84,24 @@ pub struct VerifiedPoint {
     /// that predates format 1.1.0 carries no block and reads UNKNOWN for every
     /// topic.
     pub config_coverage: logweir_core::backup_receipt::SourceConfigCoverage,
-    /// **FX-7.** Set when the receipt's pin could not be checked in this
+    /// Set when the receipt's pin could not be checked in this
     /// bucket ([`POINT_PIN_UNCHECKED`], then [`crate::catalog::pin::UNCHECKED_NOTE`]).
     /// The runner logs it as a warning and goes on.
     pub pin_note: Option<String>,
-    /// **FX-16.** The backup set the verified receipt describes, which
+    /// The backup set the verified receipt describes, which
     /// [`check_restored_set`] compares with the set the engine is about to
     /// restore before anything is decided from this receipt.
     pub set: BoundSet,
-    /// **PROD-15.1.** The verified receipt's `source.cluster_id` — read from
+    /// The verified receipt's `source.cluster_id` — read from
     /// the broker at backup time, never from a spec — which an original-name
     /// restore compares with its target's (condition 3).
     pub source_cluster_id: String,
-    /// **PROD-15.1.** The verified receipt's recorded declarative owners
-    /// (PROD-05.1): where its backup looked, and each source topic's owner.
+    /// The verified receipt's recorded declarative owners: where its backup
+    /// looked, and each source topic's owner.
     pub owners: logweir_core::original_name::ReceiptOwners,
 }
 
-/// **PROD-15.1.** The owners a verified receipt recorded: its
+/// The owners a verified receipt recorded: its
 /// `owner_detection` (absent reads as empty, "not checked") and each source
 /// topic's `topic_configuration[t].owner`.
 fn receipt_owners(
@@ -124,13 +118,13 @@ fn receipt_owners(
     }
 }
 
-/// **FX-16.** The backup set a VERIFIED recovery point describes: the only set
-/// whose records the receipt's word is about.
+/// The backup set a VERIFIED recovery point describes: the only set whose
+/// records the receipt's word is about.
 ///
-/// Everything the runner takes from the bound receipt — FX-4's configuration
-/// capture coverage (phases 3 and 7), FX-8's recorded timestamp type (the time
-/// basis) and FX-7's pin verdict (a judgement of ONE manifest object at ONE
-/// version) — is a statement about this set. [`check_restored_set`] refuses a
+/// Everything the runner takes from the bound receipt (the configuration
+/// capture coverage of phases 3 and 7, the recorded timestamp type of the
+/// time basis, and the pin verdict, a judgement of ONE manifest object at ONE
+/// version) is a statement about this set. [`check_restored_set`] refuses a
 /// run whose restored set is any other, so none of it is ever applied to
 /// another set's records.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,17 +135,17 @@ pub struct BoundSet {
     /// restore (`build_plan` renders `BackupSetRef::backup_id`).
     pub backup_id: String,
     /// The receipt's `archive.manifest_key`: the key the binding read the
-    /// manifest back through and judged FX-7's pin at — bucket-absolute, the
-    /// space `list_manifests` returns keys in — and, since the fix round, the
-    /// key the engine reads this set at under the plan's storage
-    /// (`Store::engine_manifest_key`), which `pick_backup_set` selects by.
+    /// manifest back through and judged the pin at (bucket-absolute, the
+    /// space `list_manifests` returns keys in), and the key the engine reads
+    /// this set at under the plan's storage (`Store::engine_manifest_key`),
+    /// which `pick_backup_set` selects by.
     pub manifest_key: String,
     /// The bound `manifest_sha256`, which the binding proved that key's bytes
     /// hash to.
     pub manifest_sha256: String,
     /// The version id the binding's read of that manifest answered: `None` for
     /// a store that answers none (a filesystem archive, an unversioned
-    /// bucket). FX-7's verdict is about the object AT this version.
+    /// bucket). The pin verdict is about the object AT this version.
     pub manifest_version_id: Option<String>,
 }
 
@@ -160,8 +154,8 @@ pub struct BoundSet {
 /// `Ok(None)` when the plan carries no `source.point` — a v1-shaped plan, and
 /// the only shape a pre-catalog archive can be restored from. `Ok(Some(point))`
 /// names the point this run proved, for the log line, carries its verified
-/// receipt's configuration capture coverage (FX-4), and carries the FX-7 note
-/// when the receipt's pin could not be checked in this bucket.
+/// receipt's configuration capture coverage, and carries the pin note when
+/// the receipt's pin could not be checked in this bucket.
 ///
 /// # The three answers, and why they are not one code
 ///
@@ -174,7 +168,7 @@ pub struct BoundSet {
 ///   the archive holds are not the bytes the approver signed a binding to.
 ///   Never retryable, never a warning.
 /// * **agreement** — the run continues, having touched no broker.
-/// * **agreement over a pin this bucket cannot check** (FX-7) — the receipt
+/// * **agreement over a pin this bucket cannot check**: the receipt
 ///   pins a manifest version this bucket does not hold, as every copy of the
 ///   archive does; the digest decided, the run continues, and the runner logs
 ///   [`POINT_PIN_UNCHECKED`]. A pinned version this bucket HOLDS and no longer
@@ -195,15 +189,10 @@ pub fn verify_point_binding(
     // §5.5 step 6 exists to prevent.
     let keyring = evidence_keyring(evidence_keys, &point.point_id)?;
 
-    // **The key is BUCKET-ABSOLUTE and is not qualified against the store's
-    // prefix.** Every `logweir/` key in this workspace is: `put_create_only`
-    // and `get` operate in the fully-qualified space (`Store::qualify`'s own
-    // doc comment says so — the prefix is a LISTING root), the backup runner
-    // puts the receipt at `logweir/backups/<id>/<run>.receipt.json` with no
-    // qualification, and the catalog record carries that same string. Passing
-    // it through `qualify` here would produce `<prefix>/logweir/backups/…` and
-    // report every present point as missing on any destination whose archive
-    // sits under a prefix.
+    // The key is bucket-absolute and is not qualified against the store's
+    // prefix, like every `logweir/` key (`Store::qualify`: the prefix is a
+    // listing root). Qualifying it would report every present point as
+    // missing on a destination whose archive sits under a prefix.
     let qualified = point.receipt_key.clone();
     let receipt_bytes = match archive.get_capped(&qualified, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => bytes,
@@ -266,21 +255,13 @@ pub fn verify_point_binding(
             point.point_id, receipt.archive.manifest_sha256, point.manifest_sha256
         )));
     }
-    // **FX-16 — THE PLAN NAMES THE POINT'S OWN SET.** `source.backup` is what
-    // `pick_backup_set` restores, and the receipt describes exactly one set.
-    // A plan binding point A while naming set B would restore B's records and
-    // then take every decision the receipt informs — the configuration parity
-    // of phases 3 and 7 (FX-4), the time basis (FX-8) — from A's record. The
-    // controller's readiness check refuses that plan (`preflight.rs`,
-    // `CatalogPointBindingMismatch`); this is the runner's own half, over the
-    // approved bytes, before any broker is contacted.
-    //
-    // `latestCompleted` is refused here too, and on purpose: it names whichever
-    // set is newest when the run starts, so it can agree with the point today
-    // and silently stop agreeing after the next backup. A bound plan names its
-    // point's set (`source.backup: <the receipt's backup_id>`), which is what
-    // the console, the catalog route and a rehearsal (`rehearsal.rs`, `backup:
-    // point.backup_id`) all render.
+    // The plan names the point's own set: `source.backup` is what
+    // `pick_backup_set` restores, and the receipt describes one set, so a plan
+    // binding point A while naming set B would restore B and judge it by A's
+    // record. The controller's readiness check refuses that plan
+    // (`CatalogPointBindingMismatch`); this is the runner's half, before any
+    // broker is contacted. `latestCompleted` is refused too: it can agree
+    // with the point today and stop agreeing after the next backup.
     if plan.source.backup != receipt.backup_id {
         return Err(refuse(plan_set_refusal(
             &point.point_id,
@@ -288,17 +269,12 @@ pub fn verify_point_binding(
             &plan.source.backup,
         )));
     }
-    // **FX-16 fix round (review M-1) — THE OBJECT THE ENGINE WILL READ IS THE
-    // ONE THE RECEIPT ATTESTS.** The engine is told only the plan's storage and
-    // the set id, and it loads `<prefix>/<backup_id>/manifest.json`
-    // (`Store::engine_manifest_key`, built from this handle, which is built
-    // from the plan's `source.storage`). The receipt names the key its backup
-    // read the manifest back at. Unless the two are one key, the restore reads
-    // an object the point does not describe — a plan whose prefix is a parent
-    // of the point's set with another same-id set at the engine's path, or a
-    // plan pointed at a copy under another prefix. Everything below (the
-    // manifest read, FX-7's pin, the digest) is then about the engine's own
-    // object, and `pick_backup_set` selects the set by this same key.
+    // The object the engine will read is the one the receipt attests: the
+    // engine is told only the plan's storage and the set id and loads
+    // `<prefix>/<backup_id>/manifest.json` (`Store::engine_manifest_key`).
+    // Unless that is the receipt's key, the restore reads an object the point
+    // does not describe (a parent prefix with another same-id set, a copy
+    // under another prefix). `pick_backup_set` selects by this same key.
     let engine_key = archive.engine_manifest_key(&receipt.backup_id);
     if receipt.archive.manifest_key != engine_key {
         return Err(refuse(engine_key_refusal(
@@ -348,7 +324,7 @@ pub fn verify_point_binding(
             )))
         }
     };
-    // **FX-7 — THE PIN, JUDGED IN THIS BUCKET** ([`pin::judge`], shared with
+    // The pin, judged in this bucket ([`pin::judge`], shared with
     // the catalog's deep check). A receipt taken on a versioned bucket names
     // the version of the manifest it attests. The engine restores from the
     // key's CURRENT version and knows no other, and the digest below cannot
@@ -433,7 +409,7 @@ pub fn verify_point_binding(
     }))
 }
 
-/// **FX-16.** The binding's refusal of a plan whose `source.backup` is not the
+/// The binding's refusal of a plan whose `source.backup` is not the
 /// bound point's set.
 fn plan_set_refusal(point_id: &str, receipt_backup_id: &str, plan_backup: &str) -> String {
     let named = if plan_backup == "latestCompleted" {
@@ -450,7 +426,7 @@ fn plan_set_refusal(point_id: &str, receipt_backup_id: &str, plan_backup: &str) 
     )
 }
 
-/// **FX-16 fix round (review M-1).** The binding's refusal of a plan under
+/// The binding's refusal of a plan under
 /// whose storage the engine would read the point's set somewhere other than
 /// the manifest the receipt attests. The repair names the prefix the set was
 /// written under when the receipt's key has the engine's shape.
@@ -484,16 +460,14 @@ fn engine_key_refusal(
     )
 }
 
-/// **FX-16 — THE SET THE ENGINE IS ABOUT TO RESTORE IS THE SET THE BOUND
-/// RECEIPT DESCRIBES.** Called by the drill immediately after `describe`, before
-/// the time basis is decided and before phase 2, so a refused run has created
-/// no target topic of this restore and has taken no decision from the receipt.
+/// The set the engine is about to restore is the set the bound receipt
+/// describes. Called by the drill immediately after `describe`, before the
+/// time basis is decided and before phase 2, so a refused run has created no
+/// target topic of this restore and has taken no decision from the receipt.
 ///
-/// Why it is the ENGINE's set (fix round, review M-1): the binding proved the
-/// receipt's manifest key is the key the engine reads under this plan
-/// (`Store::engine_manifest_key`), and `pick_backup_set` selects a bound plan's
-/// set by that exact key, so `set` is the object the engine will load — not
-/// whichever same-id manifest the recursive listing returned first.
+/// It is the engine's set: the binding proved the receipt's manifest key is
+/// the key the engine reads under this plan (`Store::engine_manifest_key`),
+/// and `pick_backup_set` selects a bound plan's set by that exact key.
 ///
 /// `bound` is `None` for a plan bound to no point (nothing to compare: the set
 /// is the one `source.backup` names, as it always was). Otherwise every one of
@@ -505,12 +479,12 @@ fn engine_key_refusal(
 ///   to a newer set, if a plan ever reached here with it;
 /// * **the manifest key** against the receipt's `archive.manifest_key` — the
 ///   plan's storage prefix pointing at another copy of a set with the same id
-///   (FX-7's pin verdict was taken at the receipt's key, not at this one);
+///   (the pin verdict was taken at the receipt's key, not at this one);
 /// * **the manifest digest** `describe` computed against the bound
 ///   `manifest_sha256` — different bytes under the same id and key;
 /// * **the manifest version** `describe` read against the version the binding
 ///   read — the manifest written again between the binding and `describe`,
-///   with bytes that may be identical (FX-7's case, inside this run).
+///   with bytes that may be identical, inside this run.
 ///
 /// Exit 3 ([`POINT_BINDING_SET_MISMATCH`]) naming every disagreement.
 pub fn check_restored_set(
@@ -568,14 +542,14 @@ pub fn check_restored_set(
     )))
 }
 
-/// **FX-4.** The coverage a verified point lends phases 3 and 7 — read only
+/// The coverage a verified point lends phases 3 and 7 — read only
 /// after every check in [`verify_point_binding`], so these bytes are the
 /// approved ones, signed by a trusted key, over the manifest the archive
 /// holds. A signature proves who wrote them, not that they are coherent: a
 /// receipt that contradicts itself (`validate_invariants`, the eleven arms
 /// both verifiers enforce — e.g. a 1.0.x document carrying `config_coverage`,
 /// arm 6) lends NOTHING, and its coverage reads UNKNOWN rather than being
-/// believed (review L2). The restore itself is not refused on that ground:
+/// believed. The restore itself is not refused on that ground:
 /// the binding's own checks all passed, and UNKNOWN only makes parity report
 /// `notAssessed`.
 fn verified_coverage(
@@ -596,12 +570,12 @@ fn verified_coverage(
     }
 }
 
-/// **FX-7.** The binding's refusal for a pinned version this bucket HOLDS and
+/// The binding's refusal for a pinned version this bucket HOLDS and
 /// no longer serves ([`PinVerdict::Superseded`]): the one cause
 /// ([`pin::SUPERSEDED_CAUSE`]), and what the current read answered, AS
 /// OBSERVED. A current read answered with no version id is not "an
-/// unversioned current version" — it may be suspended versioning's `null`, or
-/// a proxy that strips the header (FX-7 re-check, nit 3) — so it is said as
+/// unversioned current version": it may be suspended versioning's `null`,
+/// or a proxy that strips the header, so it is said as
 /// seen. Fail-closed either way.
 fn superseded_refusal(
     point_id: &str,
@@ -764,8 +738,8 @@ fn verify_receipt_signature(
         &IndependentObservation::none(),
         now,
     );
-    // A PASS IS `Valid` ON A `Current`/`Historical` BASIS, not `Valid` alone
-    // (TRUST-VALID-BASIS-CLASS). `Verdict::may_render_green` is that rule for a
+    // A PASS IS `Valid` ON A `Current`/`Historical` BASIS, not `Valid` alone.
+    // `Verdict::may_render_green` is that rule for a
     // decided verdict — the same allow-list `weirkeeper::verification::ValidBasis`
     // applies to a stored one (this crate does not link `weirkeeper`).
     // `decide` pairs `Valid` with those two bases only, so this reads the same
@@ -805,7 +779,7 @@ fn check_point_shape(point: &PointBinding) -> Result<(), DrillError> {
     )))
 }
 
-/// **FX-14.** What is malformed about `point` on its face, one sentence per
+/// What is malformed about `point` on its face, one sentence per
 /// field, empty when nothing is. [`check_point_shape`]'s whole judgement, and
 /// the restore preflight's (`check::kinds::restore`), so the preview refuses
 /// exactly the bindings the runner will.
@@ -906,10 +880,8 @@ pub(crate) mod tests {
     /// the plan's `source.storage` prefix.
     const ARCHIVE_PREFIX: &str = "logweir";
     /// The key the ENGINE reads set `nightly-7`'s manifest at under
-    /// [`ARCHIVE_PREFIX`] (`Store::engine_manifest_key`): since FX-16's fix
-    /// round the binding refuses a receipt that attests any other key. Until
-    /// then this fixture was `logweir/backups/nightly-7/run-1.manifest.json`,
-    /// a key no engine reads.
+    /// [`ARCHIVE_PREFIX`] (`Store::engine_manifest_key`); the binding refuses
+    /// a receipt that attests any other key.
     const MANIFEST_KEY: &str = "logweir/nightly-7/manifest.json";
 
     struct Archive {
@@ -982,8 +954,8 @@ pub(crate) mod tests {
     }
 
     /// A point proven with nothing to note, from a receipt that carries no
-    /// `config_coverage` block (FX-4: UNKNOWN for every topic), describing the
-    /// fixture's set (FX-16) as the binding read its manifest: at
+    /// `config_coverage` block (UNKNOWN for every topic), describing the
+    /// fixture's set as the binding read its manifest: at
     /// `manifest_version_id`, `None` for a store that answers no version.
     fn proven(point_id: String, manifest_version_id: Option<String>) -> Option<VerifiedPoint> {
         Some(VerifiedPoint {
@@ -997,8 +969,8 @@ pub(crate) mod tests {
                 manifest_sha256: logweir_core::ids::sha256_prefixed(br#"{"topics":[]}"#),
                 manifest_version_id,
             },
-            // PROD-15.1: the fixture receipt's measured source, and no owner
-            // record (it predates PROD-05.1's block: "not checked").
+            // The fixture receipt's measured source, and no owner record
+            // ("not checked").
             source_cluster_id: "SOURCE00000000000000000".into(),
             owners: logweir_core::original_name::ReceiptOwners::default(),
         })
@@ -1034,7 +1006,7 @@ pub(crate) mod tests {
     }
 
     /// [`archive_with_a_point`] whose receipt is edited by `edit` before it is
-    /// serialised and signed — how FX-4's rows get a 1.1.0 receipt.
+    /// serialised and signed, how a row gets a 1.1.0 receipt.
     fn archive_with_receipt(edit: impl FnOnce(&mut BackupReceipt)) -> Archive {
         let store = Store::in_memory(ARCHIVE_PREFIX);
         let manifest = br#"{"topics":[]}"#.to_vec();
@@ -1059,7 +1031,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// **FX-4.** A verified binding hands the drill its receipt's
+    /// A verified binding hands the drill its receipt's
     /// configuration capture coverage — the ONLY source phases 3 and 7 read it
     /// from — and a 1.0.0 receipt hands over UNKNOWN for every topic.
     #[test]
@@ -1104,7 +1076,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// **FX-4 review L2.** A receipt both verifiers refuse lends no coverage,
+    /// A receipt both verifiers refuse lends no coverage,
     /// even though a trusted key signed it: here a 1.0.0 document carrying a
     /// `captured` block (arm 6). The binding still verifies (its own checks
     /// pass), and the coverage reads UNKNOWN, never `captured`. Mutant: copy
@@ -1139,8 +1111,7 @@ pub(crate) mod tests {
     }
 
     /// `backup: nightly-7`, the receipt fixture's set: a bound plan names its
-    /// point's own set (FX-16). This fixture said `latestCompleted` until
-    /// FX-16, which is the plan shape the fix refuses.
+    /// point's own set.
     const PLAN_YAML: &str = r#"
 source:
   storage: {backend: filesystem, path: /tmp/logweir-binding-fixture}
@@ -1274,13 +1245,9 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// **F2's MUTANT: tolerate a manifest whose bytes changed under an intact
-    /// receipt.**
-    ///
-    /// The review planted `if false && manifest_digest != point.manifest_sha256`
-    /// and the ENTIRE suite passed: the `NotFound` half of this step was
-    /// guarded and the DIGEST half was not. This row kills it — every document
-    /// agrees with every other document, and the archive holds something else.
+    /// **A manifest whose bytes changed under an intact receipt is refused.**
+    /// Every document agrees with every other, and the archive holds something
+    /// else. KILLS: the digest half of the manifest check disabled.
     ///
     /// Seeded by ATTESTING bytes A and STORING bytes B, because `Store` is
     /// create-only by construction (Global Constraint 6) and a test cannot
@@ -1325,9 +1292,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert!(rendered.contains(&attested_sha256), "{rendered}");
     }
 
-    // -----------------------------------------------------------------------
-    // FX-7: a point on a VERSIONED bucket pins its manifest's version
-    // -----------------------------------------------------------------------
+    // A point on a versioned bucket pins its manifest's version.
 
     /// A SIGNED point on a versioned bucket whose receipt pins the manifest's
     /// version id — or, with `pin == false`, the same point written by a build
@@ -1379,7 +1344,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
 
     /// **THE PIN'S WHOLE POINT.** Engine 0.21.0 re-running over a set rewrites
     /// its segments in place and can put a manifest whose bytes are IDENTICAL
-    /// (measured, FX-7): the digest cannot see it, the version can. A pinned
+    /// (measured): the digest cannot see it, the version can. A pinned
     /// point is refused, exit 3, with the pinned version read BY ID to say the
     /// attested manifest is still retained; the same rewrite under a point
     /// that pins nothing passes the digest check, which is the limit the pin
@@ -1429,11 +1394,8 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert!(rendered.contains(pin::SUPERSEDED_CAUSE), "{rendered}");
     }
 
-    // -----------------------------------------------------------------------
-    // FX-7 fix round (review H-1): a version id belongs to ONE bucket, and a
-    // byte-identical COPY of a pinned point is the same point in another
-    // place — never "written again"
-    // -----------------------------------------------------------------------
+    // A version id belongs to one bucket, and a byte-identical copy of a
+    // pinned point is the same point in another place, never "written again".
 
     /// Every object of `from`, byte for byte, into `to`: `aws s3 sync`, `mc
     /// mirror`, rclone — anything but version-preserving replication.
@@ -1458,8 +1420,6 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             .1
     }
 
-    // ------------------------------------------------------------- FX-16
-
     /// The refusal's message, asserting it is an exit-3 guard refusal that
     /// opens with [`POINT_BINDING_SET_MISMATCH`].
     fn set_mismatch(result: Result<Option<VerifiedPoint>, DrillError>) -> String {
@@ -1475,7 +1435,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         }
     }
 
-    /// **FX-16, the plan half.** A plan bound to point A of set `nightly-7`
+    /// **The plan half.** A plan bound to point A of set `nightly-7`
     /// whose `source.backup` names `nightly-8` is refused exit 3 by the
     /// binding, over the approved bytes, before any broker is contacted —
     /// although the receipt, its signature and its manifest all verify. The
@@ -1503,7 +1463,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// **FX-16: `latestCompleted` with a bound point is refused**, even when
+    /// **`latestCompleted` with a bound point is refused**, even when
     /// the point's set is the newest one: the selector can stop agreeing with
     /// the point at the next backup, and the plan the approver signed would
     /// then restore another set under this receipt.
@@ -1520,7 +1480,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// **FX-16: the verified point carries the set it describes** — the
+    /// **The verified point carries the set it describes** — the
     /// receipt's set id and manifest key, the bound digest, and the version
     /// the binding read — on an unversioned store (no version) and on a
     /// versioned one (the current version, which is the pinned one).
@@ -1600,14 +1560,12 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         }
     }
 
-    /// **FX-16 fix round, review M-1 — the reviewer's layout.** The point's set
-    /// is NESTED under the plan's prefix (`logweir/a/nightly-7/`), and another
-    /// set with the same id and other bytes sits where the engine reads under
-    /// that prefix (`logweir/nightly-7/manifest.json`). The receipt, its
-    /// signature and its manifest all verify, and before the fix the
-    /// restored-set check passed too (the listing picked the nested set) while
-    /// the engine restored the other one. Now the binding refuses, before any
-    /// broker contact, naming both keys and the prefix to use.
+    /// **A nested set under the plan's prefix.** The point's set is nested
+    /// under the plan's prefix (`logweir/a/nightly-7/`), and another set with
+    /// the same id and other bytes sits where the engine reads under that
+    /// prefix (`logweir/nightly-7/manifest.json`). The receipt, its signature
+    /// and its manifest all verify; the binding refuses, before any broker
+    /// contact, naming both keys and the prefix to use.
     ///
     /// The control: the same layout of the point (receipt attesting the nested
     /// manifest) in an archive read through a handle whose prefix is the one
@@ -1655,8 +1613,8 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert_eq!(verified.set.manifest_key, nested);
     }
 
-    /// A receipt whose manifest key no plan storage maps the set id to (the
-    /// pre-fix-round fixture's shape) is refused, saying so.
+    /// A receipt whose manifest key no plan storage maps the set id to is
+    /// refused, saying so.
     #[test]
     fn a_receipt_key_the_engine_never_reads_is_refused() {
         let odd = "logweir/backups/nightly-7/run-1.manifest.json";
@@ -1706,7 +1664,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         )
     }
 
-    /// **FX-16, the restored-set half, row by row.** The set `describe` read
+    /// **The restored-set half, row by row.** The set `describe` read
     /// is the bound one: proven. A plan bound to no point: nothing to compare.
     /// Then each of the four disagreements ALONE is refused, naming itself —
     /// so a check that ignores any one of them fails its row.
@@ -1794,7 +1752,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     }
 
     /// A point proven by its digest with the [`POINT_PIN_UNCHECKED`] note, in
-    /// `bucket`. **FX-16 fix round (review L-2):** its bound set carries the
+    /// `bucket`. Its bound set carries the
     /// version THIS bucket's read answered — never the receipt's pin, which
     /// this bucket does not hold — or every restore of a pinned point from a
     /// DR copy would be refused at `check_restored_set`, whose `describe`
@@ -1825,10 +1783,10 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         note
     }
 
-    /// **H-1, the unversioned copy.** A pinned point copied byte for byte into
-    /// an UNVERSIONED bucket: the copy answers no version id and cannot be read
-    /// by one. Before the fix this was exit 3 "written again"; it is the same
-    /// signed point, proven by its digest, with the note.
+    /// **The unversioned copy.** A pinned point copied byte for byte into an
+    /// UNVERSIONED bucket: the copy answers no version id and cannot be read
+    /// by one. It is the same signed point, proven by its digest, with the
+    /// note.
     #[test]
     fn a_byte_identical_copy_of_a_pinned_point_in_an_unversioned_bucket_is_proven() {
         let (a, _bucket) = versioned_point(true);
@@ -1848,8 +1806,8 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// **FX-4 and FX-7 together.** What this build signs on a versioned
-    /// bucket is FX-4's receipt PLUS the pin (format 1.2.0). A point-bound run
+    /// **Coverage and the pin together.** What this build signs on a versioned
+    /// bucket is a receipt with coverage PLUS the pin (format 1.2.0). A point-bound run
     /// over it hands the receipt's configuration coverage to phases 3 and 7
     /// whether the pin was checked (the bucket that signed it) or could not be
     /// (a byte-identical copy in an unversioned bucket): the note is added
@@ -1919,7 +1877,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// **H-1, the versioned copy.** The same copy into a VERSIONED bucket,
+    /// **The versioned copy.** The same copy into a VERSIONED bucket,
     /// which issued its OWN ids: the pinned id is not in its history
     /// (`NotFound`), so the pin cannot be checked here.
     #[test]
@@ -1971,8 +1929,8 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// since expired the version the receipt pins. To a reader that is the
     /// same answer as a copy — the pinned version is not in this bucket's
     /// history — so the point degrades to the unversioned case: proven by its
-    /// digest, with the note, NOT refused. The rewrite FX-7 detects is the one
-    /// whose pinned version is still retained.
+    /// digest, with the note, NOT refused. The rewrite the pin detects is the
+    /// one whose pinned version is still retained.
     #[test]
     fn a_rewrite_whose_pinned_version_has_expired_degrades_to_the_digest_with_the_note() {
         let (store, bucket) = Store::in_memory_versioned(ARCHIVE_PREFIX);
@@ -2060,7 +2018,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert!(!rendered.contains(POINT_PIN_UNCHECKED), "{rendered}");
     }
 
-    /// FX-7 re-check, nit 3: the superseded refusal says what the current read
+    /// The superseded refusal says what the current read
     /// ANSWERED. With a version id it names it; with none (suspended
     /// versioning's `null`, or a proxy that strips the header) it says so,
     /// rather than calling the current version "unversioned", which the reader
@@ -2160,10 +2118,9 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    // ---- the bound receipt's SIGNATURE under current trust (D3 §5.5 step 6,
-    // RUNNER-POINT-BINDING-SKIPS-SIGNATURE). Every refusal row has the SAME
-    // point with one fact changed; `a_point_the_archive_holds_is_proven_and_names_itself`
-    // is the control that the untouched point runs.
+    // The bound receipt's signature under current trust (D3 §5.5 step 6).
+    // Every refusal row has the same point with one fact changed;
+    // `a_point_the_archive_holds_is_proven_and_names_itself` is the control.
 
     fn untrusted(error: &DrillError, needle: &str) {
         assert_eq!(

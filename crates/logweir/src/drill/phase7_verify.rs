@@ -1,194 +1,91 @@
-//! Phase 7 — verify. Three checks, none of which may read "matched" over
+//! Phase 7: verify. Three checks, none of which may read "matched" over
 //! nothing: (a) segment sha256 over the sampled archive segments, (c) canary
-//! consume-and-reconcile, per-record fingerprints (not watermark counts),
-//! and (d) topic-config parity against what phase 6 deliberately altered —
-//! INTENDED in a scratch drill, NOT RECONSTRUCTED in a `newTopic` restore
-//! (FX-3; `classify_parity`). The old (b), the engine's own `validation run`,
-//! is no longer called: the engine never implemented it.
+//! consume-and-reconcile by per-record fingerprints (not watermark counts),
+//! and (d) topic-config parity against what phase 6 deliberately altered:
+//! intended in a scratch drill, not reconstructed in a `newTopic` restore
+//! (`classify_parity`). There is no (b): the engine never implemented its
+//! `validation run`.
 //!
-//! ## ONE chokepoint, every lane (Task 19 fix round 3)
+//! ## One chokepoint, every lane
 //!
-//! This phase has now shipped the same critical false pass — a signed `Pass`
-//! over a restore that was never checked — through FOUR different doors:
+//! "A `Pass` means every selection was actually checked" is stated once:
 //!
-//! 1. `compare()` pooled every selection's records into one offset-keyed map,
-//!    so an un-restored topic reconciled against a DIFFERENT topic's records
-//!    (`Pass, 50/50, pass_rate 1.0`). Round 1 made `compare()` per-selection.
-//! 2. The zero-sample guard fired only on the AGGREGATE count, so one empty
-//!    selection hid inside a healthy sibling's total. Round 2 made it
-//!    per-selection.
-//! 3. `sampled_segments`' empty guard had the same aggregate shape. Closed in
-//!    round 2 alongside (2).
-//! 4. Both of those guards lived INSIDE the `ByteFingerprint` arm, so the
-//!    `ConsumeOnly` lane had no zero-record guard of any kind: one
-//!    `Unsupported` fingerprint moved the whole run onto a lane where
-//!    `result` was initialised to `Pass` and nothing could move it. A drill
-//!    against a legacy archive reported `Pass` over a restore that did
-//!    nothing — and the trigger (a pre-0.21 archive, a KBAK level-1 segment)
-//!    is a NORMAL production condition this code treats as a routine
-//!    downgrade.
+//! - **`Evidence`** has three variants and no default, so a check that
+//!   concluded nothing cannot be constructed; silence is not expressible.
+//! - **`SelectionVerdict`** exists exactly once per `SampleSelection`: `run`
+//!   iterates `sel` itself and `verdict_for_selection` cannot return "no
+//!   opinion".
+//! - **`roll_up`** is the only place `IntegrityResult` is decided. `Pass`
+//!   requires `all(fully_verified)`, positive evidence from every selection
+//!   on both lanes, and the empty ledger is answered explicitly (`all()` over
+//!   an empty slice is vacuously true).
+//! - **`ConsumeOnly` is a weaker claim, not a weaker check:** it must still
+//!   show its partition gave back at least the records the manifest claims;
+//!   nothing in `roll_up` branches on `level`.
+//! - **Short counts as unverified, against what the manifest can support:**
+//!   `claimed` = `min(sel.count, Σ record_count over the matched segments
+//!   wholly inside the sampled window)`, both ends inclusive (see
+//!   `supportable_claim`). It is not `sample.records_expected`, whose manifest
+//!   total is uncapped by `records_per_partition`. Pinned by
+//!   `claimed_is_the_manifests_wholly_inside_sum_capped_by_the_selections_own_count`.
+//! - **The mode is per selection:** a legacy segment in one partition
+//!   downgrades that partition only, and `roll_up` names in `partial_reason`
+//!   every selection whose byte-level claim was established.
 //!
-//! Each round closed the door the previous round's defect was found in. A
-//! fourth lane-specific guard predicts a fifth door, so round 3 does not add
-//! one. The invariant is now stated ONCE, structurally:
+//! ## Reconciling per selection, never pooled
 //!
-//! - **`Evidence`** is a value with three variants and no default. A check
-//!   that concluded nothing cannot be constructed. Silence — an untouched
-//!   `result`, an unsummed zero, an early `return` — is no longer expressible.
-//! - **`SelectionVerdict`** exists exactly once per `SampleSelection`. `run`
-//!   builds the vector by iterating `sel` itself and `verdict_for_selection`
-//!   cannot return "no opinion", so no selection can silently contribute
-//!   nothing.
-//! - **`roll_up`** is the ONLY place `IntegrityResult` is decided. `Pass`
-//!   requires `all(fully_verified)` — POSITIVE evidence from every selection
-//!   on both lanes — never the absence of a recorded failure. It answers the
-//!   empty ledger explicitly, because `all()` over an empty slice is
-//!   vacuously true and that is precisely the bug.
-//! - **`ConsumeOnly` carries the same obligation as `ByteFingerprint`.** It
-//!   is a weaker CLAIM, not a weaker CHECK: it asserts nothing about record
-//!   contents, and it must still show that its partition gave back at least
-//!   the records the manifest claims. Nothing in `roll_up` branches on
-//!   `level`, so the lane cannot opt out of an obligation that is not
-//!   written in the lane.
-//! - **Short counts as unverified — against what the manifest can SUPPORT.**
-//!   What the archive (or the target) actually returned is compared against
-//!   `claimed` = `min(sel.count, Σ SegmentFacts.record_count over the matched
-//!   segments WHOLLY INSIDE the sampled window)`, both window ends inclusive.
-//!   `sel.count` is `sample.records_per_partition`; the sum is the manifest's
-//!   own figure for the window, held down to the segments it PROVES are in
-//!   it. A segment the window cuts across contributes NOTHING: its records are
-//!   an upper bound, not a claim (`supportable_claim`, which carries the
-//!   reasoning and the measured false negative that produced this rule). It is
-//!   the MINIMUM of the two, and it is not `sample.records_expected` — that
-//!   scorecard field is Σ `count`, the canary the drill set out to reconcile,
-//!   and `phase4_sample`'s own manifest total is deliberately UNCAPPED by
-//!   `records_per_partition`, so holding a 25-record sample of a 250-record
-//!   window to 250 would fail every healthy drill. Holding the archive to
-//!   `claimed` therefore adds no new claim; it holds the drill to the smaller
-//!   of two numbers it already has. Pinned by
-//!   `claimed_is_the_manifests_wholly_inside_sum_capped_by_the_selections
-//!   _own_count`. One fingerprint where the manifest supports 25 is 24 records
-//!   unexamined, not a smaller successful sample — and 2 fingerprints where a
-//!   straddling segment happens to hold 3 is the whole window, not a short
-//!   read.
-//! - **The mode is PER SELECTION.** `probe_archive_modes` no longer returns
-//!   one `ConsumeOnly` for the whole backup set on the first `Unsupported`
-//!   (which also discarded the fingerprints it had already collected): a
-//!   legacy segment in one partition downgrades that partition only, and
-//!   `roll_up` names in `partial_reason` every selection whose byte-level
-//!   claim was genuinely established, so the downgrade cannot erase it.
+//! `compare()` keys on the bare record offset (every partition starts at 0,
+//! and `ConsumedRecord` carries no topic), so it is safe only scoped to one
+//! partition. It is called from `verdict_for_selection`, which is handed one
+//! selection. Pinned by `verify_phase.rs`'s
+//! `a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_healthy_topic`
+//! and `run_reconciles_two_partitions_of_one_topic_independently_not_pooled`.
 //!
-//! ## Reconciling PER SELECTION, never pooled (round 1, review finding F1)
+//! ## Exit-code routing
 //!
-//! `compare()` keys its lookup on the bare record offset alone — deliberately:
-//! every Kafka partition starts at offset 0, and a restored topic's offsets
-//! need not start where the source's did, so matching by (topic, partition,
-//! offset) all at once is not simpler, it is just as offset-collision-prone
-//! UNLESS every call to `compare()` is scoped to exactly one partition. The
-//! first version of this file called `compare()` ONCE over every selection's
-//! archive fingerprints and every selection's consumed records, flattened
-//! into two pooled lists. Because `ConsumedRecord` carries no topic field
-//! and every partition starts at offset 0, records from DIFFERENT topics or
-//! DIFFERENT partitions collided in that one shared lookup table — an
-//! entirely un-restored topic could reconcile against a DIFFERENT topic's
-//! records and sign a byte-fingerprint `Pass` over data that was never
-//! restored (demonstrated against the shipped code in the review; see
-//! `verify_phase.rs`'s
-//! `a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_healthy_topic`).
-//!
-//! The fix is now structural rather than disciplinary: `compare()` is called
-//! from `verdict_for_selection`, which is handed ONE selection, so it cannot
-//! see two selections' data at once even by accident. The cross-PARTITION
-//! half of this (two partitions of the SAME topic, which pool just as readily
-//! as two different topics since both start at offset 0) is separately pinned
-//! by `run_reconciles_two_partitions_of_one_topic_independently_not_pooled`.
-//!
-//! ## Exit-code routing (contract for the future orchestrator)
-//!
-//! Mirrors `phase5_preflight`'s documented contract exactly: `run` below
-//! returns `Ok(VerifyOutcome)` even when the drill did NOT pass — a failed
-//! reconciliation is a DRILL RESULT, not an operational failure, and is
-//! carried home inside `VerifyOutcome.integrity.{result,partial_reason}`,
-//! never as an `Err`. The orchestrator (Task 21a, not implemented here) reads
-//! `integrity.result`. `Pass` becomes `Outcome::Pass` (subject to the other
-//! phases' verdicts). `Partial` is NOT a pass, but still lands at exit 2 with
-//! a signed scorecard. `Fail` becomes `Outcome::FailIntegrity`, exit 2,
-//! signed scorecard.
-//!
-//! `run` returns `Err(DrillError::Operational(..))` ONLY when the check
-//! genuinely could not be performed at all (zero sample selections, a store
-//! I/O failure, a broker unreachable) — never because a comparison came back
-//! negative, and (round 3) never because the ARCHIVE under-delivered. Round 2
-//! treated this one class of finding two ways: an empty archive sample
-//! degraded to `Partial` and continued, while a selection matching zero
-//! archive segments was a hard `Operational` (exit 1, no artifact at all).
-//! Same class, same treatment now: both are drill results. "The archive holds
-//! no segment in this window", "it returned fewer records than its own
-//! manifest claims" and "the target gave back nothing" are all positively
-//! established facts ABOUT THE ARCHIVE OR THE RESTORE, which is exactly what
-//! phase 6's `DrillError::RestoreNoOp` precedent settled the same way; exit 1
-//! is reserved for Logweir failing to run. An auditor learns strictly more
-//! from a signed `partial` naming the exact partition than from exit 1 and no
-//! document. If this file is ever found routing a negative comparison result
-//! through `Err`, or an `Err` here through anything but exit 1, that is the
-//! exact defect this comment exists to prevent.
+//! Like `phase5_preflight`, `run` returns `Ok(VerifyOutcome)` even when the
+//! drill did not pass: a failed reconciliation is a drill result carried in
+//! `integrity.{result,partial_reason}` (`Pass` becomes `Outcome::Pass`;
+//! `Partial` and `Fail` reach exit 2 with a signed scorecard). It returns
+//! `Err(DrillError::Operational(..))` only when the check could not be
+//! performed at all (zero sample selections, a store I/O failure, an
+//! unreachable broker), never for a negative comparison or an archive that
+//! under-delivered: those are facts about the archive or the restore, and a
+//! signed `partial` naming the partition tells an auditor more than exit 1
+//! and no document.
 //!
 //! ## What the signed sample counters aggregate
 //!
-//! The verdict is per selection; `Integrity`'s three counters are one number
-//! each, and Task 20 signs them. They aggregate over EXACTLY the selections
-//! whose records were reconciled against archive fingerprints — no others
-//! contribute, and no non-contributing selection is silent, because every one
-//! of them is named in `partial_reason` and forbids a `Pass`.
-//! `pass_rate_measured` is stricter still: it is a ratio over the WHOLE
-//! sample or it is null, so a `Some(1.0)` can never sit beside a partial
-//! verdict the way the fourth door signed it over a 96%-lossy partition.
+//! `Integrity`'s three counters aggregate over exactly the selections whose
+//! records were reconciled against archive fingerprints; every other
+//! selection is named in `partial_reason` and forbids a `Pass`.
+//! `pass_rate_measured` is a ratio over the whole sample or null, so
+//! `Some(1.0)` never sits beside a partial verdict.
 //!
-//! ## `IntegrityResult::Partial` — what reaches it, and one declared gap
+//! ## `IntegrityResult::Partial`, and one declared gap
 //!
-//! Any selection whose segment lane or record lane is `Evidence::Unverified`,
-//! with no selection failing outright. Reachable in production through every
-//! lane: an archive returning zero (or short) fingerprints for a selection;
-//! a `(topic, partition, window)` the manifest facts claim exists but no
-//! segment matches; a pre-0.21 segment carrying no sha256 to check; a
-//! consume-only selection whose target partition gave back nothing or less
-//! than the manifest claims. Each names itself in `partial_reason`.
+//! Any selection whose segment or record lane is `Evidence::Unverified`, with
+//! no selection failing outright: zero or short fingerprints, a window no
+//! segment matches, a pre-0.21 segment with no sha256, a consume-only
+//! partition that gave back too little. Each names itself in
+//! `partial_reason`.
 //!
-//! The brief's OTHER named `Partial` scenario — a compacted topic that
-//! legitimately holds fewer records than the archive (spec §9.3) — is
-//! DELIBERATELY still not given a distinct reachable path. Distinguishing
-//! "compaction removed this record on purpose" from "the restore or the
-//! archive lost it" would require cross-referencing a specific mismatch
-//! against `topic_parity`'s `cleanup.policy=compact` flag, which this phase
-//! does not attempt. A compacted topic today is honestly reported via the
-//! SAME path a real mismatch takes (`Fail`, with the specific offsets
-//! logged) — a known limitation, not a defect, and out of scope to resolve
-//! algorithmically. `fixtures::verify_outcome_for_compacted_topic` (used by
-//! `a_compacted_topic_is_partial_with_a_reason`) remains a SHAPE test only,
-//! pinning the struct literal Task 20/21 consume — it does not, and cannot
-//! yet, describe a path `run` itself takes.
+//! A compacted topic that legitimately holds fewer records (spec §9.3) has no
+//! distinct path: telling compaction from loss would need cross-referencing
+//! `topic_parity`'s `cleanup.policy=compact`, which this phase does not do,
+//! so it is reported as `Fail` with the offsets logged, a known limitation.
+//! `fixtures::verify_outcome_for_compacted_topic` is a shape test only.
 //!
-//! ## The topic-rename mapping ("the known issue")
+//! ## The topic-rename mapping
 //!
-//! Every `SampleSelection.topic` and `RecordFingerprint.topic` names the
-//! ARCHIVE-side (source) topic — e.g. "orders". Phase 6 may have written the
-//! restored data under a DIFFERENT target-side name (`mapping`, e.g.
-//! "drill-orders"). Two call sites in this file translate source -> target
-//! via `mapping` BEFORE talking to the target cluster, and each is pinned by
-//! a named test.
-//!
-//! First, `verdict_for_selection` (via `mapped_topic`) calls
-//! `reader.consume_range(mapping[&sel.topic], ...)`, never
-//! `reader.consume_range(&sel.topic, ...)` — proven by `verify_phase.rs`'s
-//! `verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name`.
-//! Second, `classify_parity_all` calls `reader.topic_configs(mapping[&src])`
-//! and `reader.end_offsets(mapping[&src])`, never the source name — proven
-//! by
-//! `classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name`.
-//! A topic named in `sel` with no entry in `mapping` is refused loudly
-//! (`DrillError::Operational`), never silently skipped — silently skipping it
-//! would under-sample without saying so, exactly the failure mode this phase
-//! exists to prevent.
+//! `SampleSelection.topic` and `RecordFingerprint.topic` name the source
+//! topic; phase 6 may have restored under another name (`mapping`). Both
+//! target reads translate first: `verdict_for_selection` (via
+//! `mapped_topic`) and `classify_parity_all`, pinned by
+//! `verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name`
+//! and `classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name`.
+//! A topic in `sel` with no `mapping` entry is refused
+//! (`DrillError::Operational`), never skipped.
 use crate::drill::DrillError;
 use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::{
@@ -208,7 +105,7 @@ use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord};
 use std::collections::BTreeMap;
 
-/// PROD-08.1: the complete lane (`sample.coverage: complete`).
+/// The complete lane (`sample.coverage: complete`).
 pub mod complete;
 
 #[derive(Debug)]
@@ -234,24 +131,13 @@ impl VerifyOutcome {
 /// the restore-side injection matches (U:…/restore/helpers.rs:130). Anything
 /// that is not exactly 8 bytes is NOT an original offset and yields None.
 ///
-/// # There is deliberately NO ASCII fallback — do not add one
+/// # No ASCII fallback
 ///
-/// This function replaced a decimal-text decode
-/// (`std::str::from_utf8(v).ok().and_then(|s| s.parse::<i64>().ok())`) that was
-/// `None` against EVERY real archive, so `compare` silently fell back to the
-/// target's own offsets — correct only for a scratch topic restored from offset
-/// 0 with no window, which is precisely why every drill passed. Re-adding a
-/// text arm for the "not 8 bytes" case would resurrect that silent fallback,
-/// and an 8-byte value that happens to be ASCII digits is ambiguous under the
-/// two readings anyway: `b"12345678"` is a perfectly valid little-endian i64
-/// and is decoded as one. The tree already knows LE is right in two other
-/// places — `logweir-engine-oso/examples/mint_segments.rs` mints
-/// `off.to_le_bytes()`, and `logweir-engine-oso/tests/kbak.rs` asserts
-/// `i64::from_le_bytes` — so the text decode was the outlier, not the contract.
-///
-/// Pinned by `decode_original_offset_accepts_only_eight_bytes`
-/// (`crates/logweir/tests/windowed_reconciliation.rs`), whose `b"5"` row
-/// asserts `None` and NOT `Some(5)`.
+/// A decimal-text arm for the "not 8 bytes" case would bring back the silent
+/// fallback to the target's own offsets in `compare`, and `b"12345678"` is a
+/// valid little-endian i64 and decodes as one. Pinned by
+/// `decode_original_offset_accepts_only_eight_bytes`
+/// (`crates/logweir/tests/windowed_reconciliation.rs`).
 pub fn decode_original_offset(raw: &[u8]) -> Option<i64> {
     Some(i64::from_le_bytes(raw.try_into().ok()?))
 }
@@ -269,11 +155,11 @@ pub fn compare(
     // `decode_original_offset` must not be allowed to answer `None` for a
     // header the engine actually wrote (see its doc comment).
     //
-    // PROD-08.1: the LAST `x-original-offset`, as the complete lane reads it
+    // The last `x-original-offset`, as the complete lane reads it
     // (`complete::lineage_offset`): the backup appends its own after the
     // record's headers, so the last is this archive's lineage. A restored
-    // record from the pinned engine carries exactly one (PROD-01.1 R4), so
-    // first and last agree on every target it writes.
+    // record from the pinned engine carries exactly one, so first and last
+    // agree on every target it writes.
     let by_offset: BTreeMap<i64, &ConsumedRecord> = consumed
         .iter()
         .map(|c| {
@@ -305,12 +191,10 @@ pub fn compare(
 /// left to the target broker's default (normally `delete`) and `retention.ms`
 /// is `-1` (`logweir_kafka::reader::TARGET_TOPIC_CONFIGS`), in BOTH modes.
 ///
-/// Whether a deviation on one of them is intended depends on the MODE, which
-/// is the whole of FX-3: a scratch cluster runs `cleanup.policy=delete` with
-/// infinite retention ON PURPOSE, so a scratch drill's deviation is intended;
-/// a `newTopic` restore is the recovery itself, so the same deviation is a
-/// source setting it did NOT reconstruct. Until FX-3 this list was called
-/// `INTENDED` and applied the scratch rationale in every mode.
+/// Whether a deviation on one of them is intended depends on the mode: a
+/// scratch cluster runs `cleanup.policy=delete` with infinite retention on
+/// purpose, but a `newTopic` restore is the recovery itself, so there the
+/// same deviation is a source setting it did not reconstruct.
 const DECIDED_BY_THE_RESTORE: [&str; 2] = ["cleanup.policy", "retention.ms"];
 
 /// The `<key>` of a partition-count entry in `topic_parity`.
@@ -332,7 +216,7 @@ pub struct ParityClasses {
     /// `topic_parity.not_reconstructed` (format 1.2.0): a `newTopic`
     /// restore's deviations on the four kinds. Always empty in `scratch` mode.
     pub not_reconstructed: Vec<String>,
-    /// **FX-21.** `partition_count` and/or `replication_factor` when the
+    /// `partition_count` and/or `replication_factor` when the
     /// SOURCE's value is not recorded, so the two were NOT compared: never a
     /// match, never a deviation. `classify_parity_all` names each in
     /// `topic_parity.not_assessed` as `"<target topic>: <key> (notRecorded)"`
@@ -341,39 +225,33 @@ pub struct ParityClasses {
 }
 
 /// Spec §9.3 phase 7(d) requires the replication-factor and partition-count
-/// divergence RECORDED IN PHASE 3 to be reported. Neither is a Kafka
-/// topic-config key, so neither can ever appear in either config map — putting
-/// them in the config-key list (as an earlier draft did) meant the two values
-/// phase 6 deliberately sets could never be reported at all. They are therefore
-/// passed as explicit integers and compared separately.
+/// divergence recorded in phase 3 to be reported. Neither is a topic-config
+/// key, so they are passed as integers and compared separately.
 ///
-/// # The mode decides the label (FX-3)
+/// # The mode decides the label
 ///
-/// The four kinds — the two config keys of [`DECIDED_BY_THE_RESTORE`],
-/// `partition_count` and `replication_factor` — are deviations the restore's
-/// topic creation makes BY CONSTRUCTION: it renders the plan's
-/// `default_replication_factor` and the manifest's partition count, and leaves
-/// `cleanup.policy` and `retention.ms` to its own values. That rationale
-/// ("a scratch cluster has one broker, deletes and keeps everything") is a
-/// SCRATCH rationale:
+/// The four kinds (the two config keys of [`DECIDED_BY_THE_RESTORE`],
+/// `partition_count` and `replication_factor`) are deviations the restore's
+/// topic creation makes by construction: it renders the plan's
+/// `default_replication_factor` and the manifest's partition count, and
+/// leaves `cleanup.policy` and `retention.ms` to its own values. That is a
+/// scratch rationale:
 ///
-/// - **`scratch`**: the four are `intended`, exactly as before FX-3.
-/// - **`newTopic`**: the four are `not_reconstructed` AND `unexpected` — never
-///   `intended`. A reader of format 1.2.0 reads `not_reconstructed`; a reader
-///   that predates it sees the same deviation in `unexpected_divergence`, a
-///   weaker conclusion than the old label and never silence.
+/// - **`scratch`**: the four are `intended`.
+/// - **`newTopic`**: the four are `not_reconstructed` AND `unexpected`, never
+///   `intended`. A reader of format 1.2.0 reads `not_reconstructed`; an older
+///   reader sees the same deviation in `unexpected_divergence`, a weaker
+///   conclusion and never silence.
 ///
 /// Every other differing key is `unexpected` in both modes.
 ///
-/// # A source value that is not recorded is not a match (FX-21)
+/// # A source value that is not recorded is not a match
 ///
-/// `src_partitions` and `src_rf` are what the SOURCE's record says, and `None`
-/// when it says nothing. Until FX-21 the caller substituted the TARGET's value
-/// for a missing one, so "not recorded" compared as "no divergence" — and
-/// engine 0.23.3 records the replication factor in the manifest for the first
-/// topic it saves only, so every other topic's factor was signed as matching.
-/// A missing value is now neither compared nor matched: its key goes into
-/// [`ParityClasses::not_assessed`], whatever the mode.
+/// `src_partitions` and `src_rf` are what the source's record says, `None`
+/// when it says nothing (engine 0.23.3 records the replication factor for the
+/// first topic it saves only). A missing value is neither compared nor
+/// matched: its key goes into [`ParityClasses::not_assessed`], whatever the
+/// mode.
 pub fn classify_parity(
     mode: TargetMode,
     source_cfg: &BTreeMap<String, String>,
@@ -397,9 +275,9 @@ pub fn classify_parity(
             unexpected.push(k.clone())
         }
     }
-    // FX-21: compared only where the source's value is recorded. A recorded
-    // count of 0 or less is no count (the receipt's arm 19 refuses one), so it
-    // is not recorded either.
+    // Compared only where the source's value is recorded. A recorded count of
+    // 0 or less is no count (the receipt's arm 19 refuses one), so it is not
+    // recorded either.
     let mut not_assessed = Vec::new();
     match src_partitions.filter(|n| *n >= 1) {
         Some(src) if src != tgt_partitions => by_construction.push(PARTITION_COUNT.into()),
@@ -434,27 +312,16 @@ pub fn classify_parity(
     classes
 }
 
-// ---------------------------------------------------------------------------
-// THE CHOKEPOINT (Task 19 fix round 3). Read this before adding any check.
-//
-// Rounds 1-3 each closed the lane the previous round's false pass was found
-// in, and each left another lane open, because the invariant ("a Pass means
-// every selection was actually checked") was spelled once per lane instead of
-// once for the phase. It is now spelled exactly once, in `roll_up`, over a
-// ledger every lane is obliged to fill: `SelectionVerdict`, one per
-// `SampleSelection`, carrying `Evidence` that is a VALUE — never the absence
-// of a recorded failure.
-//
-// If you find yourself adding a lane-specific guard below, that is the signal
-// the mandate names: you have not found the chokepoint, you are patching a
-// door. Add the lane's conclusion to its `Evidence` instead.
+// The chokepoint. "A Pass means every selection was actually checked" is
+// spelled once, in `roll_up`, over a ledger every lane must fill:
+// `SelectionVerdict`, one per `SampleSelection`, carrying `Evidence` that is
+// a value. Do not add a lane-specific guard below; add the lane's conclusion
+// to its `Evidence`.
 
-/// What one check concluded about one selection. Three variants, no default,
-/// no `Ok`-shaped fourth state: a check that concluded nothing CANNOT be
-/// constructed, which is the whole structural point. Every false pass this
-/// phase has shipped came from a lane whose "I checked nothing" state was
-/// spelled as *silence* — an untouched `result: Pass`, an unsummed zero, an
-/// early `return` — rather than as a value someone downstream had to handle.
+/// What one check concluded about one selection. Three variants and no
+/// default: a check that concluded nothing cannot be constructed, so "I
+/// checked nothing" is a value someone downstream must handle, never
+/// silence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Evidence {
     /// POSITIVE evidence: `checked` units of this selection's own claim were
@@ -496,15 +363,10 @@ struct SelectionVerdict {
     /// `"topic/partition"` — the selection this verdict is about, and the
     /// prefix every reason string carries into the signed `partial_reason`.
     id: String,
-    /// What the MANIFEST can SUPPORT for this selection, capped by the
-    /// selection's own `count`: `min(sel.count, Σ record_count)` over the
-    /// matched segments **wholly inside** the sampled window, both ends
-    /// inclusive — see `supportable_claim`. A segment the window cuts across
-    /// contributes nothing, because the records it holds outside the window
-    /// cannot be fingerprinted and must not be demanded. `sel.count` is
-    /// `sample.records_per_partition`; this is the MIN of the two, and it is
-    /// NOT the scorecard's `sample.records_expected`, which is Σ `count` over
-    /// the selections and answers a different question.
+    /// What the manifest can support for this selection:
+    /// `min(sel.count, Σ record_count)` over the matched segments wholly
+    /// inside the sampled window (see `supportable_claim`). Not the
+    /// scorecard's `sample.records_expected`, which is Σ `count`.
     claimed: u64,
     /// (a) archive-segment sha256 evidence for THIS selection's segments.
     segments: Evidence,
@@ -564,15 +426,10 @@ impl SelectionVerdict {
 ///    ledger. A `Pass` requires `all(fully_verified)` — positive evidence
 ///    from every selection on both lanes — not the absence of a recorded
 ///    failure. Deleting any lane's ability to record a failure therefore
-///    cannot produce a pass; it produces `Partial`, because the lane's
-///    `Evidence` still is not `Verified`. That last sentence is only true
-///    because every lane constructs `Evidence::Verified` from a POSITIVE,
-///    non-vacuous predicate rather than as the fall-through of a chain of
-///    negative tests (Task 19 fix round 3, second pass — see
-///    `segment_evidence` and `verdict_for_selection`, where it was NOT true
-///    when this comment was first written: deleting either lane's `Failed`
-///    arm made a wholly corrupt selection fall through to `Verified`).
-///    Pinned by mutants m5/m8 in the task-19 report's mutant table.
+///    produces `Partial`, never a pass, because every lane constructs
+///    `Evidence::Verified` from a positive, non-vacuous predicate, never as
+///    the fall-through of negative tests (`segment_evidence`,
+///    `verdict_for_selection`).
 /// 2. **The empty ledger is answered first and explicitly.** `all()` over an
 ///    empty slice is vacuously TRUE — precisely the false pass this function
 ///    exists to prevent — so zero verdicts returns `Partial`, never `Pass`,
@@ -584,25 +441,19 @@ impl SelectionVerdict {
 ///    records the manifest claims". The lane cannot opt out of the
 ///    obligation, because the obligation is not written in the lane.
 ///
-/// # `count_bound` — the whole-drill check that is not a selection (Task 10)
+/// # `count_bound`: the whole-drill check that is not a selection
 ///
-/// Guard **G-WIN**'s second half is not per-selection: it compares the count
-/// the TARGET actually holds against the bound the MANIFEST puts on the
-/// restore window, over every mapped topic at once. It therefore cannot be a
-/// `SelectionVerdict`, and it must not be applied AFTER this function either —
-/// property 1 above is worth exactly as much as the claim "this is the only
-/// place `IntegrityResult` is decided", and a second decider downstream would
-/// retire that claim. So the verdict arrives here as an argument:
-/// `Some(text)` when the restored count fell outside the bound (a `Fail`, whose
-/// text `partial_reason` carries), `None` when it did not. It can only make the
-/// result worse — there is no arm in which a `None` bound turns a non-pass into
-/// a pass — and `check_restored_count` is the one place that decides it.
-///
-/// FX-23: the argument carries every WHOLE-DRILL finding, joined: the count
-/// bound (the sum, then each mapped partition outside its own bound) and the
-/// engine report's missing partitions (`check_engine_report`). Each is a
-/// measured contradiction about the restore as a whole, never missing
-/// coverage, so each is a `Fail`, through this one argument.
+/// Guard G-WIN's second half compares the count the target holds against the
+/// bound the manifest puts on the restore window, over every mapped topic at
+/// once, so it cannot be a `SelectionVerdict`, and applying it after this
+/// function would make a second decider. It arrives as an argument:
+/// `Some(text)` when a whole-drill finding was made (a `Fail`, whose text
+/// `partial_reason` carries), `None` otherwise. It can only make the result
+/// worse. It carries every whole-drill finding, joined: the count bound (the
+/// sum, then each mapped partition outside its own bound, decided by
+/// `check_restored_count`) and the engine report's missing partitions
+/// (`check_engine_report`), each a measured contradiction, never missing
+/// coverage.
 fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrity {
     if verdicts.is_empty() {
         // Still folds the bound in: an empty ledger is already not a pass, but
@@ -666,12 +517,10 @@ fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrit
         IntegrityResult::Partial
     };
 
-    // The scorecard's three sample counters aggregate over EXACTLY the
+    // The scorecard's three sample counters aggregate over exactly the
     // selections whose records were reconciled against archive fingerprints
-    // (`reconciled.is_some()`) — no others contribute, and none is silently
-    // omitted, because every selection that does not contribute appears by
-    // name in `partial_reason` and forbids a `Pass`. Task 20 signs these,
-    // so what they aggregate is stated here rather than inferred.
+    // (`reconciled.is_some()`); every other selection appears by name in
+    // `partial_reason` and forbids a `Pass`.
     let sampled: u64 = verdicts
         .iter()
         .filter_map(|v| v.reconciled)
@@ -683,26 +532,14 @@ fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrit
         .map(|(_, m)| m)
         .sum();
 
-    // `pass_rate_measured` is a RATIO OVER THE WHOLE SAMPLE or it is null.
-    // Publishing `Some(1.0)` beside a partial verdict — the shape the
-    // fourth-door review found signed onto a 96%-lossy partition — is a
-    // misleading number even when every individual figure in it is true, so
-    // the rate is withheld unless every selection's record lane reached a
-    // conclusion (verified or failed). Also keeps Task 3's invariant
-    // "pass_rate_measured set implies level == byte-fingerprint", and keeps
-    // a zero denominator null rather than NaN (`to_deterministic_json`
-    // refuses non-finite floats).
-    // NOTE for anyone mutating this line (Task 19 round 3, third pass): its
-    // value is only ever CONSULTED when no selection was downgraded, because
-    // the `level == ByteFingerprint` conjunct below short-circuits first and
-    // `level` is `ConsumeOnly` whenever any selection carries a `downgrade`.
-    // A mutant that makes this predicate skip downgraded selections — or that
-    // makes `records_conclusive` auto-true for them — is therefore
-    // PROVABLY EQUIVALENT, not an untested gap: on the only inputs that can
-    // reach the `&&`'s right-hand side, no selection is downgraded and the
-    // two forms coincide. That equivalence rests on the ordering of this
-    // conjunction, so if the `level` guard is ever moved, weakened or
-    // reordered, this predicate becomes observable and needs its own test.
+    // `pass_rate_measured` is a ratio over the whole sample or null:
+    // `Some(1.0)` beside a partial verdict misleads even when every figure in
+    // it is true. It also keeps "set implies level == byte-fingerprint", and a
+    // zero denominator null rather than NaN (`to_deterministic_json` refuses
+    // non-finite floats). This predicate is consulted only when no selection
+    // was downgraded (the `level == ByteFingerprint` conjunct short-circuits
+    // first), so a mutant that skips downgraded selections here is
+    // equivalent; reorder that conjunction and it needs its own test.
     let whole_sample_reconciled = verdicts.iter().all(SelectionVerdict::records_conclusive);
     let pass_rate_measured =
         if level == IntegrityLevel::ByteFingerprint && whole_sample_reconciled && sampled > 0 {
@@ -754,20 +591,10 @@ fn roll_up(verdicts: &[SelectionVerdict], count_bound: Option<&str>) -> Integrit
     }
 }
 
-/// Every archive segment ONE selection actually samples, matched by (topic,
-/// partition) and window overlap — the same window filter `phase4_sample`
-/// itself uses. Free function, not `BackupSetFacts::sampled_segments`:
-/// `BackupSetFacts` is defined in `logweir-core` (out of this task's declared
-/// file scope — see `task-19-addendum.md` A2's corrected Files block), so an
-/// inherent method cannot be added to it from here. The same substitution
-/// applies to `probe_archive_modes` below.
-///
-/// Task 19 fix round 3: this no longer returns `Result`, and no longer
-/// refuses. "Zero segments matched this selection" is now reported as
-/// `Evidence::Unverified` by `segment_evidence` and routed through `roll_up`
-/// like every other "compared nothing" case in the phase — see
-/// `verdict_for_selection`'s doc comment for why that severity change was
-/// deliberate.
+/// Every archive segment one selection samples, matched by (topic,
+/// partition) and window overlap, the window filter `phase4_sample` uses.
+/// Zero matched segments is not refused here: `segment_evidence` reports it
+/// as `Evidence::Unverified`.
 fn sampled_segments_for<'a>(
     facts: &'a BackupSetFacts,
     s: &SampleSelection,
@@ -784,30 +611,15 @@ fn sampled_segments_for<'a>(
         .collect()
 }
 
-/// Check (a) for ONE selection: sha256 over that selection's own sampled
+/// Check (a) for one selection: sha256 over that selection's own sampled
 /// archive segments, read back from the store.
 ///
-/// Segments written before 0.21 carry an empty sha256 [VERIFIED
-/// manifest.rs:376-380]. Round 2's code skipped them with a logged note and
-/// the module doc claimed they were "never counted as a pass" — but nothing
-/// in the code made that true: a pre-0.21 archive skipped every segment and
-/// the run still reported `Pass`, the same silence-reads-as-success shape as
-/// the fourth door, in a different lane. A skip is now `Unverified`: it is
-/// coverage the drill did not obtain, and it is reported as such.
-///
-/// Task 19 fix round 3, second pass: `Evidence::Verified` is returned from a
-/// POSITIVE, non-vacuous predicate (`!segs.is_empty() && checked ==
-/// segs.len()`) rather than as the fall-through of a chain of negative
-/// branches. That is what makes `roll_up`'s stated property 1 — "deleting a
-/// lane's ability to record a failure produces `Partial`, never a pass" —
-/// actually true here: with the `failed` branch deleted, a mismatching
-/// segment simply never increments `checked`, so the positive predicate fails
-/// and the selection lands on `Unverified`. Under the previous
-/// negative-branch-chain shape it fell through to `Verified` and signed a
-/// pass over segments whose sha256 did not match. The `!segs.is_empty()`
-/// conjunct is load-bearing for the same reason `roll_up` answers the empty
-/// ledger explicitly: `checked == segs.len()` is `0 == 0` over no segments,
-/// vacuously true, which is this file's recurring bug in miniature.
+/// Segments written before 0.21 carry an empty sha256 (manifest.rs:376-380);
+/// a skipped segment is `Unverified`, coverage the drill did not obtain.
+/// `Evidence::Verified` comes only from the positive, non-vacuous predicate
+/// `!segs.is_empty() && checked == segs.len()`, so deleting the `failed`
+/// branch lands a mismatching segment on `Unverified`, never `Verified`, and
+/// no segments is never vacuously verified.
 fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, DrillError> {
     if segs.is_empty() {
         return Ok(Evidence::Unverified {
@@ -826,29 +638,15 @@ fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, D
             skipped.push(seg.key.clone());
             continue;
         }
-        // `Store::get_capped` returns `StoreError`, not directly convertible to
-        // `DrillError` — routed through the existing `StoreError -> EngineError`
-        // conversion (`logweir-engine-oso/src/storage.rs`) so `?` can then use
-        // `DrillError`'s existing `#[from] EngineError`, rather than adding a
-        // second `From` impl for a type this crate does not own.
-        // FX-31: under the segment ceiling; an object over it is an
+        // `StoreError` reaches `DrillError` through `EngineError`'s existing
+        // conversion. Under the segment ceiling: an object over it is an
         // operational failure naming the cap, never a pass.
         let (bytes, _vid) = store
             .get_capped(&seg.key, logweir_engine_oso::storage::caps::SEGMENT)
             .map_err(EngineError::from)?;
-        // Compared as BARE HEX on both sides. `SegmentFacts.sha256` is copied
-        // verbatim out of the engine's manifest, where the field is bare hex
-        // (`"sha256": "27f6c448…"` — measured against a real 0.21.0 manifest);
-        // `sha256_prefixed` produces Logweir's own `sha256:<hex>` form, which
-        // is what `engine.digest`, `approval.plan_hash` and
-        // `target.topic_mapping_sha256` use. Comparing the two forms directly
-        // made EVERY segment of a real archive report
-        // "sha256 mismatch against the manifest", so the segment lane could
-        // never return `Verified` outside the unit tests — which construct
-        // `SegmentFacts` by hand and happen to write the prefixed form. Found
-        // by Task 21c against MinIO. The `strip_prefix` accepts either form, so
-        // a manifest that ever adopts the prefixed spelling still compares
-        // correctly.
+        // Compared as bare hex: the engine's manifest writes bare hex, and
+        // Logweir's own form is `sha256:<hex>`. `strip_prefix` accepts either,
+        // so a manifest that adopts the prefixed spelling still compares.
         let want = seg
             .sha256
             .strip_prefix("sha256:")
@@ -899,12 +697,8 @@ fn segment_evidence(store: &Store, segs: &[&SegmentFacts]) -> Result<Evidence, D
     })
 }
 
-/// What one selection's ARCHIVE side offered. Task 19 fix round 3: PER
-/// SELECTION. Round 2's `ArchiveMode` was one value for the whole backup set,
-/// and `probe_archive_mode` returned `ConsumeOnly` on the FIRST `Unsupported`
-/// — discarding every fingerprint set already collected, so one legacy
-/// partition silently erased the byte-level claim for every other selection
-/// AND moved the whole run onto a lane that had no zero-record guard at all.
+/// What one selection's archive side offered, per selection: one legacy
+/// partition must not erase the byte-level claim of every other.
 #[derive(Debug)]
 enum SelectionArchive {
     Fingerprints(Vec<RecordFingerprint>),
@@ -914,8 +708,7 @@ enum SelectionArchive {
 }
 
 /// Probes each selection's archive support independently, in `sel`'s own
-/// order (`out.len() == sel.len()`). A free function, not a method on `dyn
-/// DataEngine` — see `sampled_segments_for`'s doc comment for why.
+/// order (`out.len() == sel.len()`).
 ///
 /// An `Unsupported` for one selection downgrades ONLY that selection.
 /// `EngineError::Unsupported`'s doc comment describes a fact about a
@@ -968,55 +761,29 @@ fn mapped_topic<'a>(
     })
 }
 
-/// What the manifest can SUPPORT for one selection, and the straddling
-/// segments it deliberately did not count: `(claimed, straddlers)` where
-/// `claimed` is `min(sel.count, Σ record_count over the matched segments
-/// WHOLLY INSIDE the sample window)` and `straddlers` is
-/// `(how many, how many records they hold)`.
+/// What the manifest can support for one selection, and the straddling
+/// segments it did not count: `(claimed, straddlers)` where `claimed` is
+/// `min(sel.count, Σ record_count over the matched segments wholly inside the
+/// sample window)` and `straddlers` is `(how many, how many records they
+/// hold)`.
 ///
-/// # Why WHOLLY inside, and not overlapping (Task 10b)
+/// # Why wholly inside, not overlapping
 ///
-/// Because that is the only number an archive can be held to. The archive side
-/// (`OsoCliEngine::fingerprints`) returns exactly the records whose timestamp
-/// lies inside `[w0, w1]` — the engine's own filter is `r.timestamp >= s &&
-/// r.timestamp <= e`, both ends inclusive — while `record_count` is a property
-/// of a whole SEGMENT. When a window edge falls inside a segment (the normal
-/// case for point-in-time recovery, and guaranteed for any `point_in_time`
-/// that is not a segment boundary) that segment holds records the window
-/// EXCLUDES, so summing it into the claim demands fingerprints that cannot
-/// exist.
+/// The archive side (`OsoCliEngine::fingerprints`) returns exactly the records
+/// with `s <= timestamp <= e`, while `record_count` is a property of a whole
+/// segment. A segment a window edge falls inside (the normal point-in-time
+/// case) holds records the window excludes, so counting it demands
+/// fingerprints that cannot exist and fails a correct restore. A straddler's
+/// `record_count` is an upper bound, never a claim: the same rule
+/// `logweir_core::engine::expected_restored_count` applies to the restored
+/// count. Straddlers are returned so the `Unverified` message can disclose
+/// them.
 ///
-/// Round 1 summed every OVERLAPPING segment and shipped exactly that false
-/// negative: measured 2026-09-10 against engine 0.21.0
-/// (`sha256:8ff5be71…`) on Kafka 3.7.1, a three-partition `point_in_time`
-/// restore verified record-by-record off the broker scored
-/// `outcome: fail-integrity`, exit 2, with `integrity.mismatches: 0` and
-/// `claimed 3` against the 2 fingerprints each partition could offer — a
-/// correct restore failing about its own sample.
-///
-/// So a straddler's `record_count` is an UPPER bound and never a claim. That
-/// is the same rule `logweir_core::engine::expected_restored_count` already
-/// applies to the restored COUNT (`lower` sums the wholly-inside segments;
-/// straddlers only widen `upper`), which is why this is one rule for "what a
-/// manifest can support" rather than two, and why it needs no new manifest
-/// data. The straddlers are returned rather than dropped because the
-/// `Unverified` message has to disclose them: an auditor reading "supports at
-/// least 5" over a manifest that mentions 8 must be able to see where the
-/// other 3 went.
-///
-/// The bound is only a LOWER bound, so it can under-claim: an archive that
-/// returns fewer records than the window genuinely holds inside a straddler is
-/// not caught here. That is deliberate and is the same trade
-/// `expected_restored_count` documents — the manifest's finest granularity is
-/// the segment and it carries no per-record timestamp, so an exact figure is
-/// not derivable, and a bound that over-claims fails CORRECT implementations
-/// (STANDING RULE 21). The guard that still binds on such a selection is the
-/// positive, non-vacuous `compared > 0` conjunct at the call site: a selection
-/// the archive answered with NOTHING is `Unverified` whatever the manifest
-/// says.
-///
-/// A negative `record_count` contributes 0 rather than wrapping a `u64`,
-/// exactly as `expected_restored_count` does (interface I5).
+/// The bound is a lower bound, so it can under-claim inside a straddler: the
+/// manifest carries no per-record timestamp, and a bound that over-claims
+/// fails correct implementations. A selection the archive answered with
+/// nothing is still `Unverified` (`compared > 0` at the call site). A negative
+/// `record_count` contributes 0 rather than wrapping a `u64` (interface I5).
 fn supportable_claim(s: &SampleSelection, segs: &[&SegmentFacts]) -> (u64, (usize, u64)) {
     let (w0, w1) = s.window;
     let wholly_inside = |g: &SegmentFacts| g.start_timestamp >= w0 && g.end_timestamp <= w1;
@@ -1054,18 +821,17 @@ fn straddler_note((count, records): (usize, u64)) -> String {
     }
 }
 
-/// **PROD-08.1 (acceptance row 08-4), the sampled lane's share.** The
-/// restored records `compare` reconciles are keyed by `x-original-offset` in
-/// a map, where a repeated source offset COLLAPSES and order is invisible
-/// (PROD-01.1 V4). This reads the same consumed head in target order and
-/// names every record whose lineage offset repeats one already read
-/// (`duplicates`) or is below one already read (`out of order`; archive order
-/// is source-offset order). Records without a lineage header are `compare`'s
-/// fallback case and are skipped here.
+/// The sampled lane's lineage check. The restored records `compare`
+/// reconciles are keyed by `x-original-offset` in a map, where a repeated
+/// source offset collapses and order is invisible. This reads the same
+/// consumed head in target order and names every record whose lineage offset
+/// repeats one already read (`duplicates`) or is below one (`out of order`;
+/// archive order is source-offset order). Records without a lineage header
+/// are `compare`'s fallback case and are skipped.
 ///
-/// A new cause for the sampled lane's existing `Failed` — it can only move a
-/// verdict to the safer side (OD-7's third case) — and over the head the
-/// sample read, never the whole output: that is the complete lane's.
+/// A new cause for the sampled lane's existing `Failed`, which can only move
+/// a verdict to the safer side, over the head the sample read; the whole
+/// output is the complete lane's.
 #[must_use]
 pub fn lineage_faults(consumed: &[ConsumedRecord]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -1093,63 +859,26 @@ pub fn lineage_faults(consumed: &[ConsumedRecord]) -> Vec<String> {
     out
 }
 
-/// Builds the ONE verdict for ONE selection. Every lane's conclusion is a
+/// Builds the one verdict for one selection. Every lane's conclusion is a
 /// value in the returned `SelectionVerdict`; nothing here decides pass or
 /// fail, and nothing here may return "no opinion".
 ///
-/// Consumes from the TARGET cluster — applying the topic-rename mapping
-/// before ever calling `reader` — and calls `compare()` with ONLY this
-/// selection's own archive fingerprints and ONLY this selection's own
-/// consumed records. That is what makes the round-1 cross-partition offset
-/// collision structurally impossible rather than merely untested (module doc,
-/// "Reconciling PER SELECTION"): `compare()` never sees two selections at
-/// once because it is handed one selection at a time.
+/// Consumes from the target, applying the topic-rename mapping before calling
+/// `reader`, and calls `compare()` with only this selection's fingerprints and
+/// consumed records, so offsets cannot collide across selections (module
+/// doc). `count` is `phase4_sample`'s per-partition cap; `from` is 0 because
+/// the destination topic is freshly created.
 ///
-/// `count` is the same per-partition cap `phase4_sample` applied to the
-/// archive side; `from` is 0 because a drill's destination topic is always a
-/// freshly created scratch topic (see `compare`'s own doc comment).
+/// Both lanes carry the same obligation, positive evidence for at least
+/// `claimed`: byte-fingerprint, that many fingerprints, all reconciling;
+/// consume-only, that many records read back. Short is unverified, not a
+/// smaller successful sample, and short against what the manifest supports
+/// (`supportable_claim`), never what it overlaps.
 ///
-/// **The two lanes carry the same obligation.** Whether the archive could be
-/// fingerprinted or not, this selection must produce positive evidence:
-/// - byte-fingerprint: at least `claimed` fingerprints returned, and every
-///   one of them reconciling;
-/// - consume-only: at least `claimed` records actually read back from the
-///   target.
-///
-/// Consume-only is a weaker CLAIM (no per-record integrity assertion) and not
-/// a weaker CHECK. The fourth door existed because the obligation lived
-/// inside the `ByteFingerprint` arm; it now lives in `Evidence`, which both
-/// arms must construct.
-///
-/// **Short is unverified, not a smaller successful sample.** An archive that
-/// returns 1 fingerprint where the manifest SUPPORTS 25 has not sampled less
-/// successfully — it has left 24 records unexamined, and reporting a
-/// `pass_rate` of 1.0 over the 1 is exactly the false assurance the fourth
-/// door signed over a 96%-lossy partition.
-///
-/// **Short against what the manifest SUPPORTS, never against what it
-/// overlaps.** `claimed` comes from `supportable_claim`, which sums only the
-/// segments wholly inside the sampled window: a straddling segment's records
-/// lie partly outside the window and cannot be fingerprinted, so demanding
-/// them turned CORRECT point-in-time restores into `fail-integrity` — the
-/// false negative Task 10b fixes, and the reason the two sentences above are
-/// about a lower bound rather than about a total.
-///
-/// **Severity: a drill result, not an operational failure.** Round 2 split
-/// this class of finding two ways — the zero-sample case degraded to
-/// `Partial` and continued, the zero-segment case was a hard
-/// `DrillError::Operational` (exit 1, no artifact). Both are now drill
-/// results (exit 2, signed scorecard). Justification: every one of these
-/// findings is a positively established fact ABOUT THE ARCHIVE OR THE RESTORE
-/// (the archive holds no segment in the window; it returned fewer records
-/// than its own manifest claims; the target gave back nothing) — not a
-/// statement about Logweir's ability to run, which is what `Operational` and
-/// exit 1 mean everywhere else in this codebase (see `DrillError`'s own
-/// variant docs and phase 6's `RestoreNoOp` precedent, decided the same way
-/// for the same reason). An auditor learns strictly more from a signed
-/// `partial` naming the exact partition than from exit 1 with no document.
-/// I/O against the store or the broker stays `Operational`: that genuinely
-/// is Logweir failing to perform the check.
+/// These findings are drill results (exit 2, signed scorecard): facts about
+/// the archive or the restore, like phase 6's `RestoreNoOp`. I/O against the
+/// store or the broker stays `Operational`: that is Logweir failing to
+/// perform the check.
 fn verdict_for_selection(
     reader: &dyn ClusterReader,
     store: &Store,
@@ -1162,21 +891,12 @@ fn verdict_for_selection(
     let mapped = mapped_topic(mapping, &s.topic)?;
 
     let segs = sampled_segments_for(facts, s);
-    // `min(sel.count, Σ record_count over the segments WHOLLY INSIDE the
-    // window)`: the cap the sample asked for, or all the manifest can SUPPORT
-    // inside the window, whichever is smaller. Both halves matter — without
-    // the cap a 25-record sample of a million-record partition would always
-    // read short; without the manifest sum a window holding fewer records than
-    // `records_per_partition` would too. When the window matches no segment at
-    // all there is no manifest figure to use, so the plan's own ask stands as
-    // the claim (and `segments` is already `Unverified`, so the selection
-    // cannot pass regardless).
-    //
-    // Task 10b: this sums only the WHOLLY-INSIDE segments — see
-    // `supportable_claim` for why a straddler contributes nothing, and for the
-    // false negative that rule fixes. The OVERLAP predicate stays exactly
-    // where it was for `segs` itself: every overlapping segment's sha256 is
-    // still checked by `segment_evidence`.
+    // `min(sel.count, Σ record_count over the segments wholly inside the
+    // window)`: without the cap a 25-record sample of a large partition always
+    // reads short; without the sum a window holding fewer records than
+    // `records_per_partition` would. With no matched segment the plan's ask
+    // stands (and `segments` is already `Unverified`). Every overlapping
+    // segment's sha256 is still checked by `segment_evidence`.
     let (claimed, straddlers) = supportable_claim(s, &segs);
 
     let segments = segment_evidence(store, &segs)?;
@@ -1189,16 +909,12 @@ fn verdict_for_selection(
             for w in why {
                 tracing::error!(target: "logweir::verify", detail = %w, "reconciliation mismatch");
             }
-            // POSITIVE first, and non-vacuous (`compared > 0`): at least
-            // `claimed` fingerprints came back and every one of them
-            // reconciled. Ordering the arms this way — rather than letting
-            // `Verified` be the fall-through of a chain of negative tests —
-            // is what makes `roll_up`'s stated property 1 true on this lane:
-            // delete the `matching < compared` arm and a 100%-mismatching
-            // sample lands on `Unverified` (Partial), never on `Verified`.
-            // PROD-08.1: a repeated or backwards lineage offset in the head
-            // the sample read is examined-and-wrong, whatever `compare` saw
-            // through its offset-keyed map.
+            // Positive first and non-vacuous (`compared > 0`): at least
+            // `claimed` fingerprints came back and all reconciled, so deleting
+            // the `matching < compared` arm lands a mismatching sample on
+            // `Unverified`. A repeated or backwards lineage offset in the head
+            // is examined-and-wrong, whatever `compare` saw through its
+            // offset-keyed map.
             let order = lineage_faults(&consumed);
             for w in &order {
                 tracing::error!(target: "logweir::verify", detail = %w, "lineage order fault");
@@ -1253,16 +969,10 @@ fn verdict_for_selection(
             (evidence, counts, None)
         }
         SelectionArchive::Unsupported(reason) => {
-            // The SAME obligation, expressed at the only level this lane can
-            // honestly claim: this partition must be shown to have given
-            // back the records the manifest says it holds. It asserts
-            // nothing about their contents — that is what makes the claim
-            // weaker — and it asserts something, which is what the fourth
-            // door did not.
-            // POSITIVE first, and non-vacuous, exactly as on the
-            // byte-fingerprint lane above — the two arms of this `match` are
-            // deliberately the same shape, because they carry the same
-            // obligation and differ only in the strength of the CLAIM.
+            // The same obligation at the level this lane can claim: the
+            // partition gave back the records the manifest says it holds.
+            // Positive first and non-vacuous, the same shape as the
+            // byte-fingerprint arm.
             let evidence = if records_restored > 0 && records_restored >= claimed {
                 Evidence::Verified {
                     checked: records_restored,
@@ -1274,11 +984,8 @@ fn verdict_for_selection(
                         .into(),
                 }
             } else {
-                // Mirrors the byte-fingerprint lane's wording, over the same
-                // `claimed` and the same disclosure: the two lanes carry the
-                // same obligation and differ only in the strength of the
-                // CLAIM, so they may not differ in what they hold the
-                // manifest to.
+                // Mirrors the byte-fingerprint lane's wording over the same
+                // `claimed` and disclosure.
                 Evidence::Unverified {
                     why: format!(
                         "the target partition gave back {records_restored} records where the \
@@ -1304,68 +1011,44 @@ fn verdict_for_selection(
 }
 
 /// Folds `classify_parity` over every entry in `mapping`, applying the
-/// topic-rename mapping (module doc, point 2) before ever calling `reader`.
-/// Target partition count comes from `reader.end_offsets` (one entry per
-/// partition — a real, per-run READ of the cluster). Target replication
-/// factor is NOT read back: `plan.default_replication_factor` is used instead
-/// — this is Task 19 fix round 2's correction (review's FIX 7 remainder) of a
-/// wording bug in an earlier draft of this comment, which claimed "the exact
-/// value phase 6 rendered when it created the topic" as if it were a
-/// measurement. It is not: `plan.default_replication_factor` is what phase 6
-/// ASKED the engine to create the topic with, never read back from the
-/// broker afterward, so a genuine mismatch between the plan and what the
-/// engine actually created (a bug, a broker-side override, anything) would
-/// not be detected here. Read this field as an assertion about the PLAN, not
-/// a measurement of the cluster (see this file's `classify_parity` test
-/// `scratch_deviations_are_intentional_and_anything_else_is_not`, which
-/// exercises the same assumption). PROD-05.1 gave `ClusterReader` a
-/// `replication_factors` read since, which this phase does not use yet.
+/// topic-rename mapping (module doc) before calling `reader`. The target
+/// partition count is read (`reader.end_offsets`); the target replication
+/// factor is not: `plan.default_replication_factor` is what phase 6 asked
+/// for, so read it as an assertion about the plan, not a measurement (a
+/// broker-side override would go undetected).
 ///
-/// # FX-21: a source value that is not recorded is NOT ASSESSED
+/// # A source value that is not recorded is not assessed
 ///
-/// The SOURCE's partition count is the manifest's `original_partition_count`
+/// The source's partition count is the manifest's `original_partition_count`
 /// and its replication factor the manifest's `source_replication_factor`,
-/// else the verified receipt's `topic_configuration` factor
-/// ([`SourceConfigCoverage::replication_factor`], format 1.3.0, Logweir's own
-/// metadata read). The manifest's comes first, so a document whose manifest
-/// records the factor is decided exactly as before. Where neither records one
-/// — engine 0.23.3 records the factor for the first topic it saves only, and a
-/// manifest before engine 0.17 records neither — the key is named in
-/// `not_assessed` as `"<target>: <key> (notRecorded)"`, with its fail-safe
-/// twin in `unexpected_divergence`, and is never compared. Until FX-21 the
-/// TARGET's own value stood in for the missing one, so "not recorded" was
-/// signed as "no divergence".
+/// else the verified receipt's ([`SourceConfigCoverage::replication_factor`],
+/// format 1.3.0). Where neither records one (engine 0.23.3 records the factor
+/// for the first topic it saves only; manifests before engine 0.17 record
+/// neither) the key is named in `not_assessed` as `"<target>: <key>
+/// (notRecorded)"`, with its fail-safe twin in `unexpected_divergence`, and
+/// is never compared.
 ///
-/// Refuses `mapping.is_empty()` outright: a parity check folded over zero
-/// topics returns `(vec![], vec![])`, which reads exactly like "checked every
-/// topic and found no divergence" — this build has already shipped that
-/// exact bug once (a drift checker that reported agreement having compared
-/// nothing) and must not ship it again here.
+/// Refuses an empty `mapping`: a parity check over zero topics reads exactly
+/// like "checked every topic and found no divergence".
 ///
-/// # FX-4: parity is ASSESSED only where the capture was
+/// # Parity is assessed only where the capture was
 ///
-/// The same "agreement over nothing", one layer down: a source whose
-/// DescribeConfigs was DENIED at capture has `configurations: {}` in the
-/// manifest, and comparing a restored topic against that empty record
-/// reported no divergence. So every mapped topic whose source coverage (from
-/// the verified receipt, `coverage`) is not `captured` is named in
-/// `not_assessed` as `"<target>: configuration (<coverage>)"` — `unknown`
-/// when the plan binds no recovery point or the receipt predates 1.1.0.
+/// A source whose DescribeConfigs was denied at capture has
+/// `configurations: {}`, and comparing against that empty record reads as no
+/// divergence. So every mapped topic whose source coverage (from the verified
+/// receipt, `coverage`) is not `captured` is named in `not_assessed` as
+/// `"<target>: configuration (<coverage>)"`, `unknown` when the plan binds no
+/// recovery point or the receipt predates 1.1.0. A refused read of the
+/// target's configuration is named `"<target>: configuration
+/// (targetReadDenied)"` and its keys are not compared.
 ///
-/// A refused read of the TARGET's configuration is the same defect on the
-/// other side (rdkafka 0.36.2 used to hand it back as an empty map, T13): it
-/// is named `"<target>: configuration (targetReadDenied)"` and the topic's
-/// configuration keys are not compared at all, instead of every source key
-/// being reported as an unexpected divergence.
+/// The archive's own record is still compared wherever the target was read:
+/// a difference it shows is a fact whatever the coverage; a `not_assessed`
+/// entry withdraws only the silence. Partition count and replication factor
+/// come from metadata and are classified whatever the coverage, wherever the
+/// source's value is recorded.
 ///
-/// The archive's OWN record is still compared wherever the target was read:
-/// a difference it shows is a fact whatever the coverage. What a `not_assessed`
-/// entry withdraws is the SILENCE — "no divergence" for that topic proves
-/// nothing. Partition count and replication factor come from metadata, not
-/// from DescribeConfigs, and are classified whatever the coverage — wherever
-/// the source's value is recorded (FX-21, above).
-///
-/// # FX-3: the mode decides `intended` versus `not_reconstructed`
+/// # The mode decides `intended` versus `not_reconstructed`
 ///
 /// `mode` is the run's `target.mode`, and [`classify_parity`] is where it
 /// decides the label. `not_reconstructed` is `Some` always from here, like
@@ -1397,8 +1080,8 @@ fn classify_parity_all(
                 "topic parity check: no archive facts for mapped source topic `{src}`"
             )));
         };
-        // A REFUSED target read is a recorded fact, not an empty configuration
-        // and not an aborted drill; any other failure is operational as before.
+        // A refused target read is a recorded fact, not an empty configuration
+        // and not an aborted drill; any other failure is operational.
         let target_cfg = match reader.topic_configs(tgt) {
             Ok(cfg) => Some(cfg),
             Err(logweir_kafka::reader::KafkaError::NotAuthorized(_)) => None,
@@ -1406,10 +1089,9 @@ fn classify_parity_all(
         };
         let tgt_partitions = reader.end_offsets(tgt)?.len() as i32;
         let tgt_rf = plan.default_replication_factor;
-        // FX-21: what the SOURCE's record says, and nothing when it says
-        // nothing — never the target's own value. The manifest's factor first
-        // (a document whose manifest records it is decided as before), then
-        // the verified receipt's.
+        // What the source's record says, and nothing when it says nothing,
+        // never the target's own value: the manifest's factor first, then the
+        // verified receipt's.
         let src_partitions = t.original_partition_count;
         let src_rf = t.source_replication_factor.or_else(|| {
             coverage
@@ -1423,9 +1105,9 @@ fn classify_parity_all(
         };
         if let Some(why) = why {
             not_assessed.push(not_assessed_entry(tgt, CONFIGURATION, why));
-            // The fail-safe twin in the array every reader already shows
-            // (review M5): a reader that predates `not_assessed` must never
-            // see this topic's silence as parity.
+            // The fail-safe twin in the array every reader already shows: a
+            // reader that predates `not_assessed` must never see this topic's
+            // silence as parity.
             unexpected_all.push(not_assessed_marker(tgt, why));
         }
         let unread = BTreeMap::new();
@@ -1456,9 +1138,8 @@ fn classify_parity_all(
                 .into_iter()
                 .map(|k| format!("{tgt}: {k}")),
         );
-        // FX-21: a partition count or replication factor the source's record
-        // lacks, named with its fail-safe twin, exactly as FX-4 names a
-        // configuration it could not assess.
+        // A partition count or replication factor the source's record lacks,
+        // named with its fail-safe twin, as an unassessed configuration is.
         for key in classes.not_assessed {
             not_assessed.push(not_assessed_entry(tgt, &key, NOT_ASSESSED_NOT_RECORDED));
             unexpected_all.push(not_assessed_twin(tgt, &key, NOT_ASSESSED_NOT_RECORDED));
@@ -1475,7 +1156,7 @@ fn classify_parity_all(
         // (`Some([])`) is a claim this function can make, and absent stays the
         // spelling of "not recorded".
         not_assessed: Some(not_assessed),
-        // `Some`, always, for the same reason (FX-3, format 1.2.0). Every
+        // `Some`, always, for the same reason (format 1.2.0). Every
         // entry is also in `unexpected_divergence` (`classify_parity` moved
         // it there), which `validate_invariants`' NR-2 holds phase 8 to
         // before it signs.
@@ -1484,28 +1165,28 @@ fn classify_parity_all(
 }
 
 /// The `not_assessed` reason for a topic whose SOURCE configuration was
-/// captured but whose TARGET configuration read was refused (FX-4, T13).
+/// captured but whose TARGET configuration read was refused.
 pub const NOT_ASSESSED_TARGET_READ_DENIED: &str = "targetReadDenied";
 
-/// **FX-21.** The `not_assessed` reason for a `partition_count` or
+/// The `not_assessed` reason for a `partition_count` or
 /// `replication_factor` the SOURCE's record does not carry: neither the
 /// archive's manifest nor, for the factor, the verified receipt's
 /// `topic_configuration` names one.
 pub const NOT_ASSESSED_NOT_RECORDED: &str = "notRecorded";
 
-/// What FX-4's entries name: a topic's configuration overrides.
+/// What a configuration `not_assessed` entry names: the topic's overrides.
 const CONFIGURATION: &str = "configuration";
 
 /// One `topic_parity.not_assessed` entry: `"<target topic>: <what> (<why>)"`,
-/// where `<what>` is `configuration` (FX-4), `partition_count` or
-/// `replication_factor` (FX-21).
+/// where `<what>` is `configuration`, `partition_count` or
+/// `replication_factor`.
 fn not_assessed_entry(target_topic: &str, what: &str, why: &str) -> String {
     format!("{target_topic}: {what} ({why})")
 }
 
 /// The fail-safe twin of a `not_assessed` entry in `unexpected_divergence`:
 /// `"<target topic>: <what> not assessed (<why>)"` (see
-/// [`not_assessed_marker`], FX-4's, for why it exists). Its `<key>` — the
+/// [`not_assessed_marker`] for why it exists). Its `<key>` — the
 /// text after the last `": "` — is `<what> not assessed (<why>)`, never one of
 /// the four settings the restore decides, so the scorecard's NR-5 arm does not
 /// read a `partition_count` or `replication_factor` twin as a deviation
@@ -1514,56 +1195,35 @@ fn not_assessed_twin(target_topic: &str, what: &str, why: &str) -> String {
     format!("{target_topic}: {what} not assessed ({why})")
 }
 
-/// The entry phase 7 ALSO writes into `unexpected_divergence` for every topic
-/// it names in `not_assessed` (FX-4 fix round, review M5).
+/// The entry phase 7 also writes into `unexpected_divergence` for every topic
+/// it names in `not_assessed`.
 ///
-/// **Why.** `not_assessed` is new in format 1.1.0, so a reader that predates it
-/// — `verify_scorecard.py` 1.14.0, a `logweir drill show` or a person reading
-/// the JSON with a pre-FX-4 guide — sees only the two arrays it always had,
-/// and reads an empty `unexpected_divergence` as configuration parity. For a
-/// topic whose TARGET read was refused, the writer before FX-4 listed every
-/// source override there (it compared against an empty map, T13): noisy but
-/// fail-safe. Without this entry FX-4 would have turned that into silence.
+/// **Why.** `not_assessed` is new in format 1.1.0, so a reader that predates
+/// it sees only the two older arrays and reads an empty
+/// `unexpected_divergence` as configuration parity. This twin keeps that
+/// reader's conclusion fail-safe.
 ///
 /// **Shape.** `"<target topic>: configuration not assessed (<why>)"`, where
 /// `<why>` is the `not_assessed` reason. A configuration key never contains a
 /// space, so a reader that parses `"<topic>: <key>"` entries can tell this
 /// one apart; the authoritative list stays `not_assessed`.
-///
-/// FX-21 writes the same twin for a `partition_count` or `replication_factor`
-/// the source's record lacks (`not_assessed_twin`).
+/// `not_assessed_twin` writes the same for `partition_count` and
+/// `replication_factor`.
 #[must_use]
 pub fn not_assessed_marker(target_topic: &str, why: &str) -> String {
     not_assessed_twin(target_topic, CONFIGURATION, why)
 }
 
-/// The maximum `ConsumedRecord.timestamp_ms` across every mapped TARGET
-/// topic/partition — what phase 8's RPO reads. Reads only the last record of
-/// each partition (`end_offsets` then `consume_range` at `hi - 1`, count 1),
-/// a DECLARED DEVIATION (Task 19 fix round 2, review finding F11) from the
-/// brief's literal prose ("`newest_ts` takes the maximum
-/// `ConsumedRecord.timestamp_ms` seen"), which would mean reusing whatever
-/// `verdict_for_selection` already consumed. The real reason for the
-/// deviation, not "a local didn't survive a match arm" (an implementation
-/// detail of a since-removed code shape, not a justification): a `head`
-/// anchor's sample holds the OLDEST records in the window (`SampleSelection`'s
-/// own doc comment), so taking the max over ONLY what was sampled/consumed
-/// for the canary would badly UNDERSTATE the true newest restored timestamp
-/// and badly OVERSTATE the signed RPO. Reading the actual last record of
-/// each partition — independent of the sample — is what makes the RPO
-/// figure honest regardless of which anchor the drill used. This costs one
-/// extra broker round trip per mapped partition and assumes offset order
-/// approximates timestamp order (true for any topic that is not manually
-/// reordered), both accepted trade-offs for that correctness.
+/// The maximum `ConsumedRecord.timestamp_ms` across every mapped target
+/// topic/partition, which phase 8's RPO reads. It reads the last record of
+/// each partition (`end_offsets`, then `consume_range` at `hi - 1`, count 1),
+/// not the sample: a `head` anchor's sample holds the oldest records, so its
+/// maximum would overstate the signed RPO. One extra round trip per
+/// partition, and it assumes offset order approximates timestamp order.
 ///
-/// Refuses `mapping.is_empty()` (nothing to measure) and refuses finding zero
-/// records across every mapped partition (there is no honest timestamp to
-/// report) — the latter should be unreachable in practice, because phase 6's
-/// own post-condition (`phase6_restore::assert_post_condition`) already
-/// requires at least one non-empty partition among these same mapped
-/// destinations before phase 7 ever runs; the guard stays here anyway so a
-/// caller that reaches this function some other way cannot get a fabricated
-/// `0` (1970-01-01) read as a real timestamp.
+/// Refuses an empty `mapping` and zero records across every mapped partition
+/// (phase 6's post-condition makes the latter unreachable from `run`), so no
+/// caller gets a fabricated `0` (1970-01-01) as a real timestamp.
 fn newest_ts(
     reader: &dyn ClusterReader,
     mapping: &BTreeMap<String, String>,
@@ -1594,59 +1254,39 @@ fn newest_ts(
     })
 }
 
-/// Guard **G-WIN**, second half: the count the TARGET holds against the bound
-/// the MANIFEST puts on `[floor_ms, pit_ms]`. `None` when the count is inside
-/// the bound; `Some(text)` — the verdict `roll_up` turns into
-/// `IntegrityResult::Fail`, `Outcome::FailIntegrity` and exit 2 — when it is
-/// outside.
+/// Guard G-WIN, second half: the count the target holds against the bound
+/// the manifest puts on `[floor_ms, pit_ms]`. `None` inside the bound;
+/// `Some(text)`, which `roll_up` turns into `IntegrityResult::Fail` (exit 2),
+/// outside it.
 ///
-/// # Both numbers are MEASURED; neither is read back out of a document
+/// # Both numbers are measured
 ///
-/// The expectation comes from `logweir_core::engine::expected_restored_count`
-/// over the manifest facts this phase already holds, and the actual count from
-/// `ClusterReader::end_offsets`, the same ListOffsets read the phase-3 diff and
-/// the phase-6 post-condition use (`logweir-kafka/src/reader.rs`, whose own doc
-/// names it "the phase-7 restored-count check"). An expectation parsed back out
-/// of the document Logweir itself emitted would be a tautology: the engine's
-/// restore filter is `r.timestamp >= s && r.timestamp <= e`
-/// [U:crates/kafka-backup-core/src/restore/helpers.rs:74-82], so both sides of
-/// such a comparison shrink together and the check could never fire. The two
-/// instants arrive as plain `i64` PARAMETERS for that reason — this function
-/// cannot reach a document even if a later edit wanted it to — and
+/// The expectation is `logweir_core::engine::expected_restored_count` over
+/// the manifest facts, the actual count `ClusterReader::end_offsets`. An
+/// expectation parsed back out of the document Logweir emitted would be a
+/// tautology (the engine filters `s <= timestamp <= e`, so both sides shrink
+/// together), so the two instants arrive as plain `i64` parameters, and
 /// `the_count_expectation_never_reads_the_rendered_document`
 /// (`crates/logweir/tests/windowed_reconciliation.rs`) reads this function's
-/// own source text to keep it that way.
+/// source to keep it that way.
 ///
-/// # Scope: exactly the topics the restore names
+/// # Scope and counting
 ///
-/// `expected_restored_count`'s signature carries no topic filter, so the scope
-/// decision lives here, beside the count it is compared against: the facts are
-/// restricted to the source topics `mapping` names, and the count is summed
-/// over the target topics those same entries map to. That is the rule plan
-/// erratum **E7(b)** fixed for the window floor, applied to the bound for the
-/// same reason — an archive set may hold topics this restore does not name, and
-/// their records were never going to be written.
+/// The facts are restricted to the source topics `mapping` names and the
+/// count summed over their targets: an archive set may hold topics this
+/// restore does not name. Every target topic was created in this run, so its
+/// high watermark is its record count; a negative watermark contributes 0.
 ///
-/// # Why a high-watermark sum is the honest actual count
+/// # And per mapped partition
 ///
-/// Every target topic in a `mode: scratch` or `mode: newTopic` restore is one
-/// Logweir created in this run (phase 6; Task 8), so it starts at offset 0 and
-/// its high watermark IS its record count. A negative watermark is impossible
-/// from a broker and contributes 0 rather than wrapping.
-///
-/// # And per mapped partition (FX-23)
-///
-/// The sum is still reported first, in its own words, when it is outside its
-/// bound. Each mapped partition is then held to its OWN bound
-/// (`logweir_core::engine::partition_count_bound`), and every partition
-/// outside it is named after the sum: an empty target partition the manifest
-/// proves holds records in the window ("holds no record but the manifest
-/// proves at least N"), a count outside the partition's bound, and records in
-/// a target partition the manifest lists no source partition for. The engine
-/// does not repartition (Logweir renders no partition mapping), so target
-/// partition `p` holds exactly source partition `p`'s window. This is what
-/// catches a restore an engine stopped early regardless of which partitions
-/// the sample happened to select.
+/// The sum is reported first when outside its bound; then each mapped
+/// partition is held to its own bound
+/// (`logweir_core::engine::partition_count_bound`) and every one outside it
+/// is named: an empty partition the manifest proves holds records, a count
+/// outside the bound, and records in a partition the manifest lists no
+/// source partition for. The engine does not repartition, so target
+/// partition `p` holds source partition `p`'s window. This catches a restore
+/// an engine stopped early whichever partitions the sample selected.
 fn check_restored_count(
     reader: &dyn ClusterReader,
     facts: &BackupSetFacts,
@@ -1655,34 +1295,16 @@ fn check_restored_count(
     pit_ms: i64,
     selection: &ReplaySelection,
 ) -> Result<Option<String>, DrillError> {
-    // PROD-11.1: the bound is the SELECTION's. A partition the plan did not
+    // The bound is the SELECTION's. A partition the plan did not
     // select is no partition of this restore: it proves nothing and must be
     // empty on the target (below). A plan with no subset restricts nothing.
     let facts = &selection.restrict(facts);
-    // UNREACHABLE FROM `run` TODAY, and kept deliberately — the same cheap
-    // belt-and-braces as `roll_up`'s redundant `!verdicts.is_empty()`
-    // conjunct below, and stated here for the same reason: an unexplained
-    // guard reads as a guard nobody thought about (Task 10's review, F2).
-    //
-    // Why it cannot fire from `run`: `topic_mapping` is built at phase 0 from
-    // `spec.source.topics` (`phase0_admit.rs:155`), and phase 4's candidates
-    // are `topic_mapping.keys()` (`drill/mod.rs:1171`), so an empty mapping
-    // makes `phase4_sample::run` refuse first ("a drill over an empty window
-    // would report a pass that means nothing") and `run`'s own
-    // `sel.is_empty()` guard refuse after that — both before this line. Phase
-    // 0's `check_topic_mapping_coverage` independently refuses (exit 3) any
-    // SELECTED topic with no entry.
-    //
-    // Why it stays: the alternative to refusing is a silent PASS. Over zero
-    // topics `expected_restored_count` is `(0, 0)` and the high-watermark sum
-    // over zero targets is `0`, so `0` is inside `[0, 0]`, this function
-    // answers `Ok(None)`, and "the count agrees with the manifest" would be
-    // reported about a comparison that examined nothing — the empty-set false
-    // pass every other guard in this phase exists to close. The next caller is
-    // a future one (a second restore mode, the operator's reconciler), which
-    // is exactly where it would arrive. `classify_parity_all` refuses an empty
-    // mapping for the same reason and IS pinned, by
-    // `classify_parity_all_refuses_an_empty_mapping`.
+    // Unreachable from `run` (phase 4 and `run`'s own `sel.is_empty()` refuse
+    // an empty mapping first), and kept: over zero topics the bound is
+    // `(0, 0)` and the sum is 0, so this would answer `Ok(None)`, an agreement
+    // over nothing, to any future caller. `classify_parity_all` refuses an
+    // empty mapping for the same reason
+    // (`classify_parity_all_refuses_an_empty_mapping`).
     if mapping.is_empty() {
         return Err(DrillError::Operational(
             "restored-count bound ran with zero mapped topics; refusing to report a count \
@@ -1701,14 +1323,11 @@ fn check_restored_count(
     };
     let (lower, upper) = expected_restored_count(&named, floor_ms, pit_ms);
 
-    // FX-23: the same bound PER MAPPED PARTITION (`partition_count_bound`), read
-    // off the same end-offset reads. The sum alone had slack: a topic an engine
-    // never restored (a SIGTERM stops it between topics, exit 0) hid inside it
-    // whenever its segments straddled the point in time or the restored topics'
-    // straddling records made up its count. A partition has no sibling to
-    // borrow from, and a straddler whose first or last record is inside the
-    // window proves at least one record, so an empty partition the manifest
-    // proves non-empty is outside its own bound.
+    // The same bound per mapped partition, off the same end-offset reads. The
+    // sum alone has slack: a topic an engine never restored (a SIGTERM stops
+    // it between topics, exit 0) can hide inside it. A straddler whose first
+    // or last record is inside the window proves at least one record, so an
+    // empty partition the manifest proves non-empty is outside its own bound.
     let mut restored = 0u64;
     let mut per_partition = Vec::new();
     for (src, target) in mapping {
@@ -1767,7 +1386,7 @@ fn check_restored_count(
     Ok((!findings.is_empty()).then(|| findings.join("; ")))
 }
 
-/// **FX-23 (c), the trigger's detector.** The engine's offset report against
+/// The engine's offset report against
 /// the partitions the manifest PROVES hold records in the restore window
 /// (`partition_count_bound`'s `lower` above 0): `Some(text)` naming every
 /// such mapped partition the report has no entry for.
@@ -1830,20 +1449,14 @@ fn check_engine_report(
     })
 }
 
-/// Phase 7's four checks, routed through ONE ledger and ONE roll-up.
+/// Phase 7's four checks, routed through one ledger and one roll-up: `run`
+/// builds exactly one `SelectionVerdict` per `SampleSelection` and hands the
+/// ledger to `roll_up`, the single place `IntegrityResult` is decided.
 ///
-/// The shape is deliberate and is the fix for the fourth false pass: `run`
-/// does not compute a verdict. It builds exactly one `SelectionVerdict` per
-/// `SampleSelection` — every lane, every selection, no exceptions — and hands
-/// the whole ledger to `roll_up`, which is the single place `IntegrityResult`
-/// is decided. There is no `result` variable here to initialise to `Pass` and
-/// forget to move.
-///
-/// `mode` is the run's `target.mode` (FX-3): it decides whether the deviations
-/// the restore's topic creation makes by construction are `intended` (a scratch
-/// drill) or `not_reconstructed` (a `newTopic` restore) — see
-/// [`classify_parity`]. It has NO default on purpose: a default is how the
-/// scratch rationale reached every mode in the first place.
+/// `mode` is the run's `target.mode`: it decides whether the deviations the
+/// restore's topic creation makes are `intended` (scratch) or
+/// `not_reconstructed` (`newTopic`), see [`classify_parity`]. No default on
+/// purpose: a default is how the scratch rationale reached every mode.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     engine: &dyn DataEngine,
@@ -1871,21 +1484,20 @@ pub fn run(
     )
 }
 
-/// [`run`], with the plan's `sample.coverage` and `sample.complete_max_records`
-/// (PROD-08.1). `run` is this with `Coverage::Sampled`, the behaviour every
-/// plan had before the field existed.
+/// [`run`], with the plan's `sample.coverage` and
+/// `sample.complete_max_records`. `run` is this with `Coverage::Sampled`.
 ///
-/// - **`Sampled`**: the sampled lane below, unchanged except that a restored
-///   head whose `x-original-offset` repeats or goes backwards now fails its
-///   selection (`lineage_faults`), and the signed block says `coverage:
-///   sampled`, `header_order: notVerified`, with the sampled partitions'
-///   structured gap and pruned ranges.
-/// - **`Complete`**: [`complete::run`] — every segment of every restored
+/// - **`Sampled`**: the sampled lane below; a restored head whose
+///   `x-original-offset` repeats or goes backwards fails its selection
+///   (`lineage_faults`), and the signed block says `coverage: sampled`,
+///   `header_order: notVerified`, with the sampled partitions' structured gap
+///   and pruned ranges.
+/// - **`Complete`**: [`complete::run`]: every segment of every restored
 ///   partition, the expected output from each record's own timestamp, every
 ///   restored record compared, exact counts. The manifest's first/last count
-///   BOUND is not consulted (it is what fails a correct point-in-time restore
-///   and passes a skipped segment, PROD-01.1 ts-bound and ts-pit); the same
-///   `roll_up` decides the verdict from one verdict per partition.
+///   bound is not consulted (it fails a correct point-in-time restore and
+///   passes a skipped segment); the same `roll_up` decides from one verdict
+///   per partition.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_coverage(
     engine: &dyn DataEngine,
@@ -1916,8 +1528,8 @@ pub fn run_with_coverage(
     )
 }
 
-/// [`run_with_coverage`], with the engine's offset report as phase 6 read it
-/// (FX-23) — what the drill orchestrator calls. A report that lacks a mapped
+/// [`run_with_coverage`], with the engine's offset report as phase 6 read it,
+/// what the drill orchestrator calls. A report that lacks a mapped
 /// partition the manifest proves holds records in the restore window
 /// (`check_engine_report`) is a whole-drill finding beside the count bound, on
 /// both lanes: `Fail`, first in `partial_reason`. `run_with_coverage` is this
@@ -1938,12 +1550,9 @@ pub fn run_after_restore(
     complete_max_records: Option<u64>,
     engine_report: &EngineReport,
 ) -> Result<VerifyOutcome, DrillError> {
-    // OSO's own rule, adopted throughout this codebase (phase4_sample's own
-    // empty-candidates guard is the precedent): zero selections scanned is
-    // never a positive result. This one IS operational — a plan that named
-    // no partition to sample is a broken plan, not a fact about the archive
-    // — and `roll_up` refuses an empty ledger independently anyway, so
-    // deleting this guard cannot produce a pass either.
+    // Zero selections scanned is never a positive result. This one is
+    // operational, a plan that named no partition to sample; `roll_up`
+    // refuses an empty ledger independently anyway.
     if sel.is_empty() {
         return Err(DrillError::Operational(
             "phase7_verify::run called with zero sample selections; a fingerprint comparison \
@@ -1952,29 +1561,15 @@ pub fn run_after_restore(
         ));
     }
 
-    // (a) + (c). One verdict per selection, built by iterating `sel` ITSELF —
-    // never by iterating whatever `probe_archive_modes` happened to return —
-    // so `verdicts.len() == sel.len()` holds by construction of this loop and
-    // a selection cannot go unjudged without being deleted from the plan.
-    //
-    // Task 19 fix round 3, second pass: this loop was `sel.iter().zip(
-    // archives.iter())` guarded by a `debug_assert_eq!` on the two lengths.
-    // `zip` stops at the SHORTER side and `debug_assert!` is compiled out of
-    // every release build (this workspace sets no `[profile.release]
-    // debug-assertions`), so in the SHIPPED binary a short `archives` would
-    // have silently dropped the trailing selections from the ledger — and a
-    // ledger that is missing a selection entirely is `all(fully_verified)`
-    // over the survivors, i.e. the same "compared nothing, said nothing"
-    // false pass in a fifth door, one the ledger cannot see because the
-    // missing selection leaves no `Evidence::Unverified` behind. Indexing
-    // `sel` and REFUSING a missing answer (rather than truncating to it)
-    // makes the ledger total in every build. This is not a lane-specific
-    // guard: it is the chokepoint's own precondition — `roll_up` can only be
-    // sound if the ledger it reads covers every selection.
+    // (a) + (c). One verdict per selection, built by indexing `sel` itself and
+    // refusing a missing archive answer, never by zipping with what
+    // `probe_archive_modes` returned: `zip` stops at the shorter side, and a
+    // ledger missing a selection is `all(fully_verified)` over the survivors.
+    // `roll_up` is sound only if the ledger covers every selection.
     let selected: Vec<(String, i32)> = sel.iter().map(|s| (s.topic.clone(), s.partition)).collect();
-    // PROD-11.1: the plan's replay selection (its own start, its subsets),
-    // which every whole-drill check below is judged over. A plan that states
-    // none selects every partition from the archive's floor.
+    // The plan's replay selection (its own start, its subsets), which every
+    // whole-drill check below is judged over. A plan that states none selects
+    // every partition from the archive's floor.
     let selection = ReplaySelection::from_plan(plan);
     let (verdicts, count_bound, block) = match verify {
         Coverage::Sampled => {
@@ -2021,7 +1616,7 @@ pub fn run_after_restore(
                 coverage: Coverage::Sampled.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 // The sampled lane reconciles `record_fingerprint`, which
-                // SORTS headers: it never verified their order (08-6).
+                // sorts headers: it never verified their order.
                 header_order: HEADER_ORDER_NOT_VERIFIED.to_string(),
                 application: APPLICATION_NOT_ATTEMPTED.to_string(),
                 gaps,
@@ -2056,11 +1651,11 @@ pub fn run_after_restore(
         }
     };
 
-    // FX-23 (c): the engine's own report, on both lanes, AFTER the count bound
-    // in the joined text — both are whole-drill findings `roll_up` takes as
-    // one argument and can only turn into a `Fail`.
+    // The engine's own report, on both lanes, after the count bound in the
+    // joined text: both are whole-drill findings `roll_up` takes as one
+    // argument and can only turn into a `Fail`.
     let report_finding = check_engine_report(
-        // PROD-11.1: only the selected partitions must be in the report.
+        // Only the selected partitions must be in the report.
         &selection.restrict(facts),
         mapping,
         plan.time_window.0.timestamp_millis(),
@@ -2085,9 +1680,8 @@ pub fn run_after_restore(
     // `records_restored_is_the_consumed_count_not_matched_plus_mismatched`.
     let records_restored: u64 = verdicts.iter().map(|v| v.records_restored).sum();
 
-    // (d) Topic-config parity — ASSESSED only where the verified receipt says
-    // the source configuration was captured (FX-4), and labelled by the run's
-    // mode (FX-3).
+    // (d) Topic-config parity, assessed only where the verified receipt says
+    // the source configuration was captured, and labelled by the run's mode.
     let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage, mode)?;
 
     Ok(VerifyOutcome {
@@ -2108,7 +1702,7 @@ mod tests {
     use super::*;
     use logweir_core::engine::{BackupSetRef, PartitionFacts, TopicFacts};
 
-    /// FX-3 review F1: arm NR-5 reads `logweir_core::scorecard::
+    /// Arm NR-5 reads `logweir_core::scorecard::
     /// RESTORE_DECIDED_SETTINGS` as "the keys phase 7 can label intended or
     /// not reconstructed". Driven with EVERY key different, a `newTopic`
     /// classification names exactly that set, and a scratch one labels
@@ -2164,12 +1758,10 @@ mod tests {
         }
     }
 
-    /// FX-21: a source partition count or replication factor that is NOT
-    /// RECORDED is neither a match nor a deviation, in both modes, whatever
-    /// the target's value — including the value the old code substituted for
-    /// it (the target's own), which is exactly the false match this closes.
-    /// A recorded `0` or less is no count either. The control: the same
-    /// values recorded are compared as before.
+    /// A source partition count or replication factor that is not recorded is
+    /// neither a match nor a deviation, in both modes, whatever the target's
+    /// value (including the target's own). A recorded `0` or less is no count
+    /// either. The control: the same values recorded are compared.
     #[test]
     fn a_source_layout_that_is_not_recorded_is_not_assessed_never_matched() {
         let none = BTreeMap::new();
@@ -2213,7 +1805,7 @@ mod tests {
         }
     }
 
-    /// FX-21: the twin's key, as arm NR-5 reads it (`parity_key`: the text
+    /// The twin's key, as arm NR-5 reads it (`parity_key`: the text
     /// after the LAST `": "`), is never one of the settings the restore
     /// decides, so a `newTopic` document carrying a `replication_factor`
     /// twin is not refused for omitting it from `not_reconstructed`.
@@ -2306,21 +1898,8 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // `sampled_segments_for` (was `sampled_segments`, which took the whole
-    // `sel` slice and returned `Result`).
-    //
-    // PREMISE CHANGE, deliberate and documented in `sampled_segments_for`'s
-    // own doc comment: round 2's function REFUSED (`DrillError::Operational`,
-    // exit 1, no artifact) when a selection matched zero segments. Round 3
-    // routes that finding through `Evidence::Unverified` and `roll_up` like
-    // every other "compared nothing" case, because "the archive holds no
-    // segment in this window" is a fact ABOUT THE ARCHIVE — a drill result,
-    // exit 2 with a signed scorecard — not Logweir failing to run. The three
-    // tests below therefore assert the SAME safety property the originals
-    // did (a selection matching nothing can never be counted as checked),
-    // restated at its new home: an empty match plus the `Unverified` the
-    // empty match produces.
+    // `sampled_segments_for`: a selection matching nothing can never be
+    // counted as checked; the empty match produces `Unverified`.
 
     #[test]
     fn sampled_segments_for_a_partition_the_facts_lack_matches_nothing_and_is_unverified() {
@@ -2349,14 +1928,8 @@ mod tests {
     }
 
     /// The right topic and partition, but a window that does not overlap the
-    /// segment's own `start_timestamp..end_timestamp` (0..100): must be
-    /// excluded, not matched regardless of window. Pins the window filter
-    /// itself, distinct from
-    /// `..._a_partition_the_facts_lack_matches_nothing_and_is_unverified`
-    /// (which pins the empty-match consequence via a partition mismatch, not
-    /// a window mismatch) and from `..._finds_the_real_match` (which never
-    /// exercises a non-overlapping window, so a mutant deleting the window
-    /// filter entirely would still pass it).
+    /// segment's `start_timestamp..end_timestamp` (0..100): excluded. Pins the
+    /// window filter itself. KILLS: the window filter deleted.
     #[test]
     fn sampled_segments_for_excludes_a_segment_outside_the_requested_window() {
         let facts = facts_one_segment();
@@ -2366,14 +1939,9 @@ mod tests {
         assert!(segment_evidence(&store, &segs).unwrap().is_unverified());
     }
 
-    /// Task 19 fix round 2 ("check for the third door"), restated for round
-    /// 3's structure. The original asserted that `sampled_segments`' AGGREGATE
-    /// `out.is_empty()` check could not hide an empty selection behind a
-    /// healthy sibling. That aggregate no longer exists to be wrong:
-    /// `sampled_segments_for` is handed ONE selection and cannot see a
-    /// sibling. What must still be proven is the consequence at the
-    /// chokepoint — a ledger holding one fully-verified selection and one
-    /// whose segments matched nothing is `Partial`, and names the empty one.
+    /// A ledger holding one fully verified selection and one whose segments
+    /// matched nothing is `Partial`, and names the empty one: an empty
+    /// selection cannot hide behind a healthy sibling.
     #[test]
     fn one_selection_matching_no_segment_cannot_hide_behind_a_healthy_sibling() {
         let facts = facts_one_segment();
@@ -2407,15 +1975,10 @@ mod tests {
         assert!(integrity.partial_reason.unwrap().contains("orders/7"));
     }
 
-    // -----------------------------------------------------------------
-    // `roll_up` — THE chokepoint. Driven directly, because these are
-    // properties of the roll-up itself rather than of any lane.
+    // `roll_up`, driven directly: these are properties of the roll-up itself.
 
-    /// The trap the module doc names explicitly: `all()` over an EMPTY slice
-    /// is vacuously TRUE, so a `roll_up` that reached its `all(fully_verified)`
-    /// arm with no verdicts at all would report the strongest possible claim
-    /// over the weakest possible evidence. This is the fifth door in embryo
-    /// and it is answered first and explicitly.
+    /// `all()` over an empty slice is vacuously true, so an empty ledger must
+    /// be `Partial`, never `Pass`.
     #[test]
     fn roll_up_on_an_empty_ledger_is_partial_never_pass() {
         let integrity = roll_up(&[], None);
@@ -2488,47 +2051,14 @@ mod tests {
         assert_eq!(failed.result, IntegrityResult::Fail);
     }
 
-    /// Task 19 fix round 3, third pass (coordinator's surviving mutant M3).
-    /// The mutant was
-    ///
-    /// ```text
-    /// - verdicts.iter().any(SelectionVerdict::failed)
-    /// + verdicts.iter().filter(|v| v.downgrade.is_none()).any(SelectionVerdict::failed)
-    /// ```
-    ///
-    /// and it changed nothing any test observed. Sized honestly, it is NOT a
-    /// fifth false-pass door: `Evidence`'s three variants are mutually
-    /// exclusive, so a `Failed` selection is never `Verified`,
-    /// `all(fully_verified)` still fails, and the result degrades to
-    /// `Partial`. `Pass` stays unreachable and the chokepoint holds.
-    ///
-    /// What it exposed is the LANE ASYMMETRY round 3 exists to close,
-    /// surviving in the one direction nobody probed: "a `Failed` selection
-    /// produces `Fail` no matter which lane it is on" was never asserted for
-    /// a DOWNGRADED selection. Under the mutant, a consume-only selection
-    /// examined and found WRONG reports `Partial` — "we could not fully check
-    /// this" — instead of `Fail` — "we checked, and it is wrong". Those say
-    /// materially different things to an auditor, and reporting the second as
-    /// the first understates a real, demonstrated failure.
-    ///
-    /// Both lanes of a downgraded selection are covered here, and they are
-    /// NOT equally reachable — worth stating, because the difference is the
-    /// reason this gap matters in production rather than only in theory:
-    ///
-    /// - The SEGMENT lane is genuinely reachable. `verdict_for_selection`
-    ///   calls `segment_evidence` BEFORE it matches on the archive mode, so
-    ///   it runs on every lane, and it can return `Failed` (a sha256 mismatch
-    ///   against the manifest). A pre-0.21 / KBAK-level-1 archive whose
-    ///   segment bytes do not match its own manifest is exactly that case,
-    ///   and it is pinned end to end by `verify_phase.rs`'s
-    ///   `a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_partial`.
-    /// - The RECORD lane is currently unreachable: the `Unsupported` arm of
-    ///   `verdict_for_selection` constructs only `Verified` and `Unverified`,
-    ///   never `Failed`, because consume-only asserts nothing about record
-    ///   contents and so cannot find them wrong. It is asserted anyway, as a
-    ///   property of `roll_up` rather than of today's callers — `roll_up` is
-    ///   the chokepoint, and a chokepoint that is only correct for the inputs
-    ///   its present callers happen to produce is not a chokepoint.
+    /// A failed selection produces `Fail` on a downgraded selection too, not
+    /// `Partial`: "we checked, and it is wrong" is not "we could not fully
+    /// check this". KILLS: `any(failed)` filtered to non-downgraded
+    /// selections. The segment lane is reachable (`segment_evidence` runs on
+    /// every lane; end to end in `verify_phase.rs`'s
+    /// `a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_partial`);
+    /// the record lane is not today, and is asserted as a property of
+    /// `roll_up`.
     #[test]
     fn a_failed_selection_reports_fail_on_every_lane_including_a_downgraded_one() {
         // Reachable: the segment lane failed on a downgraded selection.
@@ -2591,33 +2121,14 @@ mod tests {
         assert_eq!(integrity.result, IntegrityResult::Fail);
     }
 
-    /// The signed sample counters key on `reconciled.is_some()` and on
-    /// NOTHING else — the rule `roll_up`'s own comment and the module doc both
-    /// state ("they aggregate over EXACTLY the selections whose records were
-    /// reconciled against archive fingerprints").
-    ///
-    /// Found while auditing siblings of the coordinator's M3: slipping a
-    /// `.filter(|v| v.downgrade.is_none())` in front of the counters' own
-    /// `filter_map(|v| v.reconciled)` changed nothing any test observed. That
-    /// mutant is equivalent TODAY, but only by a coupling to a different
-    /// function: `verdict_for_selection`'s `Unsupported` arm happens to pass
-    /// `reconciled = None`, so `downgrade.is_some()` currently implies
-    /// `reconciled.is_none()`. It is not equivalent by any logic inside
-    /// `roll_up`. Should a future lane ever downgrade a selection while still
-    /// reconciling part of it, the mutated form would silently drop real
-    /// reconciliations out of counters Task 20 SIGNS, under-reporting
-    /// `records_sampled` while `partial_reason` still named the selection —
-    /// a signed document disagreeing with itself.
-    ///
-    /// So the documented rule is pinned as stated, on the axis it is stated
-    /// on, rather than left resting on a neighbour's current behaviour.
+    /// The signed sample counters key on `reconciled.is_some()` and nothing
+    /// else. A downgraded selection that still carries reconciliation counts
+    /// keeps them: filtering on `downgrade` would under-report
+    /// `records_sampled` while `partial_reason` named the selection.
     #[test]
     fn the_signed_counters_key_on_reconciled_alone_never_on_the_downgrade_flag() {
-        // Deliberately NOT a shape `verdict_for_selection` builds today: a
-        // downgraded selection that nonetheless carries reconciliation
-        // counts. `roll_up` is the chokepoint, and its contract must hold for
-        // the inputs it DECLARES, not merely for the ones today's single
-        // caller happens to produce.
+        // Not a shape `verdict_for_selection` builds today: `roll_up`'s
+        // contract holds for the inputs it declares.
         let mut downgraded_but_reconciled = verdict(
             "orders/0",
             Evidence::Verified { checked: 1 },
@@ -2639,8 +2150,7 @@ mod tests {
     /// `roll_up` must not branch on `level`: a consume-only selection reaches
     /// `Pass` through the same `Evidence::Verified` every other lane must
     /// produce, and an UNVERIFIED consume-only selection is refused just as
-    /// hard as an unverified byte-fingerprint one. This is the fourth door
-    /// stated as a property of the roll-up rather than of a lane.
+    /// hard as an unverified byte-fingerprint one.
     #[test]
     fn roll_up_applies_the_same_obligation_to_the_consume_only_lane() {
         let mut downgraded = verdict(
@@ -2667,7 +2177,7 @@ mod tests {
 
     /// A downgraded selection reports the weakest LEVEL for the drill, but
     /// must not erase the byte-level claim another selection genuinely
-    /// established (the fifth reproduction). `roll_up` names those selections
+    /// established. `roll_up` names those selections
     /// in `partial_reason` and keeps their real counters.
     #[test]
     fn roll_up_names_the_selections_whose_byte_level_claim_survives_a_downgrade() {
@@ -2708,10 +2218,9 @@ mod tests {
         );
     }
 
-    /// The fourth door's exact signature: `pass_rate_measured = Some(1.0)`
-    /// published beside a verdict that is NOT a pass, because the ratio was
-    /// taken over only the selections that happened to reconcile. A rate is a
-    /// ratio over the WHOLE sample or it is null.
+    /// `pass_rate_measured = Some(1.0)` beside a verdict that is not a pass,
+    /// a ratio over only the selections that reconciled, is refused: a rate
+    /// is a ratio over the whole sample or null.
     #[test]
     fn roll_up_withholds_a_pass_rate_when_any_selection_never_reconciled() {
         let mut short = verdict(
@@ -2741,12 +2250,8 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // `segment_evidence`
-
-    /// Round 2 skipped a pre-0.21 segment (empty sha256) with a logged note
-    /// and let the run still report `Pass`. A skip is coverage the drill did
-    /// not obtain and must be `Unverified`.
+    /// A pre-0.21 segment (empty sha256) is skipped as coverage the drill did
+    /// not obtain: `Unverified`, never `Pass`.
     #[test]
     fn a_segment_with_no_sha256_is_unverified_never_verified() {
         let (store, _) = store_with("logweir/k", b"anything");
@@ -2786,9 +2291,6 @@ mod tests {
         assert!(ev.is_failed(), "{ev:?}");
         assert!(ev.why().unwrap().contains("mismatch"));
     }
-
-    // -----------------------------------------------------------------
-    // `probe_archive_modes`
 
     #[test]
     fn probe_archive_modes_refuses_an_empty_selection_list() {
@@ -2832,12 +2334,9 @@ mod tests {
         assert!(matches!(err, EngineError::Operational(_)));
     }
 
-    /// Task 19 fix round 3: the mode is PER SELECTION. Round 2's
-    /// `probe_archive_mode` returned one `ConsumeOnly` for the WHOLE backup
-    /// set on the first `Unsupported`, discarding every fingerprint set it
-    /// had already collected — the fifth reproduction, at its source. One
-    /// `Unsupported` selection must downgrade only itself, the loop must
-    /// continue, and the answer count must equal the selection count.
+    /// The mode is per selection: one `Unsupported` selection downgrades only
+    /// itself, the loop continues, and the answer count equals the selection
+    /// count.
     #[test]
     fn probe_archive_modes_downgrades_only_the_unsupported_selection() {
         struct MixedLevels;
@@ -2903,10 +2402,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // `verdict_for_selection` (was `consume_and_reconcile`, which took the
-    // whole `sel` slice and one whole-backup-set `ArchiveMode`).
-
     #[test]
     fn verdict_for_selection_refuses_a_topic_with_no_mapping_entry() {
         struct Unreachable;
@@ -2929,8 +2424,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -2970,21 +2464,10 @@ mod tests {
     }
 
     /// `claimed` is `min(sel.count, Σ record_count)` over the matched segments
-    /// **wholly inside** the sampled window — the module doc's "short counts
-    /// as unverified" rule rests entirely on this figure, and the doc's claim
-    /// about WHICH figure it is has been wrong twice: it once said
-    /// "byte-for-byte the same" as `phase4_sample`'s uncapped
-    /// `sample.records_expected`, and until Task 10b it summed every
-    /// OVERLAPPING segment, which failed correct point-in-time restores.
-    ///
-    /// Renamed from `claimed_is_the_manifest_window_sum_capped_by_the_
-    /// selections_own_count`: "the manifest window sum" is the overlap sum,
-    /// and a test name that says it would now be a lie.
-    ///
-    /// All three halves are exercised: the selection's own `count` binding
-    /// when it is smaller, the wholly-inside manifest sum binding when IT is
-    /// smaller, and a straddler contributing nothing to either. A mutant
-    /// dropping any of them changes an observed number here.
+    /// **wholly inside** the sampled window. All three halves are exercised:
+    /// the selection's own `count` binding when smaller, the wholly-inside
+    /// manifest sum binding when smaller, and a straddler contributing
+    /// nothing.
     #[test]
     fn claimed_is_the_manifests_wholly_inside_sum_capped_by_the_selections_own_count() {
         struct Empty;
@@ -3007,8 +2490,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -3053,10 +2535,8 @@ mod tests {
             "the manifest's own wholly-inside record_count must cap the claim when it is smaller"
         );
 
-        // The SAME segment, against a window that ends one millisecond before
-        // it does: now it STRADDLES, so it supports nothing and the claim
-        // falls to 0. One field of one input moved; `claimed` moved from 10 to
-        // 0, which is the whole of Task 10b in one comparison.
+        // The same segment against a window ending one millisecond before it
+        // does: it now straddles, supports nothing, and the claim falls to 0.
         let mut straddled = sel_for("orders", 0, (0, 99));
         straddled.count = 40;
         let v =
@@ -3077,31 +2557,12 @@ mod tests {
         assert!(v.segments.is_unverified());
     }
 
-    // -----------------------------------------------------------------
-    // Task 10b — `claimed` is what the manifest can SUPPORT, not what it
-    // OVERLAPS.
-    //
-    // Task 11's review reproduced the false negative on the real stack
-    // (engine 0.21.0 `sha256:8ff5be71…`, Kafka 3.7.1): a three-partition
-    // `point_in_time` restore, verified record-by-record off the broker,
-    // scored `outcome: fail-integrity` with `mismatches: 0`, because
-    // `claimed` was `min(sel.count, Σ record_count over every OVERLAPPING
-    // segment)` — the WHOLE count of a straddling segment, including the
-    // records the window excludes — while `OsoCliEngine::fingerprints`
-    // returns only the records whose timestamp lies inside the window.
-    // `claimed 3` against 2 obtainable fingerprints on each partition.
-    //
-    // The rule is now the one `expected_restored_count` already writes down:
-    // only the segments WHOLLY inside the sample window, both ends inclusive,
-    // can support a claim; a straddler's records are an upper bound and
-    // contribute NOTHING.
+    // `claimed` is what the manifest can support, not what it overlaps: only
+    // segments wholly inside the sample window, both ends inclusive, support
+    // a claim (the rule `expected_restored_count` writes down).
 
-    /// `2025-10-09T08:53:20Z`, computed with `python3 -c 'import datetime as
-    /// d; print(d.datetime.fromtimestamp(1760000000, d.timezone.utc)
-    /// .isoformat())'` before it was written here (plan errata E6/E7). It is
-    /// the same instant `e2e/fixtures/drill-pitr.yaml` uses as its
-    /// `point_in_time`, so these unit rows and the owed e2e proof are about
-    /// the same boundary.
+    /// `2025-10-09T08:53:20Z`, the same instant `e2e/fixtures/drill-pitr.yaml`
+    /// uses as its `point_in_time`.
     const T_MS: i64 = 1_760_000_000_000;
 
     /// A `ClusterReader` that answers `consume_range` from a fixed vector,
@@ -3228,21 +2689,12 @@ mod tests {
         s
     }
 
-    /// **Task 10b guard (i) — the straddler.** One segment holding 3 records
-    /// across `[T−1, T+1]` (T = 1_760_000_000_000 = 2025-10-09T08:53:20Z); the
-    /// sample window is `[T−1, T]`, so the segment STRADDLES its end and the
-    /// archive can only ever return the 2 records inside. Both reconcile.
-    ///
-    /// This is the reproduced defect, in process: under the OVERLAP sum
-    /// `claimed` is `min(25, 3) = 3`, `compared >= claimed` is unreachable at
-    /// 2, and a CORRECT restore lands on `Unverified` — `fail-integrity`,
-    /// exit 2, about its own sample. Under the wholly-inside rule the
-    /// straddler supports nothing, `claimed` is 0, and the positive,
-    /// non-vacuous `compared > 0` conjunct is what still makes the verdict an
-    /// assertion rather than a vacuous pass.
-    ///
-    /// Kills mutant **M1** (restore the overlap sum): `Verified { checked: 2 }`
-    /// becomes `Unverified`, at assertion time.
+    /// **The straddler.** One segment holding 3 records across `[T−1, T+1]`;
+    /// the sample window is `[T−1, T]`, so it straddles the end and the
+    /// archive can only return the 2 records inside. Both reconcile, and the
+    /// selection is `Verified` (the `compared > 0` conjunct keeps it an
+    /// assertion). KILLS: the overlap sum restored (`claimed` 3, a correct
+    /// restore `Unverified`).
     #[test]
     fn a_straddling_segment_supports_no_claim_and_its_in_window_records_verify() {
         let (facts, store) = facts_and_store(&[("logweir/straddler.kbak", T_MS - 1, T_MS + 1, 3)]);
@@ -3281,7 +2733,7 @@ mod tests {
         assert!(v.fully_verified());
     }
 
-    /// **Task 10b guard (ii) — the kept property.** One segment WHOLLY inside
+    /// **The kept property.** One segment WHOLLY inside
     /// the window holding 5 records; the archive returns 3, all matching.
     /// That is a genuinely truncated read of a segment the window contains,
     /// which is the case "short counts as unverified" was built for, and it
@@ -3329,13 +2781,10 @@ mod tests {
         );
     }
 
-    /// **Task 10b guard (iii) — the mix.** One wholly-inside segment holding 5
-    /// and one straddler holding 3: the claim is 5, not 8. `compared == 5`
-    /// verifies; `compared == 4` does not, and the message discloses the
-    /// straddler so an auditor can see why 5 and not 8.
-    ///
-    /// The `compared == 5` half kills mutant **M1** a second time (under the
-    /// overlap sum `claimed` is 8 and 5 is short).
+    /// **The mix.** One wholly-inside segment holding 5 and one straddler
+    /// holding 3: the claim is 5, not 8. `compared == 5` verifies (KILLS: the
+    /// overlap sum); `compared == 4` does not, and the message discloses the
+    /// straddler.
     #[test]
     fn a_mixed_window_claims_the_wholly_inside_segment_and_discloses_the_straddler() {
         let segments = [
@@ -3385,16 +2834,14 @@ mod tests {
         );
     }
 
-    /// **Task 10b guard (iv) — the consume-only lane carries the SAME rule.**
-    /// The mirrors of (i) and (ii), on the lane that has no fingerprints to
-    /// compare: a straddler supports nothing and the read-back verifies; a
-    /// wholly-inside segment still binds, and a short read-back is
-    /// `Unverified` with the claim named.
-    ///
-    /// Kills mutant **M4** (apply the new rule on one lane only).
+    /// **The consume-only lane carries the same rule.** The mirrors of the
+    /// straddler and the kept property: a straddler supports nothing and the
+    /// read-back verifies; a wholly-inside segment still binds, and a short
+    /// read-back is `Unverified` with the claim named. KILLS: the rule on one
+    /// lane only.
     #[test]
     fn the_consume_only_lane_claims_the_same_wholly_inside_sum() {
-        // (i)'s mirror: the straddler.
+        // The straddler's mirror.
         let (facts, store) = facts_and_store(&[("logweir/straddler.kbak", T_MS - 1, T_MS + 1, 3)]);
         let (_, consumed) = pairs(2, T_MS);
         let v = verdict_for_selection(
@@ -3414,7 +2861,7 @@ mod tests {
             v.records
         );
 
-        // (ii)'s mirror: the wholly-inside segment.
+        // The kept property's mirror: the wholly-inside segment.
         let (facts, store) = facts_and_store(&[("logweir/inside.kbak", T_MS - 10, T_MS - 1, 5)]);
         let (_, consumed) = pairs(3, T_MS - 2);
         let v = verdict_for_selection(
@@ -3438,17 +2885,11 @@ mod tests {
         );
     }
 
-    /// **Task 10b guard (v) — both ends are INCLUSIVE.** A segment flush with
-    /// BOTH window edges (`start_timestamp == w0`, `end_timestamp == w1`) is
-    /// wholly inside it, exactly as `expected_restored_count` reads the
-    /// restore window: the engine's own filter is `r.timestamp >= s &&
-    /// r.timestamp <= e`, so a segment touching a bound is inside it, not
-    /// across it.
-    ///
-    /// Kills mutant **M2** (`>=` → `>` on either end): the segment stops
-    /// counting, `claimed` falls to 0, and a 3-fingerprint read of a proven 5
-    /// reports `Verified` — the false PASS the false negative's fix must not
-    /// buy.
+    /// **Both ends are inclusive.** A segment flush with both window edges is
+    /// wholly inside, as the engine's own filter `s <= timestamp <= e` reads
+    /// it. KILLS: `>=` → `>` on either end (the segment stops counting,
+    /// `claimed` falls to 0, and a 3-fingerprint read of a proven 5 reports
+    /// `Verified`).
     #[test]
     fn a_segment_flush_with_both_window_edges_is_wholly_inside() {
         let (facts, store) = facts_and_store(&[("logweir/flush.kbak", T_MS - 10, T_MS, 5)]);
@@ -3477,17 +2918,11 @@ mod tests {
         );
     }
 
-    /// **Reviewer's guard (Task 10b review, M5).** `supportable_claim` clamps a
-    /// negative `record_count` to 0 (interface I5) on BOTH of its sums — the
-    /// wholly-inside claim and the straddler disclosure. The module doc asserts
-    /// this ("A negative `record_count` contributes 0 rather than wrapping a
-    /// `u64`"), and until this row nothing in the tree observed it: deleting
-    /// both `.max(0)` calls left the whole workspace green.
-    ///
-    /// A wrapped `-1` is `u64::MAX`, which does not merely mis-size the claim —
-    /// it makes `compared >= claimed` unreachable for every archive, turning
-    /// one malformed manifest field into a `fail-integrity` on a correct
-    /// restore, which is the very class of defect Task 10b exists to remove.
+    /// `supportable_claim` clamps a negative `record_count` to 0 (interface
+    /// I5) on both sums, the wholly-inside claim and the straddler disclosure.
+    /// A wrapped `-1` is `u64::MAX`, which would make `compared >= claimed`
+    /// unreachable and fail a correct restore. KILLS: either `.max(0)`
+    /// deleted.
     #[test]
     fn a_negative_or_zero_record_count_contributes_nothing_and_never_wraps() {
         // (a) WHOLLY INSIDE, record_count -1 → supports 0, not 2^64-1.
@@ -3584,8 +3019,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -3619,14 +3053,10 @@ mod tests {
         assert!(err.to_string().contains("zero mapped topics"));
     }
 
-    /// Task 19 fix round 1 (review finding F4, surviving mutant r16): a
-    /// mapped topic with no matching entry in `facts.topics` must be
-    /// REFUSED, never silently `continue`d past. Silently skipping it would
-    /// let `TopicParity` report agreement over fewer topics than the
-    /// operator actually asked about, with no signal that anything was
-    /// dropped. The `Unreachable` reader panics if `classify_parity_all`
-    /// ever reaches it — the refusal must fire on the facts lookup alone,
-    /// before any target read.
+    /// A mapped topic with no matching entry in `facts.topics` is refused,
+    /// never skipped: skipping would let `TopicParity` report agreement over
+    /// fewer topics than asked. The `Unreachable` reader panics if reached:
+    /// the refusal fires on the facts lookup alone.
     #[test]
     fn classify_parity_all_refuses_a_mapped_topic_with_no_archive_facts() {
         struct Unreachable;
@@ -3652,8 +3082,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -3716,8 +3145,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -3763,8 +3191,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(
@@ -3790,15 +3217,9 @@ mod tests {
         assert!(err.to_string().contains("no restored records"));
     }
 
-    /// Task 19 fix round 1 (review finding F5, surviving mutant r14): the
-    /// cross-partition aggregation itself — `n.max(r.timestamp_ms)` — was
-    /// unpinned; every prior fixture gave each mapped topic a single
-    /// partition, or gave every partition the SAME timestamp, so a mutant
-    /// swapping `max` for `min` survived undetected. Two partitions with
-    /// DELIBERATELY DIFFERENT last-record timestamps close that gap:
-    /// `newest_ts` is the direct input to `measured.rpo_seconds` (module doc
-    /// on `Restored`/phase 8), so reporting the OLDEST instead of the NEWEST
-    /// restored record would corrupt a signed RPO with nothing red.
+    /// `newest_ts` takes the maximum across partitions with different
+    /// last-record timestamps: it feeds `measured.rpo_seconds`, so the oldest
+    /// would corrupt a signed RPO. KILLS: `max` swapped for `min`.
     #[test]
     fn newest_ts_returns_the_maximum_not_the_minimum_across_partitions() {
         struct TwoPartitionsDistinctTimestamps;
@@ -3821,8 +3242,7 @@ mod tests {
             fn broker_configs(
                 &self,
             ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
-                // Task 8 (guard G-TS) added this to `ClusterReader`. Phase 7
-                // never reads it: the target-topic preflight is phase 0's.
+                // Phase 7 never reads it: the target-topic preflight is phase 0's.
                 unimplemented!()
             }
             fn topic_configs(

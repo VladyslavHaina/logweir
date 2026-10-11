@@ -14,19 +14,17 @@ pub struct Selection {
     /// It is NOT the canary size, and it is NOT what the scorecard's
     /// identically-named `sample.records_expected` publishes: that field is
     /// the sum of `count` over `per_partition` — how many records the drill
-    /// set out to reconcile. On this repository's own fixtures the two are 500
-    /// and 25 for a single partition. `crate::drill::sample_info` computes the
-    /// scorecard's figure from `per_partition[..].count` for exactly this
-    /// reason; substituting this field there would make the signed document
-    /// claim it verified twenty times what it did (Task 16's parked item,
-    /// discharged in Task 21a).
+    /// set out to reconcile (on this repository's fixtures, 500 against 25 for
+    /// one partition). `crate::drill::sample_info` computes the scorecard's
+    /// figure from `per_partition[..].count` for that reason; substituting
+    /// this field would make the signed document overstate what it verified.
     pub records_expected: u64,
     pub topics: u32,
     pub partitions: u32,
     /// Human-readable facts that must reach the operator: known capture gaps
     /// and retention-pruned ranges overlapping the sampled window.
     pub notes: Vec<String>,
-    /// **FX-23.** The restored topics with at least one partition in the
+    /// The restored topics with at least one partition in the
     /// window that `max_partitions` left WITHOUT a sampled partition, sorted
     /// and each once — empty when every such topic has one. It can be
     /// non-empty only when `max_partitions` is below the number of those
@@ -78,7 +76,7 @@ pub fn run(
     run_selected(facts, spec, topics, None)
 }
 
-/// [`run`], over a plan's replay selection (PROD-11.1). `None` — a plan that
+/// [`run`], over a plan's replay selection. `None` — a plan that
 /// states none — is [`run`] exactly.
 ///
 /// With a selection, a sample may come only from a SELECTED partition (a
@@ -93,13 +91,10 @@ pub fn run_selected(
     topics: &[String],
     selection: Option<&ReplaySelection>,
 ) -> Result<Selection, DrillError> {
-    // Task 19 fix round 1 (review finding F2): `records_per_partition: 0` is
-    // an ordinary YAML value nothing else rejects, and it reaches every
-    // `SampleSelection.count` this function builds. A zero-count selection
-    // makes `OsoCliEngine::fingerprints` return `Ok(vec![])` — zero archive
-    // fingerprints, no error — which let phase 7's canary reconciliation
-    // report a byte-fingerprint `Pass` over a comparison that checked
-    // nothing. Refused at the root, not only where it was found reachable.
+    // `records_per_partition: 0` is an ordinary YAML value nothing else
+    // rejects, and a zero-count selection makes `OsoCliEngine::fingerprints`
+    // return no fingerprints and no error: a comparison that checks nothing.
+    // Refused at the root.
     if spec.records_per_partition == 0 {
         return Err(DrillError::Operational(
             "sample.records_per_partition is 0; a canary sample of zero records per partition \
@@ -121,7 +116,7 @@ pub fn run_selected(
     let (ms0, ms1) = (w0.timestamp_millis(), w1.timestamp_millis());
     let mut candidates: Vec<Candidate> = Vec::new();
 
-    // PROD-08.1: a COMPLETE verification selects every partition the
+    // A COMPLETE verification selects every partition the
     // manifest lists for a restored topic — never a `max_partitions` subset
     // (phase 0 refuses that pairing), and never only the partitions whose
     // segments' first/last timestamps overlap the window: those bounds are
@@ -131,7 +126,7 @@ pub fn run_selected(
     let complete = spec.coverage == Coverage::Complete;
     for t in facts.topics.iter().filter(|t| topics.contains(&t.name)) {
         for p in &t.partitions {
-            // PROD-11.1: a partition the plan did not select restored nothing.
+            // A partition the plan did not select restored nothing.
             if selection.is_some_and(|sel| !sel.selects_partition(&t.name, p.partition_id)) {
                 continue;
             }
@@ -253,20 +248,18 @@ pub fn run_selected(
     })
 }
 
-/// **FX-23 (b).** Keep at most `max` candidates, ROUND-ROBIN across topics:
+/// Keep at most `max` candidates, ROUND-ROBIN across topics:
 /// the first partition of every topic, in manifest order, then the second of
 /// every topic that has one, and so on. Returns what is kept, in the
 /// candidates' own (manifest) order, and the topics left with no kept
 /// partition, sorted.
 ///
-/// The cap used to keep the FIRST `max` candidates in manifest order, which
-/// is the order the engine restores topics in. A restore the engine stopped
-/// early (a SIGTERM is honoured between topics, with exit 0) restores a
-/// manifest-order PREFIX of the topics, so that sample covered exactly the
-/// topics that finished, and reconciled them. Round-robin samples every topic
-/// as soon as the cap allows one partition each; below that, the topics it
-/// could not reach are named in the signed `sample` block rather than left to
-/// be inferred, and phase 7's per-partition count bound still holds them.
+/// Manifest order is the order the engine restores topics in, and an
+/// early-stopped restore (a SIGTERM is honoured between topics, exit 0)
+/// restores a manifest-order prefix, so a first-`max` cap would sample
+/// exactly the topics that finished. Topics the cap cannot reach are named in
+/// the signed `sample` block, and phase 7's per-partition count bound still
+/// holds them.
 fn round_robin(candidates: Vec<Candidate>, max: usize) -> (Vec<Candidate>, Vec<String>) {
     // Rank of each candidate within its topic (0 for a topic's first listed
     // partition), and each topic's first appearance, both in manifest order.
