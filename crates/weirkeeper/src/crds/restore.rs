@@ -1,6 +1,6 @@
-//! `Restore` — one restore run, and the only kind a drill is.
+//! `Restore`: one restore run, and the only kind a drill is.
 //!
-//! `Drill` IS NOT A KIND. A drill is a `Restore` whose `spec.target.mode` is
+//! A drill is not a kind: it is a `Restore` whose `spec.target.mode` is
 //! `scratch` (Global Constraint 34). A `Restore` only ever writes a *new*
 //! topic, so restoring into production is non-destructive by construction, and
 //! the drill's only distinguishing behaviour is a scratch target plus phase-9

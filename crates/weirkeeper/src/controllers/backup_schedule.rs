@@ -55,12 +55,13 @@
 //! output before any status refinement and turns such a slot into
 //! [`SlotDecision::BeforeCreation`]: not fired, not missed, `Ready=True`.
 //!
-//! # `suspend` is the one mutable field
+//! # Only `sourceRef` is sealed
 //!
 //! The object-level CEL rule
-//! ([`crate::crds::backup_schedule::SUSPEND_ONLY_RULE`]) makes it so. This
-//! reconciler reads it and never writes it: like every reconciler here it
-//! patches `/status` and nothing else, and it never DELETEs.
+//! ([`crate::crds::backup_schedule::SOURCE_REF_IMMUTABLE_RULE`]) seals it;
+//! every other field is policy the next admission reads. Like every
+//! reconciler here this one patches `/status` and nothing else, and it never
+//! deletes.
 
 use std::fmt;
 use std::sync::Arc;

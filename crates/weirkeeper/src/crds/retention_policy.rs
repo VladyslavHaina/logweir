@@ -1,4 +1,4 @@
-//! `RetentionPolicy` — what may be removed from one destination, and under
+//! `RetentionPolicy`: what may be removed from one destination, and under
 //! whose authority.
 //!
 //! # Why deletion is its own kind (ADR 0008 Amendment G, and Amendment H)
@@ -10,17 +10,15 @@
 //!
 //! # `mode` is the boundary, and `Report` is the default
 //!
-//! Tag 1's statement — *no Logweir component holds any delete capability
-//! against object storage* — becomes version-scoped by Amendment H: it is true
-//! wherever `mode != Enforce`. In `Report` (the default) and
-//! `ExternalLifecycle` nothing is deleted by Logweir at all; `Enforce` opts in
-//! to a separately linked, separately credentialed worker that may delete under
-//! an explicitly configured archive prefix, **never under `logweir/`**, only
-//! from an administrator-approved plan, and only with an attributable record —
-//! create-only under `logweir/`, written by a credential that cannot delete
-//! there, and **unsigned in this build** (`docs/stability.md`).
-//! `logweir-store` stays delete-free and the control plane stays delete-free
-//! either way.
+//! *No Logweir component holds any delete capability against object storage*
+//! holds wherever `mode != Enforce` (Amendment H). In `Report` (the default)
+//! and `ExternalLifecycle` Logweir deletes nothing; `Enforce` opts in to a
+//! separately linked, separately credentialed worker that may delete under an
+//! explicitly configured archive prefix, **never under `logweir/`**, only from
+//! an administrator-approved plan, and only with an attributable record
+//! (create-only under `logweir/`, written by a credential that cannot delete
+//! there, and **unsigned in this build**, `docs/stability.md`).
+//! `logweir-store` and the control plane stay delete-free either way.
 //!
 //! `ExternalLifecycle` is a **declaration**, not an enforcement: it records
 //! that a bucket lifecycle rule exists so the console can stop claiming
@@ -30,11 +28,10 @@
 //!
 //! # What is immutable, and why those three
 //!
-//! `destinationRef`, `catalogRef` and `scope` are sealed. A policy that could
-//! be re-pointed is a policy whose approved plan — a list of point ids with a
-//! digest — could be applied to a different bucket. The mutable half is the
-//! part an administrator is expected to change: the rules, the holds, the mode
-//! and the approved plan digest.
+//! `destinationRef`, `catalogRef` and `scope` are sealed: a policy that could
+//! be re-pointed is one whose approved plan (point ids with a digest) could be
+//! applied to a different bucket. The rules, holds, mode and approved plan
+//! digest are what an administrator is expected to change.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

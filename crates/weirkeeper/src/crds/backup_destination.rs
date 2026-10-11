@@ -1,37 +1,34 @@
-//! `BackupDestination` — where archives live, saved once and referenced, with
+//! `BackupDestination`: where archives live, saved once and referenced, with
 //! no credential value anywhere in it.
 //!
 //! # Why a kind and not a field (ADR 0008 Amendment F)
 //!
 //! A destination is shared by schedules, manual backups, restores and catalog
-//! import. Copying the same bucket, endpoint and credential reference into
-//! every one of them is the defect PLAT-08 removes: four spellings of one
-//! location is how a controller and a runner come to disagree about which
-//! archive they read. A `ConfigMap` convention would carry no structural
-//! schema, no CEL, no status, no printer columns and no RBAC separation.
+//! import; four spellings of one location is how a controller and a runner come
+//! to disagree about which archive they read. A `ConfigMap` convention would
+//! carry no structural schema, no CEL, no status, no printer columns and no
+//! RBAC separation.
 //!
 //! # The two halves, and why only one of them is immutable
 //!
 //! `spec.storage` and `spec.transport.security` are **immutable** (R1, R2): a
 //! different location is a different destination, and a transport that could
 //! be changed in place would let an edit silently move an existing archive's
-//! traffic onto plaintext HTTP. Everything else — the description, the CA
-//! reference, every credential reference — is **mutable**, because rotation is
-//! an operational routine and a rotation that required recreating the object
-//! would require re-pointing every schedule that names it.
+//! traffic onto plaintext HTTP. Everything else (the description, the CA
+//! reference, every credential reference) is **mutable**: rotation is routine,
+//! and a rotation that required recreating the object would require
+//! re-pointing every schedule that names it.
 //!
-//! Executions never read this object at run time: PLAT-06.1's freeze copies a
-//! resolved snapshot into the run's immutable inputs, so a later edit cannot
-//! change a run that already exists.
+//! Executions never read this object at run time: a resolved snapshot is
+//! frozen into the run's immutable inputs, so a later edit cannot change a run
+//! that already exists.
 //!
 //! # Addressing is never a transport choice
 //!
 //! `storage.addressing` (`PathStyle` / `VirtualHosted`) says how a request
-//! names the bucket. It says NOTHING about whether the connection is
-//! encrypted, in either direction. R3 is the rule that states the one real
-//! coupling — the endpoint scheme must match the declared transport — and it
-//! names the endpoint, never the addressing. This is the UI defect G5 written
-//! into the schema so it cannot come back.
+//! names the bucket, and nothing about whether the connection is encrypted.
+//! R3 states the one real coupling (the endpoint scheme must match the
+//! declared transport) and names the endpoint, never the addressing.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -150,7 +147,7 @@ pub const R9_ARCHIVE_READ_GRANT_MESSAGE: &str = "evidenceRead ArchiveReadGrant r
 /// The four rules that sit on `.spec` itself, in R-order.
 ///
 /// R1 and R2 name `oldSelf`, so the placement is load-bearing for the reason
-/// [`super::backup_schedule::SUSPEND_ONLY_RULE`]'s is: a per-field transition
+/// [`super::backup_schedule::SOURCE_REF_IMMUTABLE_RULE`]'s is: a per-field
 /// rule does not fire on an absent → present transition at the 1.29 floor.
 pub const SPEC_RULES: [super::SpecRule; 4] = [
     super::SpecRule::new(R1_STORAGE_IMMUTABLE_RULE, R1_STORAGE_IMMUTABLE_MESSAGE),

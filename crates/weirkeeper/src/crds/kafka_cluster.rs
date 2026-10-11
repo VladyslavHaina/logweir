@@ -1,40 +1,37 @@
-//! `KafkaCluster` — a cluster connection as an object, not a Secret
+//! `KafkaCluster`: a cluster connection as an object, not a Secret
 //! convention.
 //!
 //! The Secret carries only the password; this resource carries the bootstrap
-//! servers, the auth mode, the **username**, the TLS flag, the role and —
-//! after the controller's probe — the *observed* `clusterId`. Phase 0 reads
+//! servers, the auth mode, the **username**, the TLS flag, the role and, after
+//! the controller's probe, the *observed* `clusterId`. Phase 0 reads
 //! the cluster id from the broker and never from a spec
 //! (`crates/logweir/src/drill/phase0_admit.rs`), so `status.clusterId` is an
 //! observation and `spec` says nothing about it.
 //!
-//! # The saved-connection contract, version 1 (PLAT-07.1)
+//! # The saved-connection contract, version 1
 //!
 //! Every field this file declares is resolved by exactly one function,
 //! [`crate::connection::resolve`], and every runner Job that dials this
-//! cluster — probe, backup, restore — is built from that one resolution. The
-//! contract is additive over the fields that shipped before it: an object that
-//! names none of `auth.secretRef.passwordKey` or `auth.tlsCa` resolves exactly
-//! as it did (the fixtures under `tests/fixtures/connection/legacy` are the
-//! measured proof).
+//! cluster (probe, backup, restore) is built from that one resolution. The
+//! contract is additive: an object that names neither
+//! `auth.secretRef.passwordKey` nor `auth.tlsCa` resolves as it always did
+//! (the fixtures under `tests/fixtures/connection/legacy` prove it).
 //!
-//! THE TLS SWITCH STAYS `auth.tls`. A CA reference is an input that can only
-//! ADD trust material to a transport that is already TLS; it never turns TLS
-//! on. That split is what keeps a rollback honest: an older controller that
-//! does not know `auth.tlsCa` still reads `auth.tls` and still dials TLS, so
-//! the field it ignores can only make verification fail (a private CA is not
-//! in the image's public roots), never downgrade the transport.
+//! **The TLS switch stays `auth.tls`.** A CA reference can only add trust
+//! material to a transport that is already TLS; it never turns TLS on. That
+//! keeps a rollback honest: an older controller that does not know
+//! `auth.tlsCa` still reads `auth.tls` and dials TLS, so the field it ignores
+//! can only make verification fail, never downgrade the transport.
 //!
 //! # Unrecognised fields are kept, so they can be refused
 //!
-//! The API server prunes what the INSTALLED CRD does not declare, so a field
+//! The API server prunes what the installed CRD does not declare, so a field
 //! reaches this controller undeclared only when the CRD is newer than the
-//! controller — a rollback, or a CRD applied ahead of its controller. Each
-//! connection struct therefore captures undeclared keys
-//! (`unrecognized_fields`, never published in the schema) and
-//! [`crate::connection::resolve`] refuses an object carrying one, naming it,
-//! instead of silently resolving the connection without a setting its author
-//! asked for.
+//! controller (a rollback, or a CRD applied ahead of its controller). Each
+//! connection struct captures undeclared keys (`unrecognized_fields`, never in
+//! the schema) and [`crate::connection::resolve`] refuses an object carrying
+//! one, naming it, instead of resolving without a setting its author asked
+//! for.
 
 use std::collections::BTreeMap;
 

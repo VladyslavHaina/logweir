@@ -1,4 +1,4 @@
-//! `TrustPolicy` — which keys may authorise, which may attest, and what
+//! `TrustPolicy`: which keys may authorise, which may attest, and what
 //! happened to each of them since.
 //!
 //! # Cluster-scoped, for the reason the roster is (ADR 0008 Amendment G)
@@ -11,10 +11,9 @@
 //!
 //! # Mutable, and monotonic
 //!
-//! This is the half of PLAT-19.1 that `TrustRoster` cannot do: a key has a
-//! lifecycle. So the spec is deliberately NOT sealed — an administrator
-//! retires and revokes keys on a live policy — and an object-level CEL rule
-//! makes every change one-way instead:
+//! Unlike `TrustRoster`, a key here has a lifecycle, so the spec is not sealed
+//! (an administrator retires and revokes keys on a live policy) and an
+//! object-level CEL rule makes every change one-way instead:
 //!
 //! - every `keyId` that existed still exists (one object-level rule), with
 //!   identical public material (one per-key rule);
@@ -23,30 +22,29 @@
 //! - `revokedAt` and `revocationEffectiveFrom` are write-once;
 //! - a `KeyCompromise` revocation stays a compromise (G9).
 //!
-//! **Public material cannot be edited away**, because old archives still need
-//! it: a receipt signed in March must still verify in December, and a policy
-//! that could drop the key would make every archive it signed unverifiable in
-//! one `kubectl apply`. Retirement and revocation change the VERDICT for new
-//! and stored evidence (§7.4); they never remove the key.
+//! **Public material cannot be edited away**: a receipt signed in March must
+//! still verify in December, and a policy that could drop the key would make
+//! every archive it signed unverifiable in one `kubectl apply`. Retirement and
+//! revocation change the verdict for new and stored evidence (§7.4); they
+//! never remove the key.
 //!
 //! # Why the rules are object-level, and why the list is an associative list
 //!
-//! Object-level for the reason [`super::backup_schedule::SUSPEND_ONLY_RULE`]
-//! is: a per-field transition rule does not fire on an absent → present
-//! transition, and `optionalOldSelf` is 1.30+, above the 1.29 floor. The
-//! map/`filter` form of the rule does not compile at all — the measured API
-//! server error is quoted in that module's header, and this file does not
-//! repeat it.
+//! Object-level for the reason
+//! [`super::backup_schedule::SOURCE_REF_IMMUTABLE_RULE`] is: a per-field
+//! transition rule does not fire on an absent → present transition, and
+//! `optionalOldSelf` is 1.30+, above the 1.29 floor. The map/`filter` form
+//! does not compile at all (the API server error is quoted in that module's
+//! header).
 //!
-//! `spec.keys` is declared `x-kubernetes-list-type: map` keyed by `keyId`, and
-//! that does two jobs. The API server itself refuses a duplicate key id — the
-//! CEL alternative is a quadratic self-join to enforce something the server
-//! already enforces. And it lets the PER-KEY rules be transition rules: the
-//! server correlates `oldSelf` with the entry that has the same key, so
-//! [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`] and the three lifecycle rules are
-//! evaluated once per item instead of inside a quadratic walk. That is not an
-//! optimisation: the quadratic form was REFUSED by a live API server for
-//! exceeding the CEL cost budget, and the measurement is quoted at G1.
+//! `spec.keys` is `x-kubernetes-list-type: map` keyed by `keyId`, which does
+//! two jobs: the API server itself refuses a duplicate key id (the CEL
+//! alternative is a quadratic self-join), and the per-key rules can be
+//! transition rules, because the server correlates `oldSelf` with the entry
+//! that has the same key, so [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`] and the
+//! three lifecycle rules are evaluated once per item. Not an optimisation: a
+//! live API server refused the quadratic form for exceeding the CEL cost
+//! budget (the measurement is quoted at G1).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
