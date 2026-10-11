@@ -12,29 +12,23 @@
 // In both, `Valid` counts only beside no `trust` block or a `Current` /
 // `Historical` basis (`validVerification`, D3 sections 7.4 and 12).
 //
-// A `Backup` HAS NO `outcome` FIELD AT ALL. Not on the status
-// (`crates/weirkeeper/src/crds/backup.rs`), not on the recorded verification,
-// not on the signed receipt. So the `Backup` rule cannot be the `Restore` rule
-// with a different field name: reading `outcome` here would compare `undefined`
-// against a string, every badge would go grey, and the failure would look like
-// a data problem rather than like a bug in the page. The two rules are written
-// out separately, tested separately against four fixtures each, and neither
-// reads the other's field.
+// A `Backup` HAS NO `outcome` FIELD AT ALL -- not on the status, the recorded
+// verification or the signed receipt -- so reading `outcome` here would
+// compare `undefined` against a string and every badge would go grey,
+// looking like a data problem. The two rules are written out and tested
+// separately, and neither reads the other's field.
 //
-// WHAT A GREEN BADGE CLAIMS, AND WHAT IT DOES NOT. It claims that WEIRKEEPER
-// -- the controller, in the cluster, with its own read-only evidence
-// credential and the TrustRoster's public keys -- fetched the signed document
-// and verified it, at the instant and against the key id the label names. It
-// does not claim that this page verified anything. This page holds no key,
-// mints no approval and performs no cryptography, so the string
-// "verified in your browser" is one this product must never render, and the
-// specs assert its absence from every rendered badge.
+// WHAT A GREEN BADGE CLAIMS: that WEIRKEEPER -- the controller, with its own
+// read-only evidence credential and the trusted public keys --
+// fetched the signed document and verified it, at the instant and against
+// the key id the label names. Never that this page verified anything: it
+// holds no key and performs no cryptography, so "verified in your browser"
+// must never render, and the specs assert its absence from every badge.
 //
-// WHEN IT IS NOT GREEN, THE WORD IS `unverified`. Never "pass": a `pass` is a
-// statement about a RUN, and the badge is a statement about a DOCUMENT. Every
-// combination that is not (Valid AND the run's own success) gets the same
-// single word, and the recorded `result` and `detail` are rendered in the
-// evidence block beside it so a reader can see which of the four cases it was.
+// WHEN IT IS NOT GREEN, THE WORD IS `unverified`, never "pass": a `pass` is a
+// statement about a RUN, and the badge is about a DOCUMENT. The recorded
+// `result` and `detail` are rendered beside it so a reader can see which
+// case it was.
 
 import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
@@ -69,8 +63,8 @@ import { operationRoute } from "./operation.js";
 
 const PLURAL = "backups";
 
-// THE ADAPTER (PLAT-18.1). One object, whichever API is in front of the page:
-// `ui/client.js` decides that once at boot and dispatches every call.
+// The adapter: one object, whichever API is in front of the page
+// (`ui/client.js` decides once at boot).
 const API = apiClient();
 
 /** The sentence the backups table carries when the namespace holds none. */
@@ -80,31 +74,23 @@ export const NO_BACKUP_SENTENCE =
 
 /** The verification half of BOTH rules, and nothing else.
  *
- *  `Ok` is `[verifiedAt, matchedKeyId, basis]`; anything else is `null`. A
- *  `Valid` carrying no `matchedKeyId` or no `verifiedAt` is NOT a verdict the
- *  controller ever writes -- it sets both on every `Valid`
- *  (`crates/weirkeeper/src/verification.rs`) -- so a block shaped like that is
- *  treated here as no verdict at all rather than as a green badge whose label
- *  cannot be written.
+ *  `Ok` is `[verifiedAt, matchedKeyId, basis]`; anything else is `null`. The
+ *  controller sets both `matchedKeyId` and `verifiedAt` on every `Valid`, so a
+ *  `Valid` missing either is treated as no verdict rather than as a green
+ *  badge whose label cannot be written.
  *
- *  THE TRUST BASIS IS PART OF THE RULE NOW (D3 section 7.4), and it is the
- *  controller's rule (`weirkeeper::verification::ValidBasis`, read here by
- *  render.js `trustBlockAllowsGreen`). A PRESENT `trust` block is green only
- *  on `Current` or `Historical`. Every other present block is NOT green:
- *  `RecordedBeforeRevocation` (a compromised key signed it and a controller
- *  happened to have seen it first, which is an observation and not a
- *  signature this installation still accepts), `Unverified` (nothing has been
- *  compared yet), the string `None`, a block with no basis or a `null` one,
- *  and a word this build does not know. The controller's badge and
- *  `logweir-api` refuse each of those too.
+ *  THE TRUST BASIS IS PART OF THE RULE (D3 section 7.4), the controller's own
+ *  (`weirkeeper::verification::ValidBasis`, read by render.js
+ *  `trustBlockAllowsGreen`): a PRESENT `trust` block is green only on
+ *  `Current` or `Historical`. `RecordedBeforeRevocation` is an observation,
+ *  not a signature this installation still accepts; `Unverified`, `None`, a
+ *  missing or `null` basis and an unknown word are not green either.
  *
- *  AN OBJECT WITH NO `trust` KEY AT ALL -- OR `trust: null`, THE SAME ABSENCE --
- *  STAYS GREEN. The block is additive
- *  and every object written before D3 carries none; D3 section 12's rule is that an
- *  absent field is NOT OBSERVED, and treating "an older controller wrote this"
- *  as a downgrade would turn every archive in an upgraded cluster red. A console
- *  detail (`client.js` `mergeOperation`) writes no block where the API said
- *  the block was absent, so it reaches this rule the same way. */
+ *  NO `trust` KEY, OR `trust: null`, STAYS GREEN: the block is additive, an
+ *  absent field is NOT OBSERVED (D3 section 12), and reading an older
+ *  controller's object as a downgrade would turn every archive in an
+ *  upgraded cluster red. A console detail (`client.js` `mergeOperation`)
+ *  writes no block where the API said it was absent. */
 export function validVerification(status) {
   const evidence = (status && status.evidence) || {};
   const verification = evidence.verification || {};
@@ -128,11 +114,10 @@ export function validVerification(status) {
 
 /** The label a green badge carries, verbatim.
  *
- *  A `Historical` BADGE IS A PASS AND NOT A WARNING. D3 section 7.6's supported key
- *  rotation is meant to produce exactly this: the key was valid when it
- *  signed, the old archives keep verifying, and the public material can never
- *  be edited out of the policy. The qualifier says so on the badge so a reader
- *  is not left wondering why a retired key id appears on a green row. */
+ *  A `Historical` badge is a pass, not a warning: a supported key rotation
+ *  (D3 section 7.6) produces exactly this -- the key was valid when it
+ *  signed and old archives keep verifying -- and the qualifier says why a
+ *  retired key id appears on a green row. */
 export function greenLabel(verifiedAt, matchedKeyId, basis) {
   return "verified by weirkeeper at " + verifiedAt + " against key " + matchedKeyId +
     (basis === "Historical" ? HISTORICAL_SUFFIX : "");
@@ -142,13 +127,10 @@ export function greenLabel(verifiedAt, matchedKeyId, basis) {
  *  is `Valid`, its trust basis is one a green badge may carry, AND the run's
  *  own exit code is `0`. Reads no `outcome`, because a `Backup` has none.
  *
- *  WHEN IT IS NOT GREEN THE CAPTION STILL CARRIES THE WORD `unverified`, and
- *  now says WHICH of the cases it is. The word is what every older surface
- *  looks for and what the existing badge rule promises; the case is what says
- *  where to go and look. `Invalid` is a claim about the DOCUMENT,
- *  `NotAttempted` about the CONTROLLER and `Untrusted` about the SIGNER
- *  (D3 section 7.4), and a console that printed one word for all three would have
- *  destroyed the only distinction that says what to fix. */
+ *  When it is not green the caption still carries the word `unverified` (what
+ *  every surface looks for) and says WHICH case it is: `Invalid` is about
+ *  the DOCUMENT, `NotAttempted` the CONTROLLER and `Untrusted` the SIGNER (D3
+ *  section 7.4) -- the distinction that says what to fix. */
 export function backupBadge(status) {
   const s = status || {};
   // A CONSOLE LIST ROW carries a summary verdict and no recorded block: read
@@ -180,29 +162,24 @@ function nameCell(object, ns) {
 
 /** What the TRIGGER column is for, and what it is not.
  *
- *  `spec.trigger.kind` IS THE ONLY FIELD READ. `spec.triggeredBy` -- the older
- *  `manual | schedule` string -- is still on every run and is still rendered on
- *  the detail view, but it cannot tell a catch-up or a retry from an ordinary
- *  slot, so reading it as a kind would flatten four facts into two. A run
- *  frozen before PLAT-05.1 has no trigger, and the column says that rather
- *  than filling in `Scheduled`.
+ *  `spec.trigger.kind` IS THE ONLY FIELD READ. The older `spec.triggeredBy`
+ *  (`manual | schedule`) is rendered on the detail view but cannot tell a
+ *  catch-up or a retry from an ordinary slot. A run older than triggers has
+ *  none, and the column says that rather than filling in `Scheduled`.
  *
- *  AND THE RETRY CEILING IS NOT GUESSED. A retry renders "Retry, attempt 2"
- *  here: the "of N" needs the schedule's CURRENT `retry.maxRetries`, which a
- *  run carries no copy of, and this table does not read schedules. The
- *  schedule's own card, which does hold the policy, renders "Retry 2 of 3". */
+ *  The retry ceiling is not guessed: "of N" needs the schedule's CURRENT
+ *  `retry.maxRetries`, which a run carries no copy of, so a retry renders
+ *  "Retry, attempt 2" here and "Retry 2 of 3" on the schedule's own card. */
 export const TRIGGER_COLUMN_SENTENCE =
   "TRIGGER is the run's own spec.trigger: Scheduled for a slot that fired at its instant, " +
   "CatchUp for the same slot started late, Retry for attempt k of it with a new execution id, " +
   "and Manual for a run a person asked for. A run created before triggers were recorded carries none and " +
   "says so; it is never read from triggeredBy, which cannot tell those four apart.";
 
-/** THE LINK EVERY ROW CARRIES TO THE DURABLE OPERATION VIEW (PLAT-12.1).
- *
- *  BOTH HALVES OF THE IDENTITY TRAVEL, for the same reason the restore link
- *  carries a uid: a name is reused, and a run deleted and recreated under one
- *  is a different run with different evidence. The operation view refuses a
- *  uid that does not answer rather than switching under a reader. */
+/** THE LINK EVERY ROW CARRIES TO THE DURABLE OPERATION VIEW. The uid travels
+ *  with the name, because a run deleted and recreated under one name is a
+ *  different run; the operation view refuses a uid that does not answer
+ *  rather than switching under a reader. */
 export function operationCell(object, ns) {
   const meta = (object && object.metadata) || {};
   if (typeof meta.name !== "string" || meta.name.length === 0) {
@@ -221,9 +198,8 @@ export function renderBackupList(input, ns) {
     const status = object.status || {};
     const meta = object.metadata || {};
     const spec = object.spec || {};
-    // THE RUN'S TWO LINKS IN ONE CELL (MCP-25's class, on this table): its
-    // page, and the operation view beneath it. As the eighth column "Follow
-    // this run" was the one a 1024 px window scrolled out of sight.
+    // The run's two links in one cell, its page and the operation view beneath
+    // it, so neither is the last column a narrow window scrolls away.
     const follow = operationCell(object, ns);
     return [
       nameCell(object, ns) + (follow === cell(null) ? "" : "<span class=\"cell-sub\">" + follow + "</span>"),
@@ -246,8 +222,7 @@ export function renderBackupList(input, ns) {
       : "") +
     "<p class=\"note\">" + esc(TRIGGER_COLUMN_SENTENCE) + "</p>" +
     table(
-      // CREATED, NOT AGE (MCP-18): the column holds the creation instant, and a
-      // column named for a duration needed a paragraph to say it was not one.
+      // CREATED, not AGE: the column holds the creation instant.
       ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "CREATED"],
       rows,
       NO_BACKUP_SENTENCE,
@@ -288,12 +263,11 @@ export function renderBackupDetail(object) {
       ["identity presented", cell(auth.mode) + " " + cell(auth.username)],
       ["operation", operationCell(object, (object.metadata || {}).namespace)],
     ]) +
-    // WHAT THIS RUN COVERED, from its own `status.selection` and from nowhere
-    // else. `renderCoverageLine` is shared with the schedules page so a
-    // coverage label cannot read one way on a run and another on the schedule
-    // that made it; it renders the sentence naming the missing projection when
-    // the object carries no selection block, and the recorded
-    // `TopicsResolved=False` reason when a dynamic resolution refused.
+    // WHAT THIS RUN COVERED, from its own `status.selection` alone.
+    // `renderCoverageLine` is shared with the schedules page so a coverage label
+    // cannot read differently on a run and on its schedule; with no selection
+    // block it names the missing projection, and a refused dynamic resolution
+    // shows the recorded `TopicsResolved=False` reason.
     renderCoverageLine(object) +
     "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
     evidenceBlock(evidence) +
@@ -313,13 +287,11 @@ export function renderBackupDetail(object) {
   );
 }
 
-// --------------------------------------------------------------- mount half
-
 export async function mountBackups(node, ns, parse, lifecycle, deps) {
   const api = (deps || {}).api || API;
   try {
-    // THE FIRST PAGE IS SHOWN WHILE THE REST ARE READ (MCP-26): at 258 runs the
-    // list was a spinner until the last page answered.
+    // The first page is shown while the rest are read, rather than a spinner
+    // until the last page answers.
     const options = Object.assign({}, readOptions(lifecycle) || {}, {
       onPage: (partial) => {
         if (active(lifecycle)) {
