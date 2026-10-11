@@ -3356,7 +3356,7 @@ the fresh-install default below, which an upgrade can never reach.
 ### The three modes, and a fresh install's default (PROD-16.1)
 
 The operator sees three modes; the internal names stay, because they are
-inside signed documents and snapshots (`logweir_core::approval_policy::OperatorMode`
+inside signed documents and snapshots (`logweir_core::approval_policy::ApprovalRoute`
 is the one mapping, `logweir.approvalPolicy.internalMode` the chart's half):
 
 | mode | internal | who approves a `Restore` |

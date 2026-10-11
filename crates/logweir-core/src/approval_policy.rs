@@ -78,7 +78,7 @@
 //!
 //! # The three modes the operator sees
 //!
-//! [`OperatorMode`] is the ONE mapping between the internal names, which stay
+//! [`ApprovalRoute`] is the ONE mapping between the internal names, which stay
 //! because they are inside signed bytes and snapshots (`Ordinary`, `Governed`,
 //! `legacy-governed-v1`), and the names the chart values, the console and the
 //! docs use: `confirm`, `two-person` (PROD-16.2: `Governed` with
@@ -345,12 +345,17 @@ impl std::fmt::Display for ApprovalMode {
 /// A property of the POLICY, frozen into its snapshot and so into the digest
 /// every signed document names: a request confirmed under one value is a
 /// document for another policy under the other.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// `Console` is the one value `approverSignature` has on the wire. A second
+/// spelling for the default would be a second snapshot, and a second digest,
+/// for one policy, so `PersonalKey` is never written and never read.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ApproverSignature {
     /// A personal `GovernedApproval` key countersigns the console's
     /// confirmation (`strict`). ABSENT on the wire: every policy written
     /// before PROD-16.2 is this, with the snapshot bytes it always had.
     #[default]
+    #[serde(skip)]
     PersonalKey,
     /// The console signs for an approver who signed in and clicked Approve
     /// and who is not the requester (`two-person`). `approverSignature:
@@ -370,14 +375,6 @@ impl ApproverSignature {
             Self::Console => "the console (approverSignature: Console)",
         }
     }
-}
-
-/// The one value `approverSignature` has on the wire. A second spelling for
-/// the default would be a second snapshot, and a second digest, for one
-/// policy.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-enum ConsoleWord {
-    Console,
 }
 
 /// **PROD-16.2 — HOW A POLICY'S APPROVAL IS MADE: THE CLOSED TABLE.**
@@ -412,16 +409,27 @@ enum ConsoleWord {
 /// built a policy another way. A snapshot edited after the controller froze
 /// it is refused before any of that by its digest, which the Job template
 /// pins and the signed document names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// **The route is also the mode the OPERATOR sees** (PROD-16.1): its wire
+/// spelling is the operator's word, `legacy-governed-v1` is `strict`
+/// ([`Self::of`]), and the product API publishes it as `OperatorModeView`.
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[schemars(
+    rename = "OperatorModeView",
+    description = "The approval mode in the operator's words — the one mapping is \
+                   `logweir_core::approval_policy::ApprovalRoute`."
+)]
 pub enum ApprovalRoute {
-    /// `confirm`: the requester's own confirmation in the console is the
-    /// whole authorisation.
+    /// One-person confirmation in the console (internal `Ordinary`).
+    #[serde(rename = "confirm")]
     RequesterConfirms,
-    /// `two-person`: a second person signs in to the shared console and
-    /// approves; the console signs who and when.
+    /// Two-person approval in the console (PROD-16.2: internal `Governed`
+    /// with `approverSignature: Console`): a second person signs in to the
+    /// shared console and clicks Approve.
+    #[serde(rename = "two-person")]
     SecondPersonInConsole,
-    /// `strict`: a personal `GovernedApproval` key countersigns the console's
-    /// confirmation.
+    /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
+    #[serde(rename = "strict")]
     PersonalKey,
 }
 
@@ -438,11 +446,35 @@ pub enum ConsoleKind {
 impl ApprovalRoute {
     /// The operator's word for the route.
     #[must_use]
-    pub const fn operator_mode(self) -> OperatorMode {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::RequesterConfirms => OperatorMode::Confirm,
-            Self::SecondPersonInConsole => OperatorMode::TwoPerson,
-            Self::PersonalKey => OperatorMode::Strict,
+            Self::RequesterConfirms => "confirm",
+            Self::SecondPersonInConsole => "two-person",
+            Self::PersonalKey => "strict",
+        }
+    }
+
+    /// Parse an operator's word.
+    #[must_use]
+    pub fn from_operator_name(name: &str) -> Option<Self> {
+        match name {
+            "confirm" => Some(Self::RequesterConfirms),
+            "two-person" => Some(Self::SecondPersonInConsole),
+            "strict" => Some(Self::PersonalKey),
+            _ => None,
+        }
+    }
+
+    /// What an effective policy is, in the operator's words.
+    #[must_use]
+    pub fn of(effective: &EffectivePolicy) -> Self {
+        match effective {
+            EffectivePolicy::Legacy => Self::PersonalKey,
+            // THROUGH THE TABLE. The pair that is not a row cannot come out of
+            // a parsed document or a snapshot; shown as `strict`, the mode
+            // that asks for the most, and refused by `route()` at every layer
+            // that would act on it.
+            EffectivePolicy::Bound(policy) => policy.route().unwrap_or(Self::PersonalKey),
         }
     }
 
@@ -502,80 +534,7 @@ impl ApprovalRoute {
     }
 }
 
-/// PROD-16.1 — the three approval modes an OPERATOR sees, and the one place
-/// they are mapped onto the internal names.
-///
-/// | operator | internal | who approves |
-/// |---|---|---|
-/// | `confirm` | `Ordinary` (v2, the console's signature) | the requester, one click in the console |
-/// | `two-person` | `Governed` with `approverSignature: Console` (PROD-16.2) | a second person, one click in the shared console |
-/// | `strict` | `Governed` (v2) or `legacy-governed-v1` (v1) | a human approver's personal key |
-///
-/// The internal names stay: they are inside signed documents and policy
-/// snapshots, and renaming them would change signed bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OperatorMode {
-    /// One-person confirmation in the console (`Ordinary`).
-    Confirm,
-    /// Two-person approval in the console — PROD-16.2: a `Governed` policy
-    /// whose `approverSignature` is `Console`. A second person signs in to
-    /// the shared console and clicks Approve; no personal key.
-    TwoPerson,
-    /// A personal-key approval: `Governed` (the console confirms, an approver
-    /// countersigns with a `GovernedApproval` key) or `legacy-governed-v1`.
-    Strict,
-}
-
-impl OperatorMode {
-    /// The operator-facing spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Confirm => "confirm",
-            Self::TwoPerson => "two-person",
-            Self::Strict => "strict",
-        }
-    }
-
-    /// Parse an operator-facing spelling.
-    #[must_use]
-    pub fn from_operator_name(name: &str) -> Option<Self> {
-        match name {
-            "confirm" => Some(Self::Confirm),
-            "two-person" => Some(Self::TwoPerson),
-            "strict" => Some(Self::Strict),
-            _ => None,
-        }
-    }
-
-    /// What an effective policy is, in the operator's words.
-    #[must_use]
-    pub fn of(effective: &EffectivePolicy) -> Self {
-        match effective {
-            EffectivePolicy::Legacy => Self::Strict,
-            // THROUGH THE TABLE. The pair that is not a row cannot come out of
-            // a parsed document or a snapshot; shown as `strict`, the mode
-            // that asks for the most, and refused by `route()` at every layer
-            // that would act on it.
-            EffectivePolicy::Bound(policy) => policy
-                .route()
-                .map_or(Self::Strict, ApprovalRoute::operator_mode),
-        }
-    }
-
-    /// Whether the in-cluster administrator console (`localAdmin`) may serve
-    /// this mode. `confirm` may (PROD-16.1: the confirming principal is
-    /// `urn:logweir:local-admin#admin`, and whoever can reach that console can
-    /// confirm — stated in SECURITY.md); `strict` may, because an independent
-    /// approver key still decides; `two-person` may NOT, because the console's
-    /// one identity cannot be two people.
-    #[must_use]
-    pub const fn allowed_in_local_admin(self) -> bool {
-        !matches!(self, Self::TwoPerson)
-    }
-}
-
-impl std::fmt::Display for OperatorMode {
+impl std::fmt::Display for ApprovalRoute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -882,7 +841,7 @@ struct Snapshot {
     max_age_seconds: i64,
     require_distinct_principal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    approver_signature: Option<ConsoleWord>,
+    approver_signature: Option<ApproverSignature>,
 }
 
 impl ApprovalPolicy {
@@ -926,10 +885,8 @@ impl ApprovalPolicy {
             mode: self.mode,
             max_age_seconds: self.max_age_seconds,
             require_distinct_principal: self.require_distinct_principal,
-            approver_signature: match self.approver_signature {
-                ApproverSignature::PersonalKey => None,
-                ApproverSignature::Console => Some(ConsoleWord::Console),
-            },
+            approver_signature: (self.approver_signature == ApproverSignature::Console)
+                .then_some(ApproverSignature::Console),
         };
         // A struct of strings, an enum, an integer and a bool cannot fail to
         // serialise; an empty vector would hash to a digest no document names.
@@ -967,10 +924,7 @@ impl ApprovalPolicy {
             mode: snapshot.mode,
             max_age_seconds: snapshot.max_age_seconds,
             require_distinct_principal: snapshot.require_distinct_principal,
-            approver_signature: match snapshot.approver_signature {
-                None => ApproverSignature::PersonalKey,
-                Some(ConsoleWord::Console) => ApproverSignature::Console,
-            },
+            approver_signature: snapshot.approver_signature.unwrap_or_default(),
         };
         // PROD-16.2: a snapshot is one of the table's rows, or it is not a
         // snapshot `ApprovalPolicySet::parse` rendered: only a Governed
@@ -3202,14 +3156,17 @@ namespaces:
         assert_eq!(effective, EffectivePolicy::Bound(default_confirm_policy()));
         assert_eq!(effective.mode(), ApprovalMode::Ordinary);
         assert_eq!(effective.name(), DEFAULT_CONFIRM_POLICY_NAME);
-        assert_eq!(OperatorMode::of(&effective), OperatorMode::Confirm);
+        assert_eq!(
+            ApprovalRoute::of(&effective),
+            ApprovalRoute::RequesterConfirms
+        );
         assert_eq!(fresh.unbound_basis(), UnboundBasis::FreshInstall);
         // NEGATIVE CONTROL: the same empty document, unmarked.
         let unmarked = ApprovalPolicySet::default();
         assert_eq!(unmarked.resolve("anything"), EffectivePolicy::Legacy);
         assert_eq!(
-            OperatorMode::of(&unmarked.resolve("anything")),
-            OperatorMode::Strict
+            ApprovalRoute::of(&unmarked.resolve("anything")),
+            ApprovalRoute::PersonalKey
         );
     }
 
@@ -3410,32 +3367,32 @@ namespaces:
 
     #[test]
     fn local_admin_may_serve_confirm_and_strict_but_never_two_person() {
-        assert!(OperatorMode::Confirm.allowed_in_local_admin());
-        assert!(OperatorMode::Strict.allowed_in_local_admin());
-        assert!(!OperatorMode::TwoPerson.allowed_in_local_admin());
+        assert!(ApprovalRoute::RequesterConfirms.console_may_request(ConsoleKind::LocalAdmin));
+        assert!(ApprovalRoute::PersonalKey.console_may_request(ConsoleKind::LocalAdmin));
+        assert!(!ApprovalRoute::SecondPersonInConsole.console_may_request(ConsoleKind::LocalAdmin));
     }
 
     #[test]
     fn the_operator_names_are_one_mapping() {
         for mode in [
-            OperatorMode::Confirm,
-            OperatorMode::TwoPerson,
-            OperatorMode::Strict,
+            ApprovalRoute::RequesterConfirms,
+            ApprovalRoute::SecondPersonInConsole,
+            ApprovalRoute::PersonalKey,
         ] {
-            assert_eq!(OperatorMode::from_operator_name(mode.as_str()), Some(mode));
+            assert_eq!(ApprovalRoute::from_operator_name(mode.as_str()), Some(mode));
         }
-        assert_eq!(OperatorMode::from_operator_name("Ordinary"), None);
+        assert_eq!(ApprovalRoute::from_operator_name("Ordinary"), None);
         assert_eq!(
-            OperatorMode::of(&set().resolve("team-a")),
-            OperatorMode::Confirm
+            ApprovalRoute::of(&set().resolve("team-a")),
+            ApprovalRoute::RequesterConfirms
         );
         assert_eq!(
-            OperatorMode::of(&set().resolve("prod")),
-            OperatorMode::Strict
+            ApprovalRoute::of(&set().resolve("prod")),
+            ApprovalRoute::PersonalKey
         );
         assert_eq!(
-            OperatorMode::of(&EffectivePolicy::Legacy),
-            OperatorMode::Strict
+            ApprovalRoute::of(&EffectivePolicy::Legacy),
+            ApprovalRoute::PersonalKey
         );
         // A document may spell a policy's mode either way; the parsed policy,
         // its snapshot and its digest are the internal ones.
@@ -3746,20 +3703,23 @@ namespaces:
         assert_eq!(operator.digest(), both.digest());
         assert_eq!(operator.resolve("team-a"), internal.resolve("team-a"));
         let effective = operator.resolve("team-a");
-        assert_eq!(OperatorMode::of(&effective), OperatorMode::TwoPerson);
+        assert_eq!(
+            ApprovalRoute::of(&effective),
+            ApprovalRoute::SecondPersonInConsole
+        );
         assert_eq!(effective.mode(), ApprovalMode::Governed);
-        assert!(!OperatorMode::of(&effective).allowed_in_local_admin());
+        assert!(!ApprovalRoute::of(&effective).console_may_request(ConsoleKind::LocalAdmin));
         // It needs no `allowOrdinaryConfirmation`: it is not Ordinary.
         assert!(!operator.allows_ordinary_confirmation());
         // NEGATIVE CONTROL: the Governed policy beside it is still strict,
         // with the snapshot it always had.
         let strict = operator.resolve("prod");
-        assert_eq!(OperatorMode::of(&strict), OperatorMode::Strict);
+        assert_eq!(ApprovalRoute::of(&strict), ApprovalRoute::PersonalKey);
         assert_eq!(
             strict.bound().map(|p| p.approver_signature),
             Some(ApproverSignature::PersonalKey)
         );
-        assert!(OperatorMode::of(&strict).allowed_in_local_admin());
+        assert!(ApprovalRoute::of(&strict).console_may_request(ConsoleKind::LocalAdmin));
 
         // The installation digest moves when a policy gains the setting.
         let as_strict = ApprovalPolicySet::parse(&TWO_PERSON_DOC.replace("two-person", "strict"))
@@ -4618,8 +4578,8 @@ namespaces:
         assert!(ApprovalPolicy::from_snapshot_bytes(&not_a_row.snapshot_bytes()).is_err());
         // Shown as the mode that asks for the most, never as confirm.
         assert_eq!(
-            OperatorMode::of(&EffectivePolicy::Bound(not_a_row)),
-            OperatorMode::Strict
+            ApprovalRoute::of(&EffectivePolicy::Bound(not_a_row)),
+            ApprovalRoute::PersonalKey
         );
 
         // route -> (operator word, authorising usage, awaits an approver,
@@ -4627,7 +4587,7 @@ namespaces:
         for (route, word, usage, awaits, countersign, signed) in [
             (
                 RequesterConfirms,
-                OperatorMode::Confirm,
+                "confirm",
                 KeyUsage::ConsoleConfirmation,
                 false,
                 false,
@@ -4635,7 +4595,7 @@ namespaces:
             ),
             (
                 SecondPersonInConsole,
-                OperatorMode::TwoPerson,
+                "two-person",
                 KeyUsage::ConsoleConfirmation,
                 true,
                 false,
@@ -4643,14 +4603,14 @@ namespaces:
             ),
             (
                 PersonalKey,
-                OperatorMode::Strict,
+                "strict",
                 KeyUsage::GovernedApproval,
                 true,
                 true,
                 "governed",
             ),
         ] {
-            assert_eq!(route.operator_mode(), word, "{route:?}");
+            assert_eq!(route.as_str(), word, "{route:?}");
             assert_eq!(route.authorising_usage(), usage, "{route:?}");
             assert_eq!(route.awaits_an_approver(), awaits, "{route:?}");
             assert_eq!(route.takes_a_countersignature(), countersign, "{route:?}");
@@ -4673,12 +4633,6 @@ namespaces:
             assert_eq!(
                 route.console_may_approve(console),
                 approve,
-                "{route:?} {console:?}"
-            );
-            // The older predicate agrees with the table.
-            assert_eq!(
-                route.operator_mode().allowed_in_local_admin() || console == Shared,
-                request,
                 "{route:?} {console:?}"
             );
         }

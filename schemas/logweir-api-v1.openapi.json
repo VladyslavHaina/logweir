@@ -10263,7 +10263,7 @@
         }
       },
       "OperatorModeView": {
-        "description": "PROD-16.1: the approval mode in the operator's words — the one mapping is `logweir_core::approval_policy::OperatorMode`.",
+        "description": "The approval mode in the operator's words — the one mapping is `logweir_core::approval_policy::ApprovalRoute`.",
         "oneOf": [
           {
             "description": "One-person confirmation in the console (internal `Ordinary`).",

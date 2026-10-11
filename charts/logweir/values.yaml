@@ -176,7 +176,7 @@ retention:
 approvalPolicy:
   default: ""                       # unbound: "" = confirm if fresh with a console, else strict | confirm | strict
   allowOrdinaryConfirmation: false  # D0's floor: confirm (Ordinary) policies and default: confirm need it
-  policies: []                      # [{name, mode: confirm|two-person|strict, maxAgeSeconds, requireDistinctPrincipal}]; two-person needs api.console.mode=shared
+  policies: []                      # [{name, mode: confirm|two-person|strict, maxAgeSeconds, requireDistinctPrincipal}]; two-person needs api.console.mode=shared; Ordinary|Governed are older aliases
   namespaces: {}                    # {<namespace>: <policy name>}; an explicit binding always wins
   confirmationKeySecret: ""         # "" = the hook's key with identity.bootstrapFeatures.consoleKey, else none
 

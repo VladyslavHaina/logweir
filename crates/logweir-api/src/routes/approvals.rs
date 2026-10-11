@@ -21,7 +21,7 @@ use crate::contract::{
 use crate::http::RequestId;
 use crate::problem::ApiError;
 use crate::projection;
-use logweir_core::approval_policy::{ApprovalMode, ApprovalRoute, OperatorMode};
+use logweir_core::approval_policy::{ApprovalMode, ApprovalRoute};
 
 /// The list route identifier.
 pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/approvals";
@@ -121,7 +121,7 @@ pub async fn policy(
     // PROD-16.2: by the table. A bound policy is one of its rows.
     let route = bound.map(crate::approval::route_of).transpose()?;
     let ordinary = route == Some(ApprovalRoute::RequesterConfirms);
-    let operator_mode = OperatorMode::of(&effective);
+    let operator_mode = ApprovalRoute::of(&effective);
     Ok(json(
         StatusCode::OK,
         &ApprovalPolicyResponse {
@@ -130,7 +130,7 @@ pub async fn policy(
                 namespace: ns.clone(),
                 name: effective.name().to_string(),
                 mode: effective.mode().into(),
-                operator_mode: operator_mode.into(),
+                operator_mode,
                 basis: PolicyBasisView::of(&policies, &ns),
                 legacy: effective.is_legacy(),
                 max_age_seconds: bound.map(|p| p.max_age_seconds),
