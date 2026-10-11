@@ -219,6 +219,38 @@ fn a_globbed_topic_in_the_spec_exits_3_at_phase_0_with_its_reason_line() {
     );
 }
 
+/// **The withdrawn `notifications` block, through the binary.** The example
+/// plan with a PagerDuty routing key added exits 3 at phase 0 with
+/// `refusal-reason=GuardRefused`, naming `notifications`
+/// and never echoing the key. (The control, an empty block passing, is
+/// `logweir-core`'s `a_notifications_block_that_names_a_sink_is_refused_by_name`;
+/// the shipped example itself carries `webhooks: []`.)
+#[test]
+fn a_plan_that_names_a_notification_sink_exits_3_naming_notifications() {
+    let example = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    assert!(example.contains("\nnotifications:\n  webhooks: []\n"));
+    let spec = example.replacen(
+        "\nnotifications:\n  webhooks: []\n",
+        "\nnotifications:\n  webhooks: []\n  pagerduty_routing_key: R0FAKEROUTINGKEY\n",
+        1,
+    );
+    let (code, stdout, stderr) = run_with_spec_capturing_streams(&spec);
+    assert_eq!(code, Some(3), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        last_line(&stdout),
+        "refusal-reason=GuardRefused",
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("notifications is withdrawn"),
+        "the refusal must name the block:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("R0FAKEROUTINGKEY") && !stdout.contains("R0FAKEROUTINGKEY"),
+        "the routing key is never echoed"
+    );
+}
+
 /// **C15 at phase 0** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
 /// with `allow_http: false` exits 3 with its reason line before anything runs:
 /// the pinned engine (0.22.0 and later) derives plaintext from the endpoint's

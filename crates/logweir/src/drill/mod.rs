@@ -98,8 +98,8 @@ pub enum DrillError {
     SigningOrLock(String),
     /// Startup signing readiness failed before a client, work directory, or
     /// output existed. Kept distinct from [`Self::SigningOrLock`] because a
-    /// later unattested drill result still owes terminal metrics/notification
-    /// handling, while a failed prerequisite must cause no execution output
+    /// later unattested drill result still owes terminal metrics handling,
+    /// while a failed prerequisite must cause no execution output
     /// or network side effect at all.
     #[error("signing or lock proof failed: {0}")]
     SigningPrerequisite(String),
@@ -1158,8 +1158,8 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
     // The alias's ONE line, before anything else this process says.
     let _ = print_deprecation_to(&mut std::io::stderr().lock(), invoked_as);
 
-    let (outcome, authenticated_spec) = execute_for_reporting(&args, &run_id);
-    report(&args, &run_id, authenticated_spec.as_ref(), outcome)
+    let outcome = execute_for_reporting(&args, &run_id);
+    report(&args, &run_id, outcome)
 }
 
 /// `run_named` with the run's handles SUPPLIED rather than constructed — the
@@ -1168,8 +1168,8 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
 /// `run_named` needs a live broker, a bucket and the engine binary (that is
 /// what `context` builds), so nothing could previously assert what one full
 /// invocation of either CLI name does without them. This is the same
-/// `run`/`run_with` split the crate already uses for `execute`/`execute_with`
-/// and `report`/`report_with`, and it is what
+/// `run`/`run_with` split the crate already uses for `execute`/`execute_with`,
+/// and it is what
 /// `crates/logweir/tests/restore_mode.rs::
 /// cli_drill_run_is_an_alias_for_restore_run` calls: one function, one args
 /// value parsed from either command line, and the deprecation line captured
@@ -1178,9 +1178,7 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
 /// It does NOT install a tracing subscriber and does not enter the `drill`
 /// span. Those are process-global and belong to the binary's entry point;
 /// installing them here would make two calls in one test process fight over
-/// the global default. It also does not send plan-controlled notifications:
-/// supplying a `Ctx` bypasses captured-byte contract and approval startup, so
-/// this test seam has no authenticated notification authority.
+/// the global default.
 pub fn run_with(
     args: &RunArgs,
     run_id: &str,
@@ -1200,7 +1198,7 @@ pub fn run_with(
         )
     );
     let outcome = execute_with_outcome(args, run_id, c);
-    report(args, run_id, None, outcome)
+    report(args, run_id, outcome)
 }
 
 /// Everything `run` does with `execute`'s answer, split out so it can be
@@ -1219,30 +1217,7 @@ pub fn run_with(
 /// of them under the exit-code tests. So this function decides only what to
 /// PRINT and whether a drill result exists to finish; the code comes from the
 /// conversion.
-fn report(
-    args: &RunArgs,
-    run_id: &str,
-    authenticated_spec: Option<&DrillSpec>,
-    outcome: Result<RestoreOutcome, DrillError>,
-) -> ExitCode {
-    report_with(
-        args,
-        run_id,
-        authenticated_spec,
-        outcome,
-        &phase7_verify::UreqSink::new(),
-    )
-}
-
-/// Split from `report` for the same reason `run`/`execute` are split: the test
-/// needs to observe the outbound event without a socket (GC17).
-fn report_with(
-    args: &RunArgs,
-    run_id: &str,
-    authenticated_spec: Option<&DrillSpec>,
-    outcome: Result<RestoreOutcome, DrillError>,
-    sink: &dyn phase7_verify::EventSink,
-) -> ExitCode {
+fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillError>) -> ExitCode {
     let sc: Option<&Scorecard> = match &outcome {
         Ok(o) => Some(&o.scorecard),
         // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
@@ -1250,10 +1225,6 @@ fn report_with(
         Err(DrillError::NotPass(sc, _)) => Some(sc),
         Err(_) => None,
     };
-    // Task 14: `sc.is_none()` is exactly `Err(non-NotPass)`, which is exactly
-    // the set the pre-Task-11 `_ =>` arm carried — exits 1, 3 and 4, the three
-    // codes on which the PagerDuty route used to say nothing at all.
-    let mut failure_message: Option<String> = None;
     // [I9] The GuardRefusal's OWN message, not `DrillError`'s `Display`. The
     // enum wraps it as `guard: plan refused by the admission guard: <message>`
     // (`DrillError::Guard`'s `#[error]` and `GuardRefusal`'s), and
@@ -1283,7 +1254,6 @@ fn report_with(
             // reads by key. The structured event above is JSON and already
             // escapes it.
             eprintln!("{}", crate::exit::one_line(&e.to_string()));
-            failure_message = Some(e.to_string());
         }
     }
     // The diagnostics above are emitted BEFORE the code is derived, which is
@@ -1301,27 +1271,6 @@ fn report_with(
     // path that does not flow through here is a path that does not return an
     // ExitCode from `report`, which the compiler will not let you write.
     publish(args, run_id, code, sc);
-    // Task 14: AFTER `publish`, so a hung, refusing or misconfigured alerting
-    // endpoint can never delay or prevent Task 11's metrics record — the one
-    // artifact the exit-1/3/4 paths are now guaranteed to leave. BEFORE
-    // `exiting`, so "drill finished" stays the last line on the stream.
-    // `ExitCode` is `Copy`, so passing `code` to both this call and `exiting`
-    // is fine. GC11: `notify_failure_with` returns nothing and swallows every
-    // transport failure — the code is already decided above and is not
-    // reachable from here.
-    let signing_prerequisite_failed = matches!(&outcome, Err(DrillError::SigningPrerequisite(_)));
-    if !signing_prerequisite_failed {
-        if let (Some(msg), Some(s)) = (failure_message.as_deref(), authenticated_spec) {
-            phase7_verify::notify_failure_with(
-                &s.notifications,
-                s.name.as_deref(),
-                run_id,
-                code,
-                msg,
-                sink,
-            );
-        }
-    }
     // [I8] Every run that SIGNED a scorecard has keys to name: a pass, and a
     // drill result that did not pass (exit 2) — see `exiting`. Exits 1, 3 and
     // 4 wrote no artifact and have none.
@@ -2393,23 +2342,16 @@ fn load_startup_inputs(
 }
 
 pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
-    execute_for_reporting(args, run_id).0
+    execute_for_reporting(args, run_id)
 }
 
-/// Execute while retaining notification authority only after the exact plan
-/// bytes have passed the argv/environment contract and approval verification.
-/// The retained value is independent of any later projected-file replacement.
-fn execute_for_reporting(
-    args: &RunArgs,
-    run_id: &str,
-) -> (Result<RestoreOutcome, DrillError>, Option<DrillSpec>) {
-    let contract = match execution_contract_for_invocation(
-        args.execution_contract_version.as_deref(),
-        |name| std::env::var(name).ok(),
-    ) {
-        Ok(contract) => contract,
-        Err(error) => return (Err(error), None),
-    };
+/// Execute, after the exact plan bytes have passed the argv/environment
+/// contract and approval verification.
+fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
+    let contract =
+        execution_contract_for_invocation(args.execution_contract_version.as_deref(), |name| {
+            std::env::var(name).ok()
+        })?;
     // THE STORE CONTRACT, BEFORE ANY CLIENT AND BEFORE ANY FILE IS READ — D2
     // §3.5. A version this build does not implement is exit 3 here, for the
     // reason the pinned-approver guard was moved to this seam: `context`
@@ -2417,10 +2359,7 @@ fn execute_for_reporting(
     // connections, so a refusal below it would have dialled the target before
     // saying it refused.
     let store_contract =
-        match crate::backup::store_contract::admit(args.store_contract_version.as_deref()) {
-            Ok(contract) => contract,
-            Err(refusal) => return (Err(refusal.into()), None),
-        };
+        crate::backup::store_contract::admit(args.store_contract_version.as_deref())?;
     // **D3 §2.4's channel version, once, before the first phase line.** A
     // reader that knows which grammar follows can parse the `progress-phase=`
     // lines without guessing; a reader that sees no such line is talking to a
@@ -2439,14 +2378,10 @@ fn execute_for_reporting(
     // PROD-01.3 security follow-up, FIRST: a projected credential whose
     // binding does not name the connection this Job was built for is refused
     // before it is even validated (`CredentialBindingMismatch`, exit 3).
-    if let Err(error) = crate::credential_binding::check_projected_bindings() {
-        return (Err(error.into()), None);
-    }
+    crate::credential_binding::check_projected_bindings()?;
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
-    if let Err(error) = check_projected_credentials() {
-        return (Err(error.into()), None);
-    }
+    check_projected_credentials()?;
     // The pinned approver set, at the SAME seam and for the same reason (Task
     // 22 fix round 1, review finding MED-1). It began one frame lower, at the
     // top of `execute_with_outcome` — which is already past `context(args)`,
@@ -2463,31 +2398,18 @@ fn execute_for_reporting(
     // which is what `tests/approval.rs::
     // an_unpinned_approver_is_refused_without_dialling_the_bootstrap` asserts
     // over the whole transcript of a run against a closed port.
-    if let Err(error) =
-        phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)
-    {
-        return (Err(error), None);
-    }
+    phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
     // Signing readiness is established before `context` constructs the Kafka
     // client, object stores, or engine runner. Keep this parsed identity for
     // approval comparison and every evidence document the run emits.
-    let signer = match load_signer(&args.signing_key) {
-        Ok(signer) => signer,
-        Err(error) => return (Err(error), None),
-    };
-    let startup = match load_startup_inputs(args, &signer.verifying_key(), contract.as_ref()) {
-        Ok(startup) => startup,
-        Err(error) => return (Err(error), None),
-    };
+    let signer = load_signer(&args.signing_key)?;
+    let startup = load_startup_inputs(args, &signer.verifying_key(), contract.as_ref())?;
     let authenticated_spec: DrillSpec = match serde_yaml::from_str(&startup.spec_text) {
         Ok(spec) => spec,
         Err(error) => {
-            return (
-                Err(DrillError::Operational(format!(
-                    "drill spec does not parse: {error}"
-                ))),
-                None,
-            )
+            return Err(DrillError::Operational(format!(
+                "drill spec does not parse: {error}"
+            )))
         }
     };
     // **PROD-01.3: SASL/PLAIN only over TLS**, over the AUTHENTICATED plan
@@ -2496,12 +2418,10 @@ fn execute_for_reporting(
     // `refusal-reason=PlainWithoutTls`, so the password is never sent to a
     // listener the plan would reach in the clear. Phase 0 repeats the check
     // (`phase0_admit::local`) for every path that reaches it another way.
-    if let Err(error) = logweir_core::guard::reject_auth_without_required_tls(
+    logweir_core::guard::reject_auth_without_required_tls(
         "target.auth",
         &authenticated_spec.target.auth,
-    ) {
-        return (Err(error.into()), Some(authenticated_spec));
-    }
+    )?;
     // **FX-20 fix round (review F1)**: a storage region that is not a region
     // name is refused here, exit 3 (`StorageRegionInvalid`), before the point
     // binding below reads the archive and before any client exists. On an
@@ -2516,9 +2436,7 @@ fn execute_for_reporting(
     .and_then(|()| {
         logweir_core::guard::reject_invalid_storage_region("evidence", &authenticated_spec.evidence)
     });
-    if let Err(error) = region_refusal {
-        return (Err(error.into()), Some(authenticated_spec));
-    }
+    region_refusal?;
     // **PROD-15.1: the original-name SHAPE, over the authenticated plan and
     // BEFORE anything is read or dialled.** The block is legal only in
     // `newTopic` mode, beside `prefix: ""`, and in a plan that asks for
@@ -2527,7 +2445,7 @@ fn execute_for_reporting(
     // repeats the check (`phase0_admit::local`) for every path that reaches
     // it another way.
     if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
-        return (Err(GuardRefusal(refusal).into()), Some(authenticated_spec));
+        return Err(GuardRefusal(refusal).into());
     }
     // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
     // BEFORE anything is read or dialled.** An original-name plan needs its
@@ -2536,10 +2454,7 @@ fn execute_for_reporting(
     // the standing path); an `originalName` approval authorises nothing else.
     // The controller made the same comparison before the Job existed; this is
     // the runner's own half.
-    if let Err(error) = check_original_name_subject(&authenticated_spec, startup.approved.as_ref())
-    {
-        return (Err(error), Some(authenticated_spec));
-    }
+    check_original_name_subject(&authenticated_spec, startup.approved.as_ref())?;
     // **Execution contract v2's two bindings, and they go HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
@@ -2550,17 +2465,14 @@ fn execute_for_reporting(
     // measurement is in `execute_for_reporting`'s own comment above). That is
     // what makes "refused before any data-plane work" true at the socket
     // layer, which is the claim D3 §4.3 and §5.5 both make.
-    let bindings = match check_v2_bindings(
+    let bindings = check_v2_bindings(
         args,
         &startup,
         &authenticated_spec,
         contract.as_ref(),
         store_contract,
         &signer.verifying_key(),
-    ) {
-        Ok(bindings) => bindings,
-        Err(error) => return (Err(error), Some(authenticated_spec)),
-    };
+    )?;
     let standing_approved = bindings.standing_approved;
     // **EXACTLY ONE authorization produced this run's `Approved`** —
     // PLAT-14.3b. The per-run approval path fills `startup.approved` in
@@ -2572,43 +2484,34 @@ fn execute_for_reporting(
     // could be removed and a run would still need SOMETHING to have minted an
     // `Approved`, so a rehearsal that skipped its authorization entirely
     // cannot reach phase 0 by falling through.
-    let approved =
-        match (startup.approved, standing_approved) {
-            (Some(approved), None) | (None, Some(approved)) => approved,
-            (Some(_), Some(_)) => {
-                return (
-                    Err(GuardRefusal(
-                        "this run presented both a verified per-run approval and a standing \
+    let approved = match (startup.approved, standing_approved) {
+        (Some(approved), None) | (None, Some(approved)) => approved,
+        (Some(_), Some(_)) => {
+            return Err(GuardRefusal(
+                "this run presented both a verified per-run approval and a standing \
                      rehearsal authorization; exactly one authorizes a Restore; no data \
                      operation was started"
-                            .to_string(),
-                    )
-                    .into()),
-                    Some(authenticated_spec),
-                )
-            }
-            (None, None) => return (
-                Err(GuardRefusal(
-                    "this run is authorized by nothing: no per-run approval was verified and no \
+                    .to_string(),
+            )
+            .into())
+        }
+        (None, None) => {
+            return Err(GuardRefusal(
+                "this run is authorized by nothing: no per-run approval was verified and no \
                      standing rehearsal authorization was proved; no data operation was started"
-                        .to_string(),
-                )
-                .into()),
-                Some(authenticated_spec),
-            ),
-        };
+                    .to_string(),
+            )
+            .into())
+        }
+    };
     // FX-4: the context is built WITH what the VERIFIED point binding
     // established about each source topic's configuration capture (unknown for
     // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
     // PROD-15.1: what only the runner holds about an original-name restore's
     // source and owners — the verified receipt's facts and the KafkaTopic
     // resources it was given — read once, before any client exists.
-    let original_name = match original_name_inputs(args, &authenticated_spec, bindings.point_source)
-    {
-        Ok(inputs) => inputs,
-        Err(error) => return (Err(error), Some(authenticated_spec)),
-    };
-    let outcome = match context(
+    let original_name = original_name_inputs(args, &authenticated_spec, bindings.point_source)?;
+    match context(
         startup.spec_text,
         startup.allowed_text,
         store_contract,
@@ -2618,8 +2521,7 @@ fn execute_for_reporting(
     ) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
-    };
-    (outcome, Some(authenticated_spec))
+    }
 }
 
 /// What the two execution-contract-v2 bindings established.
@@ -3775,8 +3677,8 @@ fn teardown(
 /// hand, in ONE place used by all three paths that reach it (phase 5's
 /// `Verdict::Block`, phase 6's `RestoreNoOp`, and the normal run). Three
 /// copies of this sequence is three chances for one of them to drop a step:
-/// the artifact write, the post-put receipt and the notification are all
-/// obligations of every signed result, not of the happy path only.
+/// the artifact write and the post-put receipt are both obligations of every
+/// signed result, not of the happy path only.
 ///
 /// `record` borrows `sc` mutably, so the document phase 8 signs is frozen
 /// here rather than borrowed out from under it.
@@ -3818,11 +3720,6 @@ fn sign_and_publish(
         // signal (`docs/stability.md` says so in those words).
         tracing::warn!(error = %e, "post-put evidence receipt not persisted");
     }
-    phase7_verify::notify(
-        &c.spec.notifications,
-        c.spec.name.as_deref(),
-        &signed.scorecard,
-    );
     Ok(signed)
 }
 
@@ -4848,7 +4745,7 @@ mod pod_log_lines_pin {
     }
 
     /// **The runner never starts a line with someone else's text.** An error's
-    /// text can echo a plan's string or a broker's, and `report_with` is the
+    /// text can echo a plan's string or a broker's, and `report` is the
     /// one place this command prints it: through `crate::exit::one_line`,
     /// which leaves no line break in it. The behaviour is
     /// `exit::one_line_tests` and, through the real binary,
@@ -4861,10 +4758,10 @@ mod pod_log_lines_pin {
         // Built from two halves so this row's own source is not a match.
         let raw = concat!("eprintln!(\"{", "e}\")");
         let drill = include_str!("mod.rs");
-        let report = fn_body(drill, "report_with");
+        let report = fn_body(drill, "report");
         assert!(
             report.contains("eprintln!(\"{}\", crate::exit::one_line(&e.to_string()));"),
-            "report_with prints the error through one_line"
+            "report prints the error through one_line"
         );
         assert_eq!(drill.matches(raw).count(), 0, "no raw print of an error");
         // `backup run`'s twin: a controller reads that pod log by key too.
@@ -5789,7 +5686,7 @@ mod tests {
                 .with_ansi(false)
                 .finish();
             let got = tracing::subscriber::with_default(subscriber, || {
-                report(&args_with(Some(sink.clone())), "01TEST", None, outcome)
+                report(&args_with(Some(sink.clone())), "01TEST", outcome)
             });
 
             assert_eq!(
@@ -5852,7 +5749,7 @@ mod tests {
             ))),
             Err(DrillError::SigningOrLock("x".into())),
         ] {
-            report(&args_with(None), "01TEST", None, outcome);
+            report(&args_with(None), "01TEST", outcome);
         }
 
         let after = cwd_entries();
@@ -5904,12 +5801,7 @@ mod tests {
 
         let pass = dir.path().join("pass.prom");
         assert_eq!(
-            report(
-                &args_with(Some(pass.clone())),
-                "01TEST",
-                None,
-                Ok(an_outcome())
-            ),
+            report(&args_with(Some(pass.clone())), "01TEST", Ok(an_outcome())),
             ExitCode::Ok
         );
         assert!(pass.exists(), "a pass writes its metrics");
@@ -5921,7 +5813,6 @@ mod tests {
             report(
                 &args_with(Some(notpass.clone())),
                 "01TEST",
-                None,
                 Err(DrillError::NotPass(Box::new(sc), None))
             ),
             ExitCode::DrillNotPass,
@@ -5938,7 +5829,6 @@ mod tests {
             report(
                 &args_with(Some(op.clone())),
                 "01TEST",
-                None,
                 Err(DrillError::Operational("broker unreachable".into()))
             ),
             ExitCode::Operational
@@ -5962,10 +5852,7 @@ mod tests {
             ),
         ] {
             let p = dir.path().join(name);
-            assert_eq!(
-                report(&args_with(Some(p.clone())), "01TEST", None, Err(e)),
-                want
-            );
+            assert_eq!(report(&args_with(Some(p.clone())), "01TEST", Err(e)), want);
             assert!(
                 p.exists(),
                 "T0-7: exit {} leaves no scorecard, which is exactly why it owes a record",
@@ -5985,7 +5872,6 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
-                None,
                 Err(DrillError::Operational("broker unreachable".into()))
             ),
             ExitCode::Operational
@@ -6009,7 +5895,6 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
-                None,
                 Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
                     "x".into()
                 )))
@@ -6034,7 +5919,6 @@ mod tests {
             report(
                 &args_with(Some(p.clone())),
                 "01TEST",
-                None,
                 Err(DrillError::SigningOrLock("x".into()))
             ),
             ExitCode::SigningOrLock
@@ -6081,12 +5965,7 @@ mod tests {
         ] {
             let p = dir.path().join(format!("exit-{}.prom", code as u8));
             assert_eq!(
-                report(
-                    &args_with(Some(p.clone())),
-                    "01TEST",
-                    None,
-                    representative(code)
-                ),
+                report(&args_with(Some(p.clone())), "01TEST", representative(code)),
                 code
             );
             let t = std::fs::read_to_string(&p).unwrap_or_else(|e| {
@@ -6310,125 +6189,6 @@ mod tests {
         assert_eq!(seen, vec![0, 1, 2, 3, 4]);
     }
 
-    // ---------------------------------------------------------------- T0-15
-    // The notification half of the terminal paths. `report_with` is private,
-    // so these live here rather than in `crates/logweir/tests/notify.rs`, where
-    // the rest of T0-15's coverage is.
-
-    /// An `EventSink` that records instead of dialling (GC17).
-    #[derive(Default)]
-    struct RecordingSink {
-        posts: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
-    }
-
-    impl phase7_verify::EventSink for RecordingSink {
-        fn post(&self, url: &str, body: &serde_json::Value) -> Result<(), String> {
-            self.posts
-                .lock()
-                .unwrap()
-                .push((url.to_string(), body.clone()));
-            Ok(())
-        }
-    }
-
-    /// The checked-in example spec, plus the notification config a drill that
-    /// wants to be paged would carry.
-    fn spec_with_a_routing_key() -> DrillSpec {
-        let mut spec: DrillSpec =
-            serde_yaml::from_str(include_str!("../../../../examples/drill.yaml")).unwrap();
-        spec.name = Some("nightly".into());
-        spec.notifications.pagerduty_routing_key = Some("R0FAKEFAKEFAKEFAKEFAKEFAKEFAKE0".into());
-        spec
-    }
-
-    /// **M1.** The exit-1 path pages. This is the whole of T0-15: before it,
-    /// `report`'s no-scorecard branch logged and printed and did nothing else,
-    /// so the three codes that mean "a human is needed and there is no
-    /// artifact to read instead" notified nobody, while the one code that
-    /// meant "the drill finished and signed its own scorecard" was loud.
-    ///
-    /// `metrics_file: None` on purpose: `publish` returns early on that arm,
-    /// so this asserts the notification and nothing about Task 11's textfile.
-    #[test]
-    fn report_pages_on_an_operational_failure() {
-        let spec = spec_with_a_routing_key();
-        let sink = RecordingSink::default();
-        let code = report_with(
-            &args_with(None),
-            "01TEST",
-            Some(&spec),
-            Err(DrillError::Operational("broker unreachable".into())),
-            &sink,
-        );
-
-        assert_eq!(
-            code,
-            ExitCode::Operational,
-            "GC11: the notification must not touch the exit code"
-        );
-        let posts = sink.posts.lock().unwrap().clone();
-        assert_eq!(posts.len(), 1, "exit 1 left no page: {posts:?}");
-        assert_eq!(posts[0].0, phase7_verify::PAGERDUTY_US_ENDPOINT);
-        assert_eq!(posts[0].1["event_action"], "trigger");
-        assert_eq!(
-            posts[0].1["dedup_key"],
-            serde_json::json!(phase7_verify::failure_dedup_key(Some("nightly")))
-        );
-    }
-
-    /// The other side of the same branch, in both directions.
-    ///
-    /// A drill RESULT (exit 0 and exit 2) is phase 8's to notify — it has a
-    /// scorecard, and `report` must not page a second time — and a spec that
-    /// configured no route is never paged at all.
-    #[test]
-    fn report_pages_only_where_there_is_no_scorecard() {
-        let spec = spec_with_a_routing_key();
-
-        for outcome in [
-            Ok(an_outcome()),
-            Err(DrillError::NotPass(Box::new(a_scorecard()), None)),
-        ] {
-            let sink = RecordingSink::default();
-            report_with(&args_with(None), "01TEST", Some(&spec), outcome, &sink);
-            assert!(
-                sink.posts.lock().unwrap().is_empty(),
-                "a drill RESULT was paged from `report`; phase 8 already notified with the \
-                 scorecard in hand, and this would be a second, scorecard-less page for one \
-                 drill"
-            );
-        }
-
-        // No spec reachable at all (an unreadable or unparseable spec file is
-        // itself an exit-1 operational failure): nothing to page with, and the
-        // drill still exits 1.
-        let sink = RecordingSink::default();
-        let code = report_with(
-            &args_with(None),
-            "01TEST",
-            None,
-            Err(DrillError::Operational("spec unreadable".into())),
-            &sink,
-        );
-        assert_eq!(code, ExitCode::Operational);
-        assert!(sink.posts.lock().unwrap().is_empty());
-
-        let sink = RecordingSink::default();
-        let code = report_with(
-            &args_with(None),
-            "01TEST",
-            Some(&spec),
-            Err(DrillError::SigningPrerequisite("invalid key".into())),
-            &sink,
-        );
-        assert_eq!(code, ExitCode::SigningOrLock);
-        assert!(
-            sink.posts.lock().unwrap().is_empty(),
-            "signer prerequisite diagnostics are local-only even if a caller incorrectly supplies \
-             notification configuration"
-        );
-    }
-
     /// **The signed document says WHICH MODE the run was in, and names a
     /// marker topic only in the mode that verified one** (fix round 1, review
     /// F1).
@@ -6503,36 +6263,6 @@ mod tests {
             wire.get("marker_topic").is_none(),
             "an absent marker topic is an absent KEY, not a null one: {wire}"
         );
-    }
-
-    /// Reporting uses the authenticated in-memory plan snapshot and never
-    /// follows a later replacement at `args.spec`.
-    #[test]
-    fn late_plan_replacement_cannot_change_the_notification_destination() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("drill.yaml");
-        let mut authenticated = spec_with_a_routing_key();
-        authenticated.notifications.pagerduty_endpoint =
-            Some("https://trusted-notify.example/events".into());
-        let mut substituted = authenticated.clone();
-        substituted.notifications.pagerduty_endpoint =
-            Some("https://substituted.example/events".into());
-        std::fs::write(&p, serde_yaml::to_string(&substituted).unwrap()).unwrap();
-        let mut args = args_with(None);
-        args.spec = p;
-        let sink = RecordingSink::default();
-        let code = report_with(
-            &args,
-            "01TEST",
-            Some(&authenticated),
-            Err(DrillError::Operational("post-auth startup failure".into())),
-            &sink,
-        );
-        assert_eq!(code, ExitCode::Operational);
-        let posts = sink.posts.lock().unwrap();
-        assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].0, "https://trusted-notify.example/events");
-        assert_ne!(posts[0].0, "https://substituted.example/events");
     }
 }
 

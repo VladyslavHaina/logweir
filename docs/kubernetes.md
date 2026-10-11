@@ -6908,8 +6908,7 @@ argv/environment contract. A pre-contract runner rejects the new argv flag as
 unknown before command dispatch, so a new controller cannot silently run a
 vulnerable old binary. `immutable: true` prevents updates; the runner-side
 digest check also closes delete/recreate substitution under the same ConfigMap
-name. Failure notifications retain only the routing fields parsed from these
-authenticated bytes; reporting never reopens `/plan/restore.yaml`.
+name.
 
 #### Upgrade, rollback and legacy Jobs
 
@@ -7223,9 +7222,8 @@ segment that would not decode), compares only part of the restore. It signs
 reads `covered` before the outcome, so a real one is named by this reason and
 not by `OutcomeNotPass`, and so is a status whose other fields said pass), the
 product API's `verifiedSuccess` is `false`, the console's badge and list
-verdict say so, a rehearsal over it is `lastFailed`, the runner's notification
-body carries `integrity.covered: false` and its metrics
-`logweir_drill_integrity_complete_covered 0`. Alert on either: the condition's
+verdict say so, a rehearsal over it is `lastFailed`, and the runner's metrics
+carry `logweir_drill_integrity_complete_covered 0`. Alert on either: the condition's
 reason `CompleteNotCovered`, or the gauge
 `logweir_drill_integrity_complete_covered == 0` in the runner's metrics
 textfile ([metrics.md](metrics.md)).

@@ -1801,3 +1801,43 @@ fn fx20_phase0_refuses_an_injected_region_on_either_store() {
     )
     .expect("real regions are admitted");
 }
+
+/// **The withdrawn `notifications` block at phase 0**, the backstop for every
+/// path that reaches phase 0 without the runner's startup check: a plan that
+/// names a sink is refused before the broker is asked anything. CONTROL: the
+/// same plan with an empty block is admitted (`phase0_calls_broker_configs_…`
+/// above runs it unchanged).
+#[test]
+fn a_plan_that_names_a_notification_sink_is_refused_at_phase_0() {
+    let mut spec = a_recent_spec();
+    spec.notifications.webhooks = vec!["https://example.test/hook".into()];
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "CreateTime")]);
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let refused = phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect_err("a plan that names a sink is refused");
+    let message = guard_message(refused);
+    assert!(
+        message.starts_with("notifications is withdrawn"),
+        "{message}"
+    );
+    assert!(creator.calls.lock().unwrap().is_empty());
+
+    spec.notifications.webhooks.clear();
+    phase0_admit::run(
+        &spec,
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect("the same plan with an empty block is admitted");
+}

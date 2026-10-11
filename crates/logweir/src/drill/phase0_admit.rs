@@ -289,6 +289,9 @@ pub fn run_with_original_name(
         .into());
     }
 
+    // Purely local: the withdrawn `notifications` block names no sink.
+    logweir_core::guard::reject_withdrawn_notifications(&spec.notifications)?;
+
     // **C15** (PROD-00.3f), purely local: an `http://` archive endpoint with
     // `allow_http: false` is refused here, exit 3, before anything runs. The
     // pinned engine would otherwise derive plaintext from the scheme; the

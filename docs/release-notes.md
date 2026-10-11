@@ -3326,14 +3326,25 @@ OD-12); each part below did nothing v1 uses.
   running finishes and then stays, because nothing patches its TTL any more:
   `kubectl delete jobs -n <ns> -l logweir.dev/component=notification`
   removes them and their event ConfigMaps.
+- **The drill's own notification post is withdrawn.** A run no longer posts
+  to a webhook, Slack or PagerDuty, after a drill or on a failure. The plan's
+  `notifications` block still parses, because it sits inside signed plan
+  bytes: absent or empty (`webhooks: []`, what the console writes) is
+  accepted, and a block that names a sink is refused by name, by the
+  controller's admission of a destination-backed `Restore` and by the runner
+  at phase 0 (exit 3, `refusal-reason=GuardRefused`), before anything is read.
+  An upgraded install sees such a `Restore` or `drill run` refused; remove the
+  sinks and approve the plan again. Alert on the runner's metrics textfile or
+  the `Restore`'s conditions instead.
 - **The ACL read is gone** (item 37's `DescribeAcls` capture and its `unsafe`
   wrapper). Nothing called it: no run reads or records ACLs. The
   consumer-group and cluster reads behind the same crate are unchanged, and
   consumer positions are still written, read and documented.
 
 **Do:** remove the `notify` block from your values before `helm upgrade`
-(see *Required operator actions*), apply the CRDs, and remove
-`spec.notifications` from each `ProtectionPolicy` when convenient.
+and the sinks from every plan that names one (see *Required operator
+actions*), apply the CRDs, and remove `spec.notifications` from each
+`ProtectionPolicy` when convenient.
 **Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone);
 controller rows over a recording API double (a policy that still names sinks
 is evaluated as before and its condition names the withdrawal; the control
@@ -3341,13 +3352,15 @@ without the field publishes no such condition; no row's route table has a
 Job or ConfigMap route, so any delivery would panic); API rows over an older
 live object (its routes and delivery state are not published); the chart's
 refusal row and its control (`notify=null` renders); the bind-credential
-refusal row and its control; the unsafe-scope gate over the smaller crate;
+refusal row and its control; the plan's `notifications` refusal at the
+controller's admission, at phase 0 and through the binary, with an empty
+block as the control; the unsafe-scope gate over the smaller crate;
 the e2e group rows (the three ACL rows are removed with the read).
 [UNVERIFIED — no cluster has applied the narrowed ProtectionPolicy CRD over an older policy yet; the PoC upgrade that carries this item runs it.]
 **Rollback:** roll back the chart, the CRDs, the controller and the runner
 together. The older CRD types `spec.notifications` again, but the API server
 already dropped what was inside it, so each route must be written again; an
-older runner logs phase 7's warning again.
+older runner posts a plan's notifications and logs phase 7's warning again.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -3357,7 +3370,9 @@ In addition to the next entry's six, in its order:
   (item 73): the chart refuses it by name. With `--reuse-values`, pass
   `--set notify=null`. A `ProtectionPolicy` that still sets
   `spec.notifications` keeps working and says the field is withdrawn; remove
-  the field when convenient.
+  the field when convenient. **Before the runner image rolls, remove the
+  sinks from every restore plan that names one** (item 73) and approve it
+  again: a plan whose `notifications` block names a sink is refused.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the

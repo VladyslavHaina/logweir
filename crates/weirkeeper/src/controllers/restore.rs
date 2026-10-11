@@ -1852,6 +1852,16 @@ pub async fn admit_restore_destinations(
             )
         })?;
 
+    // The withdrawn `notifications` block: a plan that names a sink is refused
+    // by name before any Job exists, in the runner's own words. The runner
+    // refuses it again at phase 0, which is where an inline Restore meets it.
+    if let Err(refusal) = logweir_core::guard::reject_withdrawn_notifications(&plan.notifications) {
+        return Err(RestoreError::Refused(
+            logweir_core::guard::TERMINAL_STATE_GUARD_REFUSED,
+            refusal.0,
+        ));
+    }
+
     // CHECK 7. EXACT, ON ALL SIX FIELDS. The runner reads the location out of
     // the PLAN, so a destination whose location differs would contribute its
     // credential to a run that reads somewhere else.

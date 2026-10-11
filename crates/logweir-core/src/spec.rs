@@ -21,17 +21,11 @@ pub type RestoreSpec = DrillSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrillSpec {
-    /// This drill's own stable identity, per ruling **R-D**.
+    /// This drill's own stable identity, per ruling **R-D**. It named the
+    /// drill's PagerDuty incident until the drill's notification post was
+    /// withdrawn; it is still part of the plan grammar.
     ///
-    /// It exists so two drill specs pointed at ONE cluster do not share a
-    /// PagerDuty incident: the dedup key is built from this plus the target
-    /// cluster id (`crate::drill::phase7_verify::dedup_key` in the `logweir`
-    /// crate). Before it existed the key was `logweir-drill-{cluster_id}`, so
-    /// a passing nightly drill RESOLVED a failing weekly drill's open page.
-    ///
-    /// Optional, so every spec written before this field existed still parses;
-    /// when it is absent the key falls back to a prefix of the approval's
-    /// `plan_hash`, which is distinct per spec and stable across re-runs.
+    /// Optional, so every spec written before this field existed still parses.
     ///
     /// It is NOT `drill_id`. An artifact-side identity that travels ON the
     /// scorecard is backlog T1-8, assigned to decision O16 with default *not
@@ -57,7 +51,10 @@ pub struct DrillSpec {
     /// key — and be refused by name. Silently ignoring it would hide the guard.
     #[serde(default)]
     pub engine_overrides: BTreeMap<String, serde_yaml::Value>,
-    /// Spec §13. Absent means "notify nobody"; it is never an error.
+    /// Spec §13, WITHDRAWN: Logweir posts nothing after a run. The key still
+    /// parses, because it sits inside signed plan bytes, and an absent or
+    /// empty block is fine; a block that names a sink is refused by name
+    /// (`crate::guard::reject_withdrawn_notifications`).
     #[serde(default)]
     pub notifications: Notifications,
 }
@@ -421,10 +418,9 @@ impl std::fmt::Display for TimeBasis {
     }
 }
 
-/// Spec §13's notification shape. v0.1 POSTs one JSON summary per sink and
-/// treats every transport failure as a logged warning — a drill result that is
-/// already signed and uploaded must not be downgraded because a webhook was
-/// down.
+/// Spec §13's notification shape, WITHDRAWN: kept so a plan that carries it
+/// still parses, and refused when it names a sink
+/// (`crate::guard::reject_withdrawn_notifications`).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Notifications {
     #[serde(default)]
@@ -459,6 +455,17 @@ pub struct Notifications {
     /// plaintext HTTP would put a bearer credential on the wire.
     #[serde(default)]
     pub pagerduty_endpoint: Option<String>,
+}
+
+impl Notifications {
+    /// Whether the block names no sink at all — the only shape a run accepts.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.webhooks.is_empty()
+            && self.slack_webhook.is_none()
+            && self.pagerduty_routing_key.is_none()
+            && self.pagerduty_endpoint.is_none()
+    }
 }
 
 /// HAND-WRITTEN, not derived, and for the same reason

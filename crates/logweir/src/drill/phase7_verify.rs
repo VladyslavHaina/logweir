@@ -2099,27 +2099,6 @@ pub fn run_after_restore(
     })
 }
 
-/// The notification half of this phase lives in [`crate::notify`] now, and is
-/// re-exported here so that every call site and every structural guard keeps
-/// the path it already uses.
-///
-/// D3 §3.4 moves it: the protection controller has no Secret verb and no HTTP
-/// egress, so PLAT-14.2's alert delivery reuses THIS code in the runner image,
-/// through the new `logweir notify deliver` subcommand. A subcommand cannot
-/// reasonably reach into `drill::phase7_verify` for a sink trait, and a second
-/// copy of a redactor or a timeout policy is how the two copies come to
-/// disagree — the reason `redact_url` itself moved to `logweir-core` in fix
-/// round 1. So the code moved and nothing else did: `crate::notify` is the
-/// definition, this is the alias, and the re-export list below is exhaustive
-/// (nothing in the moved block is private to it except `redact_ureq_error`,
-/// which was private here too).
-pub use crate::notify::{
-    dedup_key, failure_dedup_key, notify, notify_agent, notify_agent_with, notify_body,
-    notify_failure, notify_failure_with, notify_with, notify_with_sink, pagerduty_endpoint,
-    redact_url, EventSink, UreqSink, NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT, PAGERDUTY_SILENCED,
-    PAGERDUTY_US_ENDPOINT,
-};
-
 #[cfg(test)]
 mod tests {
     //! Direct, fine-grained coverage of the private helpers' own empty-set

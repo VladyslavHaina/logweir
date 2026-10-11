@@ -459,9 +459,7 @@ printer column, [kubernetes.md](../kubernetes.md)), the product API's
 `selection` on both restore reads and the operation view's
 `verificationScope` ([api.md](../api.md)), the console's History list, detail
 and operation view (`partial: partitions 0, 2 of topic orders`, and a
-complete-coverage sentence over every SELECTED partition), and the runner's
-notification body (`selection` with `scope: "partial"`, `format_version`; the
-PagerDuty incident title appends `(partial: …)`). An unnarrowed restore shows
+complete-coverage sentence over every SELECTED partition). An unnarrowed restore shows
 none of these, exactly as before.
 
 **The number.** 2.0.0. A renumber moves
@@ -1340,16 +1338,14 @@ everywhere a human or a dashboard actually reads one. All three now carry it:
 |---|---|
 | `drill show --format table` | A line in the **qualifiers** footer: the count and every removed path, plus a note that `drill verify` and `docs/verify_scorecard.py` both refuse the document. `show` does not verify and its exit code is unchanged — a redaction is a qualifier, not a "this reader cannot honestly render this" condition. |
 | Prometheus textfile (`--metrics-textfile`) | `logweir_drill_redactions{cluster="…"}`, emitted **unconditionally** — `0` for a whole document — so `logweir_drill_redactions > 0` is a valid alert. A count, never a path label: paths are document-controlled and would be unbounded cardinality. |
-| Notification body (webhook / Slack / PagerDuty `custom_details`) | A `redactions` array of the removed paths, always present and empty for a whole document. This is the only surface that reaches a human away from a terminal. |
 
 `--format json` needed no change: it prints the signed bytes, so the array was
 always visible there. The put receipt needed none either — it binds the
 scorecard by digest and reports storage facts, and echoes no scorecard field.
 
-**The `reason` strings are deliberately not displayed** by the footer or the
-notification body. A non-empty `redactions` is by construction a document no
+**The `reason` strings are deliberately not displayed** by the footer. A non-empty `redactions` is by construction a document no
 Logweir writer produced, so its `reason` is free text that arrived with the
-document, and both of those surfaces are read by a human deciding how much to
+document, and that surface is read by a human deciding how much to
 trust what they are looking at. The **path** is the whole actionable signal.
 
 **This is a deliberate RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format
