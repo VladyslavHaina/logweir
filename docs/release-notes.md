@@ -3362,6 +3362,12 @@ kubectl --context <ctx> -n logweir-system delete deployment,serviceaccount,netwo
 kubectl --context <ctx> delete clusterrole,clusterrolebinding -l app.kubernetes.io/name=logweir
 ```
 
+A `weirkeeper-policy` ConfigMap you created by hand blocks `helm install`,
+because Helm will not adopt it. Set its settings as chart values (`checks.*`,
+`runs.*`, `engine.*`, `evidence.*`), then
+`kubectl --context <ctx> -n logweir-system delete configmap weirkeeper-policy`
+before installing.
+
 Your RoleBindings to the five human roles keep working: the chart recreates
 the roles under the same names. Helm skips CRDs that exist; apply a newer set
 by hand ([the chart README](../charts/logweir/README.md), *Upgrading the CRDs by
