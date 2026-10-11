@@ -7441,7 +7441,8 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
 /// code, is not read.
 ///
 /// KILLS: the line's code not put on the message (the reason dropped); the
-/// variable not read; a free-text variable echoed into the status.
+/// variable not read; a free-text variable echoed into the status; a named
+/// refusal counted, degraded or recorded differently from the line-dropped run.
 #[tokio::test]
 async fn fx15_a_refused_run_names_its_refusal_on_the_status() {
     let digest = learned_digest().await;
@@ -7471,6 +7472,19 @@ async fn fx15_a_refused_run_names_its_refusal_on_the_status() {
             .unwrap_or_default()
             .to_string()
     };
+    // The status with the two messages a named refusal may change blanked.
+    let decided = |status: &Value| -> Value {
+        let mut status = status.clone();
+        for condition in status["conditions"].as_array_mut().expect("conditions") {
+            if condition["type"] == "Enforced" || condition["type"] == "EnforcementDegraded" {
+                condition["message"] = Value::Null;
+            }
+        }
+        status
+    };
+    // CONTROL: the line dropped. Harvested first, at the same instant, so the
+    // run id is the same and each class is held to it.
+    let (generic, _) = harvest("logweir-retention: x\n").await;
     for (class, log, named) in [
         (
             "invocation",
@@ -7512,10 +7526,16 @@ async fn fx15_a_refused_run_names_its_refusal_on_the_status() {
             "{class}: {status}"
         );
         assert_eq!(status["enforcement"], "LogweirWorker", "{class}: not held");
+        // Nothing a pass decides changes: the failure count, the lease,
+        // `lastEnforcement`, the guarantees and every condition's status and
+        // reason are the line-dropped run's, byte for byte.
+        assert_eq!(
+            decided(&status),
+            decided(&generic),
+            "{class}: a named refusal changes only the two messages"
+        );
     }
 
-    // CONTROL: the line dropped.
-    let (generic, _) = harvest("logweir-retention: x\n").await;
     let said = message(&generic, "Enforced");
     assert!(
         said.contains("REFUSED its plan") && !said.contains("(exit 3, "),
