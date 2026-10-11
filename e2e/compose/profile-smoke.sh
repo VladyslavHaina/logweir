@@ -30,7 +30,7 @@ lw_e2e_check_coherent || exit 1
 # `stack-env.sh --kafka` set one, else `apache/kafka:<KAFKA_VERSION>` with
 # `.env`'s pin, exactly as the compose file resolves it.
 KV=${KAFKA_VERSION:-$(sed -n 's/^KAFKA_VERSION=//p' e2e/compose/.env 2>/dev/null)}
-KV=${KV:-3.7.1}
+KV=${KV:-4.3.1}
 IMG="${KAFKA_IMAGE:-apache/kafka:$KV}"
 NET="${LW_E2E_PROJECT}_kafka-net"
 CERTS="$PWD/.e2e/auth/$LW_E2E_PROJECT"

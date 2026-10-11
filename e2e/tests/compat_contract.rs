@@ -1422,8 +1422,8 @@ fn assert_restored(label: &str, g: &Generic) {
 /// `logweir check run` against the default broker's plaintext listener and
 /// its SCRAM-SHA-512 one: every capability row is answered from the broker's
 /// ApiVersions as read on a real, authenticated connection, and agrees with
-/// the broker's own tool whichever line the stack runs (3.7.1 in CI: no group
-/// types; 3.9 and 4.x: typed).
+/// the broker's own tool whichever line the stack runs (4.3.1 in CI: typed;
+/// the legacy 3.7.1, weekly in engine-matrix: no group types).
 ///
 /// CONTROL, in the same row: the same plan listing NO capability row gets
 /// none, which is what keeps an older controller from receiving an id it
